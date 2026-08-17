@@ -1,0 +1,106 @@
+{
+  "probe": {
+    "id": "rx-06",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "Our Negishi looks clean at 100 mg — one spot, 94 LCAP — and at 2 kg we get three new impurities, the largest at 1.8%. Nothing in the recipe changed. What is different at scale?",
+    "expects_tools": [
+      "find_notes",
+      "gather_evidence",
+      "similar_reactions",
+      "expand_note"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a computed mixing time, Reynolds number or mass-transfer coefficient",
+      "a heat-transfer or exotherm calculation for the large vessel",
+      "a quantitative attribution of impurity level to a scale parameter"
+    ],
+    "direction": "The chemistry half is answerable and the engineering half is not, and a good answer says which is which up front. Chemical hypotheses worth naming: longer addition and hold times so intermediates see conditions for hours rather than minutes, local excess at the point of addition, oxygen ingress over a longer charge, slower heat-up and cool-down giving a different thermal history, water or trace metals scaling with the reagent lot rather than with the reaction, and quench/workup residence time. Should ask what changed in dosing order, addition rate and hold time, since those are the usual real culprits and they are recorded facts the user has. Must state plainly that there is no scale-up heat/mass-transfer or mixing model in this system, so it cannot compute which of these dominates — and must not manufacture engineering numbers to close the gap.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rx-06",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "Our Negishi looks clean at 100 mg — one spot, 94 LCAP — and at 2 kg we get three new impurities, the largest at 1.8%. Nothing in the recipe changed. What is different at scale?",
+    "answer": "I need to gather evidence on your Negishi coupling and any scale-related observations already in the record, then think through what could cause impurities to appear on scale but not at small scale.The hits are not specific to your Negishi. Let me search more directly and also look for any notes about scale effects or process changes.The knowledge graph has no note specific to *your* Negishi coupling at those two scales, but it does hold an observation that is directly relevant. **campaign-aspirin-teaching** reports the same pattern you are seeing: clean small scale (1 g, 5 g, even 20 g) with an issue emerging at 100 g. In that case the yield was flat, but the recrystallization *profile* changed — it needed controlled cooling above ~20 g.\n\nLet me check what that note says in full and also think through the physical changes from 100 mg to 2 kg.The playbook note on recrystallization is relevant too — let me expand that:---\n\nThe record does not hold your specific Negishi coupling, but it does hold a strong parallel: the aspirin acetylation was clean and consistent at small scale and the issue (solvent occlusion in recrystallization) only appeared at 100 g. This is a common pattern in scale-up.\n\nThree things could explain clean 100 mg LCAP but three new impurities at 2 kg, all physical rather than chemical:\n\n**1. Heat & mass transfer during the reaction**\n\nAt 100 mg, the reaction vessel is small enough that temperature control is rapid and uniform. At 2 kg, the same heating profile (jacket temperature, stir rate) may leave a core hotter than the bulk, creating an undesired micro-environment where side reactions outcompete the main one. Negishi couplings are sensitive to temperature — if you are running warm (say, 60–80 °C for fast transmetalation), a local hotspot of 20 °C above set point can shift the selectivity.\n\n**Diagnostic:** What are the three new impurities' retention times or masses? Do they correspond to:\n- Reductive homocoupling of your organozinc reagent (Zn coupling to itself)?\n- Protodezincation (C–H formation from C–Zn)?\n- Overoxidation of your aryl/alkyl halide (if oxidation is in the pathway)?\n\nAny of those would point to higher local temperature or longer residence at elevated T.\n\n**2. Oxygen ingress & catalyst deactivation**\n\nAt 100 mg in a small flask, your headspace is small and easy to backfill with inert gas. At 2 kg in a larger vessel, even with a good inert blanket, the surface area is larger and slow oxygen leakage over the addition time can build up. Palladium species (if present, or if Ni is being oxidized) become inactive as black oxide. This would show as *lower* conversion and new impurities from incomplete coupling — not as cleaner side products, but as substrate carryover and partial-coupling species.\n\n**Diagnostic:** Did the 100 mg run finish with a tight inert line, or was it more casual? Is the 2 kg batch degassed properly at the start and *kept* under positive inert pressure throughout?\n\n**3. Concentration & solvent effects (less likely, but possible)**\n\nIf the 100 mg was run in neat reagent or very concentrated, and the 2 kg was diluted to a safer concentration (which is the right call), a lower concentration can change the reaction pathway. Intermolecular side-couplings become less probable, unimolecular rearrangements can compete better.\n\nConversely, if the 2 kg batch is more concentrated (trying to save solvent), diffusion is slower, local concentrations spike around the addition point, and that favors side reactions.\n\n---\n\n**What to do next:**\n\n1. **Name the three impurities.** Structure, mass, or HPLC retention time — anything that would let me search for them in the literature or compute their likely origins. \n\n2. **Compare the reaction conditions between 100 mg and 2 kg exactly:**\n   - Temperature profile (set vs. observed)?\n   - Stir rate and type?\n   - Reagent concentrations (mol/L total)?\n   - Addition time and order?\n   - Inert handling (how was O₂ excluded)?\n\n3. **Check the 100 mg sample for what you *didn't* see.** Were there trace impurities at, say, 0.1–0.2% that didn't get reported because the limit was 1%? LCAP might not resolve them at that scale.\n\nThe playbook note above ([[playbook-recrystallisation-purity]]) points to a general rule worth keeping in mind: purity at one scale doesn't guarantee it at another, because the purification method usually changes. Did you purify the 100 mg and 2 kg batches the same way?",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "gather_evidence",
+      "find_notes",
+      "gather_evidence",
+      "gather_evidence",
+      "expand_note",
+      "expand_note"
+    ],
+    "tool_results": [
+      {
+        "tool": "gather_evidence",
+        "preview": "[EvidenceChunk(content='<retrieved-note-0d8f72b4838855b1 id=\"rxn-amide-edc\">\\nEDC/HOBt amide coupling of benzoic acid with benzylamine.\\n\\n- base: compound-dipea (2.5 equiv)\\n- solvent: DMF, 0 °C to r"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "[EvidenceChunk(content='<retrieved-note-0d8f72b4838855b1 id=\"opt-suzuki-conditions\">\\nRepeated runs of the biaryl coupling under varied temperature, Pd loading and base.\\n\\n- transformation: rxn-suzuk"
+      },
+      {
+        "tool": "find_notes",
+        "preview": ""
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "[EvidenceChunk(content='<retrieved-note-0d8f72b4838855b1 id=\"campaign-aspirin-teaching\">\\nFour runs of the aspirin acetylation at 1 g, 5 g, 20 g and 100 g scale.\\n\\n- rxn-aspirin-acetylation\\n\\nIsolat"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "[EvidenceChunk(content='<retrieved-note-0d8f72b4838855b1 id=\"interaction-solvent-swap-question\">\\n**Q:** Can we run the EDC coupling in 2-MeTHF instead of DMF?\\n\\n**A (confirmed):** Yes, at a cost of "
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='campaign-aspirin-teaching', type='campaign', compound_smiles=None, tags=['campaign', 'scale-up'], created_by='human', source='seed-corpus', confidence=0.85, valid_from=None, valid_to="
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='playbook-recrystallisation-purity', type='playbook', compound_smiles=None, tags=['playbook', 'reporting'], created_by='human', source='seed-corpus', confidence=0.9, valid_from=None, v"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "1",
+      "5",
+      "20",
+      "100",
+      "2",
+      "80",
+      "3"
+    ],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 28.32,
+    "event_counts": {
+      "token": 59,
+      "tool_call": 7,
+      "evidence_source": 4,
+      "tool_result": 7,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "9313534369a449869f3d306458ec4b2b",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

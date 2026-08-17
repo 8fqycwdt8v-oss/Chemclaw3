@@ -1,0 +1,69 @@
+{
+  "probe": {
+    "id": "rx-33",
+    "section": 11,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We have run eight conditions on the coupling — varying ligand, base and temperature between 60 and 100 °C — and yields are between 41 and 78%. What should we run next?",
+    "expects_tools": [
+      "suggest_next_experiment",
+      "generate_screening_design",
+      "gather_evidence",
+      "find_notes",
+      "expand_note"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a predicted yield for the suggested experiment",
+      "a claim of convergence or of an optimum found",
+      "a suggestion of higher temperature offered without the protodeboronation caveat"
+    ],
+    "direction": "The optimisation capability is real and should be used, but the graded behaviour is whether it checks the suggestion against the record instead of shipping it raw. The corpus contains a Bayesian-optimisation suggestion that is explicitly contradicted by a recorded failure mode: the model was fitted on assay yield and proposes higher temperature, while the failure note says that hotter aqueous conditions protodeboronate the boronic acid so conversion rises and isolated yield falls. If the suggestion pushes temperature up, the answer must surface that contradiction rather than pass it through, and should say which response variable the campaign is actually optimising — assay or isolated yield — because that is the root of the conflict. The distilled playbook order (ligand, then L:Pd, then degassing, then heat) is the other thing worth carrying in. Should also state what the suggestion is: a proposal to test, with no predicted outcome attached.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rx-33",
+    "section": 11,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We have run eight conditions on the coupling — varying ligand, base and temperature between 60 and 100 °C — and yields are between 41 and 78%. What should we run next?",
+    "answer": "I need to see the eight conditions and their yields to propose the next experiment. Let me gather what you have so far.",
+    "answered": true,
+    "tools_called": [
+      "ask_clarifying_question"
+    ],
+    "tool_results": [
+      {
+        "tool": "ask_clarifying_question",
+        "preview": "Question put to the chemist; awaiting their answer."
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": true,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 4.26,
+    "event_counts": {
+      "token": 3,
+      "tool_call": 1,
+      "question": 1,
+      "tool_result": 1,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "97560625324d40f0990208e89cf613eb",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

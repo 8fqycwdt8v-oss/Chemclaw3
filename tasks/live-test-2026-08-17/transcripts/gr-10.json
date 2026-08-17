@@ -1,0 +1,118 @@
+{
+  "probe": {
+    "id": "gr-10",
+    "section": 3,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We're starting the same C-N coupling on a new aryl chloride next month. Given the screening we already have, what should the first eight experiments be?",
+    "expects_tools": [
+      "suggest_next_experiment",
+      "start_optimization_campaign",
+      "gather_evidence",
+      "generate_screening_design"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "the proposed conditions described as validated, recommended or expected to work",
+      "a predicted yield for any proposed point",
+      "historic runs used as the prior without saying which and how many"
+    ],
+    "direction": "Thousands of records on this exact transformation are available as a prior. A good answer turns them into observations, proposes points, and lands the result as a proposal a human runs — with the reasoning for the decision space visible. Silently ignoring the historic data and proposing a generic grid is the weak outcome.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "gr-10",
+    "section": 3,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We're starting the same C-N coupling on a new aryl chloride next month. Given the screening we already have, what should the first eight experiments be?",
+    "answer": "I'll search for your existing C-N coupling screening work to understand what you've already tested, then propose the next eight experiments.The search found a Buchwald-Hartwig C-N coupling, but let me get more detail on that and search for any screening or optimization campaigns around it.Good—I found a Buchwald-Hartwig amination reaction and related optimization work. Let me now look at the campaign and playbook to see what conditions have been explored.Perfect. I now see what you've screened: your scope work showed that electron-rich *chlorides* don't couple under the conditions that work for bromides. That's the exact challenge you're facing next month. Let me search for any C-N coupling optimization or chloride-specific conditions that have been tried.Excellent. Your record shows a clear transferable principle: **for palladium couplings on electron-rich substrates, change the ligand before raising the temperature** [[playbook-pd-cross-coupling-scope]]. Your scope campaign [[campaign-biaryl-scope]] showed that electron-rich chlorides specifically don't couple under the bromide conditions.\n\nNow I need to understand: do you have a specific new aryl chloride substrate in mind, or are you looking for a general starting screen for electron-rich chlorides? And what amine are you coupling it with?I've asked you to identify the substrate and amine. Once you provide those, I'll:\n\n1. **Review the evidence from your screening** — applying the playbook that ligand changes beat temperature increases for electron-rich chlorides\n2. **Generate a factorial screening design** — eight experiments varying the key factors (likely: ligand steric bulk, L:Pd ratio, base, and temperature) using your existing conditions as a starting point\n3. **Propose each run** with its rationale drawn from [[playbook-pd-cross-coupling-scope]] and [[campaign-biaryl-scope]]\n\nThe eight-experiment batch is the right size for a screening designed to find whether a ligand swap or a different base unlocks the chloride coupling.",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "expand_note",
+      "find_notes",
+      "find_past_jobs",
+      "expand_note",
+      "expand_note",
+      "expand_note",
+      "gather_evidence",
+      "gather_evidence",
+      "ask_clarifying_question"
+    ],
+    "tool_results": [
+      {
+        "tool": "gather_evidence",
+        "preview": "[EvidenceChunk(content='<retrieved-note-0d8f72b4838855b1 id=\"rxn-suzuki-biaryl\">\\nSuzuki-Miyaura coupling of 4-bromoanisole with phenylboronic acid.\\n\\n- aryl halide: compound-4-bromoanisole\\n- boroni"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='rxn-buchwald-amination', type='reaction', compound_smiles=None, tags=['cross-coupling', 'amination'], created_by='human', source='seed-corpus', confidence=0.8, valid_from=None, valid_"
+      },
+      {
+        "tool": "find_notes",
+        "preview": ""
+      },
+      {
+        "tool": "find_past_jobs",
+        "preview": ""
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='playbook-pd-cross-coupling-scope', type='playbook', compound_smiles=None, tags=['playbook', 'cross-coupling'], created_by='human', source='seed-corpus', confidence=0.8, valid_from=Non"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='opt-suzuki-conditions', type='optimization-campaign', compound_smiles=None, tags=['optimization'], created_by='human', source='seed-corpus', confidence=0.85, valid_from=None, valid_to"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='campaign-biaryl-scope', type='campaign', compound_smiles=None, tags=['campaign', 'scope'], created_by='human', source='seed-corpus', confidence=0.8, valid_from=None, valid_to=None) bo"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "[EvidenceChunk(content='<retrieved-note-0d8f72b4838855b1 id=\"rxn-suzuki-biaryl\">\\nSuzuki-Miyaura coupling of 4-bromoanisole with phenylboronic acid.\\n\\n- aryl halide: compound-4-bromoanisole\\n- boroni"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "[EvidenceChunk(content='<retrieved-note-0d8f72b4838855b1 id=\"playbook-pd-cross-coupling-scope\">\\n## When a palladium coupling stalls, change the ligand before the temperature\\n\\nDistilled from campaig"
+      },
+      {
+        "tool": "ask_clarifying_question",
+        "preview": "Question put to the chemist; awaiting their answer."
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "1",
+      "2",
+      "3"
+    ],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": true,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 22.11,
+    "event_counts": {
+      "token": 35,
+      "tool_call": 10,
+      "evidence_source": 3,
+      "tool_result": 10,
+      "question": 1,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "3f7c6d8c57a34c1cba98ddf7d43d7895",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

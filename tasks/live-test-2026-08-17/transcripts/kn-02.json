@@ -1,0 +1,85 @@
+{
+  "probe": {
+    "id": "kn-02",
+    "section": 1,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "our biaryl couplings keep coming out either 70-odd percent or under 20, with nothing changed on paper. any idea whats going on",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a note id that was not retrieved",
+      "a reagent-lot, instrument or operator cause that is not in the record",
+      "a yield distribution the notes do not report"
+    ],
+    "direction": "Recognises the *bimodal* signature as the diagnostic, not the average, and attributes it to dissolved oxygen killing Pd(0) — the dead black precipitate — citing playbook-degassing by id. States the remedy on file: three freeze-pump-thaw cycles, or sparging 20 minutes per 100 mL, and that two minutes of sparging is measurably the same as not degassing. Naming the mechanism without a note id, or offering a generic troubleshooting list, is a weaker answer.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "kn-02",
+    "section": 1,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "our biaryl couplings keep coming out either 70-odd percent or under 20, with nothing changed on paper. any idea whats going on",
+    "answer": "I'll search for what the record holds on your biaryl couplings — the conditions, outcomes, and anything that might explain the bimodal yield distribution.Perfect — the record holds exactly what's happening. Let me expand the key note on this:This is your answer, and it's unambiguous. **You have a degassing problem.**\n\nThe bimodal distribution — 70%+ or under 20%, nothing in between — is the signature of Pd(0) catalyst being killed by dissolved oxygen. It's not a subtle effect that depends on substrate or temperature. It's all-or-nothing: if the oxygen gets to the catalyst in the first few minutes after activation, you get a black precipitate of metallic Pd, the catalyst is gone, and the reaction stalls at low conversion. If it doesn't, you're fine.\n\n**Why \"nothing changed on paper\":** The conditions are identical on paper because the problem is invisible on paper. Oxygen solubility is not written in a notebook, time under nitrogen is guessed not measured, and \"I degassed the solvent\" covers everything from two minutes of sparging (ineffective) to proper work (which you're apparently not doing).\n\n**What actually works**, from the record [[playbook-degassing]]:\n- **Three freeze-pump-thaw cycles** on the assembled reaction vessel, or\n- **20 minutes of vigorous sparging per 100 mL of solvent**\n\nTwo minutes of sparging is *the same as not degassing*. If you've been doing brief sparges and calling it done, that's your problem.\n\nThe conditions themselves are solid: [[opt-suzuki-conditions]] shows 76-79% at 1.5 mol% Pd(OAc)₂, K₂CO₃, 80 °C. You have the right ligand, loading and temperature. The issue is that half the time the catalyst never even activates because oxygen is in the flask.\n\nStart with proper degassing — pick one method and commit to it — and the bimodal distribution should collapse to consistent 70%+ yields. If it doesn't, then the substrate or conditions need adjustment, but right now you have no data that means anything because your control (degassing) is broken.",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note"
+    ],
+    "tool_results": [
+      {
+        "tool": "find_notes",
+        "preview": "[NoteRef(id='bo-suzuki-next', type='bo-candidate', compound_smiles=None, tags=['bo', 'suggestion'], created_by='human', source='seed-corpus', confidence=0.5, valid_from=None, valid_to=None), NoteRef(i"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "[EvidenceChunk(content='<retrieved-note-0d8f72b4838855b1 id=\"opt-suzuki-conditions\">\\nRepeated runs of the biaryl coupling under varied temperature, Pd loading and base.\\n\\n- transformation: rxn-suzuk"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='playbook-degassing', type='playbook', compound_smiles=None, tags=['playbook', 'technique'], created_by='human', source='seed-corpus', confidence=0.85, valid_from=None, valid_to=None) "
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "70",
+      "20",
+      "0",
+      "100",
+      "76",
+      "1.5",
+      "80"
+    ],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 11.49,
+    "event_counts": {
+      "token": 28,
+      "tool_call": 3,
+      "tool_result": 3,
+      "evidence_source": 1,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "3e1f0652f19740a9b9d340b76bb6c0eb",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

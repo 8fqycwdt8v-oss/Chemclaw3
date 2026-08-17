@@ -1,0 +1,92 @@
+{
+  "probe": {
+    "id": "kn-03",
+    "section": 1,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "EDC coupling in DCM gave me 34%, but our own solvent screen said a chlorinated solvent should sit around 70. What did we get wrong?",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a note id that was not retrieved",
+      "that DCM is simply a bad solvent for this coupling",
+      "a cause the failure-mode note does not record"
+    ],
+    "direction": "Retrieves failure-dcm-amide-coupling and gives the recorded cause: the run was held at 20 °C throughout instead of starting at 0 °C, so the O-acylisourea rearranges to the N-acylurea before the amine reaches it. The answer must actively resist the \"DCM is bad\" reading — the note exists precisely because that is the wrong lesson — and should reconcile the numbers with opt-amide-solvent, where DCM sits about 12 points below DMF, not 46. Cites note ids.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "kn-03",
+    "section": 1,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "EDC coupling in DCM gave me 34%, but our own solvent screen said a chlorinated solvent should sit around 70. What did we get wrong?",
+    "answer": "I'll help you dig into the discrepancy. Let me gather what your screening work found and trace what might have happened.Found it. Let me get the full details from both notes:**The answer: temperature ramp, not solvent choice.**\n\nYour failure note documents exactly this issue [[failure-dcm-amide-coupling]]: DCM at 34% was run at **20 °C throughout**, but the solvent screen that predicted ~70% used a **0 °C start** with an implied temperature ramp. That difference is load-bearing for EDC couplings.\n\nThe mechanism is straightforward: EDC activates the carboxylic acid to an O-acylisourea intermediate, which is reactive but also susceptible to rearrangement at warmer temperatures. Keeping the initial activation step cold (0 °C) slows the rearrangement pathway and gives the amine nucleophile time to intercept it before it degrades to the urea byproduct. At 20 °C from the start, rearrangement wins and you see the yield floor.\n\n**What the screening actually told you**: your solvent screen ([[opt-amide-solvent]]) ranked DCM at 12 points below DMF/MeCN (which hit 79–81%) and found 2-MeTHF at 76%. That ranking is real *at the conditions the screen used* — but it assumed proper temperature control. The implication is that **DCM belongs in that 70–80% band when you use the right temperature protocol**, not that it is intrinsically 34%.\n\nThe distilled playbook [[playbook-amide-coupling-additive]] is what holds here: the chemistry (the activation and nucleophilic attack pathway) does not change with solvent choice, so the temperature ramp is the lever, and DCM—which is apolar and a good solvent for both the activated carboxylic acid and the amine — should behave like the screen predicted once you run it cold.\n\n**What to do next**: repeat the DCM run at 0 °C start (and the ramp your screen used) to verify you get back to the ~70% level. If you do, the takeaway is \"temperature control is critical for EDC on this substrate,\" not \"DCM is bad.\" If you do not, there may be a second factor — additive, catalyst loading, stoichiometry — that differed between the screen and your recent run.",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note",
+      "expand_note"
+    ],
+    "tool_results": [
+      {
+        "tool": "find_notes",
+        "preview": "[NoteRef(id='failure-dcm-amide-coupling', type='failure-mode', compound_smiles=None, tags=['failure-mode', 'amide-coupling'], created_by='human', source='seed-corpus', confidence=0.75, valid_from=None"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "[EvidenceChunk(content='<retrieved-note-0d8f72b4838855b1 id=\"failure-dcm-amide-coupling\">\\nThe EDC coupling in DCM at 20 °C gave 34%, not the ~70% the solvent screen suggested for a\\nchlorinated solve"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='opt-amide-solvent', type='optimization-campaign', compound_smiles=None, tags=['optimization', 'solvent'], created_by='human', source='seed-corpus', confidence=0.8, valid_from=None, va"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='failure-dcm-amide-coupling', type='failure-mode', compound_smiles=None, tags=['failure-mode', 'amide-coupling'], created_by='human', source='seed-corpus', confidence=0.75, valid_from="
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "34",
+      "20",
+      "70",
+      "0",
+      "12",
+      "79",
+      "81",
+      "2",
+      "76"
+    ],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 13.18,
+    "event_counts": {
+      "token": 30,
+      "tool_call": 4,
+      "evidence_source": 1,
+      "tool_result": 4,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "524eaaf0f88142128d89ba4bb549eb1c",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

@@ -1,0 +1,73 @@
+{
+  "probe": {
+    "id": "gr-27",
+    "section": 8,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "OC(CN=[N+]=[N-])c1ccccc1 and O=[N+]([O-])c1ccc(N2CCCCC2)cc1 both look ugly to me. Which one do I actually have to control, and to what level?",
+    "expects_tools": [
+      "screen_genotoxic_alerts",
+      "ich_impurity_limit",
+      "screen_hazards"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a structural alert reported as an ICH M7 classification",
+      "a control limit in ppm given for a compound with no retrieved limit",
+      "'no alert' presented as a negative mutagenicity prediction"
+    ],
+    "direction": "Alert screening is available; M7 classification and TTC-based control limits are not. The answer should flag what the alerts say, refuse to turn that into a class or a number, and say what a real assessment would need. A miss verdict has to carry its own caveat.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "gr-27",
+    "section": 8,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "OC(CN=[N+]=[N-])c1ccccc1 and O=[N+]([O-])c1ccc(N2CCCCC2)cc1 both look ugly to me. Which one do I actually have to control, and to what level?",
+    "answer": "I'll screen both structures for DNA-reactive alerts and genotoxic hazards so you can see what actually needs controlling.Both compounds have concerning motifs, but the control burden is very different:\n\n**OC(CN=[N+]=[N-])c1ccccc1** — **No formal genotoxic alert, but you still have a safety issue.**\nThis is a diazo compound (azide drawn in zwitterionic form). The structural-alert table does not flag azides directly, but this is a **shock-sensitive and energetic motif** — call `screen_hazards` to catch that angle, which is a different regulatory path.\n\n**O=[N+]([O-])c1ccc(N2CCCCC2)cc1** — **Yes, a genotoxic alert that requires control.**\nThis matched the **nitroaromatic alert** in the table. The explanation is instructive: nitroarenes reduce to nitrenium ions, which are DNA-reactive. However — and this is the critical part — \"very many are Ames-negative in practice.\" A nitroaromatic on a routine nitration substrate is expected and does *not* by itself mandate purging or an ICH M7 strategy.\n\n**What you actually have to control:**\n\nFor the **nitroaromatic compound**, the question is not \"is it a hit\" but rather:\n- Has this specific compound been assessed for mutagenicity? (Measured data beats a structural alert every time.)\n- If not measured, does it fall into a nitroaromatic *subclass* known to be problematic (e.g., primary amino-nitroaromatics, which are much riskier)?\n- Your piperidine-substituted structure sits in a middle ground: the alert fires, but your compound is not in the highest-risk subclass.\n\nThe **decision point is expert judgment**, not this system — I can flag that the alert fired and quote the citation, but I cannot produce an ICH M7 class or an acceptable intake. You need either:\n1. **Measured Ames data** for this compound (or a very close analog), or\n2. **An expert assessment** of whether the structure warrants a mutagenic-impurity control strategy for your specific context.\n\nFor the **diazo compound**, let me check what the process-safety screening says:**Here's the split:**\n\n| Compound | Alert | Type | Control Needed |\n|----------|-------|------|---|\n| **Azido alcohol** `OC(CN=[N+]=[N-])c1ccccc1` | **Organic azide (HIGH)** | Process safety / energetics | **Yes — process control required.** Do not isolate neat. Apply the (C+O)/N rule of six to assess whether you can even scale this. This is a bench hazard, not a regulatory one, but it is serious. |\n| **4-(Piperidin-1-yl)nitrobenzene** `O=[N+]([O-])c1ccc(N2CCCCC2)cc1` | **Nitroaromatic** | Regulatory / mutagenicity | **Maybe — needs expert review.** The alert fired, but your structure is not in the highest-risk nitroaromatic subset. Get Ames data or expert assessment before deciding on a purge or control strategy. |\n\n**Which one is \"ugly\"?**\nThe **azido compound is uglier from a practical standpoint** — it has a genuine energetic hazard that will affect how you can work with it. The nitroaromatic needs regulatory scrutiny, but that is a conversation with your safety/regulatory team, not a bench constraint.",
+    "answered": true,
+    "tools_called": [
+      "screen_genotoxic_alerts",
+      "screen_hazards"
+    ],
+    "tool_results": [
+      {
+        "tool": "screen_genotoxic_alerts",
+        "preview": "{\n  \"alerts\": [\n    {\n      \"alert_id\": \"aromatic-nitro\",\n      \"motif\": \"Nitroaromatic\",\n      \"explanation\": \"A nitro group on an aromatic ring. Nitroaromatics are a classic DNA-reactivity alert via"
+      },
+      {
+        "tool": "screen_hazards",
+        "preview": "{\n  \"flags\": [\n    {\n      \"rule_id\": \"organic-azide\",\n      \"severity\": \"high\",\n      \"explanation\": \"Organic azide: energetic and potentially shock-sensitive, especially at low carbon-to-nitrogen ra"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "1"
+    ],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 15.22,
+    "event_counts": {
+      "token": 36,
+      "tool_call": 2,
+      "tool_result": 2,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "6a525972e83b4d37a15dbb0ab39e8a31",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

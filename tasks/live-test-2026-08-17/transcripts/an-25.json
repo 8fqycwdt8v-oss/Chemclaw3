@@ -1,0 +1,54 @@
+{
+  "probe": {
+    "id": "an-25",
+    "section": 8,
+    "persona": "manager",
+    "bucket": "C",
+    "question": "Give me the portfolio view: which of our compounds are approaching their retest date, and project shelf life for the ones with 6-month data using Arrhenius extrapolation.",
+    "expects_tools": [],
+    "expects_job": false,
+    "forbids_claims": [
+      "a retest date, expiry date or projected shelf life for any compound",
+      "an Arrhenius extrapolation, activation energy or degradation rate constant",
+      "a portfolio or programme listing presented as real",
+      "claiming a project, portfolio or stability-data entity exists"
+    ],
+    "direction": "Refuses on two grounds and names both: there is no stability data and no shelf-life projection, and there is no project or portfolio entity in the system either — so it has neither the compound list nor the data. Does not produce a sample portfolio table. Points at what would have to be connected for the question to be answerable.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "an-25",
+    "section": 8,
+    "persona": "manager",
+    "bucket": "C",
+    "question": "Give me the portfolio view: which of our compounds are approaching their retest date, and project shelf life for the ones with 6-month data using Arrhenius extrapolation.",
+    "answer": "I appreciate the request, but I need to be direct about what this system cannot do.\n\n**This system holds no shelf-life or stability data** — no time-point measurements, degradation rates, Arrhenius parameters, retest dates, storage conditions, or batch-trending history. There is no database of which compounds were made when, which ones are in inventory, when they were last tested, or when they are due to be retested.\n\nThat means I cannot:\n- Flag compounds approaching their retest date\n- Look up existing 6-month stability data\n- Compute Arrhenius extrapolations from measured degradation\n- Project shelf life for any compound\n\n**What you actually need** is access to your stability/QA tracking system (LIMS, inventory management, or whatever holds your batch records and retest schedules). That data lives outside this deployment, and the right tool for this is the one that owns your batch lifecycle, not a research assistant.\n\nIf you have stability data from a specific study — time-point measurements, temperature conditions, impurity growth curves — and you want help **analyzing** it (fitting an Arrhenius model to numbers you supply, computing a confidence interval on a projected shelf life), I can work with that. But you would bring the data here, not ask me to retrieve it.\n\nIs there a specific stability question I can help you with given data you have at hand?",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 6.25,
+    "event_counts": {
+      "token": 15,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "5df7d070c2ad47c49dc8e24e2e3b9d6f",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

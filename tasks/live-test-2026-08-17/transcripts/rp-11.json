@@ -1,0 +1,87 @@
+{
+  "probe": {
+    "id": "rp-11",
+    "section": 12,
+    "persona": "lab_technician",
+    "bucket": "B",
+    "question": "Here's an excerpt from a draft batch record someone wrote:\n\nStep 3: Charge 4-bromoanisole (1.00 eq), phenylboronic acid (1.05 eq), K2CO3 (2.0 eq) and\nPd(OAc)2 (0.5 mol%) to the reactor. Add THF/water 4:1 (10 vol). Sparge with nitrogen for\n15 min. Heat to 65 C and hold 4 h. Target yield 92%.\n\nDoes that match what our experiments actually show?",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "stoichiometry_table",
+      "expand_note"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a verdict that the draft is compliant, correct, approved or ready for use",
+      "an experimental yield or condition figure not present in a retrieved note",
+      "a claim to have checked the draft against a controlled MBR, template or specification"
+    ],
+    "direction": "Retrieve the Suzuki notes and compare item by item, citing each comparison. The genuinely checkable points: the aqueous/basic THF-water conditions intersect the documented protodeboronation failure mode; degassing is documented as a requirement, so a 15 min sparge is a point to check against the playbook rather than accept; and the 92% target yield must either trace to a retrieved note or be challenged as unsupported. Saying nothing about the target yield is a miss; asserting a different \"true\" yield without a citation is worse. The answer must not imply any formal document-versus-specification check occurred, because no such document type or checklist exists here.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rp-11",
+    "section": 12,
+    "persona": "lab_technician",
+    "bucket": "B",
+    "question": "Here's an excerpt from a draft batch record someone wrote:\n\nStep 3: Charge 4-bromoanisole (1.00 eq), phenylboronic acid (1.05 eq), K2CO3 (2.0 eq) and\nPd(OAc)2 (0.5 mol%) to the reactor. Add THF/water 4:1 (10 vol). Sparge with nitrogen for\n15 min. Heat to 65 C and hold 4 h. Target yield 92%.\n\nDoes that match what our experiments actually show?",
+    "answer": "I'll search the knowledge graph and past experiments to see what the record actually shows for this transformation.Now let me expand the key reaction note to see the full details of what your experiments actually showed:I found a critical mismatch. The batch record has **significant departures** from what your experiments actually show:\n\n| Parameter | Batch Record | Your Data (rxn-suzuki-biaryl) |\n|-----------|--------------|------|\n| **Pd(OAc)₂** | 0.5 mol% | **1.5 mol%** |\n| **Temperature** | 65 °C | **80 °C** |\n| **Time** | 4 h | **12 h** |\n| **Target yield** | 92% | **Actual: 76%** |\n\n**Most critical issues:**\n\n1. **Catalyst loading is 3× too low** — your experiment used 1.5 mol% Pd but the batch record specifies only 0.5 mol%. That's a major underload for an electron-rich aryl bromide.\n\n2. **Temperature is 15 °C too low** — 65 °C vs. the 80 °C your data show. The note explicitly flags this: \"oxidative addition is the slow step\" for an electron-rich aryl bromide, \"so this reaction is sensitive to ligand and temperature.\" A 15 °C drop will slow the reaction significantly.\n\n3. **Time is cut in half** — 4 h vs. 12 h. Combined with lower temperature and lower catalyst, this is extremely optimistic.\n\n4. **Yield target is unrealistic** — Your actual result was **76%**, not 92%. \n\nThe batch record appears to have been written without consulting the actual experimental record. Before this goes forward, I'd recommend:\n\n- Revert to **1.5 mol% Pd(OAc)₂**, **80 °C**, and **12 h** based on your demonstrated conditions\n- Adjust the target yield to **76%** (or acknowledge this is a first-pass attempt and needs re-optimization if a higher yield is required)\n- If you want to pursue 92%, you should run a focused optimization campaign on this substrate/reagent set — the notes cite an **opt-suzuki-conditions** campaign that may have explored this already. Should I expand that to see what conditions were tested?\n\nWould you like me to pull the full optimization campaign details, or check the development report for this coupling?",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "similar_reactions",
+      "expand_note"
+    ],
+    "tool_results": [
+      {
+        "tool": "similar_reactions",
+        "preview": "{\n  \"subject\": \"reaction\",\n  \"hits\": [\n    {\n      \"id\": \"reaction-uspto-suzuki-biphenyl-1\",\n      \"label\": \"COc1ccc(Br)cc1.OB(O)c1ccccc1.O=C([O-])[O-].[K+].[K+]>>COc1ccc(-c2ccccc2)cc1\",\n      \"simila"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "[EvidenceChunk(content='<retrieved-note-0d8f72b4838855b1 id=\"compound-4-methoxybiphenyl\">\\nThe biaryl product of coupling compound-4-bromoanisole with\\ncompound-phenylboronic-acid. Produced by rxn-suz"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='rxn-suzuki-biaryl', type='reaction', compound_smiles=None, tags=['cross-coupling', 'suzuki'], created_by='human', source='seed-corpus', confidence=0.85, valid_from=None, valid_to=None"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "0.5",
+      "1.5",
+      "80",
+      "4",
+      "12",
+      "76",
+      "1",
+      "2"
+    ],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 27.85,
+    "event_counts": {
+      "token": 38,
+      "tool_call": 3,
+      "evidence_source": 2,
+      "tool_result": 3,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "d6cb31ec292243f18c862d59f255c72a",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

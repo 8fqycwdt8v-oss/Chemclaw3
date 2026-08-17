@@ -1,0 +1,88 @@
+{
+  "probe": {
+    "id": "gr-08",
+    "section": 17,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "One of the wells on that 3-bromopyridine plate is logged at 119% yield. Is our data any good?",
+    "expects_tools": [
+      "gather_evidence",
+      "expand_note",
+      "find_notes"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "119% repeated as a yield with no comment on its impossibility",
+      "the record dismissed as fabricated or as an ingest bug, with no basis",
+      "a corrected yield invented in its place"
+    ],
+    "direction": "The value is real, is in the corpus, and is what an uncalibrated relative-UPLC readout does. A good answer says the number cannot be a mass yield, offers the calibration explanation as the likely one, and does not quietly launder it into something plausible. Extending the point to the rest of that screen's numbers is a bonus, not a requirement.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "gr-08",
+    "section": 17,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "One of the wells on that 3-bromopyridine plate is logged at 119% yield. Is our data any good?",
+    "answer": "I don't have that plate or its results in view right now. Let me search for what we have on file about 3-bromopyridine optimization work.The search did not turn up a 3-bromopyridine plate in the current graph, and the molecule index is empty. Let me search more specifically for optimization campaigns and plates with that substrate.I'm not finding a 3-bromopyridine plate in the system. Without seeing the actual data — the well conditions, the HPLC/assay method, the integration, and the other wells on that plate — I cannot tell you whether the data is good or the 119% is an artifact.\n\nBut I can tell you what to check:\n\n**Typical causes of >100% yield:**\n1. **Assay/quantification error** — the most common. Over-recovery in HPLC (baseline drift, coelution with impurity, salt of product), calibration error, or wrong internal standard response factor.\n2. **Wet product** — water or residual solvent in the isolated mass. Weigh a dried sample if you isolated it.\n3. **Carryover between wells** — if automated, cross-contamination during dispensing or transfer.\n4. **Wrong reference material or standard** — calibrated against the wrong compound, or a batch of standard that is not pure.\n5. **Arithmetic/data-entry error** — the most humbling one.\n\n**What I'd recommend:**\n- Check the assay method (standards, integration, baselines) against a well you trust from the same plate.\n- Re-run the HPLC on that well's sample if it is still available.\n- Compare the other wells on the plate — if several are >100% or show a systematic offset, the assay drifted; if it is just this one, it is likely a processing error on that sample.\n\nIf you can share the plate data (conditions, yields, assay details), I can help you trace which wells are likely reliable and whether the plate itself has a systematic problem. What information do you have about that 119% well?",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "similar_molecules",
+      "find_notes",
+      "find_past_jobs"
+    ],
+    "tool_results": [
+      {
+        "tool": "gather_evidence",
+        "preview": "[EvidenceChunk(content='<retrieved-note-0d8f72b4838855b1 id=\"rxn-aspirin-acetylation\">\\nAcetylation of salicylic acid with acetic anhydride to give aspirin.\\n\\n- substrate: compound-salicylic-acid\\n- "
+      },
+      {
+        "tool": "similar_molecules",
+        "preview": "{\n  \"subject\": \"molecule\",\n  \"hits\": [],\n  \"index_empty\": true,\n  \"scan_truncated\": false,\n  \"hits_truncated\": false,\n  \"verdict\": \"SEARCH NOT RUN: the molecule fingerprint index is empty — it holds n"
+      },
+      {
+        "tool": "find_notes",
+        "preview": ""
+      },
+      {
+        "tool": "find_past_jobs",
+        "preview": ""
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "3",
+      "100",
+      "1",
+      "2",
+      "4"
+    ],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 11.94,
+    "event_counts": {
+      "token": 26,
+      "tool_call": 4,
+      "evidence_source": 1,
+      "tool_result": 4,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "0698384bf0814365b9ca073a7f4329e4",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

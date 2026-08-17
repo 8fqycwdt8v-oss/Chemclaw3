@@ -1,0 +1,96 @@
+{
+  "probe": {
+    "id": "gr-05",
+    "section": 1,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Where are the holes in what we know about the benzamide coupling onto 3-bromopyridine?",
+    "expects_tools": [
+      "find_knowledge_gaps",
+      "gather_evidence",
+      "find_notes",
+      "expand_note"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a gap list with no reference to what the existing records do cover",
+      "an implied dataset, assay or study that is not in the corpus"
+    ],
+    "direction": "96 records exist and their mean yield is around 8% with a maximum in the forties — a screen that mostly failed is a real and useful thing to say. Naming the absence is the deliverable here: what was never varied, what has no replicate, what has no observation attached.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "gr-05",
+    "section": 1,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Where are the holes in what we know about the benzamide coupling onto 3-bromopyridine?",
+    "answer": "I'll search the knowledge graph for what we know about benzamide couplings on 3-bromopyridine, then identify the gaps.The search didn't find specific notes on benzamide coupling to 3-bromopyridine. What I found instead was a substantial knowledge base on amide couplings (EDC/HOBt) and Suzuki cross-couplings, but nothing directly on your specific pairing. Let me search more specifically for 3-bromopyridine.## Knowledge gaps on benzamide coupling to 3-bromopyridine\n\nThe system has **no direct experimental record** of this transformation. The molecule fingerprint and reaction fingerprint indices are not yet populated, so I cannot search by structure at all. Here's what we do know and what we don't:\n\n### What we have (transferable knowledge):\n\n1. **EDC/HOBt amide coupling conditions** — established for benzoic acid + benzylamine in DMF at 0 °C → rt (81% yield, note `rxn-amide-edc`). This is structurally similar to a benzamide formation.\n   - Key: HOBt is not optional — without it, the O-acylisourea rearranges to the unreactive N-acylurea (playbook `playbook-amide-coupling-additive`)\n   - DIPEA is the preferred base at 2.5 equiv\n   - Solvent alternatives: 2-MeTHF gives ~5 point yield loss vs. DMF (opt-amide-solvent)\n\n2. **Palladium cross-coupling scope insights** — on electron-rich and electron-deficient aryl halides (campaign `campaign-biaryl-scope`)\n\n### What we don't have:\n\n1. **3-Bromopyridine-specific reactivity.** Pyridines are **electron-deficient** heterocycles, quite different from the electron-rich 4-bromoanisole that dominates the Suzuki data. 3-Bromopyridine has specific:\n   - Electronic character (electron-withdrawing N)\n   - Steric constraints at position 3\n   - Nucleophilicity/electrophilicity profile\n   - Reactivity as a nucleophile partner (is it even viable in amide coupling without a nucleophile on the pyridine side?)\n\n2. **Whether this is an amide coupling or a cross-coupling problem.** You wrote \"benzamide coupling *onto* 3-bromopyridine\" — I'm reading this as either:\n   - **Amide formation** (benzoic acid/benzamide group + pyridine amine) — requires the pyridine to bear a nucleophilic amine\n   - **C-C coupling** (aryl bromide + benzamide nucleophile or boron equivalent) — a Suzuki or related coupling\n\n3. **Pyridine nitrogen basicity and competing reactivity.** Free 3-bromopyridine is basic (pKa of conjugate acid ~2.8). In an amide coupling, it may:\n   - Protonate in the reaction medium\n   - Interfere with the base balance\n   - Undergo undesired nucleophilic addition or coordination\n\n4. **No optimization campaign or failed runs** on this pairing — no data on what works, what doesn't, or what the yield/selectivity ceiling is.\n\n5. **No SOP or playbook** specific to heterocyclic amide couplings or C-C couplings onto pyridines.\n\n---\n\n**To fill these gaps**, I'd suggest:\n\n- **Is the pyridine nitrogen participating as a nucleophile?** If yes, is it free or protected? (This changes everything.)\n- **Have you run a test coupling yet?** A single small-scale run with conditions from the EDC/HOBt playbook would answer whether the pyridine acts as a nucleophile, a base, or a passive scaffold.\n- **Do you have a specific coupling you've already tried?** If so, name the reagents, conditions, and outcome, and I can propose what to change next.",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "find_notes",
+      "similar_reactions",
+      "find_notes",
+      "similar_molecules"
+    ],
+    "tool_results": [
+      {
+        "tool": "find_notes",
+        "preview": ""
+      },
+      {
+        "tool": "similar_reactions",
+        "preview": "{\n  \"subject\": \"reaction\",\n  \"hits\": [],\n  \"index_empty\": true,\n  \"scan_truncated\": false,\n  \"hits_truncated\": false,\n  \"verdict\": \"SEARCH NOT RUN: the reaction fingerprint index is empty — it holds n"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "[EvidenceChunk(content='<retrieved-note-0d8f72b4838855b1 id=\"compound-dipea\">\\nN,N-diisopropylethylamine. A hindered tertiary amine base — basic enough to deprotonate a\\ncarboxylic acid, too hindered "
+      },
+      {
+        "tool": "find_notes",
+        "preview": ""
+      },
+      {
+        "tool": "similar_molecules",
+        "preview": "{\n  \"subject\": \"molecule\",\n  \"hits\": [],\n  \"index_empty\": true,\n  \"scan_truncated\": false,\n  \"hits_truncated\": false,\n  \"verdict\": \"SEARCH NOT RUN: the molecule fingerprint index is empty — it holds n"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "3",
+      "1",
+      "0",
+      "81",
+      "2.5",
+      "2",
+      "5",
+      "4"
+    ],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 24.89,
+    "event_counts": {
+      "token": 48,
+      "tool_call": 5,
+      "tool_result": 5,
+      "evidence_source": 1,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "c5da42522bd345f289cdde239b27721e",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

@@ -1,0 +1,83 @@
+{
+  "probe": {
+    "id": "rx-10",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "B",
+    "question": "My product oils out every time I add the anti-solvent. It goes cloudy, then there is a gum on the vessel wall and nothing crystallises. What is going on and what do I change?",
+    "expects_tools": [
+      "predict_solubility",
+      "find_notes",
+      "gather_evidence",
+      "expand_note"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a predicted solubility in an organic solvent or solvent mixture",
+      "a metastable zone width, a cloud point or a specific supersaturation value",
+      "a claim about which polymorph is forming"
+    ],
+    "direction": "Oiling out is a liquid-liquid phase split ahead of nucleation, and the standard levers are real and worth stating: lower supersaturation at the point of addition (slower or subsurface anti-solvent charge, more dilute), work above or below the oiling-out temperature rather than through it, seed into a slightly supersaturated solution rather than waiting for spontaneous nucleation, change the solvent pair, and check the impurity load since impurities depress nucleation. The limits must be explicit: the aqueous solubility predictor does not cover organic solvents or mixtures, and this system holds no solid-state data at all — no XRPD, no DSC, no polymorph or form information. The advice is expert prose plus whatever the record contains, and must be labelled as such rather than dressed as a computed recommendation.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rx-10",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "B",
+    "question": "My product oils out every time I add the anti-solvent. It goes cloudy, then there is a gum on the vessel wall and nothing crystallises. What is going on and what do I change?",
+    "answer": "I need to gather some evidence before I can answer this intelligently. Let me search for what you've already tried on this transformation.The record doesn't yet hold specific data on your oiling-out problem. I need to ask you to narrow this down so I can search for precedent and give you grounded advice.\n\n**Oiling out** — where a product precipitates as a liquid film on the vessel wall rather than crystallizing — is a phase-equilibrium problem, not usually a reaction problem. It happens when the solubility curve is steep enough that cooling or dilution crosses into a region where the product forms a metastable liquid phase before it can crystallize. The cloudiness you see is the solvent becoming supersaturated with product; the gum is that liquid phase nucleating onto the wall.\n\nTo diagnose and fix it, I need to know:Once I have that, I can:\n\n1. **Search the record** for similar transformations and crystallization sequences on related compounds\n2. **Compute solubility predictions** for your product in the solvents you're using, so we can see whether the system is intrinsically difficult or whether a solvent swap might work\n3. **Propose concrete changes** to the crystallization protocol — slower anti-solvent addition, a different anti-solvent, seeding, cooling rate — grounded in what's already worked and what the chemistry of your compound suggests\n\nIn the meantime, the general moves when oiling out occurs are:\n- **Slow down the anti-solvent addition** — a faster drip rate makes nucleation less likely and lets oil form instead\n- **Lower the temperature** before adding anti-solvent, if possible\n- **Use a different anti-solvent** — one that dissolves the product less and crystallizes it faster\n- **Seed the vessel** with product crystals before anti-solvent addition, to give nucleation sites\n\nBut which of these will actually work depends on your product and solvent, so tell me what you're working with.",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "gather_evidence",
+      "ask_clarifying_question"
+    ],
+    "tool_results": [
+      {
+        "tool": "gather_evidence",
+        "preview": "[EvidenceChunk(content='<retrieved-note-0d8f72b4838855b1 id=\"compound-acetic-anhydride\">\\nThe acetylating agent. Cheap, reactive, and its by-product (acetic acid) is water-soluble, which is\\nmost of w"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "[EvidenceChunk(content='<retrieved-note-0d8f72b4838855b1 id=\"proposal-amide-2-methf\">\\nProposed next run on the amide coupling, reasoned from the series rather than from a surrogate\\nmodel — the count"
+      },
+      {
+        "tool": "ask_clarifying_question",
+        "preview": "Question put to the chemist; awaiting their answer."
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "1",
+      "2",
+      "3"
+    ],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": true,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 20.08,
+    "event_counts": {
+      "token": 27,
+      "tool_call": 3,
+      "evidence_source": 2,
+      "tool_result": 3,
+      "question": 1,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "f82065df76cb444bbd6ffa3d0cfa96b0",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

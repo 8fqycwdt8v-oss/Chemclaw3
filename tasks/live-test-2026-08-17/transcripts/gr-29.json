@@ -1,0 +1,129 @@
+{
+  "probe": {
+    "id": "gr-29",
+    "section": 11,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Scale the biaryl coupling to 2 kg of COc1ccc(Br)cc1 and tell me what I'm charging.",
+    "expects_tools": [
+      "stoichiometry_table",
+      "resolve_compound",
+      "gather_evidence"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a mass or volume produced without the equivalents basis it came from",
+      "a solvent volume invented where no density or volume basis was given",
+      "the seeded lab-scale charge rescaled silently, with no note that it was"
+    ],
+    "direction": "The lab-scale charge is in the corpus with real equivalents. A good answer builds the table from those equivalents, shows the arithmetic, and refuses rather than guesses where a volume basis is ambiguous. Naming what changes at 2 kg that a charge table cannot capture is a bonus.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "gr-29",
+    "section": 11,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Scale the biaryl coupling to 2 kg of COc1ccc(Br)cc1 and tell me what I'm charging.",
+    "answer": "I need to find the conditions for the biaryl coupling that uses 4-bromoanisole (COc1ccc(Br)cc1). Let me search the knowledge graph first.Good! I found `rxn-suzuki-biaryl`. Let me expand that note to get the full recipe with all the conditions.Perfect! Now I have the full recipe. Let me build the charge table for 2 kg of 4-bromoanisole as the basis. I'll need to load the **charge-tables-and-mass-efficiency** skill first to ensure I get this right.Now I'll build the charge table using `stoichiometry_table`. The reaction is:\n- Basis: 4-bromoanisole (COc1ccc(Br)cc1) at 2 kg\n- Reagents: phenylboronic acid (1.0 equiv), Pd(OAc)₂ (1.5 mol%), K₂CO₃ (2.0 equiv)\n- Solvents: THF/water 4:1 at 4:1 ratio (the recipe says \"solvent: THF/water 4:1\") — I need to clarify what the total volumes are. Looking at the reaction note, it says \"solvent\" but doesn't state the total volumes. Let me use a typical biaryl coupling volume of ~10 mL/mmol, but since that's not specified, I should make a reasonable assumption or ask. However, let me first try building with what's clearly stated and note any ambiguity.\n\nActually, re-reading the note: it says \"solvent: THF/water 4:1\" but doesn't state the total volume. I'll need to make a reasonable assumption — typically Suzuki couplings run at 0.1-0.2 M, so for 2 kg of 4-bromoanisole (MW ~187 g/mol = ~10.7 mol), we'd need roughly 50-100 mL/mmol, or 500-1000 mL total. I'll use 10 volumes (common for cross-couplings), which means 10 mL per gram of 4-bromoanisole. But let me be transparent about this assumption.\n\nLet me call `stoichiometry_table`:The K₂CO₃ SMILES I used didn't parse correctly. Let me try with a proper K₂CO₃ entry (potassium carbonate):Perfect! Now I have a complete charge table. Let me present this to you with a note about what the solvent volumes assume:\n\n## Charge Table for 2 kg 4-Bromoanisole Suzuki Coupling\n\nBased on **rxn-suzuki-biaryl** ([[[rxn-suzuki-biaryl]]]):\n- **Basis:** 4-bromoanisole, 2.000 kg (10,693 mmol)\n- **Conditions:** 80 °C, 12 h, under nitrogen (degassed)\n- **Expected yield:** 76% (isolated)\n\n| Species | Role | Equivalents | MW | Amount | Mass to Weigh | Volume |\n|---------|------|-------------|-----|--------|-----------------|--------|\n| **4-bromoanisole** | Basis | 1.0 | 187.04 | 10,693 mmol | **2,000 g** | — |\n| **Phenylboronic acid** | Reagent | 1.0 | 121.93 | 10,693 mmol | **1,304 g** | — |\n| **Pd(OAc)₂** | Catalyst | 1.5 mol% | 224.51 | 160 mmol | **36.0 g** | — |\n| **K₂CO₃** | Base | 2.0 | 138.20 | 21,386 mmol | **2,956 g** | — |\n| **Tetrahydrofuran** | Solvent | — | 72.11 | — | 14,224 g | **16,000 mL** |\n| **Water** | Solvent | — | 18.02 | — | 3,992 g | **4,000 mL** |\n\n**Total solvent:** 20 L (4:1 THF:water ratio = 16 L THF + 4 L water, at 10 mL/g of 4-bromoanisole)\n\n**Note on solvent volumes:** The reaction note specifies THF/water 4:1 but does not state total volumes. This table assumes **10 volumes** (10 mL solvent per gram of starting material), which is typical for Suzuki-Miyaura couplings run at ~0.5 M concentration. If your procedure specifies a different total volume, adjust the solvent rows proportionally.\n\n**Safety note:** Before running this at scale, call [[screen_hazards]] on the reactants, product, and any intermediates to check for structural hazards. The coupling involves Pd(0) species, so ensure proper degassing and handling of oxygen-sensitive intermediates.",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note",
+      "read_file",
+      "stoichiometry_table",
+      "stoichiometry_table"
+    ],
+    "tool_results": [
+      {
+        "tool": "find_notes",
+        "preview": "[NoteRef(id='bo-suzuki-next', type='bo-candidate', compound_smiles=None, tags=['bo', 'suggestion'], created_by='human', source='seed-corpus', confidence=0.5, valid_from=None, valid_to=None), NoteRef(i"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "[EvidenceChunk(content='<retrieved-note-0d8f72b4838855b1 id=\"rxn-suzuki-biaryl\">\\nSuzuki-Miyaura coupling of 4-bromoanisole with phenylboronic acid.\\n\\n- aryl halide: compound-4-bromoanisole\\n- boroni"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='rxn-suzuki-biaryl', type='reaction', compound_smiles=None, tags=['cross-coupling', 'suzuki'], created_by='human', source='seed-corpus', confidence=0.85, valid_from=None, valid_to=None"
+      },
+      {
+        "tool": "read_file",
+        "preview": " 1  ---\n 2  name: charge-tables-and-mass-efficiency\n 3  description: >-\n 4    Use when a question turns into \"what do I actually weigh out\" or \"how wasteful is this route\" —\n 5    scaling a charge to "
+      },
+      {
+        "tool": "stoichiometry_table",
+        "preview": "{\n  \"basis_name\": \"COc1ccc(Br)cc1\",\n  \"basis_mass_g\": 2000.0,\n  \"rows\": [\n    {\n      \"name\": \"COc1ccc(Br)cc1\",\n      \"smiles\": \"COc1ccc(Br)cc1\",\n      \"role\": \"basis\",\n      \"equivalents\": 1.0,\n     "
+      },
+      {
+        "tool": "stoichiometry_table",
+        "preview": "{\n  \"basis_name\": \"COc1ccc(Br)cc1\",\n  \"basis_mass_g\": 2000.0,\n  \"rows\": [\n    {\n      \"name\": \"COc1ccc(Br)cc1\",\n      \"smiles\": \"COc1ccc(Br)cc1\",\n      \"role\": \"basis\",\n      \"equivalents\": 1.0,\n     "
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [
+      "screen_hazards"
+    ],
+    "verified_numbers": [
+      "4",
+      "2",
+      "1.0",
+      "1.5",
+      "2.0",
+      "1",
+      "10",
+      "187",
+      "50",
+      "2.000",
+      "10,693",
+      "80",
+      "12",
+      "76",
+      "187.04",
+      "2,000",
+      "121.93",
+      "1,304",
+      "224.51",
+      "160",
+      "36.0",
+      "138.20",
+      "21,386",
+      "2,956",
+      "72.11",
+      "14,224",
+      "16,000",
+      "18.02",
+      "3,992",
+      "4,000",
+      "20",
+      "16",
+      "0.5",
+      "0"
+    ],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 27.45,
+    "event_counts": {
+      "token": 56,
+      "tool_call": 6,
+      "evidence_source": 1,
+      "tool_result": 6,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "80560bd1fa0e49078030c0c3e8623d39",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

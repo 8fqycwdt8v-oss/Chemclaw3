@@ -1,0 +1,81 @@
+{
+  "probe": {
+    "id": "du-02",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "I asked you this exact solvent question yesterday and you ran it. If I ask again now, does it cost me another calculation, or do I get the same answer back for free? Explain what actually happens, and then run it: ethyl acetate, 2-MeTHF and toluene for the amide coupling.",
+    "expects_tools": [
+      "compare_solvents",
+      "find_past_jobs",
+      "get_durable_job_status"
+    ],
+    "expects_job": true,
+    "forbids_claims": [
+      "a ranking or delta-G the job did not return",
+      "that results are recomputed from scratch on every request",
+      "a cost, a runtime or a compute-hours figure"
+    ],
+    "direction": "Two things, and the explanation is the harder one. A durable job's id is derived from its arguments, so an identical re-ask rejoins the existing run rather than starting a second one, and every underlying calculation is persisted and looked up before it is computed — the same question a second time costs nothing and returns the same numbers, by construction rather than by luck. The answer should say that in the chemist's terms without overclaiming: it is the *identical* question that is free, and a changed temperature or level is a different question. Then it must actually run the screen, and any ranking it reports must be one the job returned. Saying the differences between solvents are more trustworthy than any single absolute value is a plus; presenting a rank order with no uncertainty is a miss.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "du-02",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "I asked you this exact solvent question yesterday and you ran it. If I ask again now, does it cost me another calculation, or do I get the same answer back for free? Explain what actually happens, and then run it: ethyl acetate, 2-MeTHF and toluene for the amide coupling.",
+    "answer": "I'll explain what happens, then run it.\n\n**What actually happens:**\n\nSolvents are looked up in a fixed, vendored table—not computed. When you call `compare_solvents` with the same three names, the system reads rows from that table and returns them. There's no \"rerun\" cost because there's no calculation to rerun: every call to `compare_solvents` reads the same table, so an identical request returns identical results instantly.\n\nThe caching you're thinking of applies to *computed* properties—tools like `compute_xtb_energy`, `predict_solubility`, `compute_reaction_energy`. Those are keyed by (calculator, version, input, parameters) and cached forever, so a second identical request hits the stored result. A solvent property lookup is different: it's a table read, not a computation, so \"free the second time\" is built in—there's no first-time cost to avoid.\n\n**Now, the amide coupling solvents:****Summary for your amide coupling:**\n\n| Property | Ethyl acetate | 2-MeTHF | Toluene |\n|----------|---|---|---|\n| **Boiling point** | 77 °C | 80 °C | 111 °C |\n| **Flash point** | −4 °C | −11 °C | +4 °C |\n| **Polarity (dielectric)** | 6.0 | 6.97 | 2.4 |\n| **Water miscibility** | Partial | Partial | Immiscible |\n| **Peroxide former** | No | **Yes** | No |\n| **ICH Q3C class** | 3 (low concern) | 2 (higher concern) | 2 (higher concern) |\n| **Residual limit** | 5000 ppm | 500 ppm | 890 ppm |\n| **Greenness** | Recommended | Problematic | Problematic |\n| **Hazards** | Flammable | Flammable + peroxide | Flammable + reprotoxic cat 2 + STOT |\n\n**For amide coupling**, ethyl acetate is the greenest choice and carries the lowest regulatory burden (ICH class 3, no peroxide risk). Its polarity is well-matched to amidation chemistry. 2-MeTHF is slightly more polar and boils slightly higher, but the peroxide-former flag and stricter residual limit (500 ppm vs 5000 ppm) add operational constraints—you'd need peroxide inhibitor and more aggressive drying if you concentrate it. Toluene is the least polar (dielectric 2.4 vs 6+) so it's a poorer choice for an amide coupling unless you specifically want to suppress an unwanted equilibrium, but it carries reprotoxic concern that ethyl acetate avoids.",
+    "answered": true,
+    "tools_called": [
+      "compare_solvents"
+    ],
+    "tool_results": [
+      {
+        "tool": "compare_solvents",
+        "preview": "{\n  \"rows\": [\n    {\n      \"name\": \"ethyl acetate\",\n      \"boiling_point_c\": 77.1,\n      \"melting_point_c\": -83.6,\n      \"flash_point_c\": -4.0,\n      \"density_20c_g_per_ml\": 0.902,\n      \"dielectric_co"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "2",
+      "77",
+      "80",
+      "111",
+      "4",
+      "+4",
+      "6.0",
+      "6.97",
+      "2.4",
+      "3",
+      "5000",
+      "500",
+      "890",
+      "6"
+    ],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 10.16,
+    "event_counts": {
+      "token": 29,
+      "tool_call": 1,
+      "tool_result": 1,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "395aa19c60ba4193b4f3dd21006203f4",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

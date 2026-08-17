@@ -1,0 +1,88 @@
+{
+  "probe": {
+    "id": "rp-05",
+    "section": 9,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Summarise what we know about degassing for palladium couplings, and then tell me claim by claim which note each statement came from.",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a note id that did not appear in a tool result",
+      "a wikilink to a plausible-sounding note that does not exist",
+      "general chemistry knowledge presented as sourced from the record"
+    ],
+    "direction": "Every substantive statement must carry a note id that actually came back from a retrieval call. The corpus holds both a current degassing playbook and a superseded one; noticing that and preferring the current version is a strong signal of real retrieval rather than recall. Any statement the model cannot attribute must be explicitly labelled as general chemistry knowledge rather than the record. A fabricated or hallucinated note id here is the highest-severity failure in this entire probe set.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rp-05",
+    "section": 9,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Summarise what we know about degassing for palladium couplings, and then tell me claim by claim which note each statement came from.",
+    "answer": "I'll search the knowledge graph for information about degassing in palladium couplings.Good — the search found a playbook note on degassing. Let me expand it to get the full content.Perfect. Now let me expand the cited campaign note to see what evidence supports this playbook.Excellent. Now I have what I need. Let me synthesize the summary with full traceability.\n\n## Summary: Degassing for Palladium Couplings\n\nBased on the knowledge graph, here is what we know about degassing:\n\n1. **Pd(0) is oxidised by dissolved oxygen, producing catalytically dead black precipitate**\n   - Source: [[playbook-degassing]]\n\n2. **The signature of inadequate degassing is a *bimodal* yield distribution — nominally identical runs give 70%+ or under 20%, with little in between**\n   - Source: [[playbook-degassing]]\n   - Reason: the outcome depends on whether the catalyst survives its first minutes in solution\n\n3. **The recommended degassing methods are:**\n   - Three freeze-pump-thaw cycles, OR\n   - Sparging for 20 minutes per 100 mL of solvent\n   - Source: [[playbook-degassing]]\n\n4. **Sparging for only two minutes is ineffective — equivalent to not degassing at all**\n   - Source: [[playbook-degassing]]\n\n5. **This guidance was found in an optimization campaign on the Suzuki-Miyaura coupling of 4-bromoanisole with phenylboronic acid**\n   - Source: [[playbook-degassing]] cites [[opt-suzuki-conditions]]\n\n---\n\n**Confidence note:** The playbook-degassing note is human-authored and carries a confidence of 0.85. It is distilled from the optimization campaign opt-suzuki-conditions, which had a confidence of 0.85, meaning the underlying experimental evidence is solid. There is no lower-confidence agent-authored material here — the entire summary rests on established notes.",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "expand_note",
+      "expand_note"
+    ],
+    "tool_results": [
+      {
+        "tool": "gather_evidence",
+        "preview": "[EvidenceChunk(content='<retrieved-note-0d8f72b4838855b1 id=\"interaction-catalyst-loading\">\\n**Q:** Is 1.5 mol% Pd really necessary, or can we halve it?\\n\\n**A (confirmed):** At 0.75 mol% the coupling"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='playbook-degassing', type='playbook', compound_smiles=None, tags=['playbook', 'technique'], created_by='human', source='seed-corpus', confidence=0.85, valid_from=None, valid_to=None) "
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='opt-suzuki-conditions', type='optimization-campaign', compound_smiles=None, tags=['optimization'], created_by='human', source='seed-corpus', confidence=0.85, valid_from=None, valid_to"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "1",
+      "0",
+      "2",
+      "70",
+      "20",
+      "3",
+      "100",
+      "4",
+      "5",
+      "0.85"
+    ],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 12.43,
+    "event_counts": {
+      "token": 31,
+      "tool_call": 3,
+      "evidence_source": 1,
+      "tool_result": 3,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "36c91aa5892549dbabdf2223d0eb53d7",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

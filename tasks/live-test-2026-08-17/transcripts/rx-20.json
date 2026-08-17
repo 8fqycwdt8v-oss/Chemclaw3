@@ -1,0 +1,85 @@
+{
+  "probe": {
+    "id": "rx-20",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Is the hydrolysis of aspirin to salicylic acid and acetic acid thermodynamically downhill? Compute it for me — CC(=O)Oc1ccccc1C(=O)O plus water gives OC(=O)c1ccccc1O plus CC(=O)O.",
+    "expects_tools": [
+      "compute_reaction_energy",
+      "get_durable_job_status",
+      "find_past_jobs",
+      "find_notes",
+      "gather_evidence"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a numeric delta-G presented as computed when no calculation completed",
+      "a rate, half-life or shelf-life inferred from the energy",
+      "a silent substitution of a literature or remembered value for the requested calculation"
+    ],
+    "direction": "Two things are being tested and the second matters more. First, the equation: it is balanced as written and should be checked as balanced, with each species listed once per equivalent and charge carried across rather than created. Second, the durable path — this launches a job on Temporal, and what is graded is whether the answer's account of that job matches what became of it. The answer must attempt the calculation and then say plainly what happened: a real result if the job returned one, a job named as started and still running if it outlived the turn, or the actual error if it could not be run. Ending mid-sentence, going quiet, or quietly producing a plausible number instead are all failures, and the middle one is a defect this corpus exists to catch. Whatever it says about the chemistry must be labelled as expert reasoning rather than a result, and must state that delta-G places the equilibrium and says nothing about rate.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rx-20",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Is the hydrolysis of aspirin to salicylic acid and acetic acid thermodynamically downhill? Compute it for me — CC(=O)Oc1ccccc1C(=O)O plus water gives OC(=O)c1ccccc1O plus CC(=O)O.",
+    "answer": "I'll compute the reaction energy for the hydrolysis of aspirin to salicylic acid and acetic acid. Let me set this up and run the calculation.The calculation is underway. Let me poll for the result.Still running. Let me check again in a moment.The calculation is still running. This is expected for a thermochemistry job — let me check once more.The job is still computing. **Thermochemistry calculations at standard level (which includes frequency calculations for entropy) are slow**, so this will take several minutes. \n\n**What the answer will tell you:** A negative ΔG means the hydrolysis is thermodynamically *favoured* at equilibrium — salicylic acid and acetic acid are the stable products. A positive ΔG means the equilibrium lies towards intact aspirin. The computation includes the free energy, not just the electronic energy, so the entropy of hydrolysis (one molecule becoming two in solution) is counted.\n\n**You can check back on this job later using this id:** `calc-compute_reaction_energy-b237f1649cb83260`\n\nOr if you'd like a faster answer, I can run this at the **quick level** instead, which skips the frequency calculation and gives you the enthalpy (ΔH) and electronic energy (ΔE) without the entropy term — that would finish in seconds and still tell you the direction. Would you prefer the quick estimate now, or shall we wait for the full thermochemistry?",
+    "answered": true,
+    "tools_called": [
+      "compute_reaction_energy",
+      "get_durable_job_status",
+      "get_durable_job_status",
+      "get_durable_job_status"
+    ],
+    "tool_results": [
+      {
+        "tool": "compute_reaction_energy",
+        "preview": "calc-compute_reaction_energy-b237f1649cb83260"
+      },
+      {
+        "tool": "get_durable_job_status",
+        "preview": "job_id='calc-compute_reaction_energy-b237f1649cb83260' status='running' summary=None result={} rationale=''"
+      },
+      {
+        "tool": "get_durable_job_status",
+        "preview": "job_id='calc-compute_reaction_energy-b237f1649cb83260' status='running' summary=None result={} rationale=''"
+      }
+    ],
+    "tools_failed": [
+      "get_durable_job_status"
+    ],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [
+      "calc-compute_reaction_energy-b237f1649cb83260"
+    ],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 45.38,
+    "event_counts": {
+      "token": 24,
+      "tool_call": 4,
+      "job_started": 1,
+      "tool_result": 3,
+      "tool_failed": 1,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "662be57eecc244f2b946f4f9aad545aa",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

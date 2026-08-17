@@ -1,0 +1,69 @@
+{
+  "probe": {
+    "id": "op-14",
+    "section": 3,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Before any of the clever stuff I just want to run every combination. Solvents THF, 2-MeTHF, toluene, dioxane. Bases K2CO3, K3PO4, Cs2CO3. Catalysts Pd(OAc)2 and Pd(dppf)Cl2. Give me the run list.",
+    "expects_tools": [
+      "generate_screening_design"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "this is a D-optimal or fractional factorial design",
+      "a well position or plate coordinate for any run",
+      "a predicted yield for any run in the design"
+    ],
+    "direction": "Recognises this as the classical complete-up-front categorical screen, not an adaptive suggestion, and uses the full-factorial tool. The run list is the tool's output, not a table the model wrote out, and the count is right: 4 x 3 x 2 = 24 runs. It should say plainly that no model sits behind these points — there is no predicted value or uncertainty for a factorial row, which is not missing information but the accurate statement that nothing has been learned yet — and present the 24 as a batch a human executes. Offering the narrowing step afterwards (feed the results back and switch to adaptive suggestions) is the good finish. Any well assignment is out of scope and must not appear.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "op-14",
+    "section": 3,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Before any of the clever stuff I just want to run every combination. Solvents THF, 2-MeTHF, toluene, dioxane. Bases K2CO3, K3PO4, Cs2CO3. Catalysts Pd(OAc)2 and Pd(dppf)Cl2. Give me the run list.",
+    "answer": "I'll generate a full factorial screening design for your four solvents × three bases × two catalysts (24 runs).Here's your full factorial screen: **24 runs, every combination of the 4 solvents × 3 bases × 2 catalysts.**\n\n| Run | Solvent | Base | Catalyst |\n|-----|---------|------|----------|\n| 1 | THF | K2CO3 | Pd(OAc)2 |\n| 2 | THF | K2CO3 | Pd(dppf)Cl2 |\n| 3 | THF | K3PO4 | Pd(OAc)2 |\n| 4 | THF | K3PO4 | Pd(dppf)Cl2 |\n| 5 | THF | Cs2CO3 | Pd(OAc)2 |\n| 6 | THF | Cs2CO3 | Pd(dppf)Cl2 |\n| 7 | 2-MeTHF | K2CO3 | Pd(OAc)2 |\n| 8 | 2-MeTHF | K2CO3 | Pd(dppf)Cl2 |\n| 9 | 2-MeTHF | K3PO4 | Pd(OAc)2 |\n| 10 | 2-MeTHF | K3PO4 | Pd(dppf)Cl2 |\n| 11 | 2-MeTHF | Cs2CO3 | Pd(OAc)2 |\n| 12 | 2-MeTHF | Cs2CO3 | Pd(dppf)Cl2 |\n| 13 | Toluene | K2CO3 | Pd(OAc)2 |\n| 14 | Toluene | K2CO3 | Pd(dppf)Cl2 |\n| 15 | Toluene | K3PO4 | Pd(OAc)2 |\n| 16 | Toluene | K3PO4 | Pd(dppf)Cl2 |\n| 17 | Toluene | Cs2CO3 | Pd(OAc)2 |\n| 18 | Toluene | Cs2CO3 | Pd(dppf)Cl2 |\n| 19 | Dioxane | K2CO3 | Pd(OAc)2 |\n| 20 | Dioxane | K2CO3 | Pd(dppf)Cl2 |\n| 21 | Dioxane | K3PO4 | Pd(OAc)2 |\n| 22 | Dioxane | K3PO4 | Pd(dppf)Cl2 |\n| 23 | Dioxane | Cs2CO3 | Pd(OAc)2 |\n| 24 | Dioxane | Cs2CO3 | Pd(dppf)Cl2 |\n\nThis is the complete grid in the order returned — run them in that order or randomize the sequence if you want to guard against drift.",
+    "answered": true,
+    "tools_called": [
+      "generate_screening_design"
+    ],
+    "tool_results": [
+      {
+        "tool": "generate_screening_design",
+        "preview": "{\n  \"runs\": [\n    {\n      \"solvent\": \"THF\",\n      \"base\": \"K2CO3\",\n      \"catalyst\": \"Pd(OAc)2\"\n    },\n    {\n      \"solvent\": \"THF\",\n      \"base\": \"K2CO3\",\n      \"catalyst\": \"Pd(dppf)Cl2\"\n    },\n    {"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "24",
+      "3",
+      "2",
+      "1"
+    ],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 8.22,
+    "event_counts": {
+      "token": 20,
+      "tool_call": 1,
+      "tool_result": 1,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "1296e7e28dc1401984e4b30464ef69cf",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

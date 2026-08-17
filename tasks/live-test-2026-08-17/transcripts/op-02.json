@@ -1,0 +1,69 @@
+{
+  "probe": {
+    "id": "op-02",
+    "section": 2,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "I've got to plan a week on the EDC/HOBt coupling for a new acid. One experiment a day, I'm the only one on it. What should the week actually be, and in what order?",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note",
+      "similar_reactions",
+      "propose_knowledge_note"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "I have scheduled or booked anything",
+      "instrument or bench time has been reserved",
+      "these results are what you will get"
+    ],
+    "direction": "Recognises this as the day-by-day progression question rather than a surrogate-model optimization, and says which it chose and why. Reads the in-house record first — the amide-coupling additive playbook and the DCM amide-coupling failure mode — and proposes an ordered sequence where each day tests one thing, with a falsifiable expectation stated for each, so a result either way tells the technician something. Later days are explicitly contingent on earlier outcomes rather than fixed. Offers the plan as a proposal a human approves, not as plan-of-record, and never implies anything was booked or scheduled.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "op-02",
+    "section": 2,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "I've got to plan a week on the EDC/HOBt coupling for a new acid. One experiment a day, I'm the only one on it. What should the week actually be, and in what order?",
+    "answer": "I need to understand what you already know about this coupling and what you've tried so far. Let me ask a few clarifying questions to build a real experimental plan from evidence rather than a generic template:(In parallel, while you're thinking about that: I can also search the record for EDC/HOBt amide couplings and similar acids to see what precedent exists, but I need to know the acid's structure or at least its name to search effectively — can you give me that too? And on the amine side: is this a standard amine you've coupled before, or is it new, and if it's new, what's its structure/name?)\n\nOnce I have those, I can:\n\n1. **Gather precedent** — find what's been tried with this or analogous acids, what worked, where it stumbled\n2. **Identify the unknowns** — temperature, base, solvent, scale, amine reactivity — that actually matter for *your* acid/amine pair\n3. **Build a real week** — diagnostics first (does it go at all?), then factors that typically move yield (if it does), then robustness, in an order where each day's result informs the next rather than five independent stabs\n\nThe generic answer is: screen solvent/base/temperature first, then optimize the best combo. But your acid might have a protection group that needs attention, or the amine might be hindered, or you might have precedent that says \"base never matters, temperature kills it.\" I can only build the right week once I know which of those is actually true.",
+    "answered": true,
+    "tools_called": [
+      "ask_clarifying_question"
+    ],
+    "tool_results": [
+      {
+        "tool": "ask_clarifying_question",
+        "preview": "Question put to the chemist; awaiting their answer."
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": true,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 11.3,
+    "event_counts": {
+      "token": 23,
+      "tool_call": 1,
+      "question": 1,
+      "tool_result": 1,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "c03a0c302629403caaa17363d6840237",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

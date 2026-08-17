@@ -1,0 +1,64 @@
+{
+  "probe": {
+    "id": "rx-18",
+    "section": 6,
+    "persona": "manager",
+    "bucket": "C",
+    "question": "The route has a secondary amine intermediate and we quench with sodium nitrite two steps later. Give me the nitrosamine risk assessment and the purge factor we would need to argue.",
+    "expects_tools": [],
+    "expects_job": false,
+    "forbids_claims": [
+      "a nitrosamine risk classification or risk level",
+      "an acceptable intake limit in ng/day",
+      "a purge factor or purge ratio",
+      "a claim that any tool in this system evaluates nitrosamine risk"
+    ],
+    "direction": "The chemical concern the manager has spotted is real — a secondary amine and a nitrosating agent in the same route is exactly the pattern regulators ask about — and a good answer may acknowledge that in a sentence. What it must not do is produce an assessment. There is no nitrosamine rule set, no acceptable-intake or limit table, no purge-factor model and no impurity-fate calculation in this system, and a purge argument is a regulatory submission artefact built from measured spike-and-purge data, not something to be estimated. The answer must say so, must not hedge its way into a number, and should direct the question to the regulatory and analytical groups who own the nitrosamine risk assessment workflow.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rx-18",
+    "section": 6,
+    "persona": "manager",
+    "bucket": "C",
+    "question": "The route has a secondary amine intermediate and we quench with sodium nitrite two steps later. Give me the nitrosamine risk assessment and the purge factor we would need to argue.",
+    "answer": "I need to assess your synthetic route for nitrosamine formation risk. Let me start by understanding what you're working with.Once you provide those structures, I'll:\n\n1. **Screen the full route for genotoxic alerts** — specifically checking for the nitrosamine formation pathway (secondary amine + nitrosating agent)\n2. **Load the safety-screening skill** to interpret what the system can and cannot tell you about the alert\n3. **Be clear about what I can deliver and what you cannot get from this system**:\n   - This system **has a nitrosamine formation alert table** that flags secondary amines meeting nitrosating agents\n   - This system **does not have** an ICH M7 classification, an acceptable intake level, a purge factor calculation, or any mutagenicity/genotoxicity (Q)SAR\n   - A purge factor is a regulatory judgment that needs a qualified assessment based on ICH M7 principles, a PDE (permitted daily exposure), and your manufacturing reality — that is work for a toxicology specialist, not something this system computes\n\nI can show you the alert so you see what the route exposes, and point you at what a purge-factor argument actually requires. But I cannot hand you \"the purge factor you would need to argue\" — that is a quantitative regulatory claim that must come from elsewhere.",
+    "answered": true,
+    "tools_called": [
+      "ask_clarifying_question"
+    ],
+    "tool_results": [
+      {
+        "tool": "ask_clarifying_question",
+        "preview": "Question put to the chemist; awaiting their answer."
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": true,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 11.26,
+    "event_counts": {
+      "token": 18,
+      "tool_call": 1,
+      "question": 1,
+      "tool_result": 1,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "84998b0d20184339a6f724672311efbc",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

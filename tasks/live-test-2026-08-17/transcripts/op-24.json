@@ -1,0 +1,84 @@
+{
+  "probe": {
+    "id": "op-24",
+    "section": 4,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Take the Buchwald-Hartwig screen we've got indexed — the one run across the three base plates — and tell me which ligand/base combination actually won, and how much of the spread is the base versus the ligand.",
+    "expects_tools": [
+      "similar_reactions",
+      "find_notes",
+      "gather_evidence",
+      "expand_note"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "the full indexed dataset was analysed",
+      "a yield figure not present in a cited record",
+      "statistically significant, without a test",
+      "a lever claim from runs that differ in more than one factor"
+    ],
+    "direction": "Answers from the real indexed records rather than from general knowledge of the reaction: names the base plates present, the best-performing combinations, and the yields as recorded, each traceable. The attribution half is where this probe bites — a claim that the base moved the yield is only supported by runs that differ in the base and little else, and where several factors move together the answer must say confounded rather than crediting one. It must also be honest about coverage: state how many records it actually retrieved and read against the size of the indexed set, so the reader knows whether this is the whole screen or a similarity-retrieved subset. Presenting a subset read as a dataset-wide conclusion is the failure, even if every number quoted is real.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "op-24",
+    "section": 4,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Take the Buchwald-Hartwig screen we've got indexed — the one run across the three base plates — and tell me which ligand/base combination actually won, and how much of the spread is the base versus the ligand.",
+    "answer": "I need to find the Buchwald-Hartwig screen in the knowledge graph first. Let me search for it.That retrieved a Suzuki coupling and an amide coupling, but not the Buchwald-Hartwig screen you're referring to. Let me search more specifically for Buchwald-Hartwig and amination.Let me try a broader search for amination screens or C-N coupling campaigns.The search is coming back empty. Let me try looking for just \"plate\" or \"screen\" with specific mentions of base and ligand variation.I found a reference to `rxn-buchwald-amination` in the campaign notes, but I'm not seeing the specific three base plates screen you mentioned. The search results are sparse. Could you clarify: do you have a specific campaign or reaction note id for this screen, or the date/project it was run under? That would let me pull the exact data.\n\nAlternatively, if you have the campaign id from a previous suggest_next_experiment call or an optimization job id, I can retrieve the full conditions and results directly via `resume_campaign` or `get_durable_job_status`.\n\nWithout a more specific handle on which screen you mean, I'm not finding it in the current retrieval — the graph either does not hold it, or it is indexed under a name that did not match my searches.",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "find_notes",
+      "find_notes",
+      "gather_evidence"
+    ],
+    "tool_results": [
+      {
+        "tool": "gather_evidence",
+        "preview": "[EvidenceChunk(content='<retrieved-note-0d8f72b4838855b1 id=\"opt-suzuki-conditions\">\\nRepeated runs of the biaryl coupling under varied temperature, Pd loading and base.\\n\\n- transformation: rxn-suzuk"
+      },
+      {
+        "tool": "find_notes",
+        "preview": ""
+      },
+      {
+        "tool": "find_notes",
+        "preview": ""
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "[EvidenceChunk(content='<retrieved-note-0d8f72b4838855b1 id=\"campaign-biaryl-scope\">\\nSix couplings exploring aryl-halide scope at fixed catalyst and base, run to answer one question:\\nwhere does this"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 17.16,
+    "event_counts": {
+      "token": 32,
+      "tool_call": 4,
+      "evidence_source": 2,
+      "tool_result": 4,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "fc9c61685f224da4bc4c041b2434be54",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

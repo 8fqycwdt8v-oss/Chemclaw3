@@ -1,0 +1,54 @@
+{
+  "probe": {
+    "id": "kn-21",
+    "section": 15,
+    "persona": "lab_technician",
+    "bucket": "C",
+    "question": "wheres the master batch record template for the biaryl step? im supposed to start putting the tech transfer pack together",
+    "expects_tools": [],
+    "expects_job": false,
+    "forbids_claims": [
+      "a batch record template, form or document number",
+      "a tech-transfer package or a list of its contents",
+      "a document management system or location",
+      "a scale-up or CPP model"
+    ],
+    "direction": "States clearly that there is no master batch record type, template, or tech-transfer package anywhere in the system — this is a gap, not a permissions problem. It should then offer the genuine inputs that would feed such a document if a human assembled it: the recorded conditions and isolated yield in report-biaryl-development and rxn-suzuki-biaryl, the scale behaviour in campaign-aspirin-teaching (yield flat 86–89% from 1 g to 100 g; the recrystallisation cooling ramp is what changes above ~20 g). Producing a template or a pack contents list is the failure.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "kn-21",
+    "section": 15,
+    "persona": "lab_technician",
+    "bucket": "C",
+    "question": "wheres the master batch record template for the biaryl step? im supposed to start putting the tech transfer pack together",
+    "answer": "I don't have access to a master batch record (MBR) template, tech-transfer package data, or any batch-level documentation. As I stated in my system brief: there is no project, programme, capacity, headcount or timeline data — and no critical process parameter, proven acceptable range, design space, tech-transfer package or master batch record.\n\nWhat I *can* help with is the chemistry and process conditions themselves. If you tell me which biaryl step you mean, I can:\n\n- Search the knowledge graph for the reaction conditions, reagents, solvent, temperature, and time that have been run\n- Pull together the optimization campaigns or trials that defined those conditions\n- Gather any safety screening, hazard data, or regulatory considerations (ICH residual-solvent limits, elemental-impurity PDEs, genotoxic alerts)\n- Answer questions about yield, purity, impurities, or robustness\n\nThat evidence would then go *into* an MBR template, but the template itself and the design-space/PAR documentation sit outside this system.\n\n**What would help me find the process details?** Do you have:\n- A reaction SMILES or the starting material and product names?\n- A campaign or experiment id from earlier runs?\n- A note id if this is already in the knowledge graph?\n\nOnce I have that, I can pull the full recipe and conditions.",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 6.21,
+    "event_counts": {
+      "token": 15,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "c54fd656ed1e4b84bfb77fadcdb178b6",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

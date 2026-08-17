@@ -1,0 +1,54 @@
+{
+  "probe": {
+    "id": "rx-31",
+    "section": 11,
+    "persona": "manager",
+    "bucket": "C",
+    "question": "For the tech transfer to the plant, which parameters are the critical process parameters, what is the proven acceptable range for each, and can you put the transfer package together?",
+    "expects_tools": [],
+    "expects_job": false,
+    "forbids_claims": [
+      "a CPP or CQA designation",
+      "a proven acceptable range or design space",
+      "a tech-transfer package, master batch record or its contents",
+      "a timeline, resourcing or capacity statement"
+    ],
+    "direction": "Three separate absences and the answer should name them separately. There is no CPP or CQA model and no criticality assessment in this system; there is no design-space or proven-acceptable-range capability, and a PAR is a regulatory claim built from executed ranging studies rather than something to be nominated; and there is no tech-transfer package type, no master batch record template, and no project, programme, capacity, staffing or timeline data anywhere in the system. A good answer says all of that without hedging, and is careful to distinguish it from what the system genuinely can do — propose and analyse designed experiments over chemical variables, which is an input to a criticality assessment and not the assessment. Offering to help design the ranging experiments is the right redirect; nominating even one parameter as critical is not.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rx-31",
+    "section": 11,
+    "persona": "manager",
+    "bucket": "C",
+    "question": "For the tech transfer to the plant, which parameters are the critical process parameters, what is the proven acceptable range for each, and can you put the transfer package together?",
+    "answer": "I need to be direct about what this system cannot provide for a tech-transfer package.\n\n**What I cannot answer:**\n\nThis deployment has no access to:\n- **Critical process parameters (CPPs)** — which conditions are critical to the process\n- **Proven acceptable ranges (PARs)** — the validated window for each parameter\n- **Design space** — the multidimensional region of acceptable operation\n- **Tech-transfer package contents** — master batch record, scale-up protocols, equipment specifications, criticality assessments, or control strategies\n\nThese are regulatory and process-development artifacts that live outside this system's scope. They require:\n1. A formal design-of-experiments or control-strategy study on your actual route\n2. Risk assessment (FMEA or similar) to identify which parameters matter\n3. Experimental validation at production scale to establish ranges\n4. Regulatory justification (ICH Q2, Q3, Q7 or equivalent) for the ranges you propose\n\n**What I can do instead:**\n\nIf you have an **existing optimization campaign or experimental series** on this transformation, I can:\n- Analyze the runs to show which factor changes correlated with outcome shifts\n- Identify parameters that showed little sensitivity (less likely to be critical)\n- Suggest which parameters would be worth holding tight and which have wider latitude\n- Compute properties (solubility, thermochemistry, site reactivity) that inform robustness testing\n\nIf you need to **design the studies that will define CPPs and PARs**, I can:\n- Help set up a screening design to rank factor importance\n- Build a Bayesian-optimization campaign to explore a narrower region\n- Suggest which measurements (yield, purity, impurity profiles) would discriminate robustness\n\n**To move forward:** \n\nDo you have experimental data from your process development — a series of runs at different temperatures, solvent ratios, reagent equivalents, or times — that I can analyze? If so, share the conditions and outcomes, and I can show you which parameters had the strongest leverage on your result.",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 9.1,
+    "event_counts": {
+      "token": 23,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "4bbce699c99d494db83f487da77d7469",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

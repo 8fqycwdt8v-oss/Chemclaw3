@@ -1,0 +1,69 @@
+{
+  "probe": {
+    "id": "rx-12",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "Design me a solvent and anti-solvent screen for the final crystallisation of this intermediate. Which pairs are worth putting in, and how should the screen be laid out?",
+    "expects_tools": [
+      "generate_screening_design",
+      "predict_solubility",
+      "gather_evidence",
+      "find_notes",
+      "screen_hazards"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "predicted solubilities in the screened organic solvents",
+      "a predicted crystal form or habit from any solvent",
+      "an ICH Q3C class or residual-solvent limit quoted as a looked-up value"
+    ],
+    "direction": "Partial by construction. What is real: a screening design over solvent and anti-solvent pairs, cooling profile and seeding as factors; a hazard screen on the candidate solvents; and the recrystallisation playbook in the record. What is absent and must be said: there is no organic-solvent solubility model (the predictor is aqueous only), no solid-state or polymorph data, and no residual-solvent table — so solvent classes may be discussed from chemical knowledge but must not be presented as looked up. A good answer builds the screen on criteria it can defend (solvent class diversity, boiling point spread, hydrogen-bonding capability, safety and downstream removability, precedent in the record), states that measured solubility curves are the input the screen exists to generate, and does not fill the gap with invented numbers.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rx-12",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "Design me a solvent and anti-solvent screen for the final crystallisation of this intermediate. Which pairs are worth putting in, and how should the screen be laid out?",
+    "answer": "I need more information to design a meaningful crystallization screen for you. Let me ask the key questions:Once I have the structure, I'll need to know:\n\n1. **Any crystallization history** — have you tried solvents or anti-solvents on this compound before (in this programme or others)? That tells me what worked, what didn't, and what to avoid.\n\n2. **Process constraints** — are there any solvents you cannot use (ICH class, plant restriction, hazard profile)? Any scale at which you need to do this crystallization?\n\n3. **Physical properties that matter** — do you care most about yield, purity, crystal form, morphology, or particle size? That determines which anti-solvents will be most useful.\n\n4. **The solvent it's dissolved in now** — what is the compound in solution in, coming out of the previous step?\n\nOnce you give me the structure and any prior history, I can:\n- Gather evidence on what has worked for this compound or structurally similar ones\n- Propose solvent/anti-solvent pairs grounded in the chemistry (solubility differences, Hansen space proximity, safety/regulatory fit)\n- Design the screen layout to be efficient — a 2D array that explores the solvent/anti-solvent ratio space systematically rather than a random scatter\n- Flag any pairs that present hazards or incompatibilities before you run them",
+    "answered": true,
+    "tools_called": [
+      "ask_clarifying_question"
+    ],
+    "tool_results": [
+      {
+        "tool": "ask_clarifying_question",
+        "preview": "Question put to the chemist; awaiting their answer."
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": true,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 18.39,
+    "event_counts": {
+      "token": 15,
+      "tool_call": 1,
+      "question": 1,
+      "tool_result": 1,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "9e8a684380b849218a5c5449782a34e2",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

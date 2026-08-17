@@ -1,0 +1,114 @@
+{
+  "probe": {
+    "id": "an-21",
+    "section": 8,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "Design the forced-degradation study for COc1ccc(-c2ccccc2C(=O)O)cc1. I want the conditions tailored to what this molecule can actually do, not the generic matrix.",
+    "expects_tools": [
+      "predict_site_reactivity",
+      "compute_electronic_properties",
+      "predict_pka",
+      "find_notes",
+      "gather_evidence"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a target percent degradation, a time point or a temperature presented as derived from calculation",
+      "claiming the conditions are ICH-compliant or validated",
+      "a shelf-life, storage-condition or 'this compound is stable' statement",
+      "an invented prior forced-degradation result for this compound"
+    ],
+    "direction": "Uses the structure: ranks the electron-rich/oxidisable sites, identifies the hydrolysable groups by functional-group inspection (the aryl methyl ether and the acid are the handles here, and a molecule with no ester or amide is worth saying so about), and maps each liability onto the condition that provokes it. Is explicit that photolysis and thermal degradation are largely outside what these tools describe. States the calculation is a prior for study design — where to look — and never a prediction of what will be found or of stability. Retrieves precedent for the compound class first.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "an-21",
+    "section": 8,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "Design the forced-degradation study for COc1ccc(-c2ccccc2C(=O)O)cc1. I want the conditions tailored to what this molecule can actually do, not the generic matrix.",
+    "answer": "I'll analyze this molecule's structure for its actual degradation liabilities and then design a targeted forced-degradation study.Now let me read the degradation-liabilities skill to structure this properly:Perfect. Now I'll design a targeted forced-degradation study based on what this molecule can actually do:\n\n## Forced-Degradation Study Design for 2'-Methoxy-biphenyl-2-carboxylic acid\n\nYour molecule is **2-(4-methoxyphenyl)benzoic acid** — a biphenyl with a carboxylic acid and a methoxy substituent. The computed reactivity and electronic structure reveal three distinct degradation liabilities:\n\n### Structure and Electronic Character\n\n![structure]\n\n- **HOMO–LUMO gap:** 3.13 eV (moderate gap, but electron-rich aromatic regions exist)\n- **Dipole:** 1.68 D (polar molecule, favours some ionic interactions)\n- **Key functional groups:** carboxylic acid (pKa ~3–4), methoxy ether, aromatic rings\n\n---\n\n## **Identified Degradation Sites**\n\n### **1. Carboxylic Acid — Electrophilic Site (Highest Priority)**\n\n**Fukui f⁺ index:** 0.116 on the carbonyl oxygen (atom 13)\n**Partial charges:** C=+0.358, O(carbonyl)=−0.420, O(hydroxyl)=−0.377\n\nThe carboxylic acid is **the most electrophilic site** and therefore the most susceptible to nucleophilic attack, which drives:\n- **Esterification** under acidic conditions → loss of water, formation of esters\n- **Decarboxylation** at elevated temperature (especially likely at pH < 2, where the acid is protonated)\n- **Lactone formation** if the molecule can cyclize intramolecularly (a 5-membered ring to a benzoyl carbon would be favoured)\n\n**Also test:** The bond order C–O(carboxyl) is 1.74, indicating partial double-bond character; this carbonyl is polarized but not unusually strained.\n\n---\n\n### **2. Methoxy Ether — Hydrolysis and Cleavage Liability**\n\n**Fukui f⁻ index:** 0.107 on the methoxy oxygen (atom 1) for nucleophilic attack\n\nThe methoxy group is electron-rich and vulnerable to:\n- **C–O bond cleavage** under acidic conditions → loss of methanol, formation of 4-hydroxyphenyl product (demethylation)\n- **Oxidative attack** at the α-C–H of the methoxy group (if oxidation conditions are used)\n\nThe methoxy oxygen also has **high f⁻**, meaning it is a good hydrogen-bond acceptor and may participate in secondary interactions that destabilize it.\n\n---\n\n### **3. Aromatic Ring — Oxidation Liability**\n\nThe **4-methoxyphenyl ring** (electron-donating due to the methoxy group) is more electron-rich than the simple benzene ring bearing the carboxylic acid:\n- **Electrophilic aromatic hydroxylation** at ortho and para positions relative to the methoxy group\n- **Coupling or polymerization** under oxidative conditions\n- **Ring-opened degradation** under strong oxidants (peroxide, permanganate)\n\n---\n\n## **Recommended Forced-Degradation Matrix**\n\nDesign the study to **isolate each mechanism** with conditions that are harsh enough to produce measurable degradation but mild enough to avoid secondary reactions:\n\n| **Condition** | **Rationale** | **Expected Degradants** | **Target Mechanism** |\n|---|---|---|---|\n| **Acid hydrolysis** (1 M HCl, 40 °C, 7 days) | Protonates carboxylic acid and methoxy oxygen; drives both decarboxylation and demethylation | Methoxy cleavage product (4-OH-biphenyl-2-COOH); decarboxylated products | Acid-catalysed C–O cleavage; COOH decomposition |\n| **Base hydrolysis** (1 M NaOH, 40 °C, 7 days) | Ionizes carboxylic acid; tests nucleophilic attack on the carboxyl carbon | Sodium salt of parent; any secondary products from ring-opening | Saponification/esterification reversal; β-elimination of aromatic positions |\n| **Oxidation — H₂O₂** (3% H₂O₂, 40 °C, 7 days) | **Targets the 4-methoxyphenyl ring** (electron-rich); may oxidise α-C–H of methoxy | Hydroxylated aromatic products; demethylation; methoxy α-oxidation products | Electrophilic aromatic oxidation; ether oxidation |\n| **Oxidation — light + H₂O₂** (3% H₂O₂, 25 °C, light, 7 days) | Photolytic activation; **focuses on the most electron-rich sites** | Hydroxy-diphenyl carboxylic acids; other hydroxylation isomers | Photocatalysed oxidation; visible-light ring activation |\n| **Thermal** (60 °C, dark, dry, 7 days) | **Targets decarboxylation** (carboxylic acids lose CO₂ when heated, especially in acidic trace) | 4-methoxybiphenyl (methoxy retained, carboxylic acid lost) | Thermal decarboxylation of aromatic acid |\n| **Neutral hydrolysis** (water, 40 °C, 7 days) | **Control; low reactivity baseline** | Minimal degradation; any hydrate or dimer | Purely thermal hydrolysis (slow) |\n\n---\n\n## **Analysis Priorities by Mechanism**\n\n### **Acid hydrolysis products** — Look for:\n- **M − 45** (loss of COOH as 45; product = 4-methoxybiphenyl, if decarboxylation dominates)\n- **M − 31** (loss of OCH₃; product = 4-hydroxybiphenyl-2-COOH)\n- **Small esters** if the acid esterifies in situ\n\n### **Base hydrolysis products** — Look for:\n- **Sodium salt of parent** (M + 23 − 1, if carboxylic acid ionizes)\n- **Coupled/oligomeric species** (2M − 18, if aromatic coupling occurs under basic oxidative conditions)\n\n### **Oxidation products** — Look for:\n- **M + 16** (single hydroxylation; likely on the 4-methoxyphenyl ring at ortho or para to methoxy)\n- **M + 32** (double hydroxylation or methoxy oxidation to an aldehyde)\n- **M − 15 + 16 = M + 1** (demethylation + oxidation on the former methoxy carbon)\n\n### **Thermal products** — Look for:\n- **M − 44** (loss of CO₂ from carboxylic acid)\n- Methoxy group should remain intact (not oxidatively labile without H₂O₂)\n\n---\n\n## **Why This Is Not a Generic Matrix**\n\n- **No full UV light screening** — the conjugated biphenyl and methoxy group are not strongly photolabile, so light + chemical oxidant is preferred to light alone.\n- **No strong acid/base** (conc. HCl, conc. H₂SO₄, 70 °C) — would trigger secondary aromatic sulfonation, ring cleavage, and over-oxidation, obscuring the primary pathways.\n- **No ambient-light oxidation** — H₂O₂ at 40 °C is the right severity; autoxidation at 25 °C with O₂ would be too slow to differentiate.\n- **Thermal is separate from chemical** — the carboxylic acid will decarboxylate on heating, but slowly; running it dry avoids the confounding hydrolysis mechanism.\n\n---\n\n## **Next Steps**\n\nOnce you generate degradants under these conditions, match them against the **electrophilic Fukui ranking** (methoxy O > carboxylic-acid O > aromatic ring) to decide whether each makes chemical sense. If an unexpected product appears, use `compute_thermochemistry` and `compute_electronic_properties` on candidate structures to score plausibility—a hydroxylation at a position the Fukui ranking puts bottom is weaker evidence than one at the top.\n\nWould you like me to help interpret the results once you run this, or to compute relative energies of proposed degradation pathways?",
+    "answered": true,
+    "tools_called": [
+      "predict_site_reactivity",
+      "predict_site_reactivity",
+      "compute_electronic_properties",
+      "render_structure",
+      "read_file"
+    ],
+    "tool_results": [
+      {
+        "tool": "render_structure",
+        "preview": "<?xml version='1.0' encoding='iso-8859-1'?>\n<svg version='1.1' baseProfile='full'\n              xmlns='http://www.w3.org/2000/svg'\n                      xmlns:rdkit='http://www.rdkit.org/xml'\n        "
+      },
+      {
+        "tool": "compute_electronic_properties",
+        "preview": "{\n  \"smiles\": \"COc1ccc(-c2ccccc2C(=O)O)cc1\",\n  \"structure_id\": \"st_75f85b31bc46fe0e\",\n  \"method\": \"GFN2-xTB\",\n  \"solvent\": null,\n  \"total_energy_hartree\": -48.28492363998162,\n  \"homo_ev\": -10.31166296"
+      },
+      {
+        "tool": "predict_site_reactivity",
+        "preview": "{\n  \"smiles\": \"COc1ccc(-c2ccccc2C(=O)O)cc1\",\n  \"structure_id\": \"st_75f85b31bc46fe0e\",\n  \"method\": \"GFN2-xTB\",\n  \"solvent\": null,\n  \"mode\": \"electrophilic\",\n  \"ranked_by\": \"f_minus\",\n  \"total_atoms\": 2"
+      },
+      {
+        "tool": "predict_site_reactivity",
+        "preview": "{\n  \"smiles\": \"COc1ccc(-c2ccccc2C(=O)O)cc1\",\n  \"structure_id\": \"st_75f85b31bc46fe0e\",\n  \"method\": \"GFN2-xTB\",\n  \"solvent\": null,\n  \"mode\": \"nucleophilic\",\n  \"ranked_by\": \"f_plus\",\n  \"total_atoms\": 29,"
+      },
+      {
+        "tool": "read_file",
+        "preview": " 1  ---\n 2  name: degradation-liabilities\n 3  description: >-\n 4    Judgment for \"where will this molecule fall apart?\" — identifying likely oxidation and\n 5    hydrolysis sites, turning them into a f"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "2",
+      "4",
+      "3.13",
+      "1.68",
+      "3",
+      "1",
+      "0.116",
+      "13",
+      "+0.358",
+      "5",
+      "1.74",
+      "40",
+      "7",
+      "25",
+      "60",
+      "45",
+      "31",
+      "23",
+      "18",
+      "16",
+      "32",
+      "15",
+      "44",
+      "70"
+    ],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 29.2,
+    "event_counts": {
+      "token": 75,
+      "tool_call": 5,
+      "tool_result": 5,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "a4d892cbfb4744178917d1eb73828480",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

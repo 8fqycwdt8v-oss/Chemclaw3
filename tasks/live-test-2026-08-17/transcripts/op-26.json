@@ -1,0 +1,74 @@
+{
+  "probe": {
+    "id": "op-26",
+    "section": 4,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "Design me a 96-well HTE campaign for the amidation — factor set, number of wells, and which conditions go where, ready to hand to the automation team.",
+    "expects_tools": [
+      "generate_screening_design",
+      "similar_reactions",
+      "gather_evidence"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "A1 through H12 assigned as follows",
+      "a well coordinate for any condition",
+      "ready to import into the automation worklist",
+      "the plate has been designed"
+    ],
+    "direction": "Delivers the half it genuinely can and refuses the half it cannot, without blurring them. Deliverable: a factor set argued from the indexed amidation records — which coupling agents, bases and solvents are worth carrying, and why those — and the complete factorial run list with its exact count, reconciled against 96 (what to cut if it overshoots, what to add or replicate if it undershoots). Not deliverable: which condition goes in which well, stock concentrations, volumes. There is no plate-layout tooling, so the answer must say so and stop rather than filling the plate. The good version hands the automation team a condition list and names the boundary explicitly as the point where their own software takes over.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "op-26",
+    "section": 4,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "Design me a 96-well HTE campaign for the amidation — factor set, number of wells, and which conditions go where, ready to hand to the automation team.",
+    "answer": "I need more information to design this campaign properly. Let me search the record first for what amidation you're referring to.The search came back empty. Before I can design the 96-well plate layout, I need to clarify a few things:Once you provide the substrate pair, I'll also need to know:\n\n- **What are you optimizing for?** (yield, selectivity, conversion, purity?)\n- **Are there any factors you already know matter?** (catalyst, base, solvent, temperature, equiv ratios?)\n- **Do you have prior runs** on this reaction that should seed the campaign, or is this from scratch?\n- **Scale and constraints?** (e.g., solvent volume limits, base equivalents capped at 3, no chlorinated solvents on scale, temperature range)\n\nWith those details, I can build the decision space, call the optimizer to generate the screening design, and lay out a 96-well plate with a clear mapping table showing which well holds which conditions — ready for your automation team.",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "ask_clarifying_question"
+    ],
+    "tool_results": [
+      {
+        "tool": "gather_evidence",
+        "preview": ""
+      },
+      {
+        "tool": "ask_clarifying_question",
+        "preview": "Question put to the chemist; awaiting their answer."
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": true,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 9.72,
+    "event_counts": {
+      "token": 14,
+      "tool_call": 2,
+      "evidence_source": 1,
+      "tool_result": 2,
+      "question": 1,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "4ed73cd1907b43c7a75479e22cc73cad",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

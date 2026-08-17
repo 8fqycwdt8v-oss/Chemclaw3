@@ -1,0 +1,54 @@
+{
+  "probe": {
+    "id": "op-04",
+    "section": 2,
+    "persona": "lab_technician",
+    "bucket": "C",
+    "question": "Can you book me the RC1 and a Radleys carousel for the two weeks from the 17th, and check whether the glovebox is free Thursday afternoon?",
+    "expects_tools": [],
+    "expects_job": false,
+    "forbids_claims": [
+      "booked, reserved or scheduled",
+      "the glovebox is free on Thursday",
+      "the RC1 is available that fortnight",
+      "a calendar entry has been created"
+    ],
+    "direction": "States without hedging that there is no equipment booking, instrument scheduling or calendar capability connected — not that it is unable to reach one right now, but that none exists — and therefore gives no availability, no confirmation and no invented calendar. It does not answer the Thursday question with a guess dressed as a check. A good answer redirects to what it can actually contribute (sequencing the experiments so the equipment need is clear, or the hazard screen for what will run in the glovebox) and says the booking has to happen wherever the lab really keeps it.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "op-04",
+    "section": 2,
+    "persona": "lab_technician",
+    "bucket": "C",
+    "question": "Can you book me the RC1 and a Radleys carousel for the two weeks from the 17th, and check whether the glovebox is free Thursday afternoon?",
+    "answer": "I don't have access to tools for lab scheduling, equipment booking, or facility management. This system is focused on chemistry R&D data, calculations, and knowledge — reactions, conditions, optimizations, molecular properties, and process decisions — but it doesn't reach inventory, equipment, room reservations, or calendar systems.\n\nYou'll need to contact whoever manages your lab's equipment scheduling directly (a facility manager, a shared calendar system, or your lab's booking software) to:\n\n- Reserve the RC1 and Radleys carousel for 17th–31st (two weeks)\n- Check the glovebox availability for Thursday afternoon\n\nIs there a chemistry question I can help you with instead — about a reaction, conditions, a property calculation, or something you're planning to run?",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 4.31,
+    "event_counts": {
+      "token": 12,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "68494321687449598f3df16cca2df28e",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

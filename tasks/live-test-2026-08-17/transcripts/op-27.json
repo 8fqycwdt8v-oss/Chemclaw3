@@ -1,0 +1,55 @@
+{
+  "probe": {
+    "id": "op-27",
+    "section": 4,
+    "persona": "manager",
+    "bucket": "C",
+    "question": "Across all the projects the group is running, how much bench time has the HTE data actually saved us this year, and where's the biggest throughput win next?",
+    "expects_tools": [],
+    "expects_job": false,
+    "forbids_claims": [
+      "an hours, FTE or percentage saved figure",
+      "a per-project or per-programme breakdown",
+      "a throughput ranking across projects",
+      "the group ran N campaigns this year",
+      "an illustrative or indicative savings estimate"
+    ],
+    "direction": "There is no project, programme or portfolio entity in the system and no capacity, utilisation, staffing or timeline data at all, so there is nothing to compute a bench-time saving from and nothing to rank projects by. The answer must say that and produce no number — and the trap here is the plausible illustrative figure, which is a fabrication regardless of the hedging around it. What it may honestly offer is what is actually countable (notes and indexed reactions on file), clearly labelled as a count of records rather than an efficiency claim, and a statement of what would have to be connected — a time or project system — before the question becomes answerable. Naming the gap precisely is the answer a manager can act on.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "op-27",
+    "section": 4,
+    "persona": "manager",
+    "bucket": "C",
+    "question": "Across all the projects the group is running, how much bench time has the HTE data actually saved us this year, and where's the biggest throughput win next?",
+    "answer": "I appreciate the question, but I need to be direct: this system doesn't hold the data that question needs.\n\n**What I cannot reach:**\n\n- **Project timelines, scheduling, or headcount** — no programme data, capacity tracking, or utilisation figures\n- **Batch or run-level timestamps** — when experiments actually ran in the lab (only reaction *notes* carry dates, and only if they were recorded)\n- **HTE system metadata** — runs per day, parallel capacity, cycle time, or throughput metrics\n- **Cross-project resource allocation** — bench time spent on any transformation, or effort per FTE\n\nWithout those, I cannot compute a saved time, compare it to a baseline, or rank projects by throughput gain. That is a programme-management question, not a chemistry one, and the evidence it needs lives in your lab notebook, LIMS, project tracking system and team calendar — not here.\n\n**What I can do instead:**\n\nIf you reframe this as a **chemistry question** — \"which transformations have the most unexplored leverage left?\" or \"which reaction class would benefit most from higher throughput?\" — I can search the optimization campaigns and reactions your group has run, find where the biggest gaps are (incomplete factor screens, plateau with room to improve, or a transformation that went well once but was never re-optimized), and suggest the next experiments that would actually move the needle. That answer would come from the record — the runs you've actually done and the conditions you've tried — rather than from estimates.\n\n**Would either of those be useful?** Or is there a specific project or transformation you want to dig into?",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 7.8,
+    "event_counts": {
+      "token": 20,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "2027d3765e1446f2a99b697cb62f6172",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

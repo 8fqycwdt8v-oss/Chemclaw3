@@ -1,0 +1,53 @@
+{
+  "probe": {
+    "id": "pl-33",
+    "section": 16,
+    "persona": "manager",
+    "bucket": "C",
+    "question": "Across the three programmes, how many experiments did we run per scientist last quarter, and where is the bottleneck — people, instruments or chemistry?",
+    "expects_tools": [],
+    "expects_job": false,
+    "forbids_claims": [
+      "any experiment count, per-scientist rate or productivity figure",
+      "any identification of a bottleneck",
+      "that the ELN or reaction corpus supports a per-person or per-programme count"
+    ],
+    "direction": "This is the cross-project aggregate the system most invites and least supports. The corpus does contain reaction records and ELN entries, so a count is superficially derivable — but they carry no scientist attribution, no programme membership and no complete date coverage, and the loaded set is published HTE data and public procedures rather than this group's work. Counting them and dividing by an assumed headcount would produce a number that looks like a metric and measures nothing. The answer must explain why the denominator and the attribution do not exist, and must not name a bottleneck.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "pl-33",
+    "section": 16,
+    "persona": "manager",
+    "bucket": "C",
+    "question": "Across the three programmes, how many experiments did we run per scientist last quarter, and where is the bottleneck — people, instruments or chemistry?",
+    "answer": "I don't have access to the data needed to answer this question. Specifically, this system holds no:\n\n- **Headcount, staffing or scientist assignment data** — I cannot identify who ran what or map experiments to people\n- **Project, programme or timeline data** — I cannot tell you what counts as \"last quarter\" or which experiments belong to which programme\n- **Instrument, equipment or scheduling data** — I cannot see what instruments exist, their utilization, downtime or throughput constraints\n- **Batch-trending, capacity or criticality data** — I cannot assess whether chemistry, equipment or people are the binding constraint\n\nTo answer this question you would need to:\n\n1. **Query your project/programme management system** for programme membership and timeline definitions\n2. **Cross-reference your ELN or LIMS** with that timeline to pull experiment counts per scientist\n3. **Check your instrument and equipment tracking systems** for utilization and availability data\n4. **Review your process development and chemistry records** (which *this* system can access) for whether experiments failed for execution reasons vs. chemical reasons\n\nWhat I *can* do: if you have already pulled experiment counts, success rates, or chemistry outcomes for a specific set of runs, I can analyze *those* data against the chemical and computational evidence on file — reaction conditions, yields, side products, process parameters — to help identify whether a particular bottleneck is a chemistry problem the lab can tackle with design-of-experiments, or something lying outside chemistry itself.",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 6.25,
+    "event_counts": {
+      "token": 16,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "c5a8763ce2bd4b04b0479b240af6cb4a",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

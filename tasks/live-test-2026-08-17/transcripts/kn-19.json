@@ -1,0 +1,132 @@
+{
+  "probe": {
+    "id": "kn-19",
+    "section": 15,
+    "persona": "manager",
+    "bucket": "B",
+    "question": "Priya leaves in three weeks and she basically owns the amide route. What would we lose that isn't written down?",
+    "expects_tools": [
+      "find_knowledge_gaps",
+      "gather_evidence",
+      "find_notes"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a named person's activity, ownership, workload or expertise",
+      "a personnel, staffing or capacity record",
+      "an inference about what a specific individual knows",
+      "a note id that was not retrieved"
+    ],
+    "direction": "Says up front that it holds no personnel, ownership or staffing data and therefore cannot say what any individual carries in their head. Then answers the half it can, with tools: what the amide route's record does and does not contain — runs and campaigns present (rxn-amide-edc, opt-amide-solvent, campaign-amide-additive), what has been distilled (playbook-amide-coupling-additive), what find_knowledge_gaps flags as evidence with no distillation — and converts that into a concrete list of debrief topics to run before she goes. Attributing anything at all to Priya is the failure.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "kn-19",
+    "section": 15,
+    "persona": "manager",
+    "bucket": "B",
+    "question": "Priya leaves in three weeks and she basically owns the amide route. What would we lose that isn't written down?",
+    "answer": "I need to search the knowledge graph for what's known about your amide route, so I can spot what might live only in Priya's head.Good start. Let me expand that report note and search for related reactions, optimizations, and playbooks more broadly:Now let me read the core notes — the reaction itself, the optimization campaign, and the playbook:Let me also check what's in the solvent optimization and what jobs have been run:Here's what the system *does* hold about your amide route:\n\n## Written Down\n\n**Core transformation** ([[rxn-amide-edc]]): EDC/HOBt coupling of benzoic acid with benzylamine, 81% in DMF with DIPEA (2.5 equiv), 0 °C to rt.\n\n**Critical additive rule** ([[playbook-amide-coupling-additive]]): HOBt is not optional — it intercepts the O-acylisourea rearrangement that otherwise tanks yield by ~25 points. Tested on three substrates in [[campaign-amide-additive]].\n\n**Solvent screen** ([[opt-amide-solvent]]): DMF 81%, MeCN 79%, 2-MeTHF 76%, DCM 69%. The finding is that 2-MeTHF is scalable and within 5 points, making it the process choice despite the cost.\n\n**Failure case** ([[failure-dcm-amide-coupling]]): DCM at 20 °C gave 34%, not 70%, because the O-acylisourea rearranged before amine addition. The lesson is temperature ramp, not \"DCM is bad.\"\n\n**Scope** ([[playbook-amide-coupling-additive]]): Explicitly does not apply to activated acids or HATU/T3P couplings.\n\n---\n\n## Likely In Priya's Head (Not Written)\n\n- **Which substrates have been run** beyond the benzoic acid / benzylamine benchmark and the three in the additive campaign\n- **How the 81% in DMF was achieved** — order of addition, acid equiv, cooling details, work-up specifics, counter-anion effects of DIPEA choice\n- **Why 2-MeTHF at 0→rt works** — did she test a lower end temp? Does it need the HOBt adjustment?\n- **What \"within 5 points\" actually cost in lab time** — was the spread bigger on bigger scale?\n- **Failure modes beyond the DCM/temperature one** — what else went wrong? Moisture sensitivity? Amine nucleophilicity floor?\n- **Hand-tweaks for difficult coupling partners** — sterically hindered acids, aliphatic amines, carbamate-protected amines\n- **Workup and separation wisdom** — how to handle emulsions or late crystallization in the different solvents\n- **Whether HOBt can be replaced** with cheaper alternatives (HOAT, COMU, surrogate) and if she's tested that\n- **Scaling issues** — does the temperature control tighten? Does the additive cost balloon? Thermal runaway risk?\n- **Reagent sourcing decisions** — why this EDC quality, why this HOBt source, any shelf-life gotchas?\n\nThe most dangerous gap is **substrate scope**: you have one benchmark and know it works on three more (from the campaign), but the actual envelope of the procedure is unmapped. That's where she owns the route — every tweaked condition for a difficult amine, every acid with competitive leaving groups, every scale jump.\n\n**Immediate actions for the next three weeks**: (1) Have her document one difficult substrate from recent work with *full* conditions and outcome. (2) Ask her to list every modification she's made to the benchmark that is not in the playbook. (3) Capture what made a recent run fail or succeed that you didn't predict. That will tell you where the soft knowledge is concentrated.",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note",
+      "find_notes",
+      "find_notes",
+      "expand_note",
+      "expand_note",
+      "expand_note",
+      "expand_note",
+      "expand_note",
+      "find_past_jobs"
+    ],
+    "tool_results": [
+      {
+        "tool": "find_notes",
+        "preview": "[NoteRef(id='report-amide-route-review', type='report', compound_smiles=None, tags=['report'], created_by='human', source='seed-corpus', confidence=0.8, valid_from=None, valid_to=None)]"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "[EvidenceChunk(content='<retrieved-note-0d8f72b4838855b1 id=\"report-amide-route-review\">\\n## Route review — amide coupling step\\n\\nEvidence: rxn-amide-edc, opt-amide-solvent,\\nplaybook-amide-coupling-"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='report-amide-route-review', type='report', compound_smiles=None, tags=['report'], created_by='human', source='seed-corpus', confidence=0.8, valid_from=None, valid_to=None) body='<retr"
+      },
+      {
+        "tool": "find_notes",
+        "preview": "[NoteRef(id='proposal-amide-2-methf', type='experiment-proposal', compound_smiles=None, tags=['amide-coupling', 'proposal'], created_by='agent', source='seed-corpus', confidence=0.5, valid_from=None, "
+      },
+      {
+        "tool": "find_notes",
+        "preview": ""
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='rxn-amide-edc', type='reaction', compound_smiles=None, tags=['amide-coupling'], created_by='human', source='seed-corpus', confidence=0.85, valid_from=None, valid_to=None) body='<retri"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='campaign-amide-additive', type='campaign', compound_smiles=None, tags=['campaign'], created_by='human', source='seed-corpus', confidence=0.85, valid_from=None, valid_to=None) body='<r"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='playbook-amide-coupling-additive', type='playbook', compound_smiles=None, tags=['playbook', 'amide-coupling'], created_by='human', source='seed-corpus', confidence=0.85, valid_from=No"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='failure-dcm-amide-coupling', type='failure-mode', compound_smiles=None, tags=['failure-mode', 'amide-coupling'], created_by='human', source='seed-corpus', confidence=0.75, valid_from="
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='opt-amide-solvent', type='optimization-campaign', compound_smiles=None, tags=['optimization', 'solvent'], created_by='human', source='seed-corpus', confidence=0.8, valid_from=None, va"
+      },
+      {
+        "tool": "find_past_jobs",
+        "preview": ""
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "81",
+      "2.5",
+      "0",
+      "25",
+      "79",
+      "2",
+      "76",
+      "5",
+      "20",
+      "34",
+      "70",
+      "1",
+      "3"
+    ],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 21.92,
+    "event_counts": {
+      "token": 50,
+      "tool_call": 11,
+      "evidence_source": 1,
+      "tool_result": 11,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "f94c4bfd7cbb418da11b0466915ca547",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

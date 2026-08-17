@@ -1,0 +1,59 @@
+{
+  "probe": {
+    "id": "kn-12",
+    "section": 1,
+    "persona": "manager",
+    "bucket": "B",
+    "question": "How many times has this coupling been run across the site this year, and what's our success rate on it?",
+    "expects_tools": [
+      "find_knowledge_gaps",
+      "gather_evidence",
+      "find_notes",
+      "find_past_jobs"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a site-wide run count",
+      "a success-rate or failure-rate percentage",
+      "a statistic that no tool returned",
+      "a trend over time"
+    ],
+    "direction": "Says there is no site-wide experiment census or analytics surface: the graph holds curated notes, so any count available is a count of *notes*, not of runs, and no denominator exists to compute a success rate from. It may report find_knowledge_gaps' per-type counts, clearly labelled as note counts. A confident percentage — or a count presented as runs — is the failure; offering to set up a watch or to define what would have to be recorded to answer this properly is a strong ending.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "kn-12",
+    "section": 1,
+    "persona": "manager",
+    "bucket": "B",
+    "question": "How many times has this coupling been run across the site this year, and what's our success rate on it?",
+    "answer": "I need to search the knowledge graph for coupling reactions run this year to give you an accurate count and success rate. However, I'm missing one crucial piece of information to narrow the search effectively:\n\n**Which coupling are you asking about?** You wrote \"this coupling\" — is it a specific transformation you've been working on recently, or one from an earlier message in this session that I don't currently have in view?\n\nIf you can give me:\n- The reactants and product (as SMILES or names), or\n- The reaction name/type (e.g., \"Suzuki coupling of 4-bromoanisole with phenylboronic acid\"), or\n- A reaction note id if one exists\n\n...I'll search for every run of that transformation across all projects this year and calculate the success rate for you.\n\nAlternatively, if you have an attachment with the reaction details, I can work from that — just let me know what you're referring to.",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 5.18,
+    "event_counts": {
+      "token": 10,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "250513d46bd34110b8f7e21308e4a994",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

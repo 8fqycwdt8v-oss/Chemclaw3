@@ -1,0 +1,93 @@
+{
+  "probe": {
+    "id": "rx-07",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Which base should I try first for the amination, and is there evidence one is better than another or is it just what people happen to use?",
+    "expects_tools": [
+      "similar_reactions",
+      "gather_evidence",
+      "find_notes",
+      "expand_note"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a predicted yield per base",
+      "a computed base strength or pKa for an aliphatic amidine or phosphazene base"
+    ],
+    "direction": "The corpus contains real Buchwald-Hartwig HTE data run as three separate base plates, so 'what does the data say about base' has an evidence-grounded answer rather than a folkloric one. A good answer retrieves the records, names the bases that actually appear, says how the data is structured (screening plates, not a head-to-head process comparison) and is explicit about what that design can and cannot support. It should also name the seed note's own choice (NaOtBu in toluene) and flag base compatibility with the substrate — base-sensitive functionality, ester or nitrile survival — as a constraint no dataset lookup covers.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rx-07",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Which base should I try first for the amination, and is there evidence one is better than another or is it just what people happen to use?",
+    "answer": "I need to search the knowledge graph for evidence about amination and base selection. Let me gather what's on file.Good — the graph has a Buchwald-Hartwig amination with a base choice. Let me expand that note to see the full detail and look for any comparison or rationale.I can see the one amination run on file uses **NaOtBu** (sodium tert-butoxide) at 1.4 equiv, giving 71% isolated yield. Let me search more broadly for any base-comparison evidence or playbook guidance on amination bases.That playbook is about ligand effects, not base selection. The record is thin on this question. Let me check what we actually have and what I can reason from first principles using the tools:\n\n**What the record shows:**\n- [[rxn-buchwald-amination]] (human-authored, confidence 0.8): One Buchwald-Hartwig amination run using **NaOtBu** as the base, achieving 71% isolated yield. No comparison to other bases is documented.\n- No playbook exists on amination base selection.\n- No optimization campaign comparing bases for this transformation.\n\n**What theory says** (from my background chemistry knowledge, not from the record):\n\nFor Buchwald-Hartwig amination, base selection is *not* arbitrary — it matters fundamentally:\n\n- **NaOtBu** (sodium tert-butoxide): Strong base, **sterically hindered** so it doesn't compete as a nucleophile against the amine nucleophile. This is the \"standard\" choice in literature for aminations. It's what the one run on file used.\n- **Cs₂CO₃**: Weaker base, non-nucleophilic, but requires higher temperature (110–130 °C) and often gives lower yields for certain substrates.\n- **K₃PO₄**: Similar profile to Cs₂CO₃.\n\nThe choice is grounded in the mechanism: the amine must be deprotonated to perform the nucleophilic attack on the Pd-aryl intermediate, and you want a base strong enough to do that but not reactive enough to be a competing nucleophile itself. NaOtBu wins on both counts. Cs₂CO₃ is weaker and typically used only when NaOtBu causes decomposition of a labile substrate.\n\n**My recommendation:**\n\nStart with **NaOtBu** at 1.5–1.6 equiv in toluene at 100 °C. That's backed by the one run in the record plus standard methodology. If your substrate is decomposed by NaOtBu (you'll see that as dark color, gum instead of crystals, or low yield with complex impurities), then *then* try Cs₂CO₃ at 110 °C as a milder alternative.\n\nThe record doesn't have a head-to-head comparison, so I cannot cite one. But the base choice is mechanistically sound, not empirical — you're not just picking what \"people happen to use\", you're picking what works because of how the intermediate reacts.",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note",
+      "gather_evidence",
+      "expand_note"
+    ],
+    "tool_results": [
+      {
+        "tool": "find_notes",
+        "preview": "[NoteRef(id='campaign-biaryl-scope', type='campaign', compound_smiles=None, tags=['campaign', 'scope'], created_by='human', source='seed-corpus', confidence=0.8, valid_from=None, valid_to=None), NoteR"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "[EvidenceChunk(content='<retrieved-note-0d8f72b4838855b1 id=\"campaign-biaryl-scope\">\\nSix couplings exploring aryl-halide scope at fixed catalyst and base, run to answer one question:\\nwhere does this"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='rxn-buchwald-amination', type='reaction', compound_smiles=None, tags=['cross-coupling', 'amination'], created_by='human', source='seed-corpus', confidence=0.8, valid_from=None, valid_"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='playbook-pd-cross-coupling-scope', type='playbook', compound_smiles=None, tags=['playbook', 'cross-coupling'], created_by='human', source='seed-corpus', confidence=0.8, valid_from=Non"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": ""
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "1.4",
+      "71",
+      "0.8",
+      "1.5",
+      "100"
+    ],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 33.87,
+    "event_counts": {
+      "token": 36,
+      "tool_call": 5,
+      "evidence_source": 2,
+      "tool_result": 5,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "4f59af7383d34a058e4ee3b4f8810208",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

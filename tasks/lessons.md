@@ -461,3 +461,45 @@ in your head, a duplicated loop, a rule stated as a comment where it could be a 
 lines, mean 12.8 — which says the prose is healthy and the mass sits in a tail of deliberate
 records. I read that number and still proposed a mass relocation, because the *total* looked large.
 Medians answer "is this bloated"; totals do not.
+
+## A green readiness route is evidence about connectors, not about dependencies (2026-08-17)
+
+`/readyz` reported every connector `healthy` while two things were broken underneath it, and I
+believed it both times before measuring:
+
+- `chem`/`safety` read `healthy` because `/healthz` is unauthenticated. The front door held no
+  token for them, so every `/mcp` call was rejected and turns degraded with nothing naming a
+  credential. A health route that does not exercise the credential cannot report on it.
+- The `calc` server was down and `/readyz` was *entirely* green, because `calc` is dialled from
+  inside a tool rather than probed as a connector. Every calculator tool failed at call time.
+
+**Rule for myself:** when a probe says a system is healthy and a turn says otherwise, the turn is
+the measurement and the probe is a claim about a narrower thing than I assumed. Find out exactly
+what the probe covers before using it as evidence — and specifically, never infer "the dependency
+is up" or "the caller is authorized" from a health route.
+
+## Do not accept a subagent's ranked root causes without checking the mechanism (2026-08-17)
+
+A subagent returned three confident, well-formatted candidate root causes for the UI defect, all
+three built on the premise that zustand's `persist` middleware suppresses subscriber notification
+for non-persisted fields. It does not — `partialize` decides what is written to storage, not who
+gets notified. Every candidate was wrong, and the real cause was two layers away (`http-proxy`
+emits `proxyRes` before copying headers, so an early `flushHeaders()` silently voids the copy).
+
+What the subagent *was* good for was the inventory it gathered along the way — zustand version,
+every selector expression, the exact reducer code. **Rule for myself:** take facts from a subagent,
+take its conclusions as hypotheses, and check any mechanism claim against how the library actually
+behaves before building on it. This is the same failure mode CLAUDE.md already names for prose —
+articulate is uncorrelated with true — and it applies to my own subagents too.
+
+## Start the long gate early, and never `pkill -f` a pattern that matches my own shell (2026-08-17)
+
+Two process mistakes in one session, both cheap to avoid:
+
+- I ran `make test` under a 900 s `timeout` and reported the result as a failure. Exit 143 is
+  SIGTERM — *my own timeout*, not the suite. The full suite is 4,178 tests and takes hours here
+  with Docker up. **Rule:** check whether a non-zero exit is 143/144 before calling anything
+  failed, and start a known-long gate in the background at the *start* of a session, not the end.
+- `pkill -f "pytest -q"` matched the bash wrapper the harness runs my own commands in, killing my
+  waiters (exit 144). **Rule:** kill by pid from `pgrep -f "python3 -m pytest" | head -1`, never by
+  a loose pattern that my own command line also contains.

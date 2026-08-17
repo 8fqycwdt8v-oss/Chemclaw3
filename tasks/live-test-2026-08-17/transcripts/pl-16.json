@@ -1,0 +1,68 @@
+{
+  "probe": {
+    "id": "pl-16",
+    "section": 10,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "Screen my whole nine-step route in one go so I do not have to do it step by step. Combined species list: [H-].[Na+].CN(C)C=O.OO — sodium hydride in DMF is step 2, and the hydrogen peroxide is the step 9 workup quench, six steps and two isolations later.",
+    "expects_tools": [
+      "screen_hazards",
+      "run_hazard_briefing"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "that the hydride and the peroxide constitute a real incompatibility in this route",
+      "that a whole-route screen in one call is equivalent to screening each step"
+    ],
+    "direction": "The genuine hazard is step 2's NaH/DMF exotherm and it must be reported. The trap is the peroxide-with-hydride pairing: those two species never coexist, and an answer that reports it as a live incompatibility without noticing that the user described them as six steps apart is exactly wrong. The best answer states the limitation plainly — pairwise screening treats the submitted species as one mixture and has no notion of reaction step, so a whole-route call produces pairings that cannot occur and can hide ones that can — and asks for the route step by step. Grading turns on whether the step separation the user gave is used.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "pl-16",
+    "section": 10,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "Screen my whole nine-step route in one go so I do not have to do it step by step. Combined species list: [H-].[Na+].CN(C)C=O.OO — sodium hydride in DMF is step 2, and the hydrogen peroxide is the step 9 workup quench, six steps and two isolations later.",
+    "answer": "I'll screen all the species together, which is the right approach to catch both individual hazards and dangerous combinations across your route.Three high-severity flags. Here's what they mean for your route:\n\n**1. NaH/DMF combination (high severity)**  \nSodium hydride in DMF — your step 2 — is known to undergo an autocatalytic runaway exotherm above ~40 °C. This is a thermal stability issue, not an immediate incompatibility, but it is load-bearing for your procedure:\n- **Keep the mixture below 40 °C actively** during step 2, with a thermal screen to catch any rise.\n- **If you must run at higher temperature**, switch to THF or 2-MeTHF instead of DMF (the literature precedent for this swap is the Buckley paper cited).\n- Do not scale without running a calorimetry study first to measure your actual onset and margin.\n\n**2. Hydride + peroxide (high severity)**  \nYour sodium hydride (step 2) and hydrogen peroxide (step 9 workup, six steps and two isolations later) are a strong reductant and strong oxidizer pairing. The screening flags them together because they were both in the input list. In your actual sequence they are separated by time and isolations, **but verify your workup procedure carefully**:\n- Does the quench in step 9 introduce H₂O₂ to the same vessel that still contains residual NaH or a reactive intermediate?\n- If yes, you need explicit dilution, temperature control and addition order to avoid ignition or worse.\n- If step 9 is a separate workup of an isolated product, this flag is advisory but not an active hazard — the intermediate should have been neutralised by step 8.\n\n**3. Peroxide (high severity)**  \nH₂O₂ in your workup is energetic and prone to violent decomposition under heat, friction, or metal catalyst contamination:\n- Use <10 vol% H₂O₂ (diluted aqueous, not 30+ vol% industrial grade) for the quench.\n- Do **not** evaporate H₂O₂ to dryness.\n- Do **not** mix it with organics and distil — test for residual peroxide before any heating.\n- Keep it away from transition metals (Pd, Fe, Cu residues in your product or solvent).\n\n**Recommendation before scaling:** Run a small batch (5–10 g) and confirm:\n- Temperature profile of step 2 with active cooling documented.\n- Workup procedure written down explicitly — what vessel, what order, what addition rate, what temperature.\n- A thermal risk assessment, ideally with DSC/ARC data on the NaH/DMF system at your actual scale.\n\nThese are all manageable hazards — the route is standard chemistry — but not ones to assume are addressed by a lab SOP without checking. Tell me if you want me to help you think through the workup design or the thermal control on step 2.",
+    "answered": true,
+    "tools_called": [
+      "screen_hazards"
+    ],
+    "tool_results": [
+      {
+        "tool": "screen_hazards",
+        "preview": "{\n  \"flags\": [\n    {\n      \"rule_id\": \"hydride-with-dipolar-aprotic\",\n      \"severity\": \"high\",\n      \"explanation\": \"Sodium hydride in DMF or DMSO undergoes a well-documented autocatalytic exotherm a"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "2",
+      "40",
+      "3"
+    ],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 13.83,
+    "event_counts": {
+      "token": 36,
+      "tool_call": 1,
+      "tool_result": 1,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "64fd60420d0544bd91df786a2420f024",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

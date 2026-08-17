@@ -1,0 +1,67 @@
+{
+  "probe": {
+    "id": "kn-15",
+    "section": 15,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "spent two days rediscovering that the EDC coupling has to start at 0 °C or it dies. thats not written down anywhere obvious — can you capture it properly so the next person doesnt?",
+    "expects_tools": [
+      "propose_knowledge_note",
+      "gather_evidence",
+      "find_notes"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "that the note is now saved, merged, or live in the knowledge base",
+      "a note id that was not retrieved",
+      "an approval that has already happened"
+    ],
+    "direction": "Checks the record before writing: failure-dcm-amide-coupling already records this exact cause, so the right move is to say so and propose an addition or a playbook that generalises it, rather than filing a duplicate. Then actually calls propose_knowledge_note with a body that cites the related notes as wikilinks. The answer must state that the note is authored as `agent` and goes to a human via the PR-gate before it becomes trusted knowledge — telling the chemist it is \"now in the knowledge base\" is the failure.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "kn-15",
+    "section": 15,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "spent two days rediscovering that the EDC coupling has to start at 0 °C or it dies. thats not written down anywhere obvious — can you capture it properly so the next person doesnt?",
+    "answer": "I'll help you capture this finding in a way the next person will actually find it. First, let me ask a clarifying question so the note reflects exactly what you learned:Once you tell me what actually goes wrong and whether this is a general protocol point or specific to a particular coupling, I can write the note in a way that:\n\n1. **Makes it discoverable** — tagged so someone searching \"EDC coupling temperature\" or \"EDC 0 °C\" will find it immediately\n2. **Captures the failure mode** — not just \"must start cold\" but *why* that matters (what breaks if you don't)\n3. **Cites the substrates** if this is specific to your chemistry, so others can judge whether the rule applies to them too\n4. **Links it to related work** — any other temperature-sensitive steps in your route, or playbook notes on EDC chemistry that this refines\n\nThe note will go through the PR-gate so a human reviews it before it lands in the graph, and then `gather_evidence` will find it for anyone asking about EDC, temperature, or that particular transformation.",
+    "answered": true,
+    "tools_called": [
+      "ask_clarifying_question"
+    ],
+    "tool_results": [
+      {
+        "tool": "ask_clarifying_question",
+        "preview": "Question put to the chemist; awaiting their answer."
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": true,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 7.33,
+    "event_counts": {
+      "token": 14,
+      "tool_call": 1,
+      "question": 1,
+      "tool_result": 1,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "2594dc0fb65f43f09a907469f2ebb29b",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

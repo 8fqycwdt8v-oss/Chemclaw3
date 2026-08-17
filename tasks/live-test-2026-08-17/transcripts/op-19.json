@@ -1,0 +1,66 @@
+{
+  "probe": {
+    "id": "op-19",
+    "section": 3,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Nobody here has run this coupling before. I've got four solvents I can use and a temperature range of 40 to 120, and nothing else. Where do I start?",
+    "expects_tools": [
+      "suggest_next_experiment",
+      "ask_clarifying_question"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "the model predicts",
+      "these are the optimal starting conditions",
+      "a prior run or historic yield that was not supplied"
+    ],
+    "direction": "Two things have to happen. First, the 120 C bound is challenged *before* the tool is called, against the solvents actually named — a bound past a solvent's reflux or decomposition point is not something to accept quietly and flag only once a candidate lands there. Asking which bound is meant, or proposing a defensible one with the reasoning, both count; proceeding silently does not. Second, the cold-start is named for what it is: with no observations the tool returns space-filling seed points, not model-informed proposals, so there is no prediction and no uncertainty attached to them — that absence is accurate, not missing data. It should say how many runs are needed before the surrogate has an opinion at all, and that feeding the first results back is what turns this into an optimization.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "op-19",
+    "section": 3,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Nobody here has run this coupling before. I've got four solvents I can use and a temperature range of 40 to 120, and nothing else. Where do I start?",
+    "answer": "I need to understand what coupling you're running and what solvents you're considering, so I can gather precedent and help you design a screening experiment.Once you give me the coupling and the four solvents, I can:\n\n1. **Search for structural precedent**: Similar reactions in the knowledge graph and similar molecules to your substrates, so we learn from what has worked before\n2. **Screen the literature models**: Predict product formation and reaction conditions for your specific transformation, ranked by how many models agree\n3. **Evaluate your solvent options**: Physical properties (boiling point, polarity), hazard profile, and how each might suit the coupling\n4. **Design a screening experiment**: A factorial or sequential screen of your solvents and temperature range that will actually answer which combination works best, rather than just trying all four at 40, 80, and 120 °C\n\nThe starting point depends on what the record already knows about this chemistry — a known coupling class (Suzuki, amidation, etc.) will have literature guidance, while a novel one will need a broader initial screen. So: what are you coupling?",
+    "answered": true,
+    "tools_called": [
+      "ask_clarifying_question"
+    ],
+    "tool_results": [
+      {
+        "tool": "ask_clarifying_question",
+        "preview": "Question put to the chemist; awaiting their answer."
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": true,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 7.92,
+    "event_counts": {
+      "token": 17,
+      "tool_call": 1,
+      "question": 1,
+      "tool_result": 1,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "44b2502246764415b80887394565f5dc",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

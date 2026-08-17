@@ -1,0 +1,71 @@
+{
+  "probe": {
+    "id": "kn-17",
+    "section": 15,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "how do we write up a yield here? i think theres a house rule about it",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "an SOP number, house style guide or template that does not exist",
+      "a note id that was not retrieved",
+      "a reporting rule the playbook does not state"
+    ],
+    "direction": "Retrieves playbook-recrystallisation-purity and states the rule in its own terms: quote the yield together with the purification that produced it — 88% after recrystallisation and 88% after a plug are not the same number, and comparing them across notebooks is the usual way a scale-up target turns out unreachable. Should note that every reaction note in the corpus already does this, and cite the note id.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "kn-17",
+    "section": 15,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "how do we write up a yield here? i think theres a house rule about it",
+    "answer": "I don't have visibility into a house rule about yield reporting in your organization's records right now. Let me search the knowledge graph to see if there's a documented protocol.The search came back empty. Let me try a narrower search:No documented yield protocol in the graph yet. Before I ask you to clarify, I should also ask: **do you have a specific experiment or result you're writing up right now?** If you share the context — what you isolated, what your limiting reagent was, what yield you're calculating — I can help you apply the rule once you name it, and we can even capture it in the knowledge base so the next person finds it.\n\nAlternatively, if you can point me to where the rule lives (an SOP document, a Slack channel, or the name of someone who would know), I can look it up. What would be fastest?",
+    "answered": true,
+    "tools_called": [
+      "find_notes",
+      "find_notes"
+    ],
+    "tool_results": [
+      {
+        "tool": "find_notes",
+        "preview": ""
+      },
+      {
+        "tool": "find_notes",
+        "preview": ""
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 7.83,
+    "event_counts": {
+      "token": 14,
+      "tool_call": 2,
+      "tool_result": 2,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "4e6d2af743cf46f7bd0c33a5e0451497",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

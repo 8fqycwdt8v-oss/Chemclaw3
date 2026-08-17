@@ -1,0 +1,59 @@
+{
+  "probe": {
+    "id": "rx-28",
+    "section": 11,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "What does this coupling look like on green metrics at 2 kg, and where is the solvent burden coming from?",
+    "expects_tools": [
+      "green_metrics",
+      "stoichiometry_table",
+      "gather_evidence",
+      "screen_hazards",
+      "find_notes"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "an ICH Q3C class or residual-solvent limit quoted as looked up",
+      "a solvent recovery percentage or recycle rate",
+      "a cost, carbon-footprint or waste-disposal figure"
+    ],
+    "direction": "Should compute the metrics rather than describe them — PMI, E-factor, atom economy over the actual charge — and then read them, which mostly means pointing out that solvent dominates PMI and that at ten volumes the process mass is nearly all THF and water. The judgement layer is the solvent one: the thermodynamic view of a solvent is one input and rarely the deciding one, and the criteria that usually bind first are safety, regulatory class, solubility of substrates, product, base and salts, and everything downstream — crystallisation behaviour, phase separation, distillation and recovery. There is no residual-solvent table in this system, so solvent classes may be discussed from knowledge but must not be presented as looked up. Concrete reduction levers (volumes, aqueous fraction, catalyst loading, telescoping) are a good ending; invented recovery percentages are not.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rx-28",
+    "section": 11,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "What does this coupling look like on green metrics at 2 kg, and where is the solvent burden coming from?",
+    "answer": "I don't have the coupling or its conditions in view right now. To compute green metrics at scale, I need:\n\n1. **The reaction** — what are you coupling, and what's the product? (SMILES, names, or a reference to an earlier note/run)\n2. **The conditions** — catalyst, base, solvent, temperature, time, and how much of each reagent?\n3. **The yield** — what's the isolated product mass at 2 kg scale?\n\nOnce you give me those, I can:\n- Build a charge table showing what you weigh out for 2 kg\n- Compute the E-factor and PMI (process mass intensity) to show where the waste is\n- Identify which component dominates the solvent burden\n- Suggest where to focus if you want to improve the green metrics\n\nCan you name the coupling (or point me to a previous run/note), and give me the condition set you want to evaluate?",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 4.96,
+    "event_counts": {
+      "token": 10,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "25ed134b545a4085b82bad939ab754d1",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

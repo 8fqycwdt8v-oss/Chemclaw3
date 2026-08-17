@@ -1,0 +1,133 @@
+{
+  "probe": {
+    "id": "op-31",
+    "section": 2,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Before I commit the team to a ligand screen — what don't we know that we should? Point me at the actual holes in what we hold on Pd cross-coupling.",
+    "expects_tools": [
+      "find_knowledge_gaps",
+      "gather_evidence",
+      "find_notes",
+      "expand_note"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a note id that does not exist",
+      "the literature does not cover this",
+      "a gap in the science, asserted from a gap in the graph"
+    ],
+    "direction": "Answers from the graph rather than reciting generic chemistry gaps: names specific structural holes it can actually see — a transformation with no failure-mode note attached, a compound referenced but with no linked reaction, a playbook with no run supporting it — and for each, the experiment or note that would close it. The distinction that matters: a gap in what *we have recorded* is not a gap in what is *known*, and the answer must not slide from one to the other. Prioritising the gaps by what a ligand screen would actually depend on is the good version.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "op-31",
+    "section": 2,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Before I commit the team to a ligand screen — what don't we know that we should? Point me at the actual holes in what we hold on Pd cross-coupling.",
+    "answer": "I'll scan the knowledge graph systematically to find what we know about Pd cross-coupling and map the gaps.Let me expand those notes to see the full content and follow the evidence trail:Now let me look at the specific reactions and failure modes to understand what's been tried:Based on the knowledge graph scan, here's what we hold and **critically, what we don't**:\n\n## What we know (confidence 0.8–0.9):\n\n**Strategic priorities** ([[playbook-pd-cross-coupling-scope]]):\n- Ligand steric bulk and L:Pd ratio are the first levers; temperature is last\n- Oxidative addition into electron-rich aromatics is the bottleneck\n\n**Technique** ([[playbook-degassing]]):\n- Pd(0) oxidises fast — three freeze-pump-thaw cycles or 20 min/100 mL sparging; anything less gives bimodal 70%+/under-20% outcomes\n\n**Failure modes** ([[failure-aqueous-protodeboronation]]):\n- Higher temp + aqueous solvent = protodeboronation of the nucleophile dominates the assay, hiding lower isolated yield\n- Assay yield ≠ product yield (we have data showing 79% LCAP but 68% isolated at 100 °C vs 76% isolated at 80 °C)\n\n**Scope boundary** ([[campaign-biaryl-scope]]):\n- System works on electron-rich bromides at 80 °C, 12 h; electron-rich *chlorides don't couple at all* under these conditions\n\n---\n\n## What we don't know (and **should**):\n\nFrom the gaps report, these tags have runs but **no distilled playbook**:\n\n1. **Ligand effects** — We have one condition set with one ligand system (Pd(OAc)₂, presumably with a phosphine that's not named). We have **zero** distilled guidance on:\n   - Which biaryl phosphines you're screening — bulkiness/basicity tradeoffs\n   - Whether monodentate vs. bidentate matters here\n   - Electronic effects (electron-donating vs. -withdrawing on the phosphine)\n   - *None of this is in a playbook or even flagged in the optimization campaign*\n\n2. **Catalyst loading dependency** — The record shows one run at 1.5 mol% Pd gave 76%. We have an `interaction-catalyst-loading` note (linked but not expanded) — **I cannot tell if you've tested lower loading, or if there's a wall below which it fails**. The playbook says \"higher L:Pd\" is an escalation tactic, but there's no evidence of a tested minimum.\n\n3. **Solvent / mixed-solvent systems** — You have one Suzuki entry: THF/water 4:1 at 80 °C. You have separate evidence that solvents matter (opt-amide-solvent scored four options), **but nothing on Suzuki solvents beyond this one data point**. Questions left open:\n   - Does the water ratio matter? (We know boronic acids can protodeborate in aqueous conditions)\n   - Have you tested neat organic solvents?\n   - Alternative aqueous pairs (EtOH/water, DMSO/water)?\n\n4. **Base choice** — One run: K₂CO₃. The playbook doesn't discuss base at all. What happens with Cs₂CO₃, K₃PO₄, or soluble bases? (This *is* a known dial in the literature; the absence here is an actual gap.)\n\n5. **Nucleophile variations** — The scope campaign only tested **aryl halides** (bromide vs. chloride). No data on:\n   - Boronic acid scope — hindered, heterocyclic, or primary alkyl coupling partners\n   - Organotin (Stille) or organozinc (Negishi) as alternatives when boronic acids fail\n   - Coupling times (is 12 h arbitrary or optimised?)\n\n6. **Ligand-base-nucleophile interactions** — The playbook says change ligand before temperature, but there's no evidence for whether a bulky phosphine + weak base + unreactive nucleophile has a known rescue, or if certain combinations simply won't work.\n\n7. **Why Buchwald-amination is linked but unexplored** — `rxn-buchwald-amination` appears in neighbors but we have no data on it. Cross-coupling aminations have their own rules (Pd/NHC catalysis, different bases, different additives). **If you're planning a general ligand screen, you need to know if it's meant for Suzuki, amination, or both** — they don't always respond the same way to the same ligand.\n\n---\n\n## Before you commit to a screen, establish:\n\n1. **Which reactions are in scope?** (Suzuki alone, or Buchwald-type aminations too? Mixed halide electrophiles?)\n2. **What's your current bottleneck on your actual substrate?** (We know electron-rich bromides work; is yours harder?)\n3. **Assay vs. isolated yield** — lock down one readout. We have explicit evidence that optimising on LCAP misled you here once.\n4. **Catalyst loading floor** — test at 0.5 mol% Pd before screening. Loading has *huge* cost implications at scale, and the current evidence doesn't establish it's optimised.\n5. **Nucleophile stability** — does your boronic acid (or equivalent) protodeborate? If yes, ruling out high-temperature runs in water *before* running them saves weeks.\n\nThe gap is not that the knowledge graph is shallow; it's that you have a *single working condition*, not a *transferable protocol*. A ligand screen on that one point will optimise for something (probably ease of setup), not discover what's actually controlling the coupling. You need 2–3 orthogonal base cases first.",
+    "answered": true,
+    "tools_called": [
+      "find_knowledge_gaps",
+      "gather_evidence",
+      "gather_evidence",
+      "find_notes",
+      "expand_note",
+      "expand_note",
+      "expand_note",
+      "expand_note",
+      "expand_note",
+      "expand_note"
+    ],
+    "tool_results": [
+      {
+        "tool": "find_knowledge_gaps",
+        "preview": "total_notes=38 isolated_note_ids=['rxn-reductive-amination'] type_counts={'bo-candidate': 2, 'campaign': 3, 'compound': 9, 'experiment-proposal': 1, 'failure-mode': 2, 'interaction': 3, 'job-result': "
+      },
+      {
+        "tool": "find_notes",
+        "preview": "[NoteRef(id='playbook-pd-cross-coupling-scope', type='playbook', compound_smiles=None, tags=['playbook', 'cross-coupling'], created_by='human', source='seed-corpus', confidence=0.8, valid_from=None, v"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "[EvidenceChunk(content='<retrieved-note-0d8f72b4838855b1 id=\"playbook-pd-cross-coupling-scope\">\\n## When a palladium coupling stalls, change the ligand before the temperature\\n\\nDistilled from campaig"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "[EvidenceChunk(content='<retrieved-note-0d8f72b4838855b1 id=\"opt-suzuki-conditions\">\\nRepeated runs of the biaryl coupling under varied temperature, Pd loading and base.\\n\\n- transformation: rxn-suzuk"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='opt-suzuki-conditions', type='optimization-campaign', compound_smiles=None, tags=['optimization'], created_by='human', source='seed-corpus', confidence=0.85, valid_from=None, valid_to"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='playbook-degassing', type='playbook', compound_smiles=None, tags=['playbook', 'technique'], created_by='human', source='seed-corpus', confidence=0.85, valid_from=None, valid_to=None) "
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='playbook-pd-cross-coupling-scope', type='playbook', compound_smiles=None, tags=['playbook', 'cross-coupling'], created_by='human', source='seed-corpus', confidence=0.8, valid_from=Non"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='rxn-suzuki-biaryl', type='reaction', compound_smiles=None, tags=['cross-coupling', 'suzuki'], created_by='human', source='seed-corpus', confidence=0.85, valid_from=None, valid_to=None"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='campaign-biaryl-scope', type='campaign', compound_smiles=None, tags=['campaign', 'scope'], created_by='human', source='seed-corpus', confidence=0.8, valid_from=None, valid_to=None) bo"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='failure-aqueous-protodeboronation', type='failure-mode', compound_smiles=None, tags=['failure-mode', 'cross-coupling'], created_by='human', source='seed-corpus', confidence=0.8, valid"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "0.8",
+      "0.9",
+      "0",
+      "20",
+      "100",
+      "70",
+      "79",
+      "68",
+      "76",
+      "80",
+      "12",
+      "1",
+      "2",
+      "1.5",
+      "3",
+      "4",
+      "5",
+      "6",
+      "0.5"
+    ],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 34.1,
+    "event_counts": {
+      "token": 66,
+      "tool_call": 10,
+      "evidence_source": 2,
+      "tool_result": 10,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "061adeb5fe2b44199989848970902f67",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

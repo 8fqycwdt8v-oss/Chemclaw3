@@ -1,0 +1,138 @@
+{
+  "probe": {
+    "id": "rx-25",
+    "section": 6,
+    "persona": "manager",
+    "bucket": "A",
+    "question": "Across the chemistry we have on record, which steps ended up needing a column and which crystallised cleanly? I want to know how much chromatography we are carrying into development.",
+    "expects_tools": [
+      "find_notes",
+      "gather_evidence",
+      "expand_note",
+      "find_knowledge_gaps"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a count or percentage across a project portfolio",
+      "a claim to have surveyed all of the organisation's chemistry",
+      "a purification method for a step the record does not state one for"
+    ],
+    "direction": "Should answer from the record and be exact about how big the record is. The corpus is a few dozen hand-authored seed notes plus published HTE data and a small set of free-text ELN records — it is not a portfolio, and there is no project, programme or portfolio entity in this system at all. A good answer reports what the retrieved reaction notes actually say about isolation and purification, says how many notes that covers, and names the steps where the record is silent rather than inferring. The manager-facing judgement being tested is whether it lets 'what we have on record' be read as 'what we do', and it should say plainly that this cannot support a development-load estimate. Flagging the gap as something worth capturing going forward is a good ending.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rx-25",
+    "section": 6,
+    "persona": "manager",
+    "bucket": "A",
+    "question": "Across the chemistry we have on record, which steps ended up needing a column and which crystallised cleanly? I want to know how much chromatography we are carrying into development.",
+    "answer": "I'll search the record for chromatography and crystallization outcomes across all the reactions and processes we have on file.That retrieval is too narrow. Let me search more broadly for reaction outcomes and purification methods across the full reaction and campaign record.I've found some reaction notes in the graph. Let me expand a few of them to see their purification details.The reaction notes do not detail purification methods in their bodies. Let me look at the campaign notes and the playbooks that discuss purification.The notes I've expanded do not provide explicit purification method details (column vs crystallization). The **playbook-recrystallisation-purity** note actually makes a key point: it says \"Every reaction note in this corpus states the purification with the yield,\" but when I read the actual reaction bodies above, they don't contain that detail — they only give isolated yield, not the method used to achieve it.\n\nThis is a critical gap. **The record does not explicitly document whether each step was purified by crystallization, column chromatography, or another method.** The knowledge graph notes I can access state yields but not the purification *technique* that produced them.\n\nHere's what the record *does* tell me:\n\n1. **Aspirin acetylation** (rxn-aspirin-acetylation): 88% isolated yield \"after recrystallisation from ethanol/water\" — **crystallization** ✓\n   \n2. **EDC/HOBt amide coupling** (rxn-amide-edc): 81% isolated yield — **purification method not stated**\n\n3. **Suzuki-Miyaura coupling** (rxn-suzuki-biaryl): 76% isolated yield — **purification method not stated**; the optimization note mentions \"LCAP\" (liquid chromatography assay purity), suggesting analytical LCAP was used, but not whether purification was by column\n\n4. **Buchwald-Hartwig amination** (rxn-buchwald-amination): 71% isolated yield — **purification method not stated**\n\n## What's missing from the knowledge graph:\n\nThe record is **silent on purification methods** for most steps — there's no structured field or consistent prose statement of whether a product was:\n- Crystallized cleanly\n- Purified by column / flash chromatography\n- Obtained as an oil/gum needing column\n- Subjected to any other isolation technique\n\nThe one exception is the aspirin acetylation, which explicitly documents recrystallization.\n\n**To answer your question properly, I would need:**\n- Raw lab notebooks, ELN entries, or SOP records that detail the actual isolation method for each reaction step\n- A structured field in the reaction template capturing \"purification method\" alongside yield\n- Campaign or report notes that document scale-up behavior of purification (like the aspirin note hints at for crystallization above ~20 g)\n\nThis is not a data availability issue — it's a **documentation gap in what the knowledge graph captures**. The information likely exists in your ELN or lab notebooks but hasn't been extracted into structured form here. Would you like to share the raw ELN data, lab notes, or a summary table of which steps crystallized vs. required column chromatography? That would let me assess the actual chromatography burden for scale-up.",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "gather_evidence",
+      "gather_evidence",
+      "gather_evidence",
+      "find_knowledge_gaps",
+      "expand_note",
+      "expand_note",
+      "expand_note",
+      "expand_note",
+      "expand_note",
+      "expand_note",
+      "expand_note",
+      "expand_note"
+    ],
+    "tool_results": [
+      {
+        "tool": "gather_evidence",
+        "preview": "[EvidenceChunk(content='<retrieved-note-0d8f72b4838855b1 id=\"playbook-recrystallisation-purity\">\\n## Quote a yield with the purification that produced it\\n\\nDistilled from campaign-aspirin-teaching.\\n"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "[EvidenceChunk(content='<retrieved-note-0d8f72b4838855b1 id=\"playbook-recrystallisation-purity\">\\n## Quote a yield with the purification that produced it\\n\\nDistilled from campaign-aspirin-teaching.\\n"
+      },
+      {
+        "tool": "find_knowledge_gaps",
+        "preview": "total_notes=38 isolated_note_ids=['rxn-reductive-amination'] type_counts={'bo-candidate': 2, 'campaign': 3, 'compound': 9, 'experiment-proposal': 1, 'failure-mode': 2, 'interaction': 3, 'job-result': "
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "[EvidenceChunk(content='<retrieved-note-0d8f72b4838855b1 id=\"rxn-aspirin-acetylation\">\\nAcetylation of salicylic acid with acetic anhydride to give aspirin.\\n\\n- substrate: compound-salicylic-acid\\n- "
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": ""
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='rxn-suzuki-biaryl', type='reaction', compound_smiles=None, tags=['cross-coupling', 'suzuki'], created_by='human', source='seed-corpus', confidence=0.85, valid_from=None, valid_to=None"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='rxn-buchwald-amination', type='reaction', compound_smiles=None, tags=['cross-coupling', 'amination'], created_by='human', source='seed-corpus', confidence=0.8, valid_from=None, valid_"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='rxn-aspirin-acetylation', type='reaction', compound_smiles='CC(=O)Oc1ccccc1C(=O)O', tags=['esterification', 'worked-example'], created_by='human', source='seed-corpus', confidence=0.9"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='rxn-amide-edc', type='reaction', compound_smiles=None, tags=['amide-coupling'], created_by='human', source='seed-corpus', confidence=0.85, valid_from=None, valid_to=None) body='<retri"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='campaign-aspirin-teaching', type='campaign', compound_smiles=None, tags=['campaign', 'scale-up'], created_by='human', source='seed-corpus', confidence=0.85, valid_from=None, valid_to="
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='campaign-amide-additive', type='campaign', compound_smiles=None, tags=['campaign'], created_by='human', source='seed-corpus', confidence=0.85, valid_from=None, valid_to=None) body='<r"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='opt-suzuki-conditions', type='optimization-campaign', compound_smiles=None, tags=['optimization'], created_by='human', source='seed-corpus', confidence=0.85, valid_from=None, valid_to"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='playbook-recrystallisation-purity', type='playbook', compound_smiles=None, tags=['playbook', 'reporting'], created_by='human', source='seed-corpus', confidence=0.9, valid_from=None, v"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "1",
+      "88",
+      "2",
+      "81",
+      "3",
+      "76",
+      "4",
+      "71",
+      "20"
+    ],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 22.16,
+    "event_counts": {
+      "token": 43,
+      "tool_call": 13,
+      "evidence_source": 4,
+      "tool_result": 13,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "d2f8eb97c8be47c89008773064ec5940",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

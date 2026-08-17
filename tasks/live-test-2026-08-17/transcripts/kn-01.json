@@ -1,0 +1,86 @@
+{
+  "probe": {
+    "id": "kn-01",
+    "section": 1,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "We've got the 4-bromoanisole + PhB(OH)2 coupling on the plan for next week. Has anyone here run that before, and what conditions did they end up on?",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a note id that was not retrieved",
+      "a yield, catalyst loading or temperature not stated in the retrieved notes",
+      "a literature reference",
+      "a run or campaign that is not in the record"
+    ],
+    "direction": "Cites rxn-suzuki-biaryl by id (and plausibly opt-suzuki-conditions or report-biaryl-development) and gives the conditions actually on file: Pd(OAc)2 at 1.5 mol% Pd, K2CO3 2.0 equiv, THF/water 4:1, 80 °C, 12 h, degassed, 76% isolated. A good answer adds the recorded reason this substrate is awkward — an electron-rich aryl bromide makes oxidative addition the slow step, so it is unusually ligand- and temperature-sensitive. Every number must trace to a cited note.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "kn-01",
+    "section": 1,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "We've got the 4-bromoanisole + PhB(OH)2 coupling on the plan for next week. Has anyone here run that before, and what conditions did they end up on?",
+    "answer": "I'll search for past runs of that coupling in the knowledge graph.Great — there is a reaction note on exactly this coupling. Let me pull the full details:Perfect. Yes, **someone has run this exact coupling before** ([[rxn-suzuki-biaryl]]), and they settled on:\n\n**Conditions that worked:**\n- **Catalyst**: Pd(OAc)₂ at 1.5 mol% Pd\n- **Base**: K₂CO₃ (2.0 equiv)\n- **Solvent**: THF/water 4:1\n- **Temperature**: 80 °C\n- **Time**: 12 h\n- **Procedure**: degassed\n- **Result**: **76% isolated yield**\n\n**Why these conditions matter for your substrate**: The note flags that 4-bromoanisole is a deliberately unfavourable substrate for oxidative addition — the electron-donating methoxy group slows the coupling and makes it sensitive to ligand and temperature. That's why the protocol uses a full 12 hours at 80 °C rather than faster conditions you might see for activated aryl bromides.\n\nThere's also an **optimization campaign on related Suzuki conditions** ([[opt-suzuki-conditions]]) and a **playbook on Pd cross-coupling scope** ([[playbook-pd-cross-coupling-scope]]) that may have additional insight on how far you can push this. I can pull either if you want to see what variations they tried or what the scope looks like.\n\nWould you like me to look up the campaign or playbook for any tweaks before you run it?",
+    "answered": true,
+    "tools_called": [
+      "similar_reactions",
+      "gather_evidence",
+      "expand_note"
+    ],
+    "tool_results": [
+      {
+        "tool": "gather_evidence",
+        "preview": "[EvidenceChunk(content='<retrieved-note-0d8f72b4838855b1 id=\"rxn-suzuki-biaryl\">\\nSuzuki-Miyaura coupling of 4-bromoanisole with phenylboronic acid.\\n\\n- aryl halide: compound-4-bromoanisole\\n- boroni"
+      },
+      {
+        "tool": "similar_reactions",
+        "preview": "{\n  \"subject\": \"reaction\",\n  \"hits\": [\n    {\n      \"id\": \"reaction-uspto-suzuki-biphenyl-1\",\n      \"label\": \"COc1ccc(Br)cc1.OB(O)c1ccccc1.O=C([O-])[O-].[K+].[K+]>>COc1ccc(-c2ccccc2)cc1\",\n      \"simila"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='rxn-suzuki-biaryl', type='reaction', compound_smiles=None, tags=['cross-coupling', 'suzuki'], created_by='human', source='seed-corpus', confidence=0.85, valid_from=None, valid_to=None"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "1.5",
+      "2.0",
+      "4",
+      "1",
+      "80",
+      "12",
+      "76"
+    ],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 11.8,
+    "event_counts": {
+      "token": 21,
+      "tool_call": 3,
+      "evidence_source": 1,
+      "tool_result": 3,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "468a66cd65bc4410a47d7ee3b915753f",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

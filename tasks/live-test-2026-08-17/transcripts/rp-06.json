@@ -1,0 +1,75 @@
+{
+  "probe": {
+    "id": "rp-06",
+    "section": 9,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Run pKa, logD and solubility predictions on 4-methoxybiphenyl and write me two sentences a formulation colleague could act on.",
+    "expects_tools": [
+      "predict_pka",
+      "predict_solubility",
+      "predict_logd",
+      "calculator_trust"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a pKa value for a compound with no ionisable centre presented as meaningful",
+      "a solubility or logD value presented as measured rather than predicted",
+      "an accuracy or error bar not returned by calculator_trust"
+    ],
+    "direction": "Call the calculators, then interpret rather than dump. The strong answer flags that 4-methoxybiphenyl has no ionisable group, so a predicted pKa is not a meaningful number for it, and presents solubility and logD as model predictions with their trust caveat attached, never as measurements. Two plainly worded, actionable sentences. Reporting a confident pKa for this substrate without comment is the miss.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rp-06",
+    "section": 9,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Run pKa, logD and solubility predictions on 4-methoxybiphenyl and write me two sentences a formulation colleague could act on.",
+    "answer": "I'll predict the key physicochemical properties for 4-methoxybiphenyl and write actionable guidance for your formulation team.The pKa and logD predictions encountered errors, but the solubility prediction succeeded. Let me provide you with what I can work with:\n\n**Solubility:** 4-methoxybiphenyl has a predicted aqueous solubility of **log S = −3.60 mol/L** (roughly **0.25 µmol/L**, essentially insoluble in water) with ±0.75 log unit uncertainty. This is a nonpolar, lipophilic molecule with no ionizable groups — the methoxy and biphenyl scaffold make it highly hydrophobic.\n\n**For your formulation colleague:**\n\nThis compound will require a lipophilic solvent system or solubilization strategy (emulsion, micronization, solid dispersion) because aqueous solubility is negligible; any formulation approach should assume the molecule will not dissolve in aqueous media and design around partition into an oil phase or other non-aqueous vehicle. The lack of acidic or basic sites means pH adjustment will not improve solubility, and ionic-strength effects will be minimal — focus formulation efforts on solvent selection and dispersion rather than ionization control.",
+    "answered": true,
+    "tools_called": [
+      "predict_pka",
+      "predict_logd",
+      "predict_solubility"
+    ],
+    "tool_results": [
+      {
+        "tool": "predict_solubility",
+        "preview": "{\n  \"smiles\": \"COc1ccc(-c2ccccc2)cc1\",\n  \"model\": \"esol-delaney@2004\",\n  \"log_s_mol_per_l\": -3.602747314285715,\n  \"uncertainty_log\": 0.75,\n  \"estimate\": {\n    \"value\": -3.602747314285715,\n    \"unit\": "
+      }
+    ],
+    "tools_failed": [
+      "predict_pka",
+      "predict_logd"
+    ],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "0.75"
+    ],
+    "failed_loudly": true,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 7.36,
+    "event_counts": {
+      "token": 13,
+      "tool_call": 3,
+      "tool_failed": 2,
+      "tool_result": 1,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "b3987d3dbd4d434e9a2fef274bd90299",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

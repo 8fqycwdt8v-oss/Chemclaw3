@@ -1,0 +1,93 @@
+{
+  "probe": {
+    "id": "kn-06",
+    "section": 1,
+    "persona": "manager",
+    "bucket": "A",
+    "question": "For the 4-methoxybiphenyl step — what are we recommending right now, and is it written up anywhere I can circulate?",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a note id that was not retrieved",
+      "a document number, file path or report location",
+      "an approval or review status for the report"
+    ],
+    "direction": "Points at report-biaryl-development as the existing write-up, by id, and repeats its recommendation: 1.5 mol% Pd(OAc)2/SPhos, K2CO3, THF/water 4:1, 80 °C, rigorously degassed, 76% isolated — plus the instruction not to optimise on LCAP. It should name the note id as the circulable artifact rather than inventing a document number or a location on a shared drive.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "kn-06",
+    "section": 1,
+    "persona": "manager",
+    "bucket": "A",
+    "question": "For the 4-methoxybiphenyl step — what are we recommending right now, and is it written up anywhere I can circulate?",
+    "answer": "I'll search the knowledge graph for what we have on 4-methoxybiphenyl and any recommendations.Good — there's a development report. Let me expand that and the optimization note to show you what we have and what's written up.Yes, this is written up and ready to circulate. Here's what we're recommending:\n\n## **Current Recommendation** — note `report-biaryl-development`\n\n**Conditions for 4-methoxybiphenyl synthesis** (Suzuki coupling of 4-bromoanisole + phenylboronic acid):\n\n- **Catalyst**: 1.5 mol% Pd(OAc)₂ with SPhos ligand\n- **Base**: K₂CO₃\n- **Solvent**: THF/water 4:1\n- **Temperature**: 80 °C\n- **Critical detail**: Rigorously degassed — Pd(0) is oxidized by dissolved oxygen to inactive black precipitate\n\n**Result**: 76% isolated yield (consistent, repeatable)\n\n### Why this matters:\n\nThe optimization campaign (`opt-suzuki-conditions`) screened temperature, Pd loading, and base. A key finding is that **do not optimize on LCAP** — a higher temperature (100 °C) showed 79% by LCAP assay but only 68% isolated yield because of protodeboronation (see failure-mode note). This is a real-world trap: the assay says it's better, but the isolated material is worse.\n\n### Supporting documents already in the system:\n\n- **[[report-biaryl-development]]** — full development report with all evidence cited\n- **[[opt-suzuki-conditions]]** — the optimization campaign showing the finding above\n- **[[playbook-degassing]]** — distilled playbook: degas properly or accept bimodal yield distribution\n- **[[playbook-pd-cross-coupling-scope]]** — ligand > temperature when a coupling stalls\n\nThis report is human-authored and merged (confidence 0.8), so you can cite it directly in any documentation. Would you like me to pull the full reaction details or any of the playbook notes?",
+    "answered": true,
+    "tools_called": [
+      "find_notes",
+      "gather_evidence",
+      "expand_note",
+      "expand_note"
+    ],
+    "tool_results": [
+      {
+        "tool": "find_notes",
+        "preview": "[NoteRef(id='compound-4-methoxybiphenyl', type='compound', compound_smiles='COc1ccc(cc1)-c1ccccc1', tags=['product', 'biaryl'], created_by='human', source='seed-corpus', confidence=0.9, valid_from=Non"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "[EvidenceChunk(content='<retrieved-note-0d8f72b4838855b1 id=\"rxn-suzuki-biaryl\">\\nSuzuki-Miyaura coupling of 4-bromoanisole with phenylboronic acid.\\n\\n- aryl halide: compound-4-bromoanisole\\n- boroni"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='opt-suzuki-conditions', type='optimization-campaign', compound_smiles=None, tags=['optimization'], created_by='human', source='seed-corpus', confidence=0.85, valid_from=None, valid_to"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='report-biaryl-development', type='report', compound_smiles=None, tags=['report'], created_by='human', source='seed-corpus', confidence=0.8, valid_from=None, valid_to=None) body='<retr"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "4",
+      "1.5",
+      "1",
+      "80",
+      "0",
+      "76",
+      "100",
+      "79",
+      "68",
+      "0.8"
+    ],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 13.63,
+    "event_counts": {
+      "token": 27,
+      "tool_call": 4,
+      "tool_result": 4,
+      "evidence_source": 1,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "17d3fbf204b940ccab21a58673ccaba5",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

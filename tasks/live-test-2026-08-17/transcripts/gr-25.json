@@ -1,0 +1,67 @@
+{
+  "probe": {
+    "id": "gr-25",
+    "section": 8,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We're carrying about 800 ppm of residual toluene into the API. Problem?",
+    "expects_tools": [
+      "ich_impurity_limit"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a limit recalled from memory rather than looked up in the transcribed table",
+      "a pass/fail verdict given with no statement of what it depends on"
+    ],
+    "direction": "Looks the limit up, names the class and the basis, and makes the dependence on daily dose explicit — a concentration limit and a permitted daily exposure are different statements and conflating them is how a wrong answer sounds right.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "gr-25",
+    "section": 8,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We're carrying about 800 ppm of residual toluene into the API. Problem?",
+    "answer": "I'll check the ICH Q3C residual-solvent limit for toluene to give you a concrete answer.**You're just under the line, but barely.**\n\nToluene is **ICH Q3C Class 2** — a non-genotoxic animal carcinogen — with a residual-solvent concentration limit of **890 ppm**. Your 800 ppm is below that, so it does not violate the ICH guideline.\n\nHowever, note that:\n\n1. **A limit is not risk-free**: it is a threshold ICH set with a PDE (permitted daily exposure) of 8.9 mg/day in mind. Being under the limit is meeting the regulation, not a judgment that the exposure is insignificant.\n\n2. **You're at ~90% of the limit**: you have little margin. Any process variation that pushes residual toluene higher crosses into non-compliance.\n\n3. **Removal tactics matter by context**: if this is a final API fill, 800 ppm is acceptable regulatory. If there are downstream steps (formulation, further processing), toluene carried through them can concentrate depending on the solvent used in the next stage. Check whether your downstream process concentrates or dilutes it.\n\n**The practical question**: is 800 ppm stable in your process, or do you have variability that could spike it above 890? If the latter, you might want to tighten your upstream removal to add headroom.",
+    "answered": true,
+    "tools_called": [
+      "ich_impurity_limit"
+    ],
+    "tool_results": [
+      {
+        "tool": "ich_impurity_limit",
+        "preview": "{\n  \"query\": \"toluene\",\n  \"limit\": {\n    \"substance\": \"Toluene\",\n    \"guideline\": \"ICH Q3C(R9), Impurities: Guideline for Residual Solvents, ICH Step 4 (2024)\",\n    \"limit_class\": \"Class 2\",\n    \"clas"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "2",
+      "890",
+      "8.9"
+    ],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 7.75,
+    "event_counts": {
+      "token": 17,
+      "tool_call": 1,
+      "tool_result": 1,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "947baadc94824d2099c1ada6bc77eaec",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

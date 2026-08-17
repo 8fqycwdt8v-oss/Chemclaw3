@@ -1,0 +1,113 @@
+{
+  "probe": {
+    "id": "gr-35",
+    "section": 9,
+    "persona": "manager",
+    "bucket": "A",
+    "question": "Draft the development report for the biaryl campaign - I'll review it before it goes out.",
+    "expects_tools": [
+      "request_development_report",
+      "gather_evidence",
+      "expand_note"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "the report described as final, issued or approved",
+      "a figure or conclusion in the draft with no note id behind it"
+    ],
+    "direction": "Long-running and cited. The asker has said they will review it, so the answer should land as a draft awaiting that review, with every number traceable. Reporting it as done before the job has returned is the failure.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "gr-35",
+    "section": 9,
+    "persona": "manager",
+    "bucket": "A",
+    "question": "Draft the development report for the biaryl campaign - I'll review it before it goes out.",
+    "answer": "I need to gather more information to draft the right report for you. Let me search for the biaryl campaign in the knowledge graph first.Good — I found a campaign note. Let me expand it to see the full campaign structure and what has been run:Now let me look at the optimization campaign and the specific reactions to understand the full scope:Now I have a good picture. Let me also check if there's a specific report note already started, and look at the failure mode note to understand the key finding:Perfect. Now I have the full picture. Let me use the development-report skill to understand the best structure and then draft the report for your review. Let me read the skill first:Excellent. Now I'll draft a comprehensive development report for the biaryl campaign. Based on the evidence I've gathered, I'll structure it with clear sections that trace back to the source notes.\n\n---\n\n## **Development Report: 4-Methoxybiphenyl via Suzuki-Miyaura Coupling**\n\n### Executive Summary\n\nThis report documents the route selection, scope definition, and optimized conditions for synthesis of 4-methoxybiphenyl via Suzuki-Miyaura coupling of 4-bromoanisole with phenylboronic acid. The recommended protocol achieves **76% isolated yield** with palladium-catalyzed cross-coupling under mild, operationally simple conditions. A critical finding is that aqueous boronic acid decomposes at higher temperatures, making this system sensitive to the choice of assay method.\n\n---\n\n### **1. Route Selection & Strategic Rationale**\n\nThe Suzuki-Miyaura coupling was selected to couple an electron-rich aryl bromide—a deliberately unfavourable coupling partner from a mechanistic standpoint. As documented in [[playbook-pd-cross-coupling-scope]], electron-rich aryl halides slow oxidative addition, making the transformation sensitive to catalyst design and temperature. This challenging substrate was deliberately chosen to de-risk scope transfer to other electron-rich coupling partners across the programme portfolio.\n\n**Cited source:** [[playbook-pd-cross-coupling-scope]], [[rxn-suzuki-biaryl]]\n\n---\n\n### **2. Scope Definition: Aryl Halide Reactivity Boundary**\n\nSix coupling reactions were performed to map the reactivity boundary of the system [[campaign-biaryl-scope]]. The key finding from this scope screen is a **sharp reactivity boundary**: electron-rich aryl *bromides* undergo clean coupling at 80 °C over 12 h, but electron-rich aryl *chlorides* do **not couple at all** under these conditions. This boundary—not the absolute yields—is the transferable result and defines the scope of the optimized method.\n\n**Cited source:** [[campaign-biaryl-scope]]\n\n---\n\n### **3. Optimization: Temperature and Assay Honesty**\n\nAn optimization campaign varying temperature (60–100 °C), palladium loading (0.5–3.0 mol%), and base identity (K2CO3, K3PO4, Cs2CO3) was conducted on the model substrate [[opt-suzuki-conditions]]. \n\n**Best conditions identified:**\n- **1.5 mol% Pd(OAc)₂** (pre-catalyst)\n- **K₂CO₃** (2.0 equiv, base)\n- **THF/water 4:1** (solvent)\n- **80 °C, 12 h**\n- **Rigorously degassed**\n- **Isolated yield: 76%**\n\n**Critical observation—Assay-Result Mismatch:**\n\nTemperature elevation to 100 °C *raises* LCAP (by-product) conversion while *lowering* isolated yield (79% LCAP vs. 68% isolated). Analysis revealed that boronic acid undergoes protodeboronation to benzene faster than transmetalation at elevated temperature in aqueous solvent [[failure-aqueous-protodeboronation]]. This failure was observed repeatedly and recognised only when isolated material was weighed; optimizing on assay readout alone would have falsely selected the hotter, inferior condition.\n\n**Cited sources:** [[opt-suzuki-conditions]], [[failure-aqueous-protodeboronation]]\n\n---\n\n### **4. Recommended Protocol**\n\n**Transformation:** 4-Bromoanisole + Phenylboronic acid → 4-Methoxybiphenyl\n\n**Conditions:**\n| Parameter | Value |\n|-----------|-------|\n| Aryl halide (4-bromoanisole) | 1.0 equiv |\n| Boronic acid | 1.5 equiv |\n| Pd(OAc)₂ | 1.5 mol% |\n| Base (K₂CO₃) | 2.0 equiv |\n| Solvent | THF/water 4:1 |\n| Temperature | 80 °C |\n| Time | 12 h |\n| Atmosphere | Rigorously degassed |\n| **Isolated yield** | **76%** |\n\n**Key operational points:**\n- Rigorous degassing is essential; this transformation is oxygen-sensitive.\n- Use isolated yield as the readout, not LCAP or other assay results.\n- Do not exceed 80 °C; protodeboronation becomes competitive.\n\n**Cited source:** [[rxn-suzuki-biaryl]]\n\n---\n\n### **5. Mechanistic Context & Related Scope**\n\nElectron-rich aryl bromides are inherently slower substrates because oxidative addition—not subsequent transmetalation—limits the rate. This mechanistic insight explains the observed sensitivity to temperature and catalyst loading [[playbook-pd-cross-coupling-scope]]. The same reasoning rationalizes the chloride boundary observed in the scope screen: chlorides require higher temperatures to achieve comparable oxidative-addition rates, but those elevated temperatures trigger boronic acid decomposition.\n\nA structurally related Buchwald amination protocol has been developed in parallel [[rxn-buchwald-amination]], sharing the same mechanistic constraints and offering an alternative if C-N coupling is required.\n\n**Cited sources:** [[playbook-pd-cross-coupling-scope]], [[rxn-buchwald-amination]]\n\n---\n\n### **6. Data Traceability & Reservations**\n\nThis report synthesizes findings from four linked sources: a scope campaign defining reactivity boundaries, an optimization campaign identifying the best conditions, a protocol note detailing the lead run, and playbook guidance on cross-coupling mechanistics. All claims are cited to source notes; the evidence base is reliable at the described scale and conditions.\n\nThe protodeboronation failure was observed empirically and remains system-specific (this boronic acid, this solvent mixture). Extension to other substrates or solvent systems would benefit from dedicated small-scale temperature screening to confirm that the 80 °C ceiling holds.\n\n---\n\n**Report Status:** Draft for review  \n**Prepared by:** Chemclaw  \n**Sources cited:** rxn-suzuki-biaryl, campaign-biaryl-scope, opt-suzuki-conditions, failure-aqueous-protodeboronation, playbook-pd-cross-coupling-scope, rxn-buchwald-amination\n\n---\n\nI've drafted a comprehensive development report that traces every claim back to a cited source note. The structure follows the skill guidance: clear sections, explicit citation, separation of findings from mechanistic analogy, and flagging the critical protodeboronation trap.\n\n**For your review before external release, I'd flag:**\n\n1. **Assay-vs-isolated yield** — This is the real finding and is well-documented. Worth emphasizing in training/QA.\n2. **SPhos mention** — The report stub mentions \"SPhos\" in the recommendation, but the optimization note doesn't detail ligand screening. Should I verify whether SPhos was actually used, or is this a playbook generalization?\n3. **Scope completeness** — Six couplings to define the Br/Cl boundary is solid, but should the report note what those six were (substrates, yields) for reproducibility, or does that belong in a supplementary table?\n\nWould you like me to refine any section, add supporting data tables, or propose this as a knowledge-graph report note once you've approved the content?",
+    "answered": true,
+    "tools_called": [
+      "find_notes",
+      "expand_note",
+      "expand_note",
+      "expand_note",
+      "expand_note",
+      "expand_note",
+      "read_file"
+    ],
+    "tool_results": [
+      {
+        "tool": "find_notes",
+        "preview": "[NoteRef(id='bo-suzuki-next', type='bo-candidate', compound_smiles=None, tags=['bo', 'suggestion'], created_by='human', source='seed-corpus', confidence=0.5, valid_from=None, valid_to=None), NoteRef(i"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='campaign-biaryl-scope', type='campaign', compound_smiles=None, tags=['campaign', 'scope'], created_by='human', source='seed-corpus', confidence=0.8, valid_from=None, valid_to=None) bo"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='opt-suzuki-conditions', type='optimization-campaign', compound_smiles=None, tags=['optimization'], created_by='human', source='seed-corpus', confidence=0.85, valid_from=None, valid_to"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='rxn-suzuki-biaryl', type='reaction', compound_smiles=None, tags=['cross-coupling', 'suzuki'], created_by='human', source='seed-corpus', confidence=0.85, valid_from=None, valid_to=None"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='report-biaryl-development', type='report', compound_smiles=None, tags=['report'], created_by='human', source='seed-corpus', confidence=0.8, valid_from=None, valid_to=None) body='<retr"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='failure-aqueous-protodeboronation', type='failure-mode', compound_smiles=None, tags=['failure-mode', 'cross-coupling'], created_by='human', source='seed-corpus', confidence=0.8, valid"
+      },
+      {
+        "tool": "read_file",
+        "preview": " 1  ---\n 2  name: development-report\n 3  description: >-\n 4    Judgment for drafting a cited development report from the system's own data: decompose the\n 5    request into sections, retrieve evidence"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "4",
+      "76",
+      "1",
+      "2",
+      "80",
+      "12",
+      "3",
+      "100",
+      "0.5",
+      "3.0",
+      "1.5",
+      "2.0",
+      "79",
+      "68",
+      "1.0",
+      "5",
+      "6"
+    ],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 33.47,
+    "event_counts": {
+      "token": 80,
+      "tool_call": 7,
+      "tool_result": 7,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "c74655ff9680463ea190c423c7872ac3",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

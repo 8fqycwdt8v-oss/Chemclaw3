@@ -1222,6 +1222,40 @@ def report(
     return "\n".join(lines) + "\n"
 
 
+async def _require_mock_lane() -> None:
+    """Fail before any work if the lane is not pointed at the mock model.
+
+    Every family here assumes the mock: the shapes family asks for malformed tool calls by name,
+    and family D restarts `mock-llm` mid-flight. Against a real-model lane the first of those to
+    touch the process died on `no .live/run/mock-llm.pid — is the lane up?`, which is both alarming
+    and wrong — the lane *is* up, it is simply serving a real model, and by then the storm had
+    already driven a few hundred turns through it.
+
+    `processes.sh` starts `mock-llm` only when `CHEMCLAW_LLM_BASE_URL` names it, so its stats
+    endpoint answering is the honest precondition: it is the same fact, asked of the thing itself
+    rather than of a pid file.
+
+    Raises:
+        RuntimeError: The mock is not serving, with the setting that would fix it.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.get(MOCK_STATS)
+        reachable = response.status_code == 200
+    except httpx.HTTPError:
+        reachable = False
+
+    if not reachable:
+        raise RuntimeError(
+            f"the mock model is not answering at {MOCK_STATS}, so this storm would drive a real "
+            "model at load — cost, rate limits, and none of the malformed shapes it exists to "
+            "test. Bring the lane up pointed at the mock: "
+            "CHEMCLAW_LLM_BASE_URL=http://127.0.0.1:8820/v1 make live-up. "
+            "Note that `make live-e2e-full-stack` deliberately runs a real model and is a "
+            "different lane from this one."
+        )
+
+
 async def run_storm(
     *, sweep_turns: int, offered: int, collide: int, repeats: int, planned: Sequence[str]
 ) -> tuple[list[Finding], list[dict[str, Any]]]:
@@ -1231,6 +1265,8 @@ async def run_storm(
     caps and E kills processes, so anything they disturb must already have been measured. B is
     genuinely last because it reads the audit trail every family before it wrote to.
     """
+    await _require_mock_lane()
+
     findings: list[Finding] = []
     sweep: list[dict[str, Any]] = []
     selected = set(planned)

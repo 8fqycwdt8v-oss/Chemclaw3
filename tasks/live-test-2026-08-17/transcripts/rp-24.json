@@ -1,0 +1,87 @@
+{
+  "probe": {
+    "id": "rp-24",
+    "section": 14,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "We're moving the Buchwald amination to a new site and they only have toluene, not dioxane. Has anything similar come up before?",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "similar_reactions",
+      "similar_molecules"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a site, facility or previous technology transfer that the record does not contain",
+      "a solvent-swap outcome stated as observed when no note or reaction record backs it",
+      "a predicted yield or conversion for the toluene run presented as data"
+    ],
+    "direction": "Fingerprint search over the ~10,000 indexed HTE reactions plus the graph is the right move, and the Doyle Buchwald-Hartwig data varies both solvent and base, so it can genuinely speak to a dioxane-to-toluene swap. A strong answer retrieves, cites, and keeps what the record shows (evidence) separate from what is transferred by analogy — labelling which is which, as the report skill requires. There have been no prior site transfers in the record and the answer must not imply otherwise; \"nothing about site moves, but here is directly relevant solvent data\" is the honest shape.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rp-24",
+    "section": 14,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "We're moving the Buchwald amination to a new site and they only have toluene, not dioxane. Has anything similar come up before?",
+    "answer": "I'll search for precedent on Buchwald amination in toluene and related solvents.Good news: **there is direct precedent for Buchwald amination in toluene**, and it works. Let me pull the full details:**Your record already has Buchwald amination in toluene** [[rxn-buchwald-amination]]:\n- **Substrate**: 4-bromoanisole + morpholine  \n- **Catalyst**: Pd(OAc)₂ + RuPhos (2:1 L:Pd)  \n- **Conditions**: NaOtBu (1.4 equiv), **toluene, 100 °C, 8 h**  \n- **Yield**: 71%\n\nThis is a direct demonstration that toluene is viable for Buchwald amination. The reaction uses standard Buchwald conditions and achieves a solid yield, so you have a starting point that is closer to your current protocol than a literature value would be.\n\n**The key question for your specific case**: How does your substrate's electronic properties and solubility profile compare to 4-bromoanisole? If your amine/aryl halide pair is similarly electron-rich or dissolves similarly in toluene, you can likely transplant these conditions directly. If your substrate is electron-poor or less soluble, you may need to screen temperature or catalyst loading.\n\nDo you want me to:\n1. **Search for similar substrates** in toluene to see if there's even closer precedent to your specific aryl halide/amine pair?\n2. **Check solvent properties** to understand how toluene compares to dioxane for this reaction type (polarity, solubility)?\n3. **Propose a quick screening design** (catalyst, temperature, base loading) in toluene to optimize for your substrate?\n\nWhich would be most useful?",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "gather_evidence",
+      "expand_note"
+    ],
+    "tool_results": [
+      {
+        "tool": "gather_evidence",
+        "preview": "[EvidenceChunk(content='<retrieved-note-0d8f72b4838855b1 id=\"rxn-buchwald-amination\">\\nBuchwald-Hartwig amination of 4-bromoanisole with morpholine.\\n\\n- aryl halide: compound-4-bromoanisole\\n- pre-ca"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "[EvidenceChunk(content='<retrieved-note-0d8f72b4838855b1 id=\"rxn-buchwald-amination\">\\nBuchwald-Hartwig amination of 4-bromoanisole with morpholine.\\n\\n- aryl halide: compound-4-bromoanisole\\n- pre-ca"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='rxn-buchwald-amination', type='reaction', compound_smiles=None, tags=['cross-coupling', 'amination'], created_by='human', source='seed-corpus', confidence=0.8, valid_from=None, valid_"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "4",
+      "2",
+      "1",
+      "1.4",
+      "100",
+      "8",
+      "71",
+      "3"
+    ],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 9.86,
+    "event_counts": {
+      "token": 24,
+      "tool_call": 3,
+      "evidence_source": 2,
+      "tool_result": 3,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "fd219c594d17483695447c34b68f1fb8",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

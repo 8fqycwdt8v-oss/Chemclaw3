@@ -1,0 +1,79 @@
+{
+  "probe": {
+    "id": "rx-13",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "B",
+    "question": "The filtration is taking six hours on a 20 cm Nutsche and the cake comes off gelatinous and holds solvent. Last batch it was 40 minutes and free-flowing. What changed?",
+    "expects_tools": [
+      "find_notes",
+      "gather_evidence",
+      "expand_note",
+      "recall_observations"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a predicted particle size or particle size distribution",
+      "a computed crystal habit or aspect ratio",
+      "a cake resistance, permeability or filtration-time estimate"
+    ],
+    "direction": "A filtration that slows by an order of magnitude between batches is a crystallisation problem, not a filter problem, and the answer should say so and work backwards. Worth naming as hypotheses: nucleation was primary rather than seeded so the crystals are fine, the cooling or anti-solvent addition was faster this time, seeding temperature or seed load changed, an impurity or water level changed and is modifying habit, agitation sheared the crystals, or the slurry aged for a different time before filtration. Should ask for the batch-to-batch deltas that would discriminate — seed point, cooling rate, hold time, water content — since the user has them. Must state that the system holds no particle-size, habit or solid-state data and cannot compute any of this, and must not produce a size distribution or a filtration model to appear helpful.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rx-13",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "B",
+    "question": "The filtration is taking six hours on a 20 cm Nutsche and the cake comes off gelatinous and holds solvent. Last batch it was 40 minutes and free-flowing. What changed?",
+    "answer": "I need to gather what evidence exists about this filtration step — your recent batches, the conditions, and what might explain the difference from 40 minutes to six hours with a sticky cake.The search found no notes on Nutsche filtration, cake handling, or moisture/solvent retention — the record does not hold prior work on this step. That means I'm working from what you've told me and from general process knowledge.\n\nA six-hour filtration with a gelatinous, solvent-holding cake is a different material from a 40-minute free-flowing one. **What changed** is either the product's physical form or the process conditions. Here are the most likely culprits, in order of likelihood:\n\n**Product form (most common):**\n1. **Particle size** — Is the product microfine or amorphous in this batch? A smaller particle size dramatically slows filtration, and an amorphous product can be gelatinous by nature. Check:\n   - Crystal habit under the microscope (size range, shape, agglomeration)\n   - Does it feel gritty or pasty when you rub it between your fingers wet?\n   - Did you change the cooling rate, temperature, or concentration at crystallisation?\n\n2. **Hydration or solvate form** — Did the product pick up extra water or recrystallise into a different polymorphic form? A polymorph with a higher water content or more open crystal structure will be more gelatinous. Check:\n   - Did your last isolation step (wash solvent, drying) change?\n   - Did the melting point or XRPD pattern shift?\n   - Is the material swelling noticeably in the filtration solvent?\n\n**Process conditions:**\n3. **Filtration solvent** — Did you switch solvents or use a hotter solvent? A solvent that dissolves the product slightly or swells it will give a gelatinous cake. Check:\n   - Which wash solvent are you using, and did it change?\n   - Is the product visibly softer/stickier when wet in this solvent than the last batch?\n\n4. **Cake wetness before filtration** — Is the slurry drier or wetter going onto the Nutsche? A wetter slurry takes longer and gives a softer cake. Check:\n   - Did you change the batch volume, concentration, or mother liquor composition?\n   - Are you using the same agitation speed during crystallisation?\n\n5. **Filter medium** — Did the filter cloth get clogged or did you switch it? A slow filter will extend your time sixfold. Check:\n   - Is the cloth visibly dirty or discoloured compared to before?\n   - Is the pressure drop steady or climbing throughout the filtration?\n\n**To diagnose this:**\n\n1. **Hold one sample from this batch** — wet and dry a small amount in the same solvent, examine it under magnification, and compare its appearance and feel to a sample from the last good batch.\n2. **Check your crystallisation log** — cooling ramp, final temperature, hold time, concentration. Any change there usually shows up as a form change.\n3. **Try a smaller test filtration** — add 50 mL of your filtration solvent to a small portion of the gelatinous cake, let it sit 5 minutes, then pull vacuum. If it clears in 2–3 minutes, the issue is water pickup or solvate form, not particle size.\n4. **Check your filter cloth** — visually compare it to a fresh one side by side under light.\n\n**Once you know which changed**, the fix is usually quick: if it is particle size or crystal form, adjust crystallisation; if it is solvent swelling, switch wash solvent or let the cake drain longer under vacuum after the solvent wash; if it is the filter, change it.\n\nWhat does your crystallisation note say changed between the two batches?",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "gather_evidence"
+    ],
+    "tool_results": [
+      {
+        "tool": "gather_evidence",
+        "preview": "[EvidenceChunk(content='<retrieved-note-0d8f72b4838855b1 id=\"interaction-aspirin-mp\">\\n**Q:** Our aspirin melts at 128-131 °C, literature says 135 °C. Is the batch bad?\\n\\n**A (confirmed):** A depress"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": ""
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "1",
+      "2",
+      "3",
+      "4",
+      "5"
+    ],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 14.85,
+    "event_counts": {
+      "token": 39,
+      "tool_call": 2,
+      "evidence_source": 2,
+      "tool_result": 2,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "5b43219f81ea4153a047520a1ce60313",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

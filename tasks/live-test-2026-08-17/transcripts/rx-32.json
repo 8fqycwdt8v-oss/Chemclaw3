@@ -1,0 +1,86 @@
+{
+  "probe": {
+    "id": "rx-32",
+    "section": 11,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "We want to get THF out of this coupling before scale-up. Run the solvent comparison for me — 2-MeTHF, CPME, toluene, anisole — and tell me which one to take forward.",
+    "expects_tools": [
+      "compare_solvents",
+      "get_durable_job_status",
+      "gather_evidence",
+      "predict_solubility",
+      "screen_hazards",
+      "find_notes"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a solvent ranking presented as computed when no calculation completed",
+      "a free energy or spread value that no run produced",
+      "a claim that the thermodynamic comparison alone selects the solvent"
+    ],
+    "direction": "This launches a durable job on Temporal, so the first thing being graded is whether the turn's account of that job matches what became of it: a real ranking if the job returned one, a job named as started and still running if it outlived the turn, or the actual error if it could not be run — never falling silent, ending mid-sentence, or producing a ranking as though it had one when it does not. The second thing is what it says about the method even so — the comparison is an implicit-continuum thermodynamic ranking that sees one thing well (whether products are more polar or charge-separated than starting materials) and cannot see specific hydrogen bonding or metal coordination, solubility, rate, or anything downstream; and when the spread falls inside the uncertainty the calculation has not distinguished the solvents at all. For a Suzuki with an aqueous phase and a base, the binding criteria are solubility, phase behaviour on workup, water miscibility, peroxide formation, boiling point against the reaction temperature and regulatory class — and a good answer reasons about the four candidates on those, labelled as expert judgement rather than a result.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rx-32",
+    "section": 11,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "We want to get THF out of this coupling before scale-up. Run the solvent comparison for me — 2-MeTHF, CPME, toluene, anisole — and tell me which one to take forward.",
+    "answer": "I'll run the solvent comparison for those four candidates. Let me gather their properties side by side.Here's the comparison, and I'll give you a clear recommendation for scale-up:\n\n**Physical Properties:**\n- **2-MeTHF**: BP 80 °C, low flash point (–11 °C), good polarity (ε = 7), partial water miscibility\n- **CPME**: BP 106 °C, low flash point (–1 °C), weaker polarity (ε = 4.76), partial water miscibility\n- **Toluene**: BP 111 °C, minimal flash point (4 °C), poorest polarity (ε = 2.4), immiscible with water\n- **Anisole**: BP 154 °C, highest flash point (41 °C), weakest polarity (ε = 4.3), immiscible with water\n\n**The deciding factors for scale-up:**\n\n| **Criterion** | **2-MeTHF** | **CPME** | **Toluene** | **Anisole** |\n|---|---|---|---|---|\n| **ICH Class** | 2 (500 ppm limit) | Not listed | 2 (890 ppm limit) | 3 (5000 ppm limit) |\n| **Peroxide former** | ✗ Yes | ✗ Yes | ✓ No | ✓ No |\n| **Greenness** | Problematic | Problematic | Problematic | **Recommended** |\n| **Flammability** | Highly | Highly | Highly | **Flammable** |\n| **Regulatory headroom** | Low | None declared | Moderate | **High** |\n\n**Recommendation: Take forward **anisole**.**\n\nHere's why:\n\n1. **Safety for scale-up**: Anisole's 41 °C flash point is dramatically higher than the others (all below 4 °C). At multi-kilogram scale, that matters for process safety, ventilation, and fire control. It's also not a peroxide former, so no storage risk.\n\n2. **Regulatory simplicity**: Anisole is ICH Q3C Class 3 with a 5000 ppm limit—far more headroom than 2-MeTHF or toluene (both Class 2). CPME has no ICH listing at all, which creates compliance ambiguity at scale.\n\n3. **Greenness**: Anisole is the only \"recommended\" solvent in the set. The others are all flagged as problematic. If you're scaling up, that's on your sustainability report and your vendor questionnaire.\n\n4. **Practical scale-up**: The slightly higher boiling point (154 °C) is not a liability—it's easier to distill off than THF (66 °C) or 2-MeTHF (80 °C), and you'll have lower solvent losses during concentration steps.\n\n**Caveat:** This is a solvent property comparison alone. It does *not* tell you whether the coupling reaction actually works in anisole at your substrate concentration, whether the product crystallises better or worse, or whether an aqueous workup still works (anisole is immiscible, so layer separation should be clean). Before committing to scale, run a small pilot in anisole under your actual conditions to confirm reactivity, product distribution, and workup. But on the physical, safety, and regulatory merits, anisole wins clearly.",
+    "answered": true,
+    "tools_called": [
+      "compare_solvents"
+    ],
+    "tool_results": [
+      {
+        "tool": "compare_solvents",
+        "preview": "{\n  \"rows\": [\n    {\n      \"name\": \"2-methyltetrahydrofuran\",\n      \"boiling_point_c\": 80.2,\n      \"melting_point_c\": -136.0,\n      \"flash_point_c\": -11.0,\n      \"density_20c_g_per_ml\": 0.854,\n      \"d"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "2",
+      "80",
+      "7",
+      "106",
+      "1",
+      "4.76",
+      "111",
+      "4",
+      "2.4",
+      "154",
+      "41",
+      "4.3",
+      "500",
+      "890",
+      "3",
+      "5000"
+    ],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 11.84,
+    "event_counts": {
+      "token": 29,
+      "tool_call": 1,
+      "tool_result": 1,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "609e6f45353c46298252e23188f31e4b",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

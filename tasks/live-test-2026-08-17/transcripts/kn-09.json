@@ -1,0 +1,70 @@
+{
+  "probe": {
+    "id": "kn-09",
+    "section": 1,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Here's my reaction — COc1ccc(Br)cc1.OB(O)c1ccccc1>>COc1ccc(cc1)-c1ccccc1 — is there anything close to it in the HTE data we have indexed?",
+    "expects_tools": [
+      "similar_reactions",
+      "gather_evidence"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a reaction id the search did not return",
+      "a similarity score the tool did not return",
+      "a literature citation",
+      "conditions attributed to a hit that the hit does not carry"
+    ],
+    "direction": "Runs the reaction-fingerprint search and reports what came back, with the returned similarity values and which dataset family the hits belong to (Doyle Buchwald–Hartwig amination, Perera Suzuki–Miyaura flow, Santanilla amidation/sulfonamidation, Nielsen deoxyfluorination). If the nearest neighbours are a different transformation, it must say so plainly instead of dressing them up as precedent for this coupling.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "kn-09",
+    "section": 1,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Here's my reaction — COc1ccc(Br)cc1.OB(O)c1ccccc1>>COc1ccc(cc1)-c1ccccc1 — is there anything close to it in the HTE data we have indexed?",
+    "answer": "I'll search for reactions similar to your Suzuki-type coupling in the indexed data.Yes, there are **two very close precedents** in the indexed data:\n\n**Hit 1 & 2** (identical reactions, both ~82% similar):\n- **Reaction ID**: `reaction-uspto-suzuki-biphenyl-1` and `reaction-uspto-suzuki-biphenyl-2`\n- **Transformation**: 4-bromoanisole + phenylboronic acid → 4-methoxybiphenyl  \n- **Difference from yours**: These include explicit base (K₂CO₃) in the indexed reaction SMILES, whereas your SMILES shows only the aryl halide and boronic acid  \n\nThe high Tanimoto similarity (0.816) means these are structurally essentially identical — same aryl coupling partners, just with the base included in the indexed version.\n\n**What this tells you:**\n- The substrate pair (4-bromoanisole + phenylboronic acid) has precedent in the system, likely from USPTO/literature reactions\n- Any HTE screening or optimization data on this exact transformation would be linked from those reaction notes\n\nWould you like me to expand one of these notes to see the full experimental conditions, yields, or any optimization data we have on this coupling?",
+    "answered": true,
+    "tools_called": [
+      "similar_reactions"
+    ],
+    "tool_results": [
+      {
+        "tool": "similar_reactions",
+        "preview": "{\n  \"subject\": \"reaction\",\n  \"hits\": [\n    {\n      \"id\": \"reaction-uspto-suzuki-biphenyl-1\",\n      \"label\": \"COc1ccc(Br)cc1.OB(O)c1ccccc1.O=C([O-])[O-].[K+].[K+]>>COc1ccc(-c2ccccc2)cc1\",\n      \"simila"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "1",
+      "2",
+      "0.816"
+    ],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 7.22,
+    "event_counts": {
+      "token": 19,
+      "tool_call": 1,
+      "tool_result": 1,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "9efcd83a1efc45a3985659803bbbe2a8",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

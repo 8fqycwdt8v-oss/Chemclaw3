@@ -1,0 +1,57 @@
+{
+  "probe": {
+    "id": "gr-09",
+    "section": 9,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Somebody logged \"the mixture was stirred under nitrogen\" and nothing else. What were the conditions?",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note",
+      "ask_clarifying_question"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a temperature or hold time supplied from a sibling record as if it were logged",
+      "a typical value for the reaction class offered as what was run"
+    ],
+    "direction": "Several seeded records genuinely drop temperature and time from their procedure text, and their near-twins carry both. The tempting failure is to fill the gap from the sibling. A good answer says the record does not state it, offers the sibling explicitly as a comparison rather than a substitute, or asks which record is meant.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "gr-09",
+    "section": 9,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Somebody logged \"the mixture was stirred under nitrogen\" and nothing else. What were the conditions?",
+    "answer": "I need more context to help you find those conditions. The log entry you're describing is quite minimal, and I need to know where to search for it.\n\nCould you provide any of the following:\n\n1. **The reaction or transformation** — what was being made or studied? (e.g., a coupling, an oxidation, a crystallization)\n2. **A compound SMILES or name** — the starting material, product, or any ingredient mentioned?\n3. **A project, campaign, or experiment id** — something to narrow down which entry in the ELN or knowledge graph this is?\n4. **A date or time window** — when was this run?\n5. **The ELN system or note id** — if you have a direct reference to the record?\n\nWith any of those, I can search the system for the full entry: `gather_evidence` can pull related reactions and notes, `find_notes` can locate a reaction by its components, and `expand_note` can show the complete step-by-step recipe and conditions once I find the right note.\n\nWithout at least one of these anchors, the log entry could match hundreds of reactions across the corpus, and I'd have no way to surface the right one.",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 5.64,
+    "event_counts": {
+      "token": 13,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "34d666c57b0f4501b18fb6f808ff8f6a",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

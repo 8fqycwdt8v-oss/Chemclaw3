@@ -1,0 +1,54 @@
+{
+  "probe": {
+    "id": "gr-15",
+    "section": 2,
+    "persona": "lab_technician",
+    "bucket": "B",
+    "question": "Optimize it.",
+    "expects_tools": [
+      "ask_clarifying_question"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "any specific reaction, campaign or objective assumed without asking",
+      "a proposal produced for a target the asker never named"
+    ],
+    "direction": "There is no referent and several live campaigns. One clarifying question — which step, which objective — is the whole correct answer. Guessing a campaign and optimizing it is the failure, and the more fluent the guess the worse it is.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "gr-15",
+    "section": 2,
+    "persona": "lab_technician",
+    "bucket": "B",
+    "question": "Optimize it.",
+    "answer": "I'd be happy to help optimize something, but I need more context. \"Optimize it\" could mean several different things depending on what you're working on:\n\n1. **A reaction or process** — Do you have experimental results (yields, conversions, selectivities) from runs that vary conditions like temperature, solvent, catalyst, or reagent equivalents? If so, I can set up a Bayesian optimization to suggest the next conditions to try.\n\n2. **A synthetic route** — Are you comparing different pathways to the same product? I can help analyze them on yield, waste (E-factor/PMI), or other metrics.\n\n3. **Solvent choice** — Do you have a transformation and need to choose between candidates on polarity, safety, or environmental impact?\n\n4. **A molecule's structure** — Do you want to relax a geometry, sample conformers, or predict properties?\n\n5. **A computational calculation** — Have you already run something and want to refine the method or basis set?\n\nCould you tell me:\n- **What** you're optimizing (a reaction, a molecule, a route)?\n- **What metric** matters most (yield, purity, cost, safety, speed)?\n- **What data you have** (past experimental runs, conditions tried, outcomes measured)?\n\nOnce I understand the problem, I can gather the relevant evidence from the system and propose concrete next steps.",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 5.42,
+    "event_counts": {
+      "token": 14,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "c048d1e0c2fb4adb8ce42dd4dbb9bd72",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

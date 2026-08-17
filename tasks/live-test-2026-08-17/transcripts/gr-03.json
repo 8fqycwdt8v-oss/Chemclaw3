@@ -1,0 +1,72 @@
+{
+  "probe": {
+    "id": "gr-03",
+    "section": 1,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Have we ever coupled anything that looks like Brc1ccc2ncccc2c1 before?",
+    "expects_tools": [
+      "similar_reactions",
+      "substructure_matches",
+      "similar_molecules",
+      "gather_evidence",
+      "find_notes"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "'no prior work found' or equivalent, when over a thousand records on this exact halide are seeded",
+      "a count of matching records stated without any identifier a reader could check"
+    ],
+    "direction": "6-bromoquinoline is one of seven halides in the seeded flow-HTE Suzuki screen, with over a thousand records behind it and three sibling halides (chloride, iodide, triflate) on the same grid. A good answer finds them, says roughly how many and what varied, and points at something identifiable. A \"no\" here is a retrieval defect, not an honest absence.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "gr-03",
+    "section": 1,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Have we ever coupled anything that looks like Brc1ccc2ncccc2c1 before?",
+    "answer": "I'll search for similar reactions using that structure.The fingerprint indices (both for reactions and molecules) haven't been built yet, so I cannot search for structurally similar couplings or molecules that contain that isoquinoline ring system. This means **the question was not answered** — it's not that we haven't coupled this compound; I simply cannot search for it right now.\n\nThat structure is **6-bromo-isoquinoline** (Br on the isoquinoline ring at the position adjacent to the fused pyridine). \n\nTo answer whether you've coupled this before, I'd need either:\n1. The fingerprint indices to be populated, or\n2. A direct note id or search in the knowledge graph for reactions of isoquinoline derivatives\n\nDo you have a specific project or campaign name where you might have run isoquinoline couplings? If so, I can search the knowledge graph by tag or look for past jobs. Alternatively, if you can point me to an ELN entry or reaction note, I can pull that directly.",
+    "answered": true,
+    "tools_called": [
+      "similar_reactions",
+      "similar_molecules"
+    ],
+    "tool_results": [
+      {
+        "tool": "similar_molecules",
+        "preview": "{\n  \"subject\": \"molecule\",\n  \"hits\": [],\n  \"index_empty\": true,\n  \"scan_truncated\": false,\n  \"hits_truncated\": false,\n  \"verdict\": \"SEARCH NOT RUN: the molecule fingerprint index is empty — it holds n"
+      },
+      {
+        "tool": "similar_reactions",
+        "preview": "{\n  \"subject\": \"reaction\",\n  \"hits\": [],\n  \"index_empty\": true,\n  \"scan_truncated\": false,\n  \"hits_truncated\": false,\n  \"verdict\": \"SEARCH NOT RUN: the reaction fingerprint index is empty — it holds n"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 7.37,
+    "event_counts": {
+      "token": 13,
+      "tool_call": 2,
+      "tool_result": 2,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "a75c4ceea64448c58084ca20aa04b88f",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

@@ -1,0 +1,69 @@
+{
+  "probe": {
+    "id": "an-23",
+    "section": 8,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "How do this compound's degradation liabilities compare with the related compounds we have already run? I want to know whether we can lean on that prior work or have to start clean.",
+    "expects_tools": [
+      "similar_molecules",
+      "substructure_matches",
+      "find_notes",
+      "gather_evidence",
+      "predict_site_reactivity"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "invented historical forced-degradation results, degradant profiles or stability data",
+      "claiming an analogue was studied when retrieval did not return it",
+      "a read-across conclusion presented as validated rather than as a hypothesis"
+    ],
+    "direction": "Actually searches for structural neighbours and for what the knowledge graph records about them, then compares liabilities on the basis of what came back. Is explicit when the corpus contains chemistry precedent but no stability or forced-degradation data — the honest finding here is that no stability record exists to lean on. Any read-across is offered as a hypothesis with the structural basis stated, and the answer says what is missing rather than filling it in.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "an-23",
+    "section": 8,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "How do this compound's degradation liabilities compare with the related compounds we have already run? I want to know whether we can lean on that prior work or have to start clean.",
+    "answer": "I'd be happy to help you compare degradation liabilities, but I need to know which compound you're asking about. Let me search for what you might mean by \"this compound\" and \"the related compounds we have already run.\"Once you tell me which compound you're interested in, I can:\n\n1. **Identify its degradation liabilities** — oxidation and hydrolysis sites from computed reactivity and the system's knowledge\n2. **Find the related compounds you've already run** — similar molecules in the corpus and any prior degradation studies\n3. **Compare them directly** — what sites are shared, what differs, which prior work can transfer and which findings won't carry over\n\nThis comparison will tell you whether the existing data — forced-degradation designs, impurity lists, stability conditions — is likely to hold or whether you need fresh experiments tailored to the new compound's structure.",
+    "answered": true,
+    "tools_called": [
+      "ask_clarifying_question"
+    ],
+    "tool_results": [
+      {
+        "tool": "ask_clarifying_question",
+        "preview": "Question put to the chemist; awaiting their answer."
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": true,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 6.97,
+    "event_counts": {
+      "token": 11,
+      "tool_call": 1,
+      "question": 1,
+      "tool_result": 1,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "0f39a890929248679d463b9d7d01d545",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

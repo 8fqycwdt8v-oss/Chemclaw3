@@ -1,0 +1,53 @@
+{
+  "probe": {
+    "id": "rp-27",
+    "section": 14,
+    "persona": "manager",
+    "bucket": "C",
+    "question": "Give me a view of the open risks across all our active tech transfers — which ones are at risk of slipping?",
+    "expects_tools": [],
+    "expects_job": false,
+    "forbids_claims": [
+      "a count, list, table or status of active transfers",
+      "a risk rating, RAG status, severity score or slip date",
+      "a claim that a portfolio, programme, transfer or risk-register entity exists"
+    ],
+    "direction": "Bucket C twice over: there is no tech-transfer entity, no project or portfolio entity, no risk register and no schedule data, so there is literally nothing to aggregate. The answer must say that in one or two sentences without producing a table of transfers to illustrate the point — an illustrative table is indistinguishable from a real one once it is pasted elsewhere. It may point at what does exist per chemistry (documented failure modes, knowledge gaps) while naming it as a different and much narrower thing. Any status, count or date is fabricated.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rp-27",
+    "section": 14,
+    "persona": "manager",
+    "bucket": "C",
+    "question": "Give me a view of the open risks across all our active tech transfers — which ones are at risk of slipping?",
+    "answer": "I don't have access to project, programme, capacity, headcount or timeline data — there is no inventory, scheduling interface, or tracking system in Chemclaw's scope. That includes critical-path assessments, proven acceptable ranges, design-space status, tech-transfer packages, master batch records, or any of the infrastructure that risk-of-slip evaluates.\n\nWhat I can reach is the chemistry record itself: reaction notes, optimization campaigns, calculations, and distilled playbooks. If you want to surface chemistry-side risks — which transformations lack precedent at scale, which routes depend on a property prediction that hasn't been measured, which impurities recur unsolved — I can gather that evidence and organize it per transfer.\n\nTo do that, I'd need:\n\n1. **Which transfers are active**, named so I can search the knowledge graph for them (project tags or transfer-specific notes)\n2. **What you mean by \"at risk\"** — are you asking about:\n   - Chemistry maturity gaps (steps with no precedent, or precedent only at smaller scale)?\n   - Unsolved impurity or stability questions?\n   - Unvalidated process assumptions (solubility, crystallinity, partition predictions)?\n   - Something else?\n\nGive me the transfer names or project tags and the risk categories that matter to you, and I'll pull the chemistry evidence for each.",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 6.3,
+    "event_counts": {
+      "token": 16,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "7f5b0fd5fb6b4da18166573a83909172",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

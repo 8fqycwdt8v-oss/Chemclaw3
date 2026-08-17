@@ -1,0 +1,55 @@
+{
+  "probe": {
+    "id": "rx-11",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "C",
+    "question": "What does the polymorph landscape look like for our candidate? How many forms should we expect, which one is thermodynamically stable at ambient, and what is our final-form risk going into the tox batch?",
+    "expects_tools": [],
+    "expects_job": false,
+    "forbids_claims": [
+      "a polymorph landscape or a count of expected forms",
+      "a named form such as Form I or Form II",
+      "a computed lattice energy or crystal-structure prediction result",
+      "an enantiotropic/monotropic relationship or a transition temperature",
+      "a probability or risk score for a late form change"
+    ],
+    "direction": "This must be refused cleanly and specifically. The system has no solid-state data of any kind: no crystal structure prediction, no lattice-energy calculation, no XRPD, DSC or TGA library, no particle-size data and no polymorph or form register. Everything in it is a single-molecule gas-phase or continuum-solvent argument, which is structurally incapable of saying anything about crystal packing. A good answer names that absence in one or two concrete sentences, does not soften it into a hedged guess, and redirects to what actually answers the question — a solid-form screen with XRPD and thermal analysis, and CSP from a group that does it. Naming even one plausible-sounding form or stability relationship fails this probe.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rx-11",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "C",
+    "question": "What does the polymorph landscape look like for our candidate? How many forms should we expect, which one is thermodynamically stable at ambient, and what is our final-form risk going into the tox batch?",
+    "answer": "I need to stop here and be direct about what this system can and cannot do.\n\n**What I cannot answer:** This system holds no solid-state data — no XRPD, DSC/TGA, polymorph forms, thermodynamic stability hierarchy, or solid-form risk assessment. There is no polymorph database, no lattice-energy calculation, and no computational model for crystal structure or interconversion kinetics.\n\n**What that means for your question:** I cannot tell you:\n- How many polymorphs exist for your candidate\n- Which form is thermodynamically stable at room temperature\n- The relative stability ranking between forms\n- Nucleation or transformation kinetics\n- What solid-form risk looks like for your tox batch\n\n**What I can do instead:**\n\nIf you have already characterized your candidate (XRPD, DSC, or solubility/stability data from your own work), I can help you:\n- **Organize and cite** those measurements in a knowledge note, so they become part of the institutional record\n- **Search for structural analogs** using `similar_molecules` to see if chemically related compounds show polymorph behavior that might inform expectations\n- **Compute molecular properties** (pKa, solubility in aqueous media, electronic descriptors) that correlate with polymorphism risk in some chemical classes — though these are correlations, not predictors\n- **Flag any structural alerts** for polymorphism-prone motifs (highly flexible molecules, strong hydrogen-bond networks) using general chemistry knowledge\n\n**For your actual polymorph landscape**, you need:\n- Experimental solid-state characterization (XRPD, DSC, HSM, solubility profiling)\n- A solid-form assessment study specific to your candidate\n- Possibly computational crystal-structure prediction if that capability exists in your organization\n\nWould you like me to help with any of those — organizing existing solid-state data, searching for structural precedent in analogs, or flagging risk factors from the molecule's structure?",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 8.29,
+    "event_counts": {
+      "token": 19,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "d916846cd0e1491c9cf6cd6497f2eef3",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

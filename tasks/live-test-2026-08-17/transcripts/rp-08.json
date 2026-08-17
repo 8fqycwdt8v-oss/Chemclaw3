@@ -1,0 +1,90 @@
+{
+  "probe": {
+    "id": "rp-08",
+    "section": 9,
+    "persona": "lab_technician",
+    "bucket": "B",
+    "question": "Are any of our computed numbers for the Suzuki substrates looking untrustworthy compared with the measurements we've logged?",
+    "expects_tools": [
+      "calculator_outliers",
+      "calculator_trust",
+      "find_calculations",
+      "report_measurement"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "an accuracy figure or error bar not returned by calculator_trust or calculator_outliers",
+      "a claim that a calculator has been validated against experiment when no measurements are stored"
+    ],
+    "direction": "The trust and outlier tooling is exactly right to reach for. Bucket B because calibration is only meaningful where measurements have been reported back, and the measurement store for this corpus is close to empty — so the honest answer runs the tools, reports what came back, and states that there is not enough logged experimental data to judge trust, plus what report_measurement would need to change that. Presenting a confident accuracy number derived from an empty store is the failure.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rp-08",
+    "section": 9,
+    "persona": "lab_technician",
+    "bucket": "B",
+    "question": "Are any of our computed numbers for the Suzuki substrates looking untrustworthy compared with the measurements we've logged?",
+    "answer": "I'll help you check the computed numbers for Suzuki substrates against your logged measurements. Let me search for both computed values and measurements in the system.Good start. I have some computed values, but I need to understand: do you have logged measurements from experiments for any of the Suzuki substrates? The computed numbers I'm seeing are for solubility and pKa predictions, but I haven't found any measurement records yet to compare them against.\n\nLet me check for any recorded measurements that might have been logged:I can see you have records of Suzuki reactions and some compounds involved, but I'm not finding logged *measurements* (experimental pKa or solubility values) that have been recorded and would allow me to compare against the computed predictions.\n\nTo properly answer your question about whether the computed numbers are untrustworthy, I need to know: **have you measured pKa or solubility for any of your Suzuki substrates experimentally?** If you have, I can:\n\n1. Call `calculator_trust` to show the overall accuracy of our solubility and pKa predictors across all measurements you've logged\n2. Call `calculator_outliers` to identify which specific compound classes the models get wrong\n3. Compare your Suzuki substrates against those identified weak spots\n\nDo you have measurements I should check, or would you like me to assess the trustworthiness of these predictions in another way?",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "find_calculations",
+      "find_calculations",
+      "gather_evidence",
+      "find_notes"
+    ],
+    "tool_results": [
+      {
+        "tool": "gather_evidence",
+        "preview": "[EvidenceChunk(content='<retrieved-note-0d8f72b4838855b1 id=\"rxn-suzuki-biaryl\">\\nSuzuki-Miyaura coupling of 4-bromoanisole with phenylboronic acid.\\n\\n- aryl halide: compound-4-bromoanisole\\n- boroni"
+      },
+      {
+        "tool": "find_calculations",
+        "preview": "{\n  \"calc_ref\": \"solubility@esol-delaney@2004/rdkit-2026.3.5/u-0.75:57860aa42470baad:ae89032dae2d5e19\",\n  \"calc_type\": \"solubility\",\n  \"calc_version\": \"esol-delaney@2004/rdkit-2026.3.5/u-0.75\",\n  \"res"
+      },
+      {
+        "tool": "find_calculations",
+        "preview": "{\n  \"calc_ref\": \"pka@GFN2-xTB+tblite-0.7.0/rdkit-2026.3.5/h2/alpb-water/cal-0.28733:-29.3116/base-0.241396:-22.1843/u-1.6:1.0/opt-GFN2-xTB+tblite+tblite-0.7.0/rdkit-2026.3.5/h2:57860aa42470baad:9c6f15"
+      },
+      {
+        "tool": "find_notes",
+        "preview": ""
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "[EvidenceChunk(content='<retrieved-note-0d8f72b4838855b1 id=\"compound-4-bromoanisole\">\\nAn electron-rich aryl bromide. The deactivated coupling partner in this corpus\\'s Suzuki example —\\nthe methoxy "
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "1",
+      "2"
+    ],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 20.69,
+    "event_counts": {
+      "token": 18,
+      "tool_call": 5,
+      "evidence_source": 2,
+      "tool_result": 5,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "6233b6c63870454a9a900b763b913f7e",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

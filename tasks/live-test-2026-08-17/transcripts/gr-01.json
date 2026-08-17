@@ -1,0 +1,158 @@
+{
+  "probe": {
+    "id": "gr-01",
+    "section": 4,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We're picking a base for the C-N coupling of Cc1ccc(N)cc1 onto aryl halides and I have to justify the choice. Which base actually wins, and does that hold across the halides or only for some of them?",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note",
+      "similar_reactions"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a single winning base stated flatly, with no split by aryl halide",
+      "a numeric mean yield per base given without saying how many records it came from",
+      "a claim that the screening data does not exist or was not found, when three plates of it are seeded"
+    ],
+    "direction": "Reaches the seeded Buchwald-Hartwig plates (P2Et, MTBD, BTMG — ~3,955 records, all coupling the same 4-methylaniline) and reports what they show. The defensible answer is an interaction, not a champion: base ranking depends on the halide and the ligand, and the mean-over-everything hides that. Naming the plates and roughly how many records back each statement is what makes it checkable. If it can only reach part of the corpus, saying which part is a good answer; a confident single base with no per-halide split is not.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "gr-01",
+    "section": 4,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We're picking a base for the C-N coupling of Cc1ccc(N)cc1 onto aryl halides and I have to justify the choice. Which base actually wins, and does that hold across the halides or only for some of them?",
+    "answer": "I'll help you find the evidence for base selection in C-N coupling. Let me search for what's already been tried with this specific substrate and how different bases performed.The fingerprint index doesn't have reaction data yet, but the graph search found a Buchwald-Hartwig amination example. Let me search more specifically for C-N coupling and base comparison evidence.Good — I found a Buchwald amination reaction. Let me expand that note to see the full details and conditions, and look for any related campaigns.The record shows the Buchwald reaction used **NaOtBu** as the base. Let me dig into the optimization campaign and related notes to see if there was a base comparison, and look for any other precedent on halide scope.This is helpful. I can see that **K₂CO₃** was the best base found in the optimization, but that was for a Suzuki coupling, not C-N coupling. The Buchwald-Hartwig amination (which *is* C-N coupling) used **NaOtBu**. Let me search specifically for a C-N coupling base optimization or campaign to see if there's a direct comparison.The record doesn't hold a specific optimization study of base choice for your C-N coupling substrate (4-methylaniline). However, I have found evidence from a Buchwald-Hartwig amination (the direct precedent for C-N coupling on aryl halides), and base screening data from a Suzuki coupling of the same halide. Let me look specifically at what the BO recommendation says about bases, since that might have comparative reasoning.Let me get all the details of that optimization campaign to see which bases were explicitly tested.Based on the evidence I've gathered, here's what the record shows:\n\n## What the Record Holds\n\n**Direct C-N coupling precedent** ([rxn-buchwald-amination](rxn-buchwald-amination)): Buchwald-Hartwig amination of 4-bromoanisole with morpholine used **NaOtBu** (sodium tert-butoxide) at 1.4 equiv and achieved 71% isolated yield. This is your closest structural analogue — it's the same type of reaction (C-N coupling on an aryl bromide) with a similar electron-rich substrate.\n\n**Broader palladium coupling optimization** ([opt-suzuki-conditions](opt-suzuki-conditions)): A Suzuki coupling optimization of the same 4-bromoanisole substrate compared bases and found **K₂CO₃** best at 76% isolated yield (1.5 mol% Pd, 80 °C). However, this doesn't test base selection directly — it's reported as the winning condition but not as a base-only screen. The Bayesian-optimization follow-up ([bo-suzuki-next](bo-suzuki-next)) *extrapolates* to **Cs₂CO₃** as potentially better, but notes this is an experiment to run, not a conclusion.\n\n**Scope boundary** ([campaign-biaryl-scope](campaign-biaryl-scope)): The key finding was not about base choice itself but about halide scope: electron-rich bromides couple; electron-rich chlorides do not under the tested conditions. Both the Suzuki and Buchwald reactions in this campaign used fixed, predetermined bases.\n\n## The Answer to Your Question\n\n**The record does not hold a base-comparison study for your specific substrate** (4-methylaniline/p-toluidine on aryl halides). What I can tell you:\n\n1. **For Buchwald-type C-N couplings**: NaOtBu is the established choice (from [rxn-buchwald-amination](rxn-buchwald-amination)), with good precedent in the literature for primary anilines on aryl bromides.\n\n2. **For palladium cross-couplings on the same halide (4-bromoanisole)**: K₂CO₃ outperformed in the screen that was run, though the full data on what other bases were tested isn't available in the summary notes I found.\n\n3. **Whether it holds across halides**: The precedent doesn't test this. The scope campaign showed bromides vs. chlorides differ dramatically in reactivity *at fixed base*, but didn't vary the base within each halide class.\n\n**To justify your choice, you would need to either:**\n- Run a small base screen (3-4 bases: NaOtBu, K₂CO₃, Cs₂CO₃, and perhaps DBU or a phosphazene if you want to test weak bases) on your substrate with your target halides — especially if you're coupling a less electron-rich halide than 4-bromoanisole, since base strength often matters more with deactivated electrophiles.\n- Cite the Buchwald precedent if you're following that protocol with a good ligand for your amine's nucleophilicity.\n\nWould you like me to suggest a designed base screen using the optimizer, or search for additional precedent in the graph?",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "similar_reactions",
+      "gather_evidence",
+      "gather_evidence",
+      "find_notes",
+      "expand_note",
+      "find_notes",
+      "find_past_jobs",
+      "expand_note",
+      "expand_note",
+      "gather_evidence",
+      "gather_evidence",
+      "find_notes",
+      "gather_evidence",
+      "expand_note",
+      "expand_note",
+      "gather_evidence"
+    ],
+    "tool_results": [
+      {
+        "tool": "similar_reactions",
+        "preview": "{\n  \"subject\": \"reaction\",\n  \"hits\": [],\n  \"index_empty\": true,\n  \"scan_truncated\": false,\n  \"hits_truncated\": false,\n  \"verdict\": \"SEARCH NOT RUN: the reaction fingerprint index is empty — it holds n"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "[EvidenceChunk(content='<retrieved-note-0d8f72b4838855b1 id=\"rxn-amide-edc\">\\nEDC/HOBt amide coupling of benzoic acid with benzylamine.\\n\\n- base: compound-dipea (2.5 equiv)\\n- solvent: DMF, 0 °C to r"
+      },
+      {
+        "tool": "find_notes",
+        "preview": "[NoteRef(id='rxn-buchwald-amination', type='reaction', compound_smiles=None, tags=['cross-coupling', 'amination'], created_by='human', source='seed-corpus', confidence=0.8, valid_from=None, valid_to=N"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "[EvidenceChunk(content='<retrieved-note-0d8f72b4838855b1 id=\"opt-suzuki-conditions\">\\nRepeated runs of the biaryl coupling under varied temperature, Pd loading and base.\\n\\n- transformation: rxn-suzuk"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "[EvidenceChunk(content='<retrieved-note-0d8f72b4838855b1 id=\"playbook-amide-coupling-additive\">\\n## Use HOBt (or an equivalent) with EDC on anything but the simplest substrate\\n\\nDistilled from campai"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='rxn-buchwald-amination', type='reaction', compound_smiles=None, tags=['cross-coupling', 'amination'], created_by='human', source='seed-corpus', confidence=0.8, valid_from=None, valid_"
+      },
+      {
+        "tool": "find_notes",
+        "preview": ""
+      },
+      {
+        "tool": "find_past_jobs",
+        "preview": ""
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='opt-suzuki-conditions', type='optimization-campaign', compound_smiles=None, tags=['optimization'], created_by='human', source='seed-corpus', confidence=0.85, valid_from=None, valid_to"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='campaign-biaryl-scope', type='campaign', compound_smiles=None, tags=['campaign', 'scope'], created_by='human', source='seed-corpus', confidence=0.8, valid_from=None, valid_to=None) bo"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "[EvidenceChunk(content='<retrieved-note-0d8f72b4838855b1 id=\"opt-suzuki-conditions\">\\nRepeated runs of the biaryl coupling under varied temperature, Pd loading and base.\\n\\n- transformation: rxn-suzuk"
+      },
+      {
+        "tool": "find_notes",
+        "preview": ""
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "[EvidenceChunk(content='<retrieved-note-0d8f72b4838855b1 id=\"rxn-suzuki-biaryl\">\\nSuzuki-Miyaura coupling of 4-bromoanisole with phenylboronic acid.\\n\\n- aryl halide: compound-4-bromoanisole\\n- boroni"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "[EvidenceChunk(content='<retrieved-note-0d8f72b4838855b1 id=\"compound-acetylsalicylic-acid\">\\nAcetylsalicylic acid — the archetypal small-molecule analgesic and the product of the\\nesterification this"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='bo-suzuki-next', type='bo-candidate', compound_smiles=None, tags=['bo', 'suggestion'], created_by='human', source='seed-corpus', confidence=0.5, valid_from=None, valid_to=None) body='"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='opt-suzuki-conditions', type='optimization-campaign', compound_smiles=None, tags=['optimization'], created_by='human', source='seed-corpus', confidence=0.85, valid_from=None, valid_to"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "[EvidenceChunk(content='<retrieved-note-0d8f72b4838855b1 id=\"playbook-degassing\">\\n## Degas properly for Pd(0), or accept a bimodal yield distribution\\n\\nDistilled from opt-suzuki-conditions.\\n\\nPd(0)"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "4",
+      "1.4",
+      "71",
+      "76",
+      "1.5",
+      "80",
+      "1",
+      "2",
+      "3"
+    ],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 35.16,
+    "event_counts": {
+      "token": 61,
+      "tool_call": 17,
+      "evidence_source": 8,
+      "tool_result": 17,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "a8f1a22817bf42b9a5c7c808ac647fab",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

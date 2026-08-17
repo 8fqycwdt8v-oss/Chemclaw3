@@ -1,0 +1,104 @@
+{
+  "probe": {
+    "id": "op-32",
+    "section": 4,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We're choosing between an amidation and a sulfonamidation route to the same amine. What do the screens we have indexed say about which one holds up better on a hindered amine?",
+    "expects_tools": [
+      "similar_reactions",
+      "similar_molecules",
+      "substructure_matches",
+      "gather_evidence",
+      "expand_note"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "amidation is N times more robust",
+      "a computed robustness score",
+      "a controlled comparison, where the two record sets do not share substrates",
+      "a yield not present in a cited record"
+    ],
+    "direction": "Retrieves from both indexed record sets and compares what they actually contain about hindered substrates, citing records on each side and saying how many each conclusion rests on. The judgment this probe is really testing is restraint about the comparison itself: two screens run on different substrate sets under different conditions do not constitute a controlled comparison, and the answer must say so rather than manufacturing a robustness score or a headline multiple. Where the records are silent on hindrance it says not recorded. The genuinely useful output is a statement of what each set does support, plus the one experiment that would actually decide it — the same hindered amine run under both.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "op-32",
+    "section": 4,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We're choosing between an amidation and a sulfonamidation route to the same amine. What do the screens we have indexed say about which one holds up better on a hindered amine?",
+    "answer": "I'll search the knowledge graph for evidence on amidation and sulfonamidation routes, specifically looking at what we know about hindered amines.The searches returned general amidation data but not the specific hindered-amine comparison you're asking about. Let me search more directly for sulfonamidation data and for any reactions involving sterically hindered nitrogen nucleophiles.The indexed screens don't appear to hold a direct comparison of amidation vs. sulfonamidation on hindered amines. The record shows amidation methods (EDC/HOBt) and general solvent/condition screens, but no sulfonamidation data or explicit tests on sterically demanding secondary amines.\n\nBefore I give you a guess from general chemistry knowledge: **do you have a specific hindered amine substrate in mind, or are you looking for a general pattern across your project?** That matters because the comparison turns on electrophilicity (whether the sulfonyl or acyl is easier to attack) and nucleophilicity (whether the hindered amine is slow to attack either one), and those can shift by substrate.\n\nIf you'd like, I can:\n\n1. **Compute which acylating agent is more electrophilic** — use GFN2-xTB to compare partial charges on the carbonyl carbon vs. the sulfonyl sulfur with your actual amine in mind. That won't settle which route is faster in practice, but it rules out scenarios where one is fundamentally more reactive.\n\n2. **Search for precedent on a similar substrate** — if you name the amine structure or functional-group pattern (e.g., \"secondary aryl amine with two flanking methyl groups\"), I can look for reactions involving that motif.\n\n3. **Check what the literature-trained reaction models expect** — ask the forward predictor and condition predictor what they think is favourable for each route, as a sanity check against your intuition.\n\nWhich would be most useful? Or if you have the structures, I'll run the electrophilicity comparison and search for any analogous amidation/sulfonamidation precedent at the same time.",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "gather_evidence",
+      "gather_evidence",
+      "gather_evidence",
+      "gather_evidence",
+      "find_notes",
+      "find_notes"
+    ],
+    "tool_results": [
+      {
+        "tool": "gather_evidence",
+        "preview": "[EvidenceChunk(content='<retrieved-note-0d8f72b4838855b1 id=\"rxn-amide-edc\">\\nEDC/HOBt amide coupling of benzoic acid with benzylamine.\\n\\n- base: compound-dipea (2.5 equiv)\\n- solvent: DMF, 0 °C to r"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "[EvidenceChunk(content='<retrieved-note-0d8f72b4838855b1 id=\"opt-amide-solvent\">\\nSolvent screen for the EDC coupling: DMF, MeCN, DCM, 2-MeTHF.\\n\\n- transformation: rxn-amide-edc\\n- DMF and MeCN compa"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "[EvidenceChunk(content='<retrieved-note-0d8f72b4838855b1 id=\"opt-amide-solvent\">\\nSolvent screen for the EDC coupling: DMF, MeCN, DCM, 2-MeTHF.\\n\\n- transformation: rxn-amide-edc\\n- DMF and MeCN compa"
+      },
+      {
+        "tool": "find_notes",
+        "preview": ""
+      },
+      {
+        "tool": "find_notes",
+        "preview": ""
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": ""
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "[EvidenceChunk(content='<retrieved-note-0d8f72b4838855b1 id=\"compound-dipea\">\\nN,N-diisopropylethylamine. A hindered tertiary amine base — basic enough to deprotonate a\\ncarboxylic acid, too hindered "
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "1",
+      "2",
+      "3"
+    ],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 23.47,
+    "event_counts": {
+      "token": 31,
+      "tool_call": 7,
+      "evidence_source": 5,
+      "tool_result": 7,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "574794e2fde0466cbbbd1717968414dd",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

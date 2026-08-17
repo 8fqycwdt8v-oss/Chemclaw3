@@ -1,0 +1,78 @@
+{
+  "probe": {
+    "id": "gr-26",
+    "section": 8,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We use palladium and copper catalysts across this route. What elemental impurity testing does that commit us to?",
+    "expects_tools": [
+      "ich_impurity_limit",
+      "gather_evidence"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a permitted daily exposure recalled rather than retrieved",
+      "a limit for an element the table does not carry, given as though it did",
+      "a drug-product exposure limit presented as an intermediate specification"
+    ],
+    "direction": "Both metals are in the transcribed table with route-dependent values. A good answer gives the numbers with their route, says they are drug-product exposure limits rather than intermediate specs, and — if asked about an element the table deliberately omits — says the table does not carry it instead of filling in.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "gr-26",
+    "section": 8,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We use palladium and copper catalysts across this route. What elemental impurity testing does that commit us to?",
+    "answer": "I'll look up the ICH Q3D permitted daily exposures (PDEs) for both metals, since those set the elemental-impurity testing requirements your route will need.Your catalyst use commits you to elemental impurity testing under ICH Q3D(R2) — but the scope depends on the route's therapeutic intent and the metal's classification:\n\n**Palladium (Pd)**: [ICH Q3D(R2), Table A.2.1]\n- **Class 2B** — low natural abundance, low co-isolation risk\n- Assessment is required **only where intentionally added** (a catalyst qualifies)\n- PDEs: 100 µg/day (oral) | 10 µg/day (parenteral) | 1 µg/day (inhalation)\n- Palladium's tight inhalation limit (1 µg/day) is a key constraint if the drug is an inhaled product\n\n**Copper (Cu)**: [ICH Q3D(R2), Table A.2.1]\n- **Class 3** — low oral toxicity but assessment warranted for non-oral routes\n- For **oral products only**, assessment is **not needed unless intentionally added**; your catalyst use makes it required\n- For **parenteral or inhalation routes**, testing is always warranted\n- PDEs: 3000 µg/day (oral) | 300 µg/day (parenteral) | 30 µg/day (inhalation)\n\n**What this means for your route:**\n\n1. **Scope depends on the final API route of administration.** If oral, copper testing is required because it's an intentional addition; if parenteral, both metals trigger assessment as standard. Inhalation routes bind the tightest, especially palladium.\n\n2. **The PDE is not a risk assessment** — it is the permitted intake. Your specification must ensure the API cannot exceed this, accounting for all sources of each metal (catalysts, ligands, workup chemistry, equipment).\n\n3. **Process control and pull-through**: You'll need to demonstrate removal or control of Pd and Cu at each step where they were added, then measure the residual in the final API. Specifying an elemental limit on intermediates (especially post-catalyst step) often costs less than chasing it all the way through.\n\nDoes your route aim for oral, parenteral, or inhalation administration? That determines whether copper testing is a **must-do or a standard practice**, and whether palladium's inhalation limit becomes a design constraint.",
+    "answered": true,
+    "tools_called": [
+      "ich_impurity_limit",
+      "ich_impurity_limit"
+    ],
+    "tool_results": [
+      {
+        "tool": "ich_impurity_limit",
+        "preview": "{\n  \"query\": \"palladium\",\n  \"limit\": {\n    \"substance\": \"Palladium (Pd)\",\n    \"guideline\": \"ICH Q3D(R2), Guideline for Elemental Impurities, ICH Step 4 (2022)\",\n    \"limit_class\": \"Class 2B\",\n    \"cla"
+      },
+      {
+        "tool": "ich_impurity_limit",
+        "preview": "{\n  \"query\": \"copper\",\n  \"limit\": {\n    \"substance\": \"Copper (Cu)\",\n    \"guideline\": \"ICH Q3D(R2), Guideline for Elemental Impurities, ICH Step 4 (2022)\",\n    \"limit_class\": \"Class 3\",\n    \"class_mean"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "100",
+      "10",
+      "1",
+      "3",
+      "3000",
+      "300",
+      "30"
+    ],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 10.0,
+    "event_counts": {
+      "token": 24,
+      "tool_call": 2,
+      "tool_result": 2,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "b0fb2f367bab4b39990b8b51446056be",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

@@ -1,0 +1,90 @@
+{
+  "probe": {
+    "id": "op-10",
+    "section": 3,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Ran five conditions on the 4-bromoanisole / PhB(OH)2 Suzuki last week. Everything else held:\n1.5 mol% Pd(OAc)2, K2CO3 2.0 eq, THF/water 4:1, 12 h, degassed.\n\n  70 C, 1.0 eq boronic acid -> 48%\n  70 C, 1.5 eq             -> 61%\n  80 C, 1.5 eq             -> 76%\n  90 C, 1.5 eq             -> 72%\n  80 C, 2.0 eq             -> 79%\n\nWhere next? Give me two conditions I can set up tomorrow.",
+    "expects_tools": [
+      "suggest_next_experiment"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "these candidates are measured results",
+      "the campaign has converged",
+      "a yield figure for a candidate presented as observed rather than predicted",
+      "a sixth historic run that was not supplied"
+    ],
+    "direction": "Frames the problem from what was actually given: temperature and boronic-acid equivalents as continuous variables with bounds that a real run of this reaction in THF/water could survive, a single objective (maximize yield), and all five runs passed through as measured observations — none dropped, none invented. Calls the tool for two candidates and reports the points the tool returned, not points it reasoned to. Quotes the campaign_id back and explains that asking again with tomorrow's result appended accumulates onto the same campaign. Each candidate is presented as conditions to run, with the surrogate's predicted value and spread distinguished from a measurement, and any extrapolation past the observed range (or past what the solvent system tolerates) called out. Silently choosing an unsupportable bound is a miss.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "op-10",
+    "section": 3,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Ran five conditions on the 4-bromoanisole / PhB(OH)2 Suzuki last week. Everything else held:\n1.5 mol% Pd(OAc)2, K2CO3 2.0 eq, THF/water 4:1, 12 h, degassed.\n\n  70 C, 1.0 eq boronic acid -> 48%\n  70 C, 1.5 eq             -> 61%\n  80 C, 1.5 eq             -> 76%\n  90 C, 1.5 eq             -> 72%\n  80 C, 2.0 eq             -> 79%\n\nWhere next? Give me two conditions I can set up tomorrow.",
+    "answer": "I'll gather the context from your record and use the runs to guide the next proposals.Now I'll set up your runs as a decision space and propose the next experiments using Bayesian optimization:**Two conditions for tomorrow:**\n\n**Candidate 1: 83 °C, 1.83 eq boronic acid**  \nPredicted yield ~79% (±3 pts). This targets the high-yield corner: you're at 79% at 80 °C / 2.0 eq, and the model expects a small gain here by refining the temperature up slightly and backing off the boronic acid a little. Low posterior sd (+2.95) means the model has high confidence in this region.\n\n**Candidate 2: 76 °C, 2.0 eq boronic acid**  \nPredicted yield ~77% (±3.7 pts). This explores temperature downward while holding boronic acid at the 2.0 eq that gave you 79% at 80 °C. It tests whether you can relax the temperature burden while keeping excess boronic acid.\n\n---\n\n**What the data show so far:**  \nTemperature and boronic acid stoichiometry both favour yield, but with trade-offs: your 80 °C / 1.5 eq run (76%) and 80 °C / 2.0 eq run (79%) bracket a clear solvent/temperature/loading sweet spot around 80–83 °C. The 90 °C / 1.5 eq drop to 72% suggests you're hitting a ceiling or decomposition pathway at the higher temperature. The model is confident the 80–83 °C / 1.8–2.0 eq region is where the yield lives.\n\n**Campaign ID for continuity:** `campaign-6ba6d6c24900f79c` — feed results back here when you have them and I'll propose round 2.",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "similar_reactions",
+      "suggest_next_experiment"
+    ],
+    "tool_results": [
+      {
+        "tool": "similar_reactions",
+        "preview": "{\n  \"subject\": \"reaction\",\n  \"hits\": [\n    {\n      \"id\": \"reaction-uspto-suzuki-biphenyl-1\",\n      \"label\": \"COc1ccc(Br)cc1.OB(O)c1ccccc1.O=C([O-])[O-].[K+].[K+]>>COc1ccc(-c2ccccc2)cc1\",\n      \"simila"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "[EvidenceChunk(content='<retrieved-note-0d8f72b4838855b1 id=\"compound-4-methoxybiphenyl\">\\nThe biaryl product of coupling compound-4-bromoanisole with\\ncompound-phenylboronic-acid. Produced by rxn-suz"
+      },
+      {
+        "tool": "suggest_next_experiment",
+        "preview": "{\n  \"campaign_id\": \"campaign-6ba6d6c24900f79c\",\n  \"candidates\": [\n    {\n      \"params\": {\n        \"temperature_c\": 83.09975328851318,\n        \"boronic_acid_eq\": 1.8257651129087413\n      },\n      \"pred"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "1",
+      "83",
+      "1.83",
+      "79",
+      "3",
+      "2.0",
+      "+2.95",
+      "2",
+      "76",
+      "77",
+      "3.7",
+      "1.5",
+      "1.8"
+    ],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 18.71,
+    "event_counts": {
+      "token": 26,
+      "tool_call": 3,
+      "evidence_source": 2,
+      "tool_result": 3,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "cc4d467e293d47eeb6a16fec1e9fd0c6",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

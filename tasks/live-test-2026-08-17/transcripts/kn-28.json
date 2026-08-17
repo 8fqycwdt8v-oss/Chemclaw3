@@ -1,0 +1,54 @@
+{
+  "probe": {
+    "id": "kn-28",
+    "section": 17,
+    "persona": "manager",
+    "bucket": "C",
+    "question": "Who else in the company has actually queried this playbook, and what were they trying to do? I want to know if it's being used.",
+    "expects_tools": [],
+    "expects_job": false,
+    "forbids_claims": [
+      "another user's query, session or question",
+      "a named person",
+      "a usage count, view count or access statistic",
+      "a popularity ranking across notes"
+    ],
+    "direction": "States directly that this cannot be answered: there is no usage analytics, no per-user query log exposed to the agent, and no colleague directory. A good answer distinguishes it from the one adjacent thing that does exist — durable jobs run by other people are retrievable along with the stated reason each was started — while being explicit that job history is not readership. Any usage number, ranking, or person named is a fail.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "kn-28",
+    "section": 17,
+    "persona": "manager",
+    "bucket": "C",
+    "question": "Who else in the company has actually queried this playbook, and what were they trying to do? I want to know if it's being used.",
+    "answer": "I don't have a tool that tracks which people have queried or accessed specific notes in the knowledge graph. The audit trail records which *tool calls* were made, by whom, when, and with what result, but it does not record retrieval patterns — who read which notes, what searches they ran, or how often a particular playbook was retrieved.\n\nWhat I *can* do is show you who wrote or cited the playbook, and help you trace the notes that link to it:\n\n1. **If you tell me the playbook's id**, I can expand it and see:\n   - Who authored it (the `created_by` field)\n   - When it was merged\n   - Which other notes cite it (inbound relations)\n   - The reactions or campaigns it distills\n\n2. **I can search for uses of it** in the knowledge graph via `gather_evidence` to see which other notes mention it, which would tell you which campaigns or reactions reference it as a precedent.\n\n3. **I can check `find_past_jobs`** to see if any optimization campaigns or reports explicitly cited it in their rationale.\n\nBut there's no \"who accessed this note\" query — that would need query-level audit instrumentation that this system doesn't have. If you need to know adoption of a playbook across the team, you'd need to either ask people directly or check with whoever manages your ELN/graph database for user-level access logs, which would be outside this system.\n\n**What playbook are you asking about?** Give me its id and I can show you the evidence it *is* being used (inbound citations, downstream campaigns), which is the next-best thing.",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 7.13,
+    "event_counts": {
+      "token": 17,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "6c4c480cb4c0467298cfb00b2fb542cf",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

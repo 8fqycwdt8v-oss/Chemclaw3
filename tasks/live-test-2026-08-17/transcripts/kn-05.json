@@ -1,0 +1,84 @@
+{
+  "probe": {
+    "id": "kn-05",
+    "section": 1,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "quick one — is 2 min of sparging enough before we drop the catalyst in? thats what the old sop said",
+    "expects_tools": [
+      "find_notes",
+      "expand_note",
+      "gather_evidence"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "that two-minute sparging is current practice",
+      "a note id that was not retrieved",
+      "a degassing procedure the playbook does not state"
+    ],
+    "direction": "Answers no, and cites playbook-degassing for the current procedure: three freeze-pump-thaw cycles or 20 minutes of sparging per 100 mL. Critically, it should recognise the two-minute rule as the *retired* playbook-degassing-old and say it was superseded in mid-2025 — treating the two as equally current, or quietly averaging them, is the failure this probe is for.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "kn-05",
+    "section": 1,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "quick one — is 2 min of sparging enough before we drop the catalyst in? thats what the old sop said",
+    "answer": "I don't have access to your SOP or sparging protocol in the knowledge graph. Let me search for what this system knows about your catalyst drop and sparging practice.Good—there's a distilled note on degassing. Let me pull the full details:**That 2-minute SOP is the old one — and it's been superseded.** Here's what the system knows:\n\nThe distilled playbook (`playbook-degassing`, confidence 0.85, a human-authored merged note) says **sparging for 2 minutes is effectively the same as not degassing at all**. \n\nThe finding comes from a Pd(0) Suzuki coupling optimization (`opt-suzuki-conditions`). The signature of incomplete degassing is a **bimodal yield distribution**: nominally identical runs give 70%+ or under 20%, rarely anything in between. That's because Pd(0) is oxidised by dissolved oxygen to an inactive black precipitate, and whether the catalyst survives depends on whether enough oxygen was removed in those first minutes.\n\n**What works:**\n- Three freeze-pump-thaw cycles, *or*\n- **Sparging for 20 minutes per 100 mL** of solvent\n\nSo if your old SOP said 2 minutes, you're leaving oxygen in and flipping a coin on every run. The playbook explicitly replaces the old guidance on this.\n\nIs this a Pd-catalysed coupling you're running, or a different reaction?",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note"
+    ],
+    "tool_results": [
+      {
+        "tool": "find_notes",
+        "preview": ""
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "[EvidenceChunk(content='<retrieved-note-0d8f72b4838855b1 id=\"playbook-degassing\">\\n## Degas properly for Pd(0), or accept a bimodal yield distribution\\n\\nDistilled from opt-suzuki-conditions.\\n\\nPd(0)"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='playbook-degassing', type='playbook', compound_smiles=None, tags=['playbook', 'technique'], created_by='human', source='seed-corpus', confidence=0.85, valid_from=None, valid_to=None) "
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "2",
+      "0.85",
+      "0",
+      "70",
+      "20",
+      "100"
+    ],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 10.18,
+    "event_counts": {
+      "token": 19,
+      "tool_call": 3,
+      "evidence_source": 1,
+      "tool_result": 3,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "9b9a4200be3c4e45817f95809ec03e7e",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

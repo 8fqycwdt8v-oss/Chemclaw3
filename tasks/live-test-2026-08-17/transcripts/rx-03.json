@@ -1,0 +1,74 @@
+{
+  "probe": {
+    "id": "rx-03",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Search our reaction record for precedent for COc1ccc(Br)cc1.OB(O)c1ccccc1>>COc1ccc(-c2ccccc2)cc1 — how close is the nearest match and is it close enough to plan from?",
+    "expects_tools": [
+      "similar_reactions",
+      "similar_molecules",
+      "gather_evidence",
+      "find_notes"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a similarity score reported without saying which fingerprint produced it",
+      "an assertion that no precedent exists based on a single zero-hit query"
+    ],
+    "direction": "Should run the reaction-fingerprint search and report the hits with their similarity values and what those values mean (roughly: >=0.7 strong analogue, 0.4-0.7 worth a look, <0.4 weak). The judgement being tested is the DRFP caveat: the indexed HTE corpus encodes ligand/base/additive as reactants, so a two-component query can score far below the floor against a real match. If the query returns little, the answer must say that a zero/low result may mean the query recipe does not match how the corpus was indexed, and either widen the query with plausible reagents or fall back to molecule similarity on the substrates — never conclude flatly that there is no precedent.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rx-03",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Search our reaction record for precedent for COc1ccc(Br)cc1.OB(O)c1ccccc1>>COc1ccc(-c2ccccc2)cc1 — how close is the nearest match and is it close enough to plan from?",
+    "answer": "I'll search for precedent on this Suzuki coupling transformation.Good news: we have direct precedent. Let me expand the full recipe and conditions from the top match.The hits are from the fingerprint index (USPTO patent reactions) rather than from the knowledge graph itself. That means the reactions exist as indexed structures but their full recipes haven't yet been written as knowledge notes.\n\n**What we have:**\n\nThe nearest match has a **Tanimoto similarity of 0.816** — very close. It's the exact same transformation:\n- **Aryl bromide**: 4-bromoanisole (same as your query)\n- **Arylboronic acid**: phenylboronic acid (same as your query)  \n- **Product**: 4-methoxybiphenyl (same as your query)\n- **Base**: K₂CO₃ (inferred from the USPTO record showing [K+] and [CO₃²⁻])\n\nThe two indexed hits are identical matches, suggesting this is a well-known coupling that USPTO chemistry indexed multiple times from different patents.\n\n**Is it close enough to plan from?**\n\nYes, but with caveats:\n\n1. **The fingerprint match is structurally exact** — same functional groups, same regioselectivity — so the reaction *class* is well-defined.\n\n2. **But we don't have the full recipe as a knowledge note yet.** The USPTO index gives us the starting materials and product, not the specific catalyst, solvent, temperature, or timing. This is actually typical for USPTO patent reactions: the structure is certain but the detailed conditions are part of what makes each patent unique.\n\n3. **What you *can* plan from**: This is a standard Suzuki-Miyaura coupling with straightforward substrates (no steric hinderance, electron-donating group ortho to the Br). You can use standard published protocols — K₂CO₃ or K₃PO₄ in organic solvent (DMF, dioxane, THF) with a Pd catalyst (Pd(PPh₃)₄ or Pd(dppf)Cl₂ are the workhorses). Conditions are typically 80–100 °C, 1–4 h depending on scale and concentration.\n\n4. **What I'd recommend next**: If you want to optimize this specific transformation on your scale/equipment, call `suggest_next_experiment` with a decision space (catalyst, solvent, temperature, maybe base) and any runs you've already done. The USPTO precedent confirms it *works*, so a quick screen of catalyst + solvent is the efficient next step rather than a full feasibility study.\n\nWould you like me to suggest initial conditions to screen, or do you have runs on this transformation already that I should incorporate?",
+    "answered": true,
+    "tools_called": [
+      "similar_reactions",
+      "expand_note"
+    ],
+    "tool_results": [
+      {
+        "tool": "similar_reactions",
+        "preview": "{\n  \"subject\": \"reaction\",\n  \"hits\": [\n    {\n      \"id\": \"reaction-uspto-suzuki-biphenyl-1\",\n      \"label\": \"COc1ccc(Br)cc1.OB(O)c1ccccc1.O=C([O-])[O-].[K+].[K+]>>COc1ccc(-c2ccccc2)cc1\",\n      \"simila"
+      }
+    ],
+    "tools_failed": [
+      "expand_note"
+    ],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "0.816",
+      "1",
+      "2"
+    ],
+    "failed_loudly": true,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 19.89,
+    "event_counts": {
+      "token": 34,
+      "tool_call": 2,
+      "tool_result": 1,
+      "tool_failed": 1,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "f4c285c98fc04c0f8e04f490484abbe9",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

@@ -1,0 +1,88 @@
+{
+  "probe": {
+    "id": "rx-21",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "I am losing product to the aqueous layer on the workup. The product is salicylic acid, OC(=O)c1ccccc1O, and I have been washing with saturated sodium bicarbonate. What pH should the wash be at?",
+    "expects_tools": [
+      "predict_pka",
+      "predict_logd",
+      "gather_evidence",
+      "find_notes"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a specific wash pH recommended on the strength of a computed pKa",
+      "a computed pKa quoted without its uncertainty",
+      "a predicted partition coefficient presented as measured"
+    ],
+    "direction": "The user has diagnosed their own problem without realising it: bicarbonate deprotonates a carboxylic acid, so the product is being extracted into the aqueous phase by design. That should be said first and clearly. Then the discipline: the pKa predictor ranks reliably but individual values miss by up to about two units against a reported uncertainty of roughly plus or minus 1.6, and process rules of thumb like 'extract two units below the pKa' turn on exactly that margin — so the computed value may be used to reason, never to set the wash pH. If a pH is going into a procedure, the answer is to measure the pKa or take it from literature. Should state which of the three cases it is in (this is an acid site, which the tool covers), and should mention that back-extraction from an acidified aqueous phase recovers what has already been lost.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rx-21",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "I am losing product to the aqueous layer on the workup. The product is salicylic acid, OC(=O)c1ccccc1O, and I have been washing with saturated sodium bicarbonate. What pH should the wash be at?",
+    "answer": "I'll help you figure out the optimal pH for your workup. The key is understanding how salicylic acid's ionization state changes with pH, since that determines how it partitions between aqueous and organic layers.\n\nLet me start by predicting salicylic acid's pKa:Now let me also check the solubility of salicylic acid to understand its aqueous behaviour:Now let me read the ionization-and-partitioning skill to give you precise guidance on what this means for your workup:Based on the calculations and skill guidance, here's what's happening and what you should do:\n\n## The Problem\n\nSalicylic acid has a **predicted pKa of ~4.3 ± 1.6** (for the carboxylic acid site). Your saturated sodium bicarbonate wash is typically around **pH 8.3**, which is well above the pKa. This means the salicylic acid is substantially deprotonated and converted to its **carboxylate salt**, which is much more soluble in water — hence you're losing it to the aqueous layer.\n\n## The Solution\n\n**You need to keep the wash pH lower — ideally between 3–4** to keep salicylic acid mostly in its neutral (unionized) form, which partitions back into the organic solvent.\n\nHere's the reasoning:\n\n- **At pH 3**: salicylic acid is ~99% protonated (neutral), stays in the organic layer\n- **At pH 4.3** (the pKa): exactly 50% is ionized, still significant loss to aqueous\n- **At pH 8.3** (saturated NaHCO₃): nearly 100% is deprotonated, maximum loss\n\n## Practical Recommendation\n\n**Use dilute acid for the wash instead** — options include:\n\n1. **Very dilute HCl or H₂SO₄** at pH 2–3 (1–5% w/v)\n2. **Dilute citric acid** at pH ~3 (safer to handle than mineral acid)\n3. **Weak buffer** prepared to pH 3–4 if you want tighter pH control\n\n**Key point**: The predicted pKa carries ±1.6 units of uncertainty, so do not set a hard setpoint from this number alone. However, the *direction* is clear and robust — you want pH *below* the acid's pKa, not above it. If you have access to literature, check whether there's a measured pKa for salicylic acid to validate this; otherwise, run a small-scale trial with a pH 3–4 wash and measure the recovery before scaling up.\n\nThis should solve your problem — you'll recover your product in the organic layer while the impurities wash into the aqueous phase as their salts.",
+    "answered": true,
+    "tools_called": [
+      "predict_pka",
+      "predict_solubility",
+      "read_file"
+    ],
+    "tool_results": [
+      {
+        "tool": "predict_pka",
+        "preview": "{\n  \"smiles\": \"O=C(O)c1ccccc1O\",\n  \"method\": \"GFN2-xTB/ALPB-water\",\n  \"pka\": 4.29809196007821,\n  \"deprotonation_energy_kcal\": 116.9724426968232,\n  \"uncertainty\": 1.6,\n  \"site\": \"acid\"\n}"
+      },
+      {
+        "tool": "predict_solubility",
+        "preview": "{\n  \"smiles\": \"OC(=O)c1ccccc1O\",\n  \"model\": \"esol-delaney@2004\",\n  \"log_s_mol_per_l\": -1.7613083999999997,\n  \"uncertainty_log\": 0.75,\n  \"estimate\": {\n    \"value\": -1.7613083999999997,\n    \"unit\": \"log"
+      },
+      {
+        "tool": "read_file",
+        "preview": "  1  ---\n  2  name: ionization-and-partitioning\n  3  description: >-\n  4    Judgment for using a predicted pKa in process decisions — extraction and wash pH, salt\n  5    and counterion questions, ioni"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "4.3",
+      "1.6",
+      "3",
+      "4",
+      "99",
+      "50",
+      "100",
+      "1",
+      "2",
+      "5"
+    ],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 23.84,
+    "event_counts": {
+      "token": 37,
+      "tool_call": 3,
+      "tool_result": 3,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "9f03a7834de64e819d8381e9840fcdc4",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

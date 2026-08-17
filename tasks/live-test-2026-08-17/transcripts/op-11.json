@@ -1,0 +1,88 @@
+{
+  "probe": {
+    "id": "op-11",
+    "section": 3,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Buchwald screen, 4-bromoanisole + morpholine, NaOtBu 1.4 eq, toluene, 100 C, 8 h.\nXPhos 44%, SPhos 51%, RuPhos 71%, BINAP 23%.\nWhat ligand next, and why that one instead of just running RuPhos again?",
+    "expects_tools": [
+      "suggest_next_experiment",
+      "compute_electronic_properties"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "the descriptors capture the ligands' steric bulk or bite angle",
+      "RuPhos is the global optimum",
+      "the model has data on a ligand that was never run",
+      "a yield for an untried ligand stated as known"
+    ],
+    "direction": "Treats ligand as a categorical parameter and — this is the crux — featurizes it, supplying a structure per category so the surrogate sees electronic descriptors instead of four opaque labels. It must say why: without descriptors the model's belief about a ligand nobody ran is just the average of the ones that were run, so it could never recommend a new one. It then proposes at least one untried ligand and answers the \"why not RuPhos again\" question in explore/exploit terms — re-running the best is exploitation of a region already learned, while the proposal buys information where the model is least certain. Two limits must be stated: the descriptors are electronic only, so two ligands differing mainly in bulk look similar to the model, and a wrong SMILES silently describes a different molecule.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "op-11",
+    "section": 3,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Buchwald screen, 4-bromoanisole + morpholine, NaOtBu 1.4 eq, toluene, 100 C, 8 h.\nXPhos 44%, SPhos 51%, RuPhos 71%, BINAP 23%.\nWhat ligand next, and why that one instead of just running RuPhos again?",
+    "answer": "I'll search for what you have on this Buchwald screen to ground the answer in your actual results and precedent.Good — you have a note for the RuPhos result. Let me expand it and look for any broader Buchwald-amination knowledge to guide the ligand choice.The record holds your RuPhos result. The question is pure ligand-choice strategy, so let me frame this honestly: your screen shows **RuPhos at 71% is good but not optimal** — a 20-point margin over SPhos (51%) and much more over XPhos (44%) or BINAP (23%). The question \"run it again or try something new?\" depends on what you're after and what you know about the ligands.\n\n**Why not just re-run RuPhos:**\n\nRuPhos excels on electron-rich aryl halides and bulky amines. You have both here (4-bromoanisole, morpholine), so the 71% is well-explained. *Re-running* would test reproducibility, not chemistry; the gap to your best is already established. You already know the system favors RuPhos in this substrate class.\n\n**What the ligands actually ranked tell you:**\n\nYour screen measured a clear hierarchy — RuPhos >> SPhos > XPhos > BINAP — on *this specific pair*. That's real information about electronic character and steric fit, but a screen of four ligands is reconnaissance, not coverage. The question is whether you're:\n\n1. **Trying to improve yield on this exact substrate** → pursue mechanistic understanding of why RuPhos wins (it's usually the electron-rich arene + sterically demanding nucleophile pairing), test conditions that amplify that advantage (temperature, time, Pd:L ratio), not just another ligand.\n\n2. **Building a general amination protocol** → test RuPhos on a *different* aryl halide or amine class. Your 71% on an activated substrate (4-bromoanisole) does not tell you how it handles deactivated arenes (electron-poor, hindered) or small secondary amines. That's where another ligand (often JohnPhos for deactivated, or BINAP for sterically encumbered amines) would shine, and a wider substrate screen would be the real next move.\n\n3. **Optimizing conditions on RuPhos** → temperature, base equivalents, Pd loading, time. A 71% yield leaves room for kinetic tweaks without changing the ligand.\n\n**What I'd recommend:**\n\n**Do not run RuPhos again on 4-bromoanisole + morpholine unless you changed conditions.** Instead:\n\n- **Test RuPhos on a substrate that *failed* in your original screen** — e.g., if you screened deactivated arenes and RuPhos underperformed there, use your 71% as the baseline and see whether a different ligand (JohnPhos, XPhos on deactivated) beats it on a harder substrate. That answer transfers to practice better than proving RuPhos twice on the same pair.\n\n- Or **if your only question is \"can we hit 80%+ on this exact pair,\"** hold the ligand and vary Pd:L ratio, temperature, or time. Changing multiple levers when one is already known to be good is how you burn experiments.\n\nThe record has your 71% on RuPhos. What substrate or amine class did the screen originally cover, and where did yield fall short?",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "similar_reactions",
+      "expand_note",
+      "gather_evidence"
+    ],
+    "tool_results": [
+      {
+        "tool": "similar_reactions",
+        "preview": "{\n  \"subject\": \"reaction\",\n  \"hits\": [\n    {\n      \"id\": \"reaction-uspto-buchwald-hartwig-1\",\n      \"label\": \"Cc1ccc(Br)cc1.C1COCCN1.O=C([O-])[O-].[Cs+].[Cs+]>>Cc1ccc(N2CCOCC2)cc1\",\n      \"similarity\""
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "[EvidenceChunk(content='<retrieved-note-0d8f72b4838855b1 id=\"rxn-buchwald-amination\">\\nBuchwald-Hartwig amination of 4-bromoanisole with morpholine.\\n\\n- aryl halide: compound-4-bromoanisole\\n- pre-ca"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='rxn-buchwald-amination', type='reaction', compound_smiles=None, tags=['cross-coupling', 'amination'], created_by='human', source='seed-corpus', confidence=0.8, valid_from=None, valid_"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "[EvidenceChunk(content='<retrieved-note-0d8f72b4838855b1 id=\"opt-suzuki-conditions\">\\nRepeated runs of the biaryl coupling under varied temperature, Pd loading and base.\\n\\n- transformation: rxn-suzuk"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "71",
+      "4",
+      "1",
+      "2",
+      "80"
+    ],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 21.58,
+    "event_counts": {
+      "token": 43,
+      "tool_call": 4,
+      "evidence_source": 3,
+      "tool_result": 4,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "6e6845948d42461cb0ce1c28ea3cba39",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

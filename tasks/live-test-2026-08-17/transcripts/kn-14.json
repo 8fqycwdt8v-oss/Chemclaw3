@@ -1,0 +1,95 @@
+{
+  "probe": {
+    "id": "kn-14",
+    "section": 15,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "im new on the biaryl project. what should i read first so i dont repeat something the group already learned the hard way",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note",
+      "find_knowledge_gaps"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a note id that was not retrieved",
+      "an onboarding pack, induction checklist or training module that does not exist",
+      "a reading item that is not a real note"
+    ],
+    "direction": "Builds a short ordered reading list out of notes that actually exist, each cited by id with one line on why it matters. It must include the failure modes, not only the successes — failure-aqueous-protodeboronation (assay looked better while isolated yield fell) and failure-dcm-amide-coupling — alongside the playbooks (playbook-degassing, playbook-pd-cross-coupling-scope, playbook-recrystallisation-purity) and report-biaryl-development for the current recommendation. A list of generic onboarding advice with no note ids is the failure.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "kn-14",
+    "section": 15,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "im new on the biaryl project. what should i read first so i dont repeat something the group already learned the hard way",
+    "answer": "I'll search the knowledge graph for the biaryl project to get you the essential distilled wisdom and any key learnings from what's been tried.Good — there's a solid trail. Let me pull the high-level playbook and the main campaign so you get the real lessons learned:Perfect. Here's the roadmap to avoid repeating what cost the group time:\n\n## **Essential reading for the biaryl project (in order):**\n\n### 1. **The hard-won boundary** — [[campaign-biaryl-scope]]\nThe scope boundary is what stays with you: **electron-rich bromides couple, electron-rich chlorides do not** under the standard conditions. This is not a yield question — it's a reactivity boundary. Before you run a biaryl coupling, check the halide. If you need to expand to chlorides, you'll need different chemistry, not just warmer conditions.\n\n### 2. **The ligand-before-heat principle** — [[playbook-pd-cross-coupling-scope]]\nThis is the distilled wisdom from [[opt-suzuki-conditions]] and the scope campaign. When your coupling stalls:\n\n> **Change the ligand (pick a bulkier biaryl phosphine) → raise the Pd:L ratio → degas harder → only *then* heat.**\n\nThe trap: raising temperature accelerates both the coupling *and* boronic acid decomposition at roughly the same rate. You'll just get protodeboronation [[failure-aqueous-protodeboronation]] without improving yield. Ligand steric bulk is the actual lever on oxidative addition.\n\n### 3. **The working conditions** — [[report-biaryl-development]]\nFor 4-methoxybiphenyl (the template substrate):\n- **1.5 mol% Pd(OAc)₂/SPhos** (this is the sweet spot, not a starting point)\n- K₂CO₃ base\n- **THF/water 4:1** (the ratio matters for solubility; see the optimization campaign for why)\n- **80 °C** (rigorous degassing is non-negotiable here — see the protodeboronation failure)\n- 76% isolated yield\n\nThe report says \"do not optimise on LCAP\" — meaning that 76% is solid and chasing LC purity numbers won't move the isolated yield. Worth knowing if your project targets are yield-driven.\n\n### 4. **The Suzuki template** — [[rxn-suzuki-biaryl]]\nPull this to see the exact conditions, workup, and any solubility/precipitation notes the group recorded. This is your step-by-step.\n\n---\n\n**Bottom line:** You have a boundary (Br works, Cl doesn't), a principle (ligand before heat), and proven conditions (the SPhos system at 80 °C). Don't re-run the temperature sweep — the group already found that trap. If your substrate differs from 4-methoxybiphenyl, use [[campaign-biaryl-scope]] to predict whether you'll need different halide chemistry, then reach for [[playbook-pd-cross-coupling-scope]] to decide *how* to adapt.",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note",
+      "expand_note",
+      "expand_note"
+    ],
+    "tool_results": [
+      {
+        "tool": "find_notes",
+        "preview": "[NoteRef(id='bo-suzuki-next', type='bo-candidate', compound_smiles=None, tags=['bo', 'suggestion'], created_by='human', source='seed-corpus', confidence=0.5, valid_from=None, valid_to=None), NoteRef(i"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "[EvidenceChunk(content='<retrieved-note-0d8f72b4838855b1 id=\"playbook-pd-cross-coupling-scope\">\\n## When a palladium coupling stalls, change the ligand before the temperature\\n\\nDistilled from campaig"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='playbook-pd-cross-coupling-scope', type='playbook', compound_smiles=None, tags=['playbook', 'cross-coupling'], created_by='human', source='seed-corpus', confidence=0.8, valid_from=Non"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='campaign-biaryl-scope', type='campaign', compound_smiles=None, tags=['campaign', 'scope'], created_by='human', source='seed-corpus', confidence=0.8, valid_from=None, valid_to=None) bo"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='report-biaryl-development', type='report', compound_smiles=None, tags=['report'], created_by='human', source='seed-corpus', confidence=0.8, valid_from=None, valid_to=None) body='<retr"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "1",
+      "2",
+      "4",
+      "1.5",
+      "80",
+      "76"
+    ],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 18.84,
+    "event_counts": {
+      "token": 43,
+      "tool_call": 5,
+      "evidence_source": 1,
+      "tool_result": 5,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "d3fd37c1b779468eacc3efe567d77b54",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

@@ -1,0 +1,70 @@
+{
+  "probe": {
+    "id": "rx-34",
+    "section": 11,
+    "persona": "manager",
+    "bucket": "A",
+    "question": "Put together a scale-up readiness summary on the coupling for the stage gate — what we know, what the risks are, and what is still open.",
+    "expects_tools": [
+      "request_development_report",
+      "gather_evidence",
+      "find_notes",
+      "expand_note",
+      "find_knowledge_gaps"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "an engineering or equipment readiness assessment",
+      "a timeline, cost or resourcing statement",
+      "a go/no-go recommendation presented as the system's own decision",
+      "a risk stated without the record entry it came from"
+    ],
+    "direction": "Should assemble from the record rather than compose from general knowledge, and should be explicit that anything it generates enters the knowledge base through the human review gate rather than as fact — a manager-facing document is exactly where that line matters. Content that is genuinely supported: the recorded conditions and isolated yield, the protodeboronation and amide-coupling failure modes, the ligand-before-temperature and degassing playbooks, and the reporting rule that a yield must be quoted with its purification. Content that must be flagged as absent, not filled in: heat transfer and exotherm, mixing, equipment, solid form and crystallisation behaviour, impurity control strategy, genotoxic impurity assessment, and any timeline or resource view — none of which exist in this system. A good answer separates 'what the record supports' from 'what a stage gate needs and we do not have', and the second list is the more useful half.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rx-34",
+    "section": 11,
+    "persona": "manager",
+    "bucket": "A",
+    "question": "Put together a scale-up readiness summary on the coupling for the stage gate — what we know, what the risks are, and what is still open.",
+    "answer": "I'd like to help you put together a scale-up readiness summary, but I need to narrow the scope first: which coupling are you referring to? This could be a Suzuki coupling, a cross-coupling of any kind, an amide coupling, a different transformation altogether, or something specific to your current project.\n\nOnce I know which reaction you mean, I can:\n- Search the knowledge graph for all runs and optimizations of that coupling\n- Extract the current recipe and conditions from successful batches\n- Identify known risks (side-reactions, scale-sensitive parameters, safety flags)\n- Surface what remains to be tested before handoff\n\nIs there a specific coupling in your current development, or should I search for a named reaction (e.g. \"the biaryl coupling\", \"the pyridine coupling\")?",
+    "answered": true,
+    "tools_called": [
+      "ask_clarifying_question"
+    ],
+    "tool_results": [
+      {
+        "tool": "ask_clarifying_question",
+        "preview": "Question put to the chemist; awaiting their answer."
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": true,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 6.6,
+    "event_counts": {
+      "token": 9,
+      "tool_call": 1,
+      "question": 1,
+      "tool_result": 1,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "1d8c04ecc41b4d618046da18b2ece459",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

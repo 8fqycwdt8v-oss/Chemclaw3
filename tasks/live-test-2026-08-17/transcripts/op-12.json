@@ -1,0 +1,53 @@
+{
+  "probe": {
+    "id": "op-12",
+    "section": 3,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "You gave me two points — one sitting right next to my best run, one way out at low temperature. Explain why the model wants the second one. I need to defend it to my boss when it comes back at 20%.",
+    "expects_tools": [],
+    "expects_job": false,
+    "forbids_claims": [
+      "the model predicts the low-temperature point will be better",
+      "the optimizer guarantees an improvement",
+      "the second point is the optimum"
+    ],
+    "direction": "This is an explanation question and no tool call is required; an answer that re-runs the optimizer instead of explaining is worse, not better. A satisfying answer says, in a process chemist's language, that the two points are doing different jobs: the near one exploits a region the surrogate has already learned, where its predicted spread is small, and the far one is placed where the model is most uncertain, so its value is the information it returns rather than the yield. It must make the consequence explicit and defensible — a 20% result from the far point is not a wasted run, it is the run that stops the model recommending that region again — while being honest that the far point is not predicted to win and the optimizer promises nothing. Bonus for naming the risk the chemist should weigh: an excursion into untried conditions can carry a safety or selectivity surprise the model cannot see.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "op-12",
+    "section": 3,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "You gave me two points — one sitting right next to my best run, one way out at low temperature. Explain why the model wants the second one. I need to defend it to my boss when it comes back at 20%.",
+    "answer": "I'd be glad to explain the model's reasoning, but I need to see the campaign to do that honestly.\n\nCould you give me the **campaign id** from when I suggested those two points? (It would have been in my answer as something like `campaign_id: \"abc123...\"`.) That lets me pull the actual decision space, the runs you've done so far, and what the model predicted at each point — which is what tells me whether it's exploring an untried region or exploiting a gap it spotted in your best-run neighbourhood.\n\nWithout the id I could hand you a plausible story, but I couldn't defend it to your boss either, because I wouldn't actually know which point I suggested or why.\n\nOnce you give me the id, I can:\n1. **Read the decision space** — what factors, what ranges\n2. **Show you the posterior standard deviation** at both points — the model's confidence there vs. near your best run\n3. **Explain the trade-off** — whether it's betting on unexplored terrain or on curvature the dense region hasn't revealed\n4. **Quote the predicted value** at the low-temperature point so you know what it expects *if* it works\n\nThat last number is what matters most: if the model is predicting 50% or better at that point, the 20% result says something useful (the model was wrong, or the chemistry doesn't go that way, or there's a hidden constraint). If it predicted 25%, then 20% isn't a refutation — it's noise, and the point was worth running anyway because the alternative was to assume the model was right everywhere it had seen data.\n\nGive me the campaign id and I'll walk you through what the model actually saw.",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 7.62,
+    "event_counts": {
+      "token": 20,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "b74a4af741ee481bac600f1344e57388",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

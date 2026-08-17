@@ -1,0 +1,135 @@
+{
+  "probe": {
+    "id": "rp-16",
+    "section": 13,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "I need to pull together the development history of the amide coupling step for a regulatory submission section — everything we've done, each item traceable to where it came from.",
+    "expects_tools": [
+      "request_development_report",
+      "gather_evidence",
+      "find_notes",
+      "expand_note"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a completed submission section or CTD module presented as ready to file",
+      "a source note id that was not returned by a retrieval call",
+      "a regulatory-format template or required-section list held by the system",
+      "a report note that was created when the report job did not run"
+    ],
+    "direction": "This is the report harness's home ground: decompose into narrow sections, retrieve per section, cite every item with a wikilink to its source note, and mark a section with no evidence as unsupported rather than filling it. If request_development_report is called, what the answer says about that job must match what became of it — a real id and a job described as running if it started, a plainly-worded failure if it did not — never a quiet degradation into uncited prose presented as the report. A gather_evidence-based cited assembly, explicitly labelled as source material for a submission rather than as a submission section, is a strong answer. Every claim must be checkable against its link in one pass — that traceability is the entire deliverable here.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rp-16",
+    "section": 13,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "I need to pull together the development history of the amide coupling step for a regulatory submission section — everything we've done, each item traceable to where it came from.",
+    "answer": "I'll help you build a cited development report on the amide coupling step. Let me start by gathering the available evidence from the knowledge graph and past jobs.Good — there is an amide-coupling history in the graph. Let me expand the key notes to see the full recipes, outcomes, and decision logic:Perfect. I have the development history. Let me now use the development-report skill to structure this as a cited, auditable document suitable for a regulatory submission:The development report is now building. Let me poll its status:Excellent. The development report has been assembled and opened as a PR-gated note for human review. Here's what I've pulled together for you:\n\n## **Amide Coupling Step Development History** \n*Note ID: `report-amide-coupling-step-development-history-085ad364`*\n\n---\n\n### **What's included:**\n\nThe report documents your amide coupling development across **five sections**, each traceable to its source:\n\n1. **Baseline Reaction and Yield Performance** — The foundational EDC/HOBt coupling on benzoic acid + benzylamine, giving 81% with the standard conditions (DMF, 0 °C→rt, DIPEA 2.5 equiv), cited to `rxn-amide-edc` (confidence 0.85, human-authored).\n\n2. **Additive Optimization: HOBt Impact** — The three-substrate campaign (`campaign-amide-additive`, confidence 0.85) showing a consistent ~25-point yield improvement with HOBt. This is the evidence behind the distilled playbook (`playbook-amide-coupling-additive`), which explains the mechanism: HOBt intercepts the rearrangement-prone O-acylisourea faster than the N-acylurea forms irreversibly.\n\n3. **Solvent Selection and Screening** — The four-solvent screen (`opt-amide-solvent`, confidence 0.8) ranking DMF and MeCN (81%, 79%) as equivalent, DCM 12 points lower (69%), and 2-MeTHF at 76%. The note flags that the 5-point gap to DMF is recoverable at work-up.\n\n4. **Mechanistic Understanding and Failure Analysis** — The DCM failure case (`failure-dcm-amide-coupling`, confidence 0.75), which showed 34% instead of 70%. The root cause was temperature control, not the solvent itself — the reaction needed a 0 °C start to suppress rearrangement. This failure note explicitly connects back to the playbook to correct the wrong lesson (\"DCM is bad\") in favour of the right one (temperature management matters).\n\n5. **Process Recommendations and Risk Assessment** — The route review (`report-amide-route-review`, confidence 0.8) recommending **EDC/HOBt in 2-MeTHF, DIPEA 2.5 equiv, 0 °C→rt**, grounded in all three prior evidence streams: the base reaction, the additive campaign, and the solvent screen.\n\n---\n\n### **Key traits for regulatory submission:**\n\n- **Traceability**: Every claim is linked to a source note with its ID, type (reaction/campaign/playbook/failure-mode), confidence score, and authorship (human vs. distilled).\n- **Separation of evidence and reasoning**: The base reactions and screening data are kept distinct from the playbook rules distilled from them, so a reviewer can follow the chain.\n- **Failure documentation**: The DCM temperature failure is recorded with its cause and lesson, showing not just successes but how you prevented a similar mistake later.\n- **Scalability explicitly flagged**: The solvent note calls out that 2-MeTHF is the processable choice despite being 5 points lower than DMF.\n\nThe draft is now **open as a PR** — a human can review, edit, and merge it into the knowledge graph, at which point it becomes the official regulatory record for this step's development. You can cite the final merged note in your submission.\n\nWould you like me to adjust any section, add details (e.g., substrate scope, scale data, impurity profiles), or drill into any of the underlying experiments?",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "find_notes",
+      "find_past_jobs",
+      "expand_note",
+      "expand_note",
+      "expand_note",
+      "expand_note",
+      "expand_note",
+      "request_development_report",
+      "get_durable_job_status"
+    ],
+    "tool_results": [
+      {
+        "tool": "find_notes",
+        "preview": "[NoteRef(id='bo-amide-next', type='bo-candidate', compound_smiles=None, tags=['bo', 'suggestion'], created_by='human', source='seed-corpus', confidence=0.45, valid_from=None, valid_to=None), NoteRef(i"
+      },
+      {
+        "tool": "find_past_jobs",
+        "preview": ""
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "[EvidenceChunk(content='<retrieved-note-0d8f72b4838855b1 id=\"rxn-amide-edc\">\\nEDC/HOBt amide coupling of benzoic acid with benzylamine.\\n\\n- base: compound-dipea (2.5 equiv)\\n- solvent: DMF, 0 °C to r"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='playbook-amide-coupling-additive', type='playbook', compound_smiles=None, tags=['playbook', 'amide-coupling'], created_by='human', source='seed-corpus', confidence=0.85, valid_from=No"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='campaign-amide-additive', type='campaign', compound_smiles=None, tags=['campaign'], created_by='human', source='seed-corpus', confidence=0.85, valid_from=None, valid_to=None) body='<r"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='failure-dcm-amide-coupling', type='failure-mode', compound_smiles=None, tags=['failure-mode', 'amide-coupling'], created_by='human', source='seed-corpus', confidence=0.75, valid_from="
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='report-amide-route-review', type='report', compound_smiles=None, tags=['report'], created_by='human', source='seed-corpus', confidence=0.8, valid_from=None, valid_to=None) body='<retr"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='opt-amide-solvent', type='optimization-campaign', compound_smiles=None, tags=['optimization', 'solvent'], created_by='human', source='seed-corpus', confidence=0.8, valid_from=None, va"
+      },
+      {
+        "tool": "request_development_report",
+        "preview": "report-79d2f31038bf1542"
+      },
+      {
+        "tool": "get_durable_job_status",
+        "preview": "job_id='report-79d2f31038bf1542' status='completed' summary=\"Drafted 'Amide Coupling Step Development History' with 5 section(s); opened for review as note/report-amide-coupling-step-development-histo"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "1",
+      "81",
+      "0",
+      "2.5",
+      "0.85",
+      "2",
+      "25",
+      "3",
+      "0.8",
+      "79",
+      "12",
+      "76",
+      "5",
+      "4",
+      "0.75",
+      "34",
+      "70"
+    ],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [
+      "report-79d2f31038bf1542"
+    ],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 27.24,
+    "event_counts": {
+      "token": 46,
+      "tool_call": 10,
+      "tool_result": 10,
+      "evidence_source": 1,
+      "job_started": 1,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "a21d2ff18d554f13b85052778a47dda2",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

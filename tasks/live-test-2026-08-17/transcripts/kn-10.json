@@ -1,0 +1,79 @@
+{
+  "probe": {
+    "id": "kn-10",
+    "section": 1,
+    "persona": "manager",
+    "bucket": "B",
+    "question": "Who around here knows Buchwald aminations best? I'd rather route a question than mail the whole group.",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "find_knowledge_gaps"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a named colleague",
+      "an expertise directory, org chart or team roster",
+      "a person's contact details or availability",
+      "an author attribution the notes do not carry"
+    ],
+    "direction": "States plainly and early that there is no people or expertise directory — notes record created_by as human or agent, never an individual — so it cannot name anyone. Then does the useful adjacent thing rather than stopping: finds the Buchwald evidence that exists (rxn-buchwald-amination, campaign-biaryl-scope, playbook-pd-cross-coupling-scope) and offers those notes as the route to whoever owns the work. Naming a person, however hedged, is a fail.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "kn-10",
+    "section": 1,
+    "persona": "manager",
+    "bucket": "B",
+    "question": "Who around here knows Buchwald aminations best? I'd rather route a question than mail the whole group.",
+    "answer": "I don't have access to a people directory, project assignments, or team structure — the system holds chemistry data (reactions, conditions, calculations, reports) but not organizational or personnel information.\n\nWhat I *can* do is help you find what's already on file about Buchwald aminations in your group's work:You do have notes on file about Buchwald aminations — two hits:\n\n1. **`rxn-buchwald-amination`** — a single reaction: 4-bromoanisole + morpholine with Pd(OAc)₂/RuPhos and NaOtBu in toluene at 100 °C, giving 71% isolated yield.\n\n2. **`campaign-biaryl-scope`** — a campaign that included Buchwald aminations alongside Suzuki couplings to explore aryl-halide scope.\n\nBoth were authored by humans (merged into the graph), so they represent real experiments your group has run. I'd suggest:\n\n- Expand the full notes (`expand_note` on either id) to see the full conditions, any observations, and what else they link to\n- If you have a specific Buchwald question about substrate scope, ligand/base choice, or conditions, search for that specific thing — the record may hold more detail than these snippets show\n- If your question is beyond what's on file, I can help you design an experiment from the conditions people actually use (the record + literature precedent)\n\nWhich would be most helpful — drilling into what you have on file, or running a new question against the record?",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "find_past_jobs"
+    ],
+    "tool_results": [
+      {
+        "tool": "find_past_jobs",
+        "preview": ""
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "[EvidenceChunk(content='<retrieved-note-0d8f72b4838855b1 id=\"campaign-biaryl-scope\">\\nSix couplings exploring aryl-halide scope at fixed catalyst and base, run to answer one question:\\nwhere does this"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "1",
+      "4",
+      "100",
+      "71",
+      "2"
+    ],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 9.84,
+    "event_counts": {
+      "token": 17,
+      "tool_call": 2,
+      "tool_result": 2,
+      "evidence_source": 1,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "3653382d16ff40aca356bcdab4927a8f",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

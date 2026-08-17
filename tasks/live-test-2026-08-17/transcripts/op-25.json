@@ -1,0 +1,82 @@
+{
+  "probe": {
+    "id": "op-25",
+    "section": 4,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Which deoxyfluorination conditions in our data give the best yield on electron-poor substrates? I've got a nitro-substituted phenol to do.",
+    "expects_tools": [
+      "similar_reactions",
+      "similar_molecules",
+      "substructure_matches",
+      "gather_evidence"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a yield quoted without the record it came from",
+      "this will give you X% on your substrate",
+      "a condition set that does not appear in the retrieved records"
+    ],
+    "direction": "Retrieves from the indexed deoxyfluorination records by structure and reaction similarity, ranks the retrieved conditions by their recorded yields, and cites each. The judgment that matters is transfer: it must say how close the retrieved substrates actually are to a nitro-substituted phenol, and that a similarity neighbour is precedent, not a prediction — an electron-poor phenol may behave differently from anything in the set, and the answer should say what specifically would make it do so. Recommending one condition set to try first with a reason, while stating the caveat, is a good answer; quoting yields as if they were this substrate's is not.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "op-25",
+    "section": 4,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Which deoxyfluorination conditions in our data give the best yield on electron-poor substrates? I've got a nitro-substituted phenol to do.",
+    "answer": "I'll search for deoxyfluorination conditions in your record, focusing on electron-poor substrates and yields.The record appears not to hold any deoxyfluorination reactions — both queries returned other transformation types (Suzuki, acetylation, esterification, amidation, amination) with no fluorination results. \n\nTo move forward, I have two options:\n\n1. **Search your knowledge graph more broadly** for any fluorination conditions at all, in case they're indexed under a different reaction name\n2. **Help you design conditions** based on the literature and computational assessment of your specific nitro-phenol substrate\n\nThe fact that nitro-substituted phenols are *electron-poor* makes them particularly challenging for nucleophilic aromatic substitution (which is what deoxyfluorination usually is). Let me ask:Once I have your substrate structure, I can:\n- **Compute site reactivity** on the phenolic oxygen to predict what activation might be needed\n- **Search for similar molecules** that have been fluorinated to find any related precedent\n- **Check your conditions** against the safety and hazard screens for deoxyfluorinating reagents\n\nIn the meantime: deoxyfluorination on electron-poor aromatics typically demands either **very activated substrates** (like triflates or tosylates of phenols rather than the free OH) or **strong nucleophilic fluoride sources** (like TBAF or tetrabutylammonium difluorotriphenylsilicate) under forcing conditions. The nitro group actually helps activation by withdrawing electron density, but the phenolic OH is still the limiting factor here.",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "gather_evidence",
+      "ask_clarifying_question"
+    ],
+    "tool_results": [
+      {
+        "tool": "gather_evidence",
+        "preview": "[EvidenceChunk(content='<retrieved-note-0d8f72b4838855b1 id=\"rxn-suzuki-biaryl\">\\nSuzuki-Miyaura coupling of 4-bromoanisole with phenylboronic acid.\\n\\n- aryl halide: compound-4-bromoanisole\\n- boroni"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": ""
+      },
+      {
+        "tool": "ask_clarifying_question",
+        "preview": "Question put to the chemist; awaiting their answer."
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "1",
+      "2"
+    ],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": true,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 12.31,
+    "event_counts": {
+      "token": 21,
+      "tool_call": 3,
+      "evidence_source": 2,
+      "tool_result": 3,
+      "question": 1,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "6291a28bec054d6285356b0a4e92fda6",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}
