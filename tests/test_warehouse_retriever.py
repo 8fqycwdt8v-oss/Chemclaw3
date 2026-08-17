@@ -277,3 +277,24 @@ def test_the_query_is_embedded_off_the_event_loop(monkeypatch: pytest.MonkeyPatc
         return ticks
 
     assert asyncio.run(_run()) > 5, "the loop kept running while the provider was blocking"
+
+
+def test_a_key_the_filesystem_cannot_resolve_costs_its_own_row_and_no_other(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The confinement must not be stricter than the question it answers.
+
+    `is_file()` returns False for a path with an embedded NUL; `resolve()` raises `ValueError` on
+    one. Confining the path without guarding that turned a single unusable row into a raise that
+    propagated to `retrieve()`'s backstop and returned `[]` for the **whole leg** — discarding
+    every other legitimate hit. That is the same "hide evidence" outcome the confinement exists to
+    prevent, so it is asserted here from the other side.
+    """
+    (tmp_path / "reaction").mkdir()
+    monkeypatch.setattr(type(settings), "knowledge_path", property(lambda _: tmp_path))
+
+    hits = _hits()
+    hits["V_EMBEDDING"][0]["REACTION_ID"] = "RX-\x00-nul"
+    chunks = _retrieve(_binding(), hits)
+
+    assert len(chunks) == 2, "one unusable key must not zero the other rows in the same result"

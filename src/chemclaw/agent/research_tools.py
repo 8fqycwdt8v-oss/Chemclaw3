@@ -243,6 +243,12 @@ async def gather_evidence(
             update={
                 "content": frame_untrusted(chunk.content, note_id=chunk.source_note_id),
                 "source": defang(chunk.source),
+                # `source_note_id` for the same reason and from the same producer: the warehouse
+                # retriever builds both from one row key, one statement apart. `safe_id` sanitizes
+                # only the *copy* interpolated into the envelope's `id=` attribute — the field on
+                # the returned model is what the tool result serializes, and it reached the model
+                # raw. Defanged rather than `safe_id`'d, because a citation has to stay resolvable.
+                "source_note_id": defang(chunk.source_note_id),
             }
         )
         for chunk in ranked[: settings.gather_evidence_max_chunks]

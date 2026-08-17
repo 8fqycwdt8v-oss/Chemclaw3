@@ -32,7 +32,7 @@ from chemclaw.ingest.eln.ord import (
 from chemclaw.ingest.eln.ord_adapter import OrdFormatError, OrdJsonAdapter
 from chemclaw.ingest.eln.sync import sync_entries
 from chemclaw.ingest.eln.validate import validate_ord
-from chemclaw.kg.note import note_id_for_reaction
+from chemclaw.kg.note import cited_links, note_id_for_reaction
 from chemclaw.kg.render import render_note
 from chemclaw.retrieval.retrievers import GraphRetriever
 from chemclaw.science.fingerprints.molfp.search import find_similar_molecules
@@ -1748,6 +1748,25 @@ def test_eln_free_text_cannot_forge_a_knowledge_graph_relation() -> None:
     assert note.outgoing_relations() == [], "the ELN must not be able to author a graph edge"
     # Neutralized, not deleted: a reviewer still reads what the chemist actually wrote.
     assert "contradicts:reaction-1234" in note.body
+
+
+@pytest.mark.parametrize("brackets", [2, 3, 4, 5, 6])
+def test_no_depth_of_opening_bracket_spells_a_relation(brackets: int) -> None:
+    """`[[[` is the spelling that defeated the first version of this escape, so depth is a case.
+
+    `str.replace("[[", "[ [")` consumes the first two brackets and leaves the third untouched, so
+    `[[[x]]` came out as `[ [[x]]` — a *new* valid delimiter, manufactured by the neutralizer
+    itself, and the edge was forged anyway. The test that shipped with that fix asserted only the
+    two-bracket spelling, so the suite was green while the control did not work. Parametrized
+    rather than fixed at three, because the property is "no depth works", not "three does not".
+    """
+    reaction = _ester()
+    reaction.hypothesis = "[" * brackets + "contradicts:reaction-1234]]"
+
+    note = note_from_ord_reaction(reaction)
+
+    assert note.outgoing_relations() == [], f"{brackets} opening brackets forged an edge"
+    assert not cited_links(note.body), "no link of any kind may survive the escape"
 
 
 def test_mass_balance_catches_a_new_element_and_nothing_weaker() -> None:

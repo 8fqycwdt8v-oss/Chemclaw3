@@ -12,7 +12,7 @@ moment of ranking, which is the distinction the human gate exists to preserve. K
 distinct call is what makes the separation structural rather than a naming convention.
 """
 
-from chemclaw.agent.framing import frame_untrusted
+from chemclaw.agent.framing import defang, frame_untrusted
 from chemclaw.core.config import settings
 from chemclaw.core.tool_registry import tool
 from chemclaw.core.turn_signals import record_proposal
@@ -88,7 +88,13 @@ async def recall_observations(limit: int = 0) -> list[Observation]:
             update={
                 "statement": frame_untrusted(
                     observation.statement, note_id=observation.id or "observation"
-                )
+                ),
+                # `projects_seen` is the same corpus text one field over: it comes from
+                # `OrdReaction.project`, an unconstrained ELN string, and rides outside the
+                # envelope where a forged delimiter reads as the envelope closing. `scope` and
+                # `evidence_note_ids` need no such treatment — both are built from validated note
+                # ids — and `origin`/`status` are Literals.
+                "projects_seen": [defang(project) for project in observation.projects_seen],
             }
         )
         for observation in await open_observations(limit or None)

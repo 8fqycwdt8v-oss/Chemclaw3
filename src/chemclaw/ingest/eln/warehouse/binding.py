@@ -68,7 +68,12 @@ class BindingError(PathSyntaxError):
 
 def _check_identifier(value: str, what: str) -> str:
     """Raise unless `value` is a bare or dotted SQL identifier safe to interpolate."""
-    if not _IDENTIFIER.match(value):
+    # `fullmatch` rather than `match`: with a trailing `$` anchor, `match` also accepts one
+    # trailing newline, so a function name ending in one passed and reached the statement text.
+    # Nothing could follow that newline — the rest of the value would have to match as well — so
+    # this was hygiene rather than a hole. But a checker whose whole job is "the value is exactly
+    # this shape" should not rest on which of two anchor semantics it happened to get.
+    if not _IDENTIFIER.fullmatch(value):
         raise BindingError(
             f"{what} {value!r} is not a plain SQL identifier; a binding may only name relations "
             "and columns, and every value it contributes is a bound parameter"

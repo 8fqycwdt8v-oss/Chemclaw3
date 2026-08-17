@@ -222,9 +222,21 @@ def _is_merged_note(key: str) -> bool:
     landing on any file that happens to exist. Confinement rather than a slug pattern, because a
     site's own row keys are its business — one containing a slash is unusual, not hostile, and it
     still has no note, which is exactly what this returns for it.
+
+    Guarded rather than bare, because `resolve()` is stricter than the `is_file()` it feeds:
+    `is_file()` answers `False` for a path with an embedded NUL or a symlink loop, while
+    `resolve()` raises `ValueError`/`RuntimeError` on both. Unguarded, one warehouse row with a NUL
+    in its key propagated out of `_chunks` to `retrieve()`'s backstop and returned `[]` for the
+    **entire leg** — discarding every other legitimate hit in that result set. That is the same
+    "hide evidence" outcome the confinement exists to prevent, reached from the other side, and the
+    confinement widened its trigger from one case to three. A key this system cannot resolve has no
+    note, which is what every one of these returns.
     """
     root = Path(settings.knowledge_path).resolve()
-    note = (root / note_relative_path("reaction", note_id_for_reaction(key))).resolve()
-    if not note.is_relative_to(root):
+    try:
+        note = (root / note_relative_path("reaction", note_id_for_reaction(key))).resolve()
+        if not note.is_relative_to(root):
+            return False
+        return note.is_file()
+    except (OSError, ValueError, RuntimeError):
         return False
-    return note.is_file()
