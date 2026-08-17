@@ -12,6 +12,7 @@ that a deployment must opt in before anything is deleted.
 import asyncio
 from typing import Any
 
+import psycopg
 import pytest
 from langchain_core.messages import HumanMessage, message_to_dict
 from psycopg.types.json import Jsonb
@@ -22,6 +23,7 @@ from chemclaw.core import db
 from chemclaw.core.config import settings
 from chemclaw.durable import retention
 from chemclaw.durable.retention import (
+    _ANALYZE_THREADS,
     _EXPIRED_THREADS,
     _PRUNABLE,
     RetentionOutcome,
@@ -470,8 +472,10 @@ def test_one_pass_works_a_bounded_batch_and_reports_the_rest() -> None:
     The conversation prune costs three round trips per session and cannot be one `DELETE` (D-145),
     so a deployment enabling retention over a long backlog faces every session it has ever had
     inside one activity's `retention_timeout_seconds`. Capped, each pass makes bounded progress —
-    and says how much it left, because a cap that is not reported reads as "there was nothing
-    more" and a growing table would look bounded in every result this job returns.
+    and says *that* it left something, because a cap that is not reported reads as "there was
+    nothing more" and a growing table would look bounded in every result this job returns. The
+    figure is a probe rather than a remainder — one row is selected over the cap and no more, so it
+    is 0 or 1 — because a true count is a second whole-table aggregate (`RetentionOutcome`).
     """
 
     async def _run() -> tuple[RetentionOutcome, int]:
@@ -611,12 +615,16 @@ def test_an_expired_thread_leaves_none_of_its_three_tables_behind() -> None:
     )
 
 
-def test_the_checkpoint_pass_says_how_many_threads_it_left() -> None:
+def test_the_checkpoint_pass_says_that_it_left_threads_behind() -> None:
     """A capped checkpoint pass reports its tail, for the reason the conversation pass does.
 
     Without it, a first pass against a deployment with a large backlog returns exactly the cap as
     its deleted count and an empty `skipped` — indistinguishable from a pass that drained the table,
     while the growth this sweep exists to bound continues.
+
+    *That* a tail exists, not how long it is: `_EXPIRED_THREADS` is asked for exactly one row over
+    the cap, so `threads_deferred` is 0 or 1 by construction and the assertion below is written as
+    the boolean it really is.
     """
 
     async def _run() -> tuple[RetentionOutcome, int]:
@@ -715,23 +723,33 @@ def test_a_schema_with_no_checkpointer_is_skipped_rather_than_failed() -> None:
     )
 
 
-# --- The thread query's LIMIT has to bound the scan, not just the answer ------------------------
+# --- The thread query has to stream `checkpoints_pkey`, in both backlog shapes ------------------
 
 # The shape the plan assertions are measured against. Enough threads that a `HashAggregate` over
 # every group is what the planner reaches for on a table with no statistics — which is the state
 # `checkpoints` is in until autovacuum first analyzes it, because `AsyncPostgresSaver.setup()`
 # creates it outside `infra/sql` and a first retention pass can easily arrive before that. Below
-# roughly this size Postgres happens to pick a streaming plan for the old query too, and the defect
-# hides.
+# roughly this size Postgres happens to pick a streaming plan even unanalyzed, and the defect hides.
 _SCAN_THREADS = 2000
 _SCAN_CHECKPOINTS_PER_THREAD = 5
-# One thread in ten is *still in use*: its oldest checkpoints are past the cutoff while its newest
-# is not. The walk has to skip those without reading past its `LIMIT`, so they belong in the fixture
-# the plan is measured on, not only in the behavioural test.
-_SCAN_LIVE_EVERY = 10
 # Far below the seeded thread count, so "the scan stopped early" is a difference of two orders of
 # magnitude rather than a rounding one.
 _SCAN_CAP = 20
+
+# The two backlog shapes the sweep actually meets, as `live_every` values for the bulk fixture: one
+# thread in `live_every` is *still in use* (its oldest checkpoints are past the cutoff, its newest
+# is not), so `10` is a first pass against a table nobody has ever pruned and `1` is every pass
+# after it.
+#
+# `_SCAN_SPARSE` is the one that matters and the one the previous version of this file did not
+# have. Retention runs daily, so after the first pass the expired threads are a *minority* scattered
+# anywhere in `thread_id` order — and a `LIMIT` cannot bound the scan there, because finding a
+# minority means visiting everyone. Asserting a cap-shaped bound on the dense fixture alone was a
+# test of one shape claiming a general property: it passed a `WITH RECURSIVE` walk that, on this
+# same fixture made sparse, enumerated all 2 001 threads to answer for 21 and read 26 003 rows of a
+# 10 000-row table.
+_SCAN_DENSE_LIVE_EVERY = 10
+_SCAN_SPARSE_LIVE_EVERY = 1
 
 
 async def _seed_checkpoint_threads(threads: int, per_thread: int, live_every: int) -> None:
@@ -814,39 +832,63 @@ def _rows_examined(plan: dict[str, Any]) -> int:
     )
 
 
-def test_the_thread_query_lets_the_limit_bound_the_scan() -> None:
-    """The defect: the old `LIMIT` bounded the deletes and not the work that produced them.
+# The plan nodes that mean "this statement materialised the whole table before answering". Their
+# absence is the property under test: with statistics, `GROUP BY thread_id ORDER BY thread_id`
+# matches `checkpoints_pkey`'s leading column, so the answer is produced by streaming the index and
+# the `LIMIT` terminates it — no hash table over every group, no sort of every group, no seq scan.
+_MATERIALISING_NODES = ("Seq Scan", "HashAggregate", "Sort")
 
-    `SELECT thread_id FROM checkpoints GROUP BY thread_id HAVING max(...) < cutoff ORDER BY
-    thread_id LIMIT n` plans, on a real table, as `Seq Scan → HashAggregate → Sort → Limit`: every
-    row read and every group built before the `LIMIT` can discard one. Work grows with the table and
-    not with the cap, so past the size where it exceeds `pg_statement_timeout_seconds` the activity
-    is cancelled, retried by Temporal, cancelled again, and the table it exists to bound grows
-    forever with a timeout as the only symptom.
 
-    Three properties, each of which the old statement fails:
+@pytest.mark.parametrize(
+    ("live_every", "expected_threads"),
+    [
+        pytest.param(_SCAN_DENSE_LIVE_EVERY, _SCAN_CAP + 1, id="dense-first-pass"),
+        pytest.param(_SCAN_SPARSE_LIVE_EVERY, 0, id="sparse-steady-state"),
+    ],
+)
+def test_the_thread_query_streams_the_primary_key_in_both_backlog_shapes(
+    live_every: int, expected_threads: int
+) -> None:
+    """One streaming pass over `checkpoints_pkey`, whether the backlog is dense or drained.
 
-    * **nothing sequentially scans `checkpoints`** — every access is through `checkpoints_pkey`, so
-      the cost of a pass is a number of index probes rather than a fraction of the table;
-    * **the recursion stops at the cap** — the walk enumerates barely more threads than it was asked
-      for, out of a table holding two orders of magnitude more;
-    * **the rows actually read are a small fraction of the table**, which is the plain statement of
-      "the `LIMIT` bounded the scan".
+    **The property, and why it is this one.** A retention pass has to find the threads whose
+    *newest* checkpoint has expired. When they are a scattered minority — every pass after the
+    first, since this job runs daily — no statement can be bounded by the cap, because finding a
+    minority means visiting everyone. So the honest bound is not "read few rows" but **"read no row
+    twice"**: one ordered walk of the primary key, `max()` accumulated as it goes, the `LIMIT`
+    stopping it as soon as the cap is full. That is what `Limit → GroupAggregate → Index Scan using
+    checkpoints_pkey` does, and it is the plan `_EXPIRED_THREADS` gets once `_ANALYZE_THREADS` has
+    run.
 
-    Asserted on measured row counts and on the absence of a sequential scan rather than on an exact
-    plan shape, because the point is that this statement has only one plan available to it — which
-    is itself the fix. `DISTINCT` was tried first and rejected for failing exactly here: measured,
-    it plans `Limit → Unique → Index Scan` on a table with statistics and
-    `Seq Scan → HashAggregate → Sort → Limit` on the same table without them.
+    Three assertions, and each of them is a measured failure of the `WITH RECURSIVE` loose index
+    scan this statement was briefly replaced by:
+
+    * **nothing materialises the table** — no `Seq Scan`, no `HashAggregate`, no `Sort`. This is the
+      claim the rewrite was built on ("an aggregate must build every group before the `LIMIT` can
+      discard one") and it is true only of a table with no statistics.
+    * **no row is read more than once** — the walk read 26 003 rows of this 10 000-row fixture made
+      sparse, because it pays a fresh index probe *plus* a correlated `max()` per thread. Measured
+      at 200 000 threads that is 8 147 ms against this statement's 593 ms, and it is *cancelled*
+      under a 2 s statement timeout where this completes in 618 ms.
+    * **on a dense backlog the `LIMIT` still stops the scan early** — a first pass reads a small
+      fraction of the table, which is the case the rewrite existed to serve and which this statement
+      serves better (2.5 ms against 21.3 ms at 200 000 threads).
+
+    The sparse arm is the one the previous version of this test lacked, and its absence is why a
+    regression passed: the fixture pinned `live_every = 10`, making 90% of threads expired, so a
+    statement that visits every thread still looked cap-bounded.
     """
 
     async def _run() -> tuple[dict[str, Any], list[str]]:
         await migrated_db_or_skip()
         await _create_checkpoint_tables()
         try:
-            await _seed_checkpoint_threads(
-                _SCAN_THREADS, _SCAN_CHECKPOINTS_PER_THREAD, _SCAN_LIVE_EVERY
-            )
+            await _seed_checkpoint_threads(_SCAN_THREADS, _SCAN_CHECKPOINTS_PER_THREAD, live_every)
+            async with db.connection(settings.postgres_dsn) as conn:
+                # The statement the sweep itself runs one statement earlier, for the same reason:
+                # this plan is only available to a planner that has statistics for `checkpoints`.
+                await conn.execute(_ANALYZE_THREADS)
+                await conn.commit()
             plan = await _plan_of(_EXPIRED_THREADS, (30, _SCAN_CAP + 1))
             async with db.connection(settings.postgres_dsn) as conn, conn.cursor() as cur:
                 await cur.execute(_EXPIRED_THREADS, (30, _SCAN_CAP + 1))
@@ -859,27 +901,106 @@ def test_the_thread_query_lets_the_limit_bound_the_scan() -> None:
     seeded_rows = _SCAN_THREADS * _SCAN_CHECKPOINTS_PER_THREAD
     nodes = _plan_nodes(plan)
 
-    assert len(threads) == _SCAN_CAP + 1, (
-        "the thread query must return one over the cap, so the pass can tell a drained backlog "
-        f"from a capped one; got {len(threads)}"
+    assert len(threads) == expected_threads, (
+        f"the thread query returned {len(threads)} threads, expected {expected_threads}; the cap "
+        "probe is how the pass tells a drained backlog from a capped one"
     )
 
-    sequential = [node["Node Type"] for node in nodes if node["Node Type"] == "Seq Scan"]
-    assert sequential == [], (
-        "the thread query sequentially scans `checkpoints`; its cost is then the table's size, "
-        "which is what makes a first pass on a large one time out for ever"
-    )
-
-    walked = [node["Actual Rows"] for node in nodes if node["Node Type"] == "Recursive Union"]
-    assert walked and max(walked) <= _SCAN_CAP + 3, (
-        f"the walk enumerated {walked} threads of {_SCAN_THREADS} to answer for {_SCAN_CAP + 1}; "
-        "the LIMIT is bounding the answer, not the scan"
+    materialising = [
+        node["Node Type"] for node in nodes if node["Node Type"] in _MATERIALISING_NODES
+    ]
+    assert materialising == [], (
+        f"the thread query materialises `checkpoints` ({materialising}); its cost is then the "
+        "table's size however small the cap, which is what makes a pass on a large one time out"
     )
 
     examined = _rows_examined(plan)
-    assert examined < seeded_rows // 10, (
-        f"the query read {examined} of {seeded_rows} rows for {_SCAN_CAP + 1} threads — "
-        "the LIMIT is bounding the answer, not the scan"
+    assert examined <= seeded_rows, (
+        f"the query read {examined} of {seeded_rows} seeded rows — more than one read per row "
+        "means a probe per thread rather than one ordered pass, which is what times out when the "
+        "expired threads are a scattered minority"
+    )
+
+    if expected_threads:
+        assert examined < seeded_rows // 10, (
+            f"the query read {examined} of {seeded_rows} rows to fill a cap of {_SCAN_CAP + 1} — "
+            "on a dense backlog the LIMIT must still stop the scan early"
+        )
+
+
+def test_the_sweep_gives_the_planner_the_statistics_no_migration_can() -> None:
+    """The one shape where `_EXPIRED_THREADS` plans badly, and the one statement that fixes it.
+
+    `checkpoints` is created by `AsyncPostgresSaver.setup()`, outside `infra/sql`, so no migration
+    ever analyzes it and a first retention pass can easily arrive before autovacuum does. With no
+    statistics the planner has no idea `thread_id` holds thousands of distinct values, so it reaches
+    for `Parallel Seq Scan → Partial HashAggregate → Sort → Finalize GroupAggregate` — measured at
+    200 000 threads, that is 1 526 ms with 5.8 MB spilled to disk, against 2.5 ms for the identical
+    statement once analyzed. Past the size where it exceeds `pg_statement_timeout_seconds` the
+    activity is cancelled, retried by Temporal, cancelled again, and the table it exists to bound
+    grows forever with a timeout as the only symptom.
+
+    So this asserts both halves: that the hazard is real on a table nobody has analyzed, and that
+    running the sweep removes it. The table is **dropped and recreated** rather than emptied,
+    because `DELETE` leaves `pg_statistic` behind — an earlier test in this file would otherwise
+    hand this one the very statistics it is meant to be missing.
+    """
+
+    async def _run() -> tuple[list[str], list[str]] | None:
+        await migrated_db_or_skip()
+        async with db.connection(settings.postgres_dsn) as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("SELECT current_schema()")
+                row = await cur.fetchone()
+            schema = str(row[0]) if row else "public"
+            # Schema-qualified for the reason
+            # `test_a_schema_with_no_checkpointer_is_skipped_rather_than_failed` spells out at
+            # length: an unqualified drop resolves to `public` and takes the running deployment's
+            # turn state with it.
+            await conn.execute(f'DROP TABLE IF EXISTS "{schema}".checkpoints')
+            await conn.commit()
+        await _create_checkpoint_tables()
+        async with db.connection(settings.postgres_dsn) as conn, conn.cursor() as cur:
+            await cur.execute("SELECT to_regclass(%s)", (f"{schema}.checkpoints",))
+            recreated = await cur.fetchone()
+        if recreated is None or recreated[0] is None:
+            return None
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(settings, "retention_checkpoints_days", 30)
+        monkeypatch.setattr(settings, "retention_session_messages_days", 0)
+        monkeypatch.setattr(settings, "retention_session_events_days", 0)
+        # A tiny cap so the sweep's own deletions barely change the table between the two plans.
+        monkeypatch.setattr(settings, "retention_max_sessions_per_pass", 2)
+        try:
+            await _seed_checkpoint_threads(
+                _SCAN_THREADS, _SCAN_CHECKPOINTS_PER_THREAD, _SCAN_DENSE_LIVE_EVERY
+            )
+            before = _plan_nodes(await _plan_of(_EXPIRED_THREADS, (30, _SCAN_CAP + 1)))
+            await prune_expired_rows()
+            after = _plan_nodes(await _plan_of(_EXPIRED_THREADS, (30, _SCAN_CAP + 1)))
+            return (
+                [node["Node Type"] for node in before],
+                [node["Node Type"] for node in after],
+            )
+        finally:
+            monkeypatch.undo()
+            await _clear_checkpoint_tables()
+
+    plans = asyncio.run(_run())
+    if plans is None:
+        pytest.skip(
+            "the isolation schema's `checkpoints` could not be recreated, so the no-statistics "
+            "state cannot be produced without touching tables this test does not own"
+        )
+    before, after = plans
+
+    assert "Seq Scan" in before, (
+        "this fixture no longer reproduces the unanalyzed plan, so the assertion below proves "
+        f"nothing; nodes were {before}"
+    )
+    assert not set(after) & set(_MATERIALISING_NODES), (
+        "the sweep ran and the thread query still materialises the whole table: `ANALYZE` is not "
+        f"reaching `checkpoints`, nodes were {after}"
     )
 
 
@@ -925,9 +1046,9 @@ def test_a_thread_whose_oldest_checkpoints_expired_but_is_still_in_use_is_not_de
     the turn state of exactly the threads still in daily use, silently, because nothing reads a
     checkpoint until someone resumes the conversation and finds no state.
 
-    So the walk asks `max(ts) < cutoff` of each thread it visits rather than "does this thread hold
-    an expired checkpoint", and this is the test that it still does. The straddling thread
-    deliberately gets a lower-sorting id than the fully expired one, so the walk reaches it first.
+    So the query asks `max(ts) < cutoff` per thread rather than "does this thread hold an expired
+    checkpoint", and this is the test that it still does. The straddling thread deliberately gets a
+    lower-sorting id than the fully expired one, so an ordered scan reaches it first.
     """
 
     async def _run() -> tuple[dict[str, int], dict[str, int], RetentionOutcome]:
@@ -966,3 +1087,146 @@ def test_a_thread_whose_oldest_checkpoints_expired_but_is_still_in_use_is_not_de
     assert outcome.deleted["checkpoints"] == 2, (
         f"exactly the finished thread's two checkpoints should have gone: {outcome.deleted}"
     )
+
+
+# --- The disposal rule, shape by shape ----------------------------------------------------------
+
+# How far inside the window "newer than the cutoff" has to be for the assertion to be deterministic.
+# The cutoff is `now()` at *query* time, so a checkpoint seeded at exactly `now() - window` is
+# already fractionally older than it by the time the query runs and is correctly expired. A minute
+# is far enough inside that no plausible scheduling delay between the seed and the query can flip
+# it, and still small enough — against a 30-day window — to be a boundary rather than a margin.
+_BOUNDARY_SECONDS = 60
+
+
+async def _seed_checkpoint_at(
+    thread_id: str, checkpoint_ns: str, checkpoint_id: str, *, days: int, seconds: int = 0
+) -> None:
+    """One checkpoint row dated `days`+`seconds` before the database's own `now()`.
+
+    Sub-day precision, which `_seed_thread_with_ages` has no way to express, because the boundary
+    case is a checkpoint a minute either side of the cutoff rather than a day.
+    """
+    async with db.connection(settings.postgres_dsn) as conn:
+        await conn.execute(
+            "INSERT INTO checkpoints "
+            "(thread_id, checkpoint_ns, checkpoint_id, checkpoint, metadata) "
+            "VALUES (%s, %s, %s, jsonb_build_object('v', 1, 'id', %s::text, 'ts', "
+            "    to_char((now() - make_interval(days => %s::int, secs => %s::int)) "
+            "            AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US+00:00')), '{}'::jsonb)",
+            (thread_id, checkpoint_ns, checkpoint_id, checkpoint_id, days, seconds),
+        )
+        await conn.commit()
+
+
+async def _seed_raw_checkpoint(thread_id: str, payload: dict[str, Any]) -> None:
+    """One checkpoint row whose payload is written verbatim — including a `ts` Postgres cannot cast.
+
+    The seeding helpers above all build a well-formed timestamp, which is exactly what the two
+    malformed shapes need to avoid.
+    """
+    async with db.connection(settings.postgres_dsn) as conn:
+        await conn.execute(
+            "INSERT INTO checkpoints "
+            "(thread_id, checkpoint_ns, checkpoint_id, checkpoint, metadata) "
+            "VALUES (%s, '', %s, %s, '{}'::jsonb)",
+            (thread_id, str(payload["id"]), Jsonb(payload)),
+        )
+        await conn.commit()
+
+
+async def _expired_threads(days: int, cap: int) -> list[str]:
+    """The threads `_EXPIRED_THREADS` names as disposable: the sweep's question, asked alone."""
+    async with db.connection(settings.postgres_dsn) as conn, conn.cursor() as cur:
+        await cur.execute(_EXPIRED_THREADS, (days, cap))
+        return [str(row[0]) for row in await cur.fetchall()]
+
+
+def test_the_thread_query_is_the_disposal_rule_on_every_shape() -> None:
+    """A thread is expired **iff its newest checkpoint is older than the cutoff** — on every shape.
+
+    The rule is the one thing about this statement that may never change, and it has now been
+    written three ways (a grouped `HAVING`, a recursive walk, and back), so it is pinned against the
+    shapes a real `checkpoints` table holds rather than against whichever statement is current:
+
+    * **an empty table** — no threads, not an error and not everything;
+    * **no `ts` key at all** — `checkpoint->>'ts'` is SQL `NULL`, `max()` ignores it, and a thread
+      whose timestamps are all missing is therefore never disposable. Worth pinning because the
+      alternative reading, "unknown age means old", would delete live turn state;
+    * **more than one `checkpoint_ns` per thread** — the unit of disposal is the *thread*, so the
+      newest checkpoint in *any* namespace keeps the whole thread alive. Grouping by `thread_id`
+      alone is what makes that true, and grouping by the primary key's first two columns instead
+      would silently delete the default namespace of a thread whose subgraph is still running;
+    * **a timestamp at the boundary** — the comparison is strict `<`, so the edge belongs to the
+      expired side only once the clock has moved past it;
+    * **a thread resumed inside the window** — old checkpoints, newest one recent, must survive.
+
+    A malformed `ts` is the sixth shape and is asserted separately below, because its correct
+    answer is an exception rather than a set.
+    """
+
+    async def _run() -> tuple[list[str], list[str]]:
+        await migrated_db_or_skip()
+        await _create_checkpoint_tables()
+        await _clear_checkpoint_tables()
+        try:
+            empty = await _expired_threads(30, 100)
+
+            # Every timestamp missing: never expired, however old the row is.
+            await _seed_raw_checkpoint("shape-a-no-ts", {"v": 1, "id": "ckpt-0"})
+            # Two namespaces, and only the non-default one is still live: the thread survives whole.
+            await _seed_checkpoint_at("shape-b-two-ns", "", "ckpt-0", days=400)
+            await _seed_checkpoint_at("shape-b-two-ns", "sub", "ckpt-0", days=1)
+            # Two namespaces, both finished: the thread goes.
+            await _seed_checkpoint_at("shape-c-two-ns-dead", "", "ckpt-0", days=400)
+            await _seed_checkpoint_at("shape-c-two-ns-dead", "sub", "ckpt-0", days=380)
+            # Exactly at the cutoff when it was written, so fractionally past it when asked.
+            await _seed_checkpoint_at("shape-d-on-the-edge", "", "ckpt-0", days=30)
+            # A minute inside the window: not expired.
+            await _seed_checkpoint_at(
+                "shape-e-inside-the-edge", "", "ckpt-0", days=30, seconds=-_BOUNDARY_SECONDS
+            )
+            # Resumed across the window: old checkpoints, recent newest.
+            await _seed_checkpoint_at("shape-f-resumed", "", "ckpt-0", days=400)
+            await _seed_checkpoint_at("shape-f-resumed", "", "ckpt-1", days=1)
+
+            return empty, await _expired_threads(30, 100)
+        finally:
+            await _clear_checkpoint_tables()
+
+    empty, expired = asyncio.run(_run())
+
+    assert empty == [], f"an empty table named threads as expired: {empty}"
+    assert expired == ["shape-c-two-ns-dead", "shape-d-on-the-edge"], (
+        "the thread query no longer states the disposal rule: a thread is expired exactly when its "
+        f"newest checkpoint, in any namespace, is older than the cutoff. Got {expired}"
+    )
+
+
+def test_an_uncastable_timestamp_fails_the_pass_rather_than_disposing_of_anything() -> None:
+    """A `ts` Postgres cannot parse must raise, not be treated as old and not be skipped.
+
+    Postgres has no `TRY_CAST`, so `(checkpoint->>'ts')::timestamptz` on a payload holding
+    `"not-a-timestamp"` raises and the checkpoint pass fails — loudly, which is the right failure
+    for a disposal job: the tables before `checkpoints` in `_PRUNABLE` have already committed their
+    own deletions, and swallowing this would turn a job that *cannot run* into one reporting success
+    while the table it bounds keeps growing.
+
+    This also records where the two statements this rule has been written as differ. The grouping
+    scan casts every row it reaches, so a malformed `ts` anywhere ahead of the cap fails the whole
+    pass; the recursive walk cast only the threads it visited, so the same row failed a later pass
+    instead. Earlier and louder is the direction a retention job wants, and this test pins it.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        await _create_checkpoint_tables()
+        await _clear_checkpoint_tables()
+        try:
+            await _seed_raw_checkpoint("shape-g-bad-ts", {"v": 1, "id": "ckpt-0", "ts": "not-a-ts"})
+            await _expired_threads(30, 100)
+        finally:
+            await _clear_checkpoint_tables()
+
+    with pytest.raises(psycopg.DataError):
+        asyncio.run(_run())
