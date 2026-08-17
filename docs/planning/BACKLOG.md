@@ -436,3 +436,22 @@ aggregated WARNING naming the remedy); the gap is that the harness never takes t
 bring-up should run `ElnSyncWorkflow` with an explicit early `since` before anything advances the
 cursor, so the ORD half of the mock's data is actually reachable in an end-to-end pass. Found by
 the 2026-08-17 full-stack run — see `tasks/live-test/full-stack-e2e-2026-08-17.md`.
+
+## Surface `invalid_tool_calls` — an unparseable tool call is currently a silent no-op
+
+LangChain puts a tool call whose arguments do not parse into `AIMessage.invalid_tool_calls` rather
+than `tool_calls`. Nothing in `src/` reads that field, so the agent — which iterates `tool_calls` —
+drops the call without a `tool_failed`, a `tool_result`, or any other trace. Proven outside the
+stack via `langchain_openai.chat_models.base._convert_dict_to_message`: truncated arguments yield
+`tool_calls: []` and a populated `invalid_tool_calls` carrying the parse error.
+
+A truncated argument document is what a real model emits when a stream is cut or a token budget
+runs out, so this is reachable in production, not only under the storm's mock. With no prose the
+turn ends as `empty_answer`; **with prose it proceeds as though no tool were needed**, which is
+`D-2026-08-04-a-failure-that-says-nothing-is-read-as-proceed` exactly.
+
+Fix in the middleware chain: after the model call, convert each `invalid_tool_calls` entry into a
+visible failure the model can also correct from. Do not jump from `after_model` — see
+`D-2026-08-15-an-after-model-counter-is-a-counter-that-can-be-skipped`. Verify with
+`make live-storm`'s `f-malformed-json` check, which currently fails. Found by the 2026-08-17
+full-stack run — see `tasks/live-test/full-stack-e2e-2026-08-17.md`.

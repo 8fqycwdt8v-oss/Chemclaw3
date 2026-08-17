@@ -390,8 +390,39 @@ the check sound and the lane beneath it misconfigured. Re-running both on a corr
 lane is outstanding work, and until then no claim about job durability under worker loss should
 rest on this run.
 
-The `F` failure is real but small: an empty answer *was* surfaced loudly (`answered=False`,
-`error=empty_answer`), so nothing was swallowed; what is missing is the truncation being named.
+**The `F` failure has a proven root cause, and it is not small.** `f-malformed-json` asks the mock
+for a `find_notes` call whose arguments are truncated JSON — `{"text": "unterminated` — which is
+what a real model produces when a stream is cut or a token budget runs out. Observed: HTTP 200,
+`answered=False`, `error=empty_answer`, `tools_failed=[]`, no tool result. Nothing named the bad
+call.
+
+The neighbouring case passes, and the contrast is the clue: `f-wrong-argument` sends *valid* JSON
+with the wrong key (`query` instead of `text`) and is reported correctly. So a call that parses and
+fails is visible; a call that does not parse vanishes.
+
+Reproduced outside the stack, through the exact conversion LangChain uses:
+
+```python
+_convert_dict_to_message({'role':'assistant','content':'',
+  'tool_calls':[{'id':'call_1','type':'function',
+                 'function':{'name':'find_notes','arguments':'{"text": "unterminated'}}]})
+
+tool_calls        : []
+invalid_tool_calls: [('find_notes', '{"text": "unterminated', 'Function find_notes arguments:…')]
+```
+
+**LangChain routes an unparseable call to `AIMessage.invalid_tool_calls`, and nothing in this
+repository reads that field** — `grep -rn invalid_tool_calls src/` returns nothing. The agent
+iterates `tool_calls`, which is empty, so the call is dropped in silence. Here the turn had no
+prose either, so it surfaced as `empty_answer`; **with prose it would have proceeded as though no
+tool were needed**, which is strictly worse and is exactly
+`D-2026-08-04-a-failure-that-says-nothing-is-read-as-proceed`.
+
+Not fixed here. The fix belongs in the middleware chain — read `invalid_tool_calls` after the model
+call and turn each into a visible failure the model can also correct from — and verifying it needs
+a storm re-run on a correctly-credentialled lane, which is already outstanding for D and E. Landing
+agent-core middleware without that verification is how a plausible fix becomes a worse one.
+
 
 ## What did not run
 - **The soak pass.** `make live-soak` repeats the storm for hours; the storm itself ran (above).
