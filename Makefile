@@ -317,20 +317,20 @@ live-jobs:  ## Run a real durable job end to end (Temporal + connector worker + 
 live-probes:  ## Ask the running front door the live probe set (needs ANTHROPIC_API_KEY).
 	uv run python -m chemclaw.cli.live_probes $(ARGS)
 
-# The three M12 re-validation suites. Separate targets rather than one, because each needs the
-# stack configured a *different* way and no single invocation can hold all three: the plan gate
-# needs `CHEMCLAW_HARNESS_AUTONOMY=plan_only`, the ordering check needs the durable broker
-# deliberately stopped, and routing has to run twice against two differently-configured front doors.
-# Each exits non-zero on a failed check or on one it could not take.
+# The two M12 re-validation suites. Separate targets rather than one, because each needs the
+# stack configured a *different* way and no single invocation can hold both: the plan gate needs
+# `CHEMCLAW_HARNESS_AUTONOMY=plan_only`, and the ordering check needs the durable broker
+# deliberately stopped. Each exits non-zero on a failed check or on one it could not take.
+#
+# There was a third, `live-routing`. It measured the specialist team's routing accuracy, and
+# D-2026-08-15 deleted the team, the challenge panel and that measurement together. The target
+# outlived its suite and failed at argparse — `invalid choice: 'routing'` — so it is gone too.
 
 live-plan-gate:  ## M12: plan -> approve -> execute -> re-gate, live (needs harness_autonomy=plan_only).
 	uv run python -m chemclaw.cli.live_probes --suite plan-gate $(ARGS)
 
 live-degradation:  ## M12: capability_degraded must precede the first token (run with Temporal stopped).
 	uv run python -m chemclaw.cli.live_probes --suite degradation $(ARGS)
-
-live-routing:  ## M12: team routing accuracy + per-specialist token cost. ARM=team|single.
-	uv run python -m chemclaw.cli.live_probes --suite routing --arm $(or $(ARM),team) $(ARGS)
 
 live-storm:  ## Stress, chaos and adversarial pass against the live stack — mock model, no LLM calls.
 	uv run python -m chemclaw.cli.live_storm $(ARGS)

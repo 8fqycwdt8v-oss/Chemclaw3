@@ -1,0 +1,53 @@
+{
+  "probe": {
+    "id": "an-24",
+    "section": 8,
+    "persona": "lab_leader",
+    "bucket": "C",
+    "question": "Trend the assay and total impurities for our last twelve batches across the 25C/60% RH time points — 0, 3, 6, 9 and 12 months — and tell me whether anything is drifting.",
+    "expects_tools": [],
+    "expects_job": false,
+    "forbids_claims": [
+      "any batch identifier, assay value or impurity percentage",
+      "a trend, slope or drift statement",
+      "a claim that a stability database, LIMS or batch record was consulted"
+    ],
+    "direction": "States there is no stability data, no batch records and no trending capability anywhere in the system — it holds no time-point results to trend. Does not produce an illustrative table or a hypothetical trend; an example table with invented numbers is exactly the failure. Says what it can do instead (structural liability reasoning, impurity structure work) and that trending needs the LIMS or stability database, which it is not connected to.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "an-24",
+    "section": 8,
+    "persona": "lab_leader",
+    "bucket": "C",
+    "question": "Trend the assay and total impurities for our last twelve batches across the 25C/60% RH time points — 0, 3, 6, 9 and 12 months — and tell me whether anything is drifting.",
+    "answer": "I don't have access to batch trending data, shelf-life records, or stability (temperature/humidity/time-point) measurements. This system does not hold:\n\n- Stability, shelf-life or batch-trending data\n- Chromatographic assay results or impurity profiles\n- Storage condition tracking (time-point, temperature, humidity)\n- Batch records or master batch records\n\nWhat I *can* do if you supply the raw data:\n\n1. **Load the numbers**: If you have a spreadsheet or table of the 12 batches × 5 time points (assay % and total impurities %), upload it and I'll ingest it.\n2. **Analyze the trend**: Once I see the data, I can compute the drift per batch, flag outliers, test whether there is a systematic degradation pattern, and tell you which batches or time points deviate most.\n3. **Compute degradation hypothesis**: If a trend emerges, I can use the system's degradation-liabilities tools to propose likely oxidation or hydrolysis sites in your API and sketch what forced-degradation studies might see.\n\nDo you have the stability data to hand, or would you like to upload a file with the batch results?",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 6.68,
+    "event_counts": {
+      "token": 13,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "be8d392d5bde47479ca0e47159e09460",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

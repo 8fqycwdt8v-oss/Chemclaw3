@@ -198,7 +198,12 @@ start_ui() {
   CHEMCLAW_API_URL="http://127.0.0.1:${CHEMCLAW_LIVE_API_PORT:-8000}" \
     AUTH_MODE=dev \
     start ui-bff bash -c "cd '$UI_REPO' && exec npm run dev"
-  wait_for ui-bff "http://127.0.0.1:5173"
+  # Both halves, in dependency order. `npm run dev` starts two processes and only one of them is
+  # Vite; polling 5173 alone reported "ui-bff ready" while the BFF was dead at import, and every
+  # /api call the browser made came back 502 from Vite's proxy. The BFF is the one this harness is
+  # actually wiring to the front door, so it is the one whose own /healthz has to answer.
+  wait_for ui-bff "http://127.0.0.1:${BFF_PORT:-8787}/healthz"
+  wait_for ui-spa "http://127.0.0.1:5173"
 }
 
 # ---------------------------------------------------------------------------- entrypoint

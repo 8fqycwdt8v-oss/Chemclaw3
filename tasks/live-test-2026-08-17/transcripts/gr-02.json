@@ -1,0 +1,96 @@
+{
+  "probe": {
+    "id": "gr-02",
+    "section": 1,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Someone's asking why we degas the Suzuki. I wasn't here when that was decided - can you reconstruct it?",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "the content of the retired note presented as current practice",
+      "a rationale asserted with no note id behind it"
+    ],
+    "direction": "Two notes cover degassing and only one is current; the other has been retired. A good answer quotes the current rationale, cites it, and either ignores the retired note or names it as superseded. Quoting the retired one as what we do today is the failure this probe exists to catch.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "gr-02",
+    "section": 1,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Someone's asking why we degas the Suzuki. I wasn't here when that was decided - can you reconstruct it?",
+    "answer": "I'll search the knowledge graph for records about degassing in Suzuki couplings to reconstruct the reasoning.Good leads. Let me expand the degassing playbook and the biaryl development report to see the reasoning:Perfect. Let me pull the actual optimization campaign that led to the degassing decision:## Here's the reconstruction:\n\nThe degassing requirement came from **[[playbook-degassing]]**, a distilled playbook grounded in an optimization campaign **[[opt-suzuki-conditions]]**.\n\n**The core finding:** Pd(0) is oxidised by dissolved oxygen. When oxygen isn't removed from the mixture, the resulting black precipitate of oxidized Pd is catalytically dead — and the signature is **bimodal yield distribution**: nominally identical runs give either 70%+ or under 20%, with almost nothing in between. This randomness happens because it depends on whether the catalyst survived its first few minutes before being poisoned.\n\n**The practical requirement:** Three freeze-pump-thaw cycles *or* sparging for 20 minutes per 100 mL. The playbook explicitly notes that sparging for only two minutes is no better than not degassing at all.\n\n**Why we know this works:** The optimization campaign data showed the problem directly — when degassing wasn't controlled, results were scattered and unreliable. The playbook superseded an earlier version **[[playbook-degassing-old]]** with the same recommendation, so this has held up across multiple runs.\n\n**In context:** The biaryl development report **[[report-biaryl-development]]** spells out the full recommended conditions for your specific reaction (4-methoxybiphenyl): 1.5 mol% Pd(OAc)₂/SPhos, K₂CO₃, THF/water 4:1, 80 °C — and notes \"rigorously degassed\" as non-negotiable. The recommendation comes from the campaign data showing 76% isolated yield at those conditions.\n\nSo: degas to avoid poisoning the Pd catalyst in its critical first minutes, where a single bad run can be mistaken for a condition that doesn't work when it's actually just bad oxygen handling.",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note",
+      "expand_note",
+      "expand_note"
+    ],
+    "tool_results": [
+      {
+        "tool": "find_notes",
+        "preview": "[NoteRef(id='playbook-degassing', type='playbook', compound_smiles=None, tags=['playbook', 'technique'], created_by='human', source='seed-corpus', confidence=0.85, valid_from=None, valid_to=None), Not"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "[EvidenceChunk(content='<retrieved-note-0d8f72b4838855b1 id=\"rxn-suzuki-biaryl\">\\nSuzuki-Miyaura coupling of 4-bromoanisole with phenylboronic acid.\\n\\n- aryl halide: compound-4-bromoanisole\\n- boroni"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='playbook-degassing', type='playbook', compound_smiles=None, tags=['playbook', 'technique'], created_by='human', source='seed-corpus', confidence=0.85, valid_from=None, valid_to=None) "
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='report-biaryl-development', type='report', compound_smiles=None, tags=['report'], created_by='human', source='seed-corpus', confidence=0.8, valid_from=None, valid_to=None) body='<retr"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='opt-suzuki-conditions', type='optimization-campaign', compound_smiles=None, tags=['optimization'], created_by='human', source='seed-corpus', confidence=0.85, valid_from=None, valid_to"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "0",
+      "70",
+      "20",
+      "100",
+      "4",
+      "1.5",
+      "1",
+      "80",
+      "76"
+    ],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 13.87,
+    "event_counts": {
+      "token": 30,
+      "tool_call": 5,
+      "evidence_source": 1,
+      "tool_result": 5,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "9d488447468d45e6bc56c04ebcece216",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

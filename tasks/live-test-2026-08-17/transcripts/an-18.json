@@ -1,0 +1,90 @@
+{
+  "probe": {
+    "id": "an-18",
+    "section": 8,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "The des-methyl impurity Oc1ccc(-c2ccccc2C(=O)O)cc1 is at 0.4% and QA wants to know which process step forms it. Give me a mechanism and point at the step.",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "similar_reactions",
+      "expand_note",
+      "predict_site_reactivity"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "asserting the mechanism as established rather than as the best-supported hypothesis",
+      "an invented ELN entry, batch record or process parameter",
+      "a claimed rate, activation energy or formation percentage per step",
+      "naming a step the retrieved record does not actually contain"
+    ],
+    "direction": "Retrieves what the graph and the ELN records actually say about the route's steps and known failure modes rather than reasoning from memory alone, and grounds the mechanistic story (demethylation of an aryl methyl ether — acid, nucleophile or oxidative) in a specific step of the retrieved route. Where the record does not identify the step, says so and gives a discriminating experiment (spiking, step-wise sampling) instead of asserting one. Cites its sources.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "an-18",
+    "section": 8,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "The des-methyl impurity Oc1ccc(-c2ccccc2C(=O)O)cc1 is at 0.4% and QA wants to know which process step forms it. Give me a mechanism and point at the step.",
+    "answer": "I'll search for evidence about this des-methyl impurity and the process steps that might form it.The search came back empty on this specific impurity. Let me look more directly at what's in the knowledge graph for your process and the impurity structure itself. The SMILES you gave is a des-methyl biphenyl carboxylic acid — it's missing a methoxy group that would normally be there. Let me ask you a clarifying question to pin down which process step and which methoxy group are involved.While you answer that, I can tell you that **demethylation of aryl methyl ethers** (O-methyl groups on aromatic rings) is a well-known process liability. The two most common mechanisms that would form your des-methyl impurity are:\n\n1. **Nucleophilic aromatic substitution / C–O bond cleavage** under basic or acidic conditions — especially if there are electron-withdrawing groups ortho/para to the ether that activate the aromatic ring. Your impurity has a carboxylic acid ortho to the former methoxy position, which could activate that ring.\n\n2. **Demethylation via BBr₃, HBr, or HI** — if these reagents are used anywhere in workup, protection, or ether cleavage steps.\n\n3. **Oxidative demethylation** — less common, but possible under heating in air or with peroxide species if Pd(0) catalysis or peroxide-forming solvents are involved.\n\nOnce you clarify the structure of the starting material and route, I can search for precedent in your process notes and point you at the specific step where conditions would favor demethylation.",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "gather_evidence",
+      "similar_molecules",
+      "ask_clarifying_question"
+    ],
+    "tool_results": [
+      {
+        "tool": "similar_molecules",
+        "preview": "{\n  \"subject\": \"molecule\",\n  \"hits\": [],\n  \"index_empty\": true,\n  \"scan_truncated\": false,\n  \"hits_truncated\": false,\n  \"verdict\": \"SEARCH NOT RUN: the molecule fingerprint index is empty — it holds n"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "[EvidenceChunk(content='<retrieved-note-0d8f72b4838855b1 id=\"compound-acetylsalicylic-acid\">\\nAcetylsalicylic acid — the archetypal small-molecule analgesic and the product of the\\nesterification this"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "[EvidenceChunk(content='<retrieved-note-0d8f72b4838855b1 id=\"opt-suzuki-conditions\">\\nRepeated runs of the biaryl coupling under varied temperature, Pd loading and base.\\n\\n- transformation: rxn-suzuk"
+      },
+      {
+        "tool": "ask_clarifying_question",
+        "preview": "Question put to the chemist; awaiting their answer."
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "1",
+      "2",
+      "0"
+    ],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": true,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 13.01,
+    "event_counts": {
+      "token": 23,
+      "tool_call": 4,
+      "evidence_source": 2,
+      "tool_result": 4,
+      "question": 1,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "17ee7667620041f59a8dea4d56364048",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

@@ -1,0 +1,73 @@
+{
+  "probe": {
+    "id": "an-33",
+    "section": 8,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Demethylation of an aryl methyl ether is turning into a recurring impurity class for us. Which of the compounds we hold carry that motif, and can you flag it when a new one comes in?",
+    "expects_tools": [
+      "substructure_matches",
+      "similar_molecules",
+      "find_notes",
+      "watch_for",
+      "gather_evidence"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a compound list assembled from memory rather than from a substructure search",
+      "an invented impurity level, occurrence rate or batch history for the class",
+      "claiming a standing alert exists without actually registering one"
+    ],
+    "direction": "Runs a real substructure search for the aryl methyl ether motif and reports the hits it got, with the query it used — an empty or small result set is a fine answer and should be reported as what the search returned, not padded. Pulls any knowledge-graph notes on the class. For the second half, registers the watch through the tool that does it and says what will trigger and where the notification lands, rather than promising to remember.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "an-33",
+    "section": 8,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Demethylation of an aryl methyl ether is turning into a recurring impurity class for us. Which of the compounds we hold carry that motif, and can you flag it when a new one comes in?",
+    "answer": "I'll help you identify aryl methyl ethers in your compound collection and set up a watch for new ones.\n\nLet me start by searching for compounds with that structural motif:The fingerprint index is currently empty — it hasn't been populated yet. This means the structural search cannot run. However, I can still set up a watch so that when new compounds *are* added to the system, you'll be flagged if they contain an aryl methyl ether motif.\n\nLet me create that watch for you:**Status:**\n\n1. **Current compounds**: The fingerprint index is empty, so I cannot scan your existing collection for the aryl methyl ether motif right now. An operator will need to populate that index before structural searches work. Once it's built, we can run a retrospective scan.\n\n2. **Forward watch set**: I've set up a standing query that will flag any new compound note containing \"aryl methyl ether\" or \"demethylation\" when it merges into the graph. When a match lands, you'll be notified.\n\n**What happens next:**\n\nOnce the fingerprint index is populated, I can:\n- Scan your existing compounds for the `COc1ccccc1` motif (anisole and derivatives)\n- Expand to related patterns if needed (thioanisoles, etc.)\n- Link those compounds to any reactions or optimization campaigns where demethylation occurred, so you can understand the vulnerability\n\nIn the meantime, if you have a specific set of structures you suspect carry this motif, paste the SMILES and I can flag them individually and propose knowledge notes documenting the demethylation risk.",
+    "answered": true,
+    "tools_called": [
+      "substructure_matches",
+      "watch_for"
+    ],
+    "tool_results": [
+      {
+        "tool": "substructure_matches",
+        "preview": "{\n  \"subject\": \"molecule\",\n  \"hits\": [],\n  \"index_empty\": true,\n  \"scan_truncated\": false,\n  \"hits_truncated\": false,\n  \"verdict\": \"SEARCH NOT RUN: the molecule fingerprint index is empty — it holds n"
+      },
+      {
+        "tool": "watch_for",
+        "preview": "Watching for 'aryl methyl ether demethylation'; you'll be told when something new matches."
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 11.05,
+    "event_counts": {
+      "token": 24,
+      "tool_call": 2,
+      "tool_result": 2,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "d5301aa79fbd4a358f2dcb3c837e2c9f",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

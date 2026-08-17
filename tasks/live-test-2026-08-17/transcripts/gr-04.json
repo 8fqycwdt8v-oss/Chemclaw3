@@ -1,0 +1,71 @@
+{
+  "probe": {
+    "id": "gr-04",
+    "section": 1,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Give me everything we know about that 1536-well 3-bromopyridine plate - not just the numbers, what the write-up actually says.",
+    "expects_tools": [
+      "gather_evidence",
+      "expand_note",
+      "find_notes"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "only headline yields, with no procedure or observational detail",
+      "experimental detail attributed to the plate that is not in the retrieved text"
+    ],
+    "direction": "Four wells off that plate are seeded as free-text records carrying the source paper's own general procedure prose, alongside 96-record screens of the same chemistry. The ask is explicitly for the prose, so reading only the yields is the shallow failure. Quoting the procedure and citing which record it came from is the answer.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "gr-04",
+    "section": 1,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Give me everything we know about that 1536-well 3-bromopyridine plate - not just the numbers, what the write-up actually says.",
+    "answer": "I don't have that specific reference in view right now. To find the write-up on the 1536-well 3-bromopyridine plate, I need to search the system for it.\n\nLet me gather what's on file:The search came back empty on both fronts. That means either the note hasn't been written yet, it's been named differently than those keywords, or it's not in the system under the form you're asking about.\n\nCan you help narrow it down? Any of these would help me find it:\n- What kind of result was it (a reaction screen, an optimization campaign, a single experiment)?\n- The approximate date it ran, or which project it belonged to?\n- Any other detail from the write-up — a solvent, a catalyst, a yield range, or an author name?\n\nOr if you have the experiment ID or the note ID for it, I can pull the full write-up directly.",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "find_notes"
+    ],
+    "tool_results": [
+      {
+        "tool": "find_notes",
+        "preview": ""
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": ""
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 6.75,
+    "event_counts": {
+      "token": 15,
+      "tool_call": 2,
+      "evidence_source": 1,
+      "tool_result": 2,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "a832e37bd8814a1e886e7d17965c2b9f",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

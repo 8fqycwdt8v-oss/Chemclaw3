@@ -1,0 +1,75 @@
+{
+  "probe": {
+    "id": "an-20",
+    "section": 8,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Did we already compute anything on Oc1ccc(-c2ccccc2C(=O)O)cc1? If there is a stored vibrational spectrum I want the band list rather than a recompute.",
+    "expects_tools": [
+      "find_calculations",
+      "list_artifacts",
+      "fetch_artifact"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "quoting band positions from memory rather than from a fetched artifact",
+      "claiming a stored calculation exists without a lookup returning it",
+      "presenting an empty artifact list as a missing calculation"
+    ],
+    "direction": "Looks up the calculation store, reports what was actually run (calculator, version, when), lists the artifacts and reads the spectrum file rather than describing it. If there is nothing stored, says so plainly and offers to run it. Distinguishes \"no calculation\" from \"a calculation that produced no artifacts\", and if the fetch was truncated says the values came from part of the file.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "an-20",
+    "section": 8,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Did we already compute anything on Oc1ccc(-c2ccccc2C(=O)O)cc1? If there is a stored vibrational spectrum I want the band list rather than a recompute.",
+    "answer": "I'll search the calculation store for that molecule to see what's already been computed.We have computed a **pKa** (acid site, 6.1 ±1.6) and **aqueous solubility** (log S = −3.33 ±0.75 mol/L) on this molecule, but no vibrational spectrum yet. Let me check if there are any stored artifacts from these calculations that might include a geometry or frequency data.No artifacts stored from the pKa run. **There is no vibrational spectrum on file for this molecule.** The only prior calculations are:\n\n- **pKa prediction** (acid site): 6.1 ±1.6\n- **Aqueous solubility**: log S = −3.33 ±0.75 mol/L\n\nIf you need the IR spectrum and band list, I can run `compute_thermochemistry`, which will give you the full vibrational frequencies, IR intensities, and the thermal corrections. Would you like me to do that now, or did you have a specific solvent in mind for the calculation?",
+    "answered": true,
+    "tools_called": [
+      "find_calculations",
+      "list_artifacts"
+    ],
+    "tool_results": [
+      {
+        "tool": "find_calculations",
+        "preview": "{\n  \"calc_ref\": \"pka@GFN2-xTB+tblite-0.7.0/rdkit-2026.3.5/h2/alpb-water/cal-0.28733:-29.3116/base-0.241396:-22.1843/u-1.6:1.0/opt-GFN2-xTB+tblite+tblite-0.7.0/rdkit-2026.3.5/h2:8b6e2140e97a1712:9c6f15"
+      },
+      {
+        "tool": "list_artifacts",
+        "preview": ""
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "6.1",
+      "1.6",
+      "0.75"
+    ],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 12.09,
+    "event_counts": {
+      "token": 14,
+      "tool_call": 2,
+      "tool_result": 2,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "0ae9146f7d934a65b44323ebd30e38ee",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

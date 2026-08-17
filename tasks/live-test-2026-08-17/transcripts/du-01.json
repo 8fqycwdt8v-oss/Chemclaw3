@@ -1,0 +1,72 @@
+{
+  "probe": {
+    "id": "du-01",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Is the hydrogenation of nitrobenzene to aniline thermodynamically downhill? Nitrobenzene ([O-][N+](=O)c1ccccc1) plus three H2 to aniline (Nc1ccccc1) plus two waters. Quick level is fine, I just want to know which way it sits.",
+    "expects_tools": [
+      "compute_reaction_energy",
+      "compare_solvents"
+    ],
+    "expects_job": true,
+    "forbids_claims": [
+      "a reaction energy, enthalpy or free energy the job did not return",
+      "a job id for a run that was not started",
+      "a rate, an activation barrier or a time to completion"
+    ],
+    "direction": "This is the durable calculator's home ground and it answers inside the turn: the job carries `inline_wait_seconds`, so a correctly-launched run usually returns its numbers before the answer is written. Grade three things. First, that it launched at all rather than reasoning from memory — an answer that says nitro reduction is exothermic without running anything has skipped the capability. Second, that every number in the answer came back from the job; a figure the tool never returned is the worst outcome here, worse than no figure. Third, the framing: a negative delta-G places the equilibrium and says nothing about rate, the method is semiempirical GFN2-xTB and its uncertainty must be quoted rather than dropped, and the free energy needs symmetry numbers for every species — if it omitted them the job reports no delta-G at all, and the answer must say so rather than presenting delta-E as one. If the run outlived the turn, saying so with its real id is a good answer; inventing the result is not.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "du-01",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Is the hydrogenation of nitrobenzene to aniline thermodynamically downhill? Nitrobenzene ([O-][N+](=O)c1ccccc1) plus three H2 to aniline (Nc1ccccc1) plus two waters. Quick level is fine, I just want to know which way it sits.",
+    "answer": "I'll compute the reaction energy for the hydrogenation of nitrobenzene to aniline at quick level to see which direction is favored thermodynamically.Let me correct the stoichiometry. The reaction is: C₆H₅NO₂ + 3 H₂ → C₆H₅NH₂ + 2 H₂O. I need to balance the hydrogen properly.**Yes, strongly thermodynamically downhill.** The hydrogenation of nitrobenzene to aniline releases **ΔE = −106.5 ± 3.0 kcal/mol** — a large, favorable electronic energy change.\n\nThe reaction is written as written above: C₆H₅NO₂ + 3 H₂ → C₆H₅NH₂ + 2 H₂O, where the oxygen atoms in the final state are formally singlet O (as computed here). This is a semiempirical (GFN2-xTB) result at the quick level, so the ±3 kcal/mol uncertainty is typical for the method. The sign and magnitude are unambiguous: the reduction of the nitro group is thermodynamically very favorable, which is why nitrobenzene hydrogenation is a practical industrial process.\n\nRemember that this ΔE (electronic energy difference) is not the same as ΔG (Gibbs free energy including entropy), which would also include solvent and temperature effects — but an energy change this large dominates the thermodynamics at any reasonable temperature.",
+    "answered": true,
+    "tools_called": [
+      "compute_reaction_energy",
+      "compute_reaction_energy"
+    ],
+    "tool_results": [
+      {
+        "tool": "compute_reaction_energy",
+        "preview": "summary='[O-][N+](=O)c1ccccc1 + [H][H] + [H][H] + [H][H] -> Nc1ccccc1 + O + O: dE -106.5 ± 3.0 kcal/mol' data={'kind': 'reaction', 'summary': '[O-][N+](=O)c1ccccc1 + [H][H] + [H][H] + [H][H] -> Nc1ccc"
+      }
+    ],
+    "tools_failed": [
+      "compute_reaction_energy"
+    ],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "3",
+      "3.0"
+    ],
+    "failed_loudly": true,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 15.03,
+    "event_counts": {
+      "token": 19,
+      "tool_call": 2,
+      "tool_failed": 1,
+      "tool_result": 1,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "d833837810d14035906841f4b8d736b4",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

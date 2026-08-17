@@ -1,0 +1,95 @@
+{
+  "probe": {
+    "id": "an-17",
+    "section": 8,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "We see a +16 Da species on COc1ccc(-c2ccccc2C(=O)O)cc1. Which position is most likely hydroxylated, and how confident can we be?",
+    "expects_tools": [
+      "predict_site_reactivity",
+      "compute_electronic_properties",
+      "compute_thermochemistry",
+      "find_notes"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "naming one regioisomer as the answer when the descriptor cannot separate them",
+      "a retention-time or elution-order argument for a candidate isomer",
+      "turning the site ranking into a predicted degradant level or percentage"
+    ],
+    "direction": "Runs the site-reactivity ranking in the mode that matches the chemistry, reports the ranked electron-rich positions in chemical language (the methoxy-activated ring positions being the obvious handles), and is honest about the resolution limit: the descriptor cannot confidently separate isomeric hydroxylation products, so if several positions are plausible it says so instead of picking the top one. Frames the output as a filter on hypotheses that decides which authentic standard is worth making, never as an identification.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "an-17",
+    "section": 8,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "We see a +16 Da species on COc1ccc(-c2ccccc2C(=O)O)cc1. Which position is most likely hydroxylated, and how confident can we be?",
+    "answer": "I'll help you identify the most likely hydroxylation site on this molecule. Let me start by analyzing the structure and then computing the regioselectivity using site reactivity predictions.Now let me map the atom indices to the actual structure to interpret which positions these are. Looking at the Fukui indices for nucleophilic attack (f_plus), the ranking shows:\n\n**Top candidates for hydroxylation (+16 Da = addition of OH):**\n\n1. **Index 13 (f_plus = 0.1156)** – This is the **carboxylic acid carbonyl oxygen (C=O)**. This is by far the most reactive site for nucleophilic attack, which makes sense for hydroxylation under oxidative conditions.\n\n2. **Index 23-25, 20, 22, 28, 21** – These are aromatic **C-H positions** on the two benzene rings, with varying reactivity (f_plus 0.037–0.0668). The methoxy-substituted ring shows several active hydrogens.\n\n3. **Index 1** – The **methoxy ether oxygen** (much lower f_plus = 0.0325 for nucleophilic attack).\n\nLet me load the reactivity-descriptors skill to interpret this more carefully:Based on the site reactivity analysis with the **nucleophilic** mode (because hydroxylation—adding OH—involves nucleophilic attack on an electrophilic site, likely at the carbonyl carbon), here's the answer:\n\n## Most likely hydroxylation site:\n\n**The carboxylic acid carbonyl carbon (C=O) is by far the most reactive** for this type of hydroxylation, with an f_plus value of 0.1156 — approximately **twice as high** as the next-best aromatic C-H positions (f_plus ~0.05–0.07).\n\nThis makes chemical sense: a +16 Da addition to the COOH group would give a hydroxylated carboxylic acid (converting C=O to CH-OH), which is a common oxidative byproduct or overoxidation of carboxylic acids.\n\n## Confidence level:\n\n**Moderate-to-good confidence**, with important caveats:\n\n1. **Clear electronic preference**: The 2× gap between the carbonyl oxygen's Fukui index and the aromatic C-H sites is substantial, not a tie. This argues the calculation is picking a real trend.\n\n2. **Chemically reasonable**: Hydroxylation of carboxylic acids (especially by peroxide or other oxidants) is a known degradation pathway, making the computational ranking consistent with known chemistry.\n\n3. **But electronics only**: These Fukui indices tell you the electronic preference, not the practical outcome. Sterics (steric access to the carbonyl), the specific oxidant, the solvent, temperature, and any catalysts are not in this model. A more accessible aromatic position could win despite lower electronic reactivity.\n\n4. **No rate or yield information**: This is a ranking, not a selectivity prediction. The calculation does not say how much overoxidation you get, only which site the electrons \"prefer.\"\n\n## Recommendation:\n\nIf you want to confirm this is true hydroxylation (vs. another +16 modification), you could:\n- Run **MS/MS fragmentation** to see if the +16 neutral-losses match a hydroxyl loss\n- Compare to **an authentic hydroxylated carboxylic acid standard** by LC/MS and NMR\n- Use **computed IR** of the hydroxylated product to test whether the actual impurity matches the predicted structure",
+    "answered": true,
+    "tools_called": [
+      "predict_site_reactivity",
+      "render_structure",
+      "read_file"
+    ],
+    "tool_results": [
+      {
+        "tool": "render_structure",
+        "preview": "<?xml version='1.0' encoding='iso-8859-1'?>\n<svg version='1.1' baseProfile='full'\n              xmlns='http://www.w3.org/2000/svg'\n                      xmlns:rdkit='http://www.rdkit.org/xml'\n        "
+      },
+      {
+        "tool": "predict_site_reactivity",
+        "preview": "{\n  \"smiles\": \"COc1ccc(-c2ccccc2C(=O)O)cc1\",\n  \"structure_id\": \"st_75f85b31bc46fe0e\",\n  \"method\": \"GFN2-xTB\",\n  \"solvent\": null,\n  \"mode\": \"nucleophilic\",\n  \"ranked_by\": \"f_plus\",\n  \"total_atoms\": 29,"
+      },
+      {
+        "tool": "read_file",
+        "preview": " 1  ---\n 2  name: reactivity-descriptors\n 3  description: >-\n 4    Judgment for reading GFN2-xTB electronic descriptors — Fukui site rankings,\n 5    HOMO/LUMO gaps, partial charges, bond orders — to a"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "+16",
+      "1",
+      "13",
+      "0.1156",
+      "2",
+      "23",
+      "20",
+      "22",
+      "28",
+      "21",
+      "0.037",
+      "0.0668",
+      "3",
+      "0.0325",
+      "0.05",
+      "0.07",
+      "4"
+    ],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 19.65,
+    "event_counts": {
+      "token": 38,
+      "tool_call": 3,
+      "tool_result": 3,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "32ca3d9476124e2ab78ea626bb231112",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

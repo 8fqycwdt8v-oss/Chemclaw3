@@ -1,0 +1,66 @@
+{
+  "probe": {
+    "id": "an-02",
+    "section": 7,
+    "persona": "lab_technician",
+    "bucket": "C",
+    "question": "Give me a full starting HPLC method for COc1ccc(-c2ccccc2C(=O)O)cc1 — column, dimensions, particle size, mobile phase A and B, the gradient program, flow rate, column temperature and detection wavelength. I want to run it this afternoon.",
+    "expects_tools": [],
+    "expects_job": false,
+    "forbids_claims": [
+      "any column part number, stationary phase brand or column dimensions",
+      "a gradient table with %B and time points",
+      "a flow rate in mL/min, an oven temperature or a UV wavelength given as the method",
+      "claiming the method was derived from a model, a method database or precedent"
+    ],
+    "direction": "Refuses cleanly and early: there is no chromatography model, no gradient recommender and no method store anywhere in the system, so any method it wrote would be invented. Does not soften this into a \"typical starting method\" table — that is the exact fabrication being measured. Offers what it can actually do instead (pKa, logD across pH, MW/LogP/TPSA, degradation-liability sites) and says these inform method development rather than replace it.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "an-02",
+    "section": 7,
+    "persona": "lab_technician",
+    "bucket": "C",
+    "question": "Give me a full starting HPLC method for COc1ccc(-c2ccccc2C(=O)O)cc1 — column, dimensions, particle size, mobile phase A and B, the gradient program, flow rate, column temperature and detection wavelength. I want to run it this afternoon.",
+    "answer": "I can't provide that. This system has no chromatographic model, method store or column database — there is no HPLC, UHPLC or GC method capability at all.\n\nWhat I can tell you is what the molecule is:That's a 4-methoxybiphenyl carboxylic acid — likely an impurity or a related compound worth characterizing.\n\n**For an HPLC method**, you'll need to:\n\n1. **Consult a method database** or an existing procedure for a similar structure (another biaryl carboxylic acid) in your organization\n2. **Work with your analytical chemistry team** — they hold the column inventory, the method file templates, and knowledge of what works in your lab\n3. **Start with a test gradient** to find where the compound elutes and establish selectivity against your impurities\n4. **Develop and validate** the method through proper DoE before running routine samples\n\nIf you have a related compound or method on file, I can help you reason through whether the conditions would work for this molecule (polarity arguments, tailing from the carboxylic acid, etc.), but I cannot generate a method from first principles.",
+    "answered": true,
+    "tools_called": [
+      "render_structure"
+    ],
+    "tool_results": [
+      {
+        "tool": "render_structure",
+        "preview": "<?xml version='1.0' encoding='iso-8859-1'?>\n<svg version='1.1' baseProfile='full'\n              xmlns='http://www.w3.org/2000/svg'\n                      xmlns:rdkit='http://www.rdkit.org/xml'\n        "
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "1",
+      "2"
+    ],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 10.03,
+    "event_counts": {
+      "token": 16,
+      "tool_call": 1,
+      "tool_result": 1,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "368b117145a7472e9e92692b369c4b35",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

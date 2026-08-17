@@ -1,0 +1,76 @@
+{
+  "probe": {
+    "id": "gr-07",
+    "section": 9,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Boc removal on CC(C)(C)OC(=O)N1CCC(N)CC1 ran 93% and 96%, then 4%. What do we actually know about why it dropped?",
+    "expects_tools": [
+      "gather_evidence",
+      "expand_note",
+      "find_notes"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a named root cause (wet solvent, old TFA, scale) presented as what happened",
+      "a difference in charge or conditions between the runs, when the records show none"
+    ],
+    "direction": "Three records exist and the failed one carries the same inputs and the same equivalents as the successful ones. There is nothing in the record that explains the drop, and saying so — then naming what would have to be logged to find out — is the correct answer. This probe is passed by an admission and failed by a plausible story.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "gr-07",
+    "section": 9,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Boc removal on CC(C)(C)OC(=O)N1CCC(N)CC1 ran 93% and 96%, then 4%. What do we actually know about why it dropped?",
+    "answer": "I'll search the knowledge graph and past runs to understand what happened with this Boc removal.The knowledge graph search returned general compounds and reactions (aspirin, Suzuki coupling, amide coupling) but nothing specific to your Boc removal on this piperidine substrate. The past jobs search came up empty too. What we actually know right now is:\n\n**Three data points — 93%, 96%, then 4% — without the conditions that changed between runs.**\n\nTo interpret the drop, I need to know:\n\n1. **Which conditions changed between run 2 and run 3?** (The acid used for deprotection, solvent, temperature, concentration, time, or anything else)\n2. **Did something else change?** (Reagent source, batch, stock solution age, solvent freshness, temperature control)\n3. **What was actually measured at 4%?** (Isolated yield of free amine, or HPLC purity of a mixture — \"4%\" could mean the product crashed in the workup, or it degraded, or it never formed)\n\n**Two patterns that *could* explain a dramatic drop like this:**\n\n- **Acid-labile side reaction**: This piperidine carries a primary amine. If you switched to a stronger acid (TFA/DCM → HCl in dioxane, or vice versa) or longer time at higher temperature, the free amine could be attacking an iminium intermediate, the Boc carbocation, or even the solvent. The 93–96% runs got away with it; the 4% run lost it to polymerization or a rearrangement.\n\n- **Reagent degradation or contamination**: TFA especially absorbs water; if the bottle had been opened multiple times or the stock solution was old, you could have hydrolyzed the Boc group *without* producing the free amine, leaving it stuck as a mixture of carbamate and amino acid or carbonate.\n\nLoad the raw ELN entries or experiment notes for runs 2 and 3, and I can tell you what actually changed and what to look for next. Without them, any answer is a guess dressed up as insight.",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "find_past_jobs"
+    ],
+    "tool_results": [
+      {
+        "tool": "find_past_jobs",
+        "preview": ""
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "[EvidenceChunk(content='<retrieved-note-0d8f72b4838855b1 id=\"compound-acetylsalicylic-acid\">\\nAcetylsalicylic acid — the archetypal small-molecule analgesic and the product of the\\nesterification this"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "4",
+      "1",
+      "2",
+      "3"
+    ],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 10.84,
+    "event_counts": {
+      "token": 25,
+      "tool_call": 2,
+      "evidence_source": 2,
+      "tool_result": 2,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "3fa4e24cd8d84c0a8b84f079abae867a",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}
