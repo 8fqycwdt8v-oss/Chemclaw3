@@ -415,3 +415,61 @@ def test_a_truncated_conflict_flag_says_how_many_it_is_not_naming() -> None:
     complete = chunk.model_copy(update={"conflicts_total": 3})
     whole = report_note(Report(title="R", sections=[_section(complete)])).body
     assert "strongest of" not in whole, "an untruncated flag must not imply a hidden remainder"
+
+
+class _DeadRetriever:
+    """A source whose backing store is unreachable."""
+
+    def __init__(self, name: str = "dead") -> None:
+        self.name = name
+
+    async def retrieve(self, _query: str, _filters: dict[str, Any]) -> list[EvidenceChunk]:
+        raise ConnectionError(f"{self.name}: connection refused")
+
+
+def test_one_dead_source_marks_the_section_without_discarding_the_others() -> None:
+    """A dead share must not throw away three working sources' evidence.
+
+    `gather_section` used its own `asyncio.gather` with no `return_exceptions`, so the first
+    raising retriever propagated out, failed the whole activity, burned its retry budget, and the
+    section rendered as "retrieval failed" with `evidence=[]` — the healthy sources' hits
+    discarded. The conversational sweep over the *same* retriever set degraded per source instead.
+    Two implementations of one question, with opposite error semantics; now there is one.
+    """
+    section = ReportSection(heading="Esterification", query="ester", memory_layer="evidence")
+
+    healthy = _FakeRetriever(
+        "ester",
+        [
+            EvidenceChunk(
+                content="Ethyl acetate, 85%", source_note_id="reaction-a", retriever="fake"
+            )
+        ],
+    )
+    gathered = asyncio.run(gather_section(section, [healthy, _DeadRetriever()]))
+
+    assert gathered.retrieval_failed is True, (
+        "a section whose sweep could not ask every source must say so — a chemist signs this"
+    )
+    assert gathered.evidence, "the healthy source's evidence must survive its neighbour's outage"
+    assert gathered.supported is False, (
+        "`supported` stays False while retrieval is incomplete, even though evidence was found"
+    )
+
+
+def test_an_all_healthy_section_is_not_marked_failed() -> None:
+    """The control: no phantom degradation when every source answered."""
+    section = ReportSection(heading="Esterification", query="ester", memory_layer="evidence")
+
+    healthy = _FakeRetriever(
+        "ester",
+        [
+            EvidenceChunk(
+                content="Ethyl acetate, 85%", source_note_id="reaction-a", retriever="fake"
+            )
+        ],
+    )
+    gathered = asyncio.run(gather_section(section, [healthy]))
+
+    assert gathered.retrieval_failed is False
+    assert gathered.supported is True

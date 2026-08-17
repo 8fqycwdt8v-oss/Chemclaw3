@@ -11,7 +11,6 @@ declares each section's memory layer, so evidenced and analogical content stay s
 separated (5b.5).
 """
 
-import asyncio
 import re
 from typing import Any, Literal
 
@@ -20,6 +19,7 @@ from pydantic import BaseModel, Field
 from chemclaw.core.ids import stable_hash
 from chemclaw.kg.note import Note
 from chemclaw.retrieval.evidence import EvidenceChunk, SourceRetriever
+from chemclaw.retrieval.fanout import sweep_sources
 
 # Each section declares which memory layer it draws on, so the report keeps evidenced history
 # (episodic) and transferred generalization (semantic) structurally apart, not just by prose.
@@ -161,22 +161,36 @@ async def gather_section(
     (`supported` is False) — the report will mark it unsupported rather than invent content.
     This is the durable unit of the report workflow (5b.6): one section, one activity.
 
-    **Concurrently, which is the fix the conversational sweep already made.** The retrievers are
-    independent — up to four of them, three hitting Postgres — so a `for` loop made one section
-    cost the *sum* of their latencies inside an activity that has a `start_to_close_timeout`, and a
-    report pays that per section. `retrieval/fanout.py` states the same argument for
-    `gather_evidence` ("a list comprehension made this tool cost the sum of their latencies when it
-    only needs the maximum"); this is the durable path, which never got it.
+    **Through `sweep_sources`, the same fan-out the conversational path uses, because there is one
+    question here and there should be one implementation of asking it.** This was a second
+    `asyncio.gather` over the identical retriever set, and the two copies had drifted into opposite
+    error semantics. `fanout._sweep` catches per branch, so a dead source costs its own leg; this
+    one passed no `return_exceptions`, so the first raising retriever propagated out, failed the
+    whole activity, burned its `BAD_DATA_RETRY` budget, and left the section rendering as
+    "*Retrieval failed for this section*" — **discarding the evidence the healthy sources had
+    already found**. One dead share threw away three working sources' work.
 
-    `gather` preserves argument order, so the retriever order the fusion treats as load-bearing
-    (`fanout.py`) is the order the chunks still arrive in.
+    The shared sweep also brings what this path never had: a per-source counter, a stream event, and
+    the `failed` channel that says which sources could not be asked. Concurrency is preserved (it
+    was the reason the original `gather` existed, and `sweep_sources` fans out the same way), and so
+    is argument order, which the fusion downstream treats as load-bearing.
+
+    `retrieval_failed` is now set from *any* failed source rather than from an exception escaping.
+    That is the honest reading of what the flag documents — a section a chemist signs must not let
+    an incomplete sweep pass as a genuinely empty one — and it is strictly more informative than
+    before, because the section is marked incomplete *and* keeps what was retrieved.
     """
-    gathered = await asyncio.gather(
-        *(retriever.retrieve(section.query, section.filters) for retriever in retrievers)
+    ranked_lists, failed = await sweep_sources(
+        [(retriever.name, retriever) for retriever in retrievers],
+        section.query,
+        section.filters,
     )
-    evidence = [chunk for chunks in gathered for chunk in chunks]
+    evidence = [chunk for chunks in ranked_lists for chunk in chunks]
     return SynthesizedSection(
-        heading=section.heading, memory_layer=section.memory_layer, evidence=evidence
+        heading=section.heading,
+        memory_layer=section.memory_layer,
+        evidence=evidence,
+        retrieval_failed=bool(failed),
     )
 
 
