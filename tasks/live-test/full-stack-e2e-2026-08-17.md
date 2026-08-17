@@ -277,6 +277,28 @@ Two things worth recording, neither a Chemclaw3 defect:
 - **`make live-degradation`** as a suite. Its property — `capability_degraded` precedes the first
   token — was checked by hand in the chaos round above, with Temporal up rather than stopped.
 
+## The gate
+
+| gate | result |
+| --- | --- |
+| `make lint` | clean |
+| `make type` | clean — 597 source files |
+| tests covering this diff | **107 passed** (`test_live_storm`, `test_live_probes`, `test_live_jobs`, `test_m12_probes`, `test_decision_log`, `test_repo_map`, `test_deferred_register`) |
+| `make test` (full) | 4,178 tests, still running at the time of writing — see below |
+
+**The full suite takes hours in this environment, and that is worth recording.** With Docker up —
+which is the configuration `CLAUDE.md` explicitly asks for, so the ~157 Postgres tests do not
+silently skip — the suite collects 4,178 tests and progresses at roughly 3% per ten minutes, CPU-
+bound at ~186% on four cores rather than blocked on I/O. Running it alongside the live stack's
+thirteen processes made it materially worse; the numbers above are from a run with the stack down.
+
+This does not contradict `CLAUDE.md`'s "a green `make` locally means a green CI" — it is a
+statement about wall-clock, not correctness. But it does mean the documented pre-push gate is not
+something a session can casually run to completion, and a session that needs to should start it
+early rather than at the end. The targeted subset above is what actually exercises this diff:
+everything changed here is the Makefile, `up.sh` (shell, untested by pytest either way), one new
+function in `live_storm.py`, and documents.
+
 ## Follow-ups
 
 - Backfill ORD on first bring-up in `up.sh` (see above).

@@ -491,3 +491,15 @@ every selector expression, the exact reducer code. **Rule for myself:** take fac
 take its conclusions as hypotheses, and check any mechanism claim against how the library actually
 behaves before building on it. This is the same failure mode CLAUDE.md already names for prose —
 articulate is uncorrelated with true — and it applies to my own subagents too.
+
+## Start the long gate early, and never `pkill -f` a pattern that matches my own shell (2026-08-17)
+
+Two process mistakes in one session, both cheap to avoid:
+
+- I ran `make test` under a 900 s `timeout` and reported the result as a failure. Exit 143 is
+  SIGTERM — *my own timeout*, not the suite. The full suite is 4,178 tests and takes hours here
+  with Docker up. **Rule:** check whether a non-zero exit is 143/144 before calling anything
+  failed, and start a known-long gate in the background at the *start* of a session, not the end.
+- `pkill -f "pytest -q"` matched the bash wrapper the harness runs my own commands in, killing my
+  waiters (exit 144). **Rule:** kill by pid from `pgrep -f "python3 -m pytest" | head -1`, never by
+  a loose pattern that my own command line also contains.
