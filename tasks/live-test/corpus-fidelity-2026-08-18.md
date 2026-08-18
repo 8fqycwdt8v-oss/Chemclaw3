@@ -168,13 +168,22 @@ the PR-gate's per-note cost) and one deleted — the ORD backfill row this pass 
 
 ## What could not run, and why it did not matter here
 
-**The environment's Anthropic credential is dead.** The `API-KEY` variable is present and
-well-formed, and the API answers `401 invalid` to it — verified directly, not inferred from a test:
+**The environment's Anthropic credential is not accepted.** The `API-KEY` variable is present and
+well-formed — exactly 108 characters, `sk-ant-api03-7…NIpAAA`, no surrounding whitespace — and the
+API refuses it four different ways, so this is not a transport or header artifact:
 
-```
-$ curl -s -o /dev/null -w '%{http_code}' https://api.anthropic.com/v1/messages -H "x-api-key: $(printenv 'API-KEY')" ...
-401
-```
+| how | result |
+| --- | --- |
+| `curl` + `x-api-key` → `api.anthropic.com` | 401 `API key is invalid` |
+| `curl` + `authorization: Bearer` | 401 `Invalid bearer token`, with a real `request_id` |
+| Python `httpx` + `x-api-key`, read from `os.environ` (no shell) | 401 `API key is invalid` |
+| `GET /v1/models` rather than `/v1/messages` | 401 |
+
+`ANTHROPIC_BASE_URL` is the standard host and the agent proxy carries `anthropic.com` in its
+`noProxy` list, so nothing is intercepting; the Bearer attempt returning a genuine `request_id`
+proves the request reached Anthropic and was refused there. Whether the key was rotated since the
+2026-08-17 session or was never valid in this container cannot be told from here — the environment
+is provisioned fresh per session.
 
 So nothing model-facing ran this session: no `make live-probes`, no UI scenarios, no re-grading of
 the two corrected probes. It also makes `make test` red in this environment, at the two tests
