@@ -125,6 +125,33 @@ The file header now separates *on disk* from *reachable*, and `make live-data` r
 every run — failing if either changes in either direction — so the comment cannot go stale the way
 the counts above it did.
 
+## Arriving is not the same as being findable, and the gap is the PR-gate
+
+The last hop, asked through `find_similar_reactions` — the real entry point behind the agent's
+`similar_reactions` tool, so this measures what a chemist gets rather than what a store contains.
+
+I had assumed a record whose note is still an unmerged proposal would be invisible to search, and
+re-targeted `gr-03` on that assumption. Measuring it first was the right call, because the answer
+is **both**, depending on the path:
+
+```
+unfiltered similar_reactions on a 4-bromoanisole coupling   -> 10 real wells
+the same search narrowed by {"type": "reaction"}            -> 0, with a WARNING
+```
+
+The fingerprint row is written at ingestion; the note is not, and stays unwritten until a human
+merges the proposal. `FingerprintReactionRetriever._eligible` drops a match whose note is not on
+disk — deliberately, and its docstring gives the reason: *"a filter says 'only notes that are X';
+a note nobody can read cannot be shown to be X"*. `find_similar_reactions` takes no filter at all,
+so it reaches the pending records. Both behaviours are right. Nothing stated the gap, and on a
+freshly-ingested corpus it is total: 4,251 records that an unfiltered search finds and a filtered
+sweep does not.
+
+`gr-03`'s `expects_tools` names `similar_reactions`, which is the unfiltered path — so the
+re-target holds. The lane now checks this hop every run, asserting `index_empty` as well as the hit
+count, because an empty index answering "no precedents found" is the exact defect
+`find_similar_reactions`' own docstring was written around.
+
 ## The corpus had to be backfilled before any of this was visible
 
 Every ORD export shares one mtime — the moment the repo was cloned — and carries an older payload

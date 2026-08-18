@@ -598,6 +598,54 @@ async def check_corpus_is_reachable(mapped: dict[str, list[OrdReaction]]) -> Che
     )
 
 
+async def check_the_corpus_is_findable(mapped: dict[str, list[OrdReaction]]) -> Check:
+    """A record that arrived can actually be found — asked through the tool a chemist would use.
+
+    The last hop, and the one that turns "the data is in the database" into "the data answers a
+    question". `find_similar_reactions` is the real entry point behind the agent's
+    `similar_reactions`, so this measures what a chemist gets rather than what a store contains.
+
+    **It is deliberately checked while the notes are still unmerged**, because that is the state a
+    freshly-ingested corpus is in and the state the PR-gate keeps it in until a human acts. The
+    fingerprint row is written at ingestion and the note is not, so the two halves disagree by
+    design, and which retrieval path you take decides what you see. Measured on this corpus with
+    every note pending: an unfiltered search returns 10 real wells for a 4-bromoanisole coupling,
+    and the same search narrowed by `{"type": "reaction"}` through `FingerprintReactionRetriever`
+    returns **0**, loudly ("filtered reaction search returned 0 of 10 wanted hits"). Both are
+    correct — a note nobody can read cannot be shown to satisfy a filter — and the gap is worth a
+    check precisely because nothing else states it.
+
+    `index_empty` is asserted as well as the hit count: an empty index answering "no precedents" is
+    the exact defect `find_similar_reactions`' own docstring was written around.
+    """
+    subject = next(
+        (
+            reaction
+            for reactions in mapped.values()
+            for reaction in reactions
+            if reaction.reaction_id.startswith("bh-amination")
+        ),
+        None,
+    )
+    if subject is None:
+        return Check(
+            name="the corpus is findable", passed=False, observed="no mapped record to search for"
+        )
+    from chemclaw.science.fingerprints.rxnfp.search import find_similar_reactions
+    from chemclaw.science.fingerprints.store import default_reaction_store
+
+    search = await find_similar_reactions(default_reaction_store(), subject.reaction_smiles())
+    found = {match.id for match in search.hits}
+    return Check(
+        name="the corpus is findable",
+        passed=bool(search.hits) and not search.index_empty and subject.reaction_id in found,
+        observed=(
+            f"{len(search.hits)} similar reactions for {subject.reaction_id}, "
+            f"index_empty={search.index_empty}, itself returned={subject.reaction_id in found}"
+        ),
+    )
+
+
 # --- the backfill ----------------------------------------------------------------------------
 
 
@@ -724,6 +772,7 @@ async def run_data_checks(
     run.checks.append(await check_prose_yields_its_numbers(Path(settings.eln_export_dir)))
     if with_database:
         run.checks.append(await check_corpus_is_reachable(mapped))
+        run.checks.append(await check_the_corpus_is_findable(mapped))
 
     for dataset in _DATASETS:
         published = len(_published_rows(real_data, dataset))
