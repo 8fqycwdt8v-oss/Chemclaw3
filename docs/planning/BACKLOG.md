@@ -467,6 +467,20 @@ repository nobody can list. Nothing is broken — every proposal genuinely is a 
 a backfill and an incremental sync arguably want different submission shapes (one branch per batch,
 or a bulk proposal a reviewer expands). Found by the 2026-08-18 corpus-fidelity pass.
 
+## A revoked credential fails the two live prompt-caching tests opaquely
+
+`tests/test_prompt_caching.py` guards its two live tests on `"API-KEY" in os.environ` — that the
+variable is *set*, not that it *works*. With a revoked key both fail several frames deep inside the
+Anthropic client with a raw `AuthenticationError`, so `make test` goes red in a way that reads as a
+prompt-caching regression. Observed 2026-08-18: the environment's key is well-formed, present, and
+answered `401` by the API.
+
+Skipping on an auth error is the wrong fix — it would hide a real outage, and these tests exist
+because a belief about caching was measurably wrong once. The right one is a message that names the
+cause, so a reader learns the credential is dead rather than that the cache broke. Same distinction
+`D-2026-08-17-a-harness-that-starts-two-of-five-servers-is-a-harness-that-tests-two` draws about
+`/readyz`: holding a credential is not the same as holding one the other side accepts.
+
 ## Surface `invalid_tool_calls` — an unparseable tool call is currently a silent no-op
 
 LangChain puts a tool call whose arguments do not parse into `AIMessage.invalid_tool_calls` rather

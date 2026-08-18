@@ -166,6 +166,29 @@ waiting on it"* and `list_workflows` shows one.
 Three `BACKLOG.md` rows opened (recover the flow-Suzuki set; make an ingest rejection answerable;
 the PR-gate's per-note cost) and one deleted — the ORD backfill row this pass closes.
 
+## What could not run, and why it did not matter here
+
+**The environment's Anthropic credential is dead.** The `API-KEY` variable is present and
+well-formed, and the API answers `401 invalid` to it — verified directly, not inferred from a test:
+
+```
+$ curl -s -o /dev/null -w '%{http_code}' https://api.anthropic.com/v1/messages -H "x-api-key: $(printenv 'API-KEY')" ...
+401
+```
+
+So nothing model-facing ran this session: no `make live-probes`, no UI scenarios, no re-grading of
+the two corrected probes. It also makes `make test` red in this environment, at the two tests
+guarded on `"API-KEY" in os.environ` — a guard that checks the variable is *set* rather than that
+it *works*, which is the same distinction `D-2026-08-17`'s rule draws about `/readyz`. They fail
+with a raw `anthropic.AuthenticationError` several frames deep, so the red reads as a caching
+regression until you dig. Filed rather than patched: the tests are right to fail, and weakening
+them to skip on an auth error would hide a real outage.
+
+Everything above is model-free by design — the argument `live_jobs` makes and this lane inherits —
+so the credential being dead cost this pass nothing. That is not luck; it is why the corpus half
+was built to need no model. **The two corrected probes are unverified against a live model**, and
+that is the one open item this pass leaves behind.
+
 ## The rule
 
 > **A corpus is not reachable because it is on disk.** Seeding, mapping, proposing and indexing each
