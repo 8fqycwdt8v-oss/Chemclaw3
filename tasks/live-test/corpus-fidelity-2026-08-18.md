@@ -14,11 +14,13 @@ as a failure.
 
 | | |
 | --- | --- |
+| Every check, after the corpus finished draining | **19 / 19** |
 | Published measurements verified present, exactly once, unchanged | **9,987 / 9,987** |
 | Conditions recovered from procedure prose, exactly | **12 / 12** |
 | Seeded ORD records the adapter can map | **4,251 / 10,011** (57% refused) |
 | Zero-yield records preserved as `0.0` rather than as silence | **644 / 644** |
 | Grounded probes whose ground truth could not exist | **2 of 36** |
+| Mapped ORD records that reached the PR-gate | **4,251 / 4,251** |
 | Cost of one PR-gate proposal, measured | **1.81 s** |
 
 ## The ground truth is the paper, not the previous stage
@@ -166,6 +168,17 @@ It waits 120 s and no longer, because the drain is slow and the reason is worth 
 > the git branch-and-commit cycle, not the mapping — the whole 10,011-record corpus *maps* in 0.3 s.
 > That is a little over two hours for the mock's 4,251 ingestible records, and 4,251 branches in the
 > note repository.
+
+Run to completion here: **05:24:55 → 07:49:22, 2 h 24 m, 108 chunks**, ending `4251/4251`. The
+predicted cost held. Two things that estimate got wrong on the way, both corrected by reading the
+code rather than extrapolating the counters: `_BoundedIngest` caps a chunk at 100 *entries fetched*,
+not 100 ingested, so the drain walks all 10,011 exports and takes ~108 chunks rather than ~43 — the
+extra ones are cheap, because a refused record skips the git cycle entirely.
+
+It also settles an open question from the 2026-08-17 run, which found 1,936 of 3,955 Buchwald-Hartwig
+records ingested by a workflow Temporal reported as COMPLETED, and could not say why it stopped
+halfway. It did not: that session ended mid-drain. A backfill run to completion reaches every
+record.
 
 A real deployment's first sync is a decade of records, where that is days. Nothing is broken — every
 proposal genuinely is a reviewable unit — but a backfill and an incremental sync plausibly want

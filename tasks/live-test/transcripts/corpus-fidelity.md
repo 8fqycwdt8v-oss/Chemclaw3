@@ -1,7 +1,7 @@
 # Live corpus-fidelity pass
 
 Ground truth: the published factor tables · Postgres `user=chemclaw dbname=chemclaw host=localhost port=5432`
-· 5.3s
+· 5.4s
 
 | dataset | published | seeded | mapped | refused |
 | --- | ---: | ---: | ---: | ---: |
@@ -30,5 +30,7 @@ Ground truth: the published factor tables · Postgres `user=chemclaw dbname=chem
 | adapter preserves values · nielsen_deoxyfluorination.csv | PASS | 80/80 reactions carry their published factors and yield |
 | note carries the number | PASS | bh-amination-btmg-0018 states 0%: True · bh-amination-btmg-0000 states 14.02%: True |
 | prose yields its numbers | PASS | 12/12 procedures state a temperature and a time in prose and carry both |
+| corpus is reachable | PASS | 4251/4251 mapped ORD records have a note proposal |
+| the corpus is findable | PASS | 10 similar reactions for bh-amination-btmg-0000, index_empty=False, itself returned=True |
 
-**17/17 checks passed.**
+**19/19 checks passed.**
