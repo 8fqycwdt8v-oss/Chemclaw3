@@ -21,7 +21,11 @@ mistake. Every assertion below compares against the CSV, never against the stage
 
 One ledger, per dataset, following the published rows down the pipeline:
 
-    published (CSV) -> seeded (ORD JSON) -> mapped (OrdReaction) -> note -> proposal -> index
+    published (CSV) -> seeded (ORD JSON) -> mapped (OrdReaction) -> note -> proposal
+
+It stops at the proposal, and that is the right place rather than a shortcut: the derived
+`note_index` holds *merged* notes, and a merge is a human's decision at the PR-gate (D-004). A lane
+that indexed its own proposals to check them would be asserting that a reviewer had approved them.
 
 A stage that drops rows is not automatically a failure — one dataset is refused *deliberately*,
 and the refusal is correct (see `_DATASETS`). It is a failure when reality disagrees with the
@@ -372,7 +376,7 @@ def check_zero_yields_survive(real_data: Path, seeded: dict[str, list[dict[str, 
         for dataset in _DATASETS
         for dataset_id in dataset.dataset_ids()
         for payload in seeded.get(dataset_id, ())
-        if _seeded_yield(payload) == 0.0
+        if _seeded_yield(payload, dataset.yield_places) == 0.0
     )
     return Check(
         name="zero yields survive seeding",
