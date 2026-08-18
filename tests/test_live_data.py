@@ -22,6 +22,8 @@ from typing import Any
 
 from chemclaw.cli.live_data import (
     _DATASETS,
+    _PROSE_TEMPERATURE,
+    _PROSE_TIME,
     Check,
     DataRun,
     Dataset,
@@ -172,3 +174,23 @@ def test_the_report_names_every_failed_check() -> None:
     run = DataRun(checks=[Check("seeding faithful", False, "3 missing")])
     text = report(run)
     assert "seeding faithful" in text and "3 missing" in text and "0/1 checks passed" in text
+
+
+def test_a_procedure_run_at_zero_degrees_is_read_as_zero() -> None:
+    """A step reading "cooled to 0 °C" is a condition, not the absence of one.
+
+    One seeded fixture runs at exactly 0 °C. Anywhere a truthiness test stands in for
+    `is not None` — in the regex handling, in the comparison, in the record — that record's
+    temperature disappears and the extraction reads as a failure it is not.
+    """
+    match = _PROSE_TEMPERATURE.search("The mixture was cooled to 0 °C and stirred for 3.0 h.")
+    assert match is not None
+    assert float(match.group(1)) == 0.0
+    time_match = _PROSE_TIME.search("cooled to 0 °C and stirred for 3.0 h.")
+    assert time_match is not None and float(time_match.group(1)) == 3.0
+
+
+def test_a_temperature_is_only_read_from_a_temperature() -> None:
+    """The units anchor the match, so a mass or an NMR shift cannot become a temperature."""
+    assert _PROSE_TEMPERATURE.search("charged with 1071.0 mg of the carbamate") is None
+    assert _PROSE_TIME.search("1H NMR (400 MHz) delta 7.4") is None

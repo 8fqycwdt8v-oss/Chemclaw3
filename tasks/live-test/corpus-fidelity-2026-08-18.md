@@ -15,6 +15,7 @@ as a failure.
 | | |
 | --- | --- |
 | Published measurements verified present, exactly once, unchanged | **9,987 / 9,987** |
+| Conditions recovered from procedure prose, exactly | **12 / 12** |
 | Seeded ORD records the adapter can map | **4,251 / 10,011** (57% refused) |
 | Zero-yield records preserved as `0.0` rather than as silence | **644 / 644** |
 | Grounded probes whose ground truth could not exist | **2 of 36** |
@@ -45,7 +46,7 @@ and compares multisets of `(dataset, factors…, yield)` at each hop.
 | nielsen_deoxyfluorination        |        80 |     80 |     80 |       0 |
 ```
 
-16/16 checks pass, in 6.8 s with no infrastructure at all (`--corpus-only`).
+17/17 checks pass, in ~7 s with no infrastructure at all (`--corpus-only`).
 
 **The mock's seeding is exact.** All 9,987 published measurements are present exactly once with
 their factors and yields intact; nothing unpublished appears. That includes the parts most likely
@@ -75,6 +76,28 @@ docstring cites the same measurement as the motivation for widening the identifi
 and NAME. The widening is right in general. On this corpus it moved the number from **5,761 refused
 to 5,760** — the shorthand is unresolvable by construction, which is exactly why the mock publishes
 it as a name rather than guessing.
+
+## The free-text half: the one place a value is derived rather than copied
+
+The ORD checks above all ask whether a number *survived a hop*. The free-text corpus asks something
+harder, and the mock is built to ask it: its 32 procedures come in pairs, and the two halves carry
+their conditions differently.
+
+```
+uspto-suzuki-biphenyl-1   prose: "stirred at 82 °C for 4.0 h"   temperature_c/time_h: absent
+uspto-suzuki-biphenyl-2   prose: "stirred under nitrogen"        temperature_c/time_h: 82.0 / 4.0
+```
+
+The `-1` half has **no structured value to fall back on**. If the extraction fails, the condition
+is simply gone, and nothing downstream can distinguish "ran at 82 °C" from "temperature
+unrecorded". Measured across every procedure that states both in prose: **12/12 recovered exactly**,
+including `uspto-reductive-amination-1`, which runs at `0 °C` — the value a truthiness test loses.
+
+Two claims in `grounded.yaml`'s header were checked against the fixtures rather than taken on
+trust, and both are true: the `-2` records really do drop temperature and time from their procedure
+text, and the Suzuki twins really do differ by an impurity list (`-1` carries des-methoxy biphenyl
+at 1.4 area%, `-2` carries none) on otherwise identical charges. `gr-06` and `gr-07` are grounded in
+data that is there.
 
 ## Two probes were grading against data that cannot exist
 
@@ -126,7 +149,7 @@ different submission shapes. Filed in `BACKLOG.md` rather than fixed here.
 | | |
 | --- | --- |
 | `src/chemclaw/cli/live_data.py` | the lane: binding, checks, epoch backfill, ledger |
-| `tests/test_live_data.py` | 7 tests pinning the invariants that make a green run mean something |
+| `tests/test_live_data.py` | 9 tests pinning the invariants that make a green run mean something |
 | `make live-data` | runs it (`ARGS="--corpus-only"` needs no infrastructure; `--backfill` re-drains) |
 | `infra/live/e2e-full-stack/up.sh` | starts the epoch backfill on bring-up |
 | `data/evals/probes/grounded.yaml` | `gr-03` re-targeted, `gr-08` reframed, header states what is reachable |
