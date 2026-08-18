@@ -425,17 +425,61 @@ Temporal broker, real cluster, real HPC, real Snowflake — are in
 [`DEFERRED.md`](DEFERRED.md), each with the trigger that would revisit it, which is the register
 those belong in.
 
-## Backfill the ORD corpus on the four-repo lane's first bring-up
+## Recover the flow-Suzuki screen, or decide it stays out
 
-`infra/live/e2e-full-stack/up.sh` seeds `CHEMCLAW_DATA_SOURCES=graph,eln-json,eln-ord` and points
-`CHEMCLAW_ORD_EXPORT_DIR` at `Chemclaw3_mock`'s 10,011 ORD exports, and then never syncs them from
-an early enough cursor. All 10,011 share one mtime — the moment the repo was cloned — and carry
-older payload timestamps, so once the sync cursor passes that instant none of them can ever
-qualify again. Chemclaw3 handles this correctly and loudly (`adapter.py::warn_late_arrivals`, one
-aggregated WARNING naming the remedy); the gap is that the harness never takes the remedy. A first
-bring-up should run `ElnSyncWorkflow` with an explicit early `since` before anything advances the
-cursor, so the ORD half of the mock's data is actually reachable in an end-to-end pass. Found by
-the 2026-08-17 full-stack run — see `tasks/live-test/full-stack-e2e-2026-08-17.md`.
+`Chemclaw3_mock` seeds 10,011 ORD records and **5,760 of them — 57% — cannot be ingested at all**.
+Every refusal is the Perera flow-Suzuki set (*Science* 2018, 359, 429), whose second coupling
+partner the source spreadsheet publishes only as its own shorthand (`2a, Boronic Acid`).
+`ord_adapter._smiles` refuses rather than inventing a structure, which is right and is pinned by
+`test_ord_compound_with_no_resolvable_identifier_is_still_refused` — but that docstring's own words
+are "57% of a real corpus lost, including the yield data on components that *were* resolvable",
+and the widening it documents (INCHI, then NAME through `resolve_compound_name`) moved the number
+from 5,761 refused to 5,760.
+
+The open question is whether a reaction with one structure-less participant is worth keeping as
+*evidence*: its yield, ligand, base and halide are all real, and questions like "which base wins on
+this halide" need none of the missing structure. The two candidate shapes are (a) a `Component`
+that may carry a name instead of SMILES, with the reaction excluded from every fingerprint index,
+and (b) a separate lower-tier record type that retrieval can cite but similarity cannot reach.
+Both change what a `Component` is, so this wants its own ADR and its own measurement of what a
+partially-structured reaction does to retrieval — not a patch to `_smiles`. Measured and declared
+by `make live-data`; see `D-2026-08-18-a-corpus-is-not-reachable-because-it-is-on-disk`.
+
+## Make an ingest rejection answerable instead of only logged
+
+A record refused on ingest leaves a WARNING and nothing queryable. The seeded corpus has exactly
+one such record — `santanilla-orgsyn-boronate-well-Y36`, at 119.43%, refused because `OrdReaction`
+bounds a yield at 100 — and a chemist who asks about it can be told only "I have no such record".
+The better answer exists and is unreachable: *"that well was rejected on ingest because a yield
+cannot exceed 100%; the value is what an uncalibrated relative-UPLC readout does."* A durable
+rejection ledger (entry id, source, reason, first and last seen) would make data-quality questions
+answerable and would give `warn_late_arrivals`' aggregate a place to live besides a log line.
+`gr-08` is written against the absence today and says in its own comment what it becomes if this
+lands. Found by the 2026-08-18 corpus-fidelity pass.
+
+## The PR-gate costs 1.81 s per proposed note, and a backfill is one note per record
+
+Measured over the ORD backfill: 103 records per 3.1 minutes, steady, with the cost in the PR-gate's
+git branch-and-commit cycle rather than in mapping (the whole 10,011-record corpus maps in 0.3 s).
+That is a little over two hours for the mock's 4,251 ingestible records and 4,251 branches in the
+note repository. A real deployment's first sync is a decade of records, where this is days and a
+repository nobody can list. Nothing is broken — every proposal genuinely is a reviewable unit — but
+a backfill and an incremental sync arguably want different submission shapes (one branch per batch,
+or a bulk proposal a reviewer expands). Found by the 2026-08-18 corpus-fidelity pass.
+
+## A revoked credential fails the two live prompt-caching tests opaquely
+
+`tests/test_prompt_caching.py` guards its two live tests on `"API-KEY" in os.environ` — that the
+variable is *set*, not that it *works*. With a revoked key both fail several frames deep inside the
+Anthropic client with a raw `AuthenticationError`, so `make test` goes red in a way that reads as a
+prompt-caching regression. Observed 2026-08-18: the environment's key is well-formed, present, and
+answered `401` by the API.
+
+Skipping on an auth error is the wrong fix — it would hide a real outage, and these tests exist
+because a belief about caching was measurably wrong once. The right one is a message that names the
+cause, so a reader learns the credential is dead rather than that the cache broke. Same distinction
+`D-2026-08-17-a-harness-that-starts-two-of-five-servers-is-a-harness-that-tests-two` draws about
+`/readyz`: holding a credential is not the same as holding one the other side accepts.
 
 ## Surface `invalid_tool_calls` — an unparseable tool call is currently a silent no-op
 

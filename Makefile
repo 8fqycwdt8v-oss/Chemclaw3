@@ -36,7 +36,7 @@ SHELL := bash
 
 .DEFAULT_GOAL := help
 
-.PHONY: help install lint type test cov check ci chat db-migrate db-grants schedules-apply kg-validate eval eval-strict eval-baseline eval-baseline-check eln-validate skill-validate connector-validate datasource-validate template-validate connectors prose-validate helm-validate explain user-erase reindex reindex-full up down phoenix-up phoenix-down phoenix-publish deps-audit live-infra live-infra-down live-up live-down live-status live-jobs live-probes live-plan-gate live-degradation live-storm live-soak live-soak-report leak-probe mutants mutant-results
+.PHONY: help install lint type test cov check ci chat db-migrate db-grants schedules-apply kg-validate eval eval-strict eval-baseline eval-baseline-check eln-validate skill-validate connector-validate datasource-validate template-validate connectors prose-validate helm-validate explain user-erase reindex reindex-full up down phoenix-up phoenix-down phoenix-publish deps-audit live-infra live-infra-down live-up live-down live-status live-jobs live-probes live-data live-plan-gate live-degradation live-storm live-soak live-soak-report leak-probe mutants mutant-results
 
 help:  ## List every target with its one-line description (the default).
 	@# Reads the `## ` comments beside each target, so a new target documents itself the day it is
@@ -316,6 +316,19 @@ live-jobs:  ## Run a real durable job end to end (Temporal + connector worker + 
 
 live-probes:  ## Ask the running front door the live probe set (needs ANTHROPIC_API_KEY).
 	uv run python -m chemclaw.cli.live_probes $(ARGS)
+
+# The corpus half of the same question `live-probes` asks of the model: not "did a tool answer"
+# but "is the number in the answer the number in the paper". Checks every published measurement
+# against what actually arrived, value by value. No model, for the reason `live-jobs` gives: a
+# graded answer cannot separate a corpus that never held the data from a model that did not look
+# for it. `ARGS="--corpus-only"` drops the Postgres half and needs no infrastructure at all.
+#
+# **It does not backfill by default, deliberately.** Making the seeded corpus reachable is a
+# once-per-bring-up job that `infra/live/e2e-full-stack/up.sh` starts, and it takes over two hours
+# (a PR-gate proposal costs ~1.8 s and there are 4,251 records). Re-running it on every check would
+# re-walk all of them for no new rows. `ARGS="--backfill"` when you need it back.
+live-data:  ## Check the seeded corpus against the published factor tables, value by value.
+	uv run python -m chemclaw.cli.live_data $(ARGS)
 
 # The two M12 re-validation suites. Separate targets rather than one, because each needs the
 # stack configured a *different* way and no single invocation can hold both: the plan gate needs
