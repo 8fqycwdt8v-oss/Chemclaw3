@@ -198,6 +198,26 @@ so the credential being dead cost this pass nothing. That is not luck; it is why
 was built to need no model. **The two corrected probes are unverified against a live model**, and
 that is the one open item this pass leaves behind.
 
+## The gate
+
+`make lint` and `make type` green across 597 files. `make test`, with Docker up so the Postgres
+tests actually run:
+
+```
+4,186 passed · 4 skipped · 2 failed
+```
+
+Both failures are the credential-guarded live prompt-caching tests, 401 on the revoked key —
+verified by running the second one alone rather than assuming it shared the first one's cause.
+`tests/test_reizman.py::test_bo_campaign_finds_high_yield` also hit its wall-clock cap at 188 s
+while the corpus drain had the machine; the suite prints its own instruction for that case, and
+with `PYTEST_TIMEOUT_SCALE=4` it **passes in 326 s**. Two of the four skips are the truncated
+checkout's migration checks.
+
+**CI is green on the same commit** — `check` (the full gate), `chart` and `image` — which is the
+independent confirmation that both local failures are environmental: CI sets no `API-KEY`, so those
+two tests skip there rather than fail, and nothing competes with the BO campaign for the machine.
+
 ## The rule
 
 > **A corpus is not reachable because it is on disk.** Seeding, mapping, proposing and indexing each
