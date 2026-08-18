@@ -337,7 +337,7 @@ backfill_corpus() {
   # git branch and commit (~1.8 s/record measured), so the full corpus takes hours and a bring-up
   # must not block on it. The workflow keeps running on the broker; `make live-data` reads how far
   # it got and is the place a shortfall is supposed to show up.
-  if (cd "$REPO_ROOT" && uv run python -m chemclaw.cli.live_data --backfill --corpus-only \
+  if (cd "$REPO_ROOT" && uv run python -m chemclaw.cli.live_data --backfill-only \
         --timeout 120 >"$LIVE_DIR/e2e-corpus-backfill.log" 2>&1); then
     log "corpus backfill: $(grep -m1 '^Backfill:' "$LIVE_DIR/e2e-corpus-backfill.log" || echo done)"
   else

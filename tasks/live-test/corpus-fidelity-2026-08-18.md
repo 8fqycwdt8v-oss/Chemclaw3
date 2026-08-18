@@ -144,6 +144,14 @@ A real deployment's first sync is a decade of records, where that is days. Nothi
 proposal genuinely is a reviewable unit — but a backfill and an incremental sync plausibly want
 different submission shapes. Filed in `BACKLOG.md` rather than fixed here.
 
+One thing a two-hour drain does make worth fixing immediately: the backfill runs under a **fixed
+workflow id**, so a second invocation rejoins the running one instead of racing it. That is D-011's
+argument applied to the harness — `up.sh` starts a drain on every bring-up and a human may run the
+lane meanwhile. It was not a hypothetical; the first version minted `eln-backfill-<timestamp>` and
+two concurrent syncs were observed contending on the PR-gate's git repository, producing no row the
+first would not have. Verified after the fix: the second invocation logs *"already running —
+waiting on it"* and `list_workflows` shows one.
+
 ## What is new
 
 | | |

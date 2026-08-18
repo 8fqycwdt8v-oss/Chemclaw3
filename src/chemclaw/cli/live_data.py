@@ -610,18 +610,31 @@ async def backfill(timeout_seconds: float) -> str:
     backfill that bypassed Temporal would prove the adapter works and leave the thing that actually
     runs in production untested.
     """
+    from temporalio.exceptions import WorkflowAlreadyStartedError
+
     from chemclaw.core.temporal_client import connect as temporal_connect
     from chemclaw.durable.eln_sync import ElnSyncWorkflow
 
     client = await temporal_connect()
-    workflow_id = f"eln-backfill-{int(time.time())}"
-    handle = await client.start_workflow(
-        ElnSyncWorkflow.run,
-        _EPOCH,
-        id=workflow_id,
-        task_queue=settings.background_task_queue,
-    )
-    logger.info("backfill %s started on %s", workflow_id, settings.background_task_queue)
+    # **A fixed id, so a second invocation rejoins the running drain instead of racing it.**
+    # This is D-011's argument applied to the harness: the drain takes hours, `up.sh` starts one on
+    # every bring-up and a human may run the lane meanwhile, and two concurrent syncs over one
+    # corpus contend on the PR-gate's git repository while producing no row the first would not.
+    # Measured while writing this: calling it twice did start two.
+    workflow_id = "eln-backfill-epoch"
+    try:
+        handle = await client.start_workflow(
+            ElnSyncWorkflow.run,
+            _EPOCH,
+            id=workflow_id,
+            task_queue=settings.background_task_queue,
+        )
+        logger.info("backfill %s started on %s", workflow_id, settings.background_task_queue)
+    except WorkflowAlreadyStartedError:
+        # Already running: take a handle to it and wait on that. Rejoining is the whole point, so
+        # this is the ordinary path on every bring-up after the first, not an error to report.
+        handle = client.get_workflow_handle(workflow_id)
+        logger.info("backfill %s already running — waiting on it", workflow_id)
     try:
         summary = await asyncio.wait_for(handle.result(), timeout=timeout_seconds)
     except TimeoutError:
@@ -672,7 +685,13 @@ async def _map_corpus(
 
 
 async def run_data_checks(
-    real_data: Path, export_dir: Path, *, with_database: bool, do_backfill: bool, timeout: float
+    real_data: Path,
+    export_dir: Path,
+    *,
+    with_database: bool,
+    do_backfill: bool,
+    timeout: float,
+    checks_enabled: bool = True,
 ) -> DataRun:
     """Check the published tables, the seeded corpus and the live database against each other.
 
@@ -684,6 +703,11 @@ async def run_data_checks(
     if do_backfill:
         run.backfilled = await backfill(timeout)
         logger.info("backfill: %s", run.backfilled)
+    if not checks_enabled:
+        # A bring-up only has to *start* the drain. Running the checks here would make its exit
+        # code report whether the corpus is currently correct — which, mid-drain, it is not.
+        run.seconds = time.monotonic() - started
+        return run
 
     seeded = _seeded_payloads(export_dir)
     mapped, refused = await _map_corpus(export_dir)
@@ -722,6 +746,11 @@ def report(run: DataRun) -> str:
     ]
     if run.backfilled:
         lines.append(f"Backfill: {run.backfilled}\n")
+    if not run.checks:
+        # `--backfill-only`: the drain was started and nothing was asked. Empty tables here would
+        # read as "every check returned nothing", which is a different and much worse claim.
+        lines.append("No checks run (`--backfill-only`). `make live-data` reads what arrived.")
+        return "\n".join(lines)
     lines += [
         "| dataset | published | seeded | mapped | refused |",
         "| --- | ---: | ---: | ---: | ---: |",
@@ -761,6 +790,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="run one ElnSyncWorkflow from the epoch first, so the seeded corpus is reachable",
     )
     parser.add_argument(
+        "--backfill-only",
+        action="store_true",
+        help=(
+            "start the backfill and run no checks — what a bring-up wants, so that its exit code "
+            "reports whether the drain started and never whether the corpus is currently correct"
+        ),
+    )
+    parser.add_argument(
         "--timeout",
         type=float,
         default=600.0,
@@ -782,8 +819,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         run_data_checks(
             real_data,
             export_dir,
-            with_database=not args.corpus_only,
-            do_backfill=args.backfill,
+            with_database=not (args.corpus_only or args.backfill_only),
+            do_backfill=args.backfill or args.backfill_only,
+            checks_enabled=not args.backfill_only,
             timeout=args.timeout,
         )
     )
