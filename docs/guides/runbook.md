@@ -205,6 +205,34 @@ Notes on the stack itself:
 - **The lane pins `CHEMCLAW_SERVICE_HOST=127.0.0.1`.** With `entra_required=false` the front door
   refuses a non-loopback bind (SEC-2) and the default is `0.0.0.0`, so without this it would
   correctly fail to start.
+- **`eval "$(bash infra/live/processes.sh env)"` before running anything from a second terminal.**
+  Every bundle this repository hosts authenticates its own `/mcp`, and `make live-up` *mints* those
+  credentials rather than defaulting them. A command run in a fresh shell would mint its own and get
+  401s from servers that are plainly up. `up` writes them into the lane's run directory and `env`
+  reads them back; the file itself is an implementation detail, and the subcommand is the contract.
+  It carries `CHEMCLAW_LIVE_PROBE_TOKEN` too, when the lane is enforcing identity, and `down`
+  removes it — stale credentials for processes that are gone are a slower version of the same
+  mismatch, not a milder one.
+- **Running the lane with identity enforced** (the posture the chart ships) needs an issuer, and
+  `Chemclaw3_mock` is one — see `D-2026-08-20-a-tenant-is-a-jwks-document-and-an-issuer-string`:
+
+  ```bash
+  # in the Chemclaw3_mock checkout
+  MOCK_ENTRA_ENABLED=true uvicorn app.main:app --port 8090
+
+  # here
+  CHEMCLAW_ENTRA_REQUIRED=true \
+  CHEMCLAW_LIVE_ENTRA_TOKEN_URL=http://127.0.0.1:8090/entra/mock-tenant/oauth2/v2.0/token \
+    make live-up
+  ```
+
+  The audience, issuer and JWKS URL derive from that one endpoint, the probe identity is minted
+  from the same tenant the front door validates against, and `CHEMCLAW_ENTRA_PRIVILEGED_ROLES`
+  defaults to `process-chemist` — named rather than left empty because both authorization gates
+  fail *closed* on an empty privileged set, so an unset role would make the run measure a
+  permissions error instead of the system. Mint any other identity by POSTing to that same URL:
+  `{"oid":"u-bench"}` for a chemist with no entitlements, `{"expires_in":-60}` for an expired token,
+  `{"unpublished_key":true}` for a forgery.
 - **Each worker gets its own probe port** (9000-9003). `worker_http` otherwise has them all
   contend for 9000; setting the port to 0 would silence the readiness signal this lane polls.
 - **Without a Docker daemon** the bootstrap builds pgvector and the Temporal CLI from git clones.

@@ -57,21 +57,6 @@ topic).
 
 ## 1 — Untrusted input reaching a privileged surface
 
-- [ ] **Four of the six endpoint-serving connectors are unauthenticated** — [M]. `bo`, `calc`,
-      `molfp` and `rxnfp` ship `auth: mode: none`. The NetworkPolicy is the only thing between a pod
-      in the namespace and a tool that starts durable work. The mode is not theoretical: `chem` and
-      `safety` are served by `Chemclaw3-mcp`, whose `connector_app` enforces a bearer on `/mcp`
-      itself, so their manifests set `mode: bearer` and `CHEMCLAW_CHEM_TOKEN` /
-      `CHEMCLAW_SAFETY_TOKEN` are read per request today. The four remaining are the ones we host,
-      and `connectors/server.py`'s `BearerAuthMiddleware` already enforces the mode from each
-      bundle's own manifest, failing closed on an unresolved one.
-      *Measured shape of the change:* four manifests, four `values.yaml` `optionalKeys`, the
-      `tests/test_helm_chart.py` set that pins them, `.env.example`, and the dev/live runners —
-      which need the vars or every call 401s. **Watch the name collision**: `CHEMCLAW_CALC_TOKEN` is
-      already taken by a different hop (`core/config/calculators.py:165`, the token core presents to
-      the *remote* calc server), so the calc connector's own `/mcp` needs a distinct variable.
-      *Design direction:* MCP's OAuth 2.1 / ID-JAG token exchange for the federated case.
-
 - [ ] **The unauthenticated `X-Chemclaw-Actor` header becomes durable attribution** — [M], and
       **narrower than this row used to claim**. It does not reach `job_records` or the audit trail:
       the durable path takes the actor as an argument sourced from core's validated front-door
@@ -420,8 +405,8 @@ above when it becomes the next thing worth doing, and delete it from here when i
 
 The large multi-item programmes that used to be tracked here as sections are records now, not
 plans: the F0–F9 foundation build, the F10 parity pass, the F11 gap closure, the BO capability
-roadmap and the xTB/QM (X-series) roadmap. Their remaining live edges — real Entra tenant, real
-Temporal broker, real cluster, real HPC, real Snowflake — are in
+roadmap and the xTB/QM (X-series) roadmap. Their remaining live edges — real Temporal broker, real
+cluster, real HPC, real Snowflake — are in
 [`DEFERRED.md`](DEFERRED.md), each with the trigger that would revisit it, which is the register
 those belong in.
 

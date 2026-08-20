@@ -1,56 +1,84 @@
-# Task — `agent/durable_tools.py` imports workflow implementations: is that a D-002 layering break?
+# Task — Prove the enforced identity path works, and close the six audit findings
 
-Raised as: "agent/durable_tools.py imports workflow implementations in order to launch them, where
-D-002 puts durability only in Temporal. That's a genuine layering question and wants its own ADR,
-not a readability edit."
+Audit report: https://claude.ai/code/artifact/047c07fc-4f0a-4715-b55f-08ebc685b06b
 
 ## Plan
 
-- [x] Establish the real surface: which modules outside `durable/` import a workflow class
-- [x] Read what D-002 actually says (vs. what the concern assumes it says)
-- [x] Measure the marginal import closure the workflow-class imports add to the agent process
-- [x] Measure whether the agent/front-door process currently loads bundle-only heavy deps
-- [x] Measure what the by-name alternative costs under `mypy --strict`
-- [x] Check whether the edge is already declared/enforced anywhere
-- [x] Decide, write the ADR, add the ledger row
-- [x] Close the one gap the investigation actually found, with a test
-- [x] `make lint type test` green
+### Proof (F1) — the headline
+- [x] Fake Entra issuer in `Chemclaw3_mock` (`app/entra/`), off by default
+- [x] Backend integration test that boots the REAL app with `entra_required=true` against a real
+      HTTP JWKS, nothing patched — 14 cases, mutation-proved
+- [x] Live lane runs enforced (`CHEMCLAW_LIVE_ENTRA_TOKEN_URL`), and was run
+
+### Fixes
+- [x] F2 — 16 tests for `src/auth/msalAuth.ts`, five mutations caught
+- [x] F3 — 401 recovery in `api/client.ts` for every route; `openStream` stops on 401
+- [x] F4 — three readerless Entra settings and the `CHEMCLAW_ENTRA_TOKEN_ENDPOINT` ConfigMap value
+- [x] F5 — the bundled UI mounts only when identity is off
+- [x] F6a — bearer auth for `bo`, `calc`, `molfp`, `rxnfp`
+- [x] F6b — `chemclaw_group_claim_overage_total` + a PrometheusRule
+- [x] F6c — mock HPC compares tokens with `compare_digest` over bytes
+
+### Close
+- [x] Three ADRs + ledger rows
+- [x] `make lint type test` green (4197 passed; 2 pre-existing failures need a live model key)
+- [x] `BACKLOG.md` connector row and the stale live-edge lists deleted
 
 ## What was measured
 
-| Question | Result |
+**The enforced path, against the running stack** (front door, four workers, four connectors,
+Postgres, Temporal), `CHEMCLAW_ENTRA_REQUIRED=true`:
+
+| request | result |
 |---|---|
-| Launch sites outside `durable/` | **4**, not 1 (`agent/durable_tools`, `agent/interaction_tools`, `connectors/jobs`, `templates/registry`) |
-| Marginal closure of the 2 workflow imports in `durable_tools` | **10 modules, 0 new third-party roots** (1898 → 1888) |
-| Bundle-only heavy deps in agent / front door | **none** (`bofire`, `botorch`, `tblite`, `gpytorch`, `xgboost`) |
-| Bundle modules loaded by agent / front door | **zero**, across 7 discovered bundles |
-| Wrong workflow argument, typed launch | `mypy --strict` **errors** |
-| Wrong workflow argument, by-name launch | **silent** |
-| Dependency direction | already **bidirectional** — `durable/template_activities.py` imports `chemclaw.agent` to run a turn inside an activity |
-| Edge already declared? | **yes** — `tests/test_layering.py::_CYCLE_EDGES` has `("chemclaw.agent", "chemclaw.durable")` with its reason |
+| no token · garbage · unpublished key · wrong aud · wrong iss · expired · no `exp` | 401 (all seven) |
+| a token the tenant vouches for | 200 |
+| `DELETE /jobs/x` no roles → privileged | 403 → 404 |
+| alice's session read by alice → by bench | 200 → 404 `unknown session` |
+| `/healthz` `/readyz` `/metrics` → `/` | 200 → 404 |
 
-## Review
+A full turn then ran through it, and `audit_events.actor` recorded `u-alice` — the `oid` from the
+minted token. That row is the chain.
 
-**The premise does not hold, and the measurement is what settles it.** D-002 forbids merging
-*durability models* — a second durable store in the conversation layer — and asks for the
-integration to be "one thin DIY adapter". `durable_tools.py` is that adapter: it stores nothing
-durable, and the import is Temporal's own typed launch API. Removing it would trade a compile-time
-error for a runtime one at precisely the site where durable identity and D-011 idempotency are
-decided.
+**Connector credentials, from a genuinely fresh shell** after `eval "$(processes.sh env)"`:
+`POST bo/mcp` 401 without, 400 with (past the gate), `GET bo/healthz` 200 unauthenticated.
 
-**What the concern does correctly point at is one layer down, and it was real:** the rule that
-actually protects the agent process is not "agent must not import durable" — it is *"the agent must
-never import a **bundle's** workflow"*, which is what the connector seam's by-name cross-queue
-dispatch exists for. That held (measured above) and **nothing asserted it**. Core's *worker* has
-exactly that guard (`test_cores_workers_import_no_bundle`); the agent layer, which also launches
-workflows, had none — and `test_layering.py`'s policy is package-granular, so it structurally
-cannot express it. The same gap, on the other side of the seam, is why
-`test_the_connector_job_wrapper_imports_no_connector` was written.
+**Mutation proofs.** Backend: 7 deliberate regressions, 7 caught. UI: 5 on `msalAuth`, 2 on the 401
+recovery, 1 on the job stream, 3 on the proxy — all caught.
 
-Closed by `tests/test_layering.py::test_the_agent_layer_imports_no_bundle_workflow`. ADR:
-`D-2026-08-17-a-workflow-type-is-a-launch-contract-not-a-durability-leak`.
+## What was *not* proven, and why
 
-**Not done:** no change to `durable_tools.py`'s launch shape — the investigation concluded the
-import is correct, so editing it would have been the readability edit the task explicitly excluded.
-One comment was added at the import site, because "why is this allowed?" is a question this
-investigation shows a reader will have again.
+**The browser → tenant hop.** MSAL talks to `login.microsoftonline.com`; mocking that is mocking a
+login UI rather than a key set, and a UI auth mode accepting tokens from an arbitrary issuer would
+rebuild the `ALLOW_DEV_AUTH` hazard. The frontend's own contribution is pinned by tests instead.
+
+**A real-model turn.** This environment's `API-KEY` is rejected by Anthropic (401 measured against
+`api.anthropic.com` directly), so the live turn ran against `cli.mock_llm` — the lane's documented
+credential-free mode, where only the model is faked.
+
+## Two mutations that were invalid, recorded so nobody repeats them
+
+- Deleting `audience=` from `jwt.decode` does not disable the audience check: PyJWT rejects *every*
+  token carrying an `aud` when the decoder passes none. Use `options={"verify_aud": False}`.
+- Making `IdentityProviderUnavailable` an `AuthError` subclass changes nothing — its `except` clause
+  in `require_principal` is ordered first. Mutate the `raise` instead.
+
+## Findings the work itself turned up
+
+- **The connector probe allowlist never matched under a mount.** `request.url.path` keeps the mount
+  prefix (Starlette records it in `root_path` and leaves the path whole), so `/molfp/healthz` was
+  not exempt. Invisible while nothing was refused; would have 401'd the whole fleet's readiness
+  sweep the day a credential was declared.
+- **`--export-env` is not idempotent**, unlike the URL map it replaced: a second shell minted
+  different tokens and got 401s from healthy servers. `processes.sh` persists them; `processes.sh
+  env` reads them back.
+- **`eval "$(...)"` swallows the exit status**, so a failing runner surfaced twenty lines later as
+  `CHEMCLAW_CONNECTOR_URLS: unbound variable` instead of naming the real error.
+- **The transport test rebuilt each endpoint from scratch**, dropping the manifest's `auth` — so it
+  connected anonymously and proved nothing about the credential a deployment requires.
+- **`--export-env` hand-quoted its values.** A minted token is base64url and could never need
+  escaping; an operator-supplied one is an arbitrary string, and `processes.sh` `eval`s the output.
+  `shlex.quote`, with a test that round-trips a value carrying `'` through the shell's own parser.
+- **The runbook named a runtime-only path**, which `make prose-validate` resolves against the tree —
+  so it passed while the lane happened to be up and failed once it was down. The subcommand is the
+  contract; the file is an implementation detail and is no longer written down as one.

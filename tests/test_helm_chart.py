@@ -295,6 +295,10 @@ def test_chart_declares_only_the_documented_secrets() -> None:
         "CHEMCLAW_NOTE_WEBHOOK_SECRET",
     }
     assert set(_VALUES["secrets"]["optionalKeys"].values()) == {
+        "CHEMCLAW_BO_MCP_TOKEN",
+        "CHEMCLAW_CALC_MCP_TOKEN",
+        "CHEMCLAW_MOLFP_MCP_TOKEN",
+        "CHEMCLAW_RXNFP_MCP_TOKEN",
         "CHEMCLAW_FRAMING_ENVELOPE_SECRET",
         "CHEMCLAW_CHEM_TOKEN",
         "CHEMCLAW_SAFETY_TOKEN",

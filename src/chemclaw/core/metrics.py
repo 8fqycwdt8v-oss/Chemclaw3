@@ -229,6 +229,20 @@ _COUNTERS: dict[str, str] = {
     # from was not even exhausted: it never grew past 13 of 64 connections and opened zero new
     # ones. Counted separately from the admission shed so "the loop could not schedule a handoff"
     # is not read as "the LLM endpoint is full".
+    # A token whose group memberships did not fit in it. Entra replaces `groups` with
+    # `_claim_names` past roughly 150 memberships, and there is no fix at request time — resolving
+    # the overage needs a Graph call, which D-089 does not permit. So the user with the *most*
+    # access silently arrives with the *fewest* group-derived entitlements, and until this counter
+    # existed the only trace was a WARNING line: a chemist quietly loses a gated document share and
+    # nothing an operator watches moves. Counting it is what makes the condition alertable rather
+    # than greppable, which is this repository's own standing rule about measurement.
+    #
+    # Unlabelled, deliberately: the interesting series is "is this happening at all", and a label
+    # carrying the `oid` would key an unauthenticated exposition on user identity.
+    "chemclaw_group_claim_overage_total": (
+        "Validated tokens that carried a group-claim overage (`_claim_names`) instead of `groups`, "
+        "so no group-derived entitlement could be read for that user."
+    ),
     "chemclaw_db_unavailable_total": (
         "Requests shed with 503 because a pooled Postgres connection could not be obtained."
     ),

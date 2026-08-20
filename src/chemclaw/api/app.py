@@ -21,8 +21,8 @@ Routes: `GET /healthz` (liveness), `GET /readyz` (readiness), `POST /sessions` (
 `GET /sessions` (the caller's conversation list), `POST /sessions/{id}/messages` (send a turn,
 Server-Sent-Events stream of `chemclaw.api.events`), `GET /sessions/{id}/messages` (read the
 transcript
-back), and the static chat UI at `/`. Identity (Entra OIDC on every non-health route) is layered
-on in F4.
+back), and — in dev only — the bundled chat UI at `/`. Identity (Entra OIDC on every non-health
+route) is layered on in F4.
 """
 
 import asyncio
@@ -365,7 +365,19 @@ def create_app(
     ):
         module.register(app)
 
-    if _STATIC_DIR.is_dir():
+    # **Only when identity is not enforced**, and that is a property of this UI rather than a
+    # policy choice. `api/static/app.js` sends no `Authorization` header at all — measured: the
+    # string does not occur in it — and subscribes to job push-back with a native `EventSource`,
+    # which cannot carry one. So under `entra_required` every call it makes is a 401 on the first
+    # click: serving it there publishes a permanently broken chat client on the same public host
+    # as the API, competing for `/` with `Chemclaw3_ui`, which does authenticate.
+    #
+    # A setting was considered and rejected: there is no configuration under which this UI works
+    # with identity on, so a knob would only offer a way to be wrong. `Chemclaw3_ui` is the
+    # authenticated front end; this one is the dev affordance it grew out of, and the condition
+    # says exactly that. `tests/test_route_auth_coverage.py` now asserts that an enforced app has
+    # *no* ungatable surface at all, which is the property this buys.
+    if _STATIC_DIR.is_dir() and not settings.entra_required:
         app.mount("/", StaticFiles(directory=str(_STATIC_DIR), html=True), name="static")
 
     return app

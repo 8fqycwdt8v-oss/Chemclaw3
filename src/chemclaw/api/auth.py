@@ -28,6 +28,7 @@ from pydantic import BaseModel, Field
 from chemclaw.api.rate_limit import RateLimited, enforce_request_budget
 from chemclaw.core.config import settings
 from chemclaw.core.identity_context import GROUP_ROLE_PREFIX
+from chemclaw.core.metrics_bridge import record_metric
 
 logger = logging.getLogger(__name__)
 
@@ -189,6 +190,11 @@ def _principal_from_claims(claims: dict[str, Any]) -> Principal:
         # is no fix here — resolving it needs a Graph call, which D-089 does not permit — so it is
         # named in the log rather than hidden behind a shorter role list.
         if "groups" not in claims and "_claim_names" in claims:
+            # Counted as well as logged. The log line names *who*, which an operator needs once
+            # they are looking; the counter is what makes them look, because a warning on a pod's
+            # stdout is not something anyone watches and this failure is silent from the chemist's
+            # side too — a gated share simply returns nothing.
+            record_metric(lambda m: m.increment("chemclaw_group_claim_overage_total"))
             logger.warning(
                 "token for %s carries a group-claim overage rather than 'groups'; "
                 "group-derived entitlements are unavailable for this user",

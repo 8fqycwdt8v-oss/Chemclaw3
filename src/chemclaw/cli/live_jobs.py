@@ -43,11 +43,13 @@ from typing import Any
 
 from temporalio.client import WorkflowExecutionStatus
 
+from chemclaw.cli.chat import resolve_identity
 from chemclaw.connectors.jobs import build_job_tool, job_workflow_id
 from chemclaw.connectors.registry import find_job
 from chemclaw.core.config import settings
 from chemclaw.core.db import _redact
 from chemclaw.core.db import connection as db_connection
+from chemclaw.core.identity_context import reset_current_identity, set_current_identity
 from chemclaw.core.logging import configure_logging
 from chemclaw.core.temporal_client import connect as temporal_connect
 
@@ -402,10 +404,32 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="where to write the markdown report (default: alongside the live transcripts)",
     )
+    parser.add_argument(
+        "--actor",
+        default=None,
+        help=f"the identity this smoke launches its job as (default: {settings.cli_admin_actor!r})",
+    )
     args = parser.parse_args(argv)
 
     configure_logging()
-    run = asyncio.run(run_smoke(args.run_dir))
+    # **This smoke launches a *user-triggered* durable job, so it has to say who it is.**
+    # `connectors.jobs.prepare_job_launch` calls `require_actor()`, which under `entra_required`
+    # refuses work with no authenticated user — the F4-T3 rule, and correct: a job record whose
+    # `requested_by` is nobody is a record that answers no question. Unbound, this tool simply
+    # could not run in the posture the chart ships, which is the one worth smoking.
+    #
+    # Through `chat.resolve_identity` rather than a second reading of the same two settings: it
+    # already encodes "--admin bypasses *authentication* only" and reads `cli_admin_actor` and
+    # `cli_admin_roles`, and a smoke that invented its own entitlement would be measuring a
+    # permission this deployment never granted. `cli_admin_roles` is empty by default, so an
+    # enforced lane whose job is declared `expensive: true` still refuses it here — which is the
+    # trigger gate working, and an operator naming a role is the remedy.
+    actor, roles = resolve_identity(admin=True, actor=args.actor)
+    identity = set_current_identity(actor, roles)
+    try:
+        run = asyncio.run(run_smoke(args.run_dir))
+    finally:
+        reset_current_identity(identity)
     text = report(run)
     print(text)
 

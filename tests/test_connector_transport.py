@@ -109,8 +109,13 @@ def composite() -> Iterator[int]:
     is also what `chemclaw.cli.connectors_dev` does for the dev loop, so this exercises that shape
     too.
     """
-    from chemclaw.cli.connectors_dev import build_composite
+    from chemclaw.cli.connectors_dev import build_composite, ensure_dev_tokens
 
+    # Every bundle we host now authenticates its own `/mcp`, so the composite needs credentials to
+    # exist before it serves — and the tests below need the *same* values to present. Minted the
+    # way `make connectors` mints them rather than by setting a literal here, so this exercises the
+    # dev path instead of a parallel one.
+    ensure_dev_tokens()
     app, _urls = build_composite()
     port = _free_port()
     with _Server(app, port):
@@ -145,7 +150,14 @@ def test_the_agent_sees_exactly_the_manifest_allow_list(name: str, composite: in
     assert declared, f"{name} declares no agent-facing tools"
 
     async def _discover() -> set[str]:
-        endpoint = HttpEndpoint(url=f"http://127.0.0.1:{composite}/{name}/mcp")
+        # The bundle's *own* endpoint with the address swapped, not a fresh one: rebuilding it
+        # dropped the manifest's `auth` declaration, so this connected anonymously and proved
+        # nothing about the credential the deployment actually requires. It connected at all only
+        # because no bundle we host declared one.
+        assert isinstance(manifest.endpoint, HttpEndpoint)
+        endpoint = manifest.endpoint.model_copy(
+            update={"url": f"http://127.0.0.1:{composite}/{name}/mcp"}
+        )
         spec = _mcp_connection(cast(ConnectorManifest, SimpleNamespace(name=name)), endpoint)
         spec = replace(spec, allowed_tools=tuple(sorted(declared)))
         async with AsyncExitStack() as stack:

@@ -555,9 +555,9 @@ def _trace_config(trace_config: Any) -> Any:
 # `repr` of a settings object — and cannot false-positive on anything else.
 #
 # Listed rather than derived from a name pattern (`*_token`, `*_secret`), because deriving would
-# silently include `entra_token_endpoint` and `budget_max_tokens_per_user` — a URL and an integer —
-# and silently *exclude* the next secret whose name does not match. A list is one line per addition
-# and is visible in review, which is what a credential inventory should be.
+# silently include `calc_server_token_env` and `budget_max_tokens_per_user` — a variable *name* and
+# an integer — and silently *exclude* the next secret whose name does not match. A list is one line
+# per addition and is visible in review, which is what a credential inventory should be.
 _SECRET_SETTINGS = (
     "llm_api_key",
     "hpc_api_token",

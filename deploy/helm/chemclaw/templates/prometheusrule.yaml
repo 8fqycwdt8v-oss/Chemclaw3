@@ -210,6 +210,27 @@ spec:
               durable broker or the document index. The `shedding` log line on the same pod names
               the method, the path and the subsystem.
 
+        {{- /* The one identity failure that is silent on both sides. Past ~150 group memberships
+               Entra sends `_claim_names` instead of `groups`, so the users with the MOST access
+               arrive with no group-derived entitlement at all — a gated document share simply
+               returns nothing, and the only other trace is a WARNING on a pod's stdout. There is
+               no fix at request time (resolving the overage needs a Graph call, which D-089 does
+               not permit); the remedy is to assign the group to an app role instead, which arrives
+               as a normal `roles` value. Warning rather than critical: nothing is broken, someone
+               is quietly under-entitled. */}}
+        - alert: ChemclawGroupClaimOverage
+          expr: increase(chemclaw_group_claim_overage_total[15m]) > 0
+          for: 0m
+          labels:
+            severity: warning
+          annotations:
+            summary: A token arrived with more groups than it could carry
+            description: >-
+              A user's Entra token replaced `groups` with `_claim_names`, so none of their
+              group-derived entitlements could be read and any group-gated corpus will answer
+              emptily for them. The `overage` log line on the same pod names the user. Assign the
+              group to an app role so it arrives in the `roles` claim instead.
+
         - alert: ChemclawDatabaseUnavailable
           expr: increase(chemclaw_db_unavailable_total[5m]) > 0
           for: 0m

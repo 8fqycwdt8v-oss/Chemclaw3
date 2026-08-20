@@ -382,7 +382,6 @@ config:
   CHEMCLAW_ENTRA_REQUIRED: "true"
   CHEMCLAW_ENTRA_TENANT_ID: "00000000-0000-0000-0000-000000000000"
   CHEMCLAW_ENTRA_AUDIENCE: "api://chemclaw"
-  CHEMCLAW_ENTRA_TOKEN_ENDPOINT: "https://login.microsoftonline.com/TENANT/oauth2/v2.0/token"
   # ⚠ EMPTY ON PURPOSE, AND EMPTY MEANS CLOSED. Until an operator sets this to their own Entra app
   # role(s), **every job a connector manifest declares `expensive: true` is refused for everyone**:
   # `compute_dft_energy`, `compute_interaction_energy`, `sample_conformers` and
@@ -530,6 +529,27 @@ secrets:
     chemToken: "CHEMCLAW_CHEM_TOKEN"
     safetyToken: "CHEMCLAW_SAFETY_TOKEN"
     calcToken: "CHEMCLAW_CALC_TOKEN"
+    # The four bundles **we** host, each authenticating its own `/mcp` (D-2026-08-20). Until they
+    # declared a credential the NetworkPolicy was the only thing between any pod in the namespace
+    # and a tool that starts durable HPC work — and a NetworkPolicy selects peers, not paths.
+    #
+    # Both ends read the same variable: `connectors/server.py`'s `BearerAuthMiddleware` on the
+    # serving pod, `connectors/identity.py`'s `_EnvBearerAuth` on core and the workers. Because
+    # `chemclaw.env` mounts these onto every Deployment, one value per bundle covers both sides
+    # with nothing to keep in step.
+    #
+    # `_MCP_TOKEN`, not `_TOKEN`: `CHEMCLAW_CALC_TOKEN` above is a *different hop* — the credential
+    # core presents to the remote calc server — and two hops sharing a name is how one of them ends
+    # up pointed at the wrong secret.
+    #
+    # `optional: true` for the upgrade reason the three above carry, and with the same caveat: it
+    # says nothing about whether the capability tolerates being unset. It does not. Unset, the
+    # serving pod refuses every MCP request and core raises `MissingConnectorCredential` on the
+    # first call — which is the fail-closed direction, and still an operator's job to fill in.
+    boMcpToken: "CHEMCLAW_BO_MCP_TOKEN"
+    calcMcpToken: "CHEMCLAW_CALC_MCP_TOKEN"
+    molfpMcpToken: "CHEMCLAW_MOLFP_MCP_TOKEN"
+    rxnfpMcpToken: "CHEMCLAW_RXNFP_MCP_TOKEN"
   # Secrets for the **migration hook Job only**, and the separation from `keys` above is the whole
   # point rather than tidiness: `chemclaw.env` mounts every key in that map onto every pod, so a
   # migration credential listed there would be present on the front door and every worker for the

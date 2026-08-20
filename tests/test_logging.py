@@ -625,9 +625,10 @@ def test_every_named_secret_is_a_real_settings_field() -> None:
 
     Deliberately one-directional. It does not assert that every secret-looking field is listed,
     because "secret-looking" is exactly the name-pattern heuristic the inventory's own comment
-    rejects — `entra_token_endpoint` is a URL, `budget_max_tokens_per_user` is an integer, and
-    `temporal_tls_key` is a path to a PEM rather than the key material. Whether a new field holds a
-    credential stays a human judgement made in review; whether a listed one still exists does not.
+    rejects — `calc_server_token_env` holds a variable *name*, `budget_max_tokens_per_user` is an
+    integer, and `temporal_tls_key` is a path to a PEM rather than key material. Whether a field
+    holds a credential stays a human judgement made in review; whether a listed one still exists
+    does not.
     """
     unknown = sorted(set(_SECRET_SETTINGS) - set(Settings.model_fields))
     assert not unknown, (
