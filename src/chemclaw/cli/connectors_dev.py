@@ -12,11 +12,24 @@ indirection rather than a special case. The runner prints the exact JSON to set.
 
 Only bundles with a *local* app are mounted: a connector whose server we do not own (a third-party
 MCP endpoint) has nothing to run here, and one is skipped rather than reported as broken.
+
+**The credentials are minted here, and that is not a convenience.** Every locally-served bundle now
+declares `auth: mode: bearer`, so its `/mcp` refuses an unauthenticated request — which is the
+point, and which would also make `make connectors` 401 every call unless both sides of a loopback
+pair agree on a secret. `ensure_dev_tokens` mints one per bundle where the environment does not
+already carry it, and `--export-env` prints them as shell exports so a caller that starts core in a
+*different* process (`infra/live/processes.sh`) can put the same values in both environments. There
+is deliberately no default token: a fixed dev credential in the tree is the thing that eventually
+turns up in a deployment.
 """
 
+import argparse
 import importlib
 import json
 import logging
+import os
+import secrets
+import shlex
 import sys
 from collections.abc import AsyncIterator
 from contextlib import AsyncExitStack, asynccontextmanager
@@ -24,6 +37,7 @@ from contextlib import AsyncExitStack, asynccontextmanager
 import uvicorn
 from fastapi import FastAPI
 
+from chemclaw.connectors.manifest import BearerAuth, HttpEndpoint
 from chemclaw.connectors.registry import enabled
 from chemclaw.core.config import settings
 from chemclaw.core.logging import configure_logging
@@ -48,6 +62,49 @@ def _local_app(name: str) -> FastAPI | None:
         logger.warning("connector %s: server.app exports no FastAPI `app`; skipping", name)
         return None
     return app
+
+
+def bearer_token_envs() -> dict[str, str]:
+    """The `/mcp` credential variable of every bundle *this runner serves*, keyed by connector name.
+
+    Read off the manifests rather than listed here, so a bundle that gains or drops a credential is
+    covered the day its manifest changes — the same rule `expensive_actions()` follows for the
+    trigger gate, and the reason neither has a list in core to keep up to date.
+
+    **Locally-served bundles only, which is the whole reason this filters.** `chem` and `safety`
+    also declare a bearer, and that credential belongs to `Chemclaw3-mcp` — minting a random value
+    for it would replace a clear `MissingConnectorCredential` naming the unset variable with a 401
+    from a server that has never heard of the token. A secret is only ours to invent when both ends
+    of the call are.
+    """
+    return {
+        manifest.name: manifest.endpoint.auth.token_env
+        for manifest in enabled()
+        if isinstance(manifest.endpoint, HttpEndpoint)
+        and isinstance(manifest.endpoint.auth, BearerAuth)
+        and _local_app(manifest.name) is not None
+    }
+
+
+def ensure_dev_tokens() -> dict[str, str]:
+    """Fill in a random token for every credential variable the environment does not already set.
+
+    Minted, never defaulted. A constant would be a credential committed to the tree, and the one
+    thing worse than an unauthenticated dev server is an authenticated one whose password is public
+    — the second looks like a control.
+
+    Existing values are left exactly as they are, which is what lets a caller (a live lane, a
+    compose file, an operator) decide the secret and have both processes agree on it.
+
+    Returns:
+        Every credential variable and its value, whether minted here or already present.
+    """
+    resolved: dict[str, str] = {}
+    for env_var in sorted(set(bearer_token_envs().values())):
+        token = os.environ.get(env_var) or secrets.token_urlsafe(24)
+        os.environ[env_var] = token
+        resolved[env_var] = token
+    return resolved
 
 
 def build_composite() -> tuple[FastAPI, dict[str, str]]:
@@ -85,16 +142,50 @@ def build_composite() -> tuple[FastAPI, dict[str, str]]:
     return composite, urls
 
 
-def main() -> int:
-    """Serve every enabled local connector on one port, printing the override core needs."""
-    configure_logging()
+def _export_lines(urls: dict[str, str], tokens: dict[str, str]) -> list[str]:
+    """Everything a *separate* core process needs in order to reach and authenticate to these apps.
+
+    One function so the human-readable banner and the `eval`-able output cannot disagree about what
+    core needs — the failure mode of two copies here is a lane that starts and 401s every tool call,
+    which reads as a broken connector rather than a missing variable.
+    """
+    values = {"CHEMCLAW_CONNECTOR_URLS": json.dumps(urls, separators=(",", ":")), **tokens}
+    # `shlex.quote`, not hand-written quotes. A minted token is base64url and could never need it,
+    # but an operator-supplied one is an arbitrary string, and a value carrying a quote would end
+    # the assignment early — turning the rest of a *credential* into shell words that the caller
+    # then `eval`s. The mechanical escape costs nothing and removes the question.
+    return [f"export {name}={shlex.quote(value)}" for name, value in sorted(values.items())]
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Serve every enabled local connector on one port, printing what core needs to reach them."""
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--export-env",
+        action="store_true",
+        help="Print the shell exports core needs (URLs and per-connector tokens) and exit, "
+        'for `eval "$(...)"` in a script that starts both processes.',
+    )
+    args = parser.parse_args(argv)
+
+    # Before the apps are built, so a bundle's own middleware resolves a credential that exists.
+    tokens = ensure_dev_tokens()
     composite, urls = build_composite()
+    if args.export_env:
+        # Nothing on stdout but the exports, and no `configure_logging()`: this output is `eval`ed.
+        # The composite is built and discarded rather than short-cut, so the URL map printed here
+        # is the same object the serving path prints — one reader, no second copy of the pattern.
+        print("\n".join(_export_lines(urls, tokens)))
+        return 0
+
+    configure_logging()
     if not urls:
         print("no enabled connector ships a local server — nothing to run", file=sys.stderr)
         return 1
     print(f"serving {len(urls)} connector(s) on http://{DEV_HOST}:{DEV_PORT}")
     print("point core at them with:")
-    print(f"  CHEMCLAW_CONNECTOR_URLS='{json.dumps(urls, separators=(',', ':'))}'")
+    for line in _export_lines(urls, tokens):
+        print(f"  {line}")
     uvicorn.run(composite, host=DEV_HOST, port=DEV_PORT, log_level=settings.log_level.lower())
     return 0
 

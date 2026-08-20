@@ -43,6 +43,46 @@ die() { printf '\033[31m[live] %s\033[0m\n' "$*" >&2; exit 1; }
 # configuration nothing tests.
 export CHEMCLAW_SERVICE_HOST="${CHEMCLAW_SERVICE_HOST:-127.0.0.1}"
 export CHEMCLAW_ENTRA_REQUIRED="${CHEMCLAW_ENTRA_REQUIRED:-false}"
+
+# ---------------------------------------------------------------------------- enforced identity
+#
+# The lane can run the posture the chart ships — every request carrying a validated Entra token —
+# by pointing it at an issuer. That used to be impossible offline and was recorded as gated on "a
+# real Entra tenant", which was never what it needed: a tenant, to a resource server, is a JWKS
+# document and an issuer string, and `Chemclaw3_mock`'s `app/entra/` is both (MOCK_ENTRA_ENABLED).
+#
+# Opt in with CHEMCLAW_ENTRA_REQUIRED=true and a token endpoint to mint from:
+#
+#   MOCK_ENTRA_ENABLED=true uvicorn app.main:app --port 8090        # in the mock checkout
+#   CHEMCLAW_ENTRA_REQUIRED=true #   CHEMCLAW_LIVE_ENTRA_TOKEN_URL=http://127.0.0.1:8090/entra/mock-tenant/oauth2/v2.0/token #     make live-up
+#
+# The issuer and the JWKS URL are both derived below rather than one from the other, because that
+# is how the front door reads them — `entra_jwks_endpoint` and `entra_issuer_url` resolve
+# independently, so an issuer alone cannot find the keys.
+readonly ENTRA_TOKEN_URL="${CHEMCLAW_LIVE_ENTRA_TOKEN_URL:-}"
+readonly ENTRA_BASE="${ENTRA_TOKEN_URL%/oauth2/v2.0/token}"
+if [ "$CHEMCLAW_ENTRA_REQUIRED" = "true" ]; then
+  [ -n "$ENTRA_TOKEN_URL" ] || die "CHEMCLAW_ENTRA_REQUIRED=true needs CHEMCLAW_LIVE_ENTRA_TOKEN_URL"
+  export CHEMCLAW_ENTRA_AUDIENCE="${CHEMCLAW_ENTRA_AUDIENCE:-api://chemclaw}"
+  export CHEMCLAW_ENTRA_ISSUER="${CHEMCLAW_ENTRA_ISSUER:-$ENTRA_BASE/v2.0}"
+  export CHEMCLAW_ENTRA_JWKS_URL="${CHEMCLAW_ENTRA_JWKS_URL:-$ENTRA_BASE/discovery/v2.0/keys}"
+  # The roles the probe identity holds. Named rather than left empty because both authorization
+  # gates fail *closed* on an empty privileged set — so an unset role here does not mean "no RBAC
+  # in this lane", it means every expensive job and every write tool is refused and the probe run
+  # measures a permissions error instead of the system.
+  export CHEMCLAW_ENTRA_PRIVILEGED_ROLES="${CHEMCLAW_ENTRA_PRIVILEGED_ROLES:-process-chemist}"
+fi
+
+# Mint the identity the probe runner presents, from the issuer the front door is validating
+# against. Called after the mock is known to be up (a token is minted, not fetched at startup), and
+# only in the enforced posture — an empty `live_probe_token` is how the dev posture is spelled.
+mint_probe_token() {
+  local oid="${CHEMCLAW_LIVE_PROBE_OID:-live-probe-runner}"
+  local roles="${CHEMCLAW_ENTRA_PRIVILEGED_ROLES:-process-chemist}"
+  curl -sf "$ENTRA_TOKEN_URL" -H 'content-type: application/json' \
+    -d "{\"oid\":\"$oid\",\"upn\":\"$oid@live.test\",\"roles\":[\"$roles\"]}" \
+    | "$1" -c 'import json,sys; print(json.load(sys.stdin)["access_token"])'
+}
 export CHEMCLAW_SESSION_STORE="${CHEMCLAW_SESSION_STORE:-postgres}"
 export CHEMCLAW_CONNECTORS_REQUIRED="${CHEMCLAW_CONNECTORS_REQUIRED:-true}"
 # Traces, when something is listening for them. `make phoenix-up` puts an OTLP receiver on 4317;
@@ -61,14 +101,18 @@ fi
 # command runs, which silently removes the whole knowledge-contribution half of a run.
 export CHEMCLAW_NOTE_REPO_DIR="${CHEMCLAW_NOTE_REPO_DIR:-$LIVE_DIR/knowledge-repo}"
 
-# The connector URLs come from `connectors_dev.build_composite()` itself rather than being
-# rebuilt here from the same string pattern. One reader for one shape: if the dev runner ever
-# changes its port or its mount path, this follows automatically instead of drifting.
-connector_urls() {
-  "$1" -c '
-import json
-from chemclaw.cli.connectors_dev import build_composite
-print(json.dumps(build_composite()[1], separators=(",", ":")))'
+# The connector URLs *and* the per-connector `/mcp` credentials come from the dev runner itself
+# rather than being rebuilt here from the same string patterns. One reader for one shape: if the
+# runner changes its port, its mount path or which bundles carry a credential, this follows
+# automatically instead of drifting.
+#
+# It must run **before** the connectors process starts, not after: `bo`, `calc`, `molfp` and `rxnfp`
+# now declare `auth: mode: bearer`, so the serving process and core have to inherit the *same*
+# minted tokens. Exporting them afterwards would leave the servers holding one secret and core
+# presenting another, which surfaces as every tool call 401ing — a failure that reads as a broken
+# connector rather than as a missing variable.
+connector_env() {
+  "$1" -m chemclaw.cli.connectors_dev --export-env
 }
 
 # The pid file must hold the pid of the *worker*, not of a wrapper around it. `uv run python -m …`
@@ -146,15 +190,46 @@ up() {
   python="$(python_bin)"
   cd "$REPO_ROOT"
 
-  # The connectors first: the front door refuses to report ready without them under
+  # Addresses and credentials first, so every process below inherits both (see `connector_env`).
+  #
+  # Captured before `eval`, not inside it: command substitution inside `eval` discards the exit
+  # status, so a runner that died — a bad setting, an unreadable manifest — evaluated to nothing
+  # and the lane continued to fail twenty lines later on an unbound variable, naming the variable
+  # instead of the error. Measured while adding this: a `llm_model` validation error surfaced as
+  # `CHEMCLAW_CONNECTOR_URLS: unbound variable`.
+  local connector_exports
+  connector_exports="$(connector_env "$python")" \
+    || die "could not resolve the connector addresses and credentials — see the error above"
+  eval "$connector_exports"
+  # **Persisted, because the credentials are minted rather than derived.** The URL map is a pure
+  # function of the manifests, so a later shell could always recompute it; a token is not, and a
+  # second `--export-env` in another terminal mints *different* ones. That leaves the running
+  # servers holding one secret and a later `make live-jobs` presenting another, which surfaces as
+  # 401s from a connector that is plainly up — a genuinely confusing failure, and one this file
+  # introduced the moment those bundles started requiring a credential.
+  #
+  # 0600 and under the run dir, which `.gitignore` already covers. `processes.sh env` prints it.
+  ( umask 077; printf '%s\n' "$connector_exports" > "$RUN_DIR/connector-env.sh" )
+  log "connector urls: $CHEMCLAW_CONNECTOR_URLS"
+
+  # The probe identity, in the enforced posture only. Minted before the front door starts so the
+  # export is inherited, and named in the log by *identity* rather than by value — a token in a
+  # lane's stdout is a token in whatever collects that lane's stdout.
+  if [ "$CHEMCLAW_ENTRA_REQUIRED" = "true" ]; then
+    CHEMCLAW_LIVE_PROBE_TOKEN="$(mint_probe_token "$python")" \
+      || die "could not mint a probe token from $ENTRA_TOKEN_URL — is the mock tenant running with MOCK_ENTRA_ENABLED=true?"
+    export CHEMCLAW_LIVE_PROBE_TOKEN
+    # Into the same file as the connector credentials, for the same reason: `make live-probes` run
+    # from another terminal would otherwise present nothing and 401 before a probe starts.
+    ( umask 077; printf 'export CHEMCLAW_LIVE_PROBE_TOKEN=%q\n' "$CHEMCLAW_LIVE_PROBE_TOKEN" \
+      >> "$RUN_DIR/connector-env.sh" )
+    log "identity enforced: issuer $CHEMCLAW_ENTRA_ISSUER, probe identity ${CHEMCLAW_LIVE_PROBE_OID:-live-probe-runner}"
+  fi
+
+  # The connectors themselves: the front door refuses to report ready without them under
   # `connectors_required=true`, and the workers call them through the same URLs.
   start connectors "$python" -m chemclaw.cli.connectors_dev
   wait_for connectors "http://127.0.0.1:8810/openapi.json"
-
-  local urls
-  urls="$(connector_urls "$python")"
-  export CHEMCLAW_CONNECTOR_URLS="$urls"
-  log "connector urls: $urls"
 
   # Workers next, so a job launched by the first turn has somewhere to run.
   start_worker worker-background 9000 "$python" -m chemclaw.durable.background_worker
@@ -196,6 +271,7 @@ up() {
   if llm_configured; then
     wait_for api "http://127.0.0.1:$API_PORT/readyz"
     log "live stack up. front door: http://127.0.0.1:$API_PORT · logs: $LIVE_DIR"
+    log "  from another terminal, first: eval \"\$(bash infra/live/processes.sh env)\""
   else
     log "live stack up (durable half only) · logs: $LIVE_DIR"
   fi
@@ -217,6 +293,10 @@ down() {
     fi
     rm -f "$pidfile" "$RUN_DIR/$name.port"
   done
+  # The credentials belong to the processes that just stopped. Left behind, `processes.sh env`
+  # would hand a later shell tokens for servers that are gone — a stale secret is a slower version
+  # of the mismatch this file exists to prevent, not a milder one.
+  rm -f "$RUN_DIR/connector-env.sh"
 }
 
 status() {
@@ -259,10 +339,24 @@ restart() {
   up
 }
 
+# Print the exports a *later* shell needs to talk to the running lane, so a tool started by hand
+# presents the credentials the running connectors actually hold:
+#
+#   eval "$(bash infra/live/processes.sh env)" && make live-jobs
+#
+# `up` writes the file; this only reads it back. Without it every command run outside the shell
+# that started the lane mints its own tokens and gets 401s from healthy servers.
+print_env() {
+  local file="$RUN_DIR/connector-env.sh"
+  [ -r "$file" ] || die "no $file — is the lane up? (run: make live-up)"
+  cat "$file"
+}
+
 case "${1:-up}" in
   up) up ;;
   down) down ;;
   status) status ;;
+  env) print_env ;;
   restart) [ $# -ge 2 ] || die "usage: processes.sh restart <name>"; restart "$2" ;;
-  *) die "usage: processes.sh [up|down|status|restart <name>]" ;;
+  *) die "usage: processes.sh [up|down|status|env|restart <name>]" ;;
 esac

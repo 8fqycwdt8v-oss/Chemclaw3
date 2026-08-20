@@ -63,17 +63,21 @@ class EntraSettings(BaseSettings):
     # system-triggered jobs; under enforcement `require_actor` rejects an absent user instead of
     # falling back. Config, not the old magic `"unknown"` literal.
     service_actor_id: str = "service-account"
-    # The outbound-token settings a backend pod would use to mint its own Entra token from its
-    # projected ServiceAccount JWT. The code that did it (workload identity federation, F4-T2, and
-    # the On-Behalf-Of exchange, F4-T4) is gone: it was written before any caller existed, acquired
-    # none in the year since, and a dormant token exchange nobody invokes is a credential path with
-    # no test of its real behaviour rather than a feature in waiting. These three survive it because
-    # they describe the tenant rather than the deleted mechanism, and whatever mints a token here
-    # next will need exactly them. `entra_http_timeout_seconds` also bounds the front door's JWKS
-    # fetch, which is a live reader.
-    entra_token_endpoint: str = ""
-    entra_sa_token_path: str = "/var/run/secrets/azure/tokens/azure-identity-token"
-    entra_token_refresh_leeway_seconds: float = Field(default=300.0, gt=0)
+    # How long the front door waits on the tenant when it does have to fetch keys. The one
+    # outbound-facing Entra setting left, and it has a live reader: `api/auth._client_for` builds
+    # the `PyJWKClient` with it, so a slow or blackholed IdP is bounded by our config rather than
+    # by PyJWT's 30-second default.
+    #
+    # Three settings used to sit beside it — `entra_token_endpoint`, `entra_sa_token_path` and
+    # `entra_token_refresh_leeway_seconds` — for a pod minting its own Entra token from a projected
+    # ServiceAccount JWT. That code (workload identity federation, F4-T2, and the On-Behalf-Of
+    # exchange, F4-T4) was deleted unused by D-2026-08-15, and the settings were kept on the
+    # argument that they describe the tenant rather than the mechanism. That argument does not
+    # survive contact with `values.yaml`, which shipped `CHEMCLAW_ENTRA_TOKEN_ENDPOINT` as a
+    # rendered ConfigMap value: a reader of the chart saw a configured OAuth token endpoint and
+    # concluded something exchanged tokens there. Nothing did. That is the `map_to_hpc_identity`
+    # shape one layer up — a deployment declaring a credential path that does not exist — so the
+    # three go the way their code went. D-046 still stands as the design for whatever re-adds one.
     entra_http_timeout_seconds: float = Field(default=10.0, gt=0)
     # How long the front door waits between JWKS re-fetches forced by a token whose `kid` is not
     # in the cached key set. PyJWT re-fetches on *every* such miss, and the `kid` is chosen by an

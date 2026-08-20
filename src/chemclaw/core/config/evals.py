@@ -61,6 +61,15 @@ class EvalSettings(BaseSettings):
     # (which bind a server) because the runner is a *client* and is routinely pointed at a
     # deployment it did not start.
     live_probe_base_url: str = "http://127.0.0.1:8000"
+    # The bearer the probe runner presents. Empty against a dev-posture front door, which reads no
+    # Authorization header at all; set when the lane runs with `entra_required=true`, where every
+    # probe is otherwise a 401 before a single turn starts.
+    #
+    # A token rather than a tenant/client/secret triple, because the runner is not an OAuth client
+    # and should not become one: whoever starts the lane already has to mint an identity with the
+    # roles the probes need (the expensive-job probes need a privileged one), so the only thing
+    # this needs to know is the result. `infra/live/processes.sh` mints it and exports this.
+    live_probe_token: str = ""
     # One turn's ceiling. Generous: a probe that triggers an inline calculation legitimately
     # waits, and cutting it short would record a system timeout as a model failure.
     live_probe_timeout_seconds: float = Field(default=300.0, gt=0)

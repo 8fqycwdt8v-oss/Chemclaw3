@@ -132,9 +132,15 @@ independently and carried out, removing the audit hash chain while keeping the t
 the INSERT-only grant. What that leaves open in `docs/planning/BACKLOG.md` is the durable approval
 store, the `session_messages` read-model and `HumanInTheLoopMiddleware`. `RubricMiddleware` is **declined** (`D-2026-08-16-a-second-judge-is-a-second-answer-about-the-same-answer`) — it cannot reuse `score_answer`, and a failed grading returns the ungraded answer.
 
-**Live edges remain open** (need a real Entra tenant / Temporal broker / OpenShift cluster): real token
-validation, live cluster durability + `helm`/`kubeconform` render. See
-`docs/planning/BACKLOG.md` for the exact list.
+**Live edges remain open** (need a real Temporal broker / OpenShift cluster): live cluster durability
++ `helm`/`kubeconform` render. See `docs/planning/BACKLOG.md` for the exact list.
+
+**Identity is no longer one of them** (D-2026-08-20-a-tenant-is-a-jwks-document-and-an-issuer-string).
+A tenant, to a resource server, is a JWKS document and an issuer string, so `Chemclaw3_mock`'s
+`app/entra/` is one: `tests/test_entra_end_to_end.py` runs the production app with
+`entra_required=True` against a real HTTP JWKS with nothing patched, and `make live-up` runs the
+enforced posture end to end. The one hop still unproven is browser → tenant, because MSAL talks to
+`login.microsoftonline.com` and mocking that is mocking a login UI rather than a key set.
 
 **On the design documents below: they are historical, not current.** `docs/reference/architektur.md` is
 pre-implementation design and contains **zero** references to connectors — the seam that now carries

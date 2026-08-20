@@ -30,6 +30,7 @@ through that one dependency, without turning it into middleware that would catch
 
 from collections.abc import Iterable
 
+import pytest
 from fastapi import FastAPI
 from fastapi.dependencies.models import Dependant
 from fastapi.routing import APIRoute
@@ -38,6 +39,7 @@ from starlette.routing import Route
 
 from chemclaw.api.app import create_app
 from chemclaw.api.auth import require_principal
+from chemclaw.core.config import settings
 
 # The declaration of what is intentionally reachable with no authenticated principal at all.
 # `(path, method)` rather than path alone, so a future route that reuses a path for a new method
@@ -115,6 +117,18 @@ def _unauthenticated_routes(app: FastAPI) -> list[tuple[str, str]]:
     ]
 
 
+def _enforced_app(monkeypatch: pytest.MonkeyPatch) -> FastAPI:
+    """The same app in the posture the chart ships: identity enforced.
+
+    Built through `monkeypatch` rather than by mutating `settings` directly, so the enforced
+    posture cannot leak into another test in the same process.
+    """
+    monkeypatch.setattr(settings, "entra_required", True)
+    monkeypatch.setattr(settings, "entra_audience", "api://chemclaw")
+    monkeypatch.setattr(settings, "entra_tenant_id", "tenant-for-the-surface-check")
+    return create_app()
+
+
 def _built_app() -> FastAPI:
     """The real app, built the same way the service builds it, minus any live dependencies.
 
@@ -158,6 +172,40 @@ def test_the_ungatable_surface_is_exactly_the_static_mount() -> None:
     the true-but-insufficient reason that it has nothing to gate.
     """
     assert _ungatable_surface(_built_app()) == set(_UNGATABLE_SURFACE)
+
+
+def test_an_enforced_app_has_no_ungatable_surface_at_all(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Under `entra_required` the static mount is gone, so every served route has a gate.
+
+    The mount above is the one thing the dependency sweep cannot speak for, and for the whole life
+    of this file the honest statement about it was "there is exactly one and we know what it is".
+    That was as far as it could go while the bundled UI was served in every posture — and it was
+    serving a chat client that sends no `Authorization` header (measured: the string does not occur
+    in `api/static/app.js`) and subscribes to job push-back with a native `EventSource`, which
+    cannot carry one. It could never work with identity on; it could only be a permanently broken
+    page on the public host, competing for `/` with the front end that does authenticate.
+
+    `create_app` now mounts it only when identity is off, which turns the statement above into a
+    stronger one: in the posture a deployment actually runs, the ungatable surface is empty and
+    every route FastAPI serves resolves through `require_principal`.
+    """
+    assert _ungatable_surface(_enforced_app(monkeypatch)) == set()
+
+
+def test_the_bundled_ui_is_reachable_in_dev_and_absent_under_enforcement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Asserted over the wire, because what matters is what a caller can fetch.
+
+    Both directions: a dev deployment keeps the affordance it has always had, and an enforced one
+    serves 404 where a broken login-less chat page used to be.
+    """
+    with TestClient(_built_app()) as dev:
+        assert dev.get("/").status_code == 200
+        assert dev.get("/app.js").status_code == 200
+    with TestClient(_enforced_app(monkeypatch)) as enforced:
+        assert enforced.get("/").status_code == 404
+        assert enforced.get("/app.js").status_code == 404
 
 
 def test_the_openapi_schema_is_not_served() -> None:
