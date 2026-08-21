@@ -105,21 +105,30 @@ async def launch_run(
     Raises:
         NextflowError: When the launcher rejects the launch or returns no run id.
     """
+    params: dict[str, object] = {
+        "smiles": job.molecule_smiles,
+        "method": job.method,
+        "basis_set": job.basis_set,
+        # **The chemist, on the run itself.** Four places — this bundle's manifest, the
+        # workflow, the activity and `QmJobSpec` — say the requesting user is carried to the
+        # launcher, and none of them was true: the POST body carried molecule, method and basis
+        # and nothing else, so Tower's run list and the cluster's own accounting saw only the
+        # shared HPC service identity. That is the one place the attribution is actually needed,
+        # since inside Chemclaw the `JobRecord` and the note already hold it.
+        "requested_by": job.requested_by,
+    }
+    # The starting geometry, when the chemist named one and the deployment says its pipeline reads
+    # one (D-2026-08-21). Added rather than always present, so a pipeline that takes only a SMILES
+    # receives exactly the body it received before — Nextflow ignores an unconsumed param, which is
+    # precisely why a request naming a geometry is refused at launch instead of sent hopefully.
+    if job.geometry_xyz:
+        params["geometry_xyz"] = job.geometry_xyz
+        params["charge"] = job.charge
+        params["multiplicity"] = job.multiplicity
     payload = {
         "pipeline": settings.hpc_pipeline_name,
         "revision": settings.hpc_pipeline_version,
-        "params": {
-            "smiles": job.molecule_smiles,
-            "method": job.method,
-            "basis_set": job.basis_set,
-            # **The chemist, on the run itself.** Four places — this bundle's manifest, the
-            # workflow, the activity and `QmJobSpec` — say the requesting user is carried to the
-            # launcher, and none of them was true: the POST body carried molecule, method and basis
-            # and nothing else, so Tower's run list and the cluster's own accounting saw only the
-            # shared HPC service identity. That is the one place the attribution is actually needed,
-            # since inside Chemclaw the `JobRecord` and the note already hold it.
-            "requested_by": job.requested_by,
-        },
+        "params": params,
     }
     # Idempotency (COR-2): Temporal retries `submit_to_hpc` at-least-once, so a lost launch response
     # would otherwise re-POST and double-submit an expensive HPC run. The key is deterministic so a

@@ -43,6 +43,7 @@ from chemclaw.science.calc.artifacts import (
     ArrayOffloadingStore,
     ArtifactStore,
 )
+from chemclaw.science.calc.geometry import check_server_address, structures_in
 from chemclaw.science.calc.models import (
     ConformerEnsemble,
     CrestEffort,
@@ -62,7 +63,9 @@ from chemclaw.science.calc.models import (
     ThermochemistryResult,
 )
 from chemclaw.science.calc.postgres_artifacts import default_artifact_store
+from chemclaw.science.calc.postgres_structures import default_structure_store
 from chemclaw.science.calc.store import ResultStore
+from chemclaw.science.calc.structures import StructureStore
 from chemclaw.science.calc.thermo import (
     HARTREE_TO_KCAL,
     ThermoSettings,
@@ -72,6 +75,9 @@ from chemclaw.science.calc.thermo import (
 )
 
 _Result = TypeVar("_Result")
+# The shape a server answer arrives in, before it is validated into a model. Its own variable
+# rather than `_Result` so `kept`'s signature says "the same value comes back".
+_Payload = TypeVar("_Payload")
 
 # How many atoms define each internal coordinate, and the unit its value is in.
 _COORDINATES: dict[int, tuple[str, str]] = {
@@ -112,6 +118,41 @@ async def plain(awaitable: Awaitable[_Result], what: str) -> _Result:
     """
     del what
     return await awaitable
+
+
+async def kept(payload: _Payload, *, structures: StructureStore | None = None) -> _Payload:
+    """Persist every geometry in a server payload, then hand the payload back unchanged.
+
+    **The write half of the handle** (D-2026-08-21-a-geometry-is-an-address-not-a-payload). Every
+    geometry this repository ever shows a chemist comes back through one of the calls below, and
+    every one of them is reported by its `structure_id` rather than by its coordinates. That address
+    has to resolve, and this is where it comes to.
+
+    Applied to the *returned* payload rather than on the miss path, deliberately: a cache **hit**
+    never reaches the server, so persisting only on a miss would leave every handle from a
+    previously-computed calculation unresolvable — including, on the first deployment that has this
+    store, every geometry already on disk.
+
+    **A failed write raises**, deliberately, where most bookkeeping in this tree is swallowed. A
+    geometry store that is not writing is a deployment whose next `structure_id` argument will be
+    refused as unresolvable, and a calculation that fails loudly now is the better half of that
+    than a handle that fails mysteriously later. It costs little: the calculation's own result is
+    already in the cache by the time this runs, so the retry Temporal issues for a database fault
+    pays no SCF.
+
+    Args:
+        payload: What the server (or the cache) answered with.
+        structures: Where geometries go; the configured store by default.
+
+    Returns:
+        `payload`, unchanged — so a call site reads `Model.model_validate(await kept(payload))`.
+    """
+    check_server_address(payload)
+    found = list(structures_in(payload))
+    if found:
+        store = structures if structures is not None else default_structure_store()
+        await store.put(found)
+    return payload
 
 
 # --- primitives -----------------------------------------------------------------------------
@@ -167,7 +208,7 @@ async def embed(smiles: str, run: RemoteRunner = plain) -> Structure:
         ),
         f"starting geometry for {smiles}",
     )
-    return Structure.model_validate(payload)
+    return Structure.model_validate(await kept(payload))
 
 
 async def relax(
@@ -186,7 +227,7 @@ async def relax(
         ),
         f"optimising {structure.smiles or structure.structure_id}",
     )
-    return OptimizationResult.model_validate(payload), cached
+    return OptimizationResult.model_validate(await kept(payload)), cached
 
 
 async def hessian(
@@ -288,10 +329,18 @@ async def scan_profile(
     values: tuple[float, ...],
     solvent: str | None,
     *,
+    subject: Structure | None = None,
     progress: Progress = no_progress,
     run: RemoteRunner = plain,
 ) -> ScanResult:
     """Relax the molecule at every value of one internal coordinate and assemble the profile.
+
+    `subject` is the geometry to scan *from*, when the caller named one
+    (D-2026-08-21-a-geometry-is-an-address-not-a-payload). Without it the profile is driven from a
+    fresh force-field embedding, which is the right default and the wrong answer after a conformer
+    search: a rotational barrier depends on which conformer it is measured in, and re-embedding
+    throws away the choice the search was run to make. `smiles` is then only the label the result
+    is reported under.
 
     Each point is a `scan_point` call: the server drives the coordinate with RDKit's
     `rdMolTransforms` — which moves the whole attached fragment, so the point starts from a
@@ -316,7 +365,7 @@ async def scan_profile(
     if len(atoms) not in _COORDINATES:
         raise ValueError(f"a scan coordinate is 2, 3 or 4 atoms; {len(atoms)} were given")
     coordinate, unit = _COORDINATES[len(atoms)]
-    structure = await embed(smiles, run=run)
+    structure = subject if subject is not None else await embed(smiles, run=run)
     if max(atoms) >= len(structure.elements) or min(atoms) < 0:
         raise ValueError(f"scan atom index out of range for {len(structure.elements)} atoms")
 
@@ -336,7 +385,7 @@ async def scan_profile(
             ),
             f"{coordinate} at {value:g} {unit}",
         )
-        relaxed.append(OptimizationResult.model_validate(payload))
+        relaxed.append(OptimizationResult.model_validate(await kept(payload)))
 
     energies = [point.energy_hartree for point in relaxed]
     lowest = min(range(len(energies)), key=lambda index: energies[index])
@@ -366,6 +415,7 @@ async def conformer_ensemble(
     store: ResultStore,
     smiles: str,
     *,
+    subject: Structure | None = None,
     search: EnsembleSearch = "conformers",
     effort: CrestEffort | None = None,
     solvent: str | None = None,
@@ -384,12 +434,13 @@ async def conformer_ensemble(
     of it. The cache is what makes it stable: the first run's members are what every later question
     about that molecule is weighted from.
     """
+    starting = subject if subject is not None else await embed(smiles, run=run)
     payload, cached = await run(
         cached_remote(
             store,
             "search_conformer_ensemble",
             {
-                "structure": (await embed(smiles, run=run)).model_dump(mode="json"),
+                "structure": starting.model_dump(mode="json"),
                 "search": search,
                 "effort": effort or settings.crest_effort,
                 "solvent": solvent,
@@ -399,7 +450,7 @@ async def conformer_ensemble(
     )
     return (
         ensemble_from_members(
-            EnsemblePayload.model_validate(payload),
+            EnsemblePayload.model_validate(await kept(payload)),
             smiles=require_canonical_smiles(smiles),
             search=search,
             temperature_k=temperature_k or settings.xtb_thermo_temperature_k,
@@ -412,7 +463,9 @@ async def conformer_ensemble(
 # --- non-covalent complexes -----------------------------------------------------------------
 
 
-def _ordered(smiles_a: str, smiles_b: str) -> tuple[str, str]:
+def _ordered(
+    first: tuple[str, Structure], second: tuple[str, Structure]
+) -> tuple[tuple[str, Structure], tuple[str, Structure]]:
     """The pair in a canonical order, so A-with-B and B-with-A are one calculation.
 
     The interaction of two molecules is one physical quantity, but the starting arrangement is not
@@ -420,9 +473,14 @@ def _ordered(smiles_a: str, smiles_b: str) -> tuple[str, str]:
     offsets the second along +x, so swapping them negates the intermolecular vector while leaving
     each monomer's own orientation alone. That is a *different* starting geometry, and it would key
     to a different cache entry — paying twice, at minutes per search, for the same answer.
+
+    **Each molecule travels with its geometry**, which is why this takes pairs rather than two
+    SMILES. Once a caller may name the starting geometries
+    (D-2026-08-21-a-geometry-is-an-address-not-a-payload), sorting the names while leaving the
+    structures in argument order would pair each monomer with the *other* one's conformer — a
+    calculation about neither molecule, reported as being about both.
     """
-    first, second = require_canonical_smiles(smiles_a), require_canonical_smiles(smiles_b)
-    return (first, second) if first <= second else (second, first)
+    return (first, second) if first[0] <= second[0] else (second, first)
 
 
 async def interaction(
@@ -430,6 +488,7 @@ async def interaction(
     smiles_a: str,
     smiles_b: str,
     *,
+    subjects: tuple[Structure, Structure] | None = None,
     effort: CrestEffort | None = None,
     solvent: str | None = None,
     run: RemoteRunner = plain,
@@ -451,10 +510,18 @@ async def interaction(
     mode that was not sampled cannot be reported. **It is one pair, in a continuum**: no bulk, no
     competing solvent molecules, no stoichiometry beyond two.
     """
-    smiles_a, smiles_b = _ordered(smiles_a, smiles_b)
+    given = (
+        (await embed(smiles_a, run=run), await embed(smiles_b, run=run))
+        if subjects is None
+        else subjects
+    )
+    (smiles_a, structure_a), (smiles_b, structure_b) = _ordered(
+        (require_canonical_smiles(smiles_a), given[0]),
+        (require_canonical_smiles(smiles_b), given[1]),
+    )
     monomers = []
-    for smiles in (smiles_a, smiles_b):
-        relaxed, _ = await relax(store, await embed(smiles, run=run), solvent, run=run)
+    for structure in (structure_a, structure_b):
+        relaxed, _ = await relax(store, structure, solvent, run=run)
         monomers.append(relaxed)
     # The separation between the two monomers' bounding spheres is the server's own default: it is
     # only a starting point — the wall potential and the search decide where they end up — and it
@@ -471,6 +538,9 @@ async def interaction(
             f"starting complex geometry for {smiles_a} and {smiles_b}",
         )
     )
+    # Deliberately not `kept`: this is the *starting* arrangement the search is about to discard,
+    # and no result reports its address. The geometry a caller can name is the relaxed binding mode
+    # below, which `relax` keeps.
     payload, _ = await run(
         cached_remote(
             store,
@@ -483,7 +553,7 @@ async def interaction(
         ),
         f"binding modes of {smiles_a} and {smiles_b}",
     )
-    modes = EnsemblePayload.model_validate(payload)
+    modes = EnsemblePayload.model_validate(await kept(payload))
     if not modes.members:
         raise ValueError("the complex search returned no binding modes")
     best = min(modes.members, key=lambda member: member.energy_hartree)

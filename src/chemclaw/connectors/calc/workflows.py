@@ -30,6 +30,7 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.connectors.calc.specs import XtbJobSpec
     from chemclaw.core.config import settings
     from chemclaw.durable.connector_job import ConnectorJobResult
+    from chemclaw.science.calc.geometry import without_geometry
 
 from chemclaw.connectors.queues import bundle_queue
 from chemclaw.durable.publish import BAD_DATA_RETRY
@@ -72,7 +73,25 @@ class CalcJobWorkflow:
         # `exclude_none` keeps the envelope to the one result shape that actually ran:
         # `XtbJobResult` carries five optional fields and populates exactly one, so without it
         # every reaction result would ship four explicit nulls for the model to read past.
+        #
+        # `without_geometry` is the other half of that same economy and a much larger one
+        # (D-2026-08-21-a-geometry-is-an-address-not-a-payload). Measured on a 40-atom molecule, a
+        # conformer search's envelope was 29,086 characters — 2,400 Cartesian coordinates the model
+        # cannot read and no tool in this system accepts — reaching the turn three times over: as
+        # the inline-wait return value, as the mid-turn resume message, and as
+        # `get_durable_job_status`'s result. Each geometry is replaced by the `structure_id` the
+        # activity has already persisted, which the *next* calculation does accept.
+        #
+        # Applied here rather than in the activity because the activity's return type is pinned by
+        # workflow histories in flight, and because this is a pure function of a value already in
+        # history: a replay produces byte-identical output from the same recorded result.
+        # `calc_refs` rides on the envelope's own field rather than inside `data`: it is a
+        # cross-cutting provenance fact every connector job could carry, not this bundle's domain
+        # result, and `propose_knowledge_note` takes it as one list.
         return ConnectorJobResult(
             summary=result.summary,
-            data=result.model_dump(mode="json", exclude_none=True),
+            calc_refs=result.calc_refs,
+            data=without_geometry(
+                result.model_dump(mode="json", exclude_none=True, exclude={"calc_refs"})
+            ),
         )

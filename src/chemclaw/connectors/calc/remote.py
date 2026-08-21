@@ -29,8 +29,9 @@ the hit path, so that is the one worth watching.
 """
 
 import json
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager, contextmanager
+from contextvars import ContextVar
 from datetime import timedelta
 from typing import Any
 
@@ -39,6 +40,7 @@ from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 from mcp.shared.exceptions import McpError
 from mcp.types import INVALID_PARAMS, INVALID_REQUEST, METHOD_NOT_FOUND, PARSE_ERROR
+from pydantic import BaseModel, ConfigDict
 
 from chemclaw.connectors.registry import _CONNECT_TIMEOUT_SECONDS, _READ_TIMEOUT_GRACE_SECONDS
 from chemclaw.core.config import settings
@@ -351,9 +353,28 @@ def _text(content: Any) -> str:
     return "".join(getattr(block, "text", "") for block in content)
 
 
+class KeyedCalculation(BaseModel):
+    """A calculation's identity, and the geometry it is about when it is about one.
+
+    Two facts from one `calculation_key` round trip, because the server answers both and this
+    client used to read only the first. `structure_id` is what makes "have we already relaxed this
+    conformer?" answerable at all (D-2026-08-21): a `calculation_results` row's `input_hash` is a
+    digest, so nothing about a stored row said which geometry it described — the server knows,
+    and says so, and the answer was being dropped on the floor.
+
+    Empty for a molecule-keyed calculation (pKa, solubility, descriptors), which is the honest
+    value: those are about a compound and not about any particular geometry of it.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    key: CalculationKey
+    structure_id: str = ""
+
+
 async def remote_key(
     session: ClientSession, tool: str, arguments: dict[str, Any]
-) -> CalculationKey | None:
+) -> KeyedCalculation | None:
     """The `CalculationKey` this tool would stamp on its result, without computing anything.
 
     `None` when the server reports the calculation has no derivable key. Exactly one tool answers
@@ -385,13 +406,19 @@ async def remote_key(
     # server's own params digest the same way `build` composes it with a local one, and a bump
     # invalidates every `calc` row without touching what the server considers its identity.
     try:
-        return CalculationKey(
-            calc_type=key["calc_type"],
-            calc_version=key["calc_version"],
-            input_hash=key["input_hash"],
-            params_hash=stable_hash(
-                {"epoch": CALCULATION_EPOCH, "remote_params": key["params_hash"]}
+        return KeyedCalculation(
+            key=CalculationKey(
+                calc_type=key["calc_type"],
+                calc_version=key["calc_version"],
+                input_hash=key["input_hash"],
+                params_hash=stable_hash(
+                    {"epoch": CALCULATION_EPOCH, "remote_params": key["params_hash"]}
+                ),
             ),
+            # The server's own answer, never re-derived here — the same rule this module states for
+            # `calc_version`, and for the same reason: a locally-derived value would be well-formed
+            # and would match nothing. Absent for a molecule-keyed calculation.
+            structure_id=str(identity.get("structure_id") or ""),
         )
     except (KeyError, TypeError) as exc:
         raise CalcToolError(f"calculation_key returned an unusable key for {tool}: {key}") from exc
@@ -448,6 +475,49 @@ async def remote_version(tool: str, arguments: dict[str, Any]) -> str:
     return version
 
 
+# Every calculation key reached inside the current `collecting()` block, in first-seen order.
+# A contextvar for the reasons `chemclaw.core.turn_signals` gives for its own buffer: it is
+# task-local, so two concurrent activities on one worker cannot see each other's keys; it is empty
+# off that path, so the tool surface and every direct caller are unaffected; and it is *mutated*
+# rather than rebound, so it stays visible when the work runs in a task of its own.
+_collected: ContextVar[list[str] | None] = ContextVar("chemclaw_calc_refs", default=None)
+
+
+@contextmanager
+def collecting() -> Iterator[list[str]]:
+    """Collect the calculation keys reached inside this block, for a run to cite afterwards.
+
+    **Why a collector rather than a return value.** A composite reaches between two and a few dozen
+    cached primitives across four call layers, and none of them is the place that reports a result —
+    threading a key list back through `relax`, `hessian`, `relax_to_minimum`, `_species_energy` and
+    `reaction_energy` would put cache bookkeeping in the signature of every piece of chemistry here
+    for one consumer at the top.
+
+    The consumer is the durable job, which puts them on its envelope so a note drafted from the run
+    can cite what it rested on (D-2026-08-21). `propose_knowledge_note` has advertised exactly that
+    since D-133 — "get them from a job's result envelope" — against an envelope that carried none.
+
+    De-duplicated, order preserved: a reaction relaxes a shared species once and the key is reached
+    once per lookup, and a citation list that repeats a key says nothing extra.
+    """
+    keys: list[str] = []
+    token = _collected.set(keys)
+    try:
+        yield keys
+    finally:
+        _collected.reset(token)
+
+
+def _record(key: CalculationKey) -> None:
+    """Note one key against the enclosing `collecting()` block, if there is one."""
+    keys = _collected.get()
+    if keys is None:
+        return
+    flat = key.as_str()
+    if flat not in keys:
+        keys.append(flat)
+
+
 async def cached_remote(
     store: ResultStore, tool: str, arguments: dict[str, Any]
 ) -> tuple[ResultPayload, bool]:
@@ -472,15 +542,20 @@ async def cached_remote(
     quietly and recompute forever.
     """
     async with calc_session() as session:
-        key = await remote_key(session, tool, arguments)
-        if key is None:
+        keyed = await remote_key(session, tool, arguments)
+        if keyed is None:
             raise CalcToolError(
                 f"{tool} has no derivable cache key, so it cannot be routed through the cache. "
                 "Either it is composed here from keyed primitives (as predict_logd is), or it "
                 "should be called with remote_call."
             )
 
+        # Recorded on hit and miss alike: what a run *rested on* is the same either way, and a
+        # citation list that thinned out as the cache warmed would be the least useful version of
+        # itself.
+        _record(keyed.key)
+
         async def _compute() -> ResultPayload:
             return await remote_compute(session, tool, arguments)
 
-        return await cached_compute(store, key, _compute)
+        return await cached_compute(store, keyed.key, _compute, structure_id=keyed.structure_id)

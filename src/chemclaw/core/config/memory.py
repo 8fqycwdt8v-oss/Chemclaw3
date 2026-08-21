@@ -125,6 +125,17 @@ class MemorySettings(BaseSettings):
     # — while a 76-atom Hessian is single-digit megabytes of text that no answer is built by
     # reading. This is what separates them, since both are text and neither can be refused on type.
     calc_artifact_max_chars: int = Field(default=20_000, ge=1)
+    # How many characters of one stored calculation's payload `find_calculations` may render. A
+    # *listing* budget, not a payload budget: the same result read by asking for that calculation
+    # directly is unbounded, because then a chemist asked for exactly it.
+    #
+    # It exists because this was the largest unbounded model-facing payload in the system. A stored
+    # `xtb.conformers` row holds every member the search found — 66,520 characters on one 40-atom
+    # molecule — and `calc_find_max_results` is 50, so one call could render ~830,000 tokens: past
+    # every provider's context limit, where the failure is hard rather than graceful. Geometries
+    # project to their addresses first (D-2026-08-21), which is most of the reduction; this catches
+    # whatever is still large, and the record says `result_omitted` rather than cutting silently.
+    calc_find_max_result_chars: int = Field(default=4_000, ge=1)
     # Ceiling on one `calculator_outliers` page. The listing exists to be *read* — a chemist looks
     # at the worst misses and asks what they have in common — and a hundred rows is not read, it is
     # scrolled past while spending the model's context.

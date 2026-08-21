@@ -36,12 +36,13 @@ import psycopg
 from pydantic import BaseModel, ConfigDict, Field
 
 from chemclaw.core.config import settings
-from chemclaw.core.ids import stable_hash
+from chemclaw.core.ids import canonical_text, stable_hash
 from chemclaw.science.bo.problem import (
     Candidate,
     CategoricalParameter,
     Constraint,
     ExcludeConstraint,
+    Objective,
     Observation,
     OptimizationProblem,
     Parameter,
@@ -63,9 +64,28 @@ _SPACE_FIELDS = {"kind", "name", "lower", "upper", "categories", "structures"}
 # explicit decision instead of a silent one.
 _IDENTIFYING_EXCLUSIONS = {"descriptors"}
 
+# Decimal places a bound or a coefficient is rounded to before it is hashed. 6 is far below any
+# precision a chemist states a range in (a temperature range is degrees, an equivalence is
+# hundredths) and far above the float noise a model re-emitting `120.0` introduces.
+_BOUND_DECIMALS = 6
+
 
 def _space_of(parameter: Parameter) -> dict[str, Any]:
-    """One parameter as the identity sees it.
+    """One parameter as the identity sees it, canonicalised.
+
+    **Names and labels are folded** (`core.ids.canonical_text`), because the caller is a model
+    re-emitting a decision space it read back out of `resume_campaign` — the loop this tool
+    documents, "resume, append the chemist's new result, then ask again". Measured over the ways a
+    model perturbs a value it is copying: reordering parameters and reordering categories were
+    already handled and re-emitting `20` for `20.0` is harmless, but **re-casing a category, a
+    parameter name or an objective name, or a trailing space on any of them, minted a different
+    campaign** — a fresh row with no history, silently, because `record_suggestion` upserts and
+    nothing compares the two. That is strictly worse than the duplicate run the identical defect
+    caused in `_report_id`, which folded for exactly this reason.
+
+    Bounds are rounded to `_BOUND_DECIMALS` on the same argument: a model re-emitting `120.0` as
+    `120.00000001` is not widening a search space, and the difference is far below any bound a
+    chemist states.
 
     **Descriptors identify the space unless they were computed from the structures.** When
     `structures` is set, `featurize_problem` derives the descriptors from it, so a cache miss
@@ -78,6 +98,10 @@ def _space_of(parameter: Parameter) -> dict[str, Any]:
     different campaign" failure `read_campaign_thread` exists to prevent.
     """
     dumped = parameter.model_dump(mode="json", include=_SPACE_FIELDS)
+    dumped["name"] = canonical_text(str(dumped["name"]))
+    for bound in ("lower", "upper"):
+        if dumped.get(bound) is not None:
+            dumped[bound] = round(float(dumped[bound]), _BOUND_DECIMALS)
     if isinstance(parameter, CategoricalParameter):
         # The set of choices is the space; the order they were typed in is not. `["THF","toluene"]`
         # and `["toluene","THF"]` offer the same experiments and hashed to two campaigns. Sorted
@@ -85,7 +109,13 @@ def _space_of(parameter: Parameter) -> dict[str, Any]:
         # order, because a bare `CategoricalInput` is ordinally encoded and reordering it moves the
         # acquisition optimizer (measured: `equiv` 2.1018 vs 2.0691 on one fixed-seed round). That
         # jitter is far below experimental resolution; a split history is not.
-        dumped["categories"] = sorted(parameter.categories)
+        dumped["categories"] = sorted(canonical_text(name) for name in parameter.categories)
+        # `structures` is a map *keyed by* those labels, so folding one and not the other would
+        # leave a space whose chemistry is addressed by keys the identity no longer contains.
+        if parameter.structures is not None:
+            dumped["structures"] = {
+                canonical_text(label): smiles for label, smiles in parameter.structures.items()
+            }
     if (
         isinstance(parameter, CategoricalParameter)
         and parameter.structures is None
@@ -94,9 +124,12 @@ def _space_of(parameter: Parameter) -> dict[str, Any]:
         # Added only when it carries information, by the rule the objectives and constraints keys
         # already follow: a bare categorical must hash to the payload it hashed to before this
         # existed, or every recorded campaign over one becomes unreachable.
-        dumped["descriptors"] = parameter.model_dump(mode="json", include={"descriptors"})[
-            "descriptors"
-        ]
+        dumped["descriptors"] = {
+            canonical_text(label): row
+            for label, row in parameter.model_dump(mode="json", include={"descriptors"})[
+                "descriptors"
+            ].items()
+        }
     return dumped
 
 
@@ -110,16 +143,29 @@ def _canonical(constraint: Constraint) -> dict[str, Any]:
     dumped = constraint.model_dump(mode="json")
     if isinstance(constraint, ExcludeConstraint):
         dumped["pairs"] = sorted(
-            [name, sorted(options)]
+            [canonical_text(name), sorted(canonical_text(option) for option in options)]
             for name, options in zip(constraint.parameters, constraint.options, strict=True)
         )
         del dumped["parameters"], dumped["options"]
         return dumped
     dumped["terms"] = sorted(
-        [name, coefficient]
+        [canonical_text(name), round(float(coefficient), _BOUND_DECIMALS)]
         for name, coefficient in zip(constraint.parameters, constraint.coefficients, strict=True)
     )
+    dumped["rhs"] = round(float(dumped["rhs"]), _BOUND_DECIMALS)
     del dumped["parameters"], dumped["coefficients"]
+    return dumped
+
+
+def _objective_identity(objective: Objective) -> dict[str, Any]:
+    """One objective as the identity sees it: the name folded, the direction as declared.
+
+    The direction is a closed set (`minimize`/`maximize`) and is not free text, so it is left
+    alone — folding a value pydantic already constrains buys nothing and hides where the rule
+    applies.
+    """
+    dumped = objective.model_dump(mode="json")
+    dumped["name"] = canonical_text(str(dumped["name"]))
     return dumped
 
 
@@ -133,6 +179,13 @@ def campaign_id_for(problem: OptimizationProblem) -> str:
     **Descriptors are excluded when they were computed from the structures, and included when the
     caller stated them** — see `_space_of`. Constraints are canonicalized so the order the caller
     happened to write a sum in cannot fork a campaign — see `_canonical`.
+
+    **Every model-authored name is folded and every bound rounded** (`_space_of`,
+    `_objective_identity`), because the caller re-types this whole structure from what
+    `resume_campaign` handed back and a model re-cases freely. `docs/decisions/` records the
+    measurement; the short form is that `THF` and `thf` were two campaigns with two empty
+    histories. **Existing rows are re-keyed rather than orphaned** — `chemclaw.cli.rekey_campaigns`
+    recomputes the id from each row's stored `problem`, which is why this could change at all.
 
     **The parameter list and each parameter's categories are canonicalized for the same reason**,
     which the constraint fix did not extend to them: a space is a set of axes, and the order a
@@ -150,12 +203,12 @@ def campaign_id_for(problem: OptimizationProblem) -> str:
     # becomes unreachable — `read_campaign_thread` would tell each chemist their campaign is new.
     identity: dict[str, Any] = {
         "space": space,
-        "objective": problem.objective.model_dump(mode="json"),
+        "objective": _objective_identity(problem.objective),
     }
     # Added only when they carry information, for the same reason.
     if len(problem.objectives) > 1:
         identity["objectives"] = [
-            objective.model_dump(mode="json") for objective in problem.objectives
+            _objective_identity(objective) for objective in problem.objectives
         ]
     # A constraint narrows the space, so a constrained problem is a different campaign from the
     # unconstrained one over the same bounds — the runs mean different things.
@@ -341,6 +394,26 @@ def campaign_store() -> CampaignStore:
 
         return PostgresCampaignStore()
     return InMemoryCampaignStore()
+
+
+async def campaign_is_known(campaign_id: str) -> bool:
+    """Whether anything has ever been recorded under `campaign_id`.
+
+    The read behind `ExperimentSuggestion.opened_new_campaign`: a fork of a campaign's history is
+    silent by construction, because `record_suggestion` upserts and a forked ask cannot be told
+    apart from a first one. Runs supplied against a campaign with no record is the signature of one.
+
+    Swallows a store failure as `False`-shaped ignorance rather than raising, on
+    `record_suggestion`'s argument: a database blip must not cost a chemist the suggestion that was
+    already computed. It returns `True` in that case — "assume known" — because the flag's whole
+    purpose is to raise a question, and raising one on the strength of a failed read would send a
+    chemist looking for a fork that a database outage invented.
+    """
+    try:
+        return await campaign_store().read_campaign(campaign_id) is not None
+    except _TRANSIENT_WRITE_FAILURES:
+        logger.warning("could not read campaign %s; not reporting a fork", campaign_id)
+        return True
 
 
 # The failures that are the *database's*, not ours: a blip here must not fail a computed

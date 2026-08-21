@@ -1,0 +1,22 @@
+-- The calculations a finished job rested on, kept with the job
+-- (D-2026-08-21-a-geometry-is-an-address-not-a-payload).
+--
+-- `ConnectorJobResult.calc_refs` now carries them so a note drafted from a run can cite what it
+-- was computed from — which `propose_knowledge_note` has told the model to do since D-133, against
+-- an envelope that carried none. This is the durable half of the same statement: `job_records`
+-- exists precisely because Temporal's history expires and the run's own account of itself must
+-- outlive it (D-157), and provenance that survives only until the retention window closes is
+-- provenance a chemist cannot check when it matters — months later, from a note.
+--
+-- Its own column rather than a key inside `result`, following `note_id`: `result` is the job's
+-- *domain* payload, opaque to core by design, and a cross-cutting fact about the run does not
+-- belong inside it.
+--
+-- `TEXT[]` rather than JSONB: it is a list of flat key strings and nothing else, and the array type
+-- says so. Empty for every row written before this migration, which reads correctly as "this run
+-- recorded none" — a job whose refs were never captured cannot be made to have some.
+--
+-- Additive with a default, so the previous image keeps writing this table unchanged
+-- (`tests/test_migrations_are_additive.py`). Applied by `make db-migrate` (idempotent).
+ALTER TABLE job_records
+    ADD COLUMN IF NOT EXISTS calc_refs TEXT[] NOT NULL DEFAULT '{}';

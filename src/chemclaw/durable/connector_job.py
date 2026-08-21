@@ -151,6 +151,18 @@ class ConnectorJobResult(BaseModel):
     summary: str = Field(min_length=1)
     data: dict[str, Any] = Field(default_factory=dict)
     note: Note | None = None
+    # The calculation keys this run rested on, so a conclusion drawn from it can cite them
+    # (D-2026-08-21). `propose_knowledge_note`'s `calc_refs` argument has told the model to "get
+    # them from a job's result envelope" since D-133 and no envelope carried any: the only
+    # producers in `src/` were the BO featurizer and the QM workflow's own note, neither of which
+    # an agent drafting a note from a calculation it just ran can reach. Without them a stale
+    # calculation cannot be traced to the conclusions drawn from it, which is the whole property
+    # `calc_refs` exists for.
+    #
+    # Additive and defaulted, because this crosses the Temporal wire and histories are in flight —
+    # the same rule `SpeciesEnergy.method` follows. Empty means "this job recorded none", never
+    # "it used none".
+    calc_refs: list[str] = Field(default_factory=list)
 
 
 def envelope_from_result(job_id: str, raw: Any) -> ConnectorJobResult:
@@ -241,6 +253,7 @@ def job_record_for(
         # is the part Temporal's expiring history was the only copy of.
         result=result.data,
         note_id=result.note.id if result.note is not None else "",
+        calc_refs=result.calc_refs,
         runtime_seconds=runtime_seconds,
     )
 

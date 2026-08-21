@@ -34,3 +34,25 @@ def stable_hash(payload: Any, *, chars: int = _DEFAULT_CHARS) -> str:
     """
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(canonical.encode()).hexdigest()[:chars]
+
+
+def canonical_text(value: str) -> str:
+    """Free text reduced to what it means: whitespace collapsed, case folded.
+
+    **Only ever for building an identity**, never for storage or display: the words a person chose
+    are what a draft renders and what a chemist reads back, and this deliberately loses them.
+
+    It exists because the requester of every id in this system is a language model, and a model
+    re-emits a value it has just read with the spacing and capitalisation it feels like — so a
+    byte-exact key makes "asking the same question twice" true only for a byte-identical question.
+    `agent/durable_tools._report_id` measured that and folded here first; `science/bo` found the
+    same defect a level down, where the consequence is worse than a duplicate run: a campaign id is
+    a hash of its decision space, so a re-cased category label mints a *new campaign with no
+    history* and nothing raises.
+
+    Two callers, one rule, and the rule is the interesting part — apply it to what a model
+    authors, never to what identifies a principal. Folding two spellings of an actor or a role
+    together would merge things that must not merge, which is why `_report_id` canonicalises its
+    title and sections and leaves `requested_by` and `requested_roles` byte-exact.
+    """
+    return " ".join(value.split()).casefold()

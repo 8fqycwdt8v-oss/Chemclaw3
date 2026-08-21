@@ -42,6 +42,7 @@ from typing import TypeVar
 from temporalio import activity
 
 from chemclaw.connectors.calc import compose
+from chemclaw.connectors.calc.remote import collecting
 from chemclaw.connectors.calc.results import XtbJobResult
 from chemclaw.connectors.calc.specs import (
     ComplexJobSpec,
@@ -52,10 +53,14 @@ from chemclaw.connectors.calc.specs import (
     XtbJobSpec,
 )
 from chemclaw.connectors.queues import bundle_queue
+from chemclaw.core.chem import require_canonical_smiles
 from chemclaw.core.config import settings
 from chemclaw.durable.heartbeat import beating
 from chemclaw.durable.registry import durable_activity
+from chemclaw.science.calc.models import Structure
 from chemclaw.science.calc.postgres_store import default_store
+from chemclaw.science.calc.postgres_structures import default_structure_store
+from chemclaw.science.calc.structures import require_structure
 
 _Result = TypeVar("_Result")
 
@@ -71,6 +76,38 @@ async def _beating(awaitable: Awaitable[_Result], what: str) -> _Result:
     return await beating(awaitable, what, settings.xtb_job_heartbeat_timeout_seconds)
 
 
+async def _subject(structure_id: str | None, smiles: str) -> Structure | None:
+    """Resolve a geometry handle, checking it is a geometry *of the molecule that was named*.
+
+    Two failures, both silent without this, both reported as a value the caller can act on
+    (D-2026-08-21-a-geometry-is-an-address-not-a-payload):
+
+    - **An unresolvable handle.** `require_structure` says so and names what to re-run. Answering
+      by falling back to a fresh embedding would be the worst outcome available — the chemist chose
+      a conformer, and the calculation would silently be about a different one.
+    - **A handle for the wrong molecule.** A `structure_id` addresses a geometry, not a compound,
+      so nothing about the id itself says which molecule it is of; a scan's atom indices, a
+      reaction's balance and the note the result is filed under all assume `smiles`. The two are
+      compared canonically, so `CCO` and `OCC` agree and a genuinely different molecule does not.
+
+    A stored geometry with **no** SMILES is accepted rather than refused: `Structure.smiles` is
+    optional by construction and a structure that came from a route which did not record one is
+    still the geometry the caller asked for. That is a stated trade, not an oversight — the check
+    is on a disagreement, never on an absence.
+    """
+    if structure_id is None:
+        return None
+    structure = await require_structure(default_structure_store(), structure_id)
+    named = require_canonical_smiles(smiles)
+    if structure.smiles is not None and require_canonical_smiles(structure.smiles) != named:
+        raise ValueError(
+            f"{structure_id!r} is a geometry of {structure.smiles!r}, not of {smiles!r}. "
+            "A structure id addresses one 3D geometry; use one reported by a calculation on the "
+            "molecule you are asking about."
+        )
+    return structure
+
+
 @durable_activity(bundle_queue("calc"))
 @activity.defn
 async def run_xtb_calculation(spec: XtbJobSpec) -> XtbJobResult:
@@ -80,7 +117,18 @@ async def run_xtb_calculation(spec: XtbJobSpec) -> XtbJobResult:
     the caller because this is where the numbers are: a completion push-back and a job
     listing both want one readable line, and deriving it twice from the same result is
     how the two drift apart.
+
+    `calc_refs` is collected around the whole dispatch rather than per branch, because every branch
+    wants it and the collector already de-duplicates: a solvent screen reaching the same relaxation
+    in five media cites it once.
     """
+    with collecting() as calc_refs:
+        result = await _dispatch(spec)
+    return result.model_copy(update={"calc_refs": calc_refs})
+
+
+async def _dispatch(spec: XtbJobSpec) -> XtbJobResult:
+    """Run the calculation the spec asks for. The activity's body, without its bookkeeping."""
     store = default_store()
     activity.heartbeat(f"starting {spec.kind}")
     if isinstance(spec, ReactionJobSpec):
@@ -135,6 +183,7 @@ async def run_xtb_calculation(spec: XtbJobSpec) -> XtbJobResult:
             tuple(spec.atoms),
             tuple(spec.values),
             spec.solvent,
+            subject=await _subject(spec.structure_id, spec.smiles),
             progress=activity.heartbeat,
             run=_beating,
         )
@@ -151,6 +200,7 @@ async def run_xtb_calculation(spec: XtbJobSpec) -> XtbJobResult:
         ensemble, _ = await compose.conformer_ensemble(
             store,
             spec.smiles,
+            subject=await _subject(spec.structure_id, spec.smiles),
             search=spec.search,
             effort=spec.effort,
             solvent=spec.solvent,
@@ -165,10 +215,16 @@ async def run_xtb_calculation(spec: XtbJobSpec) -> XtbJobResult:
             ensemble=ensemble,
         )
     if isinstance(spec, ComplexJobSpec):
+        pair = (
+            await _subject(spec.structure_id_a, spec.smiles_a),
+            await _subject(spec.structure_id_b, spec.smiles_b),
+        )
         interaction = await compose.interaction(
             store,
             spec.smiles_a,
             spec.smiles_b,
+            # The spec refuses a half-specified pair, so either both are resolved or both are None.
+            subjects=None if pair[0] is None or pair[1] is None else (pair[0], pair[1]),
             effort=spec.effort,
             solvent=spec.solvent,
             run=_beating,

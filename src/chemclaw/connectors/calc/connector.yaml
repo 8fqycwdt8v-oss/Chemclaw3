@@ -165,6 +165,8 @@ jobs:
       Drives one coordinate through the requested values, re-optimizing everything else at each
       point — a conformational profile or a rotational barrier, not a reaction path. Give two atom
       indices for a bond, three for an angle, four for a dihedral (0-based, as RDKit numbers them).
+      Pass a `structure_id` to scan from a conformer a search already found: a barrier depends on
+      which conformer it is measured in, so re-embedding is a different question.
       The barrier it reports is an upper bound on the *ground-state* profile and is not a transition
       state.
     params_model: chemclaw.connectors.calc.specs:ScanJobSpec
@@ -179,6 +181,12 @@ jobs:
       than one arbitrary geometry. Needs the optional CREST binary; without it the job reports that
       the search is unavailable rather than silently returning a single conformer. Effort trades
       wall-clock for coverage; a search is never cheap, so expect a job id.
+
+      Each conformer comes back as a `structure_id` with its population, not as coordinates, and
+      that id is what carries the search forward: take `lowest_structure_id` (or any member's) to
+      optimize_geometry, compute_thermochemistry, compute_electronic_properties or scan_coordinate
+      and the next calculation runs on the conformer this search chose. Handing the SMILES on
+      instead re-embeds the molecule and throws the search away.
     params_model: chemclaw.connectors.calc.specs:EnsembleJobSpec
     precondition: chemclaw.science.calc.solvents:require_supported_solvents
     # A CREST search is the one genuinely costly thing in this bundle — minutes of saturated

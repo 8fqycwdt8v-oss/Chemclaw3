@@ -51,6 +51,13 @@ is now one import away: a summarizer reads retrieved evidence and writes text th
 as conversation, so it is an indirect-prompt-injection surface pointed straight at the thread. The
 char/4 estimator and two deterministic edits need no credential, no extra model call, and no trust.
 
+**It tells the repeat guard, and that coupling is deliberate.** `agent/repeat_guard.py` refuses a
+third identical call on the stated grounds that the model already holds the first answer. Clearing a
+tool result is exactly what makes that false, and both modules said so and neither acted: this
+module's placeholder lost a "re-run the tool if you still need it" line *because* the guard would
+deny it. One call to `forget_calls` at the moment a reduction is known closes it, and it is here
+rather than in the guard because this is the only place that can see one happen.
+
 **The metric exists because prose about compaction is what caused this defect.**
 `RecordContextCompaction` is the reader that can say the mechanism fired — it compares the full
 thread on the request's state against the list the edits actually produced, so the number is
@@ -72,6 +79,7 @@ from langchain.agents.middleware.context_editing import ContextEdit, TokenCounte
 from langchain_core.messages import AnyMessage, HumanMessage
 from langchain_core.messages.utils import count_tokens_approximately, trim_messages
 
+from chemclaw.agent.repeat_guard import forget_calls
 from chemclaw.core.config import settings
 from chemclaw.core.metrics_bridge import record_metric
 
@@ -82,15 +90,16 @@ logger = logging.getLogger(__name__)
 # tool that returned nothing — a different fact, and one the model would reasonably act on by
 # calling the tool again.
 #
-# **It states the fact and gives no instruction, and both halves of that are deliberate.** An
-# earlier version ended "Re-run the tool if you still need it", which was wrong twice over. It
-# contradicted `agent/repeat_guard.py`: inside one long harness turn a cleared result can be
-# re-fetched, cleared again and re-fetched, and the third identical call in a turn is *refused* —
-# so the placeholder was telling the model to do the thing a guard three middlewares away would
-# then deny. And it charged for the advice in the worst place: this string is repeated once per
-# cleared result, tens of times, in exactly the situation where the budget is already spent. The
-# guidance is paid for once instead, in the system prompt (`chemclaw_agent`), which is where the
-# marker is explained and where a sentence costs one copy rather than twenty.
+# **It states the fact and gives no instruction, and that is now for one reason where it used to be
+# two.** An earlier version ended "Re-run the tool if you still need it". That contradicted
+# `agent/repeat_guard.py` — a cleared result could be re-fetched, cleared and re-fetched, and the
+# third identical call in a turn was *refused*, so the placeholder told the model to do what a guard
+# three middlewares away would then deny. **That half is fixed**: a reduction now clears the repeat
+# counters (`_record_reduction` calls `forget_calls`), because after a clearing an identical call is
+# a re-read rather than a repeat. What stands is the cost: this string is repeated once per cleared
+# result, tens of times, in exactly the situation where the budget is already spent. The guidance is
+# paid for once instead, in the system prompt (`chemclaw_agent`), where a sentence costs one copy
+# rather than twenty.
 TOOL_RESULT_PLACEHOLDER = (
     "[Earlier tool result dropped to stay inside this session's context budget.]"
 )
@@ -302,6 +311,11 @@ def _record_reduction(request: ModelRequest[Any]) -> None:
     record_metric(
         lambda m: m.increment("chemclaw_context_reclaimed_tokens_total", float(reclaimed))
     )
+    # The one place the reduction is *known*, so the one place that can tell the repeat guard its
+    # premise has expired. A cleared tool result leaves the model without the answer the guard
+    # assumes it is holding, and the third identical call was then refused with advice — "answer
+    # from what you already have" — about something it no longer had. See `repeat_guard`.
+    forget_calls()
 
 
 class RecordContextCompaction(AgentMiddleware[Any, Any, Any]):

@@ -82,6 +82,34 @@ def _key(name: str, arguments: Any) -> tuple[str, str]:
     return (name, json.dumps(arguments, sort_keys=True, default=str))
 
 
+def forget_calls() -> None:
+    """Clear this turn's repeat counters, because the context they assumed no longer holds.
+
+    **The dead end this removes.** The guard's whole justification is that a repeat "will not
+    answer differently" and the model already has the first answer. Compaction takes that second
+    half away: `agent/compaction.py` replaces older tool results with a placeholder, so inside one
+    long turn a result can be read, cleared, re-fetched, cleared again — and the third identical
+    call is refused, leaving the model told to "answer from what you already have" about something
+    it demonstrably no longer has.
+
+    Both modules already knew about each other and neither closed it: `compaction.py` removed a
+    "re-run the tool if you still need it" line from its placeholder *precisely because* this guard
+    would then deny it. Written down on both sides, unfixed on both sides.
+
+    **Clearing, not exempting.** After a reduction an identical call is a *re-read*, not a repeat,
+    and the counter that would refuse it is measuring a context that no longer exists. Resetting is
+    also what keeps the guard's own measurement intact — the loop it was built for (7-8 identical
+    `find_past_jobs` calls, 128-142 s against 16.9 s) happens inside a context that is not being
+    reduced, and a turn large enough to compact will re-accumulate its counts from here.
+
+    A no-op off the request path, like every other function in this module.
+    """
+    counts = _calls.get()
+    if counts is not None and counts:
+        logger.info("context was compacted; %d repeat counter(s) cleared", len(counts))
+        counts.clear()
+
+
 def count_call(name: str, arguments: Any) -> RepeatedCallRefusal | None:
     """Count this call and return the refusal it has earned, or `None` to let it through.
 

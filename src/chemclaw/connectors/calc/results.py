@@ -16,7 +16,7 @@ already in flight, so this module is a *contract* boundary rather than an import
 side stays leaf.
 """
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from chemclaw.science.calc.models import (
     ConformerEnsemble,
@@ -37,6 +37,10 @@ class XtbJobResult(BaseModel):
 
     kind: str
     summary: str
+    # The calculation keys this job reached, for the envelope to carry and a note to cite
+    # (D-2026-08-21). Additive and defaulted, because this crosses the Temporal wire and histories
+    # are in flight; a result decoded from an older history simply has none.
+    calc_refs: list[str] = Field(default_factory=list)
     reaction: ReactionEnergyResult | None = None
     solvents: SolventComparisonResult | None = None
     scan: ScanResult | None = None

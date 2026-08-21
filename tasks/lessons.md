@@ -518,3 +518,55 @@ it spends the whole retry budget proving the same thing.
 
 I also killed my own shell with `pkill -f` a second time, after writing the rule not to. Use
 `pgrep -f <pattern> | head -1` and kill the pid.
+
+## 2026-08-21 — a review is not finished until you have read the other side of the wire
+
+**The pattern.** I published a deep review of how information moves between agentic steps, and it
+was right about the shape of the problem and wrong or incomplete on five specifics — every one of
+which I found in twenty minutes of reading `Chemclaw3-mcp` and running one more measurement:
+
+- I named `predict_site_reactivity` as a place to accept a geometry. The calculation server has
+  `compute_properties_at` and **no `compute_fukui_at`**, so the argument would have been a promise
+  this repository cannot keep.
+- I named `QmJobSpec` first in the recommendation and used it as the worked example. Its geometry
+  contract lives in a Nextflow pipeline on a cluster, and Nextflow *silently ignores* a param no
+  process consumes — so the recommendation as written would have shipped a silent wrong answer.
+- I called `sample_conformers` the worst payload. `find_calculations` is **28x worse**
+  (~831,000 tokens against ~7,400) and I had not measured it.
+- I did not notice that `calculation_key` already returns `structure_id` and the client drops it —
+  the exact fact that made the whole fix cheap.
+- I did not notice that the server's `Structure.structure_id` is a `computed_field` and ours is a
+  plain property, so the authoritative address arrives on every payload and is discarded.
+
+**The rule.** *When a finding is about a boundary, read both sides before writing the
+recommendation.* Four of the five errors were the same error: reasoning about a contract from one
+end of it. The companion repos are two minutes away (`add_repo` + `git clone`), and this repository's
+CLAUDE.md says so in its own "Related repositories" section.
+
+**The second rule, which is older and I broke again.** *Measure the tool you did not think of.* I
+measured five durable job payloads carefully and never ran the one read-only tool that could return
+fifty of them. The prompt "which surfaces return a stored payload of unbounded size?" would have
+caught it; "how big is this result?" did not.
+
+## 2026-08-21 — a shape test proves the field exists, not that anything fills it
+
+**What happened.** `ConnectorJobResult.calc_refs` was added, the collector was written, the field
+was on the envelope, and a test asserted the envelope carried what it was given. All green. The
+first time I drove the actual chain end to end, a conformer job that had plainly reached a cached
+calculation reported **`calc_refs: []`** — the one line that records a key had failed to land,
+because a scripted string replacement matched a fragment `ruff format` had already reflowed.
+
+**Two rules, and the second is the one that generalises.**
+
+1. **A scripted edit that does not `assert` its target is an edit that may not have happened.**
+   Every `str.replace` in a batch script needs `assert old in s` before it, or a grep after it.
+   I asserted most of them and not that one, and that is exactly the one that silently vanished.
+   The cheap systematic check is a grep audit at the end: one line per intended change, printing
+   OK/MISS. It found nothing else — but it could only say so because it was run.
+
+2. **A test that constructs the model proves the shape; only a test that runs the code proves the
+   wiring.** `test_the_envelope_carries_the_calculations_a_note_would_cite` builds a
+   `ConnectorJobResult(calc_refs=[...])` and asserts it round-trips. It cannot fail on a missing
+   producer, and it did not. The replacement drives `run_xtb_calculation` and asserts the refs are
+   *non-empty* — a property of a run, so the test has to be a run. Whenever a change adds a field
+   that something else is supposed to fill, at least one test must exercise the filler.

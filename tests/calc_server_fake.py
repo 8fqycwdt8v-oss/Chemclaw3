@@ -35,6 +35,7 @@ from rdkit.Chem import AllChem
 
 from chemclaw.core.chem import require_canonical_smiles
 from chemclaw.core.ids import stable_hash
+from chemclaw.science.calc.structures import InMemoryStructureStore
 
 # A version string carrying **both** key delimiters, because a real one does: `esol-delaney@2004`
 # carries the `@` and `cal-0.28733:-29.3116` carries the `:`. A client that split the flat
@@ -50,6 +51,12 @@ FAKE_VERSION = "GFN2-xTB+fake@1/cal-0.28733:-29.3116"
 _KEYED: dict[str, tuple[str, tuple[str, ...]]] = {
     "compute_xtb_energy": ("xtb.sp", ("charge",)),
     "compute_electronic_properties": ("xtb.properties", ("solvent",)),
+    # The same calculation asked at a *named* geometry rather than at one embedded from a SMILES,
+    # so it answers under the same `calc_type` with the same params — the subject is what differs,
+    # and the subject is `input_hash`. Reproduced here because it is the property the
+    # cheap-search-then-careful-optimization chain rests on: relaxing a conformer and then asking
+    # for its properties must reach the entry that conformer's own address names.
+    "compute_properties_at": ("xtb.properties", ("solvent",)),
     "predict_site_reactivity": ("xtb.fukui", ()),
     "predict_pka": ("pka", ()),
     "predict_solubility": ("solubility", ()),
@@ -148,6 +155,11 @@ class FakeCalcServer:
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self._saddle_first = saddle_first
         self.overrides: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {}
+        # Where the composites' geometries land once `install` has wired it in. On the fake rather
+        # than built by `install`, so a test can read it back — resolving an id a result reported
+        # is how "the handle the agent is shown is the handle it can pass back" gets checked
+        # against the real code path instead of against a stub.
+        self.structures = InMemoryStructureStore()
 
     def count(self, tool: str) -> int:
         """How many times `tool` was called."""
@@ -198,7 +210,18 @@ class FakeCalcServer:
             "input_hash": stable_hash(inputs),
             "params_hash": stable_hash(params),
         }
-        return {"tool": tool, "calc_version": FAKE_VERSION, "key": key, "calc_key": None}
+        # `structure_id` for the calculations that run on a geometry, exactly as the real server
+        # reports it — it is the server's authoritative answer to "which geometry is this about",
+        # and it is what `calculation_results.structure_id` records so a stored row can be found by
+        # the conformer a chemist picked (D-2026-08-21). Absent for a molecule-keyed calculator,
+        # which is about a compound and not about any particular geometry of it.
+        return {
+            "tool": tool,
+            "calc_version": FAKE_VERSION,
+            "key": key,
+            "calc_key": None,
+            "structure_id": _structure_id(subject) if subject is not None else None,
+        }
 
     # --- the tools themselves ---------------------------------------------------------------
 
@@ -365,6 +388,13 @@ class FakeCalcServer:
             "sites": sites,
         }
 
+    def _compute_properties_at(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        """The geometry-taking twin, answering about the structure's own molecule."""
+        structure = arguments["structure"]
+        answer = self._compute_electronic_properties({"smiles": structure["smiles"], **arguments})
+        answer["structure_id"] = _structure_id(structure)
+        return answer
+
     def _compute_electronic_properties(self, arguments: dict[str, Any]) -> dict[str, Any]:
         canonical = require_canonical_smiles(arguments["smiles"])
         molecule = Chem.AddHs(Chem.MolFromSmiles(canonical))
@@ -416,12 +446,29 @@ class _Text:
         self.text = text
 
 
+# The modules that bound `default_structure_store` at import time, so a patch has to reach each of
+# them rather than the definition site. Three, and the list is short because the geometry store has
+# exactly three callers: the composites that write to it and the two paths that resolve a handle.
+_STRUCTURE_STORE_CALLERS = (
+    "chemclaw.connectors.calc.compose",
+    "chemclaw.connectors.calc.activities",
+    "chemclaw.connectors.calc.server.tools",
+)
+
+
 def install(monkeypatch: pytest.MonkeyPatch, server: FakeCalcServer) -> FakeCalcServer:
-    """Make every `calc_session()` yield `server`, so no socket is opened anywhere.
+    """Make every `calc_session()` yield `server` and every geometry go to `server.structures`.
 
     Patched at `connectors.calc.remote`, the one module that opens a session — so the tool path,
     the composites, the durable activities and the BO calculator bindings all reach this fake
     through their real call chains rather than through a stub of their own.
+
+    **The geometry store is part of "no socket is opened anywhere".** Every composite persists the
+    geometries it receives (D-2026-08-21-a-geometry-is-an-address-not-a-payload), so without this
+    an offline composite test reaches Postgres — which is exactly the shape of dependency this
+    fake exists to remove, and the failure a sandbox with no database would see. Installing one
+    in-memory store shared by all three callers also makes the round trip testable: a test can
+    relax a molecule and then resolve the id the result reported, through the real code path.
     """
 
     @asynccontextmanager
@@ -429,4 +476,6 @@ def install(monkeypatch: pytest.MonkeyPatch, server: FakeCalcServer) -> FakeCalc
         yield server
 
     monkeypatch.setattr("chemclaw.connectors.calc.remote.calc_session", _session)
+    for module in _STRUCTURE_STORE_CALLERS:
+        monkeypatch.setattr(f"{module}.default_structure_store", lambda: server.structures)
     return server

@@ -75,6 +75,23 @@ _DYNAMIC: dict[str, set[str]] = {
 # part of the application's matrix.
 _MIGRATOR_ONLY = {"schema_migrations"}
 
+# Modules whose statements belong to an **operator**, not to the running application, and are
+# therefore not part of the runtime role's matrix. Named by path with the reason, in the shape
+# `_DYNAMIC` uses, because the scan below reads SQL text and cannot see who runs it.
+#
+# `cli/rekey_campaigns.py` re-keys recorded BO campaigns after a change to how a campaign id is
+# derived (D-2026-08-21). It is a schema-class operation that happens to need Python — the new id is
+# computed from a stored `OptimizationProblem`, which SQL cannot do — and it runs beside
+# `make db-migrate`, under the same principal that owns the tables.
+#
+# **Excluding it is the narrower answer, and the alternative is what makes it right.** Granting the
+# runtime role what this module uses would mean DELETE on `bo_campaigns` and UPDATE on
+# `bo_suggestions`, and the grant file withholds both deliberately: a campaign's suggestions are its
+# history and "the sequence *is* the history" (031), so an UPDATE the chat service could issue is
+# exactly the boundary this file exists to keep shut. A one-off run by an operator is not a reason
+# to hand a chat turn that privilege for the rest of the deployment's life.
+_ADMIN_ONLY_MODULES = {"cli/rekey_campaigns.py"}
+
 
 def _upstream_tables() -> set[str]:
     """Every table LangGraph's `setup()` creates, derived from the installed distributions.
@@ -171,6 +188,8 @@ def verbs_the_code_uses() -> dict[str, set[str]]:
             used.setdefault(table, set()).add(verb)
 
     for path in sorted(_SRC.rglob("*.py")):
+        if path.relative_to(_SRC).as_posix() in _ADMIN_ONLY_MODULES:
+            continue
         for statement in _sql_literals(path):
             for pattern, verb in ((_INSERT, "INSERT"), (_UPDATE, "UPDATE"), (_DELETE, "DELETE")):
                 for match in pattern.finditer(statement):
