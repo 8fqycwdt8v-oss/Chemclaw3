@@ -596,3 +596,31 @@ fail on the *shape* of a diff rather than on its behaviour.
 **And the honest-reporting half.** Saying "green" before the run finishes is a claim about the
 future. The right sentence is the one I used — "still running, I will report exactly what it says" —
 and then actually reporting it, including the three that were mine.
+
+## 2026-08-21 — never `cd` inside a compound command that also runs git
+
+**What happened.** To check whether two failures were pre-existing, I made a worktree at the base
+commit:
+
+    git stash -u -q && git worktree add -q /tmp/basecheck e5f1f67 && cd /tmp/basecheck && ln -s …; git stash pop -q
+
+The shell's working directory **persists across the whole command**, so `git stash pop` ran from
+`/tmp/basecheck` and applied my three uncommitted test fixes to *that* worktree. `git worktree
+remove --force` then deleted them. The next commit carried only the lessons file while its message
+described three fixes that were no longer in the tree — and `git status` had told me so in one line
+I read past.
+
+**Three rules, in order of how much they would have saved.**
+
+1. **Use `git -C <path>` instead of `cd`.** Every git subcommand takes it, it cannot leak into the
+   next command, and it makes the target explicit at the call site.
+2. **Never stash across an operation that changes worktrees.** A stash is repository-global and
+   pops into whichever worktree asks. Committing to a scratch branch, or just reading the base
+   version with `git show <rev>:<path>`, has no such failure mode.
+3. **Read `git status --short` before writing the commit message, not after.** It printed exactly
+   one file where I expected four. The message I then wrote was a description of intent rather than
+   of the diff — which is the worst kind of commit message, because it reads as verified.
+
+The generalisation, and it is the same one as the silent `str.replace`: **an edit is not done
+because you made it — it is done because you checked it is there.** Both losses this session were
+invisible for the same reason, and both were one `grep` away.
