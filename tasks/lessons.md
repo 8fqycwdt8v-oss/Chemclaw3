@@ -570,3 +570,29 @@ because a scripted string replacement matched a fragment `ruff format` had alrea
    producer, and it did not. The replacement drives `run_xtb_calculation` and asserts the refs are
    *non-empty* — a property of a run, so the test has to be a run. Whenever a change adds a field
    that something else is supposed to fill, at least one test must exercise the filler.
+
+## 2026-08-21 — "targeted runs passed" is not "the suite passed"
+
+**What happened.** I reported the gate as lint-green, type-green, and the suite "still running,
+every touched area passed on targeted runs". The full run then found **three** failures I had
+caused or exposed, none of them in a file I had thought to run:
+
+- `test_calc_remote` asserted on `remote_key`'s return, whose *type* I had changed. I ran the calc
+  tools, jobs, compose and find tests — not the one named after the module I edited.
+- `test_layering` needed the new `cli -> science` edge declared. A structural test, invisible to
+  any per-feature run.
+- `test_suite_timeouts` failed only under `PYTEST_TIMEOUT_SCALE=4` — which is what the suite's own
+  timeout banner tells you to set. A pre-existing hermeticity bug that only bites the person
+  following the advice.
+
+**The rule.** *A change that alters a function's signature or adds an import edge has a blast
+radius no per-feature test selection covers.* Two cheap checks close most of it before the full
+run: `git diff --name-only | sed 's|src/chemclaw/|tests/test_|'`-style name mapping to find the
+test file named after each edited module, and running the structural suite —
+`test_layering`, `test_repo_map`, `test_schema_inventory`, `test_database_privileges`,
+`test_decision_log`, `test_prose_contract`, `test_docstring_paths` — on every change, because those
+fail on the *shape* of a diff rather than on its behaviour.
+
+**And the honest-reporting half.** Saying "green" before the run finishes is a claim about the
+future. The right sentence is the one I used — "still running, I will report exactly what it says" —
+and then actually reporting it, including the three that were mine.
