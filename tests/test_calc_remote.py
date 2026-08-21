@@ -147,8 +147,14 @@ def test_a_version_carrying_both_delimiters_round_trips(monkeypatch: pytest.Monk
         from chemclaw.connectors.calc.remote import calc_session
 
         async with calc_session() as session:
-            key = await remote_key(session, "predict_solubility", {"smiles": "c1ccccc1"})
-        assert key is not None
+            identity = await remote_key(session, "predict_solubility", {"smiles": "c1ccccc1"})
+        assert identity is not None
+        # `remote_key` answers with the key *and* the geometry the calculation runs on
+        # (D-2026-08-21) — the server reports both from one round trip and this client used to
+        # read only the first. A molecule-keyed calculator is about a compound and not about any
+        # particular geometry of it, so this one reports none, which is the honest value.
+        assert identity.structure_id == ""
+        key = identity.key
         assert key.calc_version == _AWKWARD_VERSION
         assert key.calc_type == "solubility"
         # Three of the four parts are the server's verbatim; `params_hash` is deliberately not.

@@ -317,6 +317,11 @@ _ALLOWED_MODULE_EDGES: set[Edge] = {
     ("chemclaw.cli", "chemclaw.evals"),
     ("chemclaw.cli", "chemclaw.ingest"),
     ("chemclaw.cli", "chemclaw.kg"),
+    # `cli/rekey_campaigns.py` re-keys recorded BO campaigns after a change to how a campaign id is
+    # derived (D-2026-08-21). The derivation is `science.bo.campaign_record.campaign_id_for` over an
+    # `OptimizationProblem`, so a re-key that did not import it would be a second copy of the rule
+    # it exists to apply — which is the one thing a re-key must not have.
+    ("chemclaw.cli", "chemclaw.science"),
     ("chemclaw.cli", "chemclaw.templates"),
     ("chemclaw.connectors", "chemclaw.agent"),
     ("chemclaw.connectors", "chemclaw.core"),
