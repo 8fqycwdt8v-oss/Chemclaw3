@@ -64,6 +64,10 @@ class JobRecord(BaseModel):
     result: dict[str, Any] = Field(default_factory=dict)
     # The note this run proposed, or "" — a join to the graph, not proof of a merge.
     note_id: str = ""
+    # The calculation keys the run rested on, from its envelope (D-2026-08-21). Kept beside the
+    # note rather than inside `result` for the same reason `note_id` is: `result` is the
+    # connector's domain payload and this is a fact about the run.
+    calc_refs: list[str] = Field(default_factory=list)
     # Wall-clock seconds the run took, measured by the wrapper across the child workflow. The row
     # said what ran and why and nothing about what it cost, so a two-second xTB call and a six-hour
     # DFT run were one row shape and one increment of `chemclaw_jobs_started_total` — on the most

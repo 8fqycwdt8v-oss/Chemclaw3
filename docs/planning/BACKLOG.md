@@ -68,6 +68,22 @@ topic).
       *core called*, not *which chemist*, so full closure needs an actor assertion bound to the call
       (OBO or a signed memo) — which is the `DEFERRED.md` warehouse row's blocker too.
 
+- [ ] **`fetch_artifact` is a tool that can only refuse** — [S]. `list_artifacts` and
+      `fetch_artifact` promise "the relaxed coordinates, the second derivatives, the raw vibrational
+      spectrum" and "a conformer search seeded from a known structure", and two agent profiles
+      (`computation`, `evidence`) instruct the agent to reach for them before proposing a rerun. In
+      this repository the **only** artifact writer left is `ArrayOffloadingStore`, which writes
+      `hessian.npy` and `dipole_derivatives.npy` — and `fetch_artifact` refuses binary by design.
+      Measured: `list_artifacts` returns one `application/x-npy` entry and `fetch_artifact` on it
+      raises "is binary … not text". `xtbopt.xyz`, `crest_conformers.xyz` and `vibspectrum` appear
+      only in `science/calc/artifacts._MEDIA_TYPES` and in comments; their writers left with the
+      engines in `D-2026-08-16-the-physics-leaves-the-cache-stays`. **The geometry half is now
+      answered elsewhere** — D-2026-08-21's `structures` store is the addressable geometry the
+      profiles were really asking for — so what is left is the *spectrum*: either the server returns
+      `vibspectrum` as an artifact, or these two tools stop advertising one. Note the row below
+      assumes `fetch_artifact` hands the model externally-produced text; today it cannot hand it
+      anything.
+
 - [ ] **No connector or MCP tool result is framed** — [M], wide half only. The two narrow channels
       are closed (`EvidenceChunk.source` is defanged, `recall_observations` frames its statements),
       and `agent/framing.py` is the pattern to reuse rather than reinvent — `frame_untrusted`,

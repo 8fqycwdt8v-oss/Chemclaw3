@@ -19,6 +19,7 @@ tool call and rendering an approval prompt), `api/runner_usage.py` (the turn's t
 
 import asyncio
 import copy
+import json
 import logging
 import time
 import uuid
@@ -847,8 +848,18 @@ def _job_results_message(results: dict[str, dict[str, Any]]) -> str:
     The results are handed to the model as *framed data*, not as an instruction: they arrive from
     a workflow, and the same injection discipline that applies to retrieved notes applies here
     (`chemclaw.agent.framing`).
+
+    **Rendered as JSON, and it used to be a Python `repr`.** `f"- {job_id}: {payload}"` over a
+    `dict` produced single-quoted keys, `None` and `True` — the exact form
+    `chemclaw.templates.resolve._text` states it exists to avoid, for the same reason ("a Python
+    repr with single quotes that a model has to guess at"), on the *higher*-traffic of the two
+    paths. `default=str` keeps a stray datetime from failing a turn over formatting, and
+    `sort_keys` makes one turn's rendering comparable with the next's.
     """
-    summary = "\n".join(f"- {job_id}: {payload}" for job_id, payload in results.items())
+    summary = "\n".join(
+        f"- {job_id}: {json.dumps(payload, sort_keys=True, default=str)}"
+        for job_id, payload in results.items()
+    )
     return (
         # "finished", not "completed", and the failure instruction is explicit. A row carrying
         # `status: failed` used to arrive under a sentence asserting the jobs had completed, and a

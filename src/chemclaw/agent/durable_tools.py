@@ -52,7 +52,7 @@ from chemclaw.agent.framing import frame_untrusted
 from chemclaw.core.config import settings
 from chemclaw.core.errors import SubsystemUnavailableError
 from chemclaw.core.identity_context import get_current_roles
-from chemclaw.core.ids import stable_hash
+from chemclaw.core.ids import canonical_text, stable_hash
 from chemclaw.core.temporal_client import connect
 from chemclaw.core.tool_registry import tool
 from chemclaw.core.turn_signals import record_job_started
@@ -70,6 +70,7 @@ from chemclaw.durable.job_record import JobRecordSummary, lookup_job_record, sea
 from chemclaw.durable.note_index import NoteReindexWorkflow
 from chemclaw.durable.report_workflow import DevelopmentReportWorkflow
 from chemclaw.retrieval.harness import ReportRequest, ReportSection
+from chemclaw.science.calc.geometry import without_geometry
 
 
 class DurableJobStatus(BaseModel):
@@ -87,6 +88,12 @@ class DurableJobStatus(BaseModel):
     status: str
     summary: str | None = None
     result: dict[str, Any] = Field(default_factory=dict)
+    # The calculations this run rested on, as `propose_knowledge_note` takes them (D-2026-08-21).
+    # That tool's docstring has said "get them from a job's result envelope" since D-133 against an
+    # envelope that carried none, so a note drafted from a calculation the agent had just run could
+    # not cite it. Empty for a job that recorded none — a report, or a run from before the refs
+    # were captured — which is the honest reading either way.
+    calc_refs: list[str] = Field(default_factory=list)
     # Why the run was asked for, when the answer came from the durable record (D-157). Empty on the
     # live-Temporal path, which reads the workflow's result rather than the record — the launching
     # turn is right there in the conversation, so restating its own reason back to the model would
@@ -103,15 +110,6 @@ _TERMINAL = {
     WorkflowExecutionStatus.TERMINATED: "terminated",
     WorkflowExecutionStatus.TIMED_OUT: "timed_out",
 }
-
-
-def _canonical(text: str) -> str:
-    """Model-written free text, reduced to what it means: whitespace collapsed, case folded.
-
-    Only for building a durable id. The request itself keeps the words the chemist chose, because
-    they are what the draft renders.
-    """
-    return " ".join(text.split()).casefold()
 
 
 def _report_id(request: ReportRequest) -> str:
@@ -156,9 +154,9 @@ def _report_id(request: ReportRequest) -> str:
     cross-actor merge this key exists to prevent, and `memory_layer` is a closed set.
     """
     payload = [
-        _canonical(request.title),
+        canonical_text(request.title),
         *sorted(
-            f"{_canonical(s.heading)}|{_canonical(s.query)}|{s.memory_layer}"
+            f"{canonical_text(s.heading)}|{canonical_text(s.query)}|{s.memory_layer}"
             for s in request.sections
         ),
         request.requested_by,
@@ -239,8 +237,15 @@ async def get_durable_job_status(job_id: str) -> DurableJobStatus:
 
     Returns:
         The status (running, completed, failed, cancelled, terminated, timed_out) and, once
-        completed, the one-line `summary` plus the structured `result`. A job still running reports
-        the status alone.
+        completed, the one-line `summary`, the structured `result`, and `calc_refs` — the
+        calculation keys the run rested on, which `propose_knowledge_note` takes so a conclusion
+        drawn from this job stays traceable to what computed it. A job still running reports the
+        status alone.
+
+        A geometry in the result is reported by its `structure_id` rather than by its coordinates.
+        That address is what the next calculation takes: pass it to `optimize_geometry`,
+        `compute_thermochemistry`, `scan_coordinate` or `compute_dft_energy` to carry one chosen
+        conformer forward instead of starting again from the molecule.
 
     Raises:
         ValueError: When the id is unknown to both Temporal and the durable record, or names a
@@ -303,7 +308,12 @@ async def _recorded_status(job_id: str) -> DurableJobStatus | None:
         job_id=job_id,
         status="completed",
         summary=record.summary,
-        result=record.result,
+        calc_refs=record.calc_refs,
+        # Projected on the way out as well as on the way in, and the difference is *old rows*: a
+        # record written before D-2026-08-21 holds the whole geometry, so a months-old conformer
+        # search collected here would still spend a context window on coordinates. The projection
+        # is idempotent, so applying it to a record already written without them costs a walk.
+        result=without_geometry(record.result),
         rationale=record.rationale,
     )
 
@@ -404,7 +414,13 @@ def completed_job_status(job_id: str, raw: Any) -> DurableJobStatus:
     """
     envelope = envelope_from_result(job_id, raw)
     return DurableJobStatus(
-        job_id=job_id, status="completed", summary=envelope.summary, result=envelope.data
+        job_id=job_id,
+        status="completed",
+        summary=envelope.summary,
+        calc_refs=envelope.calc_refs,
+        # A `calc` envelope arrives already projected (`CalcJobWorkflow`); this covers every other
+        # bundle's, and an in-flight run started by the previous release. Idempotent either way.
+        result=without_geometry(envelope.data),
     )
 
 

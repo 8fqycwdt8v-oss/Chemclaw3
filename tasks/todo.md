@@ -1,84 +1,124 @@
-# Task — Prove the enforced identity path works, and close the six audit findings
+# Close the step boundary: make a computed geometry addressable
 
-Audit report: https://claude.ai/code/artifact/047c07fc-4f0a-4715-b55f-08ebc685b06b
+The review (published 2026-08-21) found that every agent-drivable path between two calculation
+steps routes its data through the model's token stream, and that the three content-addressed
+handles the system already derives — `structure_id`, `calc_ref`, `artifact_ref` — are all
+**write-only** from the agent's side. This is the implementation.
 
-## Plan
+## What the second dig changed (read this before the list)
 
-### Proof (F1) — the headline
-- [x] Fake Entra issuer in `Chemclaw3_mock` (`app/entra/`), off by default
-- [x] Backend integration test that boots the REAL app with `entra_required=true` against a real
-      HTTP JWKS, nothing patched — 14 cases, mutation-proved
-- [x] Live lane runs enforced (`CHEMCLAW_LIVE_ENTRA_TOKEN_URL`), and was run
+Five things the review did not have, found by reading `Chemclaw3-mcp`'s calc server and by
+measuring one more tool:
 
-### Fixes
-- [x] F2 — 16 tests for `src/auth/msalAuth.ts`, five mutations caught
-- [x] F3 — 401 recovery in `api/client.ts` for every route; `openStream` stops on 401
-- [x] F4 — three readerless Entra settings and the `CHEMCLAW_ENTRA_TOKEN_ENDPOINT` ConfigMap value
-- [x] F5 — the bundled UI mounts only when identity is off
-- [x] F6a — bearer auth for `bo`, `calc`, `molfp`, `rxnfp`
-- [x] F6b — `chemclaw_group_claim_overage_total` + a PrometheusRule
-- [x] F6c — mock HPC compares tokens with `compare_digest` over bytes
+1. **The server already has the whole geometry-taking primitive set** — `relax_structure`,
+   `compute_properties_at`, `compute_hessian`, `scan_point`, `search_conformer_ensemble`,
+   `search_binding_modes`, `combine_structures`. Nothing needs building there for the xTB half.
+2. **There is no `compute_fukui_at`.** So `predict_site_reactivity` cannot take a geometry, and
+   pretending otherwise would be a cross-repo change I cannot verify. It is left out and recorded.
+3. **`calculation_key` already returns `structure_id`** for geometry-keyed calculations, and
+   `remote_key` drops it. That is the server's authoritative address, free on the hit path.
+4. **The server's `Structure.structure_id` is a `computed_field`; ours is a plain `@property`** —
+   so the authoritative address arrives on every payload and is silently discarded. Worse, the
+   server rounds by `settings.xtb_geometry_decimals` (ENV-overridable) while we froze the constant
+   at 4, so the "changing it is a cross-repository change" claim in `science/calc/models.py` holds
+   on our side only. A divergence raises nowhere and every lookup misses forever.
+5. **`find_calculations` is the worst instance of the payload problem, not `sample_conformers`.**
+   Measured: one stored `xtb.conformers` row is 66,520 characters, and `calc_find_max_results`
+   is 50 — **~830,000 tokens** for one read-only call available on two profiles. That is past
+   every provider's context limit, where `compaction.py` says the failure is hard rather than
+   graceful. The review missed it.
 
-### Close
-- [x] Three ADRs + ledger rows
-- [x] `make lint type test` green (4197 passed; 2 pre-existing failures need a live model key)
-- [x] `BACKLOG.md` connector row and the stale live-edge lists deleted
+The QM/DFT half of the chain does **not** ship enabled: the Nextflow pipeline's params contract
+(`params.smiles`) lives on a cluster this repository cannot reach, and a `geometry` param a
+pipeline ignores would silently run DFT on a fresh embedding while telling a chemist it ran on
+their conformer. It ships behind `hpc_pipeline_accepts_geometry`, default off, refusing loudly.
 
-## What was measured
+## The list
 
-**The enforced path, against the running stack** (front door, four workers, four connectors,
-Postgres, Temporal), `CHEMCLAW_ENTRA_REQUIRED=true`:
+### A. The store and the projection (F1, F2, F13)
+- [x] A1 `infra/sql/047_structures.sql` — content-addressed geometry store + grant row.
+- [x] A2 `science/calc/structures.py` — `StructureStore` protocol, in-memory backend, `put`/`get`.
+- [x] A3 `science/calc/postgres_structures.py` — the Postgres backend + `default_structure_store()`.
+- [x] A4 `science/calc/geometry.py` — one walker: `structures_in()` (persist) and
+      `without_geometry()` (the agent view). Generic over a payload, not per model.
+- [x] A5 Persist at the five `compose.py` sites where a geometry comes back from the server.
+- [x] A6 Project at the three sites that hand a stored payload to the model: `CalcJobWorkflow`'s
+      envelope, `completed_job_status`/`_recorded_status`, and `find_calculations`.
+- [x] A7 Bound `find_calculations`' per-record result with an honest `result_truncated` flag.
+- [x] A8 The divergence check: compare the server's `structure_id` with ours, log + count.
 
-| request | result |
-|---|---|
-| no token · garbage · unpublished key · wrong aud · wrong iss · expired · no `exp` | 401 (all seven) |
-| a token the tenant vouches for | 200 |
-| `DELETE /jobs/x` no roles → privileged | 403 → 404 |
-| alice's session read by alice → by bench | 200 → 404 `unknown session` |
-| `/healthz` `/readyz` `/metrics` → `/` | 200 → 404 |
+### B. The handle as an argument (F1)
+- [x] B1 `optimize_geometry(structure_id=…)`, `compute_thermochemistry(structure_id=…)`,
+      `compute_electronic_properties(structure_id=…)` — mutually exclusive with `smiles`.
+- [x] B2 `ScanJobSpec`, `EnsembleJobSpec`, `ComplexJobSpec` gain `structure_id` fields.
+- [x] B3 `compose.scan_profile` / `conformer_ensemble` / `interaction` accept a resolved structure.
+- [x] B4 `QmJobSpec.structure_id` + the `hpc_pipeline_accepts_geometry` gate + the launcher param.
 
-A full turn then ran through it, and `audit_events.actor` recorded `u-alice` — the `oid` from the
-minted token. That row is the chain.
+### C. Finding what already exists (F4)
+- [x] C1 `structure_id` on `calculation_results` (migration), on `StoredResult`, written from the
+      server's own answer in `remote_key`.
+- [x] C2 `find_calculations(structure_id=…)`, and the refusal message updated.
 
-**Connector credentials, from a genuinely fresh shell** after `eval "$(processes.sh env)"`:
-`POST bo/mcp` 401 without, 400 with (past the gate), `GET bo/healthz` 200 unauthenticated.
+### D. The deterministic path (F5, F8)
+- [x] D1 `${steps.id.result.a.b}` — dotted path in `templates/resolve.py` + `manifest.py`.
+- [x] D2 `_text()` dumps a pydantic model as JSON instead of falling through to its repr.
+- [x] D3 `_job_results_message` renders JSON, not a Python repr.
 
-**Mutation proofs.** Backend: 7 deliberate regressions, 7 caught. UI: 5 on `msalAuth`, 2 on the 401
-recovery, 1 on the job stream, 3 on the proxy — all caught.
+### E. Provenance and identity (F6, F10)
+- [x] E1 `ConnectorJobResult.calc_refs`, filled by the calc job from the keys it touched.
+- [x] E2 `core/ids.canonical_text`, used by both `_report_id` and `campaign_id_for`.
+- [x] E3 Canonicalise the campaign key; `cli/rekey_campaigns.py` backfills existing rows.
+- [x] E4 `ExperimentSuggestion.opened_new_campaign` — say so when a fork is likely accidental.
 
-## What was *not* proven, and why
+### F. Context recovery (F9)
+- [x] F1 A compacted turn resets the repeat guard: an identical call after a clearing is a
+      re-read, not a repeat. (The review proposed a tool over `tool_result_blobs`;
+      `tests/test_layering.py` forbids `agent → api`, and this is the smaller correct fix.)
 
-**The browser → tenant hop.** MSAL talks to `login.microsoftonline.com`; mocking that is mocking a
-login UI rather than a key set, and a UI auth mode accepting tokens from an arbitrary issuer would
-rebuild the `ALLOW_DEV_AUTH` hazard. The frontend's own contribution is pinned by tests instead.
+### G. The record
+- [x] G1 ADR `D-2026-08-21-a-geometry-is-an-address-not-a-payload.md` + ledger row.
+- [x] G2 `BACKLOG.md` / `DEFERRED.md` rows: the DFT geometry param, `compute_fukui_at`.
+- [x] G3 Package READMEs, `.env.example`, `ARCHITECTURE.md` if a directory moved (it does not).
+- [x] G4 Tests for every one of the above.
+- [x] G5 `make lint type test` green, with what it skipped stated.
 
-**A real-model turn.** This environment's `API-KEY` is rejected by Anthropic (401 measured against
-`api.anthropic.com` directly), so the live turn ran against `cli.mock_llm` — the lane's documented
-credential-free mode, where only the model is faked.
+## Review
 
-## Two mutations that were invalid, recorded so nobody repeats them
+**Done, and measured on the same molecule the review used** (celecoxib, 40 atoms, 20 members):
 
-- Deleting `audience=` from `jwt.decode` does not disable the audience check: PyJWT rejects *every*
-  token carrying an `aud` when the decoder passes none. Use `options={"verify_aud": False}`.
-- Making `IdentityProviderUnavailable` an `AuthError` subclass changes nothing — its `except` clause
-  in `require_principal` is ordered first. Mutate the `raise` instead.
+| | before | after |
+| --- | --- | --- |
+| mid-turn resume message | 29,634 ch (~7,408 tokens) | **5,583 ch (~1,395)** |
+| distinct numeric values in it (cap 512) | 2,400 | **38** |
+| one stored `xtb.conformers` row | 66,523 ch | **10,000 ch** |
+| `find_calculations` at `limit=50` | ~831,000 tokens | **bounded at ~50,000** |
+| campaign id under re-casing / padding / float noise | forks silently | **same campaign** (8/8 perturbations) |
+| the conformer → refine chain | inexpressible in all four modes | one hop in three of them; DFT gated |
 
-## Findings the work itself turned up
+**Five things the plan did not anticipate, found while building it.**
 
-- **The connector probe allowlist never matched under a mount.** `request.url.path` keeps the mount
-  prefix (Starlette records it in `root_path` and leaves the path whole), so `/molfp/healthz` was
-  not exempt. Invisible while nothing was refused; would have 401'd the whole fleet's readiness
-  sweep the day a credential was declared.
-- **`--export-env` is not idempotent**, unlike the URL map it replaced: a second shell minted
-  different tokens and got 401s from healthy servers. `processes.sh` persists them; `processes.sh
-  env` reads them back.
-- **`eval "$(...)"` swallows the exit status**, so a failing runner surfaced twenty lines later as
-  `CHEMCLAW_CONNECTOR_URLS: unbound variable` instead of naming the real error.
-- **The transport test rebuilt each endpoint from scratch**, dropping the manifest's `auth` — so it
-  connected anonymously and proved nothing about the credential a deployment requires.
-- **`--export-env` hand-quoted its values.** A minted token is base64url and could never need
-  escaping; an operator-supplied one is an arbitrary string, and `processes.sh` `eval`s the output.
-  `shlex.quote`, with a test that round-trips a value carrying `'` through the shell's own parser.
-- **The runbook named a runtime-only path**, which `make prose-validate` resolves against the tree —
-  so it passed while the lane happened to be up and failed once it was down. The subcommand is the
-  contract; the file is an implementation detail and is no longer written down as one.
+1. `find_calculations` needed a bound *and* a projection, and even after the projection a
+   47-member row is 10,000 characters — so the per-record ceiling is load-bearing, not belt-and-braces.
+2. `structure_id` had to mean **the geometry a calculation ran on**, not the one it produced.
+   The first test written asked the other question and failed; the server's own `calculation_key`
+   answers the input, and the input is what a chemist holding conformer #3 is asking about.
+3. Chaining through a template needed `lowest_structure_id` hoisted onto `ConformerEnsemble` as a
+   `computed_field`. Reaching `conformers[0]` would have meant list indexing in the resolver, which
+   is the first step toward the expression language `templates/manifest.py` refuses to grow.
+4. `tests/test_database_privileges.py` caught the re-key CLI asking for DELETE on `bo_campaigns`
+   and UPDATE on `bo_suggestions` — verbs the grant withholds on purpose. The answer was to name
+   the module as operator-run, not to widen the runtime role.
+5. The projection restated `charge: 0, multiplicity: 1` on every member of every ensemble. A field
+   whose value is the default is a field the model reads past; omitting the pair took another 11%.
+
+**One thing deliberately not built.** The review proposed an agent tool over `tool_result_blobs`
+for the compaction dead end. `tests/test_layering.py` forbids `agent -> api`, and the smaller fix is
+better anyway: a reduction clears the repeat counters at the one place that can see one happen.
+
+**What ships off, and why.** DFT on a chosen conformer is built and refused behind
+`hpc_pipeline_accepts_geometry`; Fukui at a chosen geometry is not built at all. Both are in
+`DEFERRED.md` with their triggers, and both are blocked on a contract outside this repository —
+a Nextflow pipeline's params, and a `compute_fukui_at` primitive `Chemclaw3-mcp` does not expose.
+
+**Operator note:** `make db-migrate` then `python -m chemclaw.cli.rekey_campaigns` on any deployment
+holding recorded BO campaigns. `--dry-run` reports what would move.

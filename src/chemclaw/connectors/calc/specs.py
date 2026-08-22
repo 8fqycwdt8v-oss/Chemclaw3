@@ -23,7 +23,7 @@ because a boundary that only holds while nothing heavy exists is not a boundary.
 
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 # What a caller has to be told about `symmetry_numbers` to supply it correctly, written once
 # because the two reaction-shaped specs advertise the identical contract. It is the *only* field
@@ -31,6 +31,18 @@ from pydantic import BaseModel, Field
 # and type, while this one is a physical quantity whose omission silently costs the free energy.
 # A plain `dict[str, int]` keeps this module leaf — no `chemclaw.science.*` import is needed to
 # state it (D-118).
+# What a caller has to be told to use a geometry handle, written once because three specs take one
+# (D-2026-08-21-a-geometry-is-an-address-not-a-payload). Every field here that carries a description
+# does so because a model cannot infer it from the name and the type, and this is the clearest case:
+# the argument is a string, and *which* strings are valid is the whole of what has to be said.
+_STRUCTURE_ID_DESCRIPTION = (
+    "A specific 3D geometry to start from, as `structure_id` — the `st_...` address reported by "
+    "optimize_geometry, sample_conformers, scan_coordinate and compute_thermochemistry. Use it to "
+    "carry a chosen conformer from one calculation into the next: without it the calculation is "
+    "run on a fresh force-field embedding, which discards whichever conformer an earlier search "
+    "settled on. Leave it unset to start from the SMILES."
+)
+
 _SYMMETRY_NUMBERS_DESCRIPTION = (
     "Rotational symmetry number per species, keyed by the exact SMILES string given in "
     "reactants/products: 1 for a molecule with no rotational symmetry, 2 for H2/N2/O2/CO2/water, "
@@ -72,13 +84,20 @@ class SolventScreenJobSpec(BaseModel):
 
 
 class ScanJobSpec(BaseModel):
-    """A durable relaxed-scan request along one internal coordinate (xTB plan X3)."""
+    """A durable relaxed-scan request along one internal coordinate (xTB plan X3).
+
+    `smiles` stays required even when `structure_id` is given, and that is not redundancy: the atom
+    indices this scan drives are indices *into* a molecule, the result is reported and cited under a
+    molecule, and a geometry that is not of that molecule is a request nobody can read. It is
+    checked against the resolved structure rather than assumed.
+    """
 
     kind: Literal["scan"] = "scan"
     smiles: str = Field(min_length=1)
     atoms: list[int] = Field(min_length=2, max_length=4)
     values: list[float] = Field(min_length=2)
     solvent: str | None = None
+    structure_id: str | None = Field(default=None, description=_STRUCTURE_ID_DESCRIPTION)
 
 
 class EnsembleJobSpec(BaseModel):
@@ -89,6 +108,7 @@ class EnsembleJobSpec(BaseModel):
     search: Literal["conformers", "tautomers", "protomers", "deprotomers"] = "conformers"
     solvent: str | None = None
     effort: Literal["quick", "normal", "extensive"] = "quick"
+    structure_id: str | None = Field(default=None, description=_STRUCTURE_ID_DESCRIPTION)
 
 
 class ComplexJobSpec(BaseModel):
@@ -99,6 +119,21 @@ class ComplexJobSpec(BaseModel):
     smiles_b: str = Field(min_length=1)
     solvent: str | None = None
     effort: Literal["quick", "normal", "extensive"] = "quick"
+    # Both or neither: a search that starts from one chosen conformer and one fresh embedding is
+    # not a comparison anybody asked for, and silently pairing them is how a number that means
+    # nothing gets reported as a binding energy.
+    structure_id_a: str | None = Field(default=None, description=_STRUCTURE_ID_DESCRIPTION)
+    structure_id_b: str | None = Field(default=None, description=_STRUCTURE_ID_DESCRIPTION)
+
+    @model_validator(mode="after")
+    def _both_geometries_or_neither(self) -> "ComplexJobSpec":
+        """Refuse a half-specified pair rather than quietly embedding the other monomer."""
+        if (self.structure_id_a is None) != (self.structure_id_b is None):
+            raise ValueError(
+                "give structure_id_a and structure_id_b together or not at all: one chosen "
+                "geometry against one fresh embedding is not a comparison of the two conformers"
+            )
+        return self
 
 
 # What an xTB job may be asked to do, discriminated on `kind`. A closed, typed union

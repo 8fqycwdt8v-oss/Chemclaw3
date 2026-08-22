@@ -21,14 +21,13 @@ from typing import Any
 
 import pytest
 
-from chemclaw.core.ids import stable_hash
+from chemclaw.core.ids import canonical_text, stable_hash
 from chemclaw.science.bo.campaign_record import (
     _IDENTIFYING_EXCLUSIONS,
     _SPACE_FIELDS,
     Campaign,
     InMemoryCampaignStore,
     Suggestion,
-    _space_of,
     campaign_id_for,
     campaign_store,
     read_campaign_thread,
@@ -417,10 +416,29 @@ _PRE_CANONICALIZATION_IDS = {
     "mixed": "campaign-55e5f929fe83a9a5",
     "with-structures": "campaign-109f34eac28892ab",
 }
-_BASELINE_IDS = {
+# Generation 2: sorted, but with every name and label still hashed byte-exact.
+_PRE_FOLDING_IDS = {
     "continuous-only": "campaign-a97f5dd910a2cc79",
     "mixed": "campaign-acfb471df76f2863",
     "with-structures": "campaign-59d74ed90e64b3f2",
+}
+# Generation 3, and current: names, category labels and objective names folded, bounds rounded
+# (D-2026-08-21-a-geometry-is-an-address-not-a-payload).
+#
+# **The second deliberate move, and unlike the first it orphans nothing**:
+# `chemclaw.cli.rekey_campaigns` recomputes each row's id from the `problem` migration 031 already
+# stores, so a chemist resuming a campaign framed before this finds it. The first move had no such
+# path and its cost was a `BACKLOG.md` row about orphaned rows; this one has one because the same
+# review that asked for the fold asked what it would break.
+#
+# `continuous-only` is deliberately *unchanged*: its names are already lower-case and its bounds
+# already round, so folding is the identity on it. That is the bound on the re-partition — the fold
+# moves exactly the spaces that carry a capital letter or stray whitespace, which is exactly the set
+# that was forking.
+_BASELINE_IDS = {
+    "continuous-only": "campaign-a97f5dd910a2cc79",
+    "mixed": "campaign-d1c269048981a830",
+    "with-structures": "campaign-fca719589962491a",
 }
 
 
@@ -460,25 +478,51 @@ def test_a_single_objective_problem_keeps_the_id_it_had_before_the_migration() -
         assert campaign_id_for(problem) == _BASELINE_IDS[label], label
 
 
+def _pre_folding_space(parameter: Any, *, sort_categories: bool) -> dict[str, Any]:
+    """`_space_of` as it dumped one parameter *before* names and labels were folded.
+
+    Reconstructed rather than called, because the two historical claims below are statements about
+    algorithms that are gone, and the current `_space_of` folds. `sort_categories` selects between
+    generation 1 (the caller's order, the fork) and generation 2 (sorted).
+
+    Faithful for the three baseline shapes only: none carries a descriptor map supplied without
+    structures, so `_space_of`'s conditional `descriptors` key is not reproduced here.
+    """
+    dumped = parameter.model_dump(
+        mode="json", include={"kind", "name", "lower", "upper", "categories", "structures"}
+    )
+    if isinstance(parameter, CategoricalParameter):
+        dumped["categories"] = (
+            sorted(parameter.categories) if sort_categories else list(parameter.categories)
+        )
+    return dumped
+
+
 def _pre_canonicalization_id(problem: OptimizationProblem) -> str:
     """`campaign_id_for` as it hashed *before* parameter and category order were canonicalized.
 
     Rebuilt here rather than asserted about, because the claim this pins is a statement about the
     old algorithm and the old algorithm is gone: the id a shape carried then cannot be recovered by
-    calling the current function, which sorts whatever it is handed. The first assertion below
-    keeps the reconstruction honest — it must reproduce the three ids captured from the parent
+    calling the current function, which sorts and folds whatever it is handed. The first assertion
+    below keeps the reconstruction honest — it must reproduce the three ids captured from the parent
     commit, or this helper has drifted from the code it stands in for.
 
     Faithful for the three baseline shapes only: none carries a constraint or a second objective,
     so the two conditional keys of the identity payload are not reproduced here.
     """
-    space: list[dict[str, Any]] = []
-    for parameter in problem.parameters:
-        dumped = _space_of(parameter)
-        if isinstance(parameter, CategoricalParameter):
-            # The old payload kept the caller's category order, which is precisely the fork.
-            dumped["categories"] = list(parameter.categories)
-        space.append(dumped)  # and the caller's parameter order, unsorted
+    space = [
+        _pre_folding_space(parameter, sort_categories=False) for parameter in problem.parameters
+    ]  # and the caller's parameter order, unsorted
+    identity = {"space": space, "objective": problem.objective.model_dump(mode="json")}
+    return f"campaign-{stable_hash(identity)}"
+
+
+def _pre_folding_id(problem: OptimizationProblem) -> str:
+    """`campaign_id_for` as it hashed after the ordering fix and before the folding one."""
+    space = sorted(
+        (_pre_folding_space(parameter, sort_categories=True) for parameter in problem.parameters),
+        key=lambda dumped: str(dumped["name"]),
+    )
     identity = {"space": space, "objective": problem.objective.model_dump(mode="json")}
     return f"campaign-{stable_hash(identity)}"
 
@@ -511,10 +555,47 @@ def test_canonicalization_moved_each_legacy_id_onto_its_sorted_twin() -> None:
         )
         # As written, the shape used to hash here — the row now orphaned.
         assert _pre_canonicalization_id(problem) == _PRE_CANONICALIZATION_IDS[label], label
-        # And its sorted spelling already carried the id it has now: the move is a merge onto an
+        # And its sorted spelling already carried the id it took next: the move is a merge onto an
         # existing row, not a newly minted one. This is the whole claim.
-        assert _pre_canonicalization_id(sorted_spelling) == _BASELINE_IDS[label], label
-        assert campaign_id_for(problem) == _BASELINE_IDS[label], label
+        assert _pre_canonicalization_id(sorted_spelling) == _PRE_FOLDING_IDS[label], label
+
+
+def test_folding_moved_only_the_spaces_that_carry_a_capital_letter() -> None:
+    """The second deliberate id move, pinned in both directions and bounded.
+
+    Folding names and labels is what stops a re-typed decision space from minting a campaign with
+    no history (D-2026-08-21) — measured, `THF` against `thf` was two rows, silently, because
+    `record_suggestion` upserts. What is asserted here is the *extent*: a space already written in
+    lower case keeps its id exactly, so the re-partition is confined to the spaces that were
+    forking, and `chemclaw.cli.rekey_campaigns` moves the rest rather than leaving them orphaned.
+    """
+    for label, problem in _baseline_problems().items():
+        previous = _pre_folding_id(problem)
+        assert previous == _PRE_FOLDING_IDS[label], label
+        current = campaign_id_for(problem)
+        assert current == _BASELINE_IDS[label], label
+        already_folded = all(
+            name == canonical_text(name)
+            for parameter in problem.parameters
+            for name in [parameter.name, *getattr(parameter, "categories", [])]
+        ) and problem.objective.name == canonical_text(problem.objective.name)
+        assert (current == previous) is already_folded, label
+
+
+def test_a_recased_or_padded_spelling_is_the_same_campaign() -> None:
+    """The defect itself: the ways a model re-emits a space it just read must not fork it."""
+    problem = _baseline_problems()["mixed"]
+    reference = campaign_id_for(problem)
+    perturbed = problem.model_copy(
+        update={
+            "parameters": [
+                ContinuousParameter(name="Temperature", lower=20, upper=120.0000001),
+                CategoricalParameter(name="solvent", categories=["thf ", " Toluene"]),
+            ],
+            "objectives": [Objective(name="Yield", direction="maximize")],
+        }
+    )
+    assert campaign_id_for(perturbed) == reference
 
 
 def test_the_legacy_spelling_hashes_to_the_same_id_as_the_new_one() -> None:

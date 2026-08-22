@@ -518,3 +518,109 @@ it spends the whole retry budget proving the same thing.
 
 I also killed my own shell with `pkill -f` a second time, after writing the rule not to. Use
 `pgrep -f <pattern> | head -1` and kill the pid.
+
+## 2026-08-21 — a review is not finished until you have read the other side of the wire
+
+**The pattern.** I published a deep review of how information moves between agentic steps, and it
+was right about the shape of the problem and wrong or incomplete on five specifics — every one of
+which I found in twenty minutes of reading `Chemclaw3-mcp` and running one more measurement:
+
+- I named `predict_site_reactivity` as a place to accept a geometry. The calculation server has
+  `compute_properties_at` and **no `compute_fukui_at`**, so the argument would have been a promise
+  this repository cannot keep.
+- I named `QmJobSpec` first in the recommendation and used it as the worked example. Its geometry
+  contract lives in a Nextflow pipeline on a cluster, and Nextflow *silently ignores* a param no
+  process consumes — so the recommendation as written would have shipped a silent wrong answer.
+- I called `sample_conformers` the worst payload. `find_calculations` is **28x worse**
+  (~831,000 tokens against ~7,400) and I had not measured it.
+- I did not notice that `calculation_key` already returns `structure_id` and the client drops it —
+  the exact fact that made the whole fix cheap.
+- I did not notice that the server's `Structure.structure_id` is a `computed_field` and ours is a
+  plain property, so the authoritative address arrives on every payload and is discarded.
+
+**The rule.** *When a finding is about a boundary, read both sides before writing the
+recommendation.* Four of the five errors were the same error: reasoning about a contract from one
+end of it. The companion repos are two minutes away (`add_repo` + `git clone`), and this repository's
+CLAUDE.md says so in its own "Related repositories" section.
+
+**The second rule, which is older and I broke again.** *Measure the tool you did not think of.* I
+measured five durable job payloads carefully and never ran the one read-only tool that could return
+fifty of them. The prompt "which surfaces return a stored payload of unbounded size?" would have
+caught it; "how big is this result?" did not.
+
+## 2026-08-21 — a shape test proves the field exists, not that anything fills it
+
+**What happened.** `ConnectorJobResult.calc_refs` was added, the collector was written, the field
+was on the envelope, and a test asserted the envelope carried what it was given. All green. The
+first time I drove the actual chain end to end, a conformer job that had plainly reached a cached
+calculation reported **`calc_refs: []`** — the one line that records a key had failed to land,
+because a scripted string replacement matched a fragment `ruff format` had already reflowed.
+
+**Two rules, and the second is the one that generalises.**
+
+1. **A scripted edit that does not `assert` its target is an edit that may not have happened.**
+   Every `str.replace` in a batch script needs `assert old in s` before it, or a grep after it.
+   I asserted most of them and not that one, and that is exactly the one that silently vanished.
+   The cheap systematic check is a grep audit at the end: one line per intended change, printing
+   OK/MISS. It found nothing else — but it could only say so because it was run.
+
+2. **A test that constructs the model proves the shape; only a test that runs the code proves the
+   wiring.** `test_the_envelope_carries_the_calculations_a_note_would_cite` builds a
+   `ConnectorJobResult(calc_refs=[...])` and asserts it round-trips. It cannot fail on a missing
+   producer, and it did not. The replacement drives `run_xtb_calculation` and asserts the refs are
+   *non-empty* — a property of a run, so the test has to be a run. Whenever a change adds a field
+   that something else is supposed to fill, at least one test must exercise the filler.
+
+## 2026-08-21 — "targeted runs passed" is not "the suite passed"
+
+**What happened.** I reported the gate as lint-green, type-green, and the suite "still running,
+every touched area passed on targeted runs". The full run then found **three** failures I had
+caused or exposed, none of them in a file I had thought to run:
+
+- `test_calc_remote` asserted on `remote_key`'s return, whose *type* I had changed. I ran the calc
+  tools, jobs, compose and find tests — not the one named after the module I edited.
+- `test_layering` needed the new `cli -> science` edge declared. A structural test, invisible to
+  any per-feature run.
+- `test_suite_timeouts` failed only under `PYTEST_TIMEOUT_SCALE=4` — which is what the suite's own
+  timeout banner tells you to set. A pre-existing hermeticity bug that only bites the person
+  following the advice.
+
+**The rule.** *A change that alters a function's signature or adds an import edge has a blast
+radius no per-feature test selection covers.* Two cheap checks close most of it before the full
+run: `git diff --name-only | sed 's|src/chemclaw/|tests/test_|'`-style name mapping to find the
+test file named after each edited module, and running the structural suite —
+`test_layering`, `test_repo_map`, `test_schema_inventory`, `test_database_privileges`,
+`test_decision_log`, `test_prose_contract`, `test_docstring_paths` — on every change, because those
+fail on the *shape* of a diff rather than on its behaviour.
+
+**And the honest-reporting half.** Saying "green" before the run finishes is a claim about the
+future. The right sentence is the one I used — "still running, I will report exactly what it says" —
+and then actually reporting it, including the three that were mine.
+
+## 2026-08-21 — never `cd` inside a compound command that also runs git
+
+**What happened.** To check whether two failures were pre-existing, I made a worktree at the base
+commit:
+
+    git stash -u -q && git worktree add -q /tmp/basecheck e5f1f67 && cd /tmp/basecheck && ln -s …; git stash pop -q
+
+The shell's working directory **persists across the whole command**, so `git stash pop` ran from
+`/tmp/basecheck` and applied my three uncommitted test fixes to *that* worktree. `git worktree
+remove --force` then deleted them. The next commit carried only the lessons file while its message
+described three fixes that were no longer in the tree — and `git status` had told me so in one line
+I read past.
+
+**Three rules, in order of how much they would have saved.**
+
+1. **Use `git -C <path>` instead of `cd`.** Every git subcommand takes it, it cannot leak into the
+   next command, and it makes the target explicit at the call site.
+2. **Never stash across an operation that changes worktrees.** A stash is repository-global and
+   pops into whichever worktree asks. Committing to a scratch branch, or just reading the base
+   version with `git show <rev>:<path>`, has no such failure mode.
+3. **Read `git status --short` before writing the commit message, not after.** It printed exactly
+   one file where I expected four. The message I then wrote was a description of intent rather than
+   of the diff — which is the worst kind of commit message, because it reads as verified.
+
+The generalisation, and it is the same one as the silent `str.replace`: **an edit is not done
+because you made it — it is done because you checked it is there.** Both losses this session were
+invisible for the same reason, and both were one `grep` away.

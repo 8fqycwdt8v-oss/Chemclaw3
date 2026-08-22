@@ -74,8 +74,16 @@ BEGIN
     -- being granted on them. Withholding it is not a formality — it is what keeps "the sweep
     -- deletes blobs and links follow" the only way a link row can disappear.
     -- Insert only: written once and never revised. `bo_suggestions` is a campaign's history, and
-    -- the sequence *is* the history (031), so an UPDATE would rewrite it.
-    EXECUTE format('GRANT INSERT ON bo_suggestions TO %I', app_role);
+    -- the sequence *is* the history (031), so an UPDATE would rewrite it. A geometry is the same
+    -- shape one table over: `structures` is content-addressed, so the key *is* the content and a
+    -- row has nothing an update could correct (D-2026-08-21).
+    --
+    -- `chemclaw.cli.rekey_campaigns` does UPDATE `bo_suggestions` and DELETE from `bo_campaigns`,
+    -- and is deliberately absent from this matrix: it is an operator's one-off re-key run beside
+    -- `make db-migrate` under the owning principal, and granting a chat turn those verbs for the
+    -- life of the deployment is exactly what the withholding above is for.
+    -- `tests/test_database_privileges.py` names the module and this reason.
+    EXECUTE format('GRANT INSERT ON bo_suggestions, structures TO %I', app_role);
 
     -- Insert, delete, and now a narrow update. The row is still written once by its creator
     -- (`ON CONFLICT DO NOTHING`, first writer wins), and offboarding removes a departed person's

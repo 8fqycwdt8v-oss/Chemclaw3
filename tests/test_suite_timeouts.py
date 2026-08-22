@@ -157,5 +157,11 @@ def test_the_knob_does_not_wear_the_products_config_prefix(monkeypatch: pytest.M
     to tell someone how to run the suite on a loaded machine — `make prose-validate` failed with
     "names CHEMCLAW_TEST_TIMEOUT_SCALE, which is not a Settings field".
     """
+    # **The real knob is cleared first, and leaving it out made this test fail for exactly the
+    # person the suite tells to set it.** `PYTEST_TIMEOUT_SCALE` is what the timeout banner
+    # prescribes on a loaded machine ("re-run with PYTEST_TIMEOUT_SCALE=4"), and with it set in the
+    # environment `timeout_scale()` correctly returns 4.0 — so the assertion below failed on a
+    # reading that had nothing to do with the prefix it is about. Found by following that advice.
+    monkeypatch.delenv("PYTEST_TIMEOUT_SCALE", raising=False)
     monkeypatch.setenv("CHEMCLAW_TEST_TIMEOUT_SCALE", "8")
     assert timeout_scale() == 1.0, "the product prefix must not name a pytest knob"

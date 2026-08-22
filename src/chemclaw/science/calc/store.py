@@ -147,6 +147,13 @@ class StoredResult(BaseModel):
     # one key. `get` leaves it None because a cache hit does not care; `find` fills it, since "what
     # do we already have on this molecule" is unanswerable without knowing when each was computed.
     created_at: datetime | None = None
+    # The 3-D geometry this calculation ran *on* — never the one it produced — for the
+    # structure-keyed families. The server's
+    # own answer, carried on the row so that "have we already relaxed this conformer?" is a query
+    # rather than an unanswerable question (D-2026-08-21). `input_hash` is a digest over the whole
+    # argument payload and is not it: two calculations on one geometry in different solvents have
+    # different input hashes and the same `structure_id`. Empty for a molecule-keyed calculator.
+    structure_id: str = ""
 
 
 # Calculators whose `input_hash` is over a 3-D structure rather than a molecule: the xTB task
@@ -154,6 +161,17 @@ class StoredResult(BaseModel):
 # subject model. A molecule alone does not determine either hash, so `smiles` cannot address
 # them — and answering "nothing found" for a molecule that has an xTB result on file would be the
 # one failure this tool cannot afford. Matched as prefixes, since the types are `xtb.<task>`.
+#
+# **A `structure_id` filter does address them**, which is what makes the refusal below a redirection
+# rather than a dead end (D-2026-08-21). It used to be neither: the message named alternatives that
+# were all molecule-keyed, so a chemist asking whether a conformer had already been relaxed was
+# told to ask a different question instead of a workable one.
+#
+# `geometry.` is kept and names nothing this deployment writes: the cross-method geometry pointer
+# went with the optimizer in `D-2026-08-16-the-physics-leaves-the-cache-stays`. Rows written by an
+# earlier release are still on disk — `calculation_results` is never pruned — so removing the
+# prefix would make a molecule filter silently answer "nothing found" about them, which is exactly
+# the failure the tuple exists to prevent.
 STRUCTURE_KEYED_PREFIXES = ("xtb.", "geometry.")
 
 
@@ -180,6 +198,11 @@ class CalculationQuery(BaseModel):
     returning an empty list, because the empty list would read as "nothing has been computed" when
     the truth is "that family cannot be looked up this way".
 
+    A `structure_id` filter and a `smiles` filter compose rather than conflict — the first narrows
+    to one geometry, the second to one molecule, and a geometry belongs to a molecule — but only
+    the second is refused against a structure-keyed type, because only the second cannot address
+    one.
+
     There is deliberately no filter on the result's *value*. The payload is an opaque
     calculator-owned mapping (`ResultPayload`) — the store has been calculator-agnostic since
     D-011, and a `total_energy_hartree > x` predicate would put one calculator's schema inside the
@@ -188,6 +211,11 @@ class CalculationQuery(BaseModel):
 
     # Matched by hashing, never by scanning — see above.
     smiles: str | None = None
+    # The geometry a calculation was about, as `optimize_geometry` and `sample_conformers` report
+    # it. The filter the structure-keyed families needed and did not have (D-2026-08-21): a
+    # molecule cannot address them, and until this the refusal below pointed only at calculators
+    # that are not about geometries at all.
+    structure_id: str | None = None
     calc_type: str | None = None
     calc_version: str | None = None
     since: datetime | None = None
@@ -202,8 +230,9 @@ class CalculationQuery(BaseModel):
         if self.calc_type.startswith(STRUCTURE_KEYED_PREFIXES):
             raise ValueError(
                 f"{self.calc_type!r} is keyed by 3-D structure, not by molecule, so it cannot be "
-                "found by SMILES. Query it by type alone, or ask for a molecule-keyed "
-                "calculation (pka, solubility, descriptors, dft)."
+                "found by SMILES. Give a `structure_id` instead — the st_... address a geometry "
+                "calculation reports — or ask for a molecule-keyed calculation (pka, solubility, "
+                "descriptors, dft)."
             )
         return self
 
@@ -281,6 +310,8 @@ def _matches(stored: StoredResult, query: CalculationQuery) -> bool:
         return False
     if query.smiles is not None and key.input_hash != molecule_hash(query.smiles):
         return False
+    if query.structure_id is not None and stored.structure_id != query.structure_id:
+        return False
     if query.since is not None and (stored.created_at is None or stored.created_at < query.since):
         return False
     if query.until is not None and (stored.created_at is None or stored.created_at > query.until):
@@ -292,6 +323,8 @@ async def cached_compute(
     store: ResultStore,
     key: CalculationKey,
     compute: Callable[[], Awaitable[ResultPayload]],
+    *,
+    structure_id: str = "",
 ) -> tuple[ResultPayload, bool]:
     """Return a result for `key`, computing and persisting it only on a miss.
 
@@ -303,6 +336,10 @@ async def cached_compute(
         store: The backend to read from and write to.
         key: The versioned identity of this calculation.
         compute: Zero-arg coroutine that produces the result on a miss.
+        structure_id: The geometry this calculation is *about*, when it is about one, so the
+            stored row can be found by it (D-2026-08-21). Recorded, never used to look up: the
+            key is still the identity, and a second calculation on the same geometry is a
+            different row. Empty for a molecule-keyed calculator, which is not about a geometry.
 
     Returns:
         `(result, was_cached)` — `was_cached` is True on a store hit, so callers
@@ -319,5 +356,7 @@ async def cached_compute(
     started = time.perf_counter()
     result = await compute()
     elapsed = time.perf_counter() - started
-    await store.put(StoredResult(key=key, result=result, compute_seconds=elapsed))
+    await store.put(
+        StoredResult(key=key, result=result, compute_seconds=elapsed, structure_id=structure_id)
+    )
     return result, False

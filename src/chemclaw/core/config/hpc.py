@@ -85,6 +85,19 @@ class HpcSettings(BaseSettings):
     # behaviour — the result still reaches the session and the PR-gated note, just without the
     # durable cache entry or the note's `calc_refs`.
     qm_persist_to_calc_store: bool = True
+    # Whether the configured Nextflow pipeline reads a starting geometry, and therefore whether a
+    # DFT request may name a `structure_id` at all
+    # (D-2026-08-21-a-geometry-is-an-address-not-a-payload).
+    #
+    # **Off by default, and it refuses rather than ignores.** The chain this whole change exists
+    # for — search conformers cheaply, then run the expensive method on the one that matters —
+    # ends at DFT, and every other half of it ships enabled because it is verifiable here. This
+    # half is not: the pipeline's params contract (`params.smiles`) lives on a cluster, Nextflow
+    # ignores a param no process consumes, and a geometry silently ignored is the worst outcome
+    # available — a chemist told their DFT ran on the conformer they chose when it ran on a fresh
+    # embedding. So a `structure_id` on a QM request is refused at launch, naming this setting,
+    # until an operator states that their pipeline revision consumes `params.geometry_xyz`.
+    hpc_pipeline_accepts_geometry: bool = False
 
     @model_validator(mode="after")
     def _poll_faster_than_heartbeat(self) -> Self:

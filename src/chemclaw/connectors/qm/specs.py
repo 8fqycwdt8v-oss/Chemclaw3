@@ -38,6 +38,44 @@ class QmJobSpec(BaseModel):
     molecule_smiles: str = Field(min_length=1, description="The molecule as a SMILES string.")
     method: str = Field(min_length=1, description='QM method / level of theory, e.g. "B3LYP".')
     basis_set: str = Field(min_length=1, description='Basis set, e.g. "def2-SVP".')
+    structure_id: str | None = Field(
+        default=None,
+        description=(
+            "A specific 3D geometry to run the calculation on, as the `st_...` address reported "
+            "by sample_conformers, optimize_geometry or scan_coordinate. This is how a cheap "
+            "conformer search is carried into an expensive method: without it the pipeline starts "
+            "from a fresh embedding, which discards whichever conformer the search settled on. "
+            "Only available where the deployment's pipeline consumes a starting geometry; "
+            "elsewhere the request is refused rather than silently run on the embedding."
+        ),
+    )
+
+
+def require_geometry_supported(spec: QmJobSpec) -> None:
+    """Refuse a DFT request that names a geometry the configured pipeline would ignore.
+
+    **The refusal is the feature.** Nextflow silently drops a `params` entry no process consumes,
+    so a deployment whose pipeline revision predates `params.geometry_xyz` would run the
+    calculation on a fresh embedding and report it as the conformer the chemist chose — a
+    confidently wrong answer with nothing anywhere saying so, which is the failure mode this
+    system can least afford (`CLAUDE.md`). Every other half of the geometry handle ships enabled
+    because it is verifiable inside this repository; this half's contract lives on a cluster, so
+    it ships behind a statement an operator makes.
+
+    Declared as the `compute_dft_energy` job's `precondition`, which is the one replay-safe place
+    a domain guard can run (`JobSpec.precondition`) and the same seam the solvent check uses: it
+    runs at launch, in the caller's turn, so the message reaches the chemist while they can still
+    act on it rather than thirty seconds into a durable run.
+    """
+    if spec.structure_id and not settings.hpc_pipeline_accepts_geometry:
+        raise ValueError(
+            f"this deployment's QM pipeline does not take a starting geometry, so "
+            f"{spec.structure_id!r} cannot be honoured and the calculation would silently run on "
+            "a fresh embedding instead. Run compute_dft_energy without structure_id and say that "
+            "the geometry is the pipeline's own, or ask an operator to enable "
+            "CHEMCLAW_HPC_PIPELINE_ACCEPTS_GEOMETRY once the pipeline revision consumes "
+            "params.geometry_xyz."
+        )
 
 
 class QMJobInput(QmJobSpec):
@@ -55,10 +93,23 @@ class QMJobInput(QmJobSpec):
     """
 
     requested_by: str = settings.service_actor_id
+    # The resolved geometry, as the XYZ block the pipeline reads. Filled by `prepare_input` from
+    # `structure_id` and, like `requested_by`, deliberately absent from `QmJobSpec`: it is not
+    # something the model may author. A model that could send coordinates could send coordinates
+    # that are not the structure its id names, and the whole point of an address is that the two
+    # cannot disagree.
+    geometry_xyz: str = ""
+    # The electronic state that geometry is in. An XYZ block carries atoms and coordinates and
+    # says nothing about charge or spin, and a DFT run needs both — so they travel beside it,
+    # read off the resolved `Structure` rather than restated by a caller who could get them wrong.
+    # The defaults are inert: nothing is sent unless `geometry_xyz` is set, and the SMILES-only
+    # path has always implied exactly this state.
+    charge: int = 0
+    multiplicity: int = 1
 
 
 def qm_job_key(spec: QmJobSpec) -> str:
-    """Stable identity of a QM calculation: molecule + method + basis only.
+    """Stable identity of a QM calculation: molecule, method, basis, and any geometry it named.
 
     The SMILES is canonicalized first, so two spellings of the same molecule (`"CCO"` / `"OCC"`)
     share one cache entry and one note rather than running the calculation twice (D-011). Raises
@@ -87,6 +138,12 @@ def qm_job_key(spec: QmJobSpec) -> str:
         "method": spec.method,
         "basis_set": spec.basis_set,
     }
+    # A named geometry is part of the identity, added only when there is one so every key derived
+    # before D-2026-08-21 stays byte-identical — the same additive rule the two pipeline fields
+    # below follow, and for the same reason: a molecule's default embedding and one of its
+    # conformers are different calculations, and this digest is also the result note's id.
+    if spec.structure_id:
+        payload["structure_id"] = spec.structure_id
     if settings.hpc_pipeline_name:
         payload["pipeline_name"] = settings.hpc_pipeline_name
     if settings.hpc_pipeline_version:
