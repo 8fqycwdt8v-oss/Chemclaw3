@@ -467,6 +467,21 @@ repository now has a **measured** better answer to a problem this repository sol
 not revisited. That is a different kind of debt and it needs its own section, because a queue that
 only holds defects can only ever restore the system to what it already intended to be.
 
+- [ ] **One merge added eighteen tools and 32% to what every turn costs** — [M], and it is the first
+      thing the two new gates caught. The GFN multi-step work took the `default` profile's static
+      prefix from **18,805 to 24,838 tokens** — measured by `tests/test_context_floor.py`, which
+      landed in the same window and so reported a cost that had already been paid. Its ceiling was
+      raised to 27,500 deliberately rather than the merge blocked, because blocking would have
+      punished an unrelated branch; the figure and the cause are in the constant's comment.
+
+      Two things are owed. **Eighteen probes**, because those tools are in
+      `tests/test_probe_coverage.py::GRANDFATHERED` — a list that claims nothing, only records what
+      predated the gate, and that the suite forbids growing. And a look at whether the eighteen need
+      to be eighteen *advertised* names: `run_bond_strength_survey` and `survey_bond_strengths` sit
+      beside each other on one surface, and `enumerate_*`/`run_*` reads like a primitive set that a
+      profile could narrow rather than every turn carrying all of it. **Bringing the ceiling back
+      down is the commit that proves that happened.**
+
 - [ ] **A tool schema is 38% developer rationale, and it ships on every turn** — [M], and it is
       what `§ 5`'s deferral row turned into once measured. `science/bo/problem.py`'s nested models
       carry design arguments in their class docstrings — *"One `objectives` field rather than a lead

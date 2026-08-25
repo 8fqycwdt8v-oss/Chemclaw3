@@ -11,6 +11,13 @@ added, and `task`, the subagent seam three merged ADRs argue about. Nobody remov
 the corpus was written against the capability the system had when the corpus was written, and
 nothing re-derived it afterwards.
 
+**Two lists, and they mean different things.** `EXEMPT` is a claim that another suite covers the
+tool as a *conversation* rather than as a turn. `GRANDFATHERED` claims nothing — it records tools
+that were already on the surface when this gate arrived, so the gate could be introduced without
+blocking unrelated work. Eighteen of those came from a single merge that added eighteen tools and
+32% to the static context floor, which is exactly the event this file exists to make visible and
+which landed while the file was still on a branch.
+
 **The exemption list is the design decision, and an exemption must name what covers it instead.**
 Some tools genuinely should not appear in an `expects_tools` line — `write_todos` is the plan
 surface and is driven as a *conversation* by `data/evals/probes/m12/plan_gate.yaml`, which is the
@@ -73,9 +80,62 @@ def _profiles_loaded() -> None:
     load_profiles()
 
 
+#: Tools that predate this gate and have no probe yet — debt, not coverage.
+#:
+#: **Distinct from `EXEMPT`, and the distinction is the whole point.** An exemption is a claim that
+#: another suite covers the tool as a conversation. This list claims nothing: it is a set of tools
+#: that were on the surface before this file existed, recorded so the gate can be introduced without
+#: either blocking unrelated work or quietly pretending the corpus is complete.
+#:
+#: Eighteen of them arrived in one merge — the GFN multi-step work — which is precisely the event
+#: this gate was built to make visible, and it landed while the gate was still on a branch. Draining
+#: this list is a `BACKLOG.md` row. **The set may only shrink**, which the test below enforces, so a
+#: future merge cannot use it as a place to put a nineteenth.
+GRANDFATHERED: frozenset[str] = frozenset(
+    {
+        "compute_ensemble_property",
+        "describe_topology",
+        "enumerate_bond_cleavages",
+        "enumerate_degradants",
+        "enumerate_protonation_states",
+        "enumerate_stereoisomers",
+        "enumerate_tautomers",
+        "rank_species",
+        "refine_ensemble",
+        "run_bond_strength_survey",
+        "run_degradant_triage",
+        "run_ensemble_free_energy",
+        "run_microspecies_profile",
+        "run_regioselectivity_in_conformer",
+        "run_stereoisomer_ranking",
+        "run_tautomer_resolution",
+        "survey_bond_strengths",
+        "transform_structure",
+    }
+)
+
+
+def test_the_grandfathered_set_only_shrinks() -> None:
+    """A tool that gains a probe leaves this list; nothing may be added to it.
+
+    Without this, `GRANDFATHERED` is just `EXEMPT` without the honesty requirement — the next merge
+    to add a tool would drop it in here and the gate would measure nothing. The count is asserted
+    rather than the membership so that *removing* one needs no edit here beyond the deletion.
+    """
+    assert len(GRANDFATHERED) <= 18, (
+        f"GRANDFATHERED has grown to {len(GRANDFATHERED)}. It is a record of tools that predate "
+        "this gate, not a place to put a new one — write a probe instead."
+    )
+    covered = sorted(GRANDFATHERED & _expected_tools())
+    assert not covered, (
+        f"{covered} now have probes and are no longer grandfathered. Delete them from the set — a "
+        "debt list that outlives the debt reads as live state."
+    )
+
+
 def test_every_agent_callable_tool_is_probed_or_exempt() -> None:
     """The first direction: a tool the corpus has never heard of is a tool nothing measures."""
-    unprobed = sorted(available_tool_names() - _expected_tools() - set(EXEMPT))
+    unprobed = sorted(available_tool_names() - _expected_tools() - set(EXEMPT) - GRANDFATHERED)
     assert not unprobed, (
         f"{len(unprobed)} agent-callable tool(s) appear in no probe's `expects_tools`:\n  "
         + "\n  ".join(unprobed)
