@@ -8,6 +8,7 @@ knowledge dir and an in-memory reaction store (no database, no git).
 import asyncio
 from collections import Counter
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -334,4 +335,44 @@ def test_the_character_budget_does_not_starve_a_source(
     assert surviving["sharedrive"] > 0 and surviving["graph"] > 0, (
         f"a source was starved by the character budget: {dict(surviving)} — "
         "which is D-2026-08-01 reintroduced in a new currency"
+    )
+
+
+def test_the_budget_charges_the_whole_chunk_and_not_only_its_content(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`content` is only part of what reaches the model, and charging it alone under-counts badly.
+
+    Measured on one realistic chunk carrying conflicts and provenance: 300 characters of content
+    against 569 serialized — a 47% under-count, so a 60,000-character budget really spent about
+    114,000. The assertion is on the *cut moving* when only non-content fields grow, because that
+    is the property; a fixed expected length would pin the serializer instead.
+    """
+    for i in range(12):
+        (tmp_path / f"n{i}.md").write_text(
+            f"---\nid: reaction-{i}\ntype: reaction\n---\nyield noted.\n", encoding="utf-8"
+        )
+    monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
+    monkeypatch.setattr(settings, "gather_evidence_max_chunks", 12)
+    monkeypatch.setattr(settings, "gather_evidence_max_chars", 1_500)
+
+    lean = asyncio.run(gather_evidence("yield"))
+
+    # Same corpus, same content, but every chunk now carries a long provenance label. Nothing about
+    # `content` changed, so a content-only budget would keep exactly as many chunks as before.
+    real_chunks = research_tools._interleave_dedup
+
+    def _padded(ranked_lists: Any) -> Any:
+        return [
+            chunk.model_copy(update={"source": "warehouse:" + "x" * 400})
+            for chunk in real_chunks(ranked_lists)
+        ]
+
+    monkeypatch.setattr(research_tools, "_interleave_dedup", _padded)
+    padded = asyncio.run(gather_evidence("yield"))
+
+    assert lean.chunks, "sanity: the corpus answers at all"
+    assert len(padded.chunks) < len(lean.chunks), (
+        "growing a non-content field did not cost the budget anything, so the budget is measuring "
+        f"content alone: {len(lean.chunks)} chunks before, {len(padded.chunks)} after"
     )
