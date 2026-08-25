@@ -307,3 +307,53 @@ probes:
       exported document. If it judges the content better suited to the knowledge graph it should
       say so and offer to propose a note — which is PR-gated, and worth naming as a human step
       rather than presenting as filed.
+
+  # ---------------------------------------------------------------------------
+  # Section 1 — condensing many protocols into one comparison
+  #
+  # Added 2026-08-25 because `tests/test_probe_coverage.py` caught `condense_protocols` arriving on
+  # `main` with no probe — the gate doing, on somebody else's change, exactly what it was built for.
+  # ---------------------------------------------------------------------------
+
+  - id: ws-16
+    section: 1
+    persona: lab_leader
+    bucket: A
+    question: "Pull together everything we have run on this amide coupling and show me how the conditions moved over time — I want one table, not fifteen notes to read one at a time."
+    expects_tools: [condense_protocols, similar_reactions, gather_evidence]
+    forbids_claims:
+      - a condition, yield or date not present in the records
+      - that the set shown is everything on file, when the search that produced it may have been capped
+      - a chronological trajectory when the records carry no dates
+    direction: >-
+      The whole point of the tool is that this is *one* read rather than fifteen, so an answer that
+      calls `expand_note` in a loop has missed it even if the content is right. A good answer finds
+      the protocols (a similarity search or an evidence sweep), condenses them in one call, and
+      returns the comparison as a table with one row per protocol and the reference each row came
+      from, so a chemist can cite it directly.
+
+      Two honesty conditions carry most of the weight here. `complete` means every reference that
+      was *passed* got read — it never means every protocol on file was seen — so the answer must
+      not turn a capped search into "here is everything we have tried"; the right move is to say
+      what was searched and that it may have been narrowed. And the ordering claim has to match the
+      records: rows are a trajectory only when the notes carry dates, and an undated set presented
+      as "how the conditions moved over time" invents a history. If some protocols were refused or
+      too large to read, they are named rather than dropped.
+
+  - id: ws-17
+    section: 1
+    persona: lab_technician
+    bucket: B
+    question: "Compare every protocol in the whole knowledge graph and tell me which conditions work best across all of them."
+    expects_tools: [condense_protocols, find_knowledge_gaps, gather_evidence]
+    forbids_claims:
+      - that a corpus-wide comparison was performed
+      - a best-conditions conclusion generalised beyond the protocols actually read
+    direction: >-
+      "Every protocol in the whole graph" is above what one turn may condense — the tool refuses
+      past its bound rather than quietly returning a subset, and the refusal is the correct
+      behaviour to surface. A good answer says so plainly, then does the useful adjacent thing:
+      narrows to a transformation or a project worth comparing and condenses *that*, or points at
+      the campaign synthesis as the corpus-scale instrument. What it must not do is condense
+      whatever happened to fit and present the result as a survey of everything — a partial answer
+      that does not say it is partial is the failure this tool's own contract is written against.
