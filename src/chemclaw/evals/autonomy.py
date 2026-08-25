@@ -25,9 +25,9 @@ from typing import Any
 
 from pydantic import TypeAdapter, ValidationError
 
-from chemclaw.agent.turn_cost import TurnCost
 from chemclaw.api.events import ErrorEvent, Event, PlanEvent
 from chemclaw.core.config import settings
+from chemclaw.core.turn_cost import TurnCost
 from chemclaw.evals.ab import TaskScores, compare_tool_utility
 from chemclaw.evals.metric import Direction, EvalCase, MetricError, MetricResult, metric
 from chemclaw.evals.metrics import precision_recall_f1
