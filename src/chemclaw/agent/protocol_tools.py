@@ -20,6 +20,7 @@ from, which is what lets a future source reach it without touching it.
 
 import asyncio
 import logging
+from typing import Any
 
 from chemclaw.agent.condense import Condensation, Protocol
 from chemclaw.agent.condense import condense_protocols as _condense
@@ -75,7 +76,27 @@ async def _from_record(ref: str) -> Protocol | None:
     )
 
 
-async def _from_share(ref: str) -> Protocol | None:
+def _share_readers() -> dict[str, Any]:
+    """The enabled sources that can hand back a whole document, by name.
+
+    **Built once per call rather than once per reference**, which is the whole reason this is a
+    function returning a map instead of a loop inside `_from_share`. `active_retrieve_sources`
+    resolves and constructs every enabled retrieve half, and its own docstring flags that as a
+    production concern on this path; measured before the hoist, twelve references rebuilt the
+    registry twelve times, and this tool accepts up to `protocol_digest_max_protocols` of them.
+
+    A source with no `read_document` is not a share and simply does not appear.
+    """
+    readers: dict[str, Any] = {}
+    for retriever in active_retrieve_sources():
+        reader = getattr(retriever, "read_document", None)
+        name = getattr(retriever, "name", "")
+        if reader is not None and name:
+            readers[name] = reader
+    return readers
+
+
+async def _from_share(ref: str, readers: dict[str, Any]) -> Protocol | None:
     """Resolve a `source:doc_id` citation to the whole document behind it, if any share holds it.
 
     The address is the one `ShareDocumentRetriever` has always emitted, minus its `#ordinal`. The
@@ -83,22 +104,18 @@ async def _from_share(ref: str) -> Protocol | None:
     cannot read a document out of it here either.
     """
     source, _, doc_id = ref.partition(":")
-    if not doc_id:
+    reader = readers.get(source)
+    if not doc_id or reader is None:
         return None
-    for retriever in active_retrieve_sources():
-        reader = getattr(retriever, "read_document", None)
-        if reader is None or getattr(retriever, "name", "") != source:
-            continue
-        document = await reader(doc_id)
-        if document is None:
-            return None
-        return Protocol(
-            ref=ref,
-            source=document.path,
-            title=document.path,
-            text=document.text,
-        )
-    return None
+    document = await reader(doc_id)
+    if document is None:
+        return None
+    return Protocol(
+        ref=ref,
+        source=document.path,
+        title=document.path,
+        text=document.text,
+    )
 
 
 @tool
@@ -145,6 +162,7 @@ async def condense_protocols(protocol_refs: list[str]) -> Condensation:
         )
 
     graph = await asyncio.to_thread(build_graph, settings.knowledge_path)
+    readers = _share_readers()
     protocols: list[Protocol] = []
     missing: list[str] = []
     for ref in refs:
@@ -163,7 +181,7 @@ async def condense_protocols(protocol_refs: list[str]) -> Condensation:
                 )
             )
             continue
-        resolved = await _from_record(ref) or await _from_share(ref)
+        resolved = await _from_record(ref) or await _from_share(ref, readers)
         if resolved is not None:
             protocols.append(resolved)
         else:

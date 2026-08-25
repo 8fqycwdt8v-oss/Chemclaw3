@@ -90,6 +90,10 @@ class EvidenceSweep(BaseModel):
     chunks: list[EvidenceChunk] = Field(default_factory=list)
     # `None` when everything found was returned. Otherwise which bound cut the list — the two are
     # separately actionable: a `count` cut narrows with a filter, a `chars` cut narrows the sources.
+    #
+    # **The bound that bit first**, when both would have. That is the actionable one, but it means a
+    # reader who narrows on `chars` may then meet the count cap; `total_before_cap` is what says how
+    # much is still unseen either way.
     truncated_by: Literal["count", "chars"] | None = None
     # How many chunks survived merging before either cap, so "40 of 300" is expressible.
     total_before_cap: int = Field(default=0, ge=0)

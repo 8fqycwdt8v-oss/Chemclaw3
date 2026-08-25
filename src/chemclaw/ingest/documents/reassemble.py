@@ -29,7 +29,7 @@ removed exactly once.
 """
 
 
-def join_chunks(pieces: list[str], overlap_chars: int) -> str:
+def join_chunks(pieces: list[str], overlap_chars: int, max_chars: int | None = None) -> str:
     """Concatenate chunks in document order, removing the overlap each repeats from the last.
 
     **Not arithmetic on `overlap_chars`, and that is the whole subtlety.** `chunk._split_block`
@@ -47,6 +47,9 @@ def join_chunks(pieces: list[str], overlap_chars: int) -> str:
     Args:
         pieces: The chunks' `content`, in ascending `ordinal` order.
         overlap_chars: The cutting's `chunk_overlap_chars` — the largest repeat that can be real.
+        max_chars: Stop assembling once this much text exists. A backstop rather than the primary
+            bound — the read is bounded at the fetch (`DocumentIndex.stored_document`), and this
+            keeps the string bounded too for any caller that hands over more pieces than it should.
 
     Returns:
         The document's indexed text. Empty for no pieces.
@@ -55,6 +58,8 @@ def join_chunks(pieces: list[str], overlap_chars: int) -> str:
         return ""
     assembled = pieces[0]
     for piece in pieces[1:]:
+        if max_chars is not None and len(assembled) >= max_chars:
+            break
         assembled += piece[_repeat_length(assembled, piece, overlap_chars) :]
     return assembled
 
