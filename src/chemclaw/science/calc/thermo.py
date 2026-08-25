@@ -34,6 +34,7 @@ benzene's sigma 12.
 import base64
 import io
 import math
+from collections.abc import Sequence
 
 import numpy as np
 from pydantic import BaseModel, Field
@@ -50,6 +51,7 @@ from chemclaw.science.calc.models import (
     Structure,
     ThermochemistryResult,
     VibrationalMode,
+    WeightedValue,
 )
 
 # Hartree to kcal/mol. Every energy the server returns is in Hartree; every difference a chemist
@@ -427,6 +429,81 @@ def displaced_along(structure: Structure, direction: list[list[float]]) -> Struc
     )
 
 
+def boltzmann_populations(
+    relative_kcal: Sequence[float], degeneracies: Sequence[int], temperature_k: float
+) -> list[float]:
+    """Normalized populations from relative energies in kcal/mol, weighted by degeneracy.
+
+    Extracted from `ensemble_from_members`, where it was inline, once a third caller appeared: a
+    free-energy-weighted ensemble and a Boltzmann-averaged property both need exactly this and must
+    agree with it to the last digit — an ensemble whose populations sum to one under one convention,
+    averaged over by a property using another, is two answers to one question.
+
+    **Degeneracy multiplies the weight, and it is not bookkeeping.** Each conformer stands for `g`
+    rotamers that are equally populated, so it carries `g` times the statistical weight. Measured on
+    n-butane, ignoring it puts the anti conformer at 73% against CREST's own reported 59.1%; with
+    it, 59.2%.
+    """
+    rt = _GAS_CONSTANT_CAL * temperature_k / 1000.0  # kcal/mol
+    smallest = min(relative_kcal)
+    weights = [
+        degeneracy * math.exp(-(value - smallest) / rt)
+        for value, degeneracy in zip(relative_kcal, degeneracies, strict=True)
+    ]
+    total = sum(weights)
+    return [weight / total for weight in weights]
+
+
+def ensemble_entropy(populations: Sequence[float], degeneracies: Sequence[int]) -> float:
+    """Conformational entropy in cal/(mol K) from a population distribution.
+
+    `S = -R sum p ln(p/g)`: each conformer stands for `g` equally populated rotamers, so the sum
+    runs over *states* rather than over conformers. Reproduces CREST's own reported ensemble entropy
+    for n-butane to three figures, which is the check that the two count the same thing.
+    """
+    return -_GAS_CONSTANT_CAL * sum(
+        population * math.log(population / degeneracy)
+        for population, degeneracy in zip(populations, degeneracies, strict=True)
+        if population > 0
+    )
+
+
+def free_energy_populations(
+    gibbs_hartree: Sequence[float], degeneracies: Sequence[int], temperature_k: float
+) -> list[float]:
+    """Populations from Gibbs free energies rather than from electronic energies.
+
+    **A different treatment, not a better one, and the result must say which ran.** Weighting by G
+    carries the zero-point, thermal and entropic differences between conformers, which is the right
+    distribution when those differ — a conformer with a low electronic energy and a stiff, ordered
+    geometry is over-weighted by E alone. It costs one Hessian per member, which is why
+    `ensemble_from_members` weights by E and this stands beside it rather than replacing it; D-101
+    states the trade as "one Hessian per member, half an hour each at 76 atoms".
+
+    Same convention as `boltzmann_populations` by construction — it *is* that function over a
+    different energy — so the two cannot drift into disagreeing about degeneracy or about the
+    reference state.
+    """
+    lowest = min(gibbs_hartree)
+    relative = [(value - lowest) * HARTREE_TO_KCAL for value in gibbs_hartree]
+    return boltzmann_populations(relative, degeneracies, temperature_k)
+
+
+def weighted_average(values: Sequence[float], populations: Sequence[float]) -> WeightedValue:
+    """One scalar property, averaged over an ensemble at its populations.
+
+    Takes plain sequences rather than a result model because a dipole, a HOMO-LUMO gap and one
+    atom's Fukui index are the same arithmetic: a per-atom property is this function called once per
+    atom, and giving each its own function is how three of them come to disagree.
+    """
+    if not values:
+        raise ValueError("nothing to average")
+    mean = sum(value * population for value, population in zip(values, populations, strict=True))
+    return WeightedValue(
+        mean=mean, minimum=min(values), maximum=max(values), spread=max(values) - min(values)
+    )
+
+
 def ensemble_from_members(
     payload: EnsemblePayload,
     *,
@@ -456,21 +533,8 @@ def ensemble_from_members(
     lowest = min(member.energy_hartree for member in members)
     relative = [(member.energy_hartree - lowest) * HARTREE_TO_KCAL for member in members]
     degeneracies = [member.degeneracy for member in members]
-    rt = _GAS_CONSTANT_CAL * temperature_k / 1000.0  # kcal/mol
-    weights = [
-        degeneracy * math.exp(-value / rt)
-        for value, degeneracy in zip(relative, degeneracies, strict=True)
-    ]
-    total = sum(weights)
-    populations = [weight / total for weight in weights]
-    # S = -R * sum p ln(p/g): each conformer stands for `g` equally populated rotamers, so the sum
-    # runs over states rather than over conformers. Reproduces CREST's own reported ensemble entropy
-    # for n-butane to three figures, which is the check that the two count the same thing.
-    entropy = -_GAS_CONSTANT_CAL * sum(
-        population * math.log(population / degeneracy)
-        for population, degeneracy in zip(populations, degeneracies, strict=True)
-        if population > 0
-    )
+    populations = boltzmann_populations(relative, degeneracies, temperature_k)
+    entropy = ensemble_entropy(populations, degeneracies)
     conformers = [
         Conformer(
             relative_kcal=round(energy, 3),

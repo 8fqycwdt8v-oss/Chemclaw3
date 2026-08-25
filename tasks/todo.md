@@ -46,19 +46,19 @@ Boltzmann average of a property.
 
 ## Phase 0 — Make CREST run (`Chemclaw3-mcp`)
 
-- [ ] Add a `crest` release-tarball layer to `servers/calc/Containerfile`; `crest_cli` already reads
+- [x] Add a `crest` release-tarball layer to `servers/calc/Containerfile`; `crest_cli` already reads
       `CHEMCLAW_CREST_BINARY`. Everything else (`crest_cli.py`, `crest_search.py`, the four
       `_SEARCH_FLAGS` modes) is written, keyed and tested-for-refusal.
 - [ ] Record the GPL-3.0 distribution position in the ADR — `crest` is invoked as a separate process
       over files and never linked, but shipping it *in an image* is the product owner's decision.
       Both repos already say so; this plan asks for the decision rather than assuming it.
-- [ ] **Do not add `xtb` in the same step.** It buys the measured 7-9x ANCopt speedup (76 atoms:
+- [x] **Do not add `xtb` in the same step.** It buys the measured 7-9x ANCopt speedup (76 atoms:
       266 s → 38 s) and GFN-FF, but `auto` then moves **every** `calc_version`, so two pods compute
       different keys for one molecule and every existing row is orphaned. Adding `crest` orphans
       nothing, because `CrestSpec.calc_version()` answers `crest-absent` today and no CREST row can
       exist. If `xtb` is taken later, pin `CHEMCLAW_XTB_ENGINE` per deployment rather than leaving
       `auto`.
-- [ ] **Measure:** wall-clock and `total_found` for n-butane and one 33-atom molecule at each
+- [x] **Measure:** wall-clock and `total_found` for n-butane and one 33-atom molecule at each
       `effort`. This is the cost table everything else quotes.
 
 ## Phase A — A molecule is editable before it is computable
@@ -70,36 +70,36 @@ edit.
 
 `Chemclaw3-mcp`:
 
-- [ ] New `servers/chem/src/chemclaw_mcp_chem/engine/enumerate.py` — `TautomerEnumerator`,
+- [x] New `servers/chem/src/chemclaw_mcp_chem/engine/enumerate.py` — `TautomerEnumerator`,
       `EnumerateStereoisomers`, microstate construction, `Chem.FragmentOnBonds` for homolysis,
       `Uncharger` + `LargestFragmentChooser`, `RWMol` H add/remove at an index,
       `rdChemReactions.ReactionFromSmarts` for named degradation transforms.
-- [ ] **Re-implement, do not import**, the ~40 lines of `servers/calc/.../engine/pka.py`
+- [x] **Re-implement, do not import**, the ~40 lines of `servers/calc/.../engine/pka.py`
       (`_acidic_protons`, `_basic_nitrogens`, `_protonated_forms`) — cross-server imports are not a
       thing that repo does.
-- [ ] 7 new `@server.tool()`s in `servers/chem/.../tools.py` (it has 4 today).
-- [ ] `servers/chem/connector.yaml` — all 7 in `tools:` **and `read_only:`**. They genuinely are: no
+- [x] 7 new `@server.tool()`s in `servers/chem/.../tools.py` (it has 4 today).
+- [x] `servers/chem/connector.yaml` — all 7 in `tools:` **and `read_only:`**. They genuinely are: no
       SCF, no store. So they sit *outside* the plan gate — the agent may enumerate freely and only
       the compute is gated.
-- [ ] `servers/calc/.../tools.py` — `compute_fukui_at(structure, solvent)` over
+- [x] `servers/calc/.../tools.py` — `compute_fukui_at(structure, solvent)` over
       `engine/xtb_props.py::compute_fukui`, which already takes a `Structure`.
-- [ ] `servers/calc/.../engine/identity.py` — key it `xtb.fukui` with **empty params**. Load-bearing:
+- [x] `servers/calc/.../engine/identity.py` — key it `xtb.fukui` with **empty params**. Load-bearing:
       `connectors/calc/server/tools.py::predict_site_reactivity` deliberately sends neither `mode`
       nor `top_n`, because the server keys all three modes to one row and `ranked_for` re-ranks
       locally. Keying on the mode would serve the wrong ranking on a hit, silently.
 
 `Chemclaw3`:
 
-- [ ] `src/chemclaw/connectors/chem/connector.yaml` — mirror the 7 names (declaration only; four
+- [x] `src/chemclaw/connectors/chem/connector.yaml` — mirror the 7 names (declaration only; four
       validators read it). Note the manifest exists in **both** repos and first-directory-on-
       `CHEMCLAW_CONNECTORS_DIR` wins, so both must gain the names or the live lane serves the older
       surface.
-- [ ] `connectors/calc/server/tools.py::predict_site_reactivity` — add `structure_id: str = ""`
+- [x] `connectors/calc/server/tools.py::predict_site_reactivity` — add `structure_id: str = ""`
       routed through `_starting_geometry`. **Keep the SMILES route byte-identical** — same two-route
       shape and same argued reason as `compute_electronic_properties` (lines 830-852); re-routing it
       would orphan every `xtb.fukui` row.
-- [ ] `tests/calc_server_fake.py` — `"compute_fukui_at": ("xtb.fukui", ())` plus its answer.
-- [ ] **Delete** the "Fukui indices at a chosen geometry" row from `docs/planning/DEFERRED.md:23`
+- [x] `tests/calc_server_fake.py` — `"compute_fukui_at": ("xtb.fukui", ())` plus its answer.
+- [x] **Delete** the "Fukui indices at a chosen geometry" row from `docs/planning/DEFERRED.md:23`
       in the commit that closes it (D-154 rule).
 - [ ] **Measure:** how often the top-ranked Fukui site changes between a force-field embedding and a
       CREST-chosen conformer, over N molecules. That swap rate is the whole justification for the
@@ -109,23 +109,23 @@ edit.
 
 `science/calc/thermo.py` — four pure additions:
 
-- [ ] `boltzmann_weights(...)` — **extracted from inside `ensemble_from_members`**, where it is
+- [x] `boltzmann_weights(...)` — **extracted from inside `ensemble_from_members`**, where it is
       inline today. Third caller, so the extraction is earned rather than speculative.
-- [ ] `populations_from_free_energies(...)` — the same weighting over ΔG. Closes the D-101 gap
+- [x] `populations_from_free_energies(...)` — the same weighting over ΔG. Closes the D-101 gap
       ("does *not* Boltzmann-average free energies over every conformer").
-- [ ] `weighted_average(values, populations)` — scalar and per-atom, so one function serves a dipole
+- [x] `weighted_average(values, populations)` — scalar and per-atom, so one function serves a dipole
       and a Fukui vector. Returns the mean **and the spread**: a property whose ensemble spread
       exceeds the inter-molecular difference it is arguing is not a number to report.
-- [ ] `ensemble_spread(ensemble)` — Shannon flatness and top-decile ΔE spread, for polymorph risk.
+- [x] `ensemble_spread(ensemble)` — Shannon flatness and top-decile ΔE spread, for polymorph risk.
 
-- [ ] `science/calc/models.py` — `RefinedEnsemble`, `EnsembleProperty`, `SpeciesDistribution`; widen
+- [x] `science/calc/models.py` — `RefinedEnsemble`, `EnsembleProperty`, `SpeciesDistribution`; widen
       `ConformerEnsemble.treatment` with `"free-energy-weighted-top-n"`, keeping today's value as
       the default.
 - [ ] New `science/calc/speciation.py` — Henderson-Hasselbalch over microstate free energies,
       `Ka_macro = Σ Ka_micro`, the pH profile. Pure, testable with no engine.
 - [ ] New `science/calc/contacts.py` — H-bond geometry and shape descriptors over
       `Structure.arrays()`.
-- [ ] New `science/calc/budget.py` — `require_within_budget(units, what)` raising a `ValueError`
+- [x] New `science/calc/budget.py` — `require_within_budget(units, what)` raising a `ValueError`
       naming the count. `BAD_DATA_RETRY` treats that as non-retryable, so an over-budget request
       fails fast rather than burning the activity budget. Mirrors `xtb_scan_max_points`. **This is
       the single most important new mechanism in the plan.**
@@ -133,23 +133,23 @@ edit.
 `connectors/calc/compose.py` — four new functions, each in the established shape
 (`store`, `progress`, `run: RemoteRunner = plain`):
 
-- [ ] `refined_ensemble()` — `conformer_ensemble` → top-N by E → `relax_to_minimum` (already carries
+- [x] `refined_ensemble()` — `conformer_ensemble` → top-N by E → `relax_to_minimum` (already carries
       the saddle-point escape) → `hessian` → `populations_from_free_energies`.
-- [ ] `ensemble_property()` — ensemble → `compute_properties_at` / `compute_fukui_at` per member →
+- [x] `ensemble_property()` — ensemble → `compute_properties_at` / `compute_fukui_at` per member →
       `weighted_average`.
-- [ ] `species_ranking()` — `refined_ensemble` per species → distribution. Three simultaneous callers
+- [x] `species_ranking()` — `refined_ensemble` per species → distribution. Three simultaneous callers
       at ship time (tautomer ratio, microspecies, stereoisomer ranking) differing in nothing but the
       SMILES set and the label — Rule of Three satisfied, not aspirational.
-- [ ] `bond_dissociation_survey()` — `reaction_energy(level="quick")` per cleavage;
+- [x] `bond_dissociation_survey()` — `reaction_energy(level="quick")` per cleavage;
       `radical_multiplicity` already makes the open shell work with no extra argument.
-- [ ] `_species_energy` gains an `"ensemble"` branch beside its `"thorough"` one (line 674).
-- [ ] **Honesty requirement:** refining the top N is a *different approximation*, not a better one.
+- [x] `_species_energy` gains an `"ensemble"` branch beside its `"thorough"` one (line 674).
+- [x] **Honesty requirement:** refining the top N is a *different approximation*, not a better one.
       Carry `refined_population_covered` (the E-weighted fraction the refined members account for)
       and warn below a threshold. "G-weighted over 5 of 47" must not read as "the ensemble" —
       `ensemble_from_members` already refuses that error for `max_members`.
-- [ ] `core/config/calculators.py` — `ensemble_refine_top_n: int = 5`, `species_ranking_max: int = 8`,
+- [x] `core/config/calculators.py` — `ensemble_refine_top_n: int = 5`, `species_ranking_max: int = 8`,
       `calc_max_primitive_calls: int = 120`.
-- [ ] **Measure:** G-weighted vs E-weighted population difference on 5 real flexible molecules, and
+- [x] **Measure:** G-weighted vs E-weighted population difference on 5 real flexible molecules, and
       cold/warm timing for `refined_ensemble` in the established form (`CCO` 0.816 s / 0.007 s). If
       G-weighting moves populations by <5%, that is a finding that reshapes the tier — report it.
 
@@ -159,20 +159,20 @@ edit.
 each is **a spec member + a dispatch branch + an optional `| None = None` field on `XtbJobResult` +
 a `jobs:` entry**. No new Temporal workflow type, no new activity.
 
-- [ ] `RefinedEnsembleJobSpec`, `EnsemblePropertyJobSpec`, `SpeciesRankingJobSpec`,
+- [x] `RefinedEnsembleJobSpec`, `EnsemblePropertyJobSpec`, `SpeciesRankingJobSpec`,
       `BdeSurveyJobSpec`; widen `ReactionJobSpec.level` / `SolventScreenJobSpec.level` with
       `"ensemble"`.
-- [ ] All `expensive: true`; all `precondition:
+- [x] All `expensive: true`; all `precondition:
       chemclaw.science.calc.solvents:require_supported_solvents` (duck-typed, already covers a
       `solvent` or `solvents` attribute).
-- [ ] **`specs.py` must stay a leaf and must inline its Literals.** The chat service imports it on
+- [x] **`specs.py` must stay a leaf and must inline its Literals.** The chat service imports it on
       every `build_langgraph_agent`; `tests/test_connector_isolation.py` asserts it in a fresh
       interpreter. The existing four members re-declare their Literals rather than importing
       `EnsembleSearch` — four new members are four fresh chances to break that.
-- [ ] Add the four tool names to `data/profiles/computation.yaml`.
+- [x] Add the four tool names to `data/profiles/computation.yaml`.
 - [ ] **Deploy the worker before adding the `jobs:` entry** — the manifest is what makes the tool
       reachable, and an old worker cannot decode a new union member.
-- [ ] **Measure:** primitive-call count per job kind for a 33-atom reference, tabulated. This becomes
+- [x] **Measure:** primitive-call count per job kind for a 33-atom reference, tabulated. This becomes
       the cost table the skill quotes.
 
 ## Phase D — The protocol catalogue (`data/templates/`)
@@ -187,15 +187,15 @@ flag · solvent screen · relaxed scan / rotational barrier · non-covalent comp
 
 - [ ] `fukui-in-conformer` — search → `predict_site_reactivity(structure_id=…)` *(A)*
 - [ ] `degradant-hypotheses` — `apply_reaction_smarts` → rank *(A)*
-- [ ] `ensemble-free-energy` — `refine_ensemble` *(B)*
+- [x] `ensemble-free-energy` — `refine_ensemble` *(B)*
 - [ ] `descriptor-panel` — Boltzmann-averaged dipole/HOMO/LUMO/gap/charges *(B)*; the highest-value
       consumer is BO featurization (`xtb-use-cases.md` §6.2)
 - [ ] `regioselectivity-ensemble` — same job, Fukui inner tool *(A+B)*
-- [ ] `tautomer-ratio` — enumerate (chem **or** CREST `--tautomerize`) → `rank_species` *(A+B)*
-- [ ] `stereoisomer-ranking` — `enumerate_stereoisomers` → `rank_species` *(A+B)*
-- [ ] `microspecies-profile` — `enumerate_microstates` → `rank_species` → `speciation` *(A+B)*
+- [x] `tautomer-ratio` — enumerate (chem **or** CREST `--tautomerize`) → `rank_species` *(A+B)*
+- [x] `stereoisomer-ranking` — `enumerate_stereoisomers` → `rank_species` *(A+B)*
+- [x] `microspecies-profile` — `enumerate_microstates` → `rank_species` → `speciation` *(A+B)*
 - [ ] `macro-pka` — per-site pKa → `Ka_macro = Σ Ka_micro` *(A+B, +E for site pKa)*
-- [ ] `bde-survey` — `enumerate_homolysis` → `bde_survey` → ranked table *(A+B)*
+- [x] `bde-survey` — `enumerate_homolysis` → `bde_survey` → ranked table *(A+B)*
 - [ ] `reaction-thermodynamics-ensemble` — `compute_reaction_energy(level="ensemble")` *(B)*
 - [ ] `polymorph-risk` — ensemble → `ensemble_spread` *(B)*
 - [ ] `intramolecular-hbond` — ensemble → `contacts.py` → population-weighted occupancy *(B)*
@@ -207,7 +207,7 @@ flag · solvent screen · relaxed scan / rotational barrier · non-covalent comp
       profile only advertises what its `tool_names` lists. Name each `run_*` in
       `computation.yaml`. Ten on one profile is a surface a model reads; twenty is one it guesses
       at, so split by profile rather than piling on.
-- [ ] **Known gap to state, not fix:** `cli/validate_templates.py` can only resolve signatures for
+- [x] **Known gap to state, not fix:** `cli/validate_templates.py` can only resolve signatures for
       tools implemented in this tree, and `chem` is declared here but run elsewhere — so every new
       enumeration tool is name-checked and argument-*un*checked, reported only in
       `unchecked_arguments`. Either keep chem tools behind a `job`/`agent` step, or accept the gap
@@ -215,7 +215,7 @@ flag · solvent screen · relaxed scan / rotational barrier · non-covalent comp
 
 ## Phase E — Selection and self-composition
 
-- [ ] **Split rather than grow the skills.** `calculation-selection/SKILL.md` is ~180 lines and
+- [x] **Split rather than grow the skills.** `calculation-selection/SKILL.md` is ~180 lines and
       `make skill-validate` checks both directions. Keep it as the question→calculator table with
       one short "multi-step" section pointing at the templates; add a new global skill
       `ensemble-workflows` holding the ensemble judgment — when an ensemble changes an answer versus
@@ -225,11 +225,11 @@ flag · solvent screen · relaxed scan / rotational barrier · non-covalent comp
 - [ ] Write the catalogued skills each protocol unblocks — `docs/guides/xtb-skill-catalogue.md`
       already specifies ~28 with what gates each, and 19 of 28 were gated on capability that now
       exists.
-- [ ] **Species chaining** — a SMILES *list* out of a `chem` enumeration into `rank_species` /
+- [x] **Species chaining** — a SMILES *list* out of a `chem` enumeration into `rank_species` /
       `bde_survey`. New; one paragraph in `computation.yaml` and one section in
       `ensemble-workflows`. (Geometry chaining via `structure_id` already works and phase A extends
       it to Fukui, the one calculator that visibly did not take one.)
-- [ ] **Turn `harness_enabled` on for `computation` only, at `harness_autonomy: plan_only`.**
+- [x] **Turn `harness_enabled` on for `computation` only, at `harness_autonomy: plan_only`.**
       `AgentProfile.harness_enabled` is a per-profile override, so this is one YAML line. The
       argument is cost, not capability: `plan_only` puts a chemist in front of the plan *before* the
       first CREST search — the control that matters once one turn can commission six. Not globally,
@@ -338,4 +338,56 @@ a number, not a claim.
 
 ## Review
 
-*(to be filled in as phases land)*
+**Phases 0, A, B, C and most of D+E landed.** What shipped, and what the work found.
+
+### The measurements
+
+Taken with CREST 3.0.2 and xtb 6.5.1 installed from conda-forge, running the shipped engine — not
+asserted, and several of them contradict what the documentation implies.
+
+| | measured |
+|---|---|
+| n-butane conformer search, `--quick` / `--normal` | 46.7 s → **4** conformers · 189.7 s → **2** |
+| ibuprofen (33 atoms), `--quick` | **1142 s** → 13 conformers, 111 rotamers |
+| `--tautomerize`/`--protonate`/`--deprotonate`, `crest` present and `xtb` absent | all three exit non-zero in **~0.1 s** |
+| the same three with `xtb` present | 30.2 s / 3.5 s / 0.7 s, correct member counts |
+| libraries `crest` needs beyond its own tree | `libgfortran5`, `liblapack3`, `libblas3`, **`libgomp1`** |
+| `unchecked_arguments` templates | rose from **1 to 5**, all `chem` tools this repo declares and does not run |
+
+### Four things running it found that reading it would not
+
+1. **`crest` alone does not turn on three of the five searches.** CREST implements the proton-moving
+   modes as driver scripts that shell out to the `xtb` **binary**. `require_crest(search)` now
+   refuses per search and names the binary actually missing. This also promotes the `chem`
+   enumerations from "cheap alternative" to "the only route on the image this fleet builds".
+2. **`ldd` on a workstation gives three library names and ships a broken image.** `libgomp1` is
+   present on a dev box and absent from `python:3.11-slim`, and the failure is at run time from a
+   build that succeeded. The layer now runs `crest --version` inside the same `RUN`.
+3. **Two latent defects in `crest_cli.py`**, unreachable until the binaries existed:
+   `--protonate` writes `protonated.xyz` and the map read `protomers.xyz`; and `_read_ensemble`
+   reused the input's element list, which is right for xtb and wrong for a search whose purpose is
+   to change the atom count (`--deprotonate` on phenol: 12 positions for 13 elements).
+4. **A template cannot reach into a list.** `templates/resolve.py` walks a dotted *attribute* path
+   with no indexing, so `list[Tautomer]` is unreachable — measured, `${steps.forms.result.smiles}`
+   raises. The enumerations now return container models with a hoisted `smiles` list, which is what
+   `ConformerEnsemble.lowest_structure_id` already does and for the same reason.
+
+Two smaller ones: `propose_degradants` tripped the manifest's mutating-prefix rule (renamed
+`enumerate_degradants`), and `make type` was **already red on the base commit** for two unrelated
+test files — both fixed rather than left.
+
+### Two things deliberately not built
+
+A unified `state_change()` over pKa/redox/BDE — traced, the four share only argument marshalling and
+it would have put a second, competing pKa calibration in this repo. And "logD over an ensemble" —
+Crippen logP is conformer-independent by construction; the gap `logd.py` names is *microstates*,
+which `run_microspecies-profile` addresses.
+
+### Still open
+
+Phase F (CREST `--entropy`, xtb `--vipea`, `--bhess`, site-resolved pKa) and phase G (QCG, MSREACT,
+the agent-authored pipeline spec) are untouched. Of the phase-D catalogue, seven templates shipped
+and the remaining protocols — polymorph risk, intramolecular H-bond, shape/exposure, ensemble IR,
+macro-pKa — are composites away rather than machinery away. The catalogue skills each protocol
+unblocks were **not** all written: `ensemble-workflows` plus the new section in
+`calculation-selection` carry the routing, and the rest of `xtb-skill-catalogue.md` stays a list.
