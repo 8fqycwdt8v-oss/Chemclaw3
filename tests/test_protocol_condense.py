@@ -346,7 +346,7 @@ def test_a_protocol_without_a_field_is_not_diffed_against_one_that_has_it() -> N
 
 
 def test_nothing_comparable_is_not_reported_as_unchanged() -> None:
-    """ "unchanged" is a claim that the conditions match, so it may not stand in for "no idea".
+    """Saying the conditions are unchanged is a claim, so it cannot stand in for "no idea".
 
     The third cell state, and the reason the guard needed one: silencing the fabricated change
     without it would have turned every incomparable pair into a positive assertion of sameness.
@@ -383,7 +383,7 @@ def test_the_source_registry_is_built_once_per_call(monkeypatch: pytest.MonkeyPa
     from chemclaw.agent import protocol_tools
 
     builds = 0
-    original = protocol_tools.active_retrieve_sources
+    original = protocol_tools.active_retrieve_sources  # type: ignore[attr-defined]
 
     def _counted() -> Any:
         nonlocal builds
