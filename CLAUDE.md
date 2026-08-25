@@ -170,7 +170,7 @@ generations and are not in scope for any task here.
   can be live-tested end-to-end without real integrations.
 
 **Where a capability belongs.** This repo holds *infrastructure*: conversation orchestration, the
-knowledge graph, retrieval, memory, ingestion, identity and durable execution. Scientific capability
+knowledge graph, retrieval, memory, ingestion, **publication** and durable execution. Scientific capability
 — quantum chemistry, reaction prediction, property lookup, optimization — belongs in `Chemclaw3-mcp`
 as a server. **The boundary within science is by *composability*, not by speed or by subject**
 (`D-2026-08-16-the-physics-leaves-the-cache-stays`): a *primitive* — one calculation whose identity
@@ -184,6 +184,17 @@ them transitively needed almost all of it — and shipping `compute_thermochemis
 turned a 0.007 s repeat into a full recompute, because its key names the geometry its refinement
 loop settles on. Duration was never the property that mattered; a server there may be slow, it may
 not be stateful.
+
+**Computed values leave, too** (`D-2026-08-25-a-cache-is-not-a-record`). `calculation_results` is a
+*cache* — `key` onto an opaque `result JSONB`, and its own query model refuses any predicate on the
+payload, because "a `total_energy_hartree > x` predicate would put one calculator's schema inside
+the thing that persists all of them". That is right for exact-key lookup and is exactly why it
+cannot also be the scientific record. So `src/chemclaw/publish/` projects every result — primitive
+or composite, single compound, multi-compound, reaction or ensemble — into a typed record and
+delivers it to a database this system does **not** own: a third manifest seam beside
+`connector.yaml` and `datasource.yaml`, because a connector *produces*, a source *supplies*, and a
+sink *consumes what the system produced*. The schema ships in `schema/result-store/` and a site
+creates it; publishing is off until `CHEMCLAW_RESULT_SINKS` names a sink.
 
 `science/fingerprints` stays here despite the name — retrieval, memory and ELN ingest import it
 in-process, which makes it infrastructure by this rule rather than an exception to it. `science/safety` used to be listed beside it on the same grounds; that argument

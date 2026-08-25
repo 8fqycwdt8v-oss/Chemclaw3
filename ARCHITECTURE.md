@@ -43,6 +43,7 @@ generates enters the graph through a **PR-gate**, so a human decides before it b
 | `memory/` | — | The memory layers over past campaigns, interactions and failures, plus the ungated observations tier (D-161). |
 | `templates/` | — | Step templates: the manifest, registry and resolver. |
 | `evals/` | — | The eval harness and metrics. |
+| `publish/` | — | The outbound result seam: every computed value, projected into a typed scientific record and delivered to a database this system does not own. The counterpart of `ingest/` — that brings a corpus in, this sends results out — and the reason it is neither a connector nor a data source is that both refuse it by rule: `connector-validate` bans a mutating tool on an endpoint, and a source "cannot acquire a write path by declaring one". A sink is a folder plus a `sink.yaml`, discovered like the other two seams and **enabled by nobody unless `CHEMCLAW_RESULT_SINKS` names it** (D-2026-08-25). |
 | `cli/` | — | Every terminal entrypoint in one place: `chat` (the admin CLI, and the `chemclaw` console script) plus the validator and verifier entrypoints `make` invokes — `kg-validate` and `eln-validate` are the exceptions, living with the code they check. |
 
 Layer 3 has no code: it is `SKILL.md` files — the global ones in `skills/`, the bundled ones
@@ -56,7 +57,8 @@ inside each connector.
 | `skills/` | **Layer 3**: the global `SKILL.md` files — judgment not tied to one connector. |
 | `data/` | Every corpus the code reads at runtime, each behind a `CHEMCLAW_*` setting: `evals/` (the case-set, retrieval corpus and committed baseline), `templates/` (the shipped step templates), `profiles/` (agent profiles), `vendored/` (build-time datasets with their provenance), `eln-exports/` (sample ELN drops). |
 | `tests/` | The suite. Also the gate for several *declarations*: the packaging lists, the Containerfile COPY set, the Helm chart's kinds, the ADR ledger, the layering rules. |
-| `infra/` | The local dev stack (`docker-compose.yml`) and the SQL migrations. |
+| `infra/` | The local dev stack (`docker-compose.yml`) and the SQL migrations — **this** system's own database. |
+| `schema/` | Schemas ChemClaw3 ships for databases it does **not** own, published so a DBA can apply them. Distinct from `infra/sql/` for the reason the two must never merge: nothing here holds DDL privileges on these stores, and the runtime principal is deliberately not the one that can define their tables. Today: `result-store/`, the canonical computed-results schema. |
 | `deploy/` | OpenShift delivery: one rootless multi-target image (`Containerfile`, role chosen by `CHEMCLAW_COMPONENT`) and the Helm chart. |
 | `docs/` | The record and the reference — see `docs/README.md` for which parts are maintained. |
 | `examples/` | A runnable walkthrough. Deliberately not shipped in the wheel. |

@@ -81,6 +81,11 @@ class MemorySettings(BaseSettings):
     # The cost is stated rather than hidden: until an operator sets this, the table grows, and it
     # grows faster than the two above it. `infra/sql/README.md` says so in its Disposal column.
     retention_tool_results_days: int = Field(default=0, ge=0)
+    # How long a *delivered* result publication is kept. Only delivered rows are ever pruned: a
+    # pending or failed one is the only record that something has not reached its results store,
+    # and deleting that would turn an outage into a silent gap. 0 disables it, like every window
+    # here.
+    retention_result_publications_days: int = Field(default=0, ge=0)
     # The LangGraph checkpoint tables (`checkpoints`, `checkpoint_blobs`, `checkpoint_writes`).
     # They held the same standing as the fingerprint tables in this module's opening complaint —
     # nothing deleted from them, ever — with one difference that made it easy to miss: they are

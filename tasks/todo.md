@@ -1,46 +1,83 @@
-# The condenser's headline measurement was taken on a path production does not use
+# Publish every computed value as a queryable scientific record
 
-Plan: `/root/.claude/plans/as-if-you-ask-fuzzy-crab.md` (approved).
-Base: `85a3c51`. Branch: `claude/condenser-wire-payload`.
+The investigation asked how computed values are stored — for reactions, single and multi-compound
+calculations, and conformer ensembles — and whether *any* calculation could be stored in a highly
+structured database outside this system. This is the implementation.
+`docs/decisions/D-2026-08-25-a-cache-is-not-a-record.md` is the decision; this is the working record.
 
-## Measured
+## What the investigation found (read this before the list)
 
-- [x] **`exclude=True` does nothing.** `_stringify` tries `json.dumps` (fails on a `BaseModel`) and
-      falls back to `str()` = pydantic repr, which ignores `exclude`. Wire evidence from a compiled
-      graph: `table='' rows=[] complete=True oversized=[] degraded=[]`.
-- [x] **The ratio is 2.7x, not 9.1x** — 39,890 vs 14,611 tokens at N=80, against 6,352 claimed.
-- [x] **Repo-wide**: `EvidenceSweep` reaches the model as repr too. Pre-existing.
-- [x] **§4 confirmed** (was unverified): `EXPLAIN (ANALYZE)` shows `loops=400` on both
-      `CITATION_SQL` and `_MODIFIED_SQL` to return **2** rows — the window forces per-row
-      evaluation, and both subqueries are row-invariant.
+Five stores hold computed values. **None is a scientific record.** `calculation_results` is a cache
+— `key` onto an opaque `result JSONB` — and its own query model refuses any predicate on the
+payload, deliberately. That is right for exact-key lookup, and it is exactly why the cache cannot
+also be the record.
 
-## Steps
+Two findings shaped everything downstream:
 
-- [x] 1. The tool renders a string; drop `exclude=True`; re-measure on the wire.
-- [x] 2. Hoist the two row-invariant subqueries out of the windowed subquery.
-- [x] 3. Pin the stringification shape in `tests/test_upstream_surface.py` (absence form).
-- [x] 4. Superseding ADR with the corrected table; ledger row.
-- [x] 5. BACKLOG row for the repo-wide repr payload; `tasks/lessons.md`.
+- **Composites are not persisted at all.** After `D-2026-08-16` a composite whose key would name an
+  output is decomposed rather than cached, so `compute_thermochemistry`, `compute_reaction_energy`,
+  `compare_solvents` and the weighted ensemble exist only as `job_records.result` JSONB — and on the
+  conversational path, nowhere beyond a TTL-swept trace blob. The shapes a chemist reasons about
+  were the least recorded.
+- **Nothing published a computed value outward.** Every outbound HTTP client in the tree is a fetch.
+
+## Done
+
+- [x] **Canonical record** — `publish/record.py`. One subject shape for all five cases; identity
+      excludes solvent/temperature/method so cross-solvent comparison is a `GROUP BY`.
+- [x] **Property registry** — `publish/properties.py`, 78 properties. The FK that keeps the fact
+      layer from being EAV: a value cannot be written under a name nobody defined.
+- [x] **Solvent canonicalization** — `publish/solvents.py`. 42 upstream names → 25 solvents.
+- [x] **Projection** — `publish/project.py`, 17 result shapes.
+- [x] **Shipped schema** — `schema/result-store/001_core.sql`, 21 tables, portable (no arrays, no
+      sequences, no partial/expression indexes). `make sink-schema` prints it plus a generated seed.
+- [x] **The sink seam** — `sink.yaml`, registry, two drivers (SQL + HTTP) and a psycopg `Warehouse`.
+- [x] **Outbox + drain** — migration 050, `PublishResultsWorkflow`, three enqueue hooks, retention,
+      grants, metrics.
+- [x] **CLI + bundle** — `sink_schema`, `backfill_publications`, `validate_sinks`, and the
+      `results` jobs-only bundle for the deliberate republish.
+- [x] **Tests** — the six chemistry questions as SQL against a live database, projection
+      round-trip with a field-coverage check, registry coherence, solvent parity, outbox durability.
+
+## Three defects the tests found that reading the code had not
+
+Worth keeping, because each was silent and each is the kind that recurs.
+
+1. **Species were matched to members by list position.** `species` and the equation's own
+   `reactants`/`products` are independently produced sequences — a `quick` run returns no species at
+   all. A two-species breakdown over a three-member equation put cyclohexane's free energy on
+   butadiene. Both are plausible numbers in the same units. Now matched on `(role, molecule)`.
+2. **The two ensemble shapes carry different halves and neither carries both.** `EnsembleMember`
+   has an absolute energy and no population; `Conformer` has a population and no absolute energy.
+   Requiring either would have made half the ensembles unpublishable.
+3. **A field-coverage check found three real gaps** reading the models had missed: a missing
+   descriptor, an exotherm flag published without the threshold it was judged against, and a scan
+   whose coordinate said "dihedral" without saying which atoms.
+
+## Verified
+
+- `make lint`, `make type` green. Full suite run against a live Postgres/Temporal
+  (`sudo dockerd; make up; make db-migrate`) — see the review below for what remains red and why.
+- **End to end, not just unit**: a calculation through the real `cached_compute` path → outbox →
+  `drain_result_publications` → a second Postgres running the shipped DDL, landing as typed rows
+  with unit, uncertainty, method and molecule. Redelivery verified as a no-op.
+- The generated DDL + seed load into a clean schema: 21 tables, 78 properties, 25 solvents, 42
+  aliases, and `tetrahydrofuran` resolving to `thf`.
+- `backfill_publications` queues on the first run and writes nothing on the second.
 
 ## Review
 
-| what | before | after |
-|---|---|---|
-| wire payload at N=80 | 14,611 tokens (2.7x) | **6,368 (6.3x)** |
-| `CITATION_SQL`/`_MODIFIED_SQL` | `loops=400`, 854 buffers, 3.257 ms | **0 per-row subplans, 56 buffers, 1.530 ms** |
-| both backends' `modified_at` | 2026-03-04 vs 2026-01-01 | **agree** |
+**What went well.** The plan's acceptance check — the six questions as SQL — was the right bar: it
+caught the species-matching corruption, which no amount of re-reading the projector would have. The
+field-coverage test (a payload that records which keys were read) is worth reusing anywhere a model
+is projected into another shape.
 
-Two findings arrived *while fixing*, not from the plan:
+**What I would do differently.** I reused the warehouse seam's `ConnectionBinding` for the SQL
+sink's connection block before noticing it is Snowflake-shaped and has no host or port. The fix —
+letting the driver's own signature be the schema — is what the data-source seam already does for
+`config:`, and I should have started there.
 
-- The `EXPLAIN` that confirmed the per-row subqueries also exposed a **backend disagreement** on
-  `modified_at` that had been there since the reader landed — Postgres took `max` across copies as
-  the rule states, the reference backend took the cited path's own time. The cross-backend test
-  could not see it: one file row, no mtime.
-- My first strengthened fixture for that gave the same row both the smallest path *and* the newest
-  time, so it passed against either rule. The cited copy is now deliberately not the newest one.
-
-That is the third and fourth time this session a fixture held constant the axis that broke. The
-`lessons.md` entry says so plainly rather than filing it as a one-off.
-
-Suite: 4,303 passed, 3 skipped (shallow git history; no Postgres skips). `make lint type` clean.
-Six validators green.
+**Left deliberately open**, both queued in `BACKLOG.md` §4: no deployment yet points at a real
+results database, and nothing has measured rows-per-calculation on a real corpus. That second one
+also decides whether `property_value` needs partitioning, which is why no partition key is chosen —
+picking one before the row count is known would be a guess.
