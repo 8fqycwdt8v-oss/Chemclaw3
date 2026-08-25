@@ -25,6 +25,7 @@ from typing import Any
 
 from pydantic import TypeAdapter, ValidationError
 
+from chemclaw.agent.turn_cost import TurnCost
 from chemclaw.api.events import ErrorEvent, Event, PlanEvent
 from chemclaw.core.config import settings
 from chemclaw.evals.ab import TaskScores, compare_tool_utility
@@ -67,6 +68,22 @@ def _final_plan(transcript: list[Event]) -> PlanEvent | None:
 def _plan_steps(plan: PlanEvent) -> list[str]:
     """Every work item of a rendered plan, checkbox stripped, order preserved."""
     return [step[4:] if step[:4] in ("[ ] ", "[x] ") else step for step in plan.todos]
+
+
+def _billed_tokens(turn: TurnCost) -> float:
+    """One turn's cost in input-token equivalents.
+
+    Input and output are counted at face value and the two cache counters at their configured
+    weights, because a cached read is charged at a fraction of an input token and a cache write at
+    a premium. Collapsing four counters into one number is what lets the metric be a single float
+    without pretending the four are interchangeable.
+    """
+    return (
+        turn.input_tokens
+        + turn.output_tokens
+        + turn.cache_read_tokens * settings.eval_cache_read_weight
+        + turn.cache_write_tokens * settings.eval_cache_write_weight
+    )
 
 
 @metric("plan_quality", Direction.HIGHER_IS_BETTER)
@@ -207,5 +224,68 @@ def plan_execute_utility(case: EvalCase) -> MetricResult:
             f"{len(summary.helped)}/{len(tasks)} task(s) helped, {len(summary.hurt)} hurt, "
             f"{len(summary.no_effect)} unchanged; net delta {summary.net_delta:+.4g} in the "
             f"{'higher' if higher_is_better else 'lower'}-is-better direction"
+        ),
+    )
+
+
+@metric("turn_cost_ratio", Direction.LOWER_IS_BETTER)
+def turn_cost_ratio(case: EvalCase) -> MetricResult:
+    """What the case's turns cost, as a ratio against the same turns' recorded baseline.
+
+    Reads `output.turns` — a list of `TurnCost` records, the ledger's own shape — and
+    `reference.baseline_tokens`. Scored so a suite can answer the question HAL asked of every agent
+    benchmark and this one could not: **not "is it right" but "is it right for what it costs".**
+    That study ran 21,730 rollouts across nine models and nine benchmarks and found the most
+    expensive model on the accuracy/cost Pareto frontier in *one* of the nine — a result invisible
+    to any suite that scores only accuracy, which is what `make eval` was.
+
+    **The scalar is a ratio, not dollars, and that is the same argument `plan_execute_utility`
+    already settled.** A metric's value is one float, and money is unbounded, denominated in a
+    currency, and re-priced by a provider without anything in this repository changing. A ratio
+    against the case's own recorded baseline is bounded in practice, comparable across case sets,
+    and — the part that matters for a drift band — moves only when *this system* changes. The token
+    counts and the per-token arithmetic stay in the provenance, where a reader can see them.
+
+    **Billed tokens, which is not the same as tokens sent.** `cache_read_tokens` are charged at a
+    fraction of the input rate and `cache_write_tokens` at a premium, so a change that adds a cache
+    breakpoint moves the sent count and the billed count in opposite directions. Scoring the sent
+    count would score a prompt-caching improvement as a regression. The weights are settings, not
+    constants here, because they are a provider's price list and this repository is not the place
+    it lives.
+
+    **Turns that never answered are counted.** `TurnCost.completed` is False for a turn torn down
+    before it produced an answer, and those spent real tokens — a ledger that kept only the tidy
+    ones would be wrong in exactly the direction that hides a runaway. The count of them is in the
+    provenance so a reader can tell an expensive answer from an expensive non-answer.
+
+    Ungated (`passed=None`), deliberately and for now. There is not yet enough history to say what
+    a cost regression looks like, and a threshold guessed today would gate the suite on a number
+    nobody measured — the same posture `plan_execute_utility` takes for the same reason. What this
+    buys immediately is a row in `baseline.json` that `make eval-baseline-check` watches for drift.
+    """
+    raw = case.output.get("turns")
+    if not isinstance(raw, list) or not raw:
+        raise MetricError("output.turns must be a non-empty list of turn-cost records")
+    try:
+        turns = [TurnCost.model_validate(turn) for turn in raw]
+    except ValidationError as exc:
+        raise MetricError(f"output.turns is not a list of turn costs: {exc}") from exc
+
+    baseline = (case.reference or {}).get("baseline_tokens")
+    if not isinstance(baseline, (int, float)) or baseline <= 0:
+        raise MetricError("reference.baseline_tokens must be a positive number of billed tokens")
+
+    billed = sum(_billed_tokens(turn) for turn in turns)
+    unfinished = sum(1 for turn in turns if not turn.completed)
+    return MetricResult(
+        metric="turn_cost_ratio",
+        value=billed / float(baseline),
+        unit=None,
+        passed=None,
+        provenance=(
+            f"{billed:,.0f} billed token-equivalents over {len(turns)} turn(s) "
+            f"({unfinished} of which never answered) against a baseline of {baseline:,.0f}; "
+            f"cache reads weighted {settings.eval_cache_read_weight:g}x and writes "
+            f"{settings.eval_cache_write_weight:g}x an input token"
         ),
     )
