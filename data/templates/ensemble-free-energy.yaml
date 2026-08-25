@@ -1,0 +1,49 @@
+# A free energy weighted by what is actually populated, rather than by electronic energy alone.
+#
+# Why a template and not just the job: the value is in the *reading*, not the running. A refined
+# ensemble reports what share of the population its refined members carry, and that number is the
+# difference between "the free energy of this molecule" and "the free energy of the five conformers
+# we could afford". The last step exists to make sure that qualifier reaches the answer.
+summary: Refine a conformer ensemble to free-energy-weighted populations and report the coverage.
+description: >-
+  A fixed two-step refinement. Runs the conformer search, optimizes and takes a Hessian for the
+  lowest members, and re-weights them by Gibbs free energy instead of by electronic energy — then
+  writes up what the refinement changed and what share of the ensemble it covers. Use it when a
+  *population* is the answer: how much of the folded form is present, which rotamer dominates, what
+  the conformational entropy actually is. When a geometry is the answer, sample_conformers already
+  gives you the lowest member's structure id for far less.
+
+inputs:
+  - name: smiles
+    type: string
+    description: The molecule to refine, as SMILES.
+  - name: solvent
+    type: string
+    description: Implicit solvent name, or an empty string for gas phase.
+    required: false
+
+steps:
+  - id: refined
+    kind: job
+    purpose: Search, then pay one optimization and one Hessian per member kept.
+    job: refine_ensemble
+    arguments:
+      smiles: "${inputs.smiles}"
+      solvent: "${inputs.solvent}"
+
+  - id: report
+    kind: agent
+    purpose: Report the populations with the qualifier that makes them honest.
+    prompt: >-
+      Report the free-energy-weighted conformer ensemble of ${inputs.smiles}.
+
+      Refinement: ${steps.refined.result}
+
+      State the populations and the conformational entropy. Then give the two qualifiers that must
+      travel with them. First, `refined_population_covered`: if the refined members carry less than
+      the whole ensemble, say so in the sentence that reports the populations, not in a footnote —
+      "free energies over 5 of 47 conformers" is a different claim from "the ensemble", and the
+      free energy is the one that looks more careful. Second, the search is a *sample* of
+      conformational space rather than an enumeration of it, so a conformer that was not sampled
+      cannot be reported as absent. Say what changed against the electronic-energy weighting, or
+      say that nothing did — both are findings.

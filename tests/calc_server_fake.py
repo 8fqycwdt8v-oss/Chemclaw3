@@ -58,6 +58,12 @@ _KEYED: dict[str, tuple[str, tuple[str, ...]]] = {
     # for its properties must reach the entry that conformer's own address names.
     "compute_properties_at": ("xtb.properties", ("solvent",)),
     "predict_site_reactivity": ("xtb.fukui", ()),
+    # The geometry-taking twin, under the same `calc_type` and — the property that matters —
+    # the same **empty** params tuple. A Fukui calculation does not depend on the mode: the
+    # server computes all three indices from three single points and sorts on the way out, so
+    # one row serves every mode. Keying on `mode` here would make a cache *hit* authoritative
+    # about an ordering it never chose, which is what `ranked_for` exists to prevent.
+    "compute_fukui_at": ("xtb.fukui", ()),
     "predict_pka": ("pka", ()),
     "predict_solubility": ("solubility", ()),
     "predict_developability_profile": ("developability", ()),
@@ -128,6 +134,23 @@ def harmonic_hessian(structure: dict[str, Any], *, imaginary: bool = False) -> d
         "hessian_npy": pack(matrix),
         "dipole_derivatives_npy": pack(np.zeros((size, 3))),
         "ir_intensities": None,
+    }
+
+
+def _nudged(structure: dict[str, Any], index: int) -> dict[str, Any]:
+    """The same molecule at a slightly different geometry — one ensemble member.
+
+    Displaces every atom along x by `index/100` Angstrom, which is two orders of magnitude above the
+    rounding `Structure` applies, so each member has its own `structure_id` and therefore its own
+    cache entry. Index 0 is returned unchanged, so the lowest member is still the input geometry and
+    the existing tests that follow it through a composite are unaffected.
+    """
+    if index == 0:
+        return structure
+    offset = index / 100.0
+    return {
+        **structure,
+        "positions": [[x + offset, y, z] for x, y, z in structure["positions"]],
     }
 
 
@@ -295,13 +318,21 @@ class FakeCalcServer:
             "effort": arguments.get("effort", "quick"),
             # Three members, degeneracies 1/2/1: enough for a degeneracy-weighted population to
             # differ visibly from an unweighted one, which is the arithmetic that stayed here.
+            #
+            # **Each member is a distinct geometry**, nudged along x by a hundredth of an Angstrom.
+            # They shared one structure until a refinement composite needed them not to: refining
+            # an ensemble is one optimization and one Hessian *per member*, and three members at one
+            # address collapse to a single cache entry — so a fake with identical members reports
+            # three refinements as one call and every fan-out test passes on work that never
+            # happened. The displacement is above `_GEOMETRY_DECIMALS`, so the three addresses
+            # genuinely differ.
             "members": [
                 {
                     "energy_hartree": -1.0 * len(structure["elements"]) - shift,
                     "degeneracy": degeneracy,
-                    "structure": structure,
+                    "structure": _nudged(structure, index),
                 }
-                for shift, degeneracy in ((0.0, 1), (-0.001, 2), (-0.002, 1))
+                for index, (shift, degeneracy) in enumerate(((0.0, 1), (-0.001, 2), (-0.002, 1)))
             ],
             "total_found": 3,
         }
@@ -388,11 +419,26 @@ class FakeCalcServer:
             "sites": sites,
         }
 
+    def _compute_fukui_at(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        """The geometry-taking twin of the Fukui ranking, answering about its own molecule."""
+        structure = arguments["structure"]
+        answer = self._predict_site_reactivity({"smiles": structure["smiles"]})
+        answer["structure_id"] = _structure_id(structure)
+        return answer
+
     def _compute_properties_at(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        """The geometry-taking twin, answering about the structure's own molecule."""
+        """The geometry-taking twin, answering about the structure's own molecule.
+
+        **The dipole depends on the geometry**, which the SMILES-in twin cannot express and which a
+        Boltzmann average is entirely about. A fake whose property is the same at every conformer
+        makes an ensemble average equal to its own mean by construction, so the spread is zero and a
+        test over it passes whatever the weighting does. The dependence is the crudest thing that
+        works — the first atom's x coordinate — because the number is never asserted as chemistry.
+        """
         structure = arguments["structure"]
         answer = self._compute_electronic_properties({"smiles": structure["smiles"], **arguments})
         answer["structure_id"] = _structure_id(structure)
+        answer["dipole_debye"] = round(answer["dipole_debye"] + structure["positions"][0][0], 4)
         return answer
 
     def _compute_electronic_properties(self, arguments: dict[str, Any]) -> dict[str, Any]:
