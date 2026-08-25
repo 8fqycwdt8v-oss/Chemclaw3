@@ -44,6 +44,13 @@ _EXPECTED_SUBSYSTEMS = {
     "log_redaction",
     "plan_approval",
     "preferences",
+    # `retrieval/condense`, added with the protocol condenser. Two degradations share it and both
+    # are per protocol rather than per turn: no reachable `"protocol-digest"` route (the comparison
+    # still renders from every record's own figures), and one extraction that failed or timed out
+    # (that row keeps its recorded figures and says its procedure was not read). Without the
+    # counter, a condensing endpoint that is down looks exactly like a corpus of protocols whose
+    # procedures happen to be empty.
+    "protocol_digest",
     # `agent/session_store.message_from_row`, added when its catch was widened to `Exception`. The
     # counter is the point of that widening: a catch that broad also swallows a converter *bug*,
     # which degrades every row of every transcript into plausible prose, and a log line nobody

@@ -145,6 +145,15 @@ _COUNTERS: dict[str, str] = {
     "chemclaw_verifier_degraded_total": (
         "Answers scored by the deterministic citation gate because the LLM judge was unavailable."
     ),
+    # One row per protocol the condenser was handed, labelled by what happened to it:
+    # `extracted` (its prose was read), `degraded` (the extraction failed or timed out, and the
+    # row kept its recorded figures), `oversized` (too large for one call, refused by name and
+    # never split). Labelled rather than three series because the three are one question — how
+    # much of what a turn asked to condense actually got condensed — and a reader who cannot
+    # divide them cannot answer it.
+    "chemclaw_protocol_digests_total": (
+        "Protocols handed to the condenser, by outcome (extracted / degraded / oversized)."
+    ),
     "chemclaw_jobs_started_total": "Durable jobs launched by an agent tool.",
     # The counter above counts *launches*, which on the most expensive thing this system does is the
     # least informative number available: a two-second xTB call and a six-hour DFT run increment it
