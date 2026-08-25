@@ -147,6 +147,27 @@ topic).
 
 ## 2 — Answers that are wrong without saying so
 
+- [ ] **Seven `chem` enumerations and `compute_fukui_at` are declared here and served nowhere** —
+      [S], and it is a live gap rather than a plan. `src/chemclaw/connectors/chem/connector.yaml`
+      names `enumerate_tautomers`, `enumerate_protonation_states`, `enumerate_stereoisomers`,
+      `enumerate_bond_cleavages`, `enumerate_degradants`, `transform_structure` and
+      `describe_topology`; six of the seven templates added by
+      `D-2026-08-25-the-loop-is-a-composite-not-a-template` call one of them, and
+      `connectors/calc/compose.py::ensemble_property` calls `compute_fukui_at` for its `fukui`
+      field. All eight are implemented in `Chemclaw3-mcp` (`servers/chem/.../engine/species.py`,
+      `servers/calc/.../tools.py`) on branch `claude/chemclaw-gfn-workflows-5eie2t` **which was
+      never pushed** — that repository was outside the session's GitHub scope and `add_repo` with
+      push access was never approved, so the work exists only in that session's container and is
+      lost with it.
+      **What this costs until it lands:** `make template-validate` passes, because `chem` is a
+      bundle this repository declares and does not run, so those tools are name-checked and
+      argument-unchecked — the count it reports rose from 1 to 6 for exactly this reason. `make
+      connector-validate` against a running server is what would catch it, and the live lane is
+      where it will surface. Re-implementing is the fallback and the ADR's "What was measured
+      rather than assumed" section is the specification: it records the per-search `xtb` binary
+      requirement, the `protonated.xyz`/`protomers.xyz` filename, and the element-list defect that
+      only appears once a search changes the atom count.
+
 - [ ] **`changes_between` diffs against *absent* and can report a change nobody made** — [S].
       `memory/progression.py::number_change` and `_species_change` treat a missing value as a value:
       a run recording no temperature beside one that does yields `temperature 90 °C → —`, which
