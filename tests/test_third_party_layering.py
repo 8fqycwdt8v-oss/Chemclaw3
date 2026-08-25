@@ -126,6 +126,13 @@ _STACKS: dict[str, str] = {
     "openai": "llm",
     "anthropic": "llm",
     "snowflake": "warehouse",
+    # The second warehouse driver, on the same terms. Tracked here so its lazy import is a
+    # *declared* exception rather than one this file simply cannot see — an untracked root is
+    # invisible to the walk, which would make "no undeclared third-party import" a weaker
+    # claim than it reads as. `databricks-vectorsearch` is a different matter: the vector
+    # adapter reaches it through `importlib.import_module`, a string no AST walk resolves,
+    # and `retrieval/vectors/databricks.py` says so in its own docstring.
+    "databricks": "warehouse",
     # Added after a review measured what `_STACKS` was leaving unpoliced. Three roots present in
     # `src/` carry a layering meaning the first version missed; the rest of what it flagged
     # (`pydantic`, `numpy`, `yaml`, `networkx`, `frontmatter`, `openpyxl`, `pypdf`, …) is correctly
@@ -277,8 +284,9 @@ _ALLOWED_LAZY_STACKS: dict[Edge, str] = {
     ("chemclaw.cli", "llm"): "cli/mock_llm mirrors the provider's own response types on demand",
     ("chemclaw.evals", "llm"): "the judge client is built per run",
     ("chemclaw.ingest", "warehouse"): (
-        "the Snowflake driver is imported inside the connect call, so a deployment that binds no "
-        "warehouse never needs it installed (D-2026-08-04: the schema is a file, not an import)"
+        "both warehouse drivers are imported inside their own connect call, so a deployment that "
+        "binds no warehouse never needs either installed (D-2026-08-04: the schema is a file, not "
+        "an import)"
     ),
 }
 

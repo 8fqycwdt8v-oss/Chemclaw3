@@ -209,6 +209,24 @@ def test_the_shipped_pistachio_manifest_binds_and_declares_what_it_carries() -> 
     assert LabelGroup.NAMED_REACTION in binding.corpus.label_groups()
 
 
+def test_one_source_carries_both_seams_onto_the_same_table() -> None:
+    """A corpus and a vector index are two questions of one table, not two sources.
+
+    `vector:` ranks by embedding similarity — "find me reactions that read like this one" — and
+    cannot answer *which ligand*, *as what* or *under what conditions*, because those are
+    properties of the recipe and an embedding is not a queryable decomposition of it. `corpus:` is
+    drained into the label index, which can.
+
+    They share a connection and nothing else, and the source declares exactly one `retrieve:`
+    callable — which is why `corpus_sources()` reads the manifest rather than asking what the built
+    retrieve half is an instance of. This is the assertion that keeps that true.
+    """
+    binding = load_binding(discovered()["pistachio"].config["binding"])
+    assert binding.vector is not None
+    assert binding.corpus is not None
+    assert binding.vector.relation == binding.corpus.relation, "two seams, one table"
+
+
 def test_a_reaction_corpus_never_becomes_an_ingest_source(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

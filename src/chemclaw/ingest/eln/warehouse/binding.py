@@ -451,7 +451,16 @@ class VectorBinding(BaseModel):
 
     relation: Identifier
     key: Identifier
-    vector_column: Identifier
+    # Empty when `index:` is set: an index ranks on its own copy of the vectors, so there is no
+    # column here to call a similarity function on.
+    vector_column: str = ""
+    # A Mosaic AI Vector Search index (a three-level Unity Catalog name), when the corpus is too
+    # large to scan. Ranking then happens on the index through the configured `VectorStore` and this
+    # relation is queried only to *resolve* the winning keys into content — which is the same
+    # division `ingest/documents/external_index.py` makes, with Databricks SQL standing in for
+    # Postgres as the catalogue. The endpoint serving it is a deployment fact
+    # (`CHEMCLAW_VECTOR_STORE_ENDPOINT_NAME`), not a per-source one, so it is not named here.
+    index: str = ""
     content_columns: list[Identifier] = Field(
         min_length=1,
         description="Columns rendered into the evidence chunk a chemist reads.",
@@ -498,7 +507,32 @@ class VectorBinding(BaseModel):
         """Identifiers are checked; `server` embedding needs the function it will call."""
         _check_identifier(self.relation, "vector relation")
         _check_identifier(self.key, "vector key")
-        _check_identifier(self.vector_column, "vector column")
+        if self.index:
+            # An index-ranked source and a scanned one are two different shapes, and a binding that
+            # half-declares both would silently take one of them. Each contradiction is named.
+            if self.vector_column:
+                raise BindingError(
+                    "a `vector:` block naming an `index` must not also name a `vector_column`: "
+                    "the index holds the vectors, and the relation is queried only to resolve the "
+                    "keys it returns into content"
+                )
+            if self.metric != "cosine":
+                raise BindingError(
+                    f"an index-ranked source is scored by `VectorMatch`, which is a cosine, so "
+                    f"metric must be 'cosine' rather than {self.metric!r}"
+                )
+            if self.embedding != "local":
+                raise BindingError(
+                    "an index-ranked source embeds the query here and sends the vector; there is "
+                    "no statement for a warehouse embedding function to appear in"
+                )
+        else:
+            if not self.vector_column:
+                raise BindingError(
+                    "a `vector:` block needs either a `vector_column` to rank on, or an `index` to "
+                    "rank in"
+                )
+            _check_identifier(self.vector_column, "vector column")
         for column in self.content_columns:
             _check_identifier(column, "vector content column")
         known = {"tag", "since", "until"}

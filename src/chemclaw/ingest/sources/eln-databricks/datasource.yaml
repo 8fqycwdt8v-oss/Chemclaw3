@@ -1,0 +1,162 @@
+# The corporate ELN, read from Databricks (Unity Catalog, over a SQL warehouse). Discovered but NOT
+# enabled — `CHEMCLAW_DATA_SOURCES` decides that, and a deployment enables this only once its
+# binding names its own real tables.
+#
+# **This file is the schema.** `chemclaw.ingest.eln.warehouse` contains no table and no column name;
+# everything specific to a site lives in the `binding:` block below. Attaching the real lakehouse is
+# editing this file — or, better, mounting a folder holding your own copy of it and putting that
+# folder first in `CHEMCLAW_DATA_SOURCES_DIR`, so the deployment's schema is not a change to this
+# repository at all.
+#
+# The sibling of `eln-snowflake`, and deliberately the *same* engine: only `connection.driver`
+# differs, because the second warehouse was the thing D-2026-08-04 built the seam for. What that
+# second driver did expose is that the similarity search was never dialect-neutral — see the
+# `vector:` block at the bottom and `ingest/eln/warehouse/driver.py`.
+#
+# The values here describe a plausible ELN and are exercised against a fixture row by
+# `tests/test_warehouse_binding.py`. They are not anyone's real schema and are meant to be replaced
+# wholesale.
+name: eln-databricks
+description: >-
+  The corporate ELN in Databricks: reactions with their charge and analytics tables, ingested to the
+  knowledge graph through the PR-gate, plus similarity search over the per-reaction embedding that
+  stays in the lakehouse.
+
+ingest: chemclaw.ingest.eln.warehouse.adapter:WarehouseElnAdapter
+retrieve: chemclaw.ingest.eln.warehouse.retriever:WarehouseVectorRetriever
+
+config:
+  binding:
+    connection:
+      driver: chemclaw.ingest.eln.warehouse.databricks:DatabricksWarehouse
+      # Environment variable NAMES. No credential is ever written into a manifest; the value is read
+      # at connect time, so a rotated token is picked up by the next connection. Unprefixed because
+      # these are the client's credentials, not settings of this application.
+      #
+      # **Three of these fields mean something different here than they do for Snowflake**, because
+      # the seam names concepts and each vendor has its own word for them:
+      #
+      #   account_env  -> the workspace hostname   (adb-1234567890.11.azuredatabricks.net)
+      #   password_env -> a personal access token  (dapi...)
+      #   warehouse    -> the SQL warehouse id, or its full /sql/1.0/warehouses/<id> path
+      #   database     -> the Unity Catalog *catalog*
+      #   schema       -> the schema within it
+      #
+      # `private_key_env` and `role` have no analogue and are *refused* rather than ignored: access
+      # is governed by Unity Catalog grants on the token's principal, and a `role:` copied over from
+      # a Snowflake binding would otherwise read as a restriction that is not in force.
+      account_env: DATABRICKS_HOST
+      password_env: DATABRICKS_TOKEN
+      warehouse: 0123456789abcdef
+      database: eln_prod
+      schema: reactions
+      query_timeout_seconds: 60
+
+    ingest:
+      # **Column names are matched exactly, and Databricks is not Snowflake about case.** Snowflake
+      # upper-cases unquoted identifiers in its result metadata, so a binding written in capitals
+      # matches whatever the site typed. Spark returns the *schema's own* casing, and every path
+      # below is an exact-case lookup on the returned row — so a binding saying `REACTION_ID`
+      # against a column declared `reaction_id` resolves to nothing, and a row that resolves to
+      # nothing is skipped rather than reported. Copy the casing from `DESCRIBE TABLE`.
+      entry:
+        relation: v_reaction
+        key: reaction_id
+        created_at: created_ts
+        # Declared so an amended run is re-ingested and the PR-gate shows the diff. Without it,
+        # every correction a chemist makes after the fact is invisible to this system forever.
+        modified_at: last_modified_ts
+        where: "status = 'COMPLETED'"
+        fetch_limit: 500
+
+      # Each block is one child table. Adding the site's next one — a workup log, a spectroscopy
+      # table — is adding four lines here and nothing else, anywhere.
+      related:
+        - name: charges
+          relation: v_reaction_charge
+          foreign_key: reaction_id
+          order_by: charge_seq
+        - name: analytics
+          relation: v_reaction_purity
+          foreign_key: reaction_id
+          order_by: peak_seq
+
+      reaction:
+        reaction_id: {path: root.reaction_id}
+        project: {path: root.project_code}
+        hypothesis: {path: root.objective}
+        procedure_text: {path: root.protocol_text}
+        performed_at: {path: root.experiment_date, transform: [{iso_date: {}}]}
+        temperature_c: {path: root.temp_c, transform: [{number: {}}]}
+        # The site records minutes; this schema is hours. A unit mismatch is a scale factor, not a
+        # code change.
+        time_h: {path: root.duration_min, transform: [{number: {}}, {scale: {factor: 0.0166666667}}]}
+        yield_percent: {path: root.yield_pct, transform: [{number: {}}, {clamp: {min: 0, max: 100}}]}
+        purity_percent: {path: root.assay_pct, transform: [{number: {}}, {clamp: {min: 0, max: 100}}]}
+        outcome_class:
+          path: root.result_flag
+          transform:
+            - value_map:
+                map: {OK: success, FAIL: failure, ABORT: inconclusive, NA: inconclusive}
+                default: inconclusive
+        failure_reason: {path: root.failure_note}
+
+      components:
+        - from: charges
+          smiles: {path: smiles_structure, fallback: {path: canonical_smiles}}
+          role:
+            path: material_type
+            transform:
+              - value_map:
+                  map:
+                    SM: reactant
+                    REAG: reagent
+                    SOLV: solvent
+                    CAT: catalyst
+                    PROD: product
+          amount_mmol: {path: amount_mmol, transform: [{number: {}}]}
+          # The site charges in grams; this schema keeps milligrams.
+          mass_mg: {path: amount_g, transform: [{number: {}}, {scale: {factor: 1000}}]}
+          attributes: [lot_number, supplier, equivalents]
+
+      impurities:
+        - from: analytics
+          name: {path: peak_name}
+          smiles: {path: peak_smiles}
+          area_percent: {path: area_pct, transform: [{number: {}}]}
+
+      # Everything else the reaction row carried, carried through as the site labelled it. This is
+      # what makes a column added to the lakehouse next quarter visible with no change here.
+      attributes:
+        include: ["*"]
+        exclude: [protocol_text, failure_note, status]
+        max_fields: 30
+
+      # Names the source, so two ELNs with colliding entry ids stay distinguishable in the graph.
+      provenance: "eln-databricks:${root.reaction_id}:${root.operator}"
+
+    vector:
+      relation: v_reaction_embedding
+      key: reaction_id
+      vector_column: reaction_vector
+      content_columns: [reaction_smiles, protocol_text, project_code]
+      # **`cosine` is the only metric this driver serves.** Databricks SQL has
+      # `vector_cosine_similarity`, which takes `ARRAY<FLOAT>` (not `ARRAY<DOUBLE>`, and not a
+      # `VECTOR` type — there isn't one). Its names for L2 and inner product are not verified in
+      # this repository, so asking for one is refused here rather than by the server.
+      metric: cosine
+      # The query is embedded here and bound as a parameter — as one JSON scalar that the server
+      # parses, because Databricks has no array *parameter* type and a 1536-float vector must stay a
+      # bound value rather than statement text. Switch to `server` when the lakehouse owns the model
+      # that built the column, and name the function in `server_embed_function`.
+      embedding: local
+      filter_columns: {tag: project_code, since: created_ts, until: created_ts}
+      # A reaction that already became a reviewed, merged note must not also arrive as a raw row —
+      # the duplicate would read as corroboration.
+      suppress_ingested: true
+
+      # **A scan, not an index.** `vector_cosine_similarity` is evaluated per row, so this ranks the
+      # whole relation on every query. That is the right shape for an ELN and the wrong one for a
+      # corpus of millions: at that size the vectors belong in a Mosaic AI Vector Search index,
+      # reached through `CHEMCLAW_VECTOR_STORE_PROVIDER=databricks`, and `where:` below is how you
+      # keep the scanned set honest in the meantime.

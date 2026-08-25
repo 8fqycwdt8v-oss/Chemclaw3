@@ -1,32 +1,39 @@
+# Pistachio — the patent reaction corpus — read from the deployment's own Databricks, and searched
+# in a Mosaic AI Vector Search index. Discovered but NOT enabled; `CHEMCLAW_DATA_SOURCES` decides.
+#
+# **Retrieve-only, and there is no ingest half by design.** Pistachio is *precedent*, not this
+# site's knowledge: a patent reaction did not happen in this lab, nobody here can vouch for it, and
+# nothing about it should become a knowledge-graph note. It answers "has this transformation been
+# done before" with a citation, and the graph keeps holding only what this site did and reviewed.
+#
+# **Why a third-party corpus is here at all**, given that `tests/test_no_egress.py` sanctions the
+# ELN sources on the grounds that they are the deployment's own systems and D-089 is about
+# third-party ones. The distinction D-089 draws is about a *runtime dependency on somebody else's
+# service*: a corpus this system fetches from a vendor at question time, whose availability,
+# licensing and content are outside the deployment's control. This is not that. It is the site's own
+# licensed copy, loaded into the site's own lakehouse by the site, reached with the same credential
+# and through the same peer as the ELN beside it, and adding no egress destination that connector
+# does not already have. The argument is made in full in
+# `docs/decisions/D-2026-08-25-a-lakehouse-arrives-on-two-seams-not-one.md`; the row in that test
+# carries the short form.
+#
+# **This file is the schema.** Nothing in `chemclaw.ingest.eln.warehouse` names a table or a column.
+# The values below describe a plausible Pistachio landing table and are meant to be replaced with
+# the site's own — better still, by mounting a folder holding your copy of this file and putting it
+# first in `CHEMCLAW_DATA_SOURCES_DIR`, so your schema is not a change to this repository.
 name: pistachio
 description: >-
-  The Pistachio reaction corpus (NextMove) loaded into the site's warehouse: millions of reactions
-  extracted from patents, most with a NameRxn classification and an atom mapping and some without.
-  Indexed into the reaction-label index as cited literature evidence, never proposed as knowledge —
-  a patent reaction is something someone else published, and a chemist follows the citation.
+  Reactions extracted from the patent literature, held in the deployment's Databricks and searched
+  by embedding similarity. Precedent and prior art — cited as evidence, never ingested as knowledge.
 
-# **Retrieve only, and deliberately no `ingest:` half.** Five separate paths in this tree assume an
-# ingest source is one site's ELN, and each of them breaks on a corpus of this size:
-#
-#   * `durable/memory_jobs.py::read_corpus` calls `fetch_new_entries(datetime.min)` on *every*
-#     active ingest half and materialises every reaction into the worker heap — three memory
-#     workflows do it per cycle.
-#   * `memory/similarity.cluster_by_similarity` is then O(n²) over that list.
-#   * `ingest_reaction` ends in `propose_note` unconditionally: one git branch per reaction,
-#     through a gate a human is supposed to read.
-#   * `sync_entries` loads every merged note body once per run to dedup against.
-#   * A Pistachio release is a versioned load addressed by key, not a live feed addressed by
-#     datetime — the `ElnAdapter` cursor contract does not fit it.
-#
-# Declaring no ingest half sidesteps all five with no edits to any of them, which is why there is
-# no "publish mode" anywhere: there is no ingest path to gate.
-# See `D-2026-08-25-a-corpus-is-evidence-not-an-eln`.
-retrieve: chemclaw.ingest.labels.retriever:WarehouseCorpusRetriever
+retrieve: chemclaw.ingest.eln.warehouse.retriever:WarehouseVectorRetriever
 
-# What this source already carries, and what the background labeller must derive anyway.
-# `provides` is **never a skip**: Pistachio ships a NameRxn classification for a large fraction of
-# its corpus and not for all of it, and every row it left empty is derived. The claim is read for
-# the coverage report and for the `override` subset check, nothing else.
+# What this corpus already carries, and what the background labeller must derive anyway.
+#
+# **`provides` is never a skip.** Pistachio ships a NameRxn classification for a large fraction of
+# its corpus and not for all of it, and every row it left empty is derived — which is the whole of
+# "the database will not have all these labels in the beginning". The claim is read for the coverage
+# sentence an answer carries and for the `override` subset check, nothing else.
 labels:
   provides:
     - named-reaction
@@ -36,43 +43,92 @@ labels:
 config:
   binding:
     connection:
-      driver: chemclaw.ingest.eln.warehouse.snowflake:SnowflakeWarehouse
-      account_env: SNOWFLAKE_ACCOUNT
-      user_env: SNOWFLAKE_USER
-      private_key_env: SNOWFLAKE_PRIVATE_KEY
-      warehouse: RND_WH
-      database: REACTION_CORPUS
-      schema: PISTACHIO
-      role: CHEMCLAW_READER
-      query_timeout_seconds: 120
+      driver: chemclaw.ingest.eln.warehouse.databricks:DatabricksWarehouse
+      # See `eln-databricks/datasource.yaml` for what each of these means on Databricks — the words
+      # are this seam's, and three of them name a different thing here than they do on Snowflake.
+      # A separate token from the ELN's is worth having: this corpus is licensed, its grants are
+      # different, and one credential per corpus is what makes revoking one of them possible.
+      account_env: DATABRICKS_HOST
+      password_env: PISTACHIO_DATABRICKS_TOKEN
+      warehouse: 0123456789abcdef
+      database: pistachio
+      schema: public
+      query_timeout_seconds: 60
 
-    # One relation, one row per reaction. The site's column names are a *binding*, not Python —
-    # the same argument `D-2026-08-04-the-schema-is-a-file` makes for the ELN: the loaded schema
-    # is not visible from here, and a schema nobody can see yet cannot be written into a module.
+    vector:
+      # **Ranked in the index, resolved in the warehouse.** At ~10^7 reactions a per-row
+      # `vector_cosine_similarity` is a full scan of the corpus on every question. So the vectors
+      # live in a Vector Search index and this relation is queried only to turn the winning keys
+      # into text — the same split `ingest/documents/external_index.py` makes between a store and a
+      # catalogue, with Databricks SQL as the catalogue.
+      #
+      # A three-level Unity Catalog name. The endpoint serving it is a deployment fact and comes
+      # from CHEMCLAW_VECTOR_STORE_ENDPOINT_NAME, not from here.
+      index: pistachio.public.reaction_index
+      relation: v_reaction
+      key: reaction_id
+      # No `vector_column`: the index holds the vectors, and naming one here is refused rather than
+      # ignored, because a binding that half-declares both shapes would silently take one of them.
+      content_columns: [reaction_smiles, title, patent_number, publication_year]
+      # `cosine` because that is what `VectorMatch.score` is, and `local` because an index-ranked
+      # source embeds the query here and sends the vector — there is no statement for a warehouse
+      # embedding function to appear in. Both are enforced by the binding rather than assumed.
+      metric: cosine
+      embedding: local
+      # A filtered search sends its eligibility to the index *before* the top-k, as a set of keys
+      # computed by these columns — filter afterwards and a narrow year range over ten million
+      # reactions returns nothing, because the k nearest all belonged to something else. A filter
+      # matching more rows than CHEMCLAW_VECTOR_STORE_MAX_SCOPE_KEYS is refused, never truncated.
+      filter_columns: {since: publication_date, until: publication_date}
+      # **False, and this is the one setting not to copy from an ELN binding.** `suppress_ingested`
+      # drops a hit whose reaction already became a note, which is right when the source is the ELN
+      # those notes came from. Nothing here is ever ingested, so every check would be a wasted
+      # filesystem probe — and a Pistachio reaction id colliding with an ELN one would silently
+      # hide a legitimate hit.
+      suppress_ingested: false
+
+    # **The second seam onto the same table, and it answers a different question.** `vector:` above
+    # ranks by embedding similarity — "find me reactions that read like this one" — which is what a
+    # research sweep wants. It cannot answer *which ligand*, *as what*, *under what conditions* or
+    # *how it was worked up*, because those are properties of the recipe and an embedding of the
+    # reaction text is not a queryable decomposition of it.
+    #
+    # So this block is drained into the reaction-label index
+    # (`D-2026-08-25-a-label-is-derived-not-recorded`): one keyset pass writes each reaction's
+    # record phase — the record-form SMILES with its agents kept, the conditions, the workup text
+    # and one row per species — and the background labeller then fills in the atom map, the named
+    # reaction and the refined per-species roles. The two seams share the connection above and
+    # nothing else.
+    #
+    # Keyset, not a datetime cursor and not OFFSET: a release is a versioned load rather than a
+    # feed, and `OFFSET n` over ten million rows makes the drain quadratically slower the further
+    # in it gets. `order_by` must be unique and stable across the release.
+    #
+    # Like everything else in this file these column names are a plausible landing table, not the
+    # site's. Replace them, or better, mount your own copy of this folder first on
+    # `CHEMCLAW_DATA_SOURCES_DIR`.
     corpus:
-      relation: V_REACTION
-      key: REACTION_ID
-      # The keyset column. Must be unique and stable across the release — the drain resumes
-      # strictly after the last value it saw, and a non-unique one silently skips rows.
-      order_by: REACTION_ID
-      # Pistachio records reactions it could not fully resolve; a row with no product is not a
-      # precedent. Inserted literally, so it is as trusted as this file.
-      where: "PRODUCT_SMILES IS NOT NULL"
+      relation: v_reaction
+      key: reaction_id
+      order_by: reaction_id
+      # A row with no product is not a precedent. Inserted literally, so it is as trusted as this
+      # file — the same trade `EntryBinding.where` makes.
+      where: "product_smiles IS NOT NULL"
       fetch_limit: 2000
 
-      smiles: {path: root.REACTION_SMILES}
-      citation: {path: root.PATENT_NUMBER, fallback: {path: root.DOCUMENT_ID}}
-      published_on: {path: root.PUBLICATION_DATE, transform: [{iso_date: {}}]}
-      temperature_c: {path: root.TEMPERATURE_C, transform: [{number: {}}]}
-      time_h: {path: root.TIME_H, transform: [{number: {}}]}
+      smiles: {path: root.reaction_smiles}
+      citation: {path: root.patent_number, fallback: {path: root.document_id}}
+      published_on: {path: root.publication_date, transform: [{iso_date: {}}]}
+      temperature_c: {path: root.temperature_c, transform: [{number: {}}]}
+      time_h: {path: root.time_h, transform: [{number: {}}]}
       yield_percent:
-        path: root.YIELD_PCT
+        path: root.yield_pct
         transform: [{number: {}}, {clamp: {min: 0, max: 100}}]
-      workup_text: {path: root.WORKUP_TEXT}
+      workup_text: {path: root.workup_text}
 
       # The labels the corpus carries. `make datasource-validate` checks these against the
       # `labels: provides:` block above, so a source cannot claim a name it has no column for.
-      named_reaction: {path: root.NAMERXN_NAME}
-      reaction_class: {path: root.NAMERXN_CLASS}
-      rxno_id: {path: root.RXNO_ID}
-      mapped_smiles: {path: root.MAPPED_REACTION_SMILES}
+      named_reaction: {path: root.namerxn_name}
+      reaction_class: {path: root.namerxn_class}
+      rxno_id: {path: root.rxno_id}
+      mapped_smiles: {path: root.mapped_reaction_smiles}

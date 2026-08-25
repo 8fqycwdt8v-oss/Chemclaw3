@@ -25,32 +25,74 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.core.config import settings
     from chemclaw.core.errors import ChemclawError
     from chemclaw.durable.registry import durable_activity, durable_workflow
+    from chemclaw.ingest.eln.warehouse.binding import CorpusBinding, load_binding
+    from chemclaw.ingest.eln.warehouse.connect import open_warehouse
+    from chemclaw.ingest.eln.warehouse.driver import Warehouse
     from chemclaw.ingest.labels.corpus import CorpusReport, drain_corpus
-    from chemclaw.ingest.labels.retriever import WarehouseCorpusRetriever
-    from chemclaw.ingest.sources.registry import active_retrieve_sources
+    from chemclaw.ingest.sources.registry import active_manifests
     from chemclaw.science.labels.molecules import CorpusMolecules
     from chemclaw.science.labels.store import default_label_index
 
+import logging
+
 from chemclaw.durable.heartbeat import beating
 from chemclaw.durable.publish import BAD_DATA_RETRY
+
+logger = logging.getLogger(__name__)
 
 # Module-level indirections so tests swap the production stores for in-memory ones.
 _label_index = default_label_index
 _corpus_molecules = CorpusMolecules
 
 
-def corpus_sources() -> dict[str, WarehouseCorpusRetriever]:
-    """Every active retrieve source that carries a drainable reaction corpus, by name.
+def corpus_sources() -> dict[str, CorpusBinding]:
+    """Every active source whose warehouse binding declares a drainable reaction corpus, by name.
 
     Also what `durable/schedules.py` asks to decide whether this job earns a Schedule at all — the
     `share_sources()` twin, and asked of the manifests rather than of a `*_enabled` setting for the
     reason that file records three times over.
+
+    **Read off the manifest rather than off the built retrieve half**, which is the shape
+    `share_sources()` uses and is deliberately *not* what this did first. A corpus and a vector
+    index are two seams onto one table — Pistachio carries both — and a source declares exactly one
+    `retrieve:` callable, so "which sources have a corpus" cannot be answered by asking what the
+    retrieve half happens to be an instance of. It is also cheaper: a manifest is YAML, and this
+    runs on every Schedule reconcile.
+
+    A malformed binding is skipped rather than raised on: `make datasource-validate --construct` is
+    where a bad binding is reported, and a worker that refuses to start because one disabled-ish
+    source has a typo would take every other drain down with it.
     """
-    return {
-        source.name: source
-        for source in active_retrieve_sources()
-        if isinstance(source, WarehouseCorpusRetriever)
-    }
+    found: dict[str, CorpusBinding] = {}
+    for manifest in active_manifests():
+        raw = manifest.config.get("binding")
+        if not isinstance(raw, dict):
+            continue
+        try:
+            corpus = load_binding(raw).corpus
+        except ValueError:
+            logger.warning(
+                "data source %s has a warehouse binding that does not load; it will not be "
+                "drained. Run `make datasource-validate --construct` for the reason.",
+                manifest.name,
+            )
+            continue
+        if corpus is not None:
+            found[manifest.name] = corpus
+    return found
+
+
+# One warehouse connection per source per worker process. `open_warehouse` builds a driver, and a
+# page is one query — reconnecting per page would pay a handshake for every thousand rows.
+_WAREHOUSES: dict[str, Warehouse] = {}
+
+
+def _warehouse_for(source: str) -> Warehouse:
+    """The open warehouse for `source`, built once per process."""
+    if source not in _WAREHOUSES:
+        manifest = next(m for m in active_manifests() if m.name == source)
+        _WAREHOUSES[source] = open_warehouse(load_binding(manifest.config["binding"]).connection)
+    return _WAREHOUSES[source]
 
 
 class CorpusSyncPlan(BaseModel):
@@ -99,14 +141,14 @@ async def plan_corpus_sync() -> CorpusSyncPlan:
 @activity.defn
 async def drain_reaction_corpus(source: str, after: str) -> CorpusReport:
     """Read one page of `source`, resuming after `after`, and record it."""
-    corpus = corpus_sources().get(source)
-    if corpus is None:  # names come from `plan_corpus_sync`, so this is a wiring bug
+    binding = corpus_sources().get(source)
+    if binding is None:  # names come from `plan_corpus_sync`, so this is a wiring bug
         raise ChemclawError(f"data source {source!r} carries no reaction corpus")
     activity.heartbeat()
     return await beating(
         drain_corpus(
-            corpus.open(),
-            corpus.corpus_binding(),
+            _warehouse_for(source),
+            binding,
             _label_index(),
             source,
             molecules=_corpus_molecules(),

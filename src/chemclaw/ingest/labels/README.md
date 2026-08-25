@@ -14,3 +14,12 @@ here. `chemclaw.ingest.documents` is split on the same line.
 | --- | --- |
 | `record.py` | builds the record phase of a label row from an `OrdReaction` — the form with agents **kept**, and why |
 | `labeller.py` | the MCP client for `Chemclaw3-mcp:servers/rxnlabel` — and why it never derives the version |
+| `merge.py` | the fill-what-is-missing rule: `provides` is never a skip |
+| `enrich.py` | one bounded drain pass, and why a batch failure retries reaction by reaction |
+| `corpus.py` | one keyset page of a bulk reaction corpus into the record phase |
+
+There is deliberately no retriever here. A corpus source's `retrieve:` half is
+`ingest.eln.warehouse.retriever:WarehouseVectorRetriever` — an embedding search over the same
+table — and the corpus drain finds its binding through the manifest rather than through that
+object, because a source declares exactly one retrieve callable and the two seams answer different
+questions.

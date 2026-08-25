@@ -66,7 +66,7 @@ BEGIN
         'GRANT INSERT, UPDATE ON '
         'calculation_results, calculation_artifacts, job_records, '
         'bo_campaigns, measurements, predictions, note_proposals, observations, '
-        'plan_approvals, note_index, sync_cursors, turn_costs, '
+        'plan_approvals, sync_cursors, turn_costs, '
         'molecule_fingerprints, reaction_fingerprints, reaction_labels, corpus_molecules, '
         'tool_result_links TO %I', app_role);
     -- `tool_result_links` joins that list and `tool_result_blobs` the full-DML one below, even
@@ -101,15 +101,22 @@ BEGIN
     -- claim is released, a subscription is removed, a preference is unset. The two document tables
     -- join them because the share index is derived from a filesystem it does not own: a file
     -- deleted from the share has to leave the index, or a chemist keeps being cited a document
-    -- nobody can open. `reaction_species` joins them for the same reason one level down: an
-    -- amended entry that removed a charge leaves a higher ordinal behind, and without the DELETE
-    -- the label index keeps answering "this reaction used TEA" from a species the current record
-    -- no longer has. `reaction_labels` itself stays in the INSERT/UPDATE group above — a reaction
-    -- is never unrecorded, only re-recorded.
+    -- nobody can open.
+    --
+    -- `note_index` joins them on that same argument, and moved here from the insert/update list
+    -- above when `reindex_notes` gained a prune (D-2026-08-25). It is derived from the Git note
+    -- tree exactly as the document tables are derived from the share, and until then a note deleted
+    -- from the tree left its row — and, once the dense half can live in an external store, its
+    -- vector — behind forever.
+    --
+    -- `reaction_species` joins them one level down: an amended entry that removed a charge leaves a
+    -- higher ordinal behind, and without the DELETE the label index keeps answering "this reaction
+    -- used TEA" from a species the current record no longer has. `reaction_labels` itself stays in
+    -- the insert/update group above — a reaction is never unrecorded, only re-recorded.
     EXECUTE format(
         'GRANT INSERT, UPDATE, DELETE ON '
         'session_messages, session_events, session_turns, subscriptions, user_preferences, '
-        'artifact_blobs, document_files, document_chunks, tool_result_blobs, '
+        'artifact_blobs, document_files, document_chunks, note_index, tool_result_blobs, '
         'reaction_species TO %I', app_role);
 
     -- The tables LangGraph creates for itself, which no migration in `infra/sql` declares and which
