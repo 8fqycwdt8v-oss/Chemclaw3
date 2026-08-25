@@ -34,9 +34,14 @@ is unaffected by it. What was run and what it said:
   report and the eleven new rows name tools, config keys, paths and ADR ids by hand.
 - `make up` + `make db-migrate` — run first, so the eval and the import-time measurements ran
   against a real Postgres rather than the skip path `CLAUDE.md` warns about.
-- `make test` was started with Postgres up and had not returned when this was written. It gates no
-  part of this change (no Python moved), and saying it passed without having seen it is exactly the
-  claim this repository deletes code for.
+- `make test` with Postgres up: **4,251 passed, 3 skipped, 3 failed**, 21m23s. None of the three is
+  this change (no Python moved) and none is a defect in the tree. Two are
+  `tests/test_prompt_caching.py` guarding on `"API-KEY" in os.environ` while this environment's value
+  is *present and rejected* — they ran instead of skipping and died on the same 401 that blocked the
+  live measurement. The third, `test_reizman.py::test_bo_campaign_finds_high_yield`, hit the 180 s
+  timeout under four concurrent pytest processes and **passes in 49 s in isolation**. The
+  present-and-stale guard is filed as a row; the timeout is recorded beside it so nobody hunts a
+  BoFire regression.
 
 Failed approach, recorded so it is not retried: driving `build_langgraph_agent()` in-process against
 the live API to measure real turn economics. The credential this environment carries is rejected;

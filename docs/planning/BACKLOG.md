@@ -410,6 +410,26 @@ topic).
       require it whenever `worker` is set.
 
 
+- [ ] **Two tests guard on a credential being *present*, not on it working, and a stale one turns a
+      skip into a red suite** — [S]. `tests/test_prompt_caching.py:304` is
+      `@pytest.mark.skipif("API-KEY" not in os.environ, ...)` and
+      `test_which_shipped_profiles_clear_the_cache_floor` reads `os.environ["API-KEY"]` directly.
+      Measured on a Claude Code Remote box for this repo on 2026-08-25: the variable is set, the
+      value is rejected — `anthropic.AuthenticationError: 401 ... 'API key is invalid.'` — so both
+      tests **ran and failed** where the intent was plainly to skip, and `make test` came back
+      `3 failed, 4251 passed, 3 skipped` on an unmodified tree. `CLAUDE.md` already warns that the
+      credential "may not exist in every environment"; what it does not cover is the worse case,
+      present-and-stale, which reads as a defect in prompt caching rather than as an absent
+      credential. Guard on reachability (a `count_tokens` probe, which is unbilled and is what the
+      second test already uses) and skip with the reason, rather than on the key being non-empty.
+
+      Beside it, and *not* a defect worth a row of its own: `tests/test_reizman.py::test_bo_campaign_finds_high_yield`
+      also failed in that run, on the 180 s `pytest-timeout`, and **passes in 49 s in isolation** —
+      it was competing with four other pytest processes. Recorded here so the next person to see it
+      red under load does not go looking for a BoFire regression.
+
+---
+
 ## 5 — Where the field moved past us
 
 Filed by the 2026-08-25 field benchmark — see
