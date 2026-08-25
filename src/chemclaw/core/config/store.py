@@ -159,6 +159,19 @@ class StoreSettings(BaseSettings):
     # provider, which is why it is validated against the provider rather than given a default that
     # would be wrong everywhere.
     vector_store_endpoint_name: str = ""
+    # The collection the knowledge graph's note vectors live in, the twin of the document one above.
+    # Named rather than derived for the same reason: a cluster is often shared, and "which
+    # collection is ours" is a deployment fact. Both corpora follow one `vector_store_provider` —
+    # there is deliberately no way to keep notes in Postgres while documents are elsewhere, because
+    # a per-corpus provider would be two selections to keep consistent and no deployment has asked.
+    vector_store_note_collection: str = "chemclaw_note_index"
+    # How many eligible keys a filtered search over an index-ranked warehouse source may send as its
+    # scope. Eligibility has to reach the index *before* its top-k or a narrow filter over a wide
+    # corpus returns nothing, so it travels as a set of keys — and a set is a set: a broad filter
+    # over ten million reactions would build a filter payload no client will carry. Exceeding this
+    # is refused with the filter named, rather than truncated, because a silently truncated
+    # eligibility set is a wrong answer that reads as a thin corpus.
+    vector_store_max_scope_keys: int = Field(default=10_000, gt=0)
 
     @model_validator(mode="after")
     def _external_vector_store_is_addressable(self) -> "StoreSettings":

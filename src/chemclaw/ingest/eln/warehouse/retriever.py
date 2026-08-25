@@ -41,6 +41,7 @@ from chemclaw.ingest.eln.warehouse.driver import Warehouse, WarehouseQueryError
 from chemclaw.ingest.eln.warehouse.expr import as_text
 from chemclaw.kg.note import note_id_for_reaction, note_relative_path
 from chemclaw.retrieval.evidence import EvidenceChunk
+from chemclaw.retrieval.vectors.base import VectorStore
 
 logger = logging.getLogger(__name__)
 
@@ -71,12 +72,30 @@ class WarehouseVectorRetriever:
         self._vector: VectorBinding = self._binding.vector
         self.name = name
         self._warehouse: Warehouse | None = None
+        # Only ever used by an index-ranked source, and resolved lazily: the data-source registry
+        # builds retrieve halves in the chat pod at startup, and a store that dialled out from a
+        # constructor would make an unreachable index a failure to *boot* rather than to search.
+        #
+        # **Deliberately not a constructor argument**, though that would be the obvious way to
+        # inject one in a test. The registry splats a manifest's whole `config:` block into this
+        # signature, so every parameter here is something a manifest can set — and `store:` is not
+        # a thing a manifest may say. `tests/test_warehouse_binding.py` pins the signature for
+        # exactly this reason; a test that needs a fake assigns the attribute.
+        self._store: VectorStore | None = None
 
     def _connection(self) -> Warehouse:
         """The warehouse, opened on first use and reused for the life of the process."""
         if self._warehouse is None:
             self._warehouse = open_warehouse(self._binding.connection)
         return self._warehouse
+
+    def _index_store(self) -> "VectorStore":
+        """The vector store an index-ranked source ranks in, resolved on first use."""
+        if self._store is None:
+            from chemclaw.retrieval.vectors.registry import default_vector_store
+
+            self._store = default_vector_store()
+        return self._store
 
     async def retrieve(self, query: str, filters: dict[str, Any]) -> list[EvidenceChunk]:
         """Return the warehouse's nearest reactions to `query`, best first.
@@ -131,6 +150,8 @@ class WarehouseVectorRetriever:
 
     async def _search(self, query: str, filters: dict[str, Any]) -> list[dict[str, Any]]:
         """Run the ranked search, embedding here or in the warehouse as the binding says."""
+        if self._vector.index:
+            return await self._search_index(query, filters)
         warehouse = self._connection()
         # Offloaded, not called inline: under the `openai_compatible` provider `embed_texts` reaches
         # the LLM endpoint over a blocking client, and this runs on the one event loop serving every
@@ -165,6 +186,75 @@ class WarehouseVectorRetriever:
         async with warehouse.cursor() as cursor:
             await cursor.execute(statement, params)
             return await cursor.fetchall()
+
+    async def _search_index(self, query: str, filters: dict[str, Any]) -> list[dict[str, Any]]:
+        """Rank in a vector index, then resolve the winning keys to content in the warehouse.
+
+        The same division of labour `ingest/documents/external_index.py` makes, with the warehouse
+        standing in for Postgres as the catalogue: the store answers *which and how similar*, and
+        the system that owns the text answers *what does it say*. It exists because the in-warehouse
+        path evaluates a similarity function per row — right for an ELN, and a full scan of the
+        corpus for anything at patent scale.
+
+        Rows come back shaped exactly as the scanned path's do, score column included, so
+        `_chunks` cannot tell which path produced them.
+        """
+        embedding = (await asyncio.to_thread(embed_texts, [query]))[0]
+        groups = await self._eligible_keys(filters)
+        if groups is not None and not groups:
+            return []
+        matches = await self._index_store().search(
+            self._vector.index, embedding, settings.retrieval_top_k, groups
+        )
+        if not matches:
+            return []
+        scores = {match.id: match.score for match in matches}
+        warehouse = self._connection()
+        statement, params = sql.resolve_statement(self._vector, warehouse.placeholder, list(scores))
+        async with warehouse.cursor() as cursor:
+            await cursor.execute(statement, params)
+            resolved = await cursor.fetchall()
+        by_key = {str(row.get(self._vector.key, "")): row for row in resolved}
+        # The store's order is the ranking; the resolve query has none. Rebuilt from `matches`
+        # rather than sorted by score, because two identical scores would otherwise reorder
+        # arbitrarily between calls. A key the relation no longer holds is simply dropped.
+        rows: list[dict[str, Any]] = []
+        for match in matches:
+            row = by_key.get(match.id)
+            if row is None:
+                continue
+            rows.append({**row, sql.SCORE_COLUMN: match.score})
+        return rows
+
+    async def _eligible_keys(self, filters: dict[str, Any]) -> set[str] | None:
+        """The keys a filtered search may match, or `None` for an unrestricted one.
+
+        `None` and the empty set are different statements and both are load-bearing: `None` means
+        the whole index and must cost no extra query, while an empty set means nothing is eligible
+        and must never be sent as an unfiltered search.
+
+        Computed here rather than applied to the results because eligibility has to reach the index
+        *before* its top-k. Filter afterwards and a narrow tag over a wide corpus returns nothing at
+        all, since the k nearest vectors all belonged to something else.
+        """
+        if not any(key in filters for key in self._vector.filter_columns):
+            return None
+        cap = settings.vector_store_max_scope_keys
+        warehouse = self._connection()
+        statement, params = sql.scope_statement(self._vector, warehouse.placeholder, filters, cap)
+        async with warehouse.cursor() as cursor:
+            await cursor.execute(statement, params)
+            rows = await cursor.fetchall()
+        if len(rows) > cap:
+            # Refused rather than truncated: a silently cut eligibility set is a wrong answer that
+            # reads as a thin corpus, and the operator's lever (a narrower filter, or a higher cap)
+            # only exists if they are told.
+            raise WarehouseQueryError(
+                f"{self.name}: the filter matches more than {cap} rows, which is more eligibility "
+                "than an index filter can carry. Narrow the query's filters, or raise "
+                "CHEMCLAW_VECTOR_STORE_MAX_SCOPE_KEYS if the index can take it"
+            )
+        return {str(row[self._vector.key]) for row in rows if row.get(self._vector.key)}
 
     def _chunks(self, rows: list[dict[str, Any]]) -> list[EvidenceChunk]:
         """Turn ranked rows into evidence, dropping the ones that already became notes."""

@@ -246,11 +246,17 @@ class Settings(
         writes_note_index = self.note_reindex_enabled or bool(
             NOTE_INDEX_SOURCES & set(self.data_source_list)
         )
-        if writes_note_index and self.embedding_dim != SCHEMA_VECTOR_DIM:
+        # Inert wherever the note vectors do not live in that column, exactly as
+        # `require_schema_vector_width()` is for the document one: an external store's deployment
+        # may legitimately run a 768-wide model, and refusing it over a column nothing writes would
+        # be this check inventing a constraint instead of reporting one.
+        pgvector_notes = self.vector_store_provider == "pgvector"
+        if writes_note_index and pgvector_notes and self.embedding_dim != SCHEMA_VECTOR_DIM:
             raise ValueError(
                 f"embedding_dim={self.embedding_dim} disagrees with the note_index vector column "
                 f"({SCHEMA_VECTOR_DIM}, infra/sql/012_note_index.sql); pgvector would reject "
-                "every write. Change both together, or drop 'vector' from data_sources."
+                "every write. Change both together, drop 'vector' from data_sources, or move the "
+                "vectors out of Postgres with vector_store_provider."
             )
         return self
 

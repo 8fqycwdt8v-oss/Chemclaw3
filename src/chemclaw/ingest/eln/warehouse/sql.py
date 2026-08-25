@@ -159,6 +159,56 @@ def vector_statement(
     return sql, params
 
 
+def scope_statement(
+    vector: VectorBinding, placeholder: str, filters: dict[str, Any], limit: int
+) -> tuple[str, list[Any]]:
+    """The keys eligible under `filters`, for an index-ranked source.
+
+    An index ranks the whole corpus; the caller's filters have to reach it *before* the top-k or a
+    narrow tag over a wide relation returns nothing at all — the k nearest vectors would all belong
+    to something else. `VectorStore.search` takes eligibility as a set of ids, so it is computed
+    here, in the one system that can evaluate a predicate over the site's own columns.
+
+    `LIMIT` is bound and one over the caller's cap, so a scope too broad to send is *detected*
+    rather than truncated: a silently truncated eligibility set is a wrong answer that looks like a
+    thin corpus. The residual this bounds is the one `retrieval/vectors/README.md` states — a scope
+    is a set, and a broad filter over a very large corpus builds a big one.
+    """
+    predicates, params = _vector_predicates(vector, placeholder, filters)
+    where = f" WHERE {' AND '.join(predicates)}" if predicates else ""
+    sql = (
+        f"SELECT {vector.key} "  # identifier checked by `binding._check_identifier`
+        f"FROM {vector.relation}{where} "
+        f"LIMIT {placeholder}"
+    )
+    return sql, [*params, limit + 1]
+
+
+def resolve_statement(
+    vector: VectorBinding, placeholder: str, keys: Sequence[str]
+) -> tuple[str, list[Any]]:
+    """The content columns for the keys an index returned — the catalogue half of a split search.
+
+    The counterpart of `ExternalVectorDocumentIndex._resolve`, with the warehouse standing in for
+    Postgres: the store answers "which, and how similar", and the system that owns the text answers
+    "what does it say". One query for the whole batch, as `related_statement` does and for the same
+    reason — a warehouse charges per round trip.
+
+    No `ORDER BY`: the ranking is the store's and the caller re-imposes it. Ordering by the key here
+    would look tidy and would silently discard the ranking.
+    """
+    if not keys:
+        raise BindingError("resolve_statement needs at least one key")
+    markers = ", ".join(placeholder for _ in keys)
+    columns = ", ".join([vector.key, *vector.content_columns])
+    sql = (
+        f"SELECT {columns} "  # identifier checked by `binding._check_identifier`
+        f"FROM {vector.relation} "
+        f"WHERE {vector.key} IN ({markers})"
+    )
+    return sql, list(keys)
+
+
 def _vector_predicates(
     vector: VectorBinding, placeholder: str, filters: dict[str, Any]
 ) -> tuple[list[str], list[Any]]:

@@ -52,6 +52,12 @@ to measure against, and no `ts_rank`. `ingest/documents/external_index.py` is th
 it is a *subclass* of the Postgres index precisely because five of the ten `DocumentIndex` methods
 are unchanged.
 
+**Two corpora use it, and both keep their catalogue in Postgres.**
+`ingest/documents/external_index.py` is the document composition and
+`retrieval/external_note_index.py` the note one (D-2026-08-25, which supersedes D-2026-08-08's
+decision to leave `note_index` on pgvector). One `vector_store_provider` moves both; there is
+deliberately no per-corpus selection.
+
 **The pgvector default is not routed through this seam at all.** Its search is one statement that
 ranks, filters and resolves the citation together, and splitting that to buy an abstraction it does
 not use would make the common deployment slower. `pgvector` is therefore not a `VectorStore`

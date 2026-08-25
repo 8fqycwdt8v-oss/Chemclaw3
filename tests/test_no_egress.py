@@ -129,6 +129,17 @@ def test_the_source_registry_offers_no_external_source() -> None:
         # different manifests naming different drivers — the seam working as designed (D-120), and
         # the second warehouse D-2026-08-04 built it for.
         "eln-databricks",
+        # The one third-party *corpus* in this list, and the only row here that needs an argument
+        # rather than a restatement of an existing one. D-089's subject is a runtime dependency on
+        # somebody else's service — a corpus fetched from a vendor at question time, whose
+        # availability, licensing and content sit outside the deployment. Pistachio here is not
+        # that: it is the site's own licensed copy, loaded into the site's own lakehouse by the
+        # site, reached with the same credential and through the same peer as `eln-databricks`, and
+        # adding no egress destination that connector does not already have. It is also
+        # retrieve-only with no ingest half at all, so a patent reaction is cited as precedent and
+        # never becomes a knowledge-graph note. Argued in full in
+        # `docs/decisions/D-2026-08-25-a-lakehouse-arrives-on-two-seams-not-one.md`.
+        "pistachio",
         # A mounted SMB/CIFS file share, and *not* an escalation of D-089 at all: it reaches no
         # host. The share is a read-only volume the platform mounts, so the code sees a POSIX path
         # exactly as `eln-json` sees a drop directory — no client, no credential in this repository,
