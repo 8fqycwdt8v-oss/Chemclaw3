@@ -544,16 +544,6 @@ only holds defects can only ever restore the system to what it already intended 
       list, so a destination with no matching port still drops), and the token obligation in the
       comment `chem` already models.
 
-- [ ] **`make type` is red on `main`, and has been for longer than anyone noticed** — [S]. Two
-      errors, neither introduced by recent work — confirmed by stashing a branch and re-running:
-      `tests/test_bo_campaign_record.py:498` returns `Any` from a function declared
-      `dict[str, Any]`, and `tests/test_step_handoff.py:376` reads `.arguments` off a
-      `ToolStep | JobStep | AgentStep` union where `AgentStep` has no such attribute. Both are in
-      *tests*, which is why the suite passes and the gate does not. `make check` is documented as
-      "what CI runs" and a gate that is red at rest is a gate nobody can use to tell their own
-      breakage from the standing one — which is how the second of these survived to be found by a
-      change that had nothing to do with it.
-
 - [ ] **This environment's `API-KEY` is present and rejected, which blocks three rows** — [S], and
       it is operational rather than code. Measured 2026-08-25: `anthropic.AuthenticationError: 401`
       from `api.anthropic.com`, with and without the session's `ANTHROPIC_BASE_URL` cleared.
