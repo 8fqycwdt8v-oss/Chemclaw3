@@ -16,16 +16,28 @@ import asyncio
 import json
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
+import frontmatter
 import pytest
 
 from chemclaw.ingest.eln.adapter import RawEntry
 from chemclaw.ingest.eln.json_adapter import JsonExportAdapter
 from chemclaw.ingest.eln.note import note_from_ord_reaction
-from chemclaw.ingest.eln.ord import Component, OrdReaction, ReactionStep, Role, StepKind
+from chemclaw.ingest.eln.ord import (
+    Component,
+    Impurity,
+    OrdReaction,
+    OutcomeClass,
+    ReactionStep,
+    Role,
+    StepKind,
+)
 from chemclaw.ingest.eln.ord_adapter import OrdFormatError, OrdJsonAdapter
 from chemclaw.ingest.eln.sync import sync_entries
 from chemclaw.ingest.eln.validate import validate_ord
+from chemclaw.kg.note import Note, ProcessConditions
+from chemclaw.kg.render import render_note
 from chemclaw.science.fingerprints.store import InMemoryFingerprintStore
 from chemclaw.science.labels.store import InMemoryLabelIndex
 from tests.conftest import FakeSubmitter
@@ -370,3 +382,155 @@ def test_ord_recipe_flows_through_sync() -> None:
         assert "## Procedure" in sub.submissions[0].files[0].content  # recipe reached the note
 
     asyncio.run(_run())
+
+
+def _warehouse_shaped(procedure: str) -> OrdReaction:
+    """A reaction as a warehouse binding produces one: prose recorded, `steps` never mapped.
+
+    `chemclaw.ingest.eln.warehouse.binding` excludes `steps` from `_MAPPABLE_FIELDS`
+    deliberately, so this is the real shape of every Snowflake-ingested reaction rather than a
+    contrived one.
+    """
+    return OrdReaction(
+        reaction_id="WH-1",
+        inputs=[Component(smiles="c1ccccc1Br", role=Role.REACTANT)],
+        outcomes=[Component(smiles="c1ccccc1-c1ccccc1", role=Role.PRODUCT)],
+        provenance="snowflake:eln",
+        procedure_text=procedure,
+    )
+
+
+def test_a_recorded_procedure_reaches_the_note_when_the_source_maps_no_steps() -> None:
+    """The warehouse path's protocol must survive to the graph, not stop at the schema.
+
+    Before this, `_procedure_block` returned `""` whenever `steps` was empty and nothing else read
+    `procedure_text`, so a Snowflake-ingested reaction reached `expand_note` with no recipe at all —
+    measured at the time: 251 characters of procedure in, a 63-character body out.
+    """
+    procedure = (
+        "Charge the aryl bromide (1.0 equiv) and boronic acid (1.2 equiv). Add Pd(dppf)Cl2 "
+        "(2 mol%). Degas, heat to 90 C for 12 h. Filter through Celite, recrystallise."
+    )
+    body = note_from_ord_reaction(_warehouse_shaped(procedure)).body
+    assert "## Procedure" in body
+    assert "Filter through Celite" in body
+
+
+def test_a_note_carries_no_procedure_section_when_the_source_recorded_none() -> None:
+    """Absent stays absent — the branch above must not invent an empty heading."""
+    reaction = _warehouse_shaped("")
+    assert reaction.procedure_text is None or not reaction.procedure_text
+    assert "## Procedure" not in note_from_ord_reaction(reaction).body
+
+
+def test_segmented_steps_do_not_also_render_the_prose_they_were_cut_from() -> None:
+    """`json_adapter`'s steps *are* the prose recut, so rendering both would duplicate the recipe.
+
+    Measured on the shipped export: 0.992 similarity between the joined steps and the prose, and
+    every step's text verbatim inside it.
+    """
+    payload = json.loads(Path("data/eln-exports/eln-2026-002.json").read_text())
+    raw = RawEntry(entry_id="e1", created_at=datetime.now(UTC), payload=payload)
+    body = note_from_ord_reaction(JsonExportAdapter().map_to_ord(raw)).body
+    assert "## Procedure" in body
+    assert "### Procedure as recorded" not in body
+
+
+def test_derived_steps_do_not_swallow_the_chemists_own_account() -> None:
+    """`ord_adapter` derives steps from structured fields; the prose is a *different*, richer text.
+
+    Measured on the shipped export: 0.555 similarity, the steps reading `Add CCO` where the prose
+    reads "a catalytic amount of sulfuric acid over 30 min". Rendering steps alone would drop that
+    sentence — the same loss this module's warehouse test covers, one source over.
+    """
+    payload = json.loads(_ORD_EXAMPLE.read_text())
+    raw = RawEntry(entry_id="e1", created_at=datetime.now(UTC), payload=payload)
+    reaction = OrdJsonAdapter().map_to_ord(raw)
+    body = note_from_ord_reaction(reaction).body
+    assert reaction.steps, "the fixture must exercise the both-present branch"
+    assert "### Procedure as recorded" in body
+    assert "catalytic amount of sulfuric acid" in body
+
+
+def test_the_numbers_a_chemist_compares_reach_the_note_as_numbers() -> None:
+    """The setpoints and outcomes must survive ingestion as data, not only as sentences.
+
+    `OrdReaction` is never persisted — it exists transiently inside `read_corpus`, which re-reads
+    the whole ELN from the beginning of time, on a worker the chat pod does not import from. So
+    without this, anything comparing runs at turn time had to re-derive these numbers from the prose
+    the ingest had just finished rendering them into.
+    """
+    reaction = OrdReaction(
+        reaction_id="R1",
+        inputs=[Component(smiles="c1ccccc1Br", role=Role.REACTANT)],
+        outcomes=[Component(smiles="c1ccccc1-c1ccccc1", role=Role.PRODUCT)],
+        provenance="snowflake:eln",
+        temperature_c=90.0,
+        time_h=12.0,
+        yield_percent=78.0,
+        purity_percent=99.1,
+        impurities=[
+            Impurity(name="des-bromo", area_percent=0.7),
+            Impurity(name="homocoupling", area_percent=0.2),
+        ],
+    )
+    conditions = note_from_ord_reaction(reaction).conditions
+    assert conditions is not None
+    assert (conditions.temperature_c, conditions.time_h) == (90.0, 12.0)
+    assert (conditions.yield_percent, conditions.purity_percent) == (78.0, 99.1)
+    # Ranked by area%, which is the number process development actually chases.
+    assert conditions.major_impurity == "des-bromo"
+    assert conditions.impurity_area_percent == 0.7
+
+
+def test_a_note_about_no_recorded_run_carries_no_conditions_block() -> None:
+    """`conditions: {}` would claim the question was asked and answered emptily."""
+    reaction = OrdReaction(
+        reaction_id="R2",
+        inputs=[Component(smiles="CC", role=Role.REACTANT)],
+        outcomes=[Component(smiles="CCO", role=Role.PRODUCT)],
+        provenance="x",
+    )
+    assert note_from_ord_reaction(reaction).conditions is None
+
+
+def test_a_successful_run_does_not_assert_its_own_success() -> None:
+    """`outcome_class` defaults to success on every source that does not report one.
+
+    Writing it unconditionally would turn "the ELN did not say" into a claim that the run worked —
+    and a failure that reads as an ordinary run is the one row in a comparison nobody may misread.
+    """
+
+    def _run(**extra: Any) -> ProcessConditions:
+        reaction = OrdReaction(
+            reaction_id="R3",
+            inputs=[Component(smiles="CC", role=Role.REACTANT)],
+            outcomes=[Component(smiles="CCO", role=Role.PRODUCT)],
+            provenance="x",
+            yield_percent=12.0,
+            **extra,
+        )
+        conditions = note_from_ord_reaction(reaction).conditions
+        assert conditions is not None
+        return conditions
+
+    assert _run().outcome is None
+    failed = _run(outcome_class=OutcomeClass.FAILURE, failure_reason="decomposed on scale")
+    assert failed.outcome == "failure"
+
+
+def test_the_conditions_block_round_trips_through_the_file_form() -> None:
+    """Frontmatter that does not survive `render_note` -> `read_note` is frontmatter nobody has."""
+    reaction = OrdReaction(
+        reaction_id="R4",
+        inputs=[Component(smiles="CC", role=Role.REACTANT)],
+        outcomes=[Component(smiles="CCO", role=Role.PRODUCT)],
+        provenance="x",
+        temperature_c=-78.0,
+        time_h=0.5,
+        yield_percent=61.5,
+    )
+    note = note_from_ord_reaction(reaction)
+    post = frontmatter.loads(render_note(note))
+    parsed = Note(body=post.content, **{k: v for k, v in post.metadata.items() if k != "body"})
+    assert parsed.conditions == note.conditions

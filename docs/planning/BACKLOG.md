@@ -147,6 +147,20 @@ topic).
 
 ## 2 — Answers that are wrong without saying so
 
+- [ ] **`changes_between` diffs against *absent* and can report a change nobody made** — [S].
+      `memory/progression.py::number_change` and `_species_change` treat a missing value as a value:
+      a run recording no temperature beside one that does yields `temperature 90 °C → —`, which
+      renders in `optimization_campaign_note`'s "Changed vs previous" column as a change. That
+      function's own docstring identifies the hazard and excludes equivalents and loadings for it —
+      it just does not apply the same rule to the two setpoints and the species sets it *does* diff.
+      Bounded in practice, which is why this is [S] and not larger: a campaign's members are all
+      `OrdReaction`s from one DRFP cluster, so both sides usually record the same fields.
+      **The turn-time condenser hit the unbounded version of this** and fixed it in `_changes`
+      (`agent/condense.py`) rather than in the shared helper, because changing the helper alters
+      merged campaign-note output and `tests/test_optimization.py`. Closing this means moving the
+      "both sides recorded it" rule into `progression` and accepting that diff — one rule instead of
+      two, which is the right end state.
+
 - [ ] **A solvate collapses onto whichever fragment is larger** — [M], and worse than filed: it is
       not only the cache key, it is the **knowledge-graph note id**. Measured,
       `standard_smiles("CCN.C1CCOC1")` returns THF, and `compound_id("CCN.C1CCOC1")` equals
@@ -300,6 +314,23 @@ it happens.
       `_the_job_ceiling_covers_the_poll_it_bounds` untouched.
 
 ## 4 — Operating it
+
+- [ ] **`read_corpus` re-reads the entire ELN from `datetime.min` on every call** — [M].
+      `durable/memory_jobs.py:63` calls `fetch_new_entries(datetime.min)` on every ingest half, so
+      each of the three memory jobs (`build_campaign_notes_activity`,
+      `build_playbook_notes_activity`, `build_optimization_notes_activity`) walks the whole record
+      from the beginning of time, and `all_reactions()` is called once per activity. On the two
+      file-drop exports this costs nothing; against a real Snowflake ELN it is a full table scan
+      per activity per scheduled run. `ElnAdapter` (`ingest/eln/adapter.py:128`) has exactly two
+      methods and neither is a fetch-by-id, so there is no cheaper read to reach for — closing this
+      means either a fetch-by-id on the adapter protocol (every source pays) or a derived store of
+      mapped `OrdReaction`s.
+      **Found while building the protocol condenser and deliberately not fixed there**
+      (`D-2026-08-25-the-structure-is-discarded-at-the-note-boundary` records the reasoning): a
+      derived store would have answered it as a side effect, and answering a scaling problem as a
+      side effect of a retrieval change is how a store nobody decided on gets built. It is also the
+      trigger on the `DEFERRED.md` row for reagent/solvent set diffs in the turn-time comparison —
+      one change answers both.
 
 - [ ] **Postgres and Temporal are neither deployed nor owned** — [L]. The chart dials
       `chemclaw-temporal-frontend.temporal.svc:7233` and namespace `chemclaw`; there is no subchart

@@ -366,6 +366,10 @@ def test_the_shipped_refinement_template_carries_an_address_between_its_steps() 
         }
     )
     refine = next(step for step in template.steps if step.id == "refine")
+    # `steps` is a `ToolStep | JobStep | AgentStep` union and only the first two carry `arguments`.
+    # Asserted rather than cast: if this step ever becomes an agent step the test should say so
+    # here, not fail three lines down on a missing attribute.
+    assert isinstance(refine, ToolStep | JobStep)
 
     ensemble = _ensemble()
     envelope = ConnectorJobResult(
