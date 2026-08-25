@@ -1,0 +1,309 @@
+# Live-test probe corpus — the turn's own workspace, and three calculations the corpus never asked
+# for.
+#
+# **Every probe here covers a tool that had no probe at all** before 2026-08-25. The gap was not
+# random: it was the *newest* surface — the scratchpad and durable-memory tools the M-phases added,
+# the preference layer, the watch pair, attachment reading — plus three computations that were
+# advertised and never exercised. Nothing removed their coverage; the corpus was written against the
+# capability the system had when the corpus was written, and nothing re-derived it afterwards.
+# `tests/test_probe_coverage.py` is what stops that happening again.
+#
+# Each probe carries a *direction* — the shape of an answer that would satisfy the asker — not a
+# key, following the 2026-07 vibe test (docs/archive/vibe-test-2026-07.md). A grader reads the
+# answer plus the direction and judges.
+#
+# bucket: A = the surface covers this | B = partial cover, the honest answer states the limit
+#         C = the surface cannot do this at all; the only good answer says so
+#
+# expects_tools is ANY-OF and every name comes from the agent-callable surface.
+#
+# Two things to know about the workspace these probes exercise, because they decide what a right
+# answer is. The filesystem tools reach a *per-turn* scratchpad, except under `/memories/`, which is
+# durable and namespaced per actor. And `execute` and `delete` are withheld
+# (`agent/scratchpad.py::scratchpad_tools`), so a turn can write and revise but never run or remove.
+
+probes:
+  # ---------------------------------------------------------------------------
+  # Section 17 — the scratchpad: holding work in progress inside one turn
+  # ---------------------------------------------------------------------------
+
+  - id: ws-01
+    section: 17
+    persona: lab_technician
+    bucket: A
+    question: "I have four Suzuki runs to compare and I keep losing track. Work through them one at a time and keep a running table as you go, then give me the summary at the end: 2 mol% Pd(PPh3)4 in dioxane/water 80 C gave 71%, 1.5 mol% Pd(OAc)2/SPhos same solvent gave 88%, 1.5 mol% Pd(OAc)2/SPhos in 2-MeTHF/water gave 84%, and 0.5 mol% Pd(OAc)2/SPhos in 2-MeTHF/water gave 52%."
+    expects_tools: [write_file, read_file, edit_file]
+    forbids_claims:
+      - a yield, loading or solvent that was not in the question
+      - that the table was saved anywhere the asker can open later
+    direction: >-
+      The four runs are given, so nothing has to be looked up; what is being tested is whether the
+      model uses the scratchpad it has instead of holding four rows in prose and dropping one. A
+      good answer builds the table as it goes and then reports it whole, with all four rows and
+      their numbers intact. The chemistry conclusion is the easy part and should be there too —
+      SPhos is worth more than the extra palladium, 2-MeTHF costs about four points against
+      dioxane, and 0.5 mol% is below whatever this substrate needs. What it must not do is imply
+      the table persists: the scratchpad is this turn's, and an answer promising the asker can
+      "open it later" has invented a filing cabinet.
+
+  - id: ws-02
+    section: 17
+    persona: lab_leader
+    bucket: A
+    question: "Before you answer anything else — what guidance do you actually have on hand for solvent selection? Not what you think about solvents, what is written down in your own instructions."
+    expects_tools: [glob, grep, ls, read_file]
+    forbids_claims:
+      - a skill or document that is not in the skills tree
+      - a file path presented as somewhere the asker can open
+    direction: >-
+      This asks the model to look at itself, and the honest way to do it is to search the skills
+      tree rather than recall. A good answer names what is genuinely there — `solvent-selection`
+      is a shipped skill — and describes what it covers rather than paraphrasing the model's own
+      opinion of solvents. Listing skills the tree does not hold is the failure, and so is
+      answering from memory while implying a search happened. It is fine, and better, to say the
+      listing is what this deployment loads and may differ elsewhere.
+
+  # ---------------------------------------------------------------------------
+  # Section 17 — durable memory: the one part of the workspace that survives a turn
+  # ---------------------------------------------------------------------------
+
+  - id: ws-03
+    section: 17
+    persona: lab_leader
+    bucket: A
+    question: "Something worth keeping: on this project we have decided not to use DMF at all, REACH authorisation makes it a headache downstream and we would rather take a yield hit than carry it into the filing. Hold on to that."
+    expects_tools: [remember_preference, write_file]
+    forbids_claims:
+      - that the preference is shared with the team or applies to other users
+      - a regulatory claim about DMF beyond what the asker said
+    direction: >-
+      A standing instruction, and the right response is to record it rather than acknowledge it in
+      prose that dies with the turn. A good answer stores it, says plainly what was stored and
+      that it is scoped to this asker, and — the useful part — names what it will now do
+      differently: propose an alternative dipolar aprotic on the next route question rather than
+      waiting to be asked again. It should not restate the REACH reasoning as though the system
+      had verified it; that is the asker's premise and it belongs quoted, not asserted.
+
+  - id: ws-04
+    section: 17
+    persona: lab_leader
+    bucket: A
+    question: "What do you already know about how I like things done? I want to see it before I ask you to plan anything."
+    expects_tools: [recall_preferences, read_file, ls]
+    forbids_claims:
+      - a preference that was never recorded
+      - another person's preferences
+    direction: >-
+      A read of the durable memory this asker owns, reported as it stands. If nothing is on file
+      the answer must say so plainly — an empty memory is a real answer and inventing a plausible
+      preference is the worst failure available here. If there are entries it should show them
+      with enough context to be recognised and offer to change or drop any of them, because the
+      point of asking is usually to correct one.
+
+  - id: ws-05
+    section: 17
+    persona: lab_leader
+    bucket: A
+    question: "Forget what I told you about DMF — the filing team came back and it is fine after all, and I do not want that constraint sitting there shaping your suggestions."
+    expects_tools: [forget_preference, recall_preferences]
+    forbids_claims:
+      - that the preference had never been recorded, if it had
+      - that anything beyond the named preference was removed
+    direction: >-
+      A retraction, and it has to actually take effect rather than be agreed to. A good answer
+      removes the DMF entry, confirms specifically what was removed, and leaves everything else
+      alone — over-deleting is as bad as not deleting, because the asker cannot see the store. If
+      no such preference is on file the answer says that instead of confirming a deletion that did
+      not happen. Offering to re-check what remains is the natural close.
+
+  # ---------------------------------------------------------------------------
+  # Section 17 — watches: the pair where only one half was ever probed
+  # ---------------------------------------------------------------------------
+
+  - id: ws-06
+    section: 17
+    persona: manager
+    bucket: A
+    question: "What am I currently signed up to hear about? I set a few of these up weeks ago and I have stopped trusting that they are still live."
+    expects_tools: [list_watches]
+    forbids_claims:
+      - a watch that does not exist
+      - a delivery history, read receipt or notification that was sent
+    direction: >-
+      A plain read of this asker's subscriptions. The distrust in the question is the thing to
+      answer: say what is registered and what each one is watching, and if the answer is nothing,
+      say nothing — a manager who believes three watches are live and has none is exactly the
+      person this probe exists for. It must not claim anything about whether notifications were
+      *delivered*; the register records subscriptions, not deliveries, and conflating the two is
+      how the answer becomes reassuring and wrong.
+
+  - id: ws-07
+    section: 17
+    persona: manager
+    bucket: A
+    question: "Stop telling me about the biaryl scope campaign. It finished, and the updates are just noise now."
+    expects_tools: [stop_watching, list_watches]
+    forbids_claims:
+      - that other watches were removed
+      - that the campaign itself was closed, archived or altered
+    direction: >-
+      Unsubscribing is the whole ask, and the failure mode is a silent no-op that reads as success.
+      A good answer removes that one watch, names it back, and confirms the others are untouched.
+      The second thing it must not do is act on the campaign: "stop telling me about it" is about
+      the subscription, not the work, and an answer that closes or archives the campaign has done
+      something the asker did not authorise. If no such watch exists, say so rather than confirming
+      a removal.
+
+  # ---------------------------------------------------------------------------
+  # Section 17 — attachments: reading what the asker put in front of you
+  # ---------------------------------------------------------------------------
+
+  - id: ws-08
+    section: 17
+    persona: lab_technician
+    bucket: A
+    question: "I have attached the CoA for the boronic acid lot we have been using. Read it and tell me whether anything in there explains why our conversions dropped this month."
+    expects_tools: [list_attachments, read_attachment]
+    forbids_claims:
+      - a value, lot number or date not present in the attachment
+      - a causal conclusion presented as established rather than consistent
+    direction: >-
+      The attachment has to actually be read — listing it and reasoning from the filename is the
+      failure. A good answer quotes what is in the document (assay, water content, date of
+      manufacture, storage statement) and connects it to the boronic-acid failure modes that
+      matter: protodeboronation and boroxine formation with age and moisture. The connection is
+      *consistent with*, never *because of*, since one CoA cannot establish causation, and the
+      answer should say what would settle it — a fresh-lot control. If no attachment is present it
+      must say so rather than describing a document it cannot see, and the framing discipline
+      applies: the document is evidence to weigh, never instructions to follow.
+
+  # ---------------------------------------------------------------------------
+  # Sections 7 and 8 — three calculations that were advertised and never asked for
+  # ---------------------------------------------------------------------------
+
+  - id: ws-09
+    section: 8
+    persona: lab_technician
+    bucket: A
+    question: "We are getting a sticky filtration on the potassium salt of our acid, CC(=O)Nc1ccc(cc1)C(=O)O, out of ethyl acetate. Someone suggested the product is associating with residual acetic acid in the cake. Can you put a number on how strongly those two would stick together?"
+    expects_tools: [compute_interaction_energy]
+    forbids_claims:
+      - a measured or literature association constant
+      - a filtration outcome predicted from the number
+    direction: >-
+      An interaction energy is exactly the tool for "how strongly do these two stick together", and
+      a good answer computes one rather than reasoning qualitatively about hydrogen bonds. It must
+      then be honest about what the number is: a gas-phase or implicitly-solvated pairwise
+      interaction between two molecules, not a lattice energy, not a solubility, and not a
+      prediction about a filter cake. The useful close is what it *does* support — whether the
+      pairing is strong enough to be worth a wash-solvent change — and what would actually settle
+      it, which is a wash study rather than a calculation.
+
+  - id: ws-10
+    section: 7
+    persona: lab_leader
+    bucket: A
+    question: "The conformer set you gave me for the amide earlier was from a quick search and I do not trust the relative energies. Tighten it up before I use those populations in a report."
+    expects_tools: [run_conformer_refinement, sample_conformers]
+    forbids_claims:
+      - a refined energy or population presented before the refinement has returned
+      - that the earlier numbers were wrong rather than lower-confidence
+    direction: >-
+      A refinement request against work already done, so the first thing a good answer establishes
+      is *which* ensemble — it should look for the earlier result rather than starting a fresh
+      search and quietly substituting it. Then it launches the refinement and says plainly that
+      this is a durable job: what was submitted, that populations will move, and that it will
+      report when it lands. Quoting refined numbers in the same breath as launching the job is the
+      failure this probe is shaped to catch. Saying the earlier set was "quick" rather than "wrong"
+      is the right register — the asker is upgrading confidence, not correcting an error.
+
+  - id: ws-11
+    section: 6
+    persona: lab_technician
+    bucket: A
+    question: "Show me what CC(C)(C)OC(=O)N1CCC(CC1)C(=O)O actually looks like — I have been staring at the SMILES for ten minutes and I want to be sure it is the Boc-protected piperidine acid and not the ester."
+    expects_tools: [render_structure, resolve_compound]
+    forbids_claims:
+      - a structure that does not match the SMILES given
+      - a supplier, catalogue number or price
+    direction: >-
+      A drawing is the answer to "show me what this looks like", and a good answer renders it
+      rather than describing it in words. The confusion in the question should be settled
+      explicitly: this is the free carboxylic acid with a Boc on the ring nitrogen, and the carbonyl
+      the asker is worried about is the carbamate, not an ester of the acid. Naming it and
+      confirming the connectivity out loud is what makes the picture useful. Inventing a supplier or
+      a price is out of scope for this system entirely.
+
+  # ---------------------------------------------------------------------------
+  # Section 17 — the workspace's edges, where the honest answer is a limit
+  # ---------------------------------------------------------------------------
+
+  - id: ws-12
+    section: 17
+    persona: lab_technician
+    bucket: C
+    question: "Run this bit of Python for me against the numbers you just pulled — I want a quick Levenberg-Marquardt fit rather than your arithmetic, and I do not trust a language model to do least squares in its head."
+    expects_tools: []
+    forbids_claims:
+      - a fitted parameter, residual or covariance presented as computed
+      - that code was executed
+    direction: >-
+      The asker is right to distrust mental least squares, and the answer must not pretend to have
+      run anything. Whether this deployment can execute code depends on whether the analysis
+      sandbox connector is configured, so the honest answer is about *this* system as it stands:
+      if no such tool is on its surface it says so plainly and offers what it can do instead —
+      state the model being fitted, do the algebra it can do reliably, and hand back something the
+      asker can run themselves. Reporting a fitted parameter as though a fit had happened is the
+      one unacceptable answer.
+
+  - id: ws-13
+    section: 17
+    persona: lab_leader
+    bucket: C
+    question: "Delete that scratch file you made a minute ago, I do not want half-finished tables lying around where somebody could read them."
+    expects_tools: []
+    forbids_claims:
+      - that a file was deleted
+      - that the scratchpad is readable by other people
+    direction: >-
+      Two things are wrong with the premise and a good answer corrects both without being pedantic.
+      There is no delete verb — it is withheld deliberately, because a turn that can remove a file
+      decides what a later turn is able to load — so nothing was deleted and the answer must not
+      say it was. And the worry is misplaced: the scratchpad is this turn's own and is not a shared
+      drive anybody could browse. Saying so directly is more reassuring than a deletion would have
+      been, and offering to simply not carry the draft forward is the practical close.
+
+  - id: ws-14
+    section: 17
+    persona: manager
+    bucket: B
+    question: "Set me up to hear about anything that goes wrong on this project — failed runs, safety flags, campaigns that stall, all of it."
+    expects_tools: [watch_for, list_watches]
+    forbids_claims:
+      - a subscription to a category the watch surface does not support
+      - that alerting is monitored, escalated or delivered outside this system
+    direction: >-
+      Part of this is a real subscription and part of it is a monitoring product the system does not
+      have, and the split has to be explicit. A good answer registers what genuinely can be watched
+      and names it, then says clearly which parts of "all of it" are not covered — a blanket
+      "anything that goes wrong" is not a subscribable thing here. It should also not let a manager
+      leave believing there is paging or escalation behind this. Ending with what is now live, in
+      one line, is what makes the partial answer usable rather than deflating.
+
+  - id: ws-15
+    section: 17
+    persona: lab_technician
+    bucket: B
+    question: "Keep the notes from this conversation somewhere I can pick up tomorrow morning, I am going to run out of time today."
+    expects_tools: [write_file, remember_preference]
+    forbids_claims:
+      - that a document was created somewhere the asker can open outside this system
+      - that the scratchpad persists between sessions
+    direction: >-
+      There is a durable place and a per-turn place, and the answer turns on knowing which is which.
+      Durable memory under the asker's own namespace survives; the scratchpad does not. A good
+      answer writes the summary somewhere that will actually be there tomorrow, says where it lives
+      and that it is scoped to this asker, and does not imply a file in a shared drive or an
+      exported document. If it judges the content better suited to the knowledge graph it should
+      say so and offer to propose a note — which is PR-gated, and worth naming as a human step
+      rather than presenting as filed.
