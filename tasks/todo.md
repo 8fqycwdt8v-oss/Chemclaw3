@@ -133,8 +133,26 @@ capability is `Chemclaw3-mcp`'s.
    forbids and which survives only on `registry.py:124`'s first-dir-wins. That ordering *is* pinned
    (`tests/test_connector_registry.py:293`), so this is a latent-not-broken and gets its own change.
 
-**Acceptance.** `make live-up && make live-status` shows the front door and four workers up, and
-`make live-probes --suite grounded` returns transcripts under `tasks/live-test/`.
+**Acceptance — met.** `make live-up` now brings up `api`, `connectors`, `chem`, `safety`,
+`mock-llm` and all four workers; `make live-status` shows nine processes up; and
+`make live-probes --only ws-01,ws-03,ws-06` drove three of the new probes through the real front
+door — real MCP sessions, real workers, transcripts on disk, 3/3 answered, 0 silent failures, 0
+fabricated citations, median turn 4.4 s.
+
+**Two things it needed that the row did not name.** The fleet's ports are read from
+`$MCP_REPO/manifests/<name>/connector.yaml` rather than hard-coded, so a server that moves port
+there moves here without an edit — the same "one reader for one shape" rule `connector_env`
+follows. And the front door needs a *model* as well as connectors: it builds a chat client at
+startup, so with none it does not fail at the first turn, it fails to boot. Pointing the lane at
+`chemclaw.cli.mock_llm` (`CHEMCLAW_LLM_PROVIDER=openai_compatible`,
+`CHEMCLAW_LLM_BASE_URL=http://127.0.0.1:8820/v1`, `CHEMCLAW_LLM_MODEL=mock`) brings it up with no
+credential at all, which is what makes this lane runnable here.
+
+**What the mock cannot do, and it bounds what W2.1, W2.3 and W2.4 can claim.** `expected tool
+reached` came back 0/3, and that is the mock behaving as designed rather than a defect: it emits
+scripted tool calls with argument names taken from the real tools, and it does not *choose* a tool
+in response to a question. Every mechanical signal about the harness is real; nothing about the
+model's judgement is. A real credential is still what those three rows need.
 
 **Risk.** This is the row most likely to be bigger than it looks, because it is the only one whose
 blocker is another repository's runtime. Timebox to three days; if it overruns, W2.1 proceeds
@@ -171,37 +189,59 @@ not survive it. Anyone reopening that needs an ADR, not a config change.
 
 ---
 
-### W1.2 — Defer the cold tool tail · [M]
+### W1.2 — Defer the cold tool tail · [M] · **step 1 done; the measurement says do not do step 2**
 
-*Row: § 5 #1, second half. Depends on W0.2 (nothing else can say whether it worked).*
+*Row: § 5 #1, second half. The plan said step 1 is a measurement, not code. It was, and it overturned
+step 2.*
 
-**Step 1 is a measurement, not code.** Over the 232-probe corpus, rank every tool by how many probes
-name it. Today's head is `gather_evidence` 116, `find_notes` 91, `expand_note` 60; the tail is thin.
-Publish the ranking in the change. **A tool is "cold" if the corpus and the profile narrowing agree
-it is** — a tool no probe names *and* that no profile makes central. Both, not either.
+**What was measured.** Every tool in the `default` profile, ranked by how many probes name it and by
+how many of the seven profiles advertise it — the plan's own definition of cold, which required
+*both* ("a tool no probe names **and** that no profile makes central. Both, not either.").
 
-**Step 2 — the mechanism, and the decision inside it.** Three routes, in descending order of
-preference:
+```
+default-profile tool schemas: 12,536 tokens over 29 tools
+cold (no probe AND not in every profile): 0 tools, 0 tokens
+```
 
-- **(a) Profile narrowing, harder.** `_capability_tools(profile)` already attenuates. If the seven
-  shipped profiles were narrow enough, most of the 8.6 k would go away *with no new machinery and no
-  new failure mode*. Cost this first; it may be the whole answer, and it is the only route that adds
-  nothing to maintain.
-- **(b) A search tool over the cold tail.** One `find_tool(query)` returning name + schema for
-  matches, with the cold tail unadvertised. This is a real behavioural change — the model cannot
-  call what it cannot see — and it goes behind a setting, defaulting **off**, until the corpus says
-  the same probes still reach the same tools.
-- **(c) Provider-native deferred loading.** `langchain-anthropic` 1.5.6 is installed; whether it
-  surfaces the `defer_loading` beta is a question to answer, not assume. If it does not, this route
-  is a fork of the provider seam and it is the wrong trade for this repo — F0's whole point is that
-  the provider is a seam, and an internal OpenAI-compatible endpoint will never have this beta.
-  Record the finding either way; that is `tests/test_upstream_surface.py`'s job.
+**There is no cold tail.** W2.1 removed it: the fifteen tools that had no probe now have one, so the
+intersection the plan asked for is empty by construction. Route (b) — a `find_tool` search over the
+cold tail, behind a setting, defaulting off — has nothing left to defer, and building it would be
+adding a mechanism to solve a condition that no longer holds.
 
-**Acceptance.** Floor under 8 k in W0.2's test **and** every probe's `expects_tools` still satisfied
-in a live run (needs W0.4). If the second cannot be shown, the change does not ship — a cheaper
-prompt that stops finding tools is a regression with a good-looking metric.
+**Route (a) is already implemented and already working.** Profile narrowing is the lever, and the
+floors show it doing its job: `default` 18,805 tokens against `computation` 7,338, `reporting`
+5,677, `evidence` 4,690, `design` 3,707, `property-lookup` 2,208, `safety` 1,937.
+`tests/test_context_floor.py` now asserts that every narrow profile is genuinely cheaper than the
+default, so that stays true. The open question route (a) leaves is not "narrow further" but
+**whether a 29-tool `default` should be what an unprofiled turn gets at all** — a product decision
+about the front door, not a context-engineering one.
 
----
+**What the measurement did find, and it is a different row.** The cost is concentrated in prose, not
+in breadth. Three tools are 32% of the tool budget, and the widest is mostly *developer rationale*
+shipped to the model on every turn:
+
+| tool | schema | of which description | of which elaboration after the first paragraph |
+| --- | ---: | ---: | ---: |
+| `start_optimization_campaign` | 8,063 ch | 4,392 | **3,047 (38% of the schema)** |
+| `propose_knowledge_note` | 4,259 ch | 2,262 | 663 |
+| `compute_reaction_energy` | 3,569 ch | 2,522 | 0 |
+
+`science/bo/problem.py`'s nested models carry paragraphs like *"One `objectives` field rather than a
+lead objective plus a sidecar list (W3). The sidecar shape guarantees that a lone objective
+sometimes lands in the wrong one"* — an argument about why the API is shaped this way, which is
+exactly what this repository asks a docstring to contain and exactly what a model filling in
+arguments cannot use. Pydantic ships it because a class docstring becomes the schema `description`.
+
+**Why that is not being done in this pass.** Separating caller guidance from developer rationale is
+a judgment call per paragraph — some of the elaboration *is* for the caller (when to supply
+categorical descriptors genuinely changes what the model should send), and a blanket cut would
+delete guidance. The plan's own acceptance for W1.2 is the reason to wait: *"every probe's
+`expects_tools` still satisfied in a live run… if the second cannot be shown, the change does not
+ship — a cheaper prompt that stops finding tools is a regression with a good-looking metric."* The
+live lane is W0.4 and it is not up. **This is exactly the situation that rule was written for.**
+
+Filed as its own row rather than left here, since it is a different change from the one this row
+described.
 
 ## Wave 2 — Evaluation (graded by W0.3)
 

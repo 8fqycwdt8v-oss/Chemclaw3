@@ -1,0 +1,70 @@
+{
+  "probe": {
+    "id": "ws-03",
+    "section": 17,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Something worth keeping: on this project we have decided not to use DMF at all, REACH authorisation makes it a headache downstream and we would rather take a yield hit than carry it into the filing. Hold on to that.",
+    "expects_tools": [
+      "remember_preference",
+      "write_file"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "that the preference is shared with the team or applies to other users",
+      "a regulatory claim about DMF beyond what the asker said"
+    ],
+    "direction": "A standing instruction, and the right response is to record it rather than acknowledge it in prose that dies with the turn. A good answer stores it, says plainly what was stored and that it is scoped to this asker, and — the useful part — names what it will now do differently: propose an alternative dipolar aprotic on the next route question rather than waiting to be asked again. It should not restate the REACH reasoning as though the system had verified it; that is the asker's premise and it belongs quoted, not asserted.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "ws-03",
+    "section": 17,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Something worth keeping: on this project we have decided not to use DMF at all, REACH authorisation makes it a headache downstream and we would rather take a yield hit than carry it into the filing. Hold on to that.",
+    "answer": "Two notes cover this coupling; both are cited above.Two notes cover this coupling; both are cited above.",
+    "answered": true,
+    "tools_called": [
+      "find_notes"
+    ],
+    "tool_results": [
+      {
+        "tool": "find_notes",
+        "preview": "[NoteRef(id='bo-suzuki-next', type='bo-candidate', compound_smiles=None, tags=['bo', 'suggestion'], created_by='human', source='seed-corpus', confidence=0.5, valid_from=None, valid_to=None), NoteRef(i"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [
+      "bo",
+      "calc",
+      "molfp",
+      "rxnfp"
+    ],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 4.36,
+    "event_counts": {
+      "capability_degraded": 1,
+      "token": 4,
+      "tool_call": 1,
+      "tool_result": 1,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "2708ea1401454797982e4396c11e86a7",
+    "first_degraded_index": 1,
+    "first_output_index": 2,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

@@ -106,20 +106,16 @@ topic).
       conversion out of the `pre-upgrade` Job into a `post-upgrade` one while the schema DDL stays
       where it is (~25 lines). Needs an ADR.
 
-- [ ] **No live lane in this repo can start** — [M]. `infra/live/processes.sh:47` pins
-      `CHEMCLAW_CONNECTORS_REQUIRED=true` while **chem and safety** are enabled and never started —
-      measured, `build_composite()` serves `bo, calc, molfp, rxnfp` and `check_connectors_at_startup`
-      raises. (This row used to name `calc` as a third; `calc` kept a local app after the physics
-      move and *is* served.) `cli/connectors_dev.py:78` emits URLs only for bundles with a local
-      app, so chem and safety keep their loopback defaults and the front door never boots. Also
-      `infra/live/e2e-full-stack/up.sh:185` puts `$MCP_REPO/manifests` on `CHEMCLAW_CONNECTORS_DIR`,
-      which `connectors/calc/connector.yaml:13` explicitly forbids — it survives on
-      `connectors/registry.py:124` (`found.setdefault`) being first-dir-wins, and **that behaviour
-      is pinned**: `tests/test_connector_registry.py:293` builds two dirs holding a bundle both
-      named `alpha`, on ports 7777 and 8888, and asserts the *first* dir's endpoint is the one
-      `enabled()` returns. (This row said "no test pins" it until 2026-08-17, which invented a
-      second hazard on top of a real one — the ordering is a load-bearing dependency of the live
-      lane whether or not it is pinned, and it is.)
+- [ ] **The four-repo lane puts the fleet's manifests on `CHEMCLAW_CONNECTORS_DIR`, which one
+      manifest forbids** — [S], and it is the half of the now-closed live-lane row that did not
+      close with it. `infra/live/e2e-full-stack/up.sh:185` adds `$MCP_REPO/manifests` to that path
+      while `connectors/calc/connector.yaml:13` explicitly forbids it. It works only because
+      `connectors/registry.py:124` is first-dir-wins (`found.setdefault`), and **that behaviour is
+      pinned**: `tests/test_connector_registry.py:293` builds two directories each holding a bundle
+      named `alpha`, on ports 7777 and 8888, and asserts the first directory's endpoint is what
+      `enabled()` returns. So this is latent rather than broken — the lane depends on an ordering
+      guarantee nothing in the lane states. Either the manifest stops forbidding it or the lane
+      stops relying on the order.
 
 - [ ] **The audit trail's `agent` column can never be non-empty** — [S]. `agent/audit.py:350` reads
       `get_current_specialist()`; `set_current_specialist` has **zero callers in `src/`** and
@@ -453,6 +449,22 @@ only holds defects can only ever restore the system to what it already intended 
       asserts the floor, so the next tool is not free at review time and paid for on every turn
       forever. Then put the cold tail behind search — success is the floor under ~8k with no probe
       losing its `expects_tools` name.
+
+- [ ] **A tool schema is 38% developer rationale, and it ships on every turn** — [M], and it is
+      what `§ 5`'s deferral row turned into once measured. `science/bo/problem.py`'s nested models
+      carry design arguments in their class docstrings — *"One `objectives` field rather than a lead
+      objective plus a sidecar list (W3)"* — and Pydantic turns a class docstring into the schema
+      `description`, so `convert_to_openai_tool` ships them. Measured 2026-08-25 on the `default`
+      profile: `start_optimization_campaign` is 8,063 chars of schema, 4,392 of it description and
+      **3,047 of that elaboration past the first paragraph**; `propose_knowledge_note` 4,259/2,262/663.
+      Those two are 25% of the profile's 12,536-token tool budget between them, and both are already
+      in `tests/test_context_floor.py::KNOWN_OVERSIZED`.
+
+      **Not a blanket cut.** Some elaboration is genuinely the caller's — when to supply categorical
+      descriptors changes what the model should send — so this is per-paragraph judgment: rationale
+      moves to a `#` comment, guidance stays in the docstring. **And it does not ship until the live
+      lane can show every probe still reaching its tool**, because a cheaper prompt that stops
+      finding tools is a regression with a good-looking metric. Blocked on the live-lane row in § 1.
 
 - [ ] **17 of 67 agent-callable tools are named by no probe, and nothing would notice the next one**
       — [M]. Measured over `data/evals/probes/*.yaml` against
