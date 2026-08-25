@@ -389,6 +389,35 @@ def test_an_external_provider_needs_an_address(monkeypatch: pytest.MonkeyPatch) 
         StoreSettings(vector_store_provider="qdrant", vector_store_url="")
 
 
+def test_the_databricks_provider_builds_the_databricks_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The second name on the token, resolved in the same one place."""
+    from chemclaw.retrieval.vectors.databricks import DatabricksVectorStore
+
+    monkeypatch.setattr(settings, "vector_store_provider", "databricks")
+    assert isinstance(default_vector_store(), DatabricksVectorStore)
+
+
+def test_databricks_needs_the_endpoint_that_serves_its_index(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An index is addressed by a pair, and the client cannot derive one half from the other.
+
+    The same stance the URL check above takes: a provider selected without the address it needs is
+    a misconfiguration that can be caught at deploy time, and the alternative is a client library's
+    "index not found" surfacing from inside a worker hours later.
+    """
+    from chemclaw.core.config.store import StoreSettings
+
+    with pytest.raises(ValueError, match="vector_store_endpoint_name"):
+        StoreSettings(
+            vector_store_provider="databricks",
+            vector_store_url="https://example.cloud.databricks.com",
+            vector_store_endpoint_name="",
+        )
+
+
 def test_the_pgvector_width_check_is_inert_for_an_external_store(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -15,6 +15,17 @@ meant teaching it about both, which is how a connection helper becomes a configu
 `?`, psycopg binds `%s`, and the alternative to asking is a module-level `paramstyle` mutation in
 the vendor client — a global that every other user of that client in the process inherits. Asking
 keeps `sql.py` dialect-neutral and lets a test assert the exact string that would be sent.
+
+**`vector_dialect` is here for exactly the same reason, and it arrived late.** How a warehouse
+spells a similarity search is as much a dialect fact as how it spells a parameter, and `sql.py` was
+neutral about the second while hardcoding the first: `VECTOR_COSINE_SIMILARITY` and
+`?::VECTOR(FLOAT, n)` are Snowflake's names, in a module whose docstring claims to contribute only
+structure. The second driver is what exposed it. A dialect owns two things a vendor genuinely
+differs on — what the similarity function is called and how a query vector is *bound*, which is the
+sharper half: Snowflake binds a Python list against a `VECTOR` cast, while a warehouse with no array
+parameter type has to take the vector as a scalar and parse it server-side. A driver that offers no
+dialect cannot serve a `vector:` block at all, and says so rather than emitting SQL its server will
+reject.
 """
 
 from collections.abc import Sequence
@@ -33,6 +44,39 @@ class WarehouseQueryError(ChemclawError):
     seeing the message. An *unreachable* warehouse is the opposite case and raises `ConnectionError`
     instead — the same split `chemclaw.core.db` makes, for the same reason.
     """
+
+
+@runtime_checkable
+class VectorDialect(Protocol):
+    """How one warehouse spells a similarity search. Owned by the driver, used by `sql.py`.
+
+    Two methods, because a vendor differs on exactly two things here and `sql.py` contributes the
+    rest of the statement unchanged.
+    """
+
+    def similarity(self, metric: str) -> tuple[str, str]:
+        """The function that computes `metric`, and the direction it sorts.
+
+        One call rather than two lookups because the pair moves together: a distance sorts ascending
+        and a similarity descending, and a metric added with the wrong pairing would return the
+        *least* similar rows while looking entirely correct.
+
+        Raises:
+            WarehouseQueryError: This warehouse has no function for that metric. Non-retryable,
+                because a binding asking for one it does not have fails identically every time.
+        """
+        ...
+
+    def query_vector(self, placeholder: str, vector: Sequence[float], dim: int) -> tuple[str, Any]:
+        """The expression standing in for the query vector, and the single value bound into it.
+
+        Returned as a pair rather than as a rendered literal because the vector is a *value* — the
+        one thing `sql.py` never writes into a statement — and because the encoding differs: a
+        warehouse with a native vector type binds the list, one without has to take a scalar it can
+        parse. `dim` is the configured embedding width, which a typed cast needs and a parsed one
+        does not.
+        """
+        ...
 
 
 @runtime_checkable
@@ -60,6 +104,18 @@ class Warehouse(Protocol):
     @property
     def placeholder(self) -> str:
         """The parameter marker this connection binds with (`?` for Snowflake, `%s` for psycopg)."""
+        ...
+
+    @property
+    def vector_dialect(self) -> "VectorDialect | None":
+        """How this warehouse spells a similarity search, or `None` if it cannot do one.
+
+        `None` is a real answer, not an omission: the ingest half is ordinary ANSI `SELECT` work
+        that every warehouse here can serve, while an in-warehouse similarity search needs a
+        function this driver has verified exists. A binding that declares a `vector:` block against
+        a driver answering `None` is refused with a message naming the driver, which is a better
+        failure than a server rejecting a function it has never heard of on the first query.
+        """
         ...
 
     def cursor(self) -> AbstractAsyncContextManager[WarehouseCursor]:
