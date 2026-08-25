@@ -47,6 +47,24 @@ class LabelSettings(BaseModel):
     # A batch is minutes of remote work with no natural progress point, so liveness is time-based.
     # Without it a dead worker goes undetected until the whole start-to-close lapses.
     label_sync_heartbeat_timeout_seconds: float = Field(default=120.0, gt=0)
+    # --- the corpus drain, which fills the record phase the labelling drain then completes ---
+    # Rows read per page out of the warehouse. Higher than the ELN's batch because there are no
+    # child-table `IN (...)` lists to blow a bind limit — one relation, one query — and a corpus is
+    # millions of rows rather than a decade of one site's runs. Bounded by the binding's own
+    # `fetch_limit` where that is lower, so a site can cap it without a redeploy of this.
+    corpus_page_size: int = Field(default=1_000, ge=1)
+    # How many pages one workflow run drains before `continue_as_new`.
+    corpus_sync_max_iterations: int = Field(default=100, ge=1)
+    # The drain activity's start-to-close and its heartbeat bound. A page is a warehouse query plus
+    # a fingerprint per distinct structure — minutes, with no natural progress point.
+    corpus_sync_timeout_seconds: float = Field(default=900.0, gt=0)
+    corpus_sync_heartbeat_timeout_seconds: float = Field(default=120.0, gt=0)
+    # How often the corpus drain runs. Daily rather than hourly: a corpus release changes when a
+    # vendor ships one, not continuously, so an hourly re-walk would read a warehouse to learn
+    # nothing. A new release is picked up within a day, or immediately by an operator running the
+    # workflow by hand.
+    corpus_sync_schedule_minutes: int = Field(default=1440, gt=0)
+
     # How often the labelling drain runs. Hourly, matching the ELN sync it follows: a reaction
     # ingested now is searchable by structure immediately and by facet within the hour.
     label_sync_schedule_minutes: int = Field(default=60, gt=0)

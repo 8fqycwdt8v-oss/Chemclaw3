@@ -145,7 +145,9 @@ def test_a_related_block_may_not_be_called_root() -> None:
 
 def test_a_binding_with_neither_half_is_rejected() -> None:
     """A connection nothing would ever open is a configuration nobody meant to write."""
-    with pytest.raises(BindingError, match="must declare an 'ingest' or a 'vector' section"):
+    with pytest.raises(
+        BindingError, match="must declare an 'ingest', a 'corpus' or a 'vector' section"
+    ):
         load_binding({"connection": {"driver": "tests.warehouse_fake:open_fake"}})
 
 

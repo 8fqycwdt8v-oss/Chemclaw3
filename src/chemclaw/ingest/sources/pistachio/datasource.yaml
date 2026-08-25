@@ -1,0 +1,78 @@
+name: pistachio
+description: >-
+  The Pistachio reaction corpus (NextMove) loaded into the site's warehouse: millions of reactions
+  extracted from patents, most with a NameRxn classification and an atom mapping and some without.
+  Indexed into the reaction-label index as cited literature evidence, never proposed as knowledge —
+  a patent reaction is something someone else published, and a chemist follows the citation.
+
+# **Retrieve only, and deliberately no `ingest:` half.** Five separate paths in this tree assume an
+# ingest source is one site's ELN, and each of them breaks on a corpus of this size:
+#
+#   * `durable/memory_jobs.py::read_corpus` calls `fetch_new_entries(datetime.min)` on *every*
+#     active ingest half and materialises every reaction into the worker heap — three memory
+#     workflows do it per cycle.
+#   * `memory/similarity.cluster_by_similarity` is then O(n²) over that list.
+#   * `ingest_reaction` ends in `propose_note` unconditionally: one git branch per reaction,
+#     through a gate a human is supposed to read.
+#   * `sync_entries` loads every merged note body once per run to dedup against.
+#   * A Pistachio release is a versioned load addressed by key, not a live feed addressed by
+#     datetime — the `ElnAdapter` cursor contract does not fit it.
+#
+# Declaring no ingest half sidesteps all five with no edits to any of them, which is why there is
+# no "publish mode" anywhere: there is no ingest path to gate.
+# See `D-2026-08-25-a-corpus-is-evidence-not-an-eln`.
+retrieve: chemclaw.ingest.labels.retriever:WarehouseCorpusRetriever
+
+# What this source already carries, and what the background labeller must derive anyway.
+# `provides` is **never a skip**: Pistachio ships a NameRxn classification for a large fraction of
+# its corpus and not for all of it, and every row it left empty is derived. The claim is read for
+# the coverage report and for the `override` subset check, nothing else.
+labels:
+  provides:
+    - named-reaction
+    - atom-mapping
+  override: []
+
+config:
+  binding:
+    connection:
+      driver: chemclaw.ingest.eln.warehouse.snowflake:SnowflakeWarehouse
+      account_env: SNOWFLAKE_ACCOUNT
+      user_env: SNOWFLAKE_USER
+      private_key_env: SNOWFLAKE_PRIVATE_KEY
+      warehouse: RND_WH
+      database: REACTION_CORPUS
+      schema: PISTACHIO
+      role: CHEMCLAW_READER
+      query_timeout_seconds: 120
+
+    # One relation, one row per reaction. The site's column names are a *binding*, not Python —
+    # the same argument `D-2026-08-04-the-schema-is-a-file` makes for the ELN: the loaded schema
+    # is not visible from here, and a schema nobody can see yet cannot be written into a module.
+    corpus:
+      relation: V_REACTION
+      key: REACTION_ID
+      # The keyset column. Must be unique and stable across the release — the drain resumes
+      # strictly after the last value it saw, and a non-unique one silently skips rows.
+      order_by: REACTION_ID
+      # Pistachio records reactions it could not fully resolve; a row with no product is not a
+      # precedent. Inserted literally, so it is as trusted as this file.
+      where: "PRODUCT_SMILES IS NOT NULL"
+      fetch_limit: 2000
+
+      smiles: {path: root.REACTION_SMILES}
+      citation: {path: root.PATENT_NUMBER, fallback: {path: root.DOCUMENT_ID}}
+      published_on: {path: root.PUBLICATION_DATE, transform: [{iso_date: {}}]}
+      temperature_c: {path: root.TEMPERATURE_C, transform: [{number: {}}]}
+      time_h: {path: root.TIME_H, transform: [{number: {}}]}
+      yield_percent:
+        path: root.YIELD_PCT
+        transform: [{number: {}}, {clamp: {min: 0, max: 100}}]
+      workup_text: {path: root.WORKUP_TEXT}
+
+      # The labels the corpus carries. `make datasource-validate` checks these against the
+      # `labels: provides:` block above, so a source cannot claim a name it has no column for.
+      named_reaction: {path: root.NAMERXN_NAME}
+      reaction_class: {path: root.NAMERXN_CLASS}
+      rxno_id: {path: root.RXNO_ID}
+      mapped_smiles: {path: root.MAPPED_REACTION_SMILES}

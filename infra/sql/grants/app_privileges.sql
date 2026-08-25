@@ -67,7 +67,7 @@ BEGIN
         'calculation_results, calculation_artifacts, job_records, '
         'bo_campaigns, measurements, predictions, note_proposals, observations, '
         'plan_approvals, note_index, sync_cursors, turn_costs, '
-        'molecule_fingerprints, reaction_fingerprints, reaction_labels, '
+        'molecule_fingerprints, reaction_fingerprints, reaction_labels, corpus_molecules, '
         'tool_result_links TO %I', app_role);
     -- `tool_result_links` joins that list and `tool_result_blobs` the full-DML one below, even
     -- though retention deletes only the blob: a cascading delete is performed with the referencing

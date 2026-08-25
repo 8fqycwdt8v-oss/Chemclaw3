@@ -22,7 +22,7 @@ found by one indexed scan. This is `note_index.fingerprint` (`infra/sql/035`) an
 
 from datetime import date, datetime
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, computed_field
 
 from chemclaw.science.labels.vocabulary import SpeciesRole
 
@@ -127,3 +127,53 @@ class ReactionLabel(BaseModel):
         description="NULL = never derived. Below the current value = derived by a superseded run.",
     )
     labelled_at: datetime | None = None
+
+
+class CorpusCoverage(BaseModel):
+    """How much of the row set an answer was drawn from is actually labelled — and the sentence.
+
+    Scoped to the **facet's** rows, never to the whole corpus, because the two are different claims
+    and only one of them is useful: "3% of the patent corpus is labelled" read as "3% of the
+    Buchwalds are labelled" is a different lie, and the labelling drain does not proceed uniformly
+    across reaction types.
+
+    `verdict` is a `computed_field` and not a bare property for the reason
+    `FingerprintSearch.verdict` spells out at length: a plain property is not serialized, so the
+    one sentence that explains what the numbers mean never leaves this process. That lesson was
+    learned on a hazard screen that told a chemist "no hazards detected" six times.
+    """
+
+    labelled: int = Field(ge=0, description="Rows in scope carrying the current labeller version.")
+    total: int = Field(ge=0, description="Rows in scope at all, labelled or not.")
+    sources: list[str] = Field(default_factory=list, description="Which sources the scope spans.")
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def verdict(self) -> str:
+        """What the reader must know about this answer's denominator before quoting it."""
+        if self.total == 0:
+            return (
+                "NO ROWS IN SCOPE: nothing in the reaction-label index matched this facet at all, "
+                "so the question was not answered. This is NOT evidence that no such reaction "
+                "exists — report that the corpus may not be indexed and say which sources are "
+                "configured."
+            )
+        if self.labelled == 0:
+            return (
+                f"NOT ANSWERABLE YET: {self.total} reaction(s) match this facet and NONE of them "
+                "have been labelled at the current labeller version, so no role, name or "
+                "structure feature could be read. Report that the labelling backfill has not "
+                "reached these rows. Do not present this as a finding about the chemistry."
+            )
+        if self.labelled < self.total:
+            share = 100 * self.labelled / self.total
+            return (
+                f"PARTIAL: this answer is drawn from {self.labelled} of {self.total} matching "
+                f"reaction(s) ({share:.0f}%) — the rest are not yet labelled at the current "
+                "version. Treat counts as a lower bound and say so; a reagent absent here may "
+                "simply live in an unlabelled row."
+            )
+        return (
+            f"COMPLETE: all {self.total} matching reaction(s) are labelled at the current version, "
+            "so counts over this facet are totals rather than lower bounds."
+        )

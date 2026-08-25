@@ -47,6 +47,7 @@ the pair applies in filename order and neither shadows the other.
 | `reaction_fingerprints` | 003 (+004, 046 index) | `science/fingerprints/store.py` | — |
 | `reaction_labels` | 050 | `science/labels/store.py` | derived and rebuildable: drop it and re-run the corpus drain plus the label backfill |
 | `reaction_species` | 050 | `science/labels/store.py` | derived and rebuildable; a species the source amended away is deleted with its reaction's record phase |
+| `corpus_molecules` | 051 | `ingest/labels/corpus.py` | derived and rebuildable: refilled by re-draining the corpus |
 | `audit_events` | 006 (+010, 011, 026, 044, 045) | `agent/audit_store.py` | **refused**: the trail is the record of who ran what, and disposing of it is a policy decision for whoever owns that record rather than an age cutoff in a cleanup job. `prev_hash`/`row_hash`/`chain_version` are retired columns, unwritten, at their defaults |
 | `sync_cursors` | 007 | `ingest/eln/cursor.py` | — (one row per ingest source; bounded by the source count) |
 | `session_messages` | 008 (+022, 026, 043, 046 `message_shape` check) | `agent/session_store.py` | `durable/retention.py`, per session through the pairing closure (D-145). The in-line compaction on write this row used to name went with the engine that needed it |

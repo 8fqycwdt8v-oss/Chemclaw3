@@ -26,12 +26,12 @@ from typing import Any
 
 import psycopg
 from psycopg.rows import TupleRow
-from pydantic import BaseModel, Field, computed_field
 
 from chemclaw.core import db
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
-from chemclaw.science.labels.records import ReactionLabel, SpeciesLabel
+from chemclaw.science.labels.facets import AgentCount, Facet, FacetSelection, FrequencyReport
+from chemclaw.science.labels.records import CorpusCoverage, ReactionLabel, SpeciesLabel
 from chemclaw.science.labels.vocabulary import SpeciesRole
 
 log = logging.getLogger(__name__)
@@ -39,56 +39,6 @@ log = logging.getLogger(__name__)
 
 class LabelIndexError(ChemclawError):
     """A label row could not be written or read back."""
-
-
-class CorpusCoverage(BaseModel):
-    """How much of the row set an answer was drawn from is actually labelled — and the sentence.
-
-    Scoped to the **facet's** rows, never to the whole corpus, because the two are different claims
-    and only one of them is useful: "3% of the patent corpus is labelled" read as "3% of the
-    Buchwalds are labelled" is a different lie, and the labelling drain does not proceed uniformly
-    across reaction types.
-
-    `verdict` is a `computed_field` and not a bare property for the reason
-    `FingerprintSearch.verdict` spells out at length: a plain property is not serialized, so the
-    one sentence that explains what the numbers mean never leaves this process. That lesson was
-    learned on a hazard screen that told a chemist "no hazards detected" six times.
-    """
-
-    labelled: int = Field(ge=0, description="Rows in scope carrying the current labeller version.")
-    total: int = Field(ge=0, description="Rows in scope at all, labelled or not.")
-    sources: list[str] = Field(default_factory=list, description="Which sources the scope spans.")
-
-    @computed_field  # type: ignore[prop-decorator]
-    @property
-    def verdict(self) -> str:
-        """What the reader must know about this answer's denominator before quoting it."""
-        if self.total == 0:
-            return (
-                "NO ROWS IN SCOPE: nothing in the reaction-label index matched this facet at all, "
-                "so the question was not answered. This is NOT evidence that no such reaction "
-                "exists — report that the corpus may not be indexed and say which sources are "
-                "configured."
-            )
-        if self.labelled == 0:
-            return (
-                f"NOT ANSWERABLE YET: {self.total} reaction(s) match this facet and NONE of them "
-                "have been labelled at the current labeller version, so no role, name or "
-                "structure feature could be read. Report that the labelling backfill has not "
-                "reached these rows. Do not present this as a finding about the chemistry."
-            )
-        if self.labelled < self.total:
-            share = 100 * self.labelled / self.total
-            return (
-                f"PARTIAL: this answer is drawn from {self.labelled} of {self.total} matching "
-                f"reaction(s) ({share:.0f}%) — the rest are not yet labelled at the current "
-                "version. Treat counts as a lower bound and say so; a reagent absent here may "
-                "simply live in an unlabelled row."
-            )
-        return (
-            f"COMPLETE: all {self.total} matching reaction(s) are labelled at the current version, "
-            "so counts over this facet are totals rather than lower bounds."
-        )
 
 
 class LabelIndex:
@@ -126,6 +76,39 @@ class LabelIndex:
 
     async def count(self) -> int:
         """How many reactions the index holds — the operator's number, not a hot path."""
+        raise NotImplementedError
+
+    async def current_version(self) -> str | None:
+        """The labeller version the index is *currently* labelled at, or `None` if nothing is.
+
+        Defined as the version of the most recently labelled row, which is the only definition that
+        behaves during an upgrade: mid-drain the index holds two versions, and this names the new
+        one — so a search answers from the rows labelled by the labeller now in service, and
+        `CorpusCoverage` correctly reports the rest as not yet labelled. Taking the *most common*
+        version instead would answer from the old labeller for as long as the backfill took, and
+        report full coverage while doing it.
+
+        A search tool asks the index rather than the labelling server: the question "what is this
+        corpus labelled at" is about our data, and putting a remote call on the read path would
+        make every search depend on a background service being up.
+        """
+        raise NotImplementedError
+
+    async def select(self, facet: Facet, version: str, limit: int) -> FacetSelection:
+        """The labelled reactions this facet selects, with the coverage of its own row set.
+
+        Only rows labelled at `version` are returned, and that is the honest choice rather than the
+        convenient one: an unlabelled row has no roles, no name and no functional groups, so it can
+        satisfy no facet — including a facet that names none of them, because presenting it beside
+        labelled rows would imply it had been checked. What it does count towards is `coverage`,
+        whose whole job is to say how many were left out.
+        """
+        raise NotImplementedError
+
+    async def agent_counts(
+        self, facet: Facet, version: str, roles: frozenset[SpeciesRole], limit: int
+    ) -> FrequencyReport:
+        """How often each species appears in each of `roles` across the facet's reactions."""
         raise NotImplementedError
 
 
@@ -204,6 +187,36 @@ class InMemoryLabelIndex(LabelIndex):
     async def count(self) -> int:
         """How many reactions are held."""
         return len(self._rows)
+
+    async def current_version(self) -> str | None:
+        """The version of the most recently labelled row."""
+        labelled = [r for r in self._rows.values() if r.labelled_at is not None]
+        if not labelled:
+            return None
+        newest = max(labelled, key=_labelled_key)
+        return newest.labeller_version
+
+    async def select(self, facet: Facet, version: str, limit: int) -> FacetSelection:
+        """The reference implementation of the facet query — plain Python over the held rows."""
+        scoped = [r for r in self._rows.values() if _in_scope(r, facet)]
+        labelled = [r for r in scoped if r.labeller_version == version and _matches(r, facet)]
+        labelled.sort(key=lambda r: (r.source, r.reaction_id))
+        return FacetSelection(
+            rows=labelled[:limit],
+            truncated=len(labelled) > limit,
+            coverage=CorpusCoverage(
+                labelled=sum(1 for r in scoped if r.labeller_version == version),
+                total=len(scoped),
+                sources=sorted({r.source for r in scoped}),
+            ),
+        )
+
+    async def agent_counts(
+        self, facet: Facet, version: str, roles: frozenset[SpeciesRole], limit: int
+    ) -> FrequencyReport:
+        """Roll the selection's species up by role, most common first."""
+        selection = await self.select(facet, version, limit)
+        return _roll_up(selection, roles)
 
 
 # The reaction-row columns `store_labels` may write and `record` must never touch. One tuple, read
@@ -495,6 +508,244 @@ class PostgresLabelIndex(LabelIndex):
             await cur.execute(self._COUNT)
             row = await cur.fetchone()
         return int(row[0]) if row else 0
+
+    async def current_version(self) -> str | None:
+        """The version of the most recently labelled row."""
+        async with self._connection() as conn, conn.cursor() as cur:
+            await cur.execute(
+                "SELECT labeller_version FROM reaction_labels WHERE labelled_at IS NOT NULL "
+                "ORDER BY labelled_at DESC, source, reaction_id LIMIT 1"
+            )
+            row = await cur.fetchone()
+        return str(row[0]) if row and row[0] is not None else None
+
+    async def select(self, facet: Facet, version: str, limit: int) -> FacetSelection:
+        """The facet's labelled reactions, plus the coverage of the row set it drew them from.
+
+        Two statements and not one, because they answer questions with different denominators: the
+        selection is over *labelled* rows that satisfy every narrowing, and the coverage is over
+        every row in scope whether labelled or not. A single query cannot produce both without
+        counting the rows it filtered out.
+
+        One row over `limit` is asked for and dropped — the same probe `find_matches` uses — so a
+        page that exactly fills the cap is distinguishable from one that merely reached it.
+        """
+        where, params = _facet_sql(facet)
+        params["version"] = version
+        params["limit"] = limit + 1
+        sql = (
+            "SELECT source, reaction_id, record_smiles, citation, performed_on, temperature_c, "
+            "time_h, yield_percent, workup_text, mapped_smiles, named_reaction, reaction_class, "
+            "rxno_id, confidence, method, labeller_version, labelled_at "
+            "FROM reaction_labels r "
+            f"WHERE labeller_version = %(version)s{where} "
+            "ORDER BY source, reaction_id LIMIT %(limit)s"
+        )
+        async with self._connection() as conn, conn.cursor() as cur:
+            await cur.execute(sql, params)
+            rows = await cur.fetchall()
+            truncated = len(rows) > limit
+            rows = rows[:limit]
+            species = await self._species_for(cur, [(str(r[0]), str(r[1])) for r in rows])
+            coverage = await self._scope_coverage(cur, facet, version)
+        return FacetSelection(
+            rows=[_label_from_row(r, species[(str(r[0]), str(r[1]))]) for r in rows],
+            truncated=truncated,
+            coverage=coverage,
+        )
+
+    async def agent_counts(
+        self, facet: Facet, version: str, roles: frozenset[SpeciesRole], limit: int
+    ) -> FrequencyReport:
+        """Roll the facet's species up by role.
+
+        Rolled up in Python over a bounded selection rather than aggregated in SQL, and that is a
+        deliberate trade rather than an oversight: the counting rules are not expressible as a
+        plain `GROUP BY` — a species charged twice in one run is one reaction's worth of evidence,
+        the denominator is reactions that named *that role* rather than all matching reactions, and
+        the median yield is over the recorded values only. Writing them twice, once here and once
+        in `_roll_up`, is how the two answers come to disagree. The cost is a cap, and the cap is
+        reported: `truncated` rides into the verdict, so a sample is never read as a total.
+        """
+        selection = await self.select(facet, version, limit)
+        return _roll_up(selection, roles)
+
+    async def _species_for(
+        self, cur: Any, keys: list[tuple[str, str]]
+    ) -> dict[tuple[str, str], list[SpeciesLabel]]:
+        """Every species of the given reactions, grouped by key — one query, not one per row."""
+        grouped: dict[tuple[str, str], list[SpeciesLabel]] = {k: [] for k in keys}
+        if not keys:
+            return grouped
+        await cur.execute(
+            self._SPECIES_FOR,
+            {"sources": [k[0] for k in keys], "ids": [k[1] for k in keys]},
+        )
+        for row in await cur.fetchall():
+            grouped[(str(row[0]), str(row[1]))].append(_species_from_row(row))
+        return grouped
+
+    async def _scope_coverage(self, cur: Any, facet: Facet, version: str) -> CorpusCoverage:
+        """Labelled-vs-total over the facet's *scope* — see `_in_scope` for why that is narrower."""
+        params: dict[str, Any] = {"version": version}
+        where = ""
+        if facet.sources:
+            params["sources"] = sorted(facet.sources)
+            where = " WHERE source = ANY(%(sources)s::text[])"
+        await cur.execute(
+            "SELECT count(*) FILTER (WHERE labeller_version = %(version)s), count(*), "
+            f"array_agg(DISTINCT source) FROM reaction_labels{where}",
+            params,
+        )
+        row = await cur.fetchone()
+        if row is None:
+            return CorpusCoverage(labelled=0, total=0, sources=[])
+        return CorpusCoverage(labelled=int(row[0]), total=int(row[1]), sources=sorted(row[2] or []))
+
+
+def _labelled_key(row: ReactionLabel) -> tuple[datetime, str, str]:
+    """Sort key for "most recently labelled", with the row key as a deterministic tie-break."""
+    assert row.labelled_at is not None  # the caller filtered on it
+    return (row.labelled_at, row.source, row.reaction_id)
+
+
+def _facet_sql(facet: Facet) -> tuple[str, dict[str, Any]]:
+    """The facet as an SQL fragment ANDed onto the version filter, plus its bound parameters.
+
+    Every narrowing that involves a species is an `EXISTS` over `reaction_species` rather than a
+    join, so a reaction with three matching products is one row rather than three — a join would
+    silently multiply a reaction's weight in any count taken over the result.
+
+    No value reaches the statement text. The facet's fields are model-supplied (a tool argument a
+    chemist typed), and this is the only place they meet SQL.
+    """
+    clauses: list[str] = []
+    params: dict[str, Any] = {}
+    if facet.sources:
+        clauses.append("r.source = ANY(%(sources)s::text[])")
+        params["sources"] = sorted(facet.sources)
+    if facet.named_reaction:
+        clauses.append("lower(r.named_reaction) = lower(%(named)s)")
+        params["named"] = facet.named_reaction
+    if facet.rxno_id:
+        clauses.append("r.rxno_id = %(rxno)s")
+        params["rxno"] = facet.rxno_id
+    if facet.species_smiles is not None:
+        role_filter = ""
+        if facet.species_roles:
+            role_filter = " AND s.derived_role = ANY(%(species_roles)s::text[])"
+            params["species_roles"] = sorted(r.value for r in facet.species_roles)
+        clauses.append(
+            "EXISTS (SELECT 1 FROM reaction_species s WHERE s.source = r.source "
+            "AND s.reaction_id = r.reaction_id AND s.smiles = %(species)s" + role_filter + ")"
+        )
+        params["species"] = facet.species_smiles
+    if facet.product_smiles:
+        clauses.append(
+            "EXISTS (SELECT 1 FROM reaction_species s WHERE s.source = r.source "
+            "AND s.reaction_id = r.reaction_id AND s.derived_role = 'product' "
+            "AND s.smiles = ANY(%(products)s::text[]))"
+        )
+        params["products"] = sorted(facet.product_smiles)
+    if facet.product_functional_group is not None:
+        clauses.append(
+            "EXISTS (SELECT 1 FROM reaction_species s WHERE s.source = r.source "
+            "AND s.reaction_id = r.reaction_id AND s.derived_role = 'product' "
+            "AND s.functional_groups @> ARRAY[%(group)s]::text[])"
+        )
+        params["group"] = facet.product_functional_group
+    return ("".join(f" AND {clause}" for clause in clauses), params)
+
+
+def _in_scope(row: ReactionLabel, facet: Facet) -> bool:
+    """Whether this row belongs to the facet's *denominator* — the coverage question.
+
+    Deliberately narrower than `_matches`: only the narrowings an unlabelled row can still answer
+    count here. A row with no derived roles cannot be excluded for holding the wrong ligand, and
+    counting it out of the denominator would hide exactly the reactions the coverage sentence
+    exists to warn about.
+    """
+    return not facet.sources or row.source in facet.sources
+
+
+def _matches(row: ReactionLabel, facet: Facet) -> bool:
+    """Whether a labelled row satisfies every narrowing the facet sets."""
+    if facet.named_reaction and (row.named_reaction or "").lower() != facet.named_reaction.lower():
+        return False
+    if facet.rxno_id and row.rxno_id != facet.rxno_id:
+        return False
+    if facet.species_smiles is not None and not any(
+        s.smiles == facet.species_smiles
+        and (not facet.species_roles or s.derived_role in facet.species_roles)
+        for s in row.species
+    ):
+        return False
+    products = [s for s in row.species if s.derived_role is SpeciesRole.PRODUCT]
+    if facet.product_smiles and not any(s.smiles in facet.product_smiles for s in products):
+        return False
+    if facet.product_functional_group is not None and not any(
+        facet.product_functional_group in s.functional_groups for s in products
+    ):
+        return False
+    return True
+
+
+def _roll_up(selection: FacetSelection, roles: frozenset[SpeciesRole]) -> FrequencyReport:
+    """Count species by role over a selection, and attach the yields that go with them.
+
+    The denominator is *reactions that named a species in this role*, not every matching reaction:
+    a run whose ligand nobody recorded is not evidence that no ligand was used, so counting it
+    would make every ligand look rarer than it is.
+    """
+    counts: dict[tuple[SpeciesRole, str], list[float | None]] = {}
+    denominator: dict[SpeciesRole, int] = {}
+    for row in selection.rows:
+        seen: set[tuple[SpeciesRole, str]] = set()
+        for species in row.species:
+            role = species.derived_role
+            if role is None or (roles and role not in roles):
+                continue
+            key = (role, species.smiles)
+            if key in seen:
+                # A species charged twice in one run is one reaction's worth of evidence for it,
+                # not two — otherwise a two-portion addition doubles that reagent's popularity.
+                continue
+            seen.add(key)
+            counts.setdefault(key, []).append(row.yield_percent)
+        for role in {r for r, _ in seen}:
+            denominator[role] = denominator.get(role, 0) + 1
+    agents = [
+        AgentCount(
+            role=role,
+            smiles=smiles,
+            count=len(yields),
+            share=len(yields) / denominator[role],
+            median_yield_percent=_median([y for y in yields if y is not None]),
+        )
+        for (role, smiles), yields in counts.items()
+    ]
+    agents.sort(key=lambda a: (-a.count, a.role.value, a.smiles))
+    return FrequencyReport(
+        agents=agents,
+        reactions_in_scope=len(selection.rows),
+        coverage=selection.coverage,
+        truncated=selection.truncated,
+    )
+
+
+def _median(values: list[float]) -> float | None:
+    """The median of what was recorded, or `None` when nothing was.
+
+    `None` rather than 0.0, because a yield nobody wrote down is not a yield of zero and a
+    frequency table that says so is worse than one that admits it does not know.
+    """
+    if not values:
+        return None
+    ordered = sorted(values)
+    middle = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[middle]
+    return (ordered[middle - 1] + ordered[middle]) / 2
 
 
 def default_label_index() -> PostgresLabelIndex:

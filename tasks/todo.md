@@ -19,8 +19,8 @@ Plan: `/root/.claude/plans/investigate-deeply-following-user-playful-spindle.md`
 ## Phase 3 — the enrichment background service
 - [x] `ingest/labels/{enrich,merge}.py`, `durable/label_sync.py`, schedule, ADRs
 
-## Phase 4 — Pistachio as an evidence corpus (warehouse `corpus:` binding)
-## Phase 5 — the six questions as tools
+## Phase 4 — Pistachio as an evidence corpus (warehouse `corpus:` binding) — DONE
+## Phase 5 — the six questions as tools — DONE
 ## Phase 6 — pattern-fingerprint substructure screen (optional)
 
 ## Review

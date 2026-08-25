@@ -5,8 +5,11 @@
 # surface is read/compute only (D-029).
 name: rxnfp
 description: >-
-  Reaction fingerprints over the indexed corpus: DRFP similarity search, for finding past runs of a
-  transformation. What counts as a precedent is the bundled reaction-search skill's judgment.
+  Reaction search over the indexed corpus: DRFP similarity for "have we run a transformation like
+  this", and the faceted precedent search for the questions similarity cannot answer — which
+  ligands, bases and solvents were used for a named reaction, what conditions worked for similar
+  products, which reactions make a product matching a SMARTS, and how they were worked up. What
+  counts as a precedent, and how to read a frequency table, is the bundled skills' judgment.
 
 endpoint:
   transport: http
@@ -30,6 +33,18 @@ endpoint:
     token_env: CHEMCLAW_RXNFP_MCP_TOKEN
   tools:
     - similar_reactions
-  # A search over the reaction index; the writer is off the agent-facing allow-list (D-029).
+    - substrate_precedent
+    - conditions_for_similar_product
+    - reagent_frequency
+    - reactions_making_substructure
+    - workup_precedent
+  # Searches over the reaction and label indexes. Both are written elsewhere — the fingerprint by
+  # the ELN sync, the labels by the background drain — so nothing here mutates and
+  # `state_changing` stays empty (D-029, D-167: a tool in neither list refuses to load).
   read_only:
     - similar_reactions
+    - substrate_precedent
+    - conditions_for_similar_product
+    - reagent_frequency
+    - reactions_making_substructure
+    - workup_precedent

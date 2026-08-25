@@ -128,6 +128,15 @@ def test_the_source_registry_offers_no_external_source() -> None:
         # no network peer, which is why the host-literal scan above needed no new allowance for it.
         # It is the deployment's own file server, and it ships disabled.
         "sharedrive",
+        # A licensed reaction corpus (Pistachio) loaded into the deployment's *own* warehouse —
+        # the same host `eln-snowflake` reaches and the same sanction. This repository holds no
+        # address, no credential and no vendor client: it holds column names in a YAML file, and
+        # the connection arrives entirely from configuration. What is new is what it *carries* —
+        # third-party licensed content, which D-089 is about — and that is the deployment's
+        # licence to hold, not this repository's: nothing here downloads it, and the source ships
+        # disabled, so a cluster reads a corpus only by naming it in `CHEMCLAW_DATA_SOURCES` and
+        # pointing the binding at a table it already has.
+        "pistachio",
     }
 
 

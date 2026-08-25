@@ -43,6 +43,7 @@ from chemclaw.core.config import settings
 from chemclaw.core.ids import stable_hash
 from chemclaw.core.temporal_client import connect
 from chemclaw.durable.artifact_eviction import ArtifactEvictionWorkflow
+from chemclaw.durable.corpus_sync import ReactionCorpusWorkflow, corpus_sources
 from chemclaw.durable.digest import DigestWorkflow
 from chemclaw.durable.document_sync import DocumentShareSyncWorkflow, share_sources
 from chemclaw.durable.eln_sync import ElnSyncWorkflow
@@ -94,6 +95,7 @@ OWNED_SCHEDULE_IDS = frozenset(
         "observations",
         "document-sync",
         "reaction-labels",
+        "reaction-corpus",
     }
 )
 
@@ -162,6 +164,12 @@ def planned_schedules() -> list[PlannedSchedule]:
     if label_policies():
         label_every = timedelta(minutes=settings.label_sync_schedule_minutes)
         schedules.append(PlannedSchedule("reaction-labels", ReactionLabelWorkflow, label_every))
+    # And the corpus drain earns one only where a source declares a `corpus:` binding. Daily
+    # rather than hourly: a release changes when a vendor ships one, so an hourly re-walk would
+    # read a warehouse to learn nothing.
+    if corpus_sources():
+        corpus_every = timedelta(minutes=settings.corpus_sync_schedule_minutes)
+        schedules.append(PlannedSchedule("reaction-corpus", ReactionCorpusWorkflow, corpus_every))
     # Digests only earn a Schedule where someone has subscribed (gap IDEA-1); otherwise the job
     # would sweep the corpus daily to deliver nothing.
     if settings.digest_enabled:
