@@ -29,7 +29,7 @@ plausible reagents" — is a workaround for a missing index.
 
 ## Decision
 
-**A second index, `reaction_labels` + `reaction_species` (`infra/sql/050`), written in two phases.**
+**A second index, `reaction_labels` + `reaction_species` (`infra/sql/051`), written in two phases.**
 
 ### The record phase cannot be derived later, so it is written at ingest
 

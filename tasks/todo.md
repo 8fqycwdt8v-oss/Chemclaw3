@@ -7,7 +7,7 @@ Plan: `/root/.claude/plans/investigate-deeply-following-user-playful-spindle.md`
 - [x] `science/labels/records.py` — `ReactionLabel`, `SpeciesLabel`
 - [x] `science/labels/policy.py` — `LabelPolicy`
 - [x] `science/labels/store.py` — `LabelIndex` Protocol, in-memory + Postgres backends
-- [x] `infra/sql/050_reaction_labels.sql` + README rows + grants
+- [x] `infra/sql/051_reaction_labels.sql` + README rows + grants
 - [x] `DataSourceManifest.labels`
 - [x] `ingest_reaction` writes the record phase; `sync_entries` / `eln_sync` thread `source`
 - [x] tests
