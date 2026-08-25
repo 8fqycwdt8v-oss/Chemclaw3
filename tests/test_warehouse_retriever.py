@@ -16,6 +16,7 @@ import pytest
 import chemclaw.ingest.eln.warehouse.retriever as retriever_module
 from chemclaw.core.config import settings
 from chemclaw.core.embeddings import embed_texts
+from chemclaw.ingest.eln.warehouse.binding import BindingError
 from chemclaw.ingest.eln.warehouse.retriever import WarehouseVectorRetriever
 from tests import warehouse_fake
 
@@ -298,3 +299,24 @@ def test_a_key_the_filesystem_cannot_resolve_costs_its_own_row_and_no_other(
     chunks = _retrieve(_binding(), hits)
 
     assert len(chunks) == 2, "one unusable key must not zero the other rows in the same result"
+
+
+def test_a_driver_with_no_similarity_dialect_refuses_the_vector_block() -> None:
+    """A `vector:` block against a driver that cannot serve one fails loudly, not as bad SQL.
+
+    How a warehouse spells a similarity search is a dialect fact and lives on the driver — see
+    `VectorDialect` in `chemclaw.ingest.eln.warehouse.driver`. A driver answering `None` has no
+    verified function to call, so the honest outcome is a `BindingError` naming the problem, not a
+    statement built from another vendor's function name for the server to reject on first query.
+
+    Checked at first use rather than at construction on purpose: resolving the driver means
+    importing the vendor client, and a chat pod that builds retrieve halves at startup must not pay
+    that import for a warehouse it may never query.
+    """
+    warehouse_fake.prime(**_hits())
+    primed = _primed()
+    primed._vector_dialect = None
+    retriever = WarehouseVectorRetriever(binding=_binding(), name="eln-warehouse")
+
+    with pytest.raises(BindingError, match="similarity-search dialect"):
+        asyncio.run(retriever._search("ester formation", {}))
