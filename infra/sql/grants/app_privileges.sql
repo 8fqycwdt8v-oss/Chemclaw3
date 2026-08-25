@@ -67,7 +67,7 @@ BEGIN
         'calculation_results, calculation_artifacts, job_records, '
         'bo_campaigns, measurements, predictions, note_proposals, observations, '
         'reaction_records, '
-        'plan_approvals, note_index, sync_cursors, turn_costs, '
+        'plan_approvals, sync_cursors, turn_costs, '
         'molecule_fingerprints, reaction_fingerprints, tool_result_links TO %I', app_role);
     -- `tool_result_links` joins that list and `tool_result_blobs` the full-DML one below, even
     -- though retention deletes only the blob: a cascading delete is performed with the referencing
@@ -102,10 +102,17 @@ BEGIN
     -- join them because the share index is derived from a filesystem it does not own: a file
     -- deleted from the share has to leave the index, or a chemist keeps being cited a document
     -- nobody can open.
+    --
+    -- `note_index` joins them on that same argument, and moved here from the insert/update list
+    -- above when `reindex_notes` gained a prune (D-2026-08-25). It is derived from the Git note
+    -- tree exactly as the document tables are derived from the share, and until then a note deleted
+    -- from the tree left its row — and, once the dense half can live in an external store, its
+    -- vector — behind forever.
     EXECUTE format(
         'GRANT INSERT, UPDATE, DELETE ON '
         'session_messages, session_events, session_turns, subscriptions, user_preferences, '
-        'artifact_blobs, document_files, document_chunks, tool_result_blobs TO %I', app_role);
+        'artifact_blobs, document_files, document_chunks, note_index, tool_result_blobs '
+        'TO %I', app_role);
 
     -- The tables LangGraph creates for itself, which no migration in `infra/sql` declares and which
     -- therefore fell through every enumeration above until they were named here.

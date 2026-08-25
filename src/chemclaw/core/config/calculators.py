@@ -51,6 +51,21 @@ class CalculatorSettings(BaseSettings):
     calc_screen_max_parallel: int = Field(default=1, ge=1)
     crest_effort: Literal["quick", "normal", "extensive"] = "quick"
     crest_max_members: int = 20
+    # How many members of an ensemble get their own optimization and Hessian when a caller asks for
+    # free-energy-weighted populations. Five, because the cost is linear in this and a Hessian is
+    # the most expensive thing after the search itself — measured, a 33-atom conformer search is
+    # ~19 minutes and there were 13 members, so refining all of them is the search again several
+    # times over. The result carries `refined_population_covered` so a truncation says so.
+    ensemble_refine_top_n: int = Field(default=5, ge=1)
+    # How many distinct species one ranking may cover — tautomers, microstates, stereoisomers.
+    # RDKit will happily enumerate twenty tautomers of a purine; each one is a separate CREST
+    # search, so this is the difference between a question and a project.
+    species_ranking_max: int = Field(default=8, ge=1)
+    # The ceiling `science/calc/budget.py` refuses above, counted in remote primitives rather than
+    # in seconds — the call count is what a composite knows before it starts, and duration depends
+    # on a molecule this layer cannot see. 120 is roughly six species refined over five members
+    # each; past that the request wants narrowing rather than a longer timeout.
+    calc_max_primitive_calls: int = Field(default=120, ge=1)
     # xTB semiempirical calculator (plan step 1c.2). Method is the GFN parametrization
     # (latest: GFN2-xTB). `xtb_embed_seed` fixes RDKit 3D embedding so results are
     # reproducible; it is part of the cache key so changing it recomputes.

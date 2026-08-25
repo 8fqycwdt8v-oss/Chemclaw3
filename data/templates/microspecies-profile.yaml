@@ -1,0 +1,65 @@
+# What is charged, at which pH — the question behind extraction, formulation and salt selection.
+#
+# Why a template: `predict_pka` reports **one** pKa and always answers with the acid site, so for
+# anything amphoteric or polyprotic it is not merely imprecise — it describes an equilibrium the
+# molecule does not have. `logd.py` refuses those molecules for exactly that reason. The fix is not
+# a better single number; it is to enumerate the microstates and rank them, which is a different
+# shape of calculation and therefore a different sequence.
+#
+# The enumeration is free and the ranking is not, which is why they are separate steps: whether a
+# molecule has one ionisable site or four is a question about its graph, answered before any
+# decision to spend a calculation.
+summary: Enumerate a molecule's protonation microstates and rank them by free energy.
+description: >-
+  A fixed three-step speciation profile. Enumerates the protonation microstates — the parent plus
+  one per ionisable site, one proton moved each — ranks them by free energy in the requested
+  solvent, and reports which form dominates. Use it when the molecule is amphoteric (an acid site
+  and a base site: amino acids, aminophenols, nicotinic acid) or polyprotic, which are exactly the
+  cases predict_pka and predict_logd refuse. For a single ionisable centre, predict_pka is cheaper
+  and calibrated against measured values, and this is not a substitute for it.
+
+inputs:
+  - name: smiles
+    type: string
+    description: The neutral molecule, as SMILES.
+  - name: solvent
+    type: string
+    description: Implicit solvent name; "water" for an aqueous speciation question.
+    required: false
+
+steps:
+  - id: states
+    kind: tool
+    purpose: The microstate set, from the molecular graph. Free — no calculation runs.
+    tool: enumerate_protonation_states
+    arguments:
+      smiles: "${inputs.smiles}"
+
+  - id: ranking
+    kind: job
+    purpose: >-
+      Free energies across the charged forms. These are different *species*, not conformers, so
+      what comes back is a distribution over forms rather than over shapes.
+    job: rank_species
+    arguments:
+      species: "${steps.states.result.smiles}"
+      ranking: microstates
+      solvent: "${inputs.solvent}"
+
+  - id: report
+    kind: agent
+    purpose: Say which form is present, and be explicit about what this ranking cannot give.
+    prompt: >-
+      Report the protonation microspecies of ${inputs.smiles}.
+
+      Microstates enumerated: ${steps.states.result}
+      Free-energy ranking: ${steps.ranking.result}
+
+      Name each microstate by its site and net charge, and say which dominates. Then state the
+      limit plainly: this ranks the microstates against each other in an implicit solvent, and it
+      does **not** produce a pKa — converting these free energies into pKa values needs the fitted
+      relationship that lives behind predict_pka, and that predictor covers one site. So this
+      answers "which form" and not "at which pH the balance tips". If the chemist needs a pH,
+      say so and give them what predict_pka does cover. Note that a continuum solvent misrepresents
+      aliphatic amine basicity badly enough that predict_pka refuses it outright; the same caution
+      applies to any ammonium microstate ranked here.

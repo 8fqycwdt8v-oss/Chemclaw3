@@ -35,6 +35,15 @@ def default_vector_store() -> VectorStore:
 
         logger.info("vector store: qdrant at %s", settings.vector_store_url)
         return QdrantVectorStore()
+    if provider == "databricks":
+        from chemclaw.retrieval.vectors.databricks import DatabricksVectorStore
+
+        logger.info(
+            "vector store: databricks at %s (endpoint %s)",
+            settings.vector_store_url,
+            settings.vector_store_endpoint_name,
+        )
+        return DatabricksVectorStore()
     if provider == "pgvector":
         raise VectorStoreConfigError(
             "'pgvector' names no external vector store: its embeddings live in the same Postgres "

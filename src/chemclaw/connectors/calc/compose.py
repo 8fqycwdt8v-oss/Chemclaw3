@@ -30,7 +30,7 @@ a locally-derived version would be *well-formed*, match zero calibration rows, a
 
 import asyncio
 from collections import Counter
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from typing import Any, Literal, Protocol, TypeVar
 
 from rdkit import Chem
@@ -43,24 +43,37 @@ from chemclaw.science.calc.artifacts import (
     ArrayOffloadingStore,
     ArtifactStore,
 )
+from chemclaw.science.calc.budget import estimate_units, require_within_budget
 from chemclaw.science.calc.geometry import check_server_address, structures_in
 from chemclaw.science.calc.models import (
+    BondDissociationSurvey,
+    Conformer,
     ConformerEnsemble,
     CrestEffort,
+    DissociatedBond,
+    ElectronicProperties,
     EnsemblePayload,
+    EnsembleProperty,
     EnsembleSearch,
     HessianPayload,
     InteractionResult,
     OptimizationResult,
+    RankedSpecies,
     ReactionEnergyResult,
     ReactionLevel,
+    RefinedConformer,
+    RefinedEnsemble,
     ScanPoint,
     ScanResult,
+    SiteReactivityResult,
     SolventComparisonResult,
     SolventEffect,
+    SpeciesDistribution,
     SpeciesEnergy,
     Structure,
     ThermochemistryResult,
+    WeightedAtom,
+    WeightedValue,
 )
 from chemclaw.science.calc.postgres_artifacts import default_artifact_store
 from chemclaw.science.calc.postgres_structures import default_structure_store
@@ -69,10 +82,34 @@ from chemclaw.science.calc.structures import StructureStore
 from chemclaw.science.calc.thermo import (
     HARTREE_TO_KCAL,
     ThermoSettings,
+    boltzmann_populations,
     displaced_along,
+    ensemble_entropy,
     ensemble_from_members,
+    free_energy_populations,
     thermochemistry_from_hessian,
+    weighted_average,
 )
+
+# What `ensemble_property` can average, and the field each name reads off its result model. A
+# closed set rather than a free-form attribute name: a caller naming a field that does not exist
+# would get an AttributeError from inside a fan-out that had already paid for its conformer search.
+EnsembleProperties = Literal["dipole_debye", "homo_ev", "lumo_ev", "gap_ev", "charges", "fukui"]
+
+# Which species-set question a distribution answers. The arithmetic is identical across them; the
+# label is what stops a reader having to infer the question from the SMILES.
+SpeciesKind = Literal["tautomers", "microstates", "stereoisomers", "custom"]
+
+# Below this share of the E-weighted population, a refined ensemble says so rather than presenting
+# a truncation as the whole. 0.9 is CENSO's own convention for how much of an ensemble a refinement
+# step carries forward, so a chemist reading the warning recognises the threshold.
+_REFINED_COVERAGE_WARNING = 0.9
+
+# Which Fukui index a per-atom average reports. The three are one calculation and `ranked_for`
+# re-sorts locally, so an ensemble average carries the radical index — the mean of the other two,
+# and the only one that is not a claim about which attack was meant.
+_DEFAULT_FUKUI_MODE = "radical"
+_FUKUI_FIELD = {"electrophilic": "f_minus", "nucleophilic": "f_plus", "radical": "f_zero"}
 
 _Result = TypeVar("_Result")
 # The shape a server answer arrives in, before it is validated into a model. Its own variable
@@ -955,4 +992,403 @@ async def solvent_comparison(
         spread_kcal=round(spread, 2),
         uncertainty_kcal=uncertainty,
         warnings=warnings,
+    )
+
+
+# --- ensembles refined, averaged and ranked ---------------------------------------------------
+#
+# **The fan-out lives here and not in a template, and that placement is the whole design.** A
+# template is an ordered step list with deliberately no loops, no conditionals and no expressions,
+# and the agent's own loop is capped at `harness_max_loop_iterations`. A tautomer ratio over eight
+# species, or a bond survey over twenty bonds, fits neither — so the loop is a composite and the
+# sequence around it is a template. Everything below is one of those loops, and every one of them
+# counts its cost before it starts (`science/calc/budget.py`).
+
+
+async def refined_ensemble(
+    store: ResultStore,
+    smiles: str,
+    *,
+    subject: Structure | None = None,
+    solvent: str | None = None,
+    temperature_k: float | None = None,
+    top_n: int | None = None,
+    progress: Progress = no_progress,
+    run: RemoteRunner = plain,
+) -> RefinedEnsemble:
+    """Re-weight a conformer ensemble by free energy instead of by electronic energy.
+
+    D-101 recorded that this system does not do this, and gave the reason: "one Hessian per member,
+    half an hour each at 76 atoms". That reason has not changed, so this does not replace
+    `conformer_ensemble` — it is the shape for when a caller decides to pay, bounded to the top
+    `ensemble_refine_top_n` members by electronic energy.
+
+    **What the refinement buys.** Weighting by E assumes every conformer has the same zero-point,
+    thermal and entropic contribution, which is exactly wrong for the case a conformer search is run
+    on: a compact hydrogen-bonded fold has a low electronic energy *and* a stiff, ordered set of low
+    modes, so E-weighting over-populates it. G-weighting is the distribution the populations are
+    supposed to be.
+
+    **What it costs in honesty.** Refining five of forty-seven and calling the result "the ensemble"
+    is the error `ensemble_from_members` already refuses for `max_members`, and it is worse here
+    because a free energy looks more careful than an electronic one. So the result carries
+    `refined_population_covered` — the E-weighted population fraction the refined members account
+    for — and warns below a threshold rather than leaving a reader to notice.
+    """
+    ensemble, _ = await conformer_ensemble(
+        store, smiles, subject=subject, solvent=solvent, temperature_k=temperature_k, run=run
+    )
+    keep = top_n or settings.ensemble_refine_top_n
+    chosen = ensemble.conformers[:keep]
+    temperature = temperature_k or settings.xtb_thermo_temperature_k
+    require_within_budget(
+        estimate_units(len(chosen), level="thorough", searched=False),
+        f"refining the top {len(chosen)} conformers of {smiles}",
+    )
+
+    settled: list[tuple[Conformer, OptimizationResult, ThermochemistryResult]] = []
+    for index, conformer in enumerate(chosen, start=1):
+        progress(f"refining conformer {index}/{len(chosen)} of {smiles}")
+        minimum, result, _ = await relax_to_minimum(
+            store,
+            conformer.structure,
+            solvent,
+            ThermoSettings(temperature_k=temperature),
+            run=run,
+        )
+        settled.append((conformer, minimum, result))
+
+    degeneracies = [conformer.degeneracy for conformer, _, _ in settled]
+    populations = free_energy_populations(
+        [result.gibbs_free_energy_hartree for _, _, result in settled], degeneracies, temperature
+    )
+    lowest_gibbs = min(result.gibbs_free_energy_hartree for _, _, result in settled)
+    members = sorted(
+        (
+            RefinedConformer(
+                structure=minimum.structure,
+                relative_kcal=round(
+                    (result.gibbs_free_energy_hartree - lowest_gibbs) * HARTREE_TO_KCAL, 3
+                ),
+                population=round(population, 4),
+                degeneracy=conformer.degeneracy,
+                gibbs_free_energy_hartree=result.gibbs_free_energy_hartree,
+                electronic_energy_hartree=minimum.energy_hartree,
+                is_minimum=result.is_minimum,
+            )
+            for (conformer, minimum, result), population in zip(settled, populations, strict=True)
+        ),
+        key=lambda member: member.relative_kcal,
+    )
+    entropy = ensemble_entropy(populations, degeneracies)
+    covered = sum(conformer.population for conformer in chosen)
+    warnings: list[str] = []
+    if covered < _REFINED_COVERAGE_WARNING:
+        warnings.append(
+            f"the {len(chosen)} refined conformers carry {covered:.0%} of the ensemble population; "
+            "these free energies describe that fraction rather than the whole ensemble"
+        )
+    if any(not member.is_minimum for member in members):
+        warnings.append(
+            "at least one refined conformer did not settle on a genuine minimum, so its free "
+            "energy is computed at a saddle point and its population is not meaningful"
+        )
+    return RefinedEnsemble(
+        smiles=require_canonical_smiles(smiles),
+        method=ensemble.method,
+        solvent=solvent,
+        temperature_k=temperature,
+        conformers=members,
+        total_found=ensemble.total_found,
+        refined_count=len(members),
+        refined_population_covered=round(covered, 4),
+        conformational_entropy_cal_per_mol_k=round(entropy, 3),
+        ensemble_correction_kcal=round(-temperature * entropy / 1000.0, 3),
+        warnings=warnings,
+    )
+
+
+async def ensemble_property(
+    store: ResultStore,
+    smiles: str,
+    *,
+    prop: EnsembleProperties = "dipole_debye",
+    solvent: str | None = None,
+    temperature_k: float | None = None,
+    max_members: int | None = None,
+    progress: Progress = no_progress,
+    run: RemoteRunner = plain,
+) -> EnsembleProperty:
+    """Compute one property at every populated conformer and weight it by their populations.
+
+    The caveat under every other number in this system is that it describes **one** conformer —
+    whichever geometry was embedded. This is the composite that lifts it, and the lift is not
+    cosmetic: a dipole, a HOMO-LUMO gap and a Fukui ranking can all move by more between two
+    populated conformers of one molecule than between two different molecules.
+
+    Which is why the answer carries a *spread* and not only a mean. When the values scatter more
+    than the difference the number is being used to argue, the honest report is that the molecule
+    does not have one value of this property at this temperature.
+
+    Per-atom properties (`fukui`, `charges`) are averaged atom by atom over the same populations,
+    which is the same arithmetic — `weighted_average` is called once per atom rather than once.
+    Atom order is the canonical SMILES order on every member, because every member came from one
+    search over one molecule.
+    """
+    ensemble, _ = await conformer_ensemble(
+        store, smiles, solvent=solvent, temperature_k=temperature_k, run=run
+    )
+    keep = max_members or settings.ensemble_refine_top_n
+    chosen = ensemble.conformers[:keep]
+    require_within_budget(
+        estimate_units(len(chosen), level="standard", searched=False),
+        f"a {prop} average over {len(chosen)} conformers of {smiles}",
+    )
+
+    tool = "compute_fukui_at" if prop == "fukui" else "compute_properties_at"
+    payloads: list[Any] = []
+    for index, conformer in enumerate(chosen, start=1):
+        progress(f"{prop} at conformer {index}/{len(chosen)} of {smiles}")
+        payload, _ = await run(
+            cached_remote(
+                store,
+                tool,
+                {"structure": conformer.structure.model_dump(mode="json"), "solvent": solvent},
+            ),
+            f"{prop} of {smiles} conformer {index}",
+        )
+        payloads.append(await kept(payload))
+
+    populations = [conformer.population for conformer in chosen]
+    total = sum(populations) or 1.0
+    populations = [population / total for population in populations]
+    scalar, per_atom = _averaged(prop, payloads, populations)
+    return EnsembleProperty(
+        smiles=require_canonical_smiles(smiles),
+        property_name=prop,
+        method=ensemble.method,
+        solvent=solvent,
+        temperature_k=ensemble.temperature_k,
+        members_averaged=len(chosen),
+        total_found=ensemble.total_found,
+        value=scalar,
+        per_atom=per_atom,
+        population_covered=round(sum(conformer.population for conformer in chosen), 4),
+    )
+
+
+def _averaged(
+    prop: EnsembleProperties, payloads: list[Any], populations: list[float]
+) -> tuple[WeightedValue | None, list[WeightedAtom]]:
+    """Split one property out of each payload and weight it — scalar or per atom.
+
+    A `match` over the property name rather than a registry, because there are four of them and a
+    registry with four entries is indirection that hides what is being read off which model.
+    """
+    if prop == "fukui":
+        sites = [SiteReactivityResult.model_validate(payload).sites for payload in payloads]
+        field = _FUKUI_FIELD[_DEFAULT_FUKUI_MODE]
+        return None, [
+            WeightedAtom(
+                index=first.index,
+                element=first.element,
+                value=weighted_average(
+                    [getattr(member[position], field) for member in sites], populations
+                ),
+            )
+            for position, first in enumerate(sites[0])
+        ]
+    properties = [ElectronicProperties.model_validate(payload) for payload in payloads]
+    if prop == "charges":
+        return None, [
+            WeightedAtom(
+                index=first.index,
+                element=first.element,
+                value=weighted_average(
+                    [member.atom_charges[position].charge for member in properties], populations
+                ),
+            )
+            for position, first in enumerate(properties[0].atom_charges)
+        ]
+    values = [getattr(member, prop) for member in properties]
+    if any(value is None for value in values):
+        raise ValueError(
+            f"{prop} is not defined for every conformer of this molecule "
+            "(a species with no unoccupied orbital has no LUMO and no gap)"
+        )
+    return weighted_average(values, populations), []
+
+
+async def species_ranking(
+    store: ResultStore,
+    species: Sequence[tuple[str, str]],
+    *,
+    kind: SpeciesKind = "custom",
+    solvent: str | None = None,
+    temperature_k: float | None = None,
+    level: ReactionLevel = "standard",
+    progress: Progress = no_progress,
+    run: RemoteRunner = plain,
+) -> SpeciesDistribution:
+    """Rank a set of *distinct species* by free energy and report their equilibrium populations.
+
+    One composite for three questions, because they are the same arithmetic over different species
+    sets: which tautomer dominates, which protonation microstate is present, which stereoisomer is
+    favoured. `kind` records which was asked — the number means something different in each, and a
+    reader must not have to infer it from the SMILES.
+
+    Each species goes through `_species_energy`, which is the engine every reaction energy already
+    uses: embed, optionally search its conformers, relax, and at `standard` or above take its
+    Hessian for a free energy. So a ranking and a reaction energy cannot disagree about what one
+    species' free energy is, and a species computed for one is a cache hit for the other.
+
+    **The set is the answer's universe, and it is not checked here.** A species that was not
+    enumerated was not ranked, so a distribution over an incomplete set is confident about the wrong
+    universe. `enumerated` carries the count the caller started from for exactly that reason.
+    """
+    if not species:
+        raise ValueError("a distribution needs at least one species")
+    ceiling = settings.species_ranking_max
+    considered = list(species[:ceiling])
+    temperature = temperature_k or settings.xtb_thermo_temperature_k
+    require_within_budget(
+        estimate_units(len(considered), level=level, searched=level == "thorough"),
+        f"ranking {len(considered)} species",
+    )
+
+    thermo = (
+        None if level == "quick" else ThermoSettings(temperature_k=temperature, symmetry_number=1)
+    )
+    energies: list[SpeciesEnergy] = []
+    for index, (smiles, _) in enumerate(considered, start=1):
+        progress(f"species {index}/{len(considered)}: {smiles}")
+        energies.append(
+            await _species_energy(store, smiles, "reactant", solvent, thermo, 1, level, run)
+        )
+
+    gibbs = [energy.gibbs_free_energy_hartree for energy in energies]
+    use_gibbs = all(value is not None for value in gibbs)
+    scale = (
+        [value for value in gibbs if value is not None]
+        if use_gibbs
+        else [energy.electronic_energy_hartree for energy in energies]
+    )
+    lowest = min(scale)
+    relative = [(value - lowest) * HARTREE_TO_KCAL for value in scale]
+    populations = boltzmann_populations(relative, [1] * len(scale), temperature)
+
+    warnings: list[str] = []
+    if not use_gibbs:
+        warnings.append(
+            "ranked by electronic energy: at level='quick' no species has a free energy, so the "
+            "populations ignore the zero-point and entropy differences between these forms"
+        )
+    if len(species) > ceiling:
+        warnings.append(
+            f"{len(species)} species were enumerated and the {ceiling - len(species)} lowest-"
+            f"priority were not computed; the populations describe the {ceiling} that were"
+        )
+    ranked = sorted(
+        (
+            RankedSpecies(
+                smiles=energy.smiles,
+                label=label,
+                relative_kcal=round(value, 3),
+                population=round(population, 4),
+                gibbs_free_energy_hartree=energy.gibbs_free_energy_hartree,
+                electronic_energy_hartree=energy.electronic_energy_hartree,
+                conformers_found=0,
+            )
+            for (_, label), energy, value, population in zip(
+                considered, energies, relative, populations, strict=True
+            )
+        ),
+        key=lambda candidate: candidate.relative_kcal,
+    )
+    return SpeciesDistribution(
+        kind=kind,
+        method=energies[0].method,
+        solvent=solvent,
+        temperature_k=temperature,
+        level=level,
+        species=ranked,
+        enumerated=len(species),
+        uncertainty_kcal=settings.xtb_reaction_uncertainty_kcal,
+        sampled=level == "thorough",
+        warnings=warnings,
+    )
+
+
+async def bond_dissociation_survey(
+    store: ResultStore,
+    smiles: str,
+    cleavages: Sequence[tuple[tuple[int, int], str, list[str]]],
+    *,
+    solvent: str | None = None,
+    temperature_k: float | None = None,
+    level: ReactionLevel = "quick",
+    progress: Progress = no_progress,
+    run: RemoteRunner = plain,
+) -> BondDissociationSurvey:
+    """Compute the dissociation energy of every enumerated bond and rank them.
+
+    Each bond is one `reaction_energy` — parent on the left, its two fragments on the right — so
+    the arithmetic, the balance check and the open-shell handling are the ones already in use rather
+    than a second implementation. `radical_multiplicity` reads the explicit radical electrons the
+    enumeration wrote (`[CH3]`, `[H]`), which is what makes a homolysis computable from two SMILES
+    with no declared spin state.
+
+    Defaults to `level="quick"`: a survey is a *ranking*, the ordering is what it supports, and a
+    Hessian per fragment per bond multiplies a twenty-bond survey by three for a magnitude
+    semiempirical theory does not deliver anyway. Ask for `standard` when the question is one bond.
+    """
+    if not cleavages:
+        raise ValueError(f"no breakable bond was enumerated for {smiles}")
+    require_within_budget(
+        estimate_units(len(cleavages) * 3, level=level, searched=False),
+        f"a {len(cleavages)}-bond dissociation survey of {smiles}",
+    )
+
+    results: list[DissociatedBond] = []
+    for index, (atoms, bond, fragments) in enumerate(cleavages, start=1):
+        progress(f"bond {index}/{len(cleavages)} ({bond}) of {smiles}")
+        reaction = await reaction_energy(
+            store,
+            [smiles],
+            list(fragments),
+            solvent,
+            temperature_k,
+            level,
+            dict.fromkeys([smiles, *fragments], 1),
+            progress=no_progress,
+            run=run,
+        )
+        energy = (
+            reaction.delta_h_kcal if reaction.delta_h_kcal is not None else reaction.delta_e_kcal
+        )
+        results.append(
+            DissociatedBond(
+                atoms=list(atoms),
+                bond=bond,
+                fragments=list(fragments),
+                dissociation_energy_kcal=round(energy, 1),
+            )
+        )
+
+    results.sort(key=lambda entry: entry.dissociation_energy_kcal)
+    if results:
+        results[0] = results[0].model_copy(update={"is_weakest": True})
+    return BondDissociationSurvey(
+        smiles=require_canonical_smiles(smiles),
+        method=settings.xtb_method,
+        solvent=solvent,
+        temperature_k=temperature_k or settings.xtb_thermo_temperature_k,
+        mode="homolytic",
+        bonds=results,
+        considered=len(cleavages),
+        uncertainty_kcal=settings.xtb_reaction_uncertainty_kcal,
+        warnings=[
+            "semiempirical bond dissociation energies carry several kcal/mol of error, so the "
+            "ordering is the answer and the magnitudes are not"
+        ],
     )

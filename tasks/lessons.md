@@ -691,6 +691,62 @@ it too, not to treat the citation as the check.
 And: `tasks/lessons.md`'s previous entry — measure the mechanism, not the outcome — was written in
 the same session as the code that failed it four times. A lesson recorded is not a lesson applied.
 
+## 2026-08-25 — a plan that says "zero new code" is a claim, and mine were wrong twice
+
+**What happened.** Planning the Databricks work, I wrote two confident structural claims into the
+plan and both were false:
+
+- *"Pistachio is zero new code — one manifest."* The `vector:` half of the warehouse binding runs
+  `VECTOR_COSINE_SIMILARITY(col, ?::VECTOR(FLOAT, n))`, which is Snowflake's function and Snowflake's
+  type. Databricks has neither, and — the part I would not have guessed — no array *parameter* type
+  at all, so a 1536-float query vector cannot be bound as a list on any statement.
+- *"The vendor shapes go in `tests/test_upstream_surface.py`."* That file's assertions import their
+  package unconditionally and its version floor calls `version(package)`. These clients are
+  deliberately not installed here, so entries there would have made the suite depend on them.
+
+Neither survived contact with the file. Both were plausible because I had read the *neighbourhood*
+— the seam's README, the sibling adapter — and inferred the rest.
+
+**The rule.** Before writing "no change needed to X" into a plan, open X and read the specific lines
+that would have to hold. A README describes intent; the function body is what runs. For a *test*
+file, read its docstring's statement of what belongs in it — three of this repository's test files
+say so explicitly, and one of them said the opposite of what I planned.
+
+**The second rule, which is the more expensive one.** I nearly shipped the Databricks score straight
+through as a cosine. It is `1/(1 + d²)` over *Euclidean* distance, and `VectorMatch.score` is
+contractually a cosine that the fusion layer ranks on. Nothing would have raised; a corpus would
+just have been ranked slightly wrong forever. **When adapting a vendor to a numeric contract, look
+up what the number actually means, and write down the boundary values** — identical, orthogonal,
+opposing. Three lines of arithmetic turned an assumption into a test.
+
+**And the thing that made all of it visible:** a review pass over my own plan, run against the real
+files rather than my memory of them, before writing any code. It found five real problems, of which
+I had independently caught three. The two I had not were the two that would have shipped.
+
+## 2026-08-25 — take the number off the wire, not off a serializer you chose
+
+I measured the condenser's saving with `model_dump_json()` and shipped the figure in a commit, an
+ADR and a PR body. Production never calls it: LangChain's `_stringify` tries `json.dumps`, fails on
+a pydantic model, and falls back to `str()`. The real saving was **2.7×**, not 9.1× — and the
+`Field(exclude=True)` the measurement was built on had no effect at all.
+
+The tell was available the whole time and I did not look for it: I never once read a `ToolMessage`.
+Every measurement went through an object I built and a serializer I picked.
+
+*Rule for myself: when measuring what something costs a model, obtain the bytes from the production
+path — drive the compiled graph, read the message it produced — and never from a representation I
+selected. If I cannot name the function that turns my return value into what the model sees, I have
+not measured it.*
+
+This is the same error as the previous entry, one level up. There I charged `content` instead of the
+serialized chunk; here I serialized with the wrong function entirely. Both are "I measured the
+mechanism I assumed was running." The previous entry's rule — measure the mechanism, not the outcome
+— was necessary and not sufficient, because I did measure a mechanism. It was the wrong one, and
+what distinguishes the right one is that **something else in the system actually calls it.**
+
+An honest note on sequence: three review passes over the same diff found three defects of this
+family, each after I had written a lesson about the family. Recording a rule and applying it are
+different acts, and the second one has to happen at the moment of writing the code, not afterwards.
 ## 2026-08-25 — a check that skips is not a check that passes
 
 **What happened.** I edited migration `050` after committing it, to add a column. Locally

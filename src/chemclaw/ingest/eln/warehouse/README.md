@@ -41,11 +41,38 @@ halves and so validates the binding itself rather than just its keyword name.
 | `binding.py` | The document's schema. `extra="forbid"`, validated when a half is built. |
 | `expr.py` | Paths (`root.COL`, `charges[0].COL`) and the closed transform vocabulary. |
 | `sql.py` | Statement construction. Checked identifiers written, every value bound. |
-| `driver.py` | The `Warehouse`/`WarehouseCursor` Protocols. No third-party import. |
+| `driver.py` | The `Warehouse`/`WarehouseCursor`/`VectorDialect` Protocols. No third-party import. |
 | `connect.py` | Late-binds the driver, reads credentials from the named variables. |
 | `adapter.py` | The ingest half — an `ElnAdapter`. |
 | `retriever.py` | The retrieve half — a `SourceRetriever`. |
-| `snowflake.py` | The only module that knows a vendor exists. |
+| `snowflake.py` | One of the two modules that know a vendor exists. |
+| `databricks.py` | The other: Databricks SQL over Unity Catalog. |
+
+## The similarity search is the driver's, not the engine's
+
+`placeholder` was always on the connection, because parameter style is a dialect fact. The
+similarity *call* is one too, and until D-2026-08-25 it was not treated as one:
+`VECTOR_COSINE_SIMILARITY` and `?::VECTOR(FLOAT, n)` are Snowflake's, and they sat in `sql.py`. Both
+now come from `Warehouse.vector_dialect`, and a driver that offers none cannot serve a `vector:`
+block — it says so, naming itself, rather than emitting SQL another server will reject.
+
+The sharper half is how a query vector is *bound*, not what the function is called. Snowflake has a
+native `VECTOR` type and binds the list. Databricks has no array parameter type at all, so the
+vector goes as one JSON scalar that `from_json(?, 'ARRAY<FLOAT>')` parses server-side — still a
+bound value, which is the invariant `sql.py` exists to hold.
+
+## Two ways to rank, and the corpus size decides
+
+`vector_column:` ranks by scanning the relation: a similarity function per row, right for an ELN.
+`index:` ranks in a Mosaic AI Vector Search index through `chemclaw.retrieval.vectors` and queries
+the relation only to resolve the winning keys into content — the split
+`ingest/documents/external_index.py` makes, with the warehouse as the catalogue. Use it when a scan
+is not affordable: at ~10⁷ rows a per-row similarity is a full corpus scan per question.
+
+A binding declares exactly one of the two; naming both is refused rather than silently resolved. On
+the index path a filter becomes a set of eligible keys computed in SQL and sent *before* the top-k
+(filter after the cut and a narrow filter over a wide corpus returns nothing), bounded by
+`CHEMCLAW_VECTOR_STORE_MAX_SCOPE_KEYS` and refused rather than truncated when it overflows.
 
 ## Four decisions worth knowing before you write a binding
 
