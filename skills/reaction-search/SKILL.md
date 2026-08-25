@@ -8,6 +8,7 @@ tools:
   - similar_molecules
   - substructure_matches
   - similar_reactions
+  - condense_protocols
 ---
 
 # Reaction / structure search
@@ -59,6 +60,18 @@ correctly but uses them well (G6).
 - These are guidance, not law: a low-Tanimoto hit sharing the *reacting* motif can matter
   more than a high-Tanimoto hit that differs only far from the reaction center. Read the
   structures, don't just trust the number.
+
+## Reading what the hits actually contain
+
+- The fingerprint tools return ids and similarity, never chemistry. A hit is a *candidate*
+  until you have read the protocol behind it, and a ranked list of ids is not evidence.
+- With more than a handful of hits, pass their ids straight to `condense_protocols` rather
+  than calling `expand_note` on each. It reads every protocol whole and returns one comparison
+  — conditions, outcomes, and what each run changed relative to the one before — which is the
+  form in which a Tanimoto neighbourhood becomes a readable answer about what has been tried.
+- A high-similarity hit whose conditions turn out to be unrelated to yours is a *worse*
+  precedent than a mid-similarity one that shares the reacting motif and the solvent system.
+  The comparison is where that becomes visible; the score alone hides it.
 
 ## Combine with metadata and the graph
 

@@ -10,6 +10,7 @@ tools:
   - gather_evidence
   - find_notes
   - expand_note
+  - condense_protocols
   - similar_reactions
   - similar_molecules
   - substructure_matches
@@ -39,10 +40,28 @@ chemistry when that is what answers the question.
    structurally similar reactions when you pass a `reaction_smiles` anchor). Pass a
    `note_type` or `tag` filter to narrow. It returns cited chunks; there is no need to query
    sources one by one for a first pass.
-3. **Drill in.** For any cited note, `expand_note` gives the full body — the step-by-step
-   recipe, per-step conditions, the verbatim procedure prose, and outcomes. That prose is
-   where impurities, observations, and robustness rationale live; read it, don't just read the
-   headline numbers.
+3. **Drill in — one protocol or many.** For a *single* cited note, `expand_note` gives the
+   full body: the step-by-step recipe, per-step conditions, the verbatim procedure prose, and
+   outcomes. That prose is where impurities, observations, and robustness rationale live; read
+   it, don't just read the headline numbers.
+
+   For **many** protocols — the usual case after `similar_reactions`, or any question of the
+   form "what have we tried" — use `condense_protocols` with the whole list of ids instead of
+   calling `expand_note` once per protocol. It reads each protocol whole (never split, and one
+   too large to read is named rather than shortened) and returns one comparison: the recorded
+   conditions and outcomes side by side, the solvent/reagents/work-up read out of each
+   procedure, and **what each run changed relative to the one before it**. That last column is
+   usually the answer to "what moved the yield" — read the trajectory, not the rows.
+
+   Calling `expand_note` twenty times is the failure this replaces: it costs a model round-trip
+   each, and the earliest bodies are cleared from your context before you write the answer, so
+   you end up reasoning about the last two and your memory of the rest. Cite straight from the
+   comparison — every row carries its reference — and fall back to `expand_note` for the one
+   protocol whose full text you actually need.
+
+   Read `complete` on the result. It means every reference *you passed* was read; it never means
+   you have seen every protocol on file — that question belongs to the search that produced the
+   references, whose own `verdict`/`hits_truncated` you must read separately.
 4. **Cross-learn by structure**, not only by text:
    - `similar_reactions(reaction_smiles)` — past runs of the *same* transformation (the
      history behind "what has been tried" / "what moved the yield").

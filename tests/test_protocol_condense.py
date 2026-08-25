@@ -235,3 +235,49 @@ def test_condensing_nothing_is_empty_rather_than_an_error() -> None:
     assert result.table == ""
     assert result.rows == []
     assert result.complete is True
+
+
+def test_the_tool_crosses_the_audit_and_authorization_chain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The whole argument for a tool over a compaction summarizer, asserted rather than claimed.
+
+    `agent/compaction.py` declines `SummarizationMiddleware` because a summarizer's output is
+    replayed as conversation, outside the framing envelope and outside every gate. The counter-claim
+    is that a condenser behind a *tool* is a different trust position — audited, authorized,
+    dry-run-refused, repeat-guarded. That is only true if the call actually crosses the chain, which
+    is what this drives a real compiled graph to prove.
+    """
+    from chemclaw.agent.langgraph_agent import build_langgraph_agent
+    from tests.test_langgraph_agent import _CollectingSink, _run, _scripted
+
+    monkeypatch.setattr(settings, "entra_required", False)
+    sink = _CollectingSink()
+    graph = build_langgraph_agent(
+        model=_scripted("condense_protocols", {"protocol_refs": []}),
+        actor="tester",
+        correlation_id="cid-condense",
+        audit_sink=sink,
+    )
+
+    _run(graph)
+
+    assert [e.tool for e in sink.events] == ["condense_protocols"]
+    event = sink.events[0]
+    assert (event.actor, event.correlation_id) == ("tester", "cid-condense")
+    assert event.outcome == "ok"
+
+
+def test_the_summarizer_is_still_off_while_the_condenser_exists() -> None:
+    """The declination stands. This change adds a tool; it does not reverse D-025.
+
+    Pinned together because the pair is the claim: a condensing model call exists in this
+    deployment *and* nothing rewrites the conversation thread. `tests/test_compaction.py` asserts
+    the second half against the compiled stack; what this adds is that it stays true beside the
+    first, so a future reader finds the two facts in one place rather than inferring the pair.
+    """
+    from chemclaw.core.tool_registry import registered_tool_names
+    from tests.test_compaction import test_the_summarizer_in_the_compiled_stack_can_never_fire
+
+    assert "condense_protocols" in registered_tool_names()
+    test_the_summarizer_in_the_compiled_stack_can_never_fire()
