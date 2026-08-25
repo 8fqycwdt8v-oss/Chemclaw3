@@ -109,7 +109,13 @@ class Condensation(BaseModel):
     """
 
     table: str
-    rows: list[ProtocolDigest] = Field(default_factory=list)
+    # **Excluded from serialization, deliberately, and measured.** The table *is* these rows
+    # rendered, so a payload carrying both sends every extracted field twice — measured at 80
+    # protocols, that duplication was most of what the condensation cost, and a tool that exists to
+    # spend less context cannot afford to say everything twice. The field stays on the object
+    # because it is the structured truth the table is built from, and tests and any future
+    # programmatic caller want it; what reaches a model is the comparison.
+    rows: list[ProtocolDigest] = Field(default_factory=list, exclude=True)
     complete: bool = True
     # The refs that were not read, so a refusal is legible as a list and not only per row.
     oversized: list[str] = Field(default_factory=list)
