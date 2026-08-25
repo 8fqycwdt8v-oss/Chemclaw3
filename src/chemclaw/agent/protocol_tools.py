@@ -27,9 +27,10 @@ from chemclaw.agent.condense import condense_protocols as _condense
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.core.tool_registry import tool
+from chemclaw.ingest.eln.records import RECORD_TYPE, default_record_store
 from chemclaw.ingest.sources.registry import active_retrieve_sources
 from chemclaw.kg.graph import build_graph
-from chemclaw.kg.note import Note
+from chemclaw.kg.note import Note, resolves_outside_graph
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +48,32 @@ def _procedure(note: Note) -> str:
     """
     _, _, procedure = note.body.partition("## Procedure")
     return procedure.strip() if procedure.strip() else note.body.strip()
+
+
+async def _from_record(ref: str) -> Protocol | None:
+    """Resolve a `reaction-<id>` citation to the transcription behind it (D-2026-08-25).
+
+    ELN runs left the graph's id space when they became rows, so the lookup above finds none of
+    them — and they are the largest class of protocol this tool exists to compare. Without this a
+    reaction reference reads as `missing`, which is the same silent hole `_from_share` was written
+    to close for share documents, arriving from the other direction.
+
+    The record carries `conditions` for the same reason a note did: the comparison wants numbers,
+    not sentences it would have to re-derive from the prose it just rendered.
+    """
+    if not resolves_outside_graph(ref):
+        return None
+    record = await default_record_store().read(ref.removeprefix("reaction-"))
+    if record is None:
+        return None
+    return Protocol(
+        ref=ref,
+        source=record.source,
+        title=RECORD_TYPE,
+        conditions=record.conditions,
+        performed_at=record.performed_at,
+        text=record.body,
+    )
 
 
 def _share_readers() -> dict[str, Any]:
@@ -154,9 +181,9 @@ async def condense_protocols(protocol_refs: list[str]) -> str:
                 )
             )
             continue
-        document = await _from_share(ref, readers)
-        if document is not None:
-            protocols.append(document)
+        resolved = await _from_record(ref) or await _from_share(ref, readers)
+        if resolved is not None:
+            protocols.append(resolved)
         else:
             missing.append(ref)
     if missing and not protocols:

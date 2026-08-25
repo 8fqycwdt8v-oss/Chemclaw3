@@ -796,3 +796,27 @@ what distinguishes the right one is that **something else in the system actually
 An honest note on sequence: three review passes over the same diff found three defects of this
 family, each after I had written a lesson about the family. Recording a rule and applying it are
 different acts, and the second one has to happen at the moment of writing the code, not afterwards.
+## 2026-08-25 — a check that skips is not a check that passes
+
+**What happened.** I edited migration `050` after committing it, to add a column. Locally
+`tests/test_migrations_are_additive.py` was green; CI failed on it. The test *skips* on a shallow
+checkout ("truncated history: ... this check would compare files against themselves") and runs
+under CI's `fetch-depth: 0`. I read the green line as "this passed" when it said "this did not
+run".
+
+The same session had already stated the general form of this — CLAUDE.md's "never report a local
+run as green without saying what it skipped" — and I applied it to the Postgres tests I *knew*
+about while missing the one that announced itself in the skip reason.
+
+Worse, the defect had already shown itself: applying the edited `050` broke `make db-migrate` on my
+own dev database with "was edited after being applied". I reset the table by hand and moved on. The
+error message was the test's message, one layer down, and I treated it as an environment chore.
+
+**The rule.** When a local run is green and CI is red on the same commit, suspect a *skip* before
+suspecting the environment — read the skip reasons, not just the count. And when a local command
+fails in a way that needs a manual workaround to proceed, that workaround is evidence about the
+change, not a chore: ask what the failure is telling you before undoing it.
+
+**Concretely for this repo:** `git fetch --unshallow` before trusting
+`test_migrations_are_additive`, `test_no_merged_migration_had_its_statements_changed` or anything
+else whose skip mentions truncated history.

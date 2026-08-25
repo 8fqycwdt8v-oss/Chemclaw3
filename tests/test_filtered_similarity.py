@@ -12,11 +12,14 @@ corpus where the wanted hits sit below the page boundary, which is what this one
 """
 
 import asyncio
-from pathlib import Path
 
 import pytest
 
 from chemclaw.core.config import settings
+from chemclaw.ingest.eln.records import (
+    InMemoryReactionRecordStore,
+    ReactionRecord,
+)
 from chemclaw.retrieval.retrievers import FingerprintReactionRetriever
 from chemclaw.science.fingerprints.rxnfp.search import record_for_reaction
 from chemclaw.science.fingerprints.store import InMemoryFingerprintStore
@@ -24,18 +27,21 @@ from chemclaw.science.fingerprints.store import InMemoryFingerprintStore
 _QUERY = "CCO.CC(=O)O>>CCOC(C)=O.O"
 
 
-def _note(directory: Path, note_id: str, note_type: str, tags: list[str]) -> None:
-    """Write one minimal note the eligibility gate can parse."""
-    front = [
-        "---",
-        f"id: {note_id}",
-        f"type: {note_type}",
-        f"tags: [{', '.join(tags)}]",
-        "---",
-        "",
-        f"Body of {note_id}.",
-    ]
-    (directory / f"{note_id}.md").write_text("\n".join(front), encoding="utf-8")
+async def _records(**projects: str | None) -> InMemoryReactionRecordStore:
+    """A record store holding one transcription per reaction id, with its project."""
+    store = InMemoryReactionRecordStore()
+    await store.record(
+        [
+            ReactionRecord(
+                reaction_id=reaction_id,
+                body=f"Body of {reaction_id}.",
+                project=project,
+                source="eln:test",
+            )
+            for reaction_id, project in projects.items()
+        ]
+    )
+    return store
 
 
 async def _indexed(reactions: dict[str, str]) -> InMemoryFingerprintStore:
@@ -46,7 +52,7 @@ async def _indexed(reactions: dict[str, str]) -> InMemoryFingerprintStore:
     return store
 
 
-def test_an_unfiltered_search_is_unchanged_including_the_pending_note(tmp_path: Path) -> None:
+def test_an_unfiltered_search_is_unchanged_including_the_unstored_record() -> None:
     """No filter means no corpus read and no drop — the D-018 pending-note citation survives.
 
     That citation is deliberate: the fingerprint index is written at ingestion while the note is
@@ -56,21 +62,19 @@ def test_an_unfiltered_search_is_unchanged_including_the_pending_note(tmp_path: 
 
     async def _run() -> None:
         store = await _indexed({"r1": _QUERY})
-        retriever = FingerprintReactionRetriever(store, notes_dir=str(tmp_path))
+        retriever = FingerprintReactionRetriever(store, InMemoryReactionRecordStore())
         chunks = await retriever.retrieve(_QUERY, {})
-        assert [c.source_note_id for c in chunks] == ["reaction-r1"]  # note file does not exist
+        assert [c.source_note_id for c in chunks] == ["reaction-r1"]  # no record stored
 
     asyncio.run(_run())
 
 
-def test_a_tag_filter_narrows_to_the_notes_that_carry_it(tmp_path: Path) -> None:
+def test_a_tag_filter_narrows_to_the_records_that_carry_it() -> None:
     """The whole point: "similar, and on this campaign" was previously unanswerable."""
 
     async def _run() -> None:
         store = await _indexed({"r1": _QUERY, "r2": "CCO.CC(=O)Cl>>CCOC(C)=O.Cl"})
-        _note(tmp_path, "reaction-r1", "reaction", ["step-3"])
-        _note(tmp_path, "reaction-r2", "reaction", ["step-9"])
-        retriever = FingerprintReactionRetriever(store, notes_dir=str(tmp_path))
+        retriever = FingerprintReactionRetriever(store, await _records(r1="step-3", r2="step-9"))
 
         assert len(await retriever.retrieve(_QUERY, {})) == 2
         narrowed = await retriever.retrieve(_QUERY, {"tag": "step-3"})
@@ -79,13 +83,12 @@ def test_a_tag_filter_narrows_to_the_notes_that_carry_it(tmp_path: Path) -> None
     asyncio.run(_run())
 
 
-def test_a_type_filter_drops_a_hit_whose_note_is_not_that_type(tmp_path: Path) -> None:
+def test_a_type_filter_drops_a_hit_whose_record_is_not_that_type() -> None:
     """`type` is the other half of the gate every note retriever already applies."""
 
     async def _run() -> None:
         store = await _indexed({"r1": _QUERY})
-        _note(tmp_path, "reaction-r1", "reaction", [])
-        retriever = FingerprintReactionRetriever(store, notes_dir=str(tmp_path))
+        retriever = FingerprintReactionRetriever(store, await _records(r1=None))
 
         assert len(await retriever.retrieve(_QUERY, {"type": "reaction"})) == 1
         assert await retriever.retrieve(_QUERY, {"type": "playbook"}) == []
@@ -93,7 +96,7 @@ def test_a_type_filter_drops_a_hit_whose_note_is_not_that_type(tmp_path: Path) -
     asyncio.run(_run())
 
 
-def test_a_filtered_hit_whose_note_is_missing_is_dropped(tmp_path: Path) -> None:
+def test_a_filtered_hit_whose_record_is_missing_is_dropped() -> None:
     """The one place the pending-note citation does not apply, and deliberately.
 
     A filter says "only notes that are X". A note nobody can read cannot be *shown* to be X, so
@@ -103,14 +106,14 @@ def test_a_filtered_hit_whose_note_is_missing_is_dropped(tmp_path: Path) -> None
 
     async def _run() -> None:
         store = await _indexed({"r1": _QUERY})
-        retriever = FingerprintReactionRetriever(store, notes_dir=str(tmp_path))
+        retriever = FingerprintReactionRetriever(store, InMemoryReactionRecordStore())
         assert await retriever.retrieve(_QUERY, {"tag": "step-3"}) == []
 
     asyncio.run(_run())
 
 
 def test_the_filter_is_applied_before_truncation_not_after(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The property the whole design turns on, and the one a small fixture would never reveal.
 
@@ -124,13 +127,11 @@ def test_the_filter_is_applied_before_truncation_not_after(
         # Near-identical esterifications, so all twelve crowd the top of the ranking together.
         reactions = {f"r{i}": f"CCO.CC(=O)O>>CCOC(C)=O.O.{'[Na+].[Cl-].' * i}O" for i in range(12)}
         store = await _indexed(reactions)
-        for rid in reactions:
-            _note(tmp_path, f"reaction-{rid}", "reaction", ["untagged"])
-        _note(tmp_path, "reaction-r11", "reaction", ["wanted"])
+        projects = dict.fromkeys(reactions, "untagged") | {"r11": "wanted"}
 
         monkeypatch.setattr(settings, "fingerprint_top_k", 2)
         monkeypatch.setattr(settings, "fingerprint_similarity_threshold", 0.0)
-        retriever = FingerprintReactionRetriever(store, notes_dir=str(tmp_path))
+        retriever = FingerprintReactionRetriever(store, await _records(**projects))
 
         page = await retriever.retrieve(_QUERY, {})
         assert len(page) == 2
@@ -152,19 +153,19 @@ def test_the_deeper_search_is_still_bounded_by_the_index_cap(
 
 
 def test_a_page_is_never_exceeded_by_the_deeper_search(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Searching deeper must widen what is *considered*, never what is returned."""
 
     async def _run() -> None:
         reactions = {f"r{i}": f"CCO.CC(=O)O>>CCOC(C)=O.O.{'[Na+].[Cl-].' * i}O" for i in range(8)}
         store = await _indexed(reactions)
-        for rid in reactions:
-            _note(tmp_path, f"reaction-{rid}", "reaction", ["wanted"])
 
         monkeypatch.setattr(settings, "fingerprint_top_k", 3)
         monkeypatch.setattr(settings, "fingerprint_similarity_threshold", 0.0)
-        retriever = FingerprintReactionRetriever(store, notes_dir=str(tmp_path))
+        retriever = FingerprintReactionRetriever(
+            store, await _records(**dict.fromkeys(reactions, "wanted"))
+        )
         assert len(await retriever.retrieve(_QUERY, {"tag": "wanted"})) == 3
 
     asyncio.run(_run())

@@ -71,6 +71,31 @@ def note_id_for_reaction(record_id: str) -> str:
     return f"reaction-{record_id}"
 
 
+# Id namespaces that resolve *outside* the markdown graph (D-2026-08-25).
+#
+# An ELN transcription is data, not a knowledge claim, so it lives in `reaction_records` rather
+# than as a file in `knowledge/` — but `memory.campaign` and `memory.optimization` still cite each
+# run as `[[reaction-<id>]]`, which is what makes a campaign narrative traversable. Without this,
+# every campaign, playbook and optimization note would fail `kg-validate` the moment reactions
+# stopped being files, for links that resolve perfectly well.
+#
+# The cost is stated rather than hidden: offline validation can check the *shape* of these ids and
+# not their existence, because `kg-validate` runs in CI with no database. Existence is checked
+# against the store by `kg.validate`, which CI runs with a database (`ReactionRecordStore.known`).
+EXTERNAL_ID_PREFIXES = ("reaction-",)
+
+
+def resolves_outside_graph(note_id: str) -> bool:
+    """Whether `note_id` names a record in a store rather than a note in the graph.
+
+    One predicate, because two callers ask it — `kg.graph.dangling_links` (is this link broken?)
+    and `agent.graph_tools.expand_note` (where do I look this up?) — and a link the first calls
+    fine that the second cannot find is exactly the two-spellings failure `note_id_for_reaction`
+    exists to prevent.
+    """
+    return note_id.startswith(EXTERNAL_ID_PREFIXES)
+
+
 def note_relative_path(note_type: str, note_id: str) -> str:
     """Where a note lives inside the knowledge directory: `<type>/<id>.md`.
 
@@ -161,6 +186,30 @@ def mentioned_ids(text: str) -> list[str]:
 # `_` is included because BO note ids embed registry objective names (e.g.
 # `bo-reizman_suzuki-<sha>`).
 _SLUG = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+
+
+def require_note_slug(value: str) -> str:
+    """Return `value` if it is a safe note slug, else raise `ValueError` naming the rule.
+
+    Extracted from `Note`'s validator because `ingest.eln.records.ReactionRecord` needs the same
+    rule and must not restate it. An ELN entry id no longer becomes a filename directly — a
+    transcription is a database row (D-2026-08-25) — but it still becomes the `reaction-<id>`
+    citation that campaign and playbook notes carry into git, so it reaches a file and a diff one
+    indirection later. Dropping the constraint when the storage changed would have been a silent
+    widening of what external JSON can put into a committed note body.
+
+    A few git ref rules the character class alone does not cover are refused explicitly (defense in
+    depth): `..` (an invalid ref component, e.g. `a..b`), a trailing `.`, and a `.lock` suffix —
+    git rejects all three, so an id that passed the schema would otherwise fail later at branch
+    creation.
+    """
+    if ".." in value or value.endswith((".", ".lock")) or not _SLUG.fullmatch(value):
+        raise ValueError(
+            f"{value!r} is not a safe note slug (allowed: {_SLUG.pattern}; "
+            "no '..', trailing '.', or '.lock' suffix)"
+        )
+    return value
+
 
 # `CalculationKey.as_str()`: `calc_type@calc_version:input_hash:params_hash`. The version segment
 # is the loose one on purpose — it carries a method name and a build string
@@ -394,20 +443,8 @@ class Note(TemporalWindow):
     @field_validator("id", "type")
     @classmethod
     def _slug_only(cls, value: str) -> str:
-        """Reject path/ref metacharacters — see the `_SLUG` rationale above.
-
-        A few git ref rules the character class alone does not cover are refused
-        explicitly (defense in depth), because the slug becomes the `note/<id>`
-        branch in the PR-gate: `..` (an invalid ref component, e.g. `a..b`), a
-        trailing `.`, and a `.lock` suffix — git rejects all three, so an id that
-        passed the schema would otherwise only fail later at branch creation.
-        """
-        if ".." in value or value.endswith((".", ".lock")) or not _SLUG.fullmatch(value):
-            raise ValueError(
-                f"{value!r} is not a safe note slug (allowed: {_SLUG.pattern}; "
-                "no '..', trailing '.', or '.lock' suffix)"
-            )
-        return value
+        """Reject path/ref metacharacters — see `require_note_slug`."""
+        return require_note_slug(value)
 
     compound_smiles: str | None = None
     tags: list[str] = Field(default_factory=list)

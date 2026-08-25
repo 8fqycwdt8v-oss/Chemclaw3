@@ -102,8 +102,8 @@ db-grants:  ## Reconcile the runtime role's privileges (run after db-migrate, on
 schedules-apply:  ## Create/update the Temporal Schedules for the periodic background jobs.
 	uv run python -m chemclaw.cli.schedules
 
-kg-validate:  ## Validate the knowledge graph (schema, duplicate ids, broken links).
-	uv run python -m chemclaw.kg.validate
+kg-validate:  ## Validate the knowledge graph (schema, duplicate ids, broken links, citations).
+	uv run python -m chemclaw.cli.validate_kg
 
 eval:  ## Score the versioned eval case-set and print the citable report (Phase 2b).
 	uv run python -m chemclaw.evals.harness

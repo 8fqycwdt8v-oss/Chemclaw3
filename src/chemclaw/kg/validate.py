@@ -15,13 +15,14 @@ gated — by the human who reviews the PR, which is what a PR-gate always meant.
 """
 
 import sys
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from pathlib import Path
+from typing import Protocol, runtime_checkable
 
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.kg.graph import dangling_links, scan_notes_dir
-from chemclaw.kg.note import Note, NoteError, known_note_types, read_note
+from chemclaw.kg.note import Note, NoteError, known_note_types, read_note, resolves_outside_graph
 from chemclaw.kg.relations import known_relations
 
 
@@ -102,6 +103,55 @@ def validate(notes_dir: Path) -> list[str]:
     return problems
 
 
+def external_citations(notes: list[Note]) -> list[tuple[str, str]]:
+    """Every `(source id, target id)` link pointing into an external id namespace.
+
+    Since D-2026-08-25 an ELN transcription is a row in `reaction_records` rather than a file in
+    `knowledge/`, so `dangling_links` deliberately does not report `[[reaction-<id>]]` as broken —
+    it cannot see the store. That leaves the citations campaigns and playbooks are built from
+    unchecked by anything, which is how a typo'd run id would merge. This is the other half: the
+    links a *store* has to answer for.
+    """
+    return sorted(
+        (note.id, target)
+        for note in notes
+        for target in note.outgoing_links()
+        if resolves_outside_graph(target)
+    )
+
+
+@runtime_checkable
+class RecordExistence(Protocol):
+    """The one question this check asks of the ELN transcription tier.
+
+    Declared here rather than imported, for the reason `retrieval.retrievers.ReactionMetadata`
+    gives: `ingest` depends on `kg`, so importing the store back would invert the layering for a
+    one-method need. The caller supplies it — `cli.validate_kg`, which is allowed to see both.
+    """
+
+    async def known(self, reaction_ids: Sequence[str]) -> set[str]:
+        """Which of `reaction_ids` the corpus holds."""
+        ...
+
+
+async def unresolved_citations(
+    citations: list[tuple[str, str]], records: RecordExistence
+) -> list[str]:
+    """Report the external citations whose record `records` does not hold.
+
+    Raises whatever the store raises when the database is unreachable — the caller decides what an
+    unrunnable check means, because a validator that silently passes when it could not look is a
+    claim that a control exists.
+    """
+    wanted = [target.removeprefix("reaction-") for _, target in citations]
+    known = await records.known(wanted)
+    return [
+        f"note {source!r} cites reaction record {target!r}, which the corpus does not hold"
+        for source, target in citations
+        if target.removeprefix("reaction-") not in known
+    ]
+
+
 def _registry_problems(
     values: Iterable[tuple[Note, Path, str]],
     registry: frozenset[str],
@@ -148,6 +198,19 @@ def main() -> int:
         return 1
     print(f"OK: {notes_dir} is a valid knowledge graph")
     return 0
+
+
+def notes_in(notes_dir: Path) -> list[Note]:
+    """Every parseable note under `notes_dir` — the corpus the citation check reads."""
+    parsed: list[Note] = []
+    for path, _ in scan_notes_dir(notes_dir):
+        try:
+            note = read_note(path)
+        except NoteError:
+            continue  # already reported by `validate`
+        if note is not None:
+            parsed.append(note)
+    return parsed
 
 
 if __name__ == "__main__":
