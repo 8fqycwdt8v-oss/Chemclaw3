@@ -399,6 +399,21 @@ def test_the_databricks_provider_builds_the_databricks_store(
     assert isinstance(default_vector_store(), DatabricksVectorStore)
 
 
+def test_databricks_will_not_accept_the_shipped_qdrant_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The emptiness check above cannot catch this: the field has a non-empty default.
+
+    `vector_store_url` ships as Qdrant's `http://localhost:6333`, so a deployment that selected
+    `databricks` and forgot the workspace URL passed startup and failed inside a worker — the exact
+    outcome that validator exists to prevent.
+    """
+    from chemclaw.core.config.store import StoreSettings
+
+    with pytest.raises(ValueError, match="shipped default"):
+        StoreSettings(vector_store_provider="databricks", vector_store_endpoint_name="ep")
+
+
 def test_databricks_needs_the_endpoint_that_serves_its_index(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
