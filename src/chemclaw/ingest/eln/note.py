@@ -264,11 +264,50 @@ def _impurity_line(impurity: Impurity) -> str:
 
 
 def _procedure_block(reaction: OrdReaction) -> str:
-    """Render the ordered procedure as a numbered list (empty when there are no steps)."""
+    """Render the recipe: the ordered steps, the prose the source recorded, or both.
+
+    **The prose branch exists because without it a whole class of source lost its protocol
+    silently.** This function used to return `""` whenever `steps` was empty, and
+    `warehouse/binding.py` excludes `steps` from what a binding may map on the stated grounds that
+    "a warehouse records a protocol as prose, which lands in `procedure_text` verbatim". Both
+    statements were true and nothing rendered that prose: measured, a warehouse-shaped reaction
+    carrying 251 characters of procedure produced a 63-character note body containing none of it,
+    and `procedure_text` had three writers and exactly one reader in the tree — a 240-character
+    excerpt in `memory/optimization`. For the first live connector, a Snowflake ELN, `expand_note`
+    answered with a reaction that had no recipe.
+
+    **Why both are sometimes rendered, decided by containment rather than by a threshold.** The two
+    file-drop adapters populate `steps` *and* `procedure_text`, and they do it differently.
+    `json_adapter` segments the prose, so its steps are that prose recut — measured, 0.992 string
+    similarity, and every step's text appears verbatim inside it. `ord_adapter` derives steps from
+    structured ORD fields while `procedure_text` is the chemist's own `notes.procedure_details` —
+    measured, 0.555 similarity, with the steps reading `Add CCO` where the prose reads "a catalytic
+    amount of sulfuric acid over 30 min". Rendering steps alone would have dropped that sentence,
+    which is the same defect one source over; rendering both always would duplicate the whole
+    recipe on every `json_adapter` note.
+
+    So the question asked is the exact one that matters — *are these steps a cut of this prose?* —
+    and it is answered by containment, which needs no tuned number and cannot drift: if every step's
+    text is inside the prose, the steps are the better presentation of it and stand alone.
+    """
+    prose = " ".join((reaction.procedure_text or "").split())
     if not reaction.steps:
-        return ""
+        return f"\n## Procedure\n\n{prose}\n" if prose else ""
     lines = "".join(f"{step.index}. {_step_line(step)}\n" for step in reaction.steps)
-    return f"\n## Procedure\n\n{lines}"
+    block = f"\n## Procedure\n\n{lines}"
+    if prose and not _steps_segment(reaction, prose):
+        block += f"\n### Procedure as recorded\n\n{prose}\n"
+    return block
+
+
+def _steps_segment(reaction: OrdReaction, prose: str) -> bool:
+    """Whether these steps are a segmentation of `prose` rather than an independent account.
+
+    True when every step's text appears verbatim in the whitespace-normalized prose — which is what
+    a segmenter produces and what a mapper reading structured fields cannot. `_procedure_block`
+    says why this is the question and why containment is how it is asked.
+    """
+    return all(" ".join(step.text.split()) in prose for step in reaction.steps)
 
 
 def _step_line(step: ReactionStep) -> str:

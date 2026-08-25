@@ -367,3 +367,70 @@ def test_ord_recipe_flows_through_sync() -> None:
         assert "## Procedure" in sub.submissions[0].files[0].content  # recipe reached the note
 
     asyncio.run(_run())
+
+
+def _warehouse_shaped(procedure: str) -> OrdReaction:
+    """A reaction as a warehouse binding produces one: prose recorded, `steps` never mapped.
+
+    `warehouse/binding.py` excludes `steps` from `_MAPPABLE_FIELDS` deliberately, so this is the
+    real shape of every Snowflake-ingested reaction rather than a contrived one.
+    """
+    return OrdReaction(
+        reaction_id="WH-1",
+        inputs=[Component(smiles="c1ccccc1Br", role=Role.REACTANT)],
+        outcomes=[Component(smiles="c1ccccc1-c1ccccc1", role=Role.PRODUCT)],
+        provenance="snowflake:eln",
+        procedure_text=procedure,
+    )
+
+
+def test_a_recorded_procedure_reaches_the_note_when_the_source_maps_no_steps() -> None:
+    """The warehouse path's protocol must survive to the graph, not stop at the schema.
+
+    Before this, `_procedure_block` returned `""` whenever `steps` was empty and nothing else read
+    `procedure_text`, so a Snowflake-ingested reaction reached `expand_note` with no recipe at all —
+    measured at the time: 251 characters of procedure in, a 63-character body out.
+    """
+    procedure = (
+        "Charge the aryl bromide (1.0 equiv) and boronic acid (1.2 equiv). Add Pd(dppf)Cl2 "
+        "(2 mol%). Degas, heat to 90 C for 12 h. Filter through Celite, recrystallise."
+    )
+    body = note_from_ord_reaction(_warehouse_shaped(procedure)).body
+    assert "## Procedure" in body
+    assert "Filter through Celite" in body
+
+
+def test_a_note_carries_no_procedure_section_when_the_source_recorded_none() -> None:
+    """Absent stays absent — the branch above must not invent an empty heading."""
+    reaction = _warehouse_shaped("")
+    assert reaction.procedure_text is None or not reaction.procedure_text
+    assert "## Procedure" not in note_from_ord_reaction(reaction).body
+
+
+def test_segmented_steps_do_not_also_render_the_prose_they_were_cut_from() -> None:
+    """`json_adapter`'s steps *are* the prose recut, so rendering both would duplicate the recipe.
+
+    Measured on the shipped export: 0.992 similarity between the joined steps and the prose, and
+    every step's text verbatim inside it.
+    """
+    payload = json.loads(Path("data/eln-exports/eln-2026-002.json").read_text())
+    raw = RawEntry(entry_id="e1", created_at=datetime.now(UTC), payload=payload)
+    body = note_from_ord_reaction(JsonExportAdapter().map_to_ord(raw)).body
+    assert "## Procedure" in body
+    assert "### Procedure as recorded" not in body
+
+
+def test_derived_steps_do_not_swallow_the_chemists_own_account() -> None:
+    """`ord_adapter` derives steps from structured fields; the prose is a *different*, richer text.
+
+    Measured on the shipped export: 0.555 similarity, the steps reading `Add CCO` where the prose
+    reads "a catalytic amount of sulfuric acid over 30 min". Rendering steps alone would drop that
+    sentence — the same loss this module's warehouse test covers, one source over.
+    """
+    payload = json.loads(_ORD_EXAMPLE.read_text())
+    raw = RawEntry(entry_id="e1", created_at=datetime.now(UTC), payload=payload)
+    reaction = OrdJsonAdapter().map_to_ord(raw)
+    body = note_from_ord_reaction(reaction).body
+    assert reaction.steps, "the fixture must exercise the both-present branch"
+    assert "### Procedure as recorded" in body
+    assert "catalytic amount of sulfuric acid" in body
