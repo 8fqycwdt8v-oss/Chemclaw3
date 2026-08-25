@@ -124,8 +124,32 @@ class StoredDocument(BaseModel):
     path: str = Field(min_length=1)
     pieces: list[Chunk] = Field(default_factory=list)
     modified_at: datetime | None = None
+    # Whether the backend stopped before the document ended. The honest source for
+    # `DocumentText.truncated`, which used to be inferred from a fully-assembled string — that is,
+    # from having already built the thing the ceiling exists to avoid building.
+    truncated: bool = False
 
     model_config = {"arbitrary_types_allowed": True}
+
+
+def _within_chars(pieces: list[Chunk], max_chars: int) -> tuple[list[Chunk], bool]:
+    """Keep pieces until their cumulative length reaches `max_chars`, plus the one that crosses it.
+
+    The in-memory mirror of the Postgres window below, written once so the two backends cut at the
+    same piece — `tests/test_document_share.py` asserts they agree about a stored document, and a
+    bound applied differently on each side would quietly make that assertion about two things.
+
+    The crossing piece is kept rather than dropped, so a document whose text ends exactly at the
+    ceiling is not reported as truncated; `truncated` is decided by what is left *after* it.
+    """
+    kept: list[Chunk] = []
+    spent = 0
+    for index, piece in enumerate(pieces):
+        kept.append(piece)
+        spent += len(piece.content)
+        if spent >= max_chars:
+            return kept, index + 1 < len(pieces)
+    return kept, False
 
 
 class DocumentText(BaseModel):
@@ -260,9 +284,16 @@ class DocumentIndex(Protocol):
         ...
 
     async def stored_document(
-        self, source: str, doc_id: str, chunking_key: str
+        self, source: str, doc_id: str, chunking_key: str, max_chars: int
     ) -> StoredDocument | None:
         """This document as stored under one cutting, or `None` when this share does not hold it.
+
+        `max_chars` bounds the read **here**, at the fetch, rather than after assembly. A binding
+        allows a 52 MB file, so a caller that trimmed afterwards would already have pulled every
+        row over the wire and built the whole string — which is precisely what
+        `document_read_max_chars` exists to prevent and, before this parameter, did not. Pieces are
+        returned until their cumulative length reaches `max_chars`, plus the one that crosses it,
+        and `truncated` says whether more existed.
 
         The read half of what `upsert` writes, and the only way back to a whole protocol: the
         parsed text is discarded once `doc_id` is taken from it, so these rows *are* the document.
@@ -447,7 +478,7 @@ class InMemoryDocumentIndex:
             self._keys.pop(row, None)
 
     async def stored_document(
-        self, source: str, doc_id: str, chunking_key: str
+        self, source: str, doc_id: str, chunking_key: str, max_chars: int
     ) -> StoredDocument | None:
         """This document as stored, when some path on `source` still holds it under this cutting."""
         paths = sorted(
@@ -465,16 +496,19 @@ class InMemoryDocumentIndex:
             ),
             key=lambda c: c.ordinal,
         )
+        kept, truncated = _within_chars(
+            [Chunk(ordinal=r.ordinal, content=r.content, coordinate=r.coordinate) for r in rows],
+            max_chars,
+        )
         return StoredDocument(
             doc_id=doc_id,
             # `min` mirrors `CITATION_SQL`, so the reference backend cites what Postgres cites.
             path=paths[0],
-            pieces=[
-                Chunk(ordinal=r.ordinal, content=r.content, coordinate=r.coordinate) for r in rows
-            ],
+            pieces=kept,
             modified_at=next(
                 (f.modified_at for f in self._files.values() if f.path == paths[0]), None
             ),
+            truncated=truncated,
         )
 
     async def stale_chunks(self, key: str, limit: int, chunkings: set[str]) -> list[StaleChunk]:
@@ -747,11 +781,21 @@ class PostgresDocumentIndex:
         # is addressed by id rather than filtered, but the *source* and *chunking* clauses of
         # `_ELIGIBLE` still apply: a document is readable from the share that indexed it, under the
         # cutting that share uses, and from nowhere else.
+        # **Bounded in SQL, not after assembly.** A binding allows a 52 MB file, so fetching every
+        # row and trimming afterwards would pull the whole document over the wire and into the chat
+        # pod — the thing `document_read_max_chars` exists to prevent. The window sums content
+        # length in `ordinal` order and keeps every piece whose *preceding* total is under the cap,
+        # which is the piece set `_within_chars` keeps: everything up to the cap, plus the one that
+        # crosses it. `remaining` is how the caller learns more existed without reading it.
         self._document = (
+            "SELECT ordinal, content, coordinate, path, modified_at, remaining FROM ("
             f"SELECT c.ordinal, c.content, c.coordinate, {CITATION_SQL}, "
-            f"({_MODIFIED_SQL}) AS modified_at FROM document_chunks c "
+            f"({_MODIFIED_SQL}) AS modified_at, "
+            "sum(length(c.content)) OVER (ORDER BY c.ordinal) - length(c.content) AS before, "
+            "count(*) OVER () AS remaining "
+            f"FROM document_chunks c "
             f"WHERE c.doc_id = %(doc)s AND c.chunking_key = %(chunking)s AND {_ELIGIBLE}"
-            "ORDER BY c.ordinal"
+            ") AS windowed WHERE before < %(cap)s ORDER BY ordinal"
         )
         # `IS DISTINCT FROM`, not `<>`: NULL is every row written before the key column existed,
         # and `<>` would silently pass over exactly those.
@@ -1072,13 +1116,14 @@ class PostgresDocumentIndex:
         ]
 
     async def stored_document(
-        self, source: str, doc_id: str, chunking_key: str
+        self, source: str, doc_id: str, chunking_key: str, max_chars: int
     ) -> StoredDocument | None:
         """This document as stored, when some path on `source` still holds it under this cutting."""
         params: dict[str, Any] = {
             "doc": doc_id,
             "chunking": chunking_key,
             "src": source,
+            "cap": max_chars,
             "tag": None,
             "since": None,
             "until": None,
@@ -1100,6 +1145,9 @@ class PostgresDocumentIndex:
             path=rows[0][3],
             pieces=[Chunk(ordinal=r[0], content=r[1], coordinate=r[2]) for r in rows],
             modified_at=rows[0][4],
+            # `remaining` counts every eligible piece; fewer rows came back than that means the
+            # window stopped early.
+            truncated=len(rows) < rows[0][5],
         )
 
     async def search_dense(

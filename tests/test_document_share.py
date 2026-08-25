@@ -1771,7 +1771,7 @@ def test_both_backends_read_the_same_whole_document() -> None:
         results = []
         for index in (PostgresDocumentIndex(), InMemoryDocumentIndex()):
             await index.upsert([file_row], chunks, key)
-            stored = await index.stored_document(SOURCE, "doc-1", "400:40")
+            stored = await index.stored_document(SOURCE, "doc-1", "400:40", 1_000_000)
             assert stored is not None, f"{type(index).__name__} did not read the document back"
             results.append(
                 (
@@ -1780,8 +1780,100 @@ def test_both_backends_read_the_same_whole_document() -> None:
                 )
             )
             # A share that does not hold it reads as absent on both.
-            assert await index.stored_document("other-share", "doc-1", "400:40") is None
+            assert await index.stored_document("other-share", "doc-1", "400:40", 1_000_000) is None
 
         assert results[0] == results[1], "the two backends disagree about the stored document"
+
+    asyncio.run(_run())
+
+
+def test_an_oversized_document_is_bounded_at_the_fetch_not_after_assembly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The point is what was never materialised, so this asserts on pieces rather than on text.
+
+    `document_read_max_chars`' own comment says it exists "so a 400-page report cannot be pulled
+    into the chat pod at all". The first version fetched every row and assembled the whole document
+    before trimming, so it prevented nothing — a binding allows a 52 MB file.
+    """
+    index = InMemoryDocumentIndex()
+    share = _long_share(tmp_path, chunk_chars=400, chunk_overlap_chars=40)
+    asyncio.run(sync_share(SOURCE, load_binding(share), index))
+    retriever = ShareDocumentRetriever(binding=share, name=SOURCE, index=index)
+    doc_id = next(iter(index._files.values())).doc_id
+
+    whole = asyncio.run(retriever.read_document(doc_id))
+    assert whole is not None and whole.chunks > 4, "the fixture must be worth bounding"
+
+    monkeypatch.setattr(settings, "document_read_max_chars", 500)
+    bounded = asyncio.run(retriever.read_document(doc_id))
+
+    assert bounded is not None
+    assert bounded.truncated is True
+    assert bounded.chunks < whole.chunks, (
+        f"every piece was still fetched ({bounded.chunks} of {whole.chunks}), so the ceiling is "
+        "being applied after assembly rather than at the fetch"
+    )
+    # Enough pieces to reach the ceiling, and not many more.
+    assert bounded.chunks <= 3
+
+
+def test_a_document_that_fits_is_never_reported_truncated(tmp_path: Path) -> None:
+    """The false-positive direction: a bound that cuts too eagerly lies the other way."""
+    index = InMemoryDocumentIndex()
+    share = _long_share(tmp_path, chunk_chars=400, chunk_overlap_chars=40)
+    asyncio.run(sync_share(SOURCE, load_binding(share), index))
+    retriever = ShareDocumentRetriever(binding=share, name=SOURCE, index=index)
+    doc_id = next(iter(index._files.values())).doc_id
+
+    whole = asyncio.run(retriever.read_document(doc_id))
+    assert whole is not None
+    assert whole.truncated is False
+    assert "Step 0:" in whole.text and "Step 119:" in whole.text
+
+
+def test_both_backends_stop_at_the_same_piece() -> None:
+    """A bound applied differently on each side would make the agreement test assert two things."""
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        async with await connect(settings.postgres_dsn) as conn:
+            await conn.execute("TRUNCATE document_files, document_chunks")
+            await conn.commit()
+
+        (vector,) = await asyncio.to_thread(embed_texts, ["a chunk of a protocol"])
+        key = embedding_config_key()
+        file_row = FileRecord(
+            path="SOPs/protocol.txt",
+            source=SOURCE,
+            doc_id="doc-cap",
+            fingerprint="1:2",
+            chunking_key="400:40",
+        )
+        chunks = [
+            ChunkRecord(
+                doc_id="doc-cap",
+                chunking_key="400:40",
+                ordinal=n,
+                content="x" * 100,
+                coordinate=f"page {n + 1}",
+                embedding=vector,
+            )
+            for n in range(10)
+        ]
+        seen = []
+        for index in (PostgresDocumentIndex(), InMemoryDocumentIndex()):
+            await index.upsert([file_row], chunks, key)
+            # 250 characters spans two 100-character pieces and crosses into the third.
+            stored = await index.stored_document(SOURCE, "doc-cap", "400:40", 250)
+            assert stored is not None
+            seen.append((len(stored.pieces), stored.truncated))
+            full = await index.stored_document(SOURCE, "doc-cap", "400:40", 10_000)
+            assert full is not None and full.truncated is False, (
+                f"{type(index).__name__} reported a complete document as truncated"
+            )
+
+        assert seen[0] == seen[1], f"the backends cut differently: {seen}"
+        assert seen[0] == (3, True)
 
     asyncio.run(_run())
