@@ -571,6 +571,15 @@ only holds defects can only ever restore the system to what it already intended 
       that number is a routing hypothesis nobody measured, which is the mistake
       `D-2026-08-15` already made once here.
 
+      **Attempted 2026-08-25, and the corpus to measure does not exist.** Against a live Postgres:
+      `session_messages` 12 (all from that day's own probe run), `session_turns` 0, `observations` 0,
+      `note_proposals` 0, `audit_events` 3. The five notes under `knowledge/playbook/` are committed
+      examples, not distillations of anything. So this row is blocked on **deployment history**
+      rather than on effort — nobody can count recurring trajectories in a database that has never
+      served a user. Its trigger is therefore a deployment with real sessions in it, and until then
+      building the generator would be building against an imagined corpus, which is the row's own
+      objection.
+
 ### The upstream-capability register — what our pinned dependencies now ship that we build ourselves
 
 *Re-derived 2026-08-25, and re-derive it whenever a dependency is bumped.* `make upstream-check` and

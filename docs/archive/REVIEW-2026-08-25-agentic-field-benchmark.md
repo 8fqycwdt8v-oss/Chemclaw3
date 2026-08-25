@@ -421,6 +421,16 @@ Each item names an anchor and the measurement that would settle it. These are fi
 8. **Re-derive the MCP catalogue against 2026 releases.** Anchor: `Chemclaw3-mcp/MODULES.md`.
    Specifically: `retro` against RetroReasoner/Retro-R1, `admet` against Boltz-2, and `nomenclature`
    (OPSIN, MIT, local — the catalogue already calls it "the best value-to-effort ratio").
+
+   > **Done, and one third of it was wrong.** `Chemclaw3-mcp` #13. `nomenclature` promoted to
+   > `next` — `py2opsin` bundles the OPSIN jar in the wheel with zero Python dependencies, so the
+   > no-egress story needs no vendoring step. `retro` unchanged, correctly: it was already
+   > *adopted*, and the 2026 work changes what "integrated" should mean rather than what to build.
+   > **`admet` against Boltz-2 was a bad suggestion**: Boltz-2 is a co-folding structure-and-
+   > binding-affinity model over protein–ligand complexes and ADMET is a secondary capability of
+   > its representations, where ADMET-AI is a property panel over 41 TDC datasets. Two servers, and
+   > only one of them is a process-chemistry question. Left in the catalogue as a note so the
+   > search is not repeated.
 9. **Put cost on the eval axis.** Anchor: `evals/metric.py`, `agent/turn_cost.py`. HAL's result — the
    most expensive model on the frontier in 1 of 9 benchmarks — is only actionable if a case set scores
    accuracy *and* cost. The meter exists; the metric does not.

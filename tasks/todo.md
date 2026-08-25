@@ -1,7 +1,14 @@
 # Implementation plan — closing the 2026-08-25 field benchmark
 
-**Status: W3.2 is built and open as [`Chemclaw3-mcp` #12](https://github.com/8fqycwdt8v-oss/Chemclaw3-mcp/pull/12),
-not merged. Everything else is planned and not started.**
+**Status, 2026-08-25.** Done: W0.1, W0.2, W0.3, W0.4, W1.1, W2.1, W2.2, W3.1 (declined, with an
+ADR), W3.2 (built, `Chemclaw3-mcp` #12), W4.1 (`Chemclaw3-mcp` #13), W4.4. W1.2 and W4.3 were
+*attempted and stopped by their own measurements* — both are written up where they stand rather than
+left looking undone. **W2.3 and W2.4 are blocked on a working model credential**, and the mock
+cannot stand in for either. W4.2 (`litsearch`) is not started: it needs a bulk-corpus build.
+
+Two of the eleven §5 backlog rows were deleted outright (the live lane, the Temporal plugin), two
+were replaced by better-aimed rows the measurements produced, and one — `admet` against Boltz-2 —
+turned out to be a bad recommendation and is recorded as one.
 
 The findings and their measurements are in
 [`docs/archive/REVIEW-2026-08-25-agentic-field-benchmark.md`](../docs/archive/REVIEW-2026-08-25-agentic-field-benchmark.md);
@@ -309,8 +316,15 @@ band of questions, that is a *profile* change with a measurement behind it, whic
 this repository accepts. If the answer is that they always help, W1.2's route (b) has a much higher
 bar to clear.
 
-**Acceptance.** A committed run with the helped share and the per-probe deltas, and a paragraph in
-the eval report saying which band, if any, is worse with tools.
+**Blocked on a working model credential, and the mock cannot stand in.** The whole comparison is
+"did having tools change the answer", and `cli.mock_llm` emits scripted tool calls with argument
+names taken from the real tools *without choosing them in response to the question*. Both arms of
+the A/B would therefore be measuring the mock's script, not tool utility. Measured on 2026-08-25
+during W0.4: three probes through the real lane, `expected tool reached` 0/3 — the harness is real
+and the judgement is not.
+
+**Acceptance, unchanged and still owed.** A committed run with the helped share and the per-probe
+deltas, and a paragraph in the eval report saying which band, if any, is worse with tools.
 
 ---
 
@@ -340,6 +354,11 @@ it does and does not measure about this system.
 **Risk.** The likeliest outcome is a low score for a legitimate reason — the corpus is not ours. The
 plan's failure mode is treating that as a verdict rather than as a calibration. Write the "what this
 does not measure" paragraph *before* seeing the number.
+
+**Blocked on the same credential.** ChemRAG-Bench is 1,932 chemistry QA pairs and the mock answers
+none of them; there is no version of this that a scripted model can produce a real number for. The
+adapter could be built unrun, and deliberately is not: this plan's first rule is that nothing which
+cannot be graded gets built, and an eval harness with no run behind it is exactly that.
 
 ---
 
@@ -490,7 +509,7 @@ and the deployment, and why row 6 is written down as insufficient on its own.
 
 ## Wave 4 — Capability, mostly in the other repository
 
-### W4.1 — Re-derive the MCP catalogue against 2026 releases · [S] · `Chemclaw3-mcp`
+### W4.1 — Re-derive the MCP catalogue · **done** · `Chemclaw3-mcp` #13
 
 *Row: § 5 #10.* Three entries, in build order:
 
@@ -518,14 +537,15 @@ in the existing fan-out with its own budget*, not as a new retrieval path, and
 
 **Two PRs, two repos**, and the second cannot merge before the first is deployable.
 
-### W4.3 — Measure the memory→skill loop before building a generator · [M, measurement only]
+### W4.3 — Measure the memory→skill loop · **attempted; the corpus does not exist**
 
-*Row: § 5 #12.* The row asks for a number first and this plan does not overrule it. Over the
-sessions on disk: how many recurring trajectories are there, and would a distilled playbook have
-changed a later answer? Only that number decides whether a generator is worth building, and building
-one first is the mistake `D-2026-08-15` already records.
+*Row: § 5 #12.* The row asks for a number before a mechanism, and this plan did not overrule it.
+The number cannot be taken here. Against a live Postgres: `session_messages` 12 — all from this
+day's own probe run — `session_turns` 0, `observations` 0, `note_proposals` 0, `audit_events` 3,
+and the five `knowledge/playbook/` notes are committed examples rather than distillations. Blocked
+on **deployment history**, not on effort, and the row now says so with its trigger.
 
-### W4.4 — A dated upstream-capability register · [S]
+### W4.4 — A dated upstream-capability register · **done**
 
 *Row: § 5 #11, and the meta-row.* A section in `BACKLOG.md`, re-derived whenever a dependency is
 bumped, listing what each pinned upstream now ships that this repository implements itself.
