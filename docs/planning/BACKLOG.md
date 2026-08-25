@@ -147,6 +147,22 @@ topic).
 
 ## 2 — Answers that are wrong without saying so
 
+- [ ] **Every structured tool result reaches the model as pydantic repr, not JSON** — [M].
+      `langchain_core.tools.base._stringify` prefers `json.dumps(content)` and falls back to
+      `str(content)`, which is what happens for every `BaseModel` this repo returns —
+      `EvidenceSweep`, `NoteView`, `FingerprintSearch`, every connector model. Measured: an
+      `EvidenceSweep` arrives as `chunks=[EvidenceChunk(content='…', source_note_id='…', …)]`.
+      Two consequences worth separating. **`Field(exclude=True)` silently does nothing** anywhere in
+      this tree — one design decision was already taken against the wrong belief about it
+      (`D-2026-08-25-the-number-was-measured-on-a-path-production-does-not-use`), and the next one
+      will be too unless the shape is known. And repr is a *guess* at a payload rather than a
+      contract: nothing upstream promises it, which is why
+      `tests/test_upstream_surface.py::test_a_pydantic_tool_return_still_reaches_the_model_as_repr`
+      now pins it in that file's absence form.
+      Not fixed in passing, because the blast radius is every tool at once and the question — should
+      payloads be JSON, or should each tool render its own boundary as `condense_protocols` now does
+      — deserves deciding rather than defaulting.
+
 - [ ] **Seven `chem` enumerations and `compute_fukui_at` are declared here and served nowhere** —
       [S], and it is a live gap rather than a plan. `src/chemclaw/connectors/chem/connector.yaml`
       names `enumerate_tautomers`, `enumerate_protonation_states`, `enumerate_stereoisomers`,
