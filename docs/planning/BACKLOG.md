@@ -484,16 +484,34 @@ only holds defects can only ever restore the system to what it already intended 
       nomenclature wants structured databases. A process chemist asking "has anyone run this coupling
       on a deactivated aryl chloride" currently gets whatever those 39 notes happen to say.
 
-- [ ] **`pyexec` is merged in the fleet and unreachable from any deployment here** — [S].
-      `Chemclaw3-mcp` #12 shipped `servers/pyexec` and `D-2026-08-25-a-sandbox-is-a-server-not-a-verb`
-      records the decision, but `grep -rn pyexec` in this tree finds only that ADR and `tasks/todo.md`:
-      no entry under `connectors:` in `deploy/helm/chemclaw/values.yaml:161`, so no `url`, no
+- [ ] **`pyexec` is merged in the fleet and unreachable from any deployment here** — **[M], not
+      [S], and the sizing changed when somebody looked.** `Chemclaw3-mcp` #12 shipped
+      `servers/pyexec` and `D-2026-08-25-a-sandbox-is-a-server-not-a-verb` records the decision, but
+      `grep -rn pyexec` in this tree finds only that ADR and `tasks/todo.md`: no entry under
+      `connectors:` in `deploy/helm/chemclaw/values.yaml:161`, so no `url`, no
       `networkPolicy.egressDestinations` host, and nothing telling an operator to provide
-      `CHEMCLAW_PYEXEC_TOKEN`. The seam working as designed is exactly why this is easy to miss —
-      **zero core edits also means zero core changes to remind anybody** — and until the chart names
-      it the agent's Python sandbox exists and cannot be called. `chem` and `safety` are the shape to
-      copy (`values.yaml:170-177`): `enabled: true`, `server: true`, a `url`, and the two operator
-      obligations spelled out in their comment.
+      `CHEMCLAW_PYEXEC_TOKEN`. The seam working as designed is why it is easy to miss — **zero core
+      edits also means zero core changes to remind anybody.**
+
+      **The obvious fix is wrong, and this is the part worth reading before starting.** Copying
+      `chem`/`safety` means adding a manifest stub under `src/chemclaw/connectors/pyexec/`. But
+      `registry.enabled()` is *"discovery is enablement until you say otherwise"* — an empty
+      `connectors_enabled` loads every discovered bundle — so shipping that stub would:
+
+      1. put `run_python` on the agent surface of **every fresh checkout**, by default;
+      2. make the front door dial `127.0.0.1:8899`, which under the `connectors_required=true` the
+         chart ships means **it refuses to boot** unless somebody is running the sandbox;
+      3. trip `tests/test_probe_coverage.py` (no probe names `run_python`) and raise the context
+         floor.
+
+      Turning a code-execution tool on by default is a decision, not a wiring change, and (2) makes
+      it a breaking one for every existing deployment. **So this needs an ADR about the default
+      before it needs a diff**, and the branch point is whether `CHEMCLAW_CONNECTORS_ENABLED` stops
+      meaning "empty loads everything" — which is a chart-wide behavioural change with its own
+      blast radius. Whichever way it goes, the change also owes a `run_python` probe, an
+      `egressPorts` entry for 8899 (the egress rule restricts by port independently of the peer
+      list, so a destination with no matching port still drops), and the token obligation in the
+      comment `chem` already models.
 
 - [ ] **`make type` is red on `main`, and has been for longer than anyone noticed** — [S]. Two
       errors, neither introduced by recent work — confirmed by stashing a branch and re-running:
