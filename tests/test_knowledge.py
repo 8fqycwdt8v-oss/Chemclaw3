@@ -181,8 +181,9 @@ def test_a_rejected_push_still_leaves_the_checkout_on_base(tmp_path: Path) -> No
 
     Historically this was the PR-gate bypass a `try/finally` closed: a rejected push (a dead
     remote, a protected ref, a hook) left `note_repo_dir` on `note/<id>` with the unreviewed note
-    in the working tree, served as merged knowledge by every reader and counted as merged by
-    `ingest/eln/sync._merged_note_bodies`. The tree is no longer switched at all, so the failure
+    in the working tree, served as merged knowledge by every reader and counted as merged by the
+    ELN sync's corpus scan (since deleted with the ELN half of the gate, D-2026-08-25). The tree is
+    no longer switched at all, so the failure
     path's obligation is a different one — dispose of the worktree — and that is asserted here
     too, because a `finally` that stops running is exactly how the original defect happened.
     """

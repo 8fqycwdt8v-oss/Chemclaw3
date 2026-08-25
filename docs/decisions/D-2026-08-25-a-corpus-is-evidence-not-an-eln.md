@@ -72,7 +72,7 @@ upsert of the record phase, so re-draining an unchanged release is a no-op that 
 
 ### Its molecules are a second table
 
-`corpus_molecules` (`infra/sql/052`) carries the same five columns `molecule_fingerprints` does, so
+`corpus_molecules` (`infra/sql/054`) carries the same five columns `molecule_fingerprints` does, so
 `PostgresFingerprintStore` serves similarity over it with no new code. It is a second table rather
 than more rows in the first because the two answer different questions and cite different things:
 one is "have we made this?" and its hits cite a compound note, the other is "is there literature

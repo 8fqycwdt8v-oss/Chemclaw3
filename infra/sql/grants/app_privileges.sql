@@ -66,6 +66,7 @@ BEGIN
         'GRANT INSERT, UPDATE ON '
         'calculation_results, calculation_artifacts, job_records, '
         'bo_campaigns, measurements, predictions, note_proposals, observations, '
+        'reaction_records, '
         'plan_approvals, sync_cursors, turn_costs, '
         'molecule_fingerprints, reaction_fingerprints, reaction_labels, corpus_molecules, '
         'tool_result_links TO %I', app_role);

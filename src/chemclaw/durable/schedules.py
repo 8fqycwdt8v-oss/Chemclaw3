@@ -49,11 +49,6 @@ from chemclaw.durable.document_sync import DocumentShareSyncWorkflow, share_sour
 from chemclaw.durable.eln_sync import ElnSyncWorkflow
 from chemclaw.durable.eval_drift import EvalDriftWorkflow
 from chemclaw.durable.label_sync import ReactionLabelWorkflow, label_policies
-from chemclaw.durable.memory_jobs import (
-    CampaignSynthesisWorkflow,
-    OptimizationCampaignWorkflow,
-    PlaybookDistillationWorkflow,
-)
 from chemclaw.durable.note_index import NoteReindexWorkflow
 from chemclaw.durable.observation_jobs import ObservationSynthesisWorkflow
 from chemclaw.durable.publish_results import PublishResultsWorkflow
@@ -120,18 +115,21 @@ def _retention_windows_are_set() -> bool:
 
 
 def planned_schedules() -> list[PlannedSchedule]:
-    """The Schedules this script maintains — the ELN sync plus the three memory jobs.
+    """The Schedules this script maintains.
 
     Pure and side-effect-free (no client), so a test can assert the set of jobs and their
     configured cadences without a live Temporal server.
+
+    **No Schedule here opens a pull request** (D-2026-08-25). Campaign synthesis, playbook
+    distillation and optimization-campaign detection used to fire hourly and propose PR-gated notes
+    with nobody having asked, which is knowledge arriving on a timer. The miners are unchanged and
+    still run — `CampaignSynthesisWorkflow`, `PlaybookDistillationWorkflow` and
+    `OptimizationCampaignWorkflow` are started on demand, by a chemist or by an agent workflow that
+    has a reason to look. What is left on a timer is ingestion, indexing, eviction and retention:
+    jobs that make the corpus queryable and none that decide what it means.
     """
     eln_every = timedelta(minutes=settings.eln_sync_schedule_minutes)
-    memory_every = timedelta(minutes=settings.memory_synthesis_schedule_minutes)
-    schedules = [
-        PlannedSchedule("campaign-synthesis", CampaignSynthesisWorkflow, memory_every),
-        PlannedSchedule("playbook-distillation", PlaybookDistillationWorkflow, memory_every),
-        PlannedSchedule("optimization-campaign", OptimizationCampaignWorkflow, memory_every),
-    ]
+    schedules: list[PlannedSchedule] = []
     # The ELN sync earns a Schedule only where there is an ELN to sync — the same question
     # `document-sync` asks seventeen lines below, asked of the same registry. It was the one
     # periodic job planned unconditionally, and with no source configured (the default) that is an
@@ -140,7 +138,7 @@ def planned_schedules() -> list[PlannedSchedule]:
     # reason `document-sync` records: `CHEMCLAW_DATA_SOURCES` is already the enable switch (D-018),
     # and a second flag could only restate it or contradict it.
     if active_ingest_source_names():
-        schedules.insert(0, PlannedSchedule("eln-sync", ElnSyncWorkflow, eln_every))
+        schedules.append(PlannedSchedule("eln-sync", ElnSyncWorkflow, eln_every))
     # The drift check is opt-in (plan F10-F2): it only earns a Schedule where a committed baseline
     # is maintained, so an unconfigured deployment does not fire an eval it has no baseline for.
     if settings.eval_drift_enabled:
@@ -223,9 +221,11 @@ def planned_schedules() -> list[PlannedSchedule]:
 def _jitter(job: PlannedSchedule) -> timedelta:
     """A deterministic per-job offset inside its interval, so co-scheduled jobs do not collide.
 
-    The three memory-synthesis jobs share one configured cadence and each re-scans the whole
-    corpus, so without an offset they fire simultaneously against a single background worker
-    (`replicas: 1`) and contend for the same reads (gap SCH-3). Temporal jitter is a *random*
+    Jobs sharing one configured cadence would otherwise fire simultaneously against a single
+    background worker (`replicas: 1`) and contend for the same reads (gap SCH-3). That was written
+    for the three memory-synthesis jobs, which no longer have Schedules (D-2026-08-25); the
+    collision it prevents is a property of any two schedules sharing a cadence, so the offset
+    stays. Temporal jitter is a *random*
     delay drawn per fire; this is instead a fixed per-schedule phase offset derived from the
     schedule id, which is stable across re-applies (so `apply_schedules` stays a reconcile, not a
     reshuffle) and spreads the jobs deterministically.

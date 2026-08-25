@@ -1,13 +1,15 @@
-"""The observations tier's durable half: mine, retire, promote (D-161).
+"""The observations tier's durable half: mine and retire on a timer, promote on demand (D-161).
 
 Shaped exactly like the memory-synthesis jobs it sits beside — one workflow on the core background
 queue, its activities reading the same corpus the ELN sync ingests — because D-019's constraint
 still holds: a new knowledge layer adds no new infrastructure. The only new thing is a table.
 
-The workflow's three steps are the tier's whole lifecycle, and the order matters. Mining first, so
-`last_seen` is refreshed for everything the corpus still supports; retiring second, so only what
-was *not* re-observed ages out; promoting last, so a row cannot be retired in the same run that
-would have promoted it.
+The three steps are the tier's whole lifecycle, and they are split across two workflows because
+only one of them costs a human anything. Mining and retirement write ungated rows and stay on a
+Schedule, in that order — mining first, so `last_seen` is refreshed for everything the corpus still
+supports, retiring second, so only what was *not* re-observed ages out. Promotion opens pull
+requests, so it is started on demand (D-2026-08-25); a row cannot be retired in the same run that
+would have promoted it, because no run does both any more.
 """
 
 import asyncio
@@ -125,11 +127,22 @@ def _promotion_summary(observation: Observation) -> str:
 @durable_workflow("background")
 @workflow.defn
 class ObservationSynthesisWorkflow:
-    """Mine, retire, then promote — the observations tier's whole periodic lifecycle."""
+    """Mine, then retire — the observations tier's periodic half.
+
+    **Promotion is not here, and that is the point** (D-2026-08-25). Mining and retirement write
+    ungated rows: what the agent noticed, kept out of the knowledge graph, costing no review.
+    Promotion opens a pull request, and a pull request nobody asked for is knowledge arriving on a
+    timer — so it moved to `ObservationPromotionWorkflow`, which a chemist or an agent workflow
+    starts when there is a reason to look at what has accumulated.
+
+    The original ordering argument survives intact for the two steps that remain: mining first, so
+    `last_seen` is refreshed for everything the corpus still supports, and retiring second, so only
+    what was *not* re-observed ages out.
+    """
 
     @workflow.run
-    async def run(self) -> list[str]:
-        """Run the three steps in order and return the references of any PRs opened."""
+    async def run(self) -> None:
+        """Refresh the tier against the current corpus, then age out what it no longer supports."""
         budget = timedelta(seconds=settings.memory_job_timeout_seconds)
         await workflow.execute_activity(
             mine_observations_activity, start_to_close_timeout=budget, retry_policy=BAD_DATA_RETRY
@@ -139,10 +152,25 @@ class ObservationSynthesisWorkflow:
             start_to_close_timeout=budget,
             retry_policy=BAD_DATA_RETRY,
         )
+
+
+@durable_workflow("background")
+@workflow.defn
+class ObservationPromotionWorkflow:
+    """Promote the observations that have earned a playbook note — on demand, never on a timer.
+
+    The one step of the tier that costs a human something: it proposes PR-gated notes for the
+    findings that crossed both promotion thresholds. Split out of the periodic workflow so that
+    every note this system opens for review is opened because somebody asked for it.
+    """
+
+    @workflow.run
+    async def run(self) -> list[str]:
+        """Propose notes for promotable observations; return the references of the PRs opened."""
         return list(
             await workflow.execute_activity(
                 promote_observations_activity,
-                start_to_close_timeout=budget,
+                start_to_close_timeout=timedelta(seconds=settings.memory_job_timeout_seconds),
                 retry_policy=note_publish_retry(),
             )
         )

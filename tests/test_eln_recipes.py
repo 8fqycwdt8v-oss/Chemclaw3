@@ -18,12 +18,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-import frontmatter
 import pytest
 
 from chemclaw.ingest.eln.adapter import RawEntry
 from chemclaw.ingest.eln.json_adapter import JsonExportAdapter
-from chemclaw.ingest.eln.note import note_from_ord_reaction
 from chemclaw.ingest.eln.ord import (
     Component,
     Impurity,
@@ -34,13 +32,17 @@ from chemclaw.ingest.eln.ord import (
     StepKind,
 )
 from chemclaw.ingest.eln.ord_adapter import OrdFormatError, OrdJsonAdapter
+from chemclaw.ingest.eln.record import record_from_ord_reaction
+from chemclaw.ingest.eln.records import (
+    InMemoryReactionRecordStore,
+    PostgresReactionRecordStore,
+)
 from chemclaw.ingest.eln.sync import sync_entries
 from chemclaw.ingest.eln.validate import validate_ord
-from chemclaw.kg.note import Note, ProcessConditions
-from chemclaw.kg.render import render_note
+from chemclaw.kg.note import ProcessConditions
 from chemclaw.science.fingerprints.store import InMemoryFingerprintStore
 from chemclaw.science.labels.store import InMemoryLabelIndex
-from tests.conftest import FakeSubmitter
+from tests.pg import migrated_db_or_skip
 
 _EPOCH = datetime.min.replace(tzinfo=UTC)
 _ORD_EXAMPLE = Path("data/eln-exports/ord/ord-2026-001.json")
@@ -361,7 +363,7 @@ def test_workup_reagent_satisfies_mass_balance() -> None:
 def test_note_renders_numbered_procedure() -> None:
     """A reaction with steps renders a numbered Procedure section in its note body."""
     reaction = _prose_reaction(_DETAILED_PROCEDURE)
-    body = note_from_ord_reaction(reaction).body
+    body = record_from_ord_reaction(reaction).body
     assert "## Procedure" in body
     assert "1. Charge substrate and THF to the reactor (_addition_)" in body
     assert "6. Concentrate and recrystallize from heptane (_purification_)" in body
@@ -372,14 +374,18 @@ def test_ord_recipe_flows_through_sync() -> None:
 
     async def _run() -> None:
         adapter = OrdJsonAdapter(str(_ORD_EXAMPLE.parent))
-        rxn, mol, sub = InMemoryFingerprintStore(), InMemoryFingerprintStore(), FakeSubmitter()
+        rxn, mol, rec = (
+            InMemoryFingerprintStore(),
+            InMemoryFingerprintStore(),
+            InMemoryReactionRecordStore(),
+        )
         summary = await sync_entries(
-            adapter, rxn, mol, sub, _EPOCH, label_index=InMemoryLabelIndex(), source="eln-ord"
+            adapter, rxn, mol, rec, _EPOCH, label_index=InMemoryLabelIndex(), source="eln-ord"
         )
         assert summary.ingested == ["ord-2026-001"]
         assert summary.rejected == []
-        assert len(sub.submissions) == 1
-        assert "## Procedure" in sub.submissions[0].files[0].content  # recipe reached the note
+        assert len(await rec.all_records()) == 1
+        assert "## Procedure" in (await rec.all_records())[0].body  # recipe reached the record
 
     asyncio.run(_run())
 
@@ -411,7 +417,7 @@ def test_a_recorded_procedure_reaches_the_note_when_the_source_maps_no_steps() -
         "Charge the aryl bromide (1.0 equiv) and boronic acid (1.2 equiv). Add Pd(dppf)Cl2 "
         "(2 mol%). Degas, heat to 90 C for 12 h. Filter through Celite, recrystallise."
     )
-    body = note_from_ord_reaction(_warehouse_shaped(procedure)).body
+    body = record_from_ord_reaction(_warehouse_shaped(procedure)).body
     assert "## Procedure" in body
     assert "Filter through Celite" in body
 
@@ -420,7 +426,7 @@ def test_a_note_carries_no_procedure_section_when_the_source_recorded_none() -> 
     """Absent stays absent — the branch above must not invent an empty heading."""
     reaction = _warehouse_shaped("")
     assert reaction.procedure_text is None or not reaction.procedure_text
-    assert "## Procedure" not in note_from_ord_reaction(reaction).body
+    assert "## Procedure" not in record_from_ord_reaction(reaction).body
 
 
 def test_segmented_steps_do_not_also_render_the_prose_they_were_cut_from() -> None:
@@ -431,7 +437,7 @@ def test_segmented_steps_do_not_also_render_the_prose_they_were_cut_from() -> No
     """
     payload = json.loads(Path("data/eln-exports/eln-2026-002.json").read_text())
     raw = RawEntry(entry_id="e1", created_at=datetime.now(UTC), payload=payload)
-    body = note_from_ord_reaction(JsonExportAdapter().map_to_ord(raw)).body
+    body = record_from_ord_reaction(JsonExportAdapter().map_to_ord(raw)).body
     assert "## Procedure" in body
     assert "### Procedure as recorded" not in body
 
@@ -446,7 +452,7 @@ def test_derived_steps_do_not_swallow_the_chemists_own_account() -> None:
     payload = json.loads(_ORD_EXAMPLE.read_text())
     raw = RawEntry(entry_id="e1", created_at=datetime.now(UTC), payload=payload)
     reaction = OrdJsonAdapter().map_to_ord(raw)
-    body = note_from_ord_reaction(reaction).body
+    body = record_from_ord_reaction(reaction).body
     assert reaction.steps, "the fixture must exercise the both-present branch"
     assert "### Procedure as recorded" in body
     assert "catalytic amount of sulfuric acid" in body
@@ -474,7 +480,7 @@ def test_the_numbers_a_chemist_compares_reach_the_note_as_numbers() -> None:
             Impurity(name="homocoupling", area_percent=0.2),
         ],
     )
-    conditions = note_from_ord_reaction(reaction).conditions
+    conditions = record_from_ord_reaction(reaction).conditions
     assert conditions is not None
     assert (conditions.temperature_c, conditions.time_h) == (90.0, 12.0)
     assert (conditions.yield_percent, conditions.purity_percent) == (78.0, 99.1)
@@ -491,7 +497,7 @@ def test_a_note_about_no_recorded_run_carries_no_conditions_block() -> None:
         outcomes=[Component(smiles="CCO", role=Role.PRODUCT)],
         provenance="x",
     )
-    assert note_from_ord_reaction(reaction).conditions is None
+    assert record_from_ord_reaction(reaction).conditions is None
 
 
 def test_a_successful_run_does_not_assert_its_own_success() -> None:
@@ -510,7 +516,7 @@ def test_a_successful_run_does_not_assert_its_own_success() -> None:
             yield_percent=12.0,
             **extra,
         )
-        conditions = note_from_ord_reaction(reaction).conditions
+        conditions = record_from_ord_reaction(reaction).conditions
         assert conditions is not None
         return conditions
 
@@ -519,8 +525,15 @@ def test_a_successful_run_does_not_assert_its_own_success() -> None:
     assert failed.outcome == "failure"
 
 
-def test_the_conditions_block_round_trips_through_the_file_form() -> None:
-    """Frontmatter that does not survive `render_note` -> `read_note` is frontmatter nobody has."""
+def test_the_conditions_block_round_trips_through_the_stored_form() -> None:
+    """Structure that does not survive the store is structure nobody has.
+
+    The claim is unchanged from when a record was a file — persistence that silently drops the
+    numbers leaves the comparison re-deriving them from prose — but the persistence is a row now
+    (D-2026-08-25), so the round trip goes through the store rather than through frontmatter.
+    Asserted against both backends, because the in-memory one is what every other test here uses
+    and a divergence would make those tests prove something the deployment does not do.
+    """
     reaction = OrdReaction(
         reaction_id="R4",
         inputs=[Component(smiles="CC", role=Role.REACTANT)],
@@ -530,7 +543,19 @@ def test_the_conditions_block_round_trips_through_the_file_form() -> None:
         time_h=0.5,
         yield_percent=61.5,
     )
-    note = note_from_ord_reaction(reaction)
-    post = frontmatter.loads(render_note(note))
-    parsed = Note(body=post.content, **{k: v for k, v in post.metadata.items() if k != "body"})
-    assert parsed.conditions == note.conditions
+    record = record_from_ord_reaction(reaction)
+    assert record.conditions is not None
+
+    async def _run() -> None:
+        memory = InMemoryReactionRecordStore()
+        await memory.record([record])
+        from_memory = await memory.read("R4")
+        assert from_memory is not None and from_memory.conditions == record.conditions
+
+        await migrated_db_or_skip()
+        durable = PostgresReactionRecordStore()
+        await durable.record([record])
+        from_pg = await durable.read("R4")
+        assert from_pg is not None and from_pg.conditions == record.conditions
+
+    asyncio.run(_run())

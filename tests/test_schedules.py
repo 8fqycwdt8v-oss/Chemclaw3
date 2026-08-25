@@ -86,15 +86,32 @@ class _FakeTemporal:
 
 
 def test_plan_covers_all_periodic_jobs() -> None:
-    """The four always-on Schedule-driven workflows are all planned, each exactly once."""
+    """The ELN sync is the one always-on Schedule, planned exactly once."""
     plan = planned_schedules()
-    assert {p.workflow for p in plan} == {
-        ElnSyncWorkflow,
+    assert {p.workflow for p in plan} == {ElnSyncWorkflow}
+    assert len({p.schedule_id for p in plan}) == len(plan)  # unique ids
+
+
+def test_no_scheduled_job_opens_a_pull_request() -> None:
+    """The rule D-2026-08-25 turns on: knowledge never arrives on a timer.
+
+    The three memory-synthesis workflows proposed PR-gated notes hourly with nobody having asked.
+    They still exist and still do their work — they are started on demand now — so the assertion
+    that matters is about the *plan*, not about whether the workflows are gone.
+
+    Asserted over whatever `planned_schedules()` returns rather than against a fixed list, so a
+    Schedule added later for a job that proposes notes fails here instead of quietly restoring the
+    behaviour this removed.
+    """
+    proposing = {
         CampaignSynthesisWorkflow,
         PlaybookDistillationWorkflow,
         OptimizationCampaignWorkflow,
     }
-    assert len({p.schedule_id for p in plan}) == len(plan)  # unique ids
+    scheduled = {p.workflow for p in planned_schedules()}
+    assert not (scheduled & proposing), (
+        "a Schedule fires these without a user asking, and each one opens pull requests"
+    )
 
 
 def test_drift_schedule_is_added_only_when_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -179,12 +196,9 @@ def test_apply_creates_missing_and_deletes_nothing_when_plan_is_current() -> Non
 
 
 def test_intervals_come_from_config() -> None:
-    """The ELN sync and memory jobs fire at their configured intervals (no hardcoding)."""
+    """The ELN sync fires at its configured interval (no hardcoding)."""
     by_workflow = {p.workflow: p.interval for p in planned_schedules()}
     assert by_workflow[ElnSyncWorkflow] == timedelta(minutes=settings.eln_sync_schedule_minutes)
-    assert by_workflow[CampaignSynthesisWorkflow] == timedelta(
-        minutes=settings.memory_synthesis_schedule_minutes
-    )
 
 
 def test_every_schedule_skips_an_overrunning_run(monkeypatch: pytest.MonkeyPatch) -> None:
