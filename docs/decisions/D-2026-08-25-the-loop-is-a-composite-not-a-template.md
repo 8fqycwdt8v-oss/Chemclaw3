@@ -148,7 +148,7 @@ and that is what `run_microspecies-profile` addresses.
   `list[Tautomer]` is unreachable from a template — `${steps.forms.result.smiles}` raises
   `UnresolvedReference`. `ConformerEnsemble.lowest_structure_id` is the precedent and the same
   argument.
-- **`make template-validate`'s `unchecked_arguments` count rose from 1 to 5**, because `chem` is a
+- **`make template-validate`'s `unchecked_arguments` count rose from 1 to 6**, because `chem` is a
   bundle this repository declares and does not run, so its tools are name-checked and
   argument-unchecked. That is the known gap, stated rather than discovered; `make
   connector-validate` against a running server is what covers it.
