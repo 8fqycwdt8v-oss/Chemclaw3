@@ -854,7 +854,10 @@ async def compute_electronic_properties(
 
 @server.tool()
 async def predict_site_reactivity(
-    smiles: str, mode: FukuiMode = "electrophilic", top_n: int = 0
+    smiles: str,
+    mode: FukuiMode = "electrophilic",
+    top_n: int = 0,
+    structure_id: str = "",
 ) -> SiteReactivityResult:
     """Rank the atoms of a molecule by how susceptible they are to attack (GFN2-xTB).
 
@@ -877,12 +880,35 @@ async def predict_site_reactivity(
         mode: Which attack to rank for.
         top_n: How many atoms to return, most susceptible first. 0 uses the configured
             default; pass a larger number to see the whole molecule.
+        structure_id: A specific 3D geometry to rank at, as reported by `optimize_geometry`,
+            `sample_conformers`, `scan_coordinate` or `compute_thermochemistry`. Empty describes a
+            force-field geometry embedded from `smiles` — fine for comparing related molecules, and
+            the wrong answer to "which site is reactive *in this conformer*", which is the question
+            a chemist asks right after a conformer search.
 
     Returns:
         The ranked sites with all three Fukui indices per atom, and the total number
         of atoms the ranking was drawn from. Atom indices match the heavy atoms of the
         canonical SMILES, with hydrogens following them.
     """
+    # Two routes to one answer, exactly as `compute_electronic_properties` above. The SMILES route
+    # stays byte-identical rather than being folded into the other: it keys on the geometry the
+    # *server* embeds, and routing it through `compute_fukui_at` would key on the geometry embedded
+    # here. Forking it would orphan every `xtb.fukui` row on disk for no gain the named-geometry
+    # route does not already deliver.
+    if structure_id:
+        structure = await _starting_geometry(smiles, structure_id)
+        payload, _ = await cached_remote(
+            default_store(),
+            "compute_fukui_at",
+            # `mode` and `top_n` are withheld here for the same reason as below — the server keys
+            # `xtb.fukui` without them and `ranked_for` re-sorts locally, so one row serves every
+            # mode and every slice of one geometry.
+            {"structure": structure.model_dump(mode="json")},
+        )
+        result = SiteReactivityResult.model_validate(payload).ranked_for(mode)
+        limit = top_n if top_n > 0 else settings.xtb_fukui_top_n
+        return result.model_copy(update={"sites": result.sites[:limit]})
     payload, _ = await cached_remote(
         default_store(),
         "predict_site_reactivity",

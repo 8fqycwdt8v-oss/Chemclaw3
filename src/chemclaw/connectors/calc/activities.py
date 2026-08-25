@@ -45,11 +45,15 @@ from chemclaw.connectors.calc import compose
 from chemclaw.connectors.calc.remote import collecting
 from chemclaw.connectors.calc.results import XtbJobResult
 from chemclaw.connectors.calc.specs import (
+    BondSurveyJobSpec,
     ComplexJobSpec,
     EnsembleJobSpec,
+    EnsemblePropertyJobSpec,
     ReactionJobSpec,
+    RefinedEnsembleJobSpec,
     ScanJobSpec,
     SolventScreenJobSpec,
+    SpeciesRankingJobSpec,
     XtbJobSpec,
 )
 from chemclaw.connectors.queues import bundle_queue
@@ -240,5 +244,96 @@ async def _dispatch(spec: XtbJobSpec) -> XtbJobResult:
                 f"{interaction.binding_modes} binding modes"
             ),
             interaction=interaction,
+        )
+    if isinstance(spec, RefinedEnsembleJobSpec):
+        refined = await compose.refined_ensemble(
+            store,
+            spec.smiles,
+            subject=await _subject(spec.structure_id, spec.smiles),
+            solvent=spec.solvent,
+            temperature_k=spec.temperature_k,
+            top_n=spec.top_n,
+            progress=activity.heartbeat,
+            run=_beating,
+        )
+        lowest = refined.conformers[0]
+        return XtbJobResult(
+            kind=spec.kind,
+            # The coverage is in the one-line summary rather than only in the payload, because that
+            # line is what a completion push-back and a job listing show — and "G-weighted over 5 of
+            # 47" is exactly the qualifier a reader would otherwise never see.
+            summary=(
+                f"{spec.smiles}: {refined.refined_count} of {refined.total_found} conformers "
+                f"refined ({refined.refined_population_covered:.0%} of the population), lowest at "
+                f"{lowest.population:.0%}"
+            ),
+            refined=refined,
+        )
+    if isinstance(spec, EnsemblePropertyJobSpec):
+        averaged = await compose.ensemble_property(
+            store,
+            spec.smiles,
+            prop=spec.prop,
+            solvent=spec.solvent,
+            temperature_k=spec.temperature_k,
+            max_members=spec.max_members,
+            progress=activity.heartbeat,
+            run=_beating,
+        )
+        detail = (
+            f"{averaged.value.mean:.3g} (spread {averaged.value.spread:.3g})"
+            if averaged.value is not None
+            else f"{len(averaged.per_atom)} atoms"
+        )
+        return XtbJobResult(
+            kind=spec.kind,
+            summary=(
+                f"{spec.smiles}: {spec.prop} over {averaged.members_averaged} conformers = {detail}"
+            ),
+            averaged=averaged,
+        )
+    if isinstance(spec, SpeciesRankingJobSpec):
+        labels = spec.labels or [""] * len(spec.species)
+        distribution = await compose.species_ranking(
+            store,
+            list(zip(spec.species, labels, strict=True)),
+            kind=spec.ranking,
+            solvent=spec.solvent,
+            temperature_k=spec.temperature_k,
+            level=spec.level,
+            progress=activity.heartbeat,
+            run=_beating,
+        )
+        dominant = distribution.dominant
+        return XtbJobResult(
+            kind=spec.kind,
+            summary=(
+                f"{spec.ranking} of {len(distribution.species)}: "
+                f"{dominant.label or dominant.smiles} dominates at {dominant.population:.0%}"
+            ),
+            distribution=distribution,
+        )
+    if isinstance(spec, BondSurveyJobSpec):
+        survey = await compose.bond_dissociation_survey(
+            store,
+            spec.smiles,
+            [
+                ((cleavage.atoms[0], cleavage.atoms[1]), cleavage.bond, cleavage.fragments)
+                for cleavage in spec.cleavages
+            ],
+            solvent=spec.solvent,
+            temperature_k=spec.temperature_k,
+            level=spec.level,
+            progress=activity.heartbeat,
+            run=_beating,
+        )
+        weakest = survey.bonds[0]
+        return XtbJobResult(
+            kind=spec.kind,
+            summary=(
+                f"{spec.smiles}: weakest of {survey.considered} bonds is {weakest.bond} at "
+                f"{weakest.dissociation_energy_kcal:.0f} ± {survey.uncertainty_kcal:.0f} kcal/mol"
+            ),
+            bonds=survey,
         )
     raise ValueError(f"unsupported xTB job kind: {spec!r}")

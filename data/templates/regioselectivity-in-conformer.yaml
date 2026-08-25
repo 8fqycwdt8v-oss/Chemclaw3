@@ -1,0 +1,50 @@
+# Which site reacts — asked of the shapes the molecule is actually in, not of one embedding.
+#
+# Why a template: `predict_site_reactivity` on a SMILES is a fine answer for a rigid molecule and a
+# quietly incomplete one for a flexible substrate, where a distant fold can shield the site the
+# ranking puts first. Nothing in the question says which case you are in, and the cheap answer looks
+# the same in both. This runs the search first so the ranking is over the populated shapes.
+summary: Rank a molecule's reactive sites averaged over its populated conformers.
+description: >-
+  A fixed two-step regioselectivity analysis. Searches the conformers, computes condensed Fukui
+  indices at each populated geometry, and reports the per-atom ranking Boltzmann-averaged over them
+  — with the spread, which is what says whether the ranking is robust to shape or an artefact of
+  one. Use it for flexible substrates and for the case where a single-conformer ranking disagrees
+  with what the bench observed. For a rigid aromatic, predict_site_reactivity alone is enough and
+  far cheaper.
+
+inputs:
+  - name: smiles
+    type: string
+    description: The molecule, as SMILES.
+  - name: solvent
+    type: string
+    description: Implicit solvent name, or an empty string for gas phase.
+    required: false
+
+steps:
+  - id: averaged
+    kind: job
+    purpose: Search, then a Fukui calculation at each member's own geometry.
+    job: compute_ensemble_property
+    arguments:
+      smiles: "${inputs.smiles}"
+      prop: fukui
+      solvent: "${inputs.solvent}"
+
+  - id: report
+    kind: agent
+    purpose: Read the ranking honestly, including when the spread says there is no ranking.
+    prompt: >-
+      Report the ensemble-averaged site reactivity of ${inputs.smiles}.
+
+      Averaged Fukui indices: ${steps.averaged.result}
+
+      Rank the sites and name the most susceptible. Then apply the reading rules: the indices rank
+      sites *within* this molecule only and never between molecules; they describe electronic
+      susceptibility alone, so sterics, the reagent and the solvent are not in the model; and a
+      heteroatom often tops the list because of its lone pair, so for a ring-substitution question
+      compare the ring carbons with each other. The addition this template makes is the **spread**:
+      where an atom's index varies across the ensemble by as much as the gap to the next atom, the
+      ranking is not robust to conformation and you should say that rather than reporting an order.
+      Close by naming what would settle it experimentally.

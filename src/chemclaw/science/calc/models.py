@@ -721,7 +721,14 @@ class ConformerEnsemble(BaseModel):
     # Free energy of the ensemble relative to its lowest member, in kcal/mol: the -T*S_conf
     # correction to add to a single-conformer free energy.
     ensemble_correction_kcal: float
-    treatment: Literal["lowest-plus-conformational-entropy"] = "lowest-plus-conformational-entropy"
+    # Which approximation produced the populations above. **Additive and defaulted**, because this
+    # model crosses the Temporal wire and histories are in flight: a result decoded from an older
+    # one carries the value it always had. `free-energy-weighted-top-n` is what a refined ensemble
+    # reports — a different treatment rather than a better one, and a reader must not have to infer
+    # which ran (D-101).
+    treatment: Literal["lowest-plus-conformational-entropy", "free-energy-weighted-top-n"] = (
+        "lowest-plus-conformational-entropy"
+    )
 
     @property
     def lowest(self) -> Structure:
@@ -743,6 +750,186 @@ class ConformerEnsemble(BaseModel):
         and a second copy of that fact is a second thing that can disagree with it.
         """
         return self.conformers[0].structure.structure_id
+
+
+class WeightedValue(BaseModel):
+    """A Boltzmann-averaged property, with the spread of what was averaged.
+
+    **The spread travels with the mean, and that is the whole design of this model.** A property
+    whose values scatter across the ensemble by more than the difference it is being used to argue
+    is not a number to report as a single figure: a mean dipole of 2.1 D over conformers ranging
+    0.4 to 4.8 D says the molecule does not have *a* dipole at this temperature. Reporting the mean
+    alone turns that into a false precision reading exactly like a measurement, so a caller has to
+    look away from the spread deliberately rather than by omission.
+    """
+
+    mean: float
+    minimum: float
+    maximum: float
+    spread: float = Field(description="maximum minus minimum, in the property's own unit")
+
+
+class WeightedAtom(BaseModel):
+    """One atom's Boltzmann-averaged per-atom property across an ensemble."""
+
+    index: int
+    element: str
+    value: WeightedValue
+
+
+class EnsembleProperty(BaseModel):
+    """A property averaged over a conformer ensemble rather than read off one geometry.
+
+    The standing caveat on every other number in this system is that it describes **one** conformer.
+    This is the shape that lifts it: each member's property computed at that member's own geometry,
+    then weighted by the population the ensemble gives it.
+
+    `refined` says which populations were used. Weighting by electronic energy is free once the
+    search exists; weighting by free energy costs one Hessian per member, so the caller chooses and
+    the result records the choice rather than letting a reader assume the better one.
+    """
+
+    smiles: str | None
+    property_name: str
+    method: str
+    solvent: str | None
+    temperature_k: float
+    members_averaged: int
+    total_found: int
+    refined: bool = False
+    sampled: Literal[True] = True
+    value: WeightedValue | None = None
+    per_atom: list[WeightedAtom] = Field(default_factory=list)
+    # The population fraction the averaged members account for, from the ensemble's own weighting.
+    # Below 1.0 the average is over a *truncation* of the ensemble, and saying so is what stops
+    # "the Boltzmann-averaged dipole" meaning "the dipole of the five conformers we could afford".
+    population_covered: float = 1.0
+
+
+class RefinedConformer(BaseModel):
+    """One ensemble member after its own optimization and Hessian."""
+
+    structure: Structure
+    relative_kcal: float
+    population: float
+    degeneracy: int = 1
+    gibbs_free_energy_hartree: float
+    electronic_energy_hartree: float
+    is_minimum: bool
+
+
+class RefinedEnsemble(BaseModel):
+    """A conformer ensemble re-weighted by free energy instead of by electronic energy.
+
+    **A different approximation, not a better one**, and two fields say so rather than leaving a
+    reader to infer it. `refined_population_covered` is the E-weighted population fraction the
+    refined members account for: refining the top five of forty-seven and reporting the result as
+    "the ensemble" is the same error `ensemble_from_members` already refuses for `max_members`, and
+    it is worse here because the number looks more careful. `treatment` on the underlying
+    `ConformerEnsemble` names the weighting.
+
+    D-101 recorded that the system does not free-energy-weight an ensemble because it is one Hessian
+    per member. That is still true; this is the shape for when a caller decides to pay it, bounded
+    to the top `ensemble_refine_top_n`.
+    """
+
+    smiles: str | None
+    method: str
+    solvent: str | None
+    temperature_k: float
+    conformers: list[RefinedConformer]
+    total_found: int
+    refined_count: int
+    refined_population_covered: float
+    conformational_entropy_cal_per_mol_k: float
+    ensemble_correction_kcal: float
+    sampled: Literal[True] = True
+    treatment: Literal["free-energy-weighted-top-n"] = "free-energy-weighted-top-n"
+    warnings: list[str] = Field(default_factory=list)
+
+    @property
+    def lowest(self) -> Structure:
+        """The lowest free-energy member — the geometry a downstream single-structure task wants."""
+        return self.conformers[0].structure
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def lowest_structure_id(self) -> str:
+        """The address of the lowest free-energy member, hoisted for the template resolver."""
+        return self.conformers[0].structure.structure_id
+
+
+class RankedSpecies(BaseModel):
+    """One species of a distribution, with the free energy it was ranked by."""
+
+    smiles: str
+    label: str = ""
+    relative_kcal: float
+    population: float
+    gibbs_free_energy_hartree: float | None = None
+    electronic_energy_hartree: float
+    structure_id: str = ""
+    conformers_found: int = 0
+
+
+class SpeciesDistribution(BaseModel):
+    """How a molecule distributes over a set of *distinct species* at equilibrium.
+
+    One shape for three questions that are the same arithmetic over different species sets: which
+    tautomer dominates, which protonation microstate is present at a pH, and which diastereomer is
+    favoured. `kind` says which was asked, because the number means something different in each and
+    a reader must not have to guess from the SMILES.
+
+    The caveat that has to travel with it: a species not in the set was not ranked, and a
+    distribution over an incomplete enumeration is confident about the wrong universe. `enumerated`
+    records how many the enumeration produced against how many survived to be computed.
+    """
+
+    kind: Literal["tautomers", "microstates", "stereoisomers", "custom"]
+    method: str
+    solvent: str | None
+    temperature_k: float
+    level: ReactionLevel
+    species: list[RankedSpecies]
+    enumerated: int
+    uncertainty_kcal: float
+    sampled: bool = False
+    warnings: list[str] = Field(default_factory=list)
+
+    @property
+    def dominant(self) -> RankedSpecies:
+        """The most populated species — the form every other number should be about."""
+        return max(self.species, key=lambda candidate: candidate.population)
+
+
+class DissociatedBond(BaseModel):
+    """One bond's dissociation energy, and the fragments it was computed from."""
+
+    atoms: list[int]
+    bond: str
+    fragments: list[str]
+    dissociation_energy_kcal: float
+    is_weakest: bool = False
+
+
+class BondDissociationSurvey(BaseModel):
+    """Every breakable bond of a molecule, ranked by how much it costs to break.
+
+    Semiempirical and therefore a *ranking* — GFN2 bond dissociation energies carry several
+    kcal/mol of error, so the ordering is the answer and the magnitudes are not. What the ordering
+    supports: which C-H a radical abstracts, which bond an autoxidation attacks first, which
+    linkage a forced-degradation study should look for.
+    """
+
+    smiles: str
+    method: str
+    solvent: str | None
+    temperature_k: float
+    mode: Literal["homolytic", "heterolytic"]
+    bonds: list[DissociatedBond]
+    considered: int
+    uncertainty_kcal: float
+    warnings: list[str] = Field(default_factory=list)
 
 
 class InteractionResult(BaseModel):

@@ -362,17 +362,31 @@ def test_a_shipped_template_whose_arguments_cannot_be_checked_says_so() -> None:
     A bundle this release declares but does not run has no `connectors/<name>/server/tools.py`
     here, so its signatures are unresolvable and `_step_problems` skips them — silently, by
     design, because an unresolvable tool must not produce invented failures. `hazard-briefing`
-    calls `screen_hazards`, which makes it the first shipped template that is name-checked and
+    calls `screen_hazards`, which made it the first shipped template that is name-checked and
     *not* argument-checked.
 
-    The assertion is deliberately on the real shipped template rather than a fixture: what would
+    The assertion is deliberately on the real shipped templates rather than a fixture: what would
     go wrong is not the reporting mechanism, it is somebody moving another bundle out and not
     noticing that a pinned procedure lost its argument check. This fails the moment that happens
     and the note stops matching what ships.
+
+    **The blind spot grew from one template to five**, and pinning the whole set rather than a
+    count is what makes that legible. Every addition is a `chem` enumeration — the bundle whose
+    capability is `Chemclaw3-mcp`'s — so the multi-step protocols of
+    `D-2026-08-25-the-loop-is-a-composite-not-a-template` are name-checked here and
+    argument-checked only by `make connector-validate` against a running server. That is the known
+    cost of enumerating on a bundle we declare and do not run, stated rather than discovered.
     """
     from chemclaw.cli.validate_templates import unchecked_arguments
 
-    assert unchecked_arguments() == {"hazard-briefing": ["screen_hazards"]}
+    assert unchecked_arguments() == {
+        "bond-strength-survey": ["enumerate_bond_cleavages"],
+        "degradant-triage": ["enumerate_degradants", "screen_hazards"],
+        "hazard-briefing": ["screen_hazards"],
+        "microspecies-profile": ["enumerate_protonation_states"],
+        "stereoisomer-ranking": ["enumerate_stereoisomers"],
+        "tautomer-resolution": ["enumerate_tautomers"],
+    }
 
 
 def test_the_validator_accepts_a_correct_tool_step(
