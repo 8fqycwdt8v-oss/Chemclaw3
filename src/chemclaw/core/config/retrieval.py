@@ -50,6 +50,25 @@ class RetrievalSettings(BaseSettings):
     # question over a large corpus fills only as much context as it needs (the agent narrows the
     # query or drills in with expand_note when the sweep is truncated).
     gather_evidence_max_chunks: int = Field(default=40, ge=1)
+    # The same cap in the currency the count cannot express. `gather_evidence_max_chunks` counts
+    # chunks whose sizes differ by roughly **7.5x** across sources — a note-backed chunk is
+    # excerpted to `note_excerpt_chars` (240) while a mounted share's chunk is up to its binding's
+    # `chunk_chars` (1,800) — and nothing normalised them, so 40 chunks is ~9.6 kB from the graph
+    # and ~72 kB from a share. A count of things cannot bound anything, because what a thing costs
+    # is whatever is in it: the same finding as `agent_keep_last_conversation_groups`, where the
+    # count-only version left a 300k-token thread at 180k against a 100k budget.
+    #
+    # Both bounds apply, and the count is kept rather than replaced — it is ENV-visible and
+    # deployments set it, which is `agent_keep_last_tool_groups`' argument for keeping a name whose
+    # meaning has been refined. ~60,000 characters is ~15k tokens against
+    # `agent_context_token_budget`'s 100,000: it leaves a graph-only deployment byte-identical and
+    # stops a share-heavy sweep at roughly 33 chunks.
+    #
+    # Spent by walking the already round-robin (or RRF-fused) ranking, so it is spent
+    # cross-source-fairly for exactly the reason the count is —
+    # `D-2026-08-01-a-cap-that-starves-a-source` is about the *shape* of a cut, and a second cap
+    # in a different currency applied the old way would reintroduce the starvation it fixed.
+    gather_evidence_max_chars: int = Field(default=60_000, ge=1_000)
     # ── Condensing many whole protocols into one comparison (`retrieval.condense`) ────────────
     # Asking for similar reactions returns many protocols, and a protocol is atomic: it cannot be
     # split, so the unit that must fit is one whole procedure. These bound what a single turn may

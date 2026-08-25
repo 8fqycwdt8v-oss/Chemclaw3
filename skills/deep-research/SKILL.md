@@ -38,8 +38,16 @@ chemistry when that is what answers the question.
 2. **Gather from everything.** `gather_evidence` sweeps all internal sources in one call
    (the whole knowledge graph — reactions, optimization campaigns, playbooks, reports — plus
    structurally similar reactions when you pass a `reaction_smiles` anchor). Pass a
-   `note_type` or `tag` filter to narrow. It returns cited chunks; there is no need to query
+   `note_type` or `tag` filter to narrow. It returns cited `chunks`; there is no need to query
    sources one by one for a first pass.
+
+   **Read what the sweep says about itself before you read the chunks.** `sources_failed` names
+   a source that could not be asked at all — with a name there, the sweep is about less than the
+   whole corpus however complete the chunks look, and that has to reach the chemist.
+   `truncated_by` says a cap cut the list and `total_before_cap` says how much there was:
+   `count` means narrow with a `note_type`/`tag`/date filter, `chars` means the sources are
+   returning long chunks and a narrower question will reach further. A truncated sweep is not a
+   small corpus.
 3. **Drill in — one protocol or many.** For a *single* cited note, `expand_note` gives the
    full body: the step-by-step recipe, per-step conditions, the verbatim procedure prose, and
    outcomes. That prose is where impurities, observations, and robustness rationale live; read
@@ -96,8 +104,11 @@ chemistry when that is what answers the question.
 - **Evidenced vs. analogy, kept visibly separate.** "We ran this exact reaction at 80 °C and
   got 85% ([[reaction-x]])" is evidence. "A similar coupling tolerated a free amine
   ([[reaction-y]]), so this one may too" is analogy — label it as such, never as fact.
-- **Silence is an honest answer.** If `gather_evidence` returns nothing on a point, say so.
-  Do not fill the gap with plausible-sounding chemistry.
+- **Silence is an honest answer — once you have checked it is silence.** If `gather_evidence`
+  returns no chunks on a point, say so, and do not fill the gap with plausible-sounding
+  chemistry. But check `sources_failed` and `truncated_by` first: an outage and a cut both look
+  like an absence in the chunk list alone, and reporting either as "we have no prior art" is a
+  confident claim about a question that was never fully asked.
 - **Breadth is deliberate.** "Typical protocol for X" or "what matters when solubility is
   low" is answered by surveying *many* notes (campaigns, playbooks, and the individual runs
   behind them), not one hit. If the first sweep is thin, widen the query or drop a filter.
