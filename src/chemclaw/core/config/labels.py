@@ -21,7 +21,11 @@ class LabelSettings(BaseModel):
     # manifest is deliberately **not** on `connectors_dirs` — the same call `calculators.py` makes
     # for the calculation server, and for the same reason: these are internal primitives, and
     # mounting the manifest would put them in the agent's prompt as tools to choose between.
-    rxnlabel_server_url: str = "http://127.0.0.1:8861/mcp"
+    # 8865 is the port `Chemclaw3-mcp`'s MODULES.md allocates to `rxnlabel`, and not a tranche-1
+    # number: 8850-8856 are all claimed by that catalogue's own proposals, and taking a proposed
+    # server's port silently is exactly what its `test_the_catalogue_claims_no_port_a_server_
+    # contradicts` exists to prevent.
+    rxnlabel_server_url: str = "http://127.0.0.1:8865/mcp"
     # The environment variable holding the bearer the server enforces on `/mcp`. Named rather than
     # carried, and read per request, so a rotation needs no restart. A missing value is a refused
     # call, not an open one.
