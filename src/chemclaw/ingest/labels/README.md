@@ -13,3 +13,4 @@ here. `chemclaw.ingest.documents` is split on the same line.
 | Module | What it does |
 | --- | --- |
 | `record.py` | builds the record phase of a label row from an `OrdReaction` — the form with agents **kept**, and why |
+| `labeller.py` | the MCP client for `Chemclaw3-mcp:servers/rxnlabel` — and why it never derives the version |

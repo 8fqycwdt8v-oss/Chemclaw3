@@ -63,6 +63,10 @@ _BAD_DATA_TYPES = [
     # corpus, not about this attempt: the drain must record the reaction before it can label it,
     # and retrying the same write finds the same absence.
     "LabelIndexError",
+    # The labelling server reached and refused: a reaction SMILES RDKit cannot parse, a species
+    # list that does not match the reaction (`chemclaw.ingest.labels.labeller`). Its retryable
+    # sibling is `LabelServerError`, which means nobody answered at all.
+    "LabelToolError",
     # An offboarding erasure the database refused, or one asked for on a blank actor
     # (`chemclaw.agent.leaver`). Non-retryable for the same reason every entry here is: a missing
     # `DELETE ON session_owners` grant and an empty actor id are both facts about the request or the

@@ -14,10 +14,10 @@ Plan: `/root/.claude/plans/investigate-deeply-following-user-playful-spindle.md`
 
 ## Phase 2 — the `rxnlabel` server and its client
 - [ ] `Chemclaw3-mcp:servers/rxnlabel/` (separate PR)
-- [ ] `ingest/labels/labeller.py` (MCP client), `core/config/labels.py`
+- [x] `ingest/labels/labeller.py` (MCP client), `core/config/labels.py`, `core/mcp_session.py`
 
 ## Phase 3 — the enrichment background service
-- [ ] `ingest/labels/{enrich,merge}.py`, `durable/label_sync.py`, schedule
+- [x] `ingest/labels/{enrich,merge}.py`, `durable/label_sync.py`, schedule, ADRs
 
 ## Phase 4 — Pistachio as an evidence corpus (warehouse `corpus:` binding)
 ## Phase 5 — the six questions as tools
