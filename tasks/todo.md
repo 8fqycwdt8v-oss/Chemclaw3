@@ -596,4 +596,44 @@ closes it — the file's own rule, and the one that kept it from reaching 4,717 
 
 ## Review
 
-*(To be written when the plan is executed, not before. Nothing in this file has been implemented.)*
+**`make test`: 4,272 passed, 6 skipped, 0 failed** (8m04s), with Postgres up so the ~157 durable
+tests actually ran. What it skipped, because a green line that does not say is worth less: three in
+`test_migrations_are_additive.py` (this checkout is a shallow clone, so a migration compares against
+itself), two in `test_prompt_caching.py` (the credential is present and stale — W0.1's whole point,
+and the skip line now says which), and one in `test_retention.py` (a checkpointer exists in
+`public`, so the absent-schema case cannot be produced without dropping tables that test does not
+own). `make lint` green. `make type` has two errors, both in `test_bo_campaign_record.py` and
+`test_step_handoff.py`, **both pre-dating this branch** — confirmed by stashing — and left alone
+rather than widening the change.
+
+`make eval`: 24 scored metrics, 4 gated failures (all four the case-set's own by-design ones),
+0 regressions. `make eval-baseline` → `make eval-baseline-check` round-trips green, 13 metrics,
+0 worsened.
+
+### What the work actually taught, beyond the ledger above
+
+**The plan's first rule paid for itself three times.** "Nothing that cannot be graded gets built"
+was written to stop premature building, and what it actually did was stop *three* planned changes
+that turned out to be wrong: W1.2's cold-tail deferral (the tail did not exist once the probes were
+written), W3.1's plugin adoption (it solves an `interrupt()` this system does not use), and the
+ChemRAG adapter (buildable unrun, and therefore not built).
+
+**Three of my own claims were wrong and each is corrected where it was made**, not in a changelog:
+the headline context figure was 28% low because it estimated at `chars / 4` instead of asking
+LangChain what it sends; finding 7 described a missing edit that was already wired, read off a
+docstring instead of the call site; and recommending Boltz-2 as an `admet` re-derivation was a
+category error — it is a protein-ligand co-folding model.
+
+**The instruments found defects the plan did not predict.** Building the context ratchet found that
+`@tool` is identity here, so a first version measured 11 tokens per tool and would have held
+nothing. Adding an eval case found that `make eval-baseline` and `make eval-baseline-check`
+disagreed about the case-set version, so a regenerated baseline failed the check it was regenerated
+for. And the full suite found that `evals` was importing `agent` — an edge the architecture
+deliberately does not declare, because the scorer must not depend on the scored.
+
+**Failed approach, recorded so it is not retried.** Driving `build_langgraph_agent()` in-process
+against the live API to measure real turn economics: this environment's credential is rejected, and
+clearing the session's `ANTHROPIC_BASE_URL` gives the same 401. `cli.mock_llm` makes the *harness*
+runnable end to end but cannot stand in for judgement — it emits scripted tool calls without
+choosing them, measured at expected-tool-reached 0/3. W2.3 and W2.4 need a real credential and
+nothing else.
