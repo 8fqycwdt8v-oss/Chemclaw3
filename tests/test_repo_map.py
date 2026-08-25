@@ -228,13 +228,13 @@ def test_the_runbook_names_the_bundles_that_actually_ship() -> None:
 def test_the_runbook_names_every_bundle_that_owns_durable_work() -> None:
     """Calling `bo` "the one that also owns durable work" was wrong, in a way one grep settles.
 
-    `calc`, `bo` and `qm` each declare `jobs:`, so each runs a second Deployment for its own
-    Temporal worker. The runbook said only `bo`, nine lines after calling `calc` "the worked
+    `calc`, `bo`, `qm` and `results` each declare `jobs:`, so each runs a second Deployment for its
+    own Temporal worker. The runbook said only `bo`, nine lines after calling `calc` "the worked
     example (five jobs, one workflow, one queue, its own worker)" — a document disagreeing with
     itself, which is what an unchecked claim looks like once someone edits half of it.
     """
     durable = _bundles_owning_durable_work()
-    assert durable == {"bo", "calc", "qm"}, (
+    assert durable == {"bo", "calc", "qm", "results"}, (
         f"the set of bundles owning durable work changed to {sorted(durable)}; update the runbook "
         "paragraph that names them, which is the claim this test exists to keep honest"
     )

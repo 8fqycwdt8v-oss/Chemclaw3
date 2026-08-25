@@ -65,6 +65,13 @@ arm of the union and a new branch in core (D-076 → D-120).
 signs off before a merge — that is the review line. `graph` is retrieve-only for this reason, not by
 omission, and a source cannot acquire a write path by declaring one.
 
+**Anywhere this system's *own* results go.** A source supplies a corpus; sending computed values
+outward is the opposite direction and has its own seam, `src/chemclaw/publish/`
+(`D-2026-08-25-a-cache-is-not-a-record`). The two look similar — a folder, a manifest, a late-bound
+`module:callable`, an enable list — and that similarity is deliberate; what separates them is which
+way the data moves and therefore what may go wrong. This one reads, so its failure is a missing
+answer; that one writes, so its failure is a record nobody has.
+
 **An ELN's retrieve half, when its records already become notes.** `eln-json` and `eln-ord` are
 ingest-only: reactions flow in and become graph notes, which the `graph` source then retrieves.
 Carrying a retriever as well would surface every ingested reaction twice.

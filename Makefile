@@ -39,7 +39,7 @@ SHELL := bash
 
 .DEFAULT_GOAL := help
 
-.PHONY: help install lint type test cov check ci chat db-migrate db-grants schedules-apply kg-validate eval eval-strict eval-baseline eval-baseline-check eln-validate skill-validate connector-validate datasource-validate template-validate connectors prose-validate helm-validate explain user-erase reindex reindex-full up down phoenix-up phoenix-down phoenix-publish deps-audit live-infra live-infra-down live-up live-down live-status live-jobs live-probes live-plan-gate live-degradation live-storm live-soak live-soak-report leak-probe mutants mutant-results
+.PHONY: help install lint type test cov check ci chat db-migrate db-grants schedules-apply kg-validate eval eval-strict eval-baseline eval-baseline-check eln-validate skill-validate connector-validate datasource-validate sink-validate sink-schema template-validate connectors prose-validate helm-validate explain user-erase reindex reindex-full up down phoenix-up phoenix-down phoenix-publish deps-audit live-infra live-infra-down live-up live-down live-status live-jobs live-probes live-plan-gate live-degradation live-storm live-soak live-soak-report leak-probe mutants mutant-results
 
 help:  ## List every target with its one-line description (the default).
 	@# Reads the `## ` comments beside each target, so a new target documents itself the day it is
@@ -82,7 +82,7 @@ check: lint type test  ## The fast inner-loop gate: lint + type + test (no cover
 # alone. Last in the list rather than first: a dependency finding is a real failure but not one
 # that should mask a broken test, and it is the one gate whose fix lives in `uv.lock` rather than
 # in the diff under review.
-ci: lint type cov kg-validate eval-strict eln-validate skill-validate connector-validate datasource-validate template-validate prose-validate helm-validate deps-audit  ## The full pre-push gate: lint + type + coverage + all validators + the dependency audit (what CI runs).
+ci: lint type cov kg-validate eval-strict eln-validate skill-validate connector-validate datasource-validate sink-validate template-validate prose-validate helm-validate deps-audit  ## The full pre-push gate: lint + type + coverage + all validators + the dependency audit (what CI runs).
 
 chat:  ## Chat with the agent from the terminal (admin/testing mode; needs ANTHROPIC_API_KEY).
 	uv run chemclaw --admin
@@ -132,6 +132,12 @@ connector-validate:  ## Validate the connector bundles (manifests, declarations,
 
 datasource-validate:  ## Validate the data-source manifests (halves resolve, config binds, names exist).
 	uv run python -m chemclaw.cli.validate_datasources
+
+sink-validate:  ## Validate the result-sink manifests (drivers resolve, config binds, names exist).
+	uv run python -m chemclaw.cli.validate_sinks
+
+sink-schema:  ## Print the DDL + registry seed a results database needs (apply it yourself).
+	uv run python -m chemclaw.cli.sink_schema --all
 
 template-validate:  ## Validate the step templates (steps, references, tools/jobs/profiles named).
 	uv run python -m chemclaw.cli.validate_templates

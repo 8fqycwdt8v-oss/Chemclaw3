@@ -722,6 +722,55 @@ opposing. Three lines of arithmetic turned an assumption into a test.
 **And the thing that made all of it visible:** a review pass over my own plan, run against the real
 files rather than my memory of them, before writing any code. It found five real problems, of which
 I had independently caught three. The two I had not were the two that would have shipped.
+---
+
+## 2026-08-25 — Test against the real model, not against your reading of it
+
+Building the result-publication projectors, I read `science/calc/models.py` carefully, wrote
+seventeen projectors from that reading, and then ran them against real model instances. Three
+things I had "verified" by reading were wrong:
+
+- `Conformer` has no `energy_hartree` — only `EnsembleMember` does. My projector required it, which
+  would have made every *returned* ensemble unpublishable while every cached one worked.
+- `EnsemblePayload` has no `smiles` — it is keyed by `structure_id`. The subject builder raised.
+- `DescriptorProfile` has `fraction_csp3`, which I had simply not seen, and so did not publish.
+
+Each took one execution to surface and would have taken a long time to find in production, because
+the failure mode of the third is *silence*: a field nobody publishes looks exactly like a field
+nobody has.
+
+**The rule: a projector is not written until it has been run against an instance of what it
+projects.** `model_fields` is one line and a constructed instance is three; that is cheaper than
+any amount of re-reading, and it is the only thing that distinguishes a field you decided not to
+publish from one you never noticed.
+
+**The stronger form, which is what I should have started with.** Reading catches what you look for.
+A *coverage check* catches what you did not: wrap the payload in a dict that records which keys were
+read, run the projector, and diff the read set against the model's fields. That found three more
+gaps — including an exotherm boolean published without the threshold it was judged against, which
+would have been uninterpretable the moment an operator changed the setting. It is now
+`tests/test_publish_projection.py::test_every_model_field_is_read_or_deliberately_ignored`, with an
+explicit exemption list so a deliberate omission carries its reason and an accidental one fails.
+
+The same shape generalizes: **wherever one model is projected into another, assert the mapping is
+total or explicitly partial.** A partial mapping nobody declared is indistinguishable from a
+complete one, right up until someone asks for the missing half.
+
+## 2026-08-25 — A position-matched zip between two independently produced lists
+
+`ReactionEnergyResult` carries `reactants`/`products` and, separately, a `species` list. I zipped
+the second onto the members built from the first by index. They are produced independently — a
+`quick`-level run returns *no* species at all — so a two-species breakdown over a three-member
+equation attached cyclohexane's free energy to butadiene.
+
+What makes this worth recording is that it is **silent by construction**: both values are plausible
+energies in the same units, on the same reaction, so nothing downstream — not a type, not a range
+check, not a reviewer's eye — would have caught it.
+
+**The rule: never zip two lists by position unless one is documented as derived from the other.**
+Match on identity. And where a test can distinguish the two, make the fixture *disagree* on order
+deliberately — mine now lists its species product-first, so a reintroduced index match fails
+immediately rather than passing on a coincidence.
 
 ## 2026-08-25 — take the number off the wire, not off a serializer you chose
 

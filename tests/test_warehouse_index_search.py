@@ -215,3 +215,60 @@ async def test_an_empty_eligibility_set_returns_nothing_without_asking_the_store
     retriever._store = await _store_ranked("ester formation", "RX-1")
 
     assert await retriever._search("ester formation", {"since": "2020-01-01"}) == []
+
+
+# --- the binding's own `where:` reaches the index path ------------------------------------------
+
+
+@_sync
+async def test_a_binding_where_is_applied_even_with_no_query_filter() -> None:
+    """`where:` says which rows are *ever* eligible; a query that filters nothing cannot waive it.
+
+    The regression this pins: `_eligible_keys` used to decide "is this search filtered" from the
+    query's keys, so a binding carrying both `index:` and `where:` restricted the corpus when the
+    model happened to pass a date and did not when it did not — the same binding, two answers, no
+    error. The scanned path has always applied `where` unconditionally; this makes the index path
+    agree.
+    """
+    retriever = _retriever(
+        await _store_ranked("ester formation", "RX-1", "RX-2"), where="STATUS = 'GRANTED'"
+    )
+    await retriever.retrieve("ester formation", {})
+
+    statements = [sql for sql, _ in warehouse_fake.NEXT.executed]  # type: ignore[union-attr]
+    assert len(statements) == 2, "a scope query ran even though the query carried no filter"
+    assert "STATUS = 'GRANTED'" in statements[0]
+
+
+@_sync
+async def test_a_binding_with_no_where_and_no_filter_still_costs_no_scope_query() -> None:
+    """The optimisation the fix must not lose: nothing to filter on is still one round trip."""
+    retriever = _retriever(await _store_ranked("ester formation", "RX-1"))
+    await retriever.retrieve("ester formation", {})
+
+    assert len(warehouse_fake.NEXT.executed) == 1  # type: ignore[union-attr]
+
+
+@_sync
+async def test_the_scope_cap_message_reaches_a_default_level_log(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The message names the operator's lever, and `retrieve` logs only a generic line at WARNING.
+
+    Without this the one actionable sentence sat at DEBUG while a broad filter read to the agent as
+    an empty corpus.
+    """
+    import logging
+
+    retriever = _retriever(await _store_ranked("ester formation", "RX-1", "RX-2"))
+    cap = settings.vector_store_max_scope_keys
+    try:
+        object.__setattr__(settings, "vector_store_max_scope_keys", 1)
+        with caplog.at_level(logging.WARNING):
+            await retriever.retrieve("ester formation", {"since": "2020-01-01"})
+    finally:
+        object.__setattr__(settings, "vector_store_max_scope_keys", cap)
+
+    assert any(
+        "CHEMCLAW_VECTOR_STORE_MAX_SCOPE_KEYS" in record.getMessage() for record in caplog.records
+    ), "the lever must be readable without turning on DEBUG"

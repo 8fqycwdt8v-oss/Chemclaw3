@@ -157,6 +157,10 @@ config:
 
       # **A scan, not an index.** `vector_cosine_similarity` is evaluated per row, so this ranks the
       # whole relation on every query. That is the right shape for an ELN and the wrong one for a
-      # corpus of millions: at that size the vectors belong in a Mosaic AI Vector Search index,
-      # reached through `CHEMCLAW_VECTOR_STORE_PROVIDER=databricks`, and `where:` below is how you
-      # keep the scanned set honest in the meantime.
+      # corpus of millions: at that size the vectors belong in a Mosaic AI Vector Search index —
+      # add an `index:` key here and this relation is queried only to resolve the keys it returns
+      # (see `pistachio/datasource.yaml`).
+      #
+      # In the meantime a `where:` key is how you keep the scanned set honest — an extra literal
+      # predicate, as on the entry query. This block does not set one, because an ELN small enough
+      # to scan does not need it; the comment used to say "`where:` below" and point at nothing.

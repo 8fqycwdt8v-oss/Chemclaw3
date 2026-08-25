@@ -222,6 +222,22 @@ connectors:
     # This bundle owns durable work, so it also gets a Temporal worker Deployment polling the queue
     # its manifest declares. Bundles without a `jobs:` entry leave this unset and get only the app.
     worker: true
+  results:
+    # Republishing computed results to an external results store (D-2026-08-25). A jobs-only
+    # bundle, so `server: false` and no app pod or Service renders.
+    #
+    # **Enabled here, and still inert unless a sink is configured.** This bundle only *re-queues*
+    # what the automatic path publishes; with `CHEMCLAW_RESULT_SINKS` empty — the default — the
+    # enqueue is a no-op and the job reports zero. Turning publishing on is that variable plus a
+    # `sink.yaml`, never this flag.
+    #
+    # One replica: a corpus walk is a rare operator action, and two pods walking the same two
+    # tables would duplicate the read for no benefit — the outbox's identity index makes the
+    # *writes* idempotent, but the scan is still paid twice.
+    enabled: true
+    server: false
+    replicas: 1
+    worker: true
   qm:
     enabled: true
     # The first jobs-only bundle: it declares no `endpoint:`, so `server: false` and it gets no app
