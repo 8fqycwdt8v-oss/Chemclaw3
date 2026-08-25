@@ -6,11 +6,11 @@
 -- *just* for conditions, and the reaction row already exists, so these ride on it and there is
 -- still exactly one place a run's figures live.
 --
--- **A separate migration rather than an edit to `050`, and that is the whole reason this file
+-- **A separate migration rather than an edit to `052`, and that is the whole reason this file
 -- exists.** The column belongs in `050` by every aesthetic measure — it is one table, added the
 -- same day, by the same change. But the runner keys each file by a checksum of its statements, so
 -- editing an applied migration breaks `make db-migrate` on every database that already ran it.
--- Measured the hard way: editing `050` in place did exactly that to this repo's own dev database,
+-- Measured the hard way: editing it in place did exactly that to this repo's own dev database,
 -- and `tests/test_migrations_are_additive.py` failed the commit that tried it.
 ALTER TABLE reaction_records ADD COLUMN IF NOT EXISTS conditions JSONB;
 

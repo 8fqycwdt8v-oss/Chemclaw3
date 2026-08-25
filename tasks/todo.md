@@ -7,7 +7,7 @@ product") with full content. Nothing extracts knowledge automatically without a 
 ## Done
 - [x] Measure the gate before changing it (202 ms/note serialized git; 425 µs/note corpus scan;
       zero LLM calls in ingest; refs *not* the bottleneck — disconfirmed)
-- [x] Migration `050_reaction_records.sql` + grants + `infra/sql/README.md` inventory row
+- [x] Migration `052_reaction_records.sql` + grants + `infra/sql/README.md` inventory row
 - [x] `ingest/eln/records.py` — Protocol + InMemory + Postgres, shaped like `fingerprints/store.py`
 - [x] `ingest/eln/note.py` → `record.py`; `note_from_ord_reaction` → `record_from_ord_reaction`
 - [x] `ingest.py` drops `propose_note`; fingerprint indexing untouched

@@ -81,7 +81,7 @@ nothing proposes one.
 **The record.** `ingest/eln/note.py` → `ingest/eln/record.py`; the same block renderers, returning
 a `ReactionRecord` instead of a `Note`. `ingest/eln/records.py` is the tier — a Protocol with an
 in-memory and a Postgres backend, shaped like `science/fingerprints/store.py` and for the same
-reason. Migration `050`. Upsert-by-id *is* the idempotency, which is what deletes the corpus scan
+reason. Migration `052`. Upsert-by-id *is* the idempotency, which is what deletes the corpus scan
 and the wedge with it: the unchanged-entry check is now keyed on the batch, not the corpus.
 
 **Reactions left the graph's id space.** `dangling_links` no longer reports `[[reaction-<id>]]` as
