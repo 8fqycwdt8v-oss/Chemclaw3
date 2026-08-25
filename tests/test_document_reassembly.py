@@ -19,7 +19,7 @@ _WORDS = "charge reflux quench filter concentrate recrystallise degas cool add s
 
 
 def _prose(blocks: int, lines: int, *, coordinates: bool, seed: int = 7) -> str:
-    """A document shaped like a parsed one: blank-line-separated blocks, optionally page-labelled."""
+    """A document shaped like a parsed one: blocks separated by blank lines, optionally labelled."""
     rng = random.Random(seed)
     out = []
     for block in range(blocks):

@@ -9,7 +9,12 @@ new infrastructure, by design.
 - **Semantic** — `failure.py` (failure modes), `playbook.py` (distilled procedure), `optimization.py`
   (what a BO campaign converged on), `interaction.py` (what a human decided and why).
 - **Plumbing** — `similarity.py` (structural identity via DRFP), `ids.py`, `supersede.py` (a newer
-  finding retiring an older one without deleting it), `jobs.py` (the durable side).
+  finding retiring an older one without deleting it), `jobs.py` (the durable side),
+  `progression.py` (the order runs were performed in and what each changed).
+- **The comparative table** — `comparison.py`. Cells, the empty-column rule and the grid, extracted
+  from `optimization.py` when `retrieval/condense.py` became a second caller. It lives here rather
+  than there because this is where the artifact was invented; two copies would be two tables that
+  disagree about what `—` means.
 
 ## The one thing here that is not a note
 

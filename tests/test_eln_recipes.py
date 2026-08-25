@@ -16,6 +16,7 @@ import asyncio
 import json
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import frontmatter
 import pytest
@@ -35,7 +36,7 @@ from chemclaw.ingest.eln.ord import (
 from chemclaw.ingest.eln.ord_adapter import OrdFormatError, OrdJsonAdapter
 from chemclaw.ingest.eln.sync import sync_entries
 from chemclaw.ingest.eln.validate import validate_ord
-from chemclaw.kg.note import Note
+from chemclaw.kg.note import Note, ProcessConditions
 from chemclaw.kg.render import render_note
 from chemclaw.science.fingerprints.store import InMemoryFingerprintStore
 from tests.conftest import FakeSubmitter
@@ -383,8 +384,9 @@ def test_ord_recipe_flows_through_sync() -> None:
 def _warehouse_shaped(procedure: str) -> OrdReaction:
     """A reaction as a warehouse binding produces one: prose recorded, `steps` never mapped.
 
-    `chemclaw.ingest.eln.warehouse.binding` excludes `steps` from `_MAPPABLE_FIELDS` deliberately, so this is the
-    real shape of every Snowflake-ingested reaction rather than a contrived one.
+    `chemclaw.ingest.eln.warehouse.binding` excludes `steps` from `_MAPPABLE_FIELDS`
+    deliberately, so this is the real shape of every Snowflake-ingested reaction rather than a
+    contrived one.
     """
     return OrdReaction(
         reaction_id="WH-1",
@@ -495,18 +497,23 @@ def test_a_successful_run_does_not_assert_its_own_success() -> None:
     Writing it unconditionally would turn "the ELN did not say" into a claim that the run worked —
     and a failure that reads as an ordinary run is the one row in a comparison nobody may misread.
     """
-    base = {
-        "reaction_id": "R3",
-        "inputs": [Component(smiles="CC", role=Role.REACTANT)],
-        "outcomes": [Component(smiles="CCO", role=Role.PRODUCT)],
-        "provenance": "x",
-        "yield_percent": 12.0,
-    }
-    assert note_from_ord_reaction(OrdReaction(**base)).conditions.outcome is None  # type: ignore[union-attr]
-    failed = OrdReaction(
-        **base, outcome_class=OutcomeClass.FAILURE, failure_reason="decomposed on scale"
-    )
-    assert note_from_ord_reaction(failed).conditions.outcome == "failure"  # type: ignore[union-attr]
+
+    def _run(**extra: Any) -> ProcessConditions:
+        reaction = OrdReaction(
+            reaction_id="R3",
+            inputs=[Component(smiles="CC", role=Role.REACTANT)],
+            outcomes=[Component(smiles="CCO", role=Role.PRODUCT)],
+            provenance="x",
+            yield_percent=12.0,
+            **extra,
+        )
+        conditions = note_from_ord_reaction(reaction).conditions
+        assert conditions is not None
+        return conditions
+
+    assert _run().outcome is None
+    failed = _run(outcome_class=OutcomeClass.FAILURE, failure_reason="decomposed on scale")
+    assert failed.outcome == "failure"
 
 
 def test_the_conditions_block_round_trips_through_the_file_form() -> None:

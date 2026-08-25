@@ -146,8 +146,10 @@ def test_a_failed_extraction_costs_one_row_and_not_the_turn() -> None:
 
 
 def test_the_comparison_renders_with_no_model_at_all() -> None:
-    """No reachable route is a deployment state, not an outage: the record's own figures still
-    compare. This is what lets the tool ship on with no credential present."""
+    """No reachable route is a deployment state, not an outage.
+
+    The record's own figures still compare, which is what lets the tool ship on with no credential.
+    """
     result = _run(
         [
             _protocol("reaction-A", "Heat to 90 C.", temperature_c=90.0, yield_percent=61.0),
@@ -161,7 +163,7 @@ def test_the_comparison_renders_with_no_model_at_all() -> None:
 
 
 def test_every_row_carries_the_citation_it_came_from() -> None:
-    """A condensation a reader cannot follow back to its source is the placeholder loss one level up.
+    """A condensation nobody can follow back to its source is the placeholder loss one level up.
 
     `ClearToolUsesEdit` drops an older tool result *and its citations*; an artifact that replaced
     those results while losing the same thing would be no improvement at all.
@@ -182,12 +184,8 @@ def test_the_comparison_is_ordered_and_says_what_that_order_licenses() -> None:
     client = _FakeClient()
     dated = _run(
         [
-            _protocol(
-                "reaction-C", "Heat to 70 C.", temperature_c=70.0, performed_at=date(2026, 3, 9)
-            ),
-            _protocol(
-                "reaction-A", "Heat to 90 C.", temperature_c=90.0, performed_at=date(2026, 3, 1)
-            ),
+            _protocol("reaction-C", "70 C.", temperature_c=70.0, performed_at=date(2026, 3, 9)),
+            _protocol("reaction-A", "90 C.", temperature_c=90.0, performed_at=date(2026, 3, 1)),
         ],
         client,
     )
@@ -206,7 +204,7 @@ def test_the_comparison_is_ordered_and_says_what_that_order_licenses() -> None:
 
 
 def test_a_column_nothing_recorded_does_not_appear() -> None:
-    """A column of dashes invites a reader to conclude the quantity was measured and found absent."""
+    """A column of dashes invites the reader to conclude the quantity was measured and absent."""
     result = _run([_protocol("reaction-A", "Heat.", yield_percent=61.0)], _FakeClient())
     assert "Yield (%)" in result.table
     assert "Purity (%)" not in result.table

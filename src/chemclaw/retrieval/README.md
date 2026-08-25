@@ -6,6 +6,11 @@ contract:
 - **Retrieval** — `retrievers.py` (the concrete sources: graph substring, dense embedding, lexical
   FTS, structural similarity), `hybrid.py` (Reciprocal Rank Fusion across them), `vector_index.py`
   (the derived dense + lexical index over notes, in-memory or Postgres).
+- **Condensation** — `condense.py`, for the case where retrieval returns more whole protocols
+  than fit one model call. A protocol is atomic and is never split; the comparison is
+  `memory/comparison.py`'s table (the same one `optimization_campaign_note` renders, so the
+  turn-time artifact and the PR-gated note cannot disagree), and the only model call is over the
+  half of a record that is prose. `agent/protocol_tools.py` resolves the citations and exposes it.
 - **The report harness** — `harness.py`, the deep-research pattern turned inward: decompose →
   fan-out → verify → cite → synthesize, over internal notes instead of the web. `evidence.py` is
   the contract joining the two: an `EvidenceChunk` **must** carry a back-reference to its source
