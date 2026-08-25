@@ -372,7 +372,7 @@ def test_ord_recipe_flows_through_sync() -> None:
 def _warehouse_shaped(procedure: str) -> OrdReaction:
     """A reaction as a warehouse binding produces one: prose recorded, `steps` never mapped.
 
-    `warehouse/binding.py` excludes `steps` from `_MAPPABLE_FIELDS` deliberately, so this is the
+    `chemclaw.ingest.eln.warehouse.binding` excludes `steps` from `_MAPPABLE_FIELDS` deliberately, so this is the
     real shape of every Snowflake-ingested reaction rather than a contrived one.
     """
     return OrdReaction(

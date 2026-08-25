@@ -9,7 +9,7 @@ answer "show me this whole document" — the chunks were the only copy and no re
 
 **Why reassembly rather than re-reading the file**, in ascending order of force:
 
-- `documents/retriever.py` deliberately imports nothing that can open a document, and
+- `chemclaw.ingest.documents.retriever` deliberately imports nothing that can open a document, and
   `tests/test_datasource_isolation.py` holds it in a subprocess. Re-reading means `pypdf`,
   `python-docx`, `python-pptx` and `openpyxl` in the process that serves conversations.
 - The chat pod need not have the CIFS mount at all. The crawler does; the front door does not.

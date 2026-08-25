@@ -268,7 +268,7 @@ def _procedure_block(reaction: OrdReaction) -> str:
 
     **The prose branch exists because without it a whole class of source lost its protocol
     silently.** This function used to return `""` whenever `steps` was empty, and
-    `warehouse/binding.py` excludes `steps` from what a binding may map on the stated grounds that
+    `chemclaw.ingest.eln.warehouse.binding` excludes `steps` from what a binding may map on the stated grounds that
     "a warehouse records a protocol as prose, which lands in `procedure_text` verbatim". Both
     statements were true and nothing rendered that prose: measured, a warehouse-shaped reaction
     carrying 251 characters of procedure produced a 63-character note body containing none of it,
