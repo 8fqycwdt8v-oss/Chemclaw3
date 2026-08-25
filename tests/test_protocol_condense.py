@@ -398,3 +398,109 @@ def test_the_source_registry_is_built_once_per_call(monkeypatch: pytest.MonkeyPa
         asyncio.run(protocol_tools.condense_protocols(refs))
 
     assert builds == 1, f"the registry was rebuilt {builds} times for {len(refs)} references"
+
+
+def _wire_content(refs: list[str], monkeypatch: pytest.MonkeyPatch) -> str:
+    """What a model actually receives for a `condense_protocols` call, off a compiled graph.
+
+    Built through the real graph rather than by choosing a serializer, because choosing one is the
+    mistake this test exists for: the payload was measured with `model_dump_json()` while
+    production stringified the same object with `str()`.
+    """
+    from chemclaw.agent import condense as condense_module
+    from chemclaw.agent.langgraph_agent import build_langgraph_agent
+    from tests.test_langgraph_agent import _CollectingSink, _run, _scripted
+
+    monkeypatch.setattr(settings, "entra_required", False)
+    monkeypatch.setattr(condense_module, "_client", lambda: _FakeClient())
+    graph = build_langgraph_agent(
+        model=_scripted("condense_protocols", {"protocol_refs": refs}),
+        actor="tester",
+        correlation_id="cid",
+        audit_sink=_CollectingSink(),
+    )
+    state = _run(graph)
+    message = next(m for m in state["messages"] if m.__class__.__name__ == "ToolMessage")
+    assert isinstance(message.content, str)
+    return message.content
+
+
+def test_the_wire_payload_carries_the_comparison_and_not_the_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`Field(exclude=True)` did nothing, and the measurement that justified it was on another path.
+
+    `langchain_core.tools.base._stringify` prefers `json.dumps`, which cannot take a `BaseModel`,
+    and falls back to `str()` — pydantic's repr, which ignores `exclude`. Measured on the wire
+    before this: `table='' rows=[] complete=True oversized=[] degraded=[]`, and every
+    `ProtocolDigest` field spelled out beside the table that already renders it. The real saving was
+    **2.7x** where the excluded-field measurement claimed 9.1x.
+    """
+    from chemclaw.kg.graph import build_graph
+
+    graph = build_graph(settings.knowledge_path)
+    refs = sorted(
+        node
+        for node in graph.nodes
+        if graph.nodes[node].get("note") is not None
+        and graph.nodes[node]["note"].type == "reaction"
+    )[:3]
+    assert refs, "the shipped corpus must hold reaction notes for this to mean anything"
+
+    content = _wire_content(refs, monkeypatch)
+
+    # The repr form of the model, which is what used to arrive.
+    assert "rows=" not in content
+    assert "digest_source=" not in content
+    assert "ProtocolDigest(" not in content
+    # And the comparison itself did arrive.
+    assert "| Protocol |" in content
+    for ref in refs:
+        assert ref in content, f"{ref} is not citable from the payload the model receives"
+
+
+def test_the_wire_payload_still_says_what_it_is_not(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`complete`/`oversized`/`degraded` are the "do not read this as the full story" contract.
+
+    Rendering must not drop them — and `complete`'s meaning cannot be recovered from a bare `True`,
+    so the render spells it out: every reference *you passed*, never every protocol on file.
+    """
+    content = _wire_content(["reaction-nope-1", "reaction-nope-2"], monkeypatch)
+    # Both references resolve to nothing, so the tool refuses — and says why, in words.
+    assert "resolved to a protocol" in content or "not read" in content.lower()
+
+    from chemclaw.kg.graph import build_graph
+
+    graph = build_graph(settings.knowledge_path)
+    refs = sorted(
+        node
+        for node in graph.nodes
+        if graph.nodes[node].get("note") is not None
+        and graph.nodes[node]["note"].type == "reaction"
+    )[:2]
+    good = _wire_content(refs, monkeypatch)
+    assert "not every protocol on file" in good, (
+        "the payload must carry what `complete` means, since a bare True cannot say it"
+    )
+
+
+def test_a_refusal_is_named_in_the_payload_the_model_reads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A protocol that was not read has to be legible as such *in the string*, not only on a field.
+
+    The oversize refusal is the one place this artifact tells a chemist to go open a document
+    themselves, so it cannot live on an attribute the model never sees.
+    """
+    monkeypatch.setattr(settings, "protocol_digest_max_chars", 100)
+    result = _run(
+        [
+            _protocol("reaction-A", "Heat.", yield_percent=61.0),
+            _protocol("sharedrive:doc-9f", "x" * 5000),
+        ],
+        _FakeClient(),
+    )
+    rendered = result.render()
+    assert "sharedrive:doc-9f" in rendered
+    assert "too large" in rendered and "never split" in rendered
+    assert "expand_note" in rendered, "the refusal must say what to do instead"

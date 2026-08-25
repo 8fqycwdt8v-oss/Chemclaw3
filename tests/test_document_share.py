@@ -1768,16 +1768,38 @@ def test_both_backends_read_the_same_whole_document() -> None:
             )
             for n in range(4)
         ]
+        # **Two copies with different modification times**, because a single file row with none
+        # holds constant the axis the two backends actually disagreed on: Postgres takes `max`
+        # across copies, and the reference backend used to take the cited path's own time.
+        # The cited copy is deliberately **not** the most recently touched one: `Archive/…` sorts
+        # first so it wins the citation, while `SOPs/…` carries the newer time. A fixture where the
+        # same row won both would pass against either rule and prove nothing about which is running.
+        cited_but_older = file_row.model_copy(
+            update={
+                "path": "Archive/protocol.txt",
+                "modified_at": datetime(2026, 1, 1, tzinfo=UTC),
+            }
+        )
+        newer_copy = file_row.model_copy(
+            update={"modified_at": datetime(2026, 3, 4, 12, tzinfo=UTC)}
+        )
+
         results = []
         for index in (PostgresDocumentIndex(), InMemoryDocumentIndex()):
-            await index.upsert([file_row], chunks, key)
+            await index.upsert([cited_but_older, newer_copy], chunks, key)
             stored = await index.stored_document(SOURCE, "doc-1", "400:40", 1_000_000)
             assert stored is not None, f"{type(index).__name__} did not read the document back"
             results.append(
                 (
                     stored.path,
+                    stored.modified_at,
                     [(p.ordinal, p.content, p.coordinate) for p in stored.pieces],
                 )
+            )
+            # The smallest path is the citation; the most recent copy is the time.
+            assert stored.path == "Archive/protocol.txt"
+            assert stored.modified_at == datetime(2026, 3, 4, 12, tzinfo=UTC), (
+                f"{type(index).__name__} reported {stored.modified_at}, not the newest copy"
             )
             # A share that does not hold it reads as absent on both.
             assert await index.stored_document("other-share", "doc-1", "400:40", 1_000_000) is None
