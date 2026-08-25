@@ -20,7 +20,12 @@ either its strongest asset or its most expensive habit — and which is which is
 framing would have predicted.
 
 **Method.** Every number below is either measured against this checkout or quoted from a named
-source. Token counts use the `chars / 4` estimator this repository already uses for
+source. Finding 7 is stated in its *corrected* form: the first draft of this review claimed the
+lossless tool-result edit was missing, and it is not — `ClearToolUsesEdit` has been wired in
+`context_compaction_middleware` since the context-management restoration. What is actually wrong is
+one trigger shared by both edits, which is a smaller and more fixable thing. The mistake is recorded
+rather than quietly overwritten because it is the failure mode this repository files rows about:
+a claim about the code read off a docstring instead of the call site. Token counts use the `chars / 4` estimator this repository already uses for
 `agent_context_token_budget`, so they are comparable to the budget the code enforces and are
 **estimates, not tokenizer output**. Scripts are throwaway; what they did is described precisely
 enough to re-run.
@@ -93,14 +98,17 @@ Ranked by consequence.
    PR-gate is the right control for that, not an argument against it: distilled-playbook proposals
    already flow through it.
 
-7. **Compaction drops what it cannot safely summarize, and the safety argument has a narrower form.**
-   `disabled_summarizer` turns upstream's summarizer off for a specific, correct reason: a summary
-   is new model prose over content that `agent/framing.py` had marked untrusted, and the envelope
-   does not survive it. So the conversation window *deletes* old groups instead. The narrower fix
-   the argument permits — summarize only the trusted spans, or summarize inside the envelope and
-   keep it — is not tried, and Anthropic's own composition (tool-result clearing for the re-fetchable
-   half, compaction for the dialogue half, memory across sessions) measured ~48–50% peak-context
-   reductions with the lossless half doing most of the work.
+7. **The lossless context edit and the destructive one share a single trigger, so the cheap lever
+   can never act alone.** `context_compaction_middleware` composes exactly the right two edits —
+   upstream's `ClearToolUsesEdit` (lossless: a re-fetchable tool result becomes a placeholder, the
+   `tool_use` record survives) and a first-party `KeepLastConversationGroupsEdit` (destructive: older
+   groups are deleted) — and hands **both** `trigger=settings.agent_context_token_budget`. One knob,
+   100k, so nothing reduces until 100k and then both fire together. Anthropic's own composition sets
+   them an order of magnitude apart deliberately (clearing at 30k, compaction at 180k in the
+   cookbook's research agent) precisely because the lossless one is cheap enough to run early and
+   often. Splitting the trigger is a second setting, not a redesign. **The summarizer being off is
+   correct and is not this finding** — a summary is new model prose over content `agent/framing.py`
+   marked untrusted, and the envelope does not survive it.
 
 8. **Nothing in this repository tracks the field.** `BACKLOG.md` is 30-odd rows and every one is a
    defect with an anchor in the tree; `DEFERRED.md` is postponements with triggers. Both are
@@ -288,7 +296,7 @@ measured better answer to the same problem, not that the current answer is wrong
 | 1 | Orchestration engine | LangGraph via `create_deep_agent`, one compiled graph per turn | LangGraph is the production standard for stateful/auditable agents | **at parity** |
 | 2 | Single vs multi agent | One agent, one `task` helper; panel and specialists deleted after measuring | MAST, ChemAmp, El Agente Gráfico all converge on "pay for the second agent with a number" | **ahead** |
 | 3 | Static context cost | ~14.7k tokens/turn, 8.6k of it tool schemas, unconditional | tool search + `defer_loading`; programmatic tool calling (−38%); code-exec MCP | **behind** |
-| 4 | Compaction | Deterministic drop of old groups; summarizer deliberately off | clear-tool-uses (lossless) + compaction + memory, composed | **behind** |
+| 4 | Compaction | `ClearToolUsesEdit` + a conversation window, both non-destructive of state — but on one shared 100k trigger | Same two edits, triggers set an order of magnitude apart so the lossless one runs early | **at parity** (mistuned) |
 | 5 | Code execution | None — `execute` withheld by design | El Agente, OpenClaw, Coscientist, ChemCrow all execute; sandboxes are commodity | **absent** |
 | 6 | Durable orchestration | Two layers, hand-wired; 2 open defects in the seam | Temporal×LangGraph plugin, public preview 2026-07-16 | **behind** |
 | 7 | Human-in-the-loop | `plan_only` default, plan gate, PR-gate, approval store | 2026 survey: every chemistry agent keeps a human in the loop | **ahead** |
@@ -406,9 +414,10 @@ Each item names an anchor and the measurement that would settle it. These are fi
    `skills/deep-research/SKILL.md`, `agent/research_tools.py::gather_evidence`. Europe PMC / OpenAlex
    bulk, vendored, no egress — the same shape as every other server there. ChemRAG's finding that
    corpus choice is task-dependent is the design input.
-7. **Add lossless tool-result clearing beside the window.** Anchor: `agent/compaction.py`. The
-   framing objection applies to *summarisation*, not to replacing a re-fetchable tool result with a
-   placeholder — which is where most of Anthropic's measured saving came from anyway.
+7. **Give the lossless context edit its own trigger.** Anchor: `agent/compaction.py::context_compaction_middleware`,
+   `core/config/agent.py`. Both edits currently read `agent_context_token_budget`. Add
+   `agent_tool_result_clear_trigger`, default it well below the budget, and the cheap edit starts
+   doing the work before the expensive one has to.
 8. **Re-derive the MCP catalogue against 2026 releases.** Anchor: `Chemclaw3-mcp/MODULES.md`.
    Specifically: `retro` against RetroReasoner/Retro-R1, `admet` against Boltz-2, and `nomenclature`
    (OPSIN, MIT, local — the catalogue already calls it "the best value-to-effort ratio").

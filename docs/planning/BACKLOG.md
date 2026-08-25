@@ -517,15 +517,23 @@ only holds defects can only ever restore the system to what it already intended 
       nomenclature wants structured databases. A process chemist asking "has anyone run this coupling
       on a deactivated aryl chloride" currently gets whatever those 39 notes happen to say.
 
-- [ ] **Compaction drops what a narrower argument would let it keep** — [M].
-      `agent/compaction.py::disabled_summarizer` turns upstream's summarizer off for a reason that is
-      right: a summary is new model prose over content `agent/framing.py` marked untrusted, and the
-      envelope does not survive it. So the conversation window **deletes** older groups instead. The
-      objection is to *summarisation*, and it does not reach the lossless half: replacing a
-      re-fetchable tool result with a placeholder (Anthropic's `clear_tool_uses_20250919`) invents no
-      prose and so cannot launder an envelope — and in Anthropic's own research-agent measurement the
-      lossless half did most of the work (peak 335k → 173k). LangChain's `context_editing` middleware
-      is the in-stack form. Keep the window as the floor; add clearing above it.
+- [ ] **The lossless context edit and the destructive one share one trigger** — [S].
+      `agent/compaction.py::context_compaction_middleware` composes exactly the right two edits —
+      upstream's `ClearToolUsesEdit` (a re-fetchable tool result becomes a placeholder; the
+      `tool_use` record survives, so the model can re-fetch) and the first-party
+      `KeepLastConversationGroupsEdit` (older groups are deleted from the request) — and hands
+      **both** `trigger=settings.agent_context_token_budget`. One knob, default 100_000: nothing
+      reduces until 100k, and then the lossless edit and the destructive one fire in the same breath.
+      Anthropic's own composition separates them by an order of magnitude on purpose — clearing at
+      30k, compaction at 180k in the cookbook's research agent — because a lossless edit is cheap
+      enough to run early and often, and every token it reclaims early is a group the destructive
+      edit never has to reach for. Add `agent_tool_result_clear_trigger` beside the budget and give
+      `ClearToolUsesEdit` its own; `tests/test_compaction.py` already drives both edits, so the
+      assertion is a third case rather than a new harness. **The summarizer being off is not this
+      row** — `disabled_summarizer`'s argument (a summary is new model prose over content
+      `agent/framing.py` marked untrusted, and the envelope does not survive it) stands, and a first
+      draft of the 2026-08-25 review filed this row wrongly as "add the lossless edit" by reading a
+      docstring instead of the call site.
 
 - [ ] **Cost is metered but never evaluated** — [S]. `agent/turn_cost.py` and `core/metrics.py` record
       what a turn spends; no case in `data/evals/cases/` scores it. HAL (21,730 rollouts, 9 models, 9
@@ -544,6 +552,22 @@ only holds defects can only ever restore the system to what it already intended 
       design; RetroReasoner/Retro-R1 changed what a retrosynthesis server would wrap. A catalogue is a
       claim about what is available, and claims go stale — the same rule this file states about its
       own rows. Re-derive those three entries; the OPSIN one is probably still the right first build.
+
+- [ ] **Memory records; it does not change what the next turn does** — [L], and it needs an ADR
+      before it needs code. Six tiers exist and all six are *read on request*:
+      `memory/campaign.py`, `interaction.py`, `failure.py`, `playbook.py`, `progression.py`,
+      `observations.py`, surfaced by `recall_observations`, `find_past_jobs` and `record_failure`.
+      Nothing in that set changes the agent's behaviour on the next turn unless a human writes a
+      `SKILL.md`: `skills/playbook-distillation/SKILL.md` is the distillation *judgment*, and the
+      PR-gate is where a distilled playbook becomes knowledge — but the loop is manual end to end and
+      nobody has measured how often it closes. The 2026 work (SkillRL, SkillForge and the
+      self-evolving surveys) is specifically about abstracting recurring trajectories into reusable
+      procedure automatically. **The PR-gate is the right control for that, not an argument against
+      it** — a proposed skill is exactly the shape the gate already carries. What is owed first is a
+      measurement rather than a mechanism: over the sessions on disk, how many recurring trajectories
+      *are* there, and would a distilled one have changed a later answer? A generator built before
+      that number is a routing hypothesis nobody measured, which is the mistake
+      `D-2026-08-15` already made once here.
 
 - [ ] **Nothing watches for upstream shipping a decision we made ourselves** — [S], and it is the
       meta-row the four above are instances of. `make upstream-check` guards the six *shapes* this
