@@ -1,6 +1,7 @@
 # Implementation plan — closing the 2026-08-25 field benchmark
 
-**Status: plan, not started. Awaiting a go-ahead.**
+**Status: W3.2 in progress (the `pyexec` server, in `Chemclaw3-mcp`). Everything else is planned
+and not started.**
 
 The findings and their measurements are in
 [`docs/archive/REVIEW-2026-08-25-agentic-field-benchmark.md`](../docs/archive/REVIEW-2026-08-25-agentic-field-benchmark.md);
@@ -15,9 +16,13 @@ Nothing here restates the *why* — that is the review's job and duplicating it 
    nothing else — a test that pins the context floor, a test that pins probe coverage, a working
    live lane, and a suite that is not red for an environmental reason. Until those land, "the tool
    surface got cheaper" is an opinion.
-2. **Two rows are decisions, not tasks.** Code execution and the Temporal plugin each get a
-   timeboxed spike and an ADR, and the ADR may say *no*. A plan that assumes the answer has
-   pre-decided it, which is the failure `D-2026-08-15` records about the specialist team.
+2. **Two rows are decisions, not tasks.** The Temporal plugin gets a timeboxed spike and an ADR
+   that may say *no* — a plan that assumes the answer has pre-decided it, which is the failure
+   `D-2026-08-15` records about the specialist team. Code execution was the second, and it is no
+   longer open in that form: W3.2 now carries a concrete proposal (`pyexec`, one stateless tool in
+   the fleet that already cannot reach the network), so its ADR decides a *design*. The direction
+   was settled by the thing the abstract question kept missing — the declination on record refuses
+   two specific sandboxes and says nothing about execution as such.
 
 Sizes are the backlog's: **[S]** ≤ a day, **[M]** a few days, **[L]** a week or more.
 
@@ -298,9 +303,11 @@ does not measure" paragraph *before* seeing the number.
 
 ---
 
-## Wave 3 — Two decisions, each a spike then an ADR
+## Wave 3 — Two decisions
 
-These are the only rows where the deliverable may be "no".
+W3.1 is a spike whose deliverable may be "no". **W3.2 is no longer a spike**: it carries a
+concrete proposal, so its ADR decides a design rather than a direction, and the build follows it in
+`Chemclaw3-mcp`.
 
 ### W3.1 — Evaluate the Temporal LangGraph plugin · [L] → ADR
 
@@ -334,34 +341,107 @@ code in the same change.
 
 ---
 
-### W3.2 — Decide code execution on its merits · [L] → ADR
+### W3.2 — `pyexec`: a Python analysis sandbox, as an offline MCP server · [L] → ADR + build
 
-*Row: § 5 #6.*
+*Row: § 5 #6. **This row now carries a concrete proposal**, and the proposal is what makes the ADR
+answerable — the previous framing asked "should the agent execute code" in the abstract, which is
+not a question anybody can close.*
 
-**Restate the current position accurately, because the plan depends on it.**
-`scratchpad.py::scratchpad_tools` withholds `execute` and `delete`. The `execute` argument is that
-deepagents 0.7 ships exactly one concrete sandbox (`LangSmithSandbox`, declined on content-egress
-grounds) and `LocalShellBackend` is documented as unrestricted. **That is a correct refusal of two
-specific sandboxes.** What is not on record is whether an execution substrate belongs at all.
+**Restate the current position, because the proposal depends on it being narrow.**
+`agent/scratchpad.py::scratchpad_tools` withholds `execute` and `delete`. The `execute` argument is
+that deepagents 0.7 ships exactly one concrete sandbox (`LangSmithSandbox`, declined because it
+egresses conversation content to a third party) and that `LocalShellBackend` is documented as
+unrestricted. **That is a correct refusal of two specific sandboxes.** Neither sentence is an
+argument against execution as such, and the consequence is much wider than the argument: numpy,
+pandas, scipy and RDKit are all installed in the very process the agent runs in — measured, 2.4.6,
+3.0.3, 1.17.1 and 2026.3.5 — and the agent can reach none of them. It cannot canonicalise an
+unexpected SMILES, fit a kinetics curve, or aggregate a table a tool just returned.
 
-**The spike, timeboxed to five days, answers what it buys *here*.** Not in general — El Agente
-Gráfico's numbers (−94.6 % LLM requests, −82.8 % tokens, 4.5×, accuracy 88.25 → 90.94 %) are about a
-quantum-chemistry workload with large numerical objects, and this system's shape is different.
-Take five real transcripts and answer: how many turns would have been shorter, or possible at all,
-with an execution substrate? If the answer is "one, marginally", the ADR says no and says why, and
-that is a good outcome.
+#### The proposal
 
-**If the answer is yes, the ADR decides the substrate, and the constraints are already written.**
-No content egress to a third party (four merged decisions). No unrestricted local shell. Which
-leaves a first-party sandbox as the only admissible shape, and that is an infrastructure commitment
-— it belongs in the ADR as a cost, not as a footnote.
+**Do not give the agent a shell. Give it one stateless MCP tool, in a server that already cannot
+reach the network, and make the operating system the security boundary rather than Python.**
 
-**A narrower option the ADR must consider and reject explicitly if it does:** allowing execution
-only inside a connector's own process, where the no-egress guarantee is already enforced and tested
-(`make offline-run` in `Chemclaw3-mcp` takes the network away and checks every answer is unchanged).
-That is a much smaller commitment and it may be most of the value.
+`Chemclaw3-mcp` is the right home and not a convenience: it already enforces no-egress at four
+independent layers (a runtime `socket.connect` guard armed on import, an AST scan per server, the
+whole suite run with the guard armed, and a default-deny `NetworkPolicy` asserted in both
+directions), and `make offline-run` proves it by *removing the network* and checking every answer is
+unchanged. That is a far stronger posture than anything reachable from inside this repository, and
+it is already built, tested and shipped.
 
----
+So: **`servers/pyexec/`, port 8899, one tool.**
+
+```
+run_python(code: str, data: dict | None = None) -> RunResult
+```
+
+It runs `code` in a throwaway child process with `numpy`, `pandas`, `scipy` and `rdkit` importable,
+binds `data` into the namespace as a plain dict, and returns captured stdout plus whatever the code
+assigned to `result`, JSON-serialised. No session, no persisted namespace, no files that outlive the
+call — the fleet's statelessness rule, which is also what makes the sandbox disposable.
+
+**Eight controls, and the honest statement of which ones are load-bearing.**
+
+| | Control | What it stops |
+| --- | --- | --- |
+| 1 | Child process, never in-process `exec` | An escape reaches a disposable process, not the server |
+| 2 | `start_new_session=True` + `killpg` on timeout | A run that spawns children still dies whole — the `calc` server's own `run_isolated` lesson, where a naive timeout killed one PID and left the rest burning CPU |
+| 3 | `setrlimit` on CPU, address space, file size, process count, file descriptors — **hard limits, so they cannot be raised back** | Infinite loops, memory exhaustion, fork bombs, disk filling |
+| 4 | Environment built from an **allowlist**, not by deleting | Bearer tokens, DSNs and `CHEMCLAW_*` settings never enter the child |
+| 5 | `python -I -B`, fresh temp cwd, `HOME` pointed inside it | Ambient `PYTHON*` config, user site-packages, cwd imports |
+| 6 | Import guard: a `sys.meta_path` finder plus a purge of `os`, `socket`, `subprocess`, `ctypes` and friends from `sys.modules`, after the heavy libraries are warmed | A casual reach for the filesystem or the network |
+| 7 | `socket.socket.connect` patched to raise *before* the purge | A held reference to an already-imported module |
+| 8 | Default-deny `NetworkPolicy`, no DNS | Everything above being wrong |
+
+**Rows 6 and 7 are ergonomics and defence in depth. They are not the boundary.** A Python-level
+sandbox is porous — `().__class__.__mro__` and its relatives are a research area, not a solved
+problem — and a design that claims otherwise is the `map_to_hpc_identity` shape: a control that
+exists in order to be pointed at. The boundary is rows 1–5 and 8. Even granting a complete escape
+from the import guard, the escapee holds a scrubbed environment, a temp directory, hard resource
+limits, a rootless read-only container and no route off the pod. **The README and the tool docstring
+must say this in these words**, because the failure mode of a sandbox is a reviewer believing a
+stronger claim than the one it can support.
+
+**Classification: `read_only`.** It writes nothing, persists nothing, and has no effect outside a
+directory deleted before it returns. That is not a technicality — `read_only` is what lets the agent
+use it *while building the plan a human is asked to approve*, and an analysis that cannot run until
+after approval is an analysis that cannot inform it.
+
+**What this deliberately is not.** Not a shell. Not a notebook — no state survives a call. Not a
+file-processing tool: `open` is removed from builtins, so the only way data gets in is `data` and the
+only way out is `result`. Not a route to the knowledge graph, the ELN or any other tool. It is a
+calculator with a scientific library on it.
+
+#### Steps
+
+1. `servers/pyexec/` following the `props` reference layout exactly: `engine/` (pure, no transport),
+   `tools.py` (the FastMCP surface — the docstring is the prompt), a three-line `app.py` over
+   `connector_app`, `Containerfile`, `deploy/networkpolicy.yaml`, `README.md`, and `connector.yaml`
+   symlinked into `manifests/pyexec/`.
+2. Tests, and the ones that matter are adversarial: a timeout is killed, a fork bomb is refused,
+   `import socket` fails, `open` is gone, the environment carries no token, memory is bounded, output
+   is truncated. Plus the fleet's standing set — `test_no_egress`, `test_deploy`, and
+   `assert_manifest_matches` against a running server.
+3. `MODULES.md`: a catalogue entry and the port registry row (8899, deliberately outside the
+   thematic bands — this is not a chemistry data source).
+4. Only then, on the Chemclaw3 side: nothing but a manifest directory and a URL. Zero core edits,
+   which is D-118 and `D-2026-08-09-a-connector-we-do-not-run` working as designed — and is also the
+   proof that this proposal does not need the `execute` verb it declines.
+5. The ADR records the decision and, importantly, **what was declined**: a shell, a persistent
+   namespace, and `LangSmithSandbox`.
+
+#### Acceptance
+
+`make check` green in `Chemclaw3-mcp`; `make offline-run` green with the network removed;
+`assert_manifest_matches` green against a running server; and, from a Chemclaw3 checkout, the tool
+appears with no diff under `src/`.
+
+#### The risk to state plainly in the ADR
+
+This is the first tool in the fleet whose *input is a program*. Every other server takes a SMILES or
+a solvent name. Prompt injection that reaches the model reaches this tool, so the controls have to
+hold against a hostile author rather than a careless one — which is why the boundary is the process
+and the deployment, and why row 6 is written down as insufficient on its own.
 
 ## Wave 4 — Capability, mostly in the other repository
 
