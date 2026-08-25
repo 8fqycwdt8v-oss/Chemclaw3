@@ -153,6 +153,23 @@ class WarehouseVectorRetriever:
         if self._vector.index:
             return await self._search_index(query, filters)
         warehouse = self._connection()
+        # Before the embedding call, not after it. Resolving the driver is what tells us whether it
+        # can serve a similarity search at all, and under `openai_compatible` the embedding below is
+        # a paid round trip to the LLM endpoint — spending one to build a statement that cannot be
+        # sent is waste on a path that will fail on every query until the deployment changes.
+        #
+        # Checked here rather than at construction because resolving the driver means importing the
+        # vendor client, and a chat pod that builds this half at startup must not pay that import
+        # for a warehouse it may never query. A `BindingError` is a `ChemclawError`, so
+        # `durable/publish.py` marks it non-retryable and `retrieve` logs it as the recurring
+        # misconfiguration it is.
+        dialect = warehouse.vector_dialect
+        if dialect is None:
+            raise BindingError(
+                f"{self.name}: this binding declares a `vector:` block, but its driver offers no "
+                "similarity-search dialect. Only a warehouse whose function names this repository "
+                "has verified can serve one; rank on a vector index instead, or drop the block"
+            )
         # Offloaded, not called inline: under the `openai_compatible` provider `embed_texts` reaches
         # the LLM endpoint over a blocking client, and this runs on the one event loop serving every
         # SSE stream — a stall here freezes conversations that have nothing to do with this source.
@@ -163,17 +180,6 @@ class WarehouseVectorRetriever:
             if self._vector.embedding == "server"
             else (await asyncio.to_thread(embed_texts, [query]))[0]
         )
-        dialect = warehouse.vector_dialect
-        if dialect is None:
-            # Checked here rather than at construction because resolving the driver means importing
-            # the vendor client, and a chat pod that builds this half at startup must not pay that.
-            # A `BindingError` is a `ChemclawError`, so `durable/publish.py` marks it non-retryable:
-            # a driver that cannot do similarity search will not learn to on a retry.
-            raise BindingError(
-                f"{self.name}: this binding declares a `vector:` block, but its driver offers no "
-                "similarity-search dialect. Only a warehouse whose function names this repository "
-                "has verified can serve one; rank on a vector index instead, or drop the block"
-            )
         statement, params = sql.vector_statement(
             self._vector,
             warehouse.placeholder,
