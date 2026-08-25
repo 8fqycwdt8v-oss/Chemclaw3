@@ -56,8 +56,10 @@ from chemclaw.durable.memory_jobs import (
 )
 from chemclaw.durable.note_index import NoteReindexWorkflow
 from chemclaw.durable.observation_jobs import ObservationSynthesisWorkflow
+from chemclaw.durable.publish_results import PublishResultsWorkflow
 from chemclaw.durable.retention import RetentionWorkflow
 from chemclaw.ingest.sources.registry import active_ingest_source_names
+from chemclaw.publish.registry import publishing_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -198,6 +200,15 @@ def planned_schedules() -> list[PlannedSchedule]:
         schedules.append(
             PlannedSchedule("artifact-eviction", ArtifactEvictionWorkflow, eviction_every)
         )
+    # Draining the result outbox earns a Schedule only where a sink is actually enabled - the same
+    # question `document-sync` and `eln-sync` ask of their own registries, and asked of the sink
+    # registry rather than of a second `result_publish_enabled` flag, because
+    # `CHEMCLAW_RESULT_SINKS` is already the enable switch (D-018) and a second flag could only
+    # restate it or contradict it. With no sink configured the queue is empty by construction, so
+    # this would be a job sweeping a table nothing writes.
+    if publishing_enabled():
+        publish_every = timedelta(minutes=settings.result_publish_schedule_minutes)
+        schedules.append(PlannedSchedule("result-publish", PublishResultsWorkflow, publish_every))
     # The observations tier is the one knowledge surface no human reviews before the agent reads
     # it, so it fires only where a deployment has consciously turned it on (D-161). Without this
     # guard the table would fill on a default nobody chose.

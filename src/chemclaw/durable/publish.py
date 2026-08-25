@@ -67,6 +67,15 @@ _BAD_DATA_TYPES = [
     # list that does not match the reaction (`chemclaw.ingest.labels.labeller`). Its retryable
     # sibling is `LabelServerError`, which means nobody answered at all.
     "LabelToolError",
+    # The result-publication seam (D-2026-08-25). Both are bad data by the same test as every entry
+    # here: a sink whose manifest cannot be resolved, or a record a destination has *answered*
+    # about and refused, fails identically on every retry. Its retryable neighbour is
+    # `SinkUnavailableError`, which is a `ConnectionError` and deliberately absent from this list.
+    "ResultSinkError",
+    "SinkRejectedError",
+    "SinkConnectionError",
+    "ProjectionError",
+    "UnknownPropertyError",
     # An offboarding erasure the database refused, or one asked for on a blank actor
     # (`chemclaw.agent.leaver`). Non-retryable for the same reason every entry here is: a missing
     # `DELETE ON session_owners` grant and an empty actor id are both facts about the request or the
@@ -228,3 +237,33 @@ async def publish_note_best_effort(activity: Any, args: list[Any], label: str) -
         workflow.logger.warning("knowledge-note publish failed for %s", label)
         if not workflow.unsafe.is_replaying():
             record_metric(lambda m: m.increment("chemclaw_notes_publish_failures_total"))
+
+
+async def publish_result_best_effort(activity: Any, args: list[Any], label: str) -> None:
+    """Queue a finished run's result for the external results store, never failing the caller.
+
+    The same polarity as `publish_note_best_effort` one function up, and for the same reason: by
+    the time this runs the scientific result is already durable in `job_records`, so a results
+    store — or the local outbox — being unavailable must not fail a completed job and send an
+    expensive campaign back round the retry loop.
+
+    It is a *separate* function rather than a parameterization of the note publish, because the two
+    differ in every respect that matters: a different timeout (a local enqueue, not a git push), a
+    different counter, and a different meaning when it fails. Sharing them would mean one call site
+    passing three arguments to say which of two things it is.
+
+    Guarded on `is_replaying` for the counter, exactly as the note publish is: a replayed history
+    would otherwise re-count every failure the workflow has ever seen.
+    """
+    try:
+        await workflow.execute_activity(
+            activity,
+            args=args,
+            task_queue=settings.background_task_queue,
+            start_to_close_timeout=timedelta(seconds=settings.result_publish_timeout_seconds),
+            retry_policy=BAD_DATA_RETRY,
+        )
+    except ActivityError:
+        workflow.logger.warning("result publication failed to queue for %s", label)
+        if not workflow.unsafe.is_replaying():
+            record_metric(lambda m: m.increment("chemclaw_result_publish_failures_total"))

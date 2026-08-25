@@ -127,6 +127,13 @@ jobs:
       - name: Validate data sources
         run: make datasource-validate
 
+      # The third seam that names its implementation as a string, and the one where a typo is
+      # quietest: a result sink is only reached by a background drain, so a bad driver reference
+      # surfaces as results silently not arriving — which looks exactly like a deployment with
+      # nothing to publish (D-2026-08-25).
+      - name: Validate result sinks
+        run: make sink-validate
+
       - name: Validate step templates
         run: make template-validate
 

@@ -242,6 +242,14 @@ _ALLOWED_MODULE_STACKS: dict[Edge, str] = {
     ("chemclaw.science", "ml"): "science/bo is BoFire on BoTorch on torch",
     ("chemclaw.science", "postgres"): "the calculation cache is a table (D-011)",
     # the leaf packages: each owns its own tables and nothing else.
+    # publish: the outbound result seam (D-2026-08-25). It reaches an external results store, so
+    # a database client and an HTTP client are its two shipped drivers rather than an exception to
+    # anything — the seam exists precisely to hold them. `postgres` is also the *local* outbox,
+    # which is a table like every other durable queue in this tree.
+    ("chemclaw.publish", "postgres"): (
+        "the outbox is a table, and the shipped SQL driver reaches a Postgres results store"
+    ),
+    ("chemclaw.publish", "httpx"): "the shipped HTTP driver POSTs records to a results service",
     ("chemclaw.kg", "postgres"): "the note-proposal store",
     ("chemclaw.ingest", "postgres"): "the document chunk index",
     ("chemclaw.ingest", "rdkit"): "an ELN row's structure is canonicalised on the way in",
