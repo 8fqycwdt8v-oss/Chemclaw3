@@ -29,7 +29,7 @@ from chemclaw.science.calc.models import (
     ConformerEnsemble,
     Structure,
 )
-from chemclaw.templates.manifest import Template, ToolStep
+from chemclaw.templates.manifest import JobStep, Template, ToolStep
 from chemclaw.templates.resolve import UnresolvedReference, resolve
 
 
@@ -366,9 +366,10 @@ def test_the_shipped_refinement_template_carries_an_address_between_its_steps() 
         }
     )
     refine = next(step for step in template.steps if step.id == "refine")
-    # `template.steps` is a union and only two of its three variants carry arguments; this test is
-    # about a tool step's, so narrow rather than reach through the union.
-    assert isinstance(refine, ToolStep)
+    # `steps` is a `ToolStep | JobStep | AgentStep` union and only the first two carry `arguments`.
+    # Asserted rather than cast: if this step ever becomes an agent step the test should say so
+    # here, not fail three lines down on a missing attribute.
+    assert isinstance(refine, ToolStep | JobStep)
 
     ensemble = _ensemble()
     envelope = ConnectorJobResult(

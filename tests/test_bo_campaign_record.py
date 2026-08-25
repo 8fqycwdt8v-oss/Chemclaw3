@@ -488,6 +488,8 @@ def _pre_folding_space(parameter: Any, *, sort_categories: bool) -> dict[str, An
     Faithful for the three baseline shapes only: none carries a descriptor map supplied without
     structures, so `_space_of`'s conditional `descriptors` key is not reproduced here.
     """
+    # Annotated because `parameter` is `Any` (three unrelated parameter classes reach here), so
+    # `model_dump` returns `Any` and the declared return type would be unchecked.
     dumped: dict[str, Any] = parameter.model_dump(
         mode="json", include={"kind", "name", "lower", "upper", "categories", "structures"}
     )

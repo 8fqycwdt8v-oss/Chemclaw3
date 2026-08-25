@@ -8,7 +8,7 @@ fingerprint search, analytics) implement it as thin adapters, so adding a source
 external literature — is a new retriever behind this interface, never a change to the core (G6).
 """
 
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
 
 from pydantic import BaseModel, Field
 
@@ -67,6 +67,35 @@ class EvidenceChunk(BaseModel):
     created_by: str = ""
     source: str = ""
     confidence: float | None = None
+
+
+class EvidenceSweep(BaseModel):
+    """What one `gather_evidence` call found, **and what it could not say**.
+
+    The tool returned a bare `list[EvidenceChunk]` and both of its silences were invisible in that
+    shape, which is why the shape changed:
+
+    - **A cut looked like a corpus.** Hitting the cap returned a short list identical to a small
+      corpus, and the tool's own docstring tells the model that empty means "nothing on file, never
+      invented". `truncated_by` says which bound bit, and `total_before_cap` says how much there
+      was — the rule `FingerprintSearch.hits_truncated` and `EvidenceChunk.conflicts_total` already
+      follow, applied to the sweep itself.
+    - **A partial outage looked like a partial corpus.** `gather_evidence` raises when *every*
+      source fails, correctly; when one of four fails it returned real-but-incomplete evidence with
+      the degradation visible only on the stream. Its own comment named the fix and deferred it:
+      "closing that needs the return type to carry provenance, which is a contract change beyond
+      this fix". `sources_failed` is that field.
+    """
+
+    chunks: list[EvidenceChunk] = Field(default_factory=list)
+    # `None` when everything found was returned. Otherwise which bound cut the list — the two are
+    # separately actionable: a `count` cut narrows with a filter, a `chars` cut narrows the sources.
+    truncated_by: Literal["count", "chars"] | None = None
+    # How many chunks survived merging before either cap, so "40 of 300" is expressible.
+    total_before_cap: int = Field(default=0, ge=0)
+    # Sources that could not be asked at all. Empty is the ordinary case; a name here means this
+    # answer is about less than the whole corpus, whatever the chunks say.
+    sources_failed: list[str] = Field(default_factory=list)
 
 
 @runtime_checkable

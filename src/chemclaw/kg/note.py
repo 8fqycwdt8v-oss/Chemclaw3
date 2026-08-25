@@ -334,6 +334,48 @@ class Relation(TemporalWindow):
         return f"relation {self.rel} -> {self.to}"
 
 
+class ProcessConditions(BaseModel):
+    """The setpoints and outcomes a run recorded, as numbers rather than as prose.
+
+    **Why this is frontmatter and not left in the body.** `note_from_ord_reaction` renders these
+    into readable bullets and the structure is then gone: `OrdReaction` is never persisted — it
+    exists only transiently inside `durable.memory_jobs.read_corpus`, which re-reads and re-maps the
+    entire ELN from the beginning of time on every call, on the background worker, behind an ingest
+    half the chat pod deliberately does not import. So at turn time the numbers a chemist compares
+    exist only as sentences, and anything wanting to compare runs had to re-derive them from prose
+    it had just finished rendering.
+
+    Putting them here rather than in a second table keeps one source of truth: the git-markdown
+    graph stays authoritative (D-004), `expand_note` already returns frontmatter, `kg-validate`
+    already checks it, and there is no migration and no store to keep in step.
+
+    **Exactly the columns the comparative table renders, and no more.** This is not a serialization
+    of `OrdReaction` — that would be the second, untyped schema `attributes` argues against. The
+    species sets behind "solvent DMF → 2-MeTHF" are deliberately absent: they need the full input
+    list, and a turn that wants them reads the prose, which is where the free-text half of a digest
+    is looking anyway.
+
+    Every field is optional because every one of them is optional on the record. Absent means "not
+    recorded", never "zero" — the distinction `comparison.MISSING` renders and `drop_empty_columns`
+    reads.
+    """
+
+    temperature_c: float | None = None
+    time_h: float | None = Field(default=None, ge=0.0)
+    yield_percent: float | None = Field(default=None, ge=0.0, le=100.0)
+    purity_percent: float | None = Field(default=None, ge=0.0, le=100.0)
+    # `OrdReaction.outcome_class`'s value. Carried because a failure that reads as an ordinary run
+    # is the one row in a comparison a chemist must not misread — and because `outcome_class`
+    # defaults to success, so silence here means "the source did not say", not "it worked".
+    outcome: Literal["success", "failure", "inconclusive"] | None = None
+    # `OrdReaction.major_impurity()`'s answer, by whatever identity the record carries. A process
+    # campaign is rarely optimizing yield; it is optimizing the impurity the yield hides.
+    major_impurity: str | None = None
+    impurity_area_percent: float | None = Field(default=None, ge=0.0, le=100.0)
+
+    model_config = ConfigDict(frozen=True)
+
+
 class Note(TemporalWindow):
     """One knowledge-graph note: its frontmatter metadata plus its Markdown body.
 
@@ -378,6 +420,12 @@ class Note(TemporalWindow):
     # `[[wikilinks]]`: an edge to something the graph does not contain is a dangling link, and
     # `kg-validate` would fail the very PR that added the note. Shape-validated here; whether the
     # target exists is a question only a database can answer, and `kg-validate` runs without one.
+    # The run's recorded setpoints and outcomes, when this note is about one (`ProcessConditions`
+    # says why they are frontmatter). Note-type-specific on a shared model exactly as
+    # `compound_smiles` above is, and for the same reason: the alternative is a second note class.
+    # `valid_from` already carries the date the run was performed (D-162), so it is not repeated
+    # here — one fact, one field.
+    conditions: ProcessConditions | None = None
     calc_refs: list[str] = Field(default_factory=list)
     artifact_refs: list[str] = Field(default_factory=list)
     # Typed edges in structured form, for the metadata a body wikilink cannot carry (STO-8/9).

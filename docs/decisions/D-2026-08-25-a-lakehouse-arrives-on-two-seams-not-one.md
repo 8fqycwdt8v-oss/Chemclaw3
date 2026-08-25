@@ -158,6 +158,34 @@ agreeing.
   precedent followed rather than improved on; an extras group was considered and dropped, because
   `deploy/Containerfile` installs with `--no-dev` and an extra nobody installs is a declaration.
 
+## Against the migration assessment, which landed on `main` while this was built
+
+`docs/archive/databricks-migration-assessment-2026-08.md` (#207) assessed the same move from the
+analysis side, concurrently and independently. Reading the two together is worth doing, because they
+agree on the load-bearing fact and diverge on exactly one thing.
+
+**They agree, independently, on the thing this decision spent the most care on.** The assessment
+records — from vendor documentation — that "Vector Search's index is **L2 internally**; cosine is
+achieved by pre-normalizing embeddings, and the metric is not configurable at index creation." That
+is the same finding §2 reaches from the score arithmetic, and it is the reason this adapter
+normalises on both sides rather than trusting the returned number. Two sources, two routes, one
+answer: worth more than either alone, and it moves the score formula's status from "documented" to
+"documented and corroborated" — though not to "measured against a tenant", which is still owed.
+
+**They diverge on the index type, and the requirement is what decides it.** The assessment's phase 2
+proposes two *Delta Sync* indexes. This change builds for a *Direct Vector Access* index, and not
+by oversight: a Delta Sync index computes its own embeddings from a source table and cannot be
+upserted or deleted into, which is the whole of what `VectorStore` is — three methods, two of them
+writes. Delta Sync remains the better shape for a corpus whose text already lives in a Delta table
+and whose embeddings a deployment is happy to let Databricks own; it is simply not a `VectorStore`,
+any more than pgvector is. If a deployment wants it, that is a second composition beside this one,
+not a variant of it.
+
+The assessment is broader than this change in every other respect — Lakebase, DBOS, Model Serving,
+identity — and none of that is decided here. What this decision settles is the two seams; its
+phase-2 row is now implemented, and its unverified question 5 (whether decomposed retrieval stays
+within latency tolerance of the fused pgvector query) is unaffected and still open.
+
 ## Alternatives rejected
 
 **A driver-specific `options:` pass-through on `ConnectionBinding`.** The obvious way to give

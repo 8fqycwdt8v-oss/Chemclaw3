@@ -625,6 +625,44 @@ The generalisation, and it is the same one as the silent `str.replace`: **an edi
 because you made it — it is done because you checked it is there.** Both losses this session were
 invisible for the same reason, and both were one `grep` away.
 
+## 2026-08-25 — measure the mechanism, not only the outcome
+
+Four defects in one session were invisible to reasoning and obvious to a five-line measurement.
+Each had a plausible argument behind it that was simply wrong.
+
+- **A de-overlapping rule inferred from content.** "Strip the longest repeat, bounded by
+  `overlap_chars`" is correct-sounding and deleted 2,400 of 5,000 characters on a repetitive line.
+  Adding a one-character periodicity shift fixed that case and still deleted 2,800 of 6,000 on
+  period-10 content. *Rule for myself: when a rule infers a boundary from content, generate the
+  adversarial content before writing the rule — repetition, periodicity, and the empty case.*
+- **A payload that said everything twice.** The condensation returned the rendered table and the
+  rows it was rendered from. The design read fine; the number was 1.4x, which would not have been
+  worth building. *Rule: measure the thing the change exists to improve, before believing it
+  improved.*
+- **Two orderings of one list.** `rows` came back in input order while the renderer sorted
+  internally — so a column that says "changed vs previous" would have been a claim about a
+  different row. Caught by a test asserting the returned order, not by reading the code.
+- **A test that passed against the mutant it was written to catch.** The starvation guard asserted
+  only that one source survived; the shape it was guarding against starves the *other* one.
+  *Rule: after writing a regression test, break the code the way the test describes and watch it
+  fail. If it does not, the test is documentation.*
+
+The generalisation, which the repository already says and I had to relearn by doing: **prose is
+evidence about what its author believed, never about what the code does.** Three of these four had
+a docstring or a comment asserting the correct behaviour at the moment the behaviour was wrong.
+
+## 2026-08-25 — do not answer a second problem as a side effect of the first
+
+Building the condenser surfaced `read_corpus`'s full-rescan of the ELN. A derived store of mapped
+`OrdReaction`s would have closed it — and would also have been the easiest way to give the
+condenser its structured fields. Two problems, one store, and the store would have been built
+without anyone deciding to build it.
+
+Note frontmatter answered the condenser's need with no new store and no migration, and the rescan
+is now a `BACKLOG.md` row with its own anchor and its own trigger. *Rule: when one change would
+close a second, unrelated problem as a side effect, that is a signal to check whether the second
+problem is driving the design — and to file it rather than ride it.*
+
 ## 2026-08-25 — a plan that says "zero new code" is a claim, and mine were wrong twice
 
 **What happened.** Planning the Databricks work, I wrote two confident structural claims into the
