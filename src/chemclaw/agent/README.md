@@ -32,7 +32,7 @@ and CLAUDE.md's four-layer rule.
 
 **Current tools:** knowledge-graph read + PR-gated write (`graph_tools`), cross-source
 evidence (`research_tools`), condensing many whole protocols into one comparison
-(`protocol_tools`, over `retrieval/condense.py`), confirmed-answer capture (`memory_tools`), and the durable
+(`protocol_tools`, over `agent/condense.py`), confirmed-answer capture (`memory_tools`), and the durable
 report launcher plus the one status tool every durable job is collected with
 (`durable_tools`). Calculators, optimization campaigns and the QM/DFT job are connector
 bundles now, advertised out of `connectors/` — including their durable launchers, which are

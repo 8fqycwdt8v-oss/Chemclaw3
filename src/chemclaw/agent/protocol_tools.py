@@ -12,7 +12,7 @@ the unit is never a fraction of a procedure — and returns one comparison inste
 The judgment about what the comparison *means* stays in the skills, as it does for every other tool
 here; this only condenses.
 
-Resolution lives here rather than in `retrieval.condense` because it is the part that knows what a
+Resolution lives here rather than in `agent.condense` because it is the part that knows what a
 citation looks like in this system: a knowledge-graph note id, or the `source:doc_id` a mounted
 share cites. The condenser itself takes whole protocols and knows nothing about where they came
 from, which is what lets a future source reach it without touching it.
@@ -21,14 +21,14 @@ from, which is what lets a future source reach it without touching it.
 import asyncio
 import logging
 
+from chemclaw.agent.condense import Condensation, Protocol
+from chemclaw.agent.condense import condense_protocols as _condense
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.core.tool_registry import tool
 from chemclaw.ingest.sources.registry import active_retrieve_sources
 from chemclaw.kg.graph import build_graph
 from chemclaw.kg.note import Note
-from chemclaw.retrieval.condense import Condensation, Protocol
-from chemclaw.retrieval.condense import condense_protocols as _condense
 
 logger = logging.getLogger(__name__)
 

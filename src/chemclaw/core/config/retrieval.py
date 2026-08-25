@@ -69,7 +69,7 @@ class RetrievalSettings(BaseSettings):
     # `D-2026-08-01-a-cap-that-starves-a-source` is about the *shape* of a cut, and a second cap
     # in a different currency applied the old way would reintroduce the starvation it fixed.
     gather_evidence_max_chars: int = Field(default=60_000, ge=1_000)
-    # ── Condensing many whole protocols into one comparison (`retrieval.condense`) ────────────
+    # ── Condensing many whole protocols into one comparison (`agent.condense`) ────────────
     # Asking for similar reactions returns many protocols, and a protocol is atomic: it cannot be
     # split, so the unit that must fit is one whole procedure. These bound what a single turn may
     # condense, in the two currencies that actually bind — how many protocols, and how much text —

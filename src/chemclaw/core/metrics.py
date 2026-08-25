@@ -396,6 +396,10 @@ _COUNTER_LABELS: dict[str, tuple[str, ...]] = {
     # Four values, fixed by a CHECK constraint in `infra/sql/027_note_proposals.sql` — the only
     # label in this registry whose cardinality is bounded by the database rather than by trust.
     "chemclaw_note_proposals_total": ("state",),
+    # Three values, fixed in `agent/condense.py`'s own `DigestSource` literal rather than by a
+    # caller: `extracted`, `degraded`, `oversized`. Bounded by the code that emits it, which is the
+    # same guarantee `state` above gets from a CHECK constraint.
+    "chemclaw_protocol_digests_total": ("outcome",),
     # Bounded by configuration exactly as `profile` is: a connector is a bundle the chart enables,
     # never a name a caller supplies, and the whole shipped fleet is six.
     "chemclaw_job_runtime_seconds_total": ("connector",),

@@ -44,7 +44,7 @@ _EXPECTED_SUBSYSTEMS = {
     "log_redaction",
     "plan_approval",
     "preferences",
-    # `retrieval/condense`, added with the protocol condenser. Two degradations share it and both
+    # `agent.condense`, added with the protocol condenser. Two degradations share it and both
     # are per protocol rather than per turn: no reachable `"protocol-digest"` route (the comparison
     # still renders from every record's own figures), and one extraction that failed or timed out
     # (that row keeps its recorded figures and says its procedure was not read). Without the

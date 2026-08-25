@@ -12,14 +12,14 @@ from typing import Any
 
 import pytest
 
-from chemclaw.core.config import settings
-from chemclaw.kg.note import ProcessConditions
-from chemclaw.retrieval.condense import (
+from chemclaw.agent.condense import (
     Condensation,
     Protocol,
     _Extraction,
     condense_protocols,
 )
+from chemclaw.core.config import settings
+from chemclaw.kg.note import ProcessConditions
 
 
 class _FakeStructured:

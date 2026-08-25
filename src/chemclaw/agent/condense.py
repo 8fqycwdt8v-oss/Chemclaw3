@@ -22,6 +22,14 @@ the workup, the observations, and one verbatim line to check the outcome against
 may come back null, because absent is a legal answer and inventing a number to fill a column is the
 one failure this whole artifact exists to avoid.
 
+**In `agent/` rather than beside `retrieval/harness.py`, and the layering test is why.**
+`tests/test_layering.py::test_retrieval_does_not_import_orchestration` holds that a retrieval
+module in a clean interpreter pulls in nothing from `chemclaw.agent` — and this module needs
+`agent.framing`, because the whole point of the map step is that untrusted procedure prose reaches
+a model. The precedent settles where it goes rather than how to get around it: `agent/verifier.py`
+is the same shape — a model call over `EvidenceChunk`s — and lives here for the same reason. What
+*is* retrieval's is the reduce, and that is `memory/comparison.py`, which this imports.
+
 **Why a tool and not `SummarizationMiddleware`, which this repository declines.** That declination
 (`agent.compaction`, and `disabled_summarizer` pinned by
 `test_the_summarizer_in_the_compiled_stack_can_never_fire`) is about the *conversation thread*, and

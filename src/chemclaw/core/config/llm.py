@@ -123,7 +123,7 @@ class LlmSettings(BaseSettings):
     # verdict is one cheap structured call, and on expiry the verifier degrades to the offline
     # deterministic citation gate rather than holding the finished answer hostage.
     verifier_timeout_seconds: float = Field(default=30.0, gt=0)
-    # The per-protocol condensation call's own deadline (`retrieval.condense`). Per *map unit*, so
+    # The per-protocol condensation call's own deadline (`agent.condense`). Per *map unit*, so
     # one stalled extraction costs one row of the comparison and never the turn — the same
     # degrade-per-item rule the verifier applies to the whole answer, one level down. Larger than
     # the verifier's 30 s because the input is a whole procedure rather than a drafted answer, and

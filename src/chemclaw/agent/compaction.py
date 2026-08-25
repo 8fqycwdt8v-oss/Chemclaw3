@@ -51,7 +51,7 @@ is now one import away: a summarizer reads retrieved evidence and writes text th
 as conversation, so it is an indirect-prompt-injection surface pointed straight at the thread. The
 char/4 estimator and two deterministic edits need no credential, no extra model call, and no trust.
 
-**This prohibition is about the thread, and `retrieval/condense.py` is not a counter-example to it**
+**This prohibition is about the thread, and `agent/condense.py` is not a counter-example to it**
 (`D-2026-08-25-a-summarizer-in-the-thread-and-a-condenser-behind-a-tool`). That module does make a
 model call over retrieved evidence, and it is named here because a reader arriving at this
 paragraph as *the* prohibition would otherwise read it as a contradiction. The two reasons above

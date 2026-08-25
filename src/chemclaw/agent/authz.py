@@ -138,6 +138,10 @@ READ_ONLY_TOOLS: frozenset[str] = frozenset(
         # should make *before* asking for an expensive run to be authorized.
         "find_past_jobs",
         "gather_evidence",
+        # Condensing whole protocols the caller already has references to. It makes a model
+        # call, which is a cost rather than an effect: it writes nothing, starts nothing, and
+        # reaches only sources the caller could already read one at a time with `expand_note`.
+        "condense_protocols",
         # The ungated observations tier (D-161). A read of a table nothing but the durable
         # mining job writes, and its whole purpose is to point at evidence worth gathering
         # *before* anything is authorized.
