@@ -37,9 +37,19 @@ from chemclaw.kg.render import render_note
 from chemclaw.retrieval.retrievers import GraphRetriever
 from chemclaw.science.fingerprints.molfp.search import find_similar_molecules
 from chemclaw.science.fingerprints.store import InMemoryFingerprintStore
+from chemclaw.science.labels.store import InMemoryLabelIndex
 from tests.conftest import FakeSubmitter
 
 _EPOCH = datetime.min.replace(tzinfo=UTC)
+
+
+def _labels() -> InMemoryLabelIndex:
+    """A throwaway label index for a test that only cares that the record phase is written.
+
+    Named rather than inlined because 21 call sites need one and a test that had to construct it
+    positionally would drift from the production signature the first time an argument moves.
+    """
+    return InMemoryLabelIndex()
 
 
 def _ester() -> OrdReaction:
@@ -510,7 +520,9 @@ def test_ingest_indexes_and_proposes() -> None:
 
     async def _run() -> None:
         rxn, mol, sub = InMemoryFingerprintStore(), InMemoryFingerprintStore(), FakeSubmitter()
-        ref = await ingest_reaction(_ester(), rxn, mol, sub)
+        ref = await ingest_reaction(
+            _ester(), rxn, mol, sub, label_index=_labels(), source="test-eln"
+        )
         assert ref == "pr://note/reaction-rxn-1"
         assert len(await rxn.all_records()) == 1  # the reaction fingerprint
         assert len(await mol.all_records()) == 3  # ethanol, acetic acid, ethyl acetate
@@ -528,7 +540,7 @@ def test_ingest_rejects_invalid_without_side_effects() -> None:
             update={"outcomes": [Component(smiles="CCCl", role=Role.PRODUCT)]}
         )
         with pytest.raises(IngestError, match="mass balance"):
-            await ingest_reaction(bad, rxn, mol, sub)
+            await ingest_reaction(bad, rxn, mol, sub, label_index=_labels(), source="test-eln")
         assert await rxn.all_records() == []
         assert await mol.all_records() == []
         assert sub.submissions == []
@@ -572,7 +584,9 @@ def test_sync_ingests_batch_and_skips_bad_entries() -> None:
                 return JsonExportAdapter().map_to_ord(raw)
 
         rxn, mol, sub = InMemoryFingerprintStore(), InMemoryFingerprintStore(), FakeSubmitter()
-        summary = await sync_entries(_Adapter(), rxn, mol, sub, _EPOCH)
+        summary = await sync_entries(
+            _Adapter(), rxn, mol, sub, _EPOCH, label_index=_labels(), source="test-eln"
+        )
 
         assert summary.ingested == ["good"]  # the good entry survives both bad ones
         assert {r.entry_id for r in summary.rejected} == {"bad-balance", "unmappable"}
@@ -611,7 +625,9 @@ def test_sync_logs_the_outcome_and_each_rejection(caplog: pytest.LogCaptureFixtu
 
     async def _run() -> None:
         rxn, mol, sub = InMemoryFingerprintStore(), InMemoryFingerprintStore(), FakeSubmitter()
-        await sync_entries(_Adapter(), rxn, mol, sub, _EPOCH)
+        await sync_entries(
+            _Adapter(), rxn, mol, sub, _EPOCH, label_index=_labels(), source="test-eln"
+        )
 
     with caplog.at_level(logging.INFO):
         asyncio.run(_run())
@@ -649,7 +665,9 @@ def test_sync_rejects_degenerate_reaction_without_aborting_batch() -> None:
                 return JsonExportAdapter().map_to_ord(raw)
 
         rxn, mol, sub = InMemoryFingerprintStore(), InMemoryFingerprintStore(), FakeSubmitter()
-        summary = await sync_entries(_Adapter(), rxn, mol, sub, _EPOCH)
+        summary = await sync_entries(
+            _Adapter(), rxn, mol, sub, _EPOCH, label_index=_labels(), source="test-eln"
+        )
 
         assert summary.ingested == ["good"]
         assert [r.entry_id for r in summary.rejected] == ["degenerate"]
@@ -699,7 +717,15 @@ def test_sync_rejects_non_slug_entry_id_without_aborting_batch() -> None:
         bad_id = _good_entry("EXP 2024/001", datetime(2026, 1, 1, tzinfo=UTC))
         good = _good_entry("good", datetime(2026, 2, 1, tzinfo=UTC))
         rxn, mol, sub = InMemoryFingerprintStore(), InMemoryFingerprintStore(), FakeSubmitter()
-        summary = await sync_entries(_ListAdapter([bad_id, good]), rxn, mol, sub, _EPOCH)
+        summary = await sync_entries(
+            _ListAdapter([bad_id, good]),
+            rxn,
+            mol,
+            sub,
+            _EPOCH,
+            label_index=_labels(),
+            source="test-eln",
+        )
 
         assert summary.ingested == ["good"]
         assert [r.entry_id for r in summary.rejected] == ["EXP 2024/001"]
@@ -720,7 +746,15 @@ def test_future_dated_entry_is_rejected_and_does_not_poison_cursor() -> None:
         future = _good_entry("future", datetime(2062, 7, 23, tzinfo=UTC))
         good = _good_entry("good", datetime(2026, 1, 1, tzinfo=UTC))
         rxn, mol, sub = InMemoryFingerprintStore(), InMemoryFingerprintStore(), FakeSubmitter()
-        summary = await sync_entries(_ListAdapter([future, good]), rxn, mol, sub, _EPOCH)
+        summary = await sync_entries(
+            _ListAdapter([future, good]),
+            rxn,
+            mol,
+            sub,
+            _EPOCH,
+            label_index=_labels(),
+            source="test-eln",
+        )
 
         assert summary.ingested == ["good"]
         assert [r.entry_id for r in summary.rejected] == ["future"]
@@ -751,7 +785,15 @@ def test_a_future_amendment_stamp_costs_the_cursor_and_not_the_entry() -> None:
         )
         good = _good_entry("good", datetime(2026, 2, 1, tzinfo=UTC))
         rxn, mol, sub = InMemoryFingerprintStore(), InMemoryFingerprintStore(), FakeSubmitter()
-        summary = await sync_entries(_ListAdapter([amended, good]), rxn, mol, sub, _EPOCH)
+        summary = await sync_entries(
+            _ListAdapter([amended, good]),
+            rxn,
+            mol,
+            sub,
+            _EPOCH,
+            label_index=_labels(),
+            source="test-eln",
+        )
 
         assert summary.ingested == ["amended", "good"]
         assert summary.rejected == []
@@ -780,7 +822,9 @@ def test_sync_fetches_an_overlap_window_behind_the_cursor(
         late = _good_entry("late", cursor - timedelta(minutes=20))
         adapter = _ListAdapter([late])
         rxn, mol, sub = InMemoryFingerprintStore(), InMemoryFingerprintStore(), FakeSubmitter()
-        summary = await sync_entries(adapter, rxn, mol, sub, cursor)
+        summary = await sync_entries(
+            adapter, rxn, mol, sub, cursor, label_index=_labels(), source="test-eln"
+        )
 
         assert adapter.fetched_since == [cursor - timedelta(seconds=1800)]
         assert summary.ingested == ["late"]
@@ -826,7 +870,9 @@ def test_sync_skips_overlap_entry_whose_note_already_merged(
         late = _good_entry("late", cursor - timedelta(hours=2))
         _write_merged_note(tmp_path, late)
         rxn, mol, sub = InMemoryFingerprintStore(), InMemoryFingerprintStore(), FakeSubmitter()
-        summary = await sync_entries(_ListAdapter([late]), rxn, mol, sub, cursor)
+        summary = await sync_entries(
+            _ListAdapter([late]), rxn, mol, sub, cursor, label_index=_labels(), source="test-eln"
+        )
 
         assert summary.skipped_existing == ["late"]
         assert summary.ingested == []  # a replay skip is not a fresh ingest
@@ -852,7 +898,9 @@ def test_sync_still_ingests_new_entry_even_if_its_note_exists(
         new = _good_entry("new", cursor + timedelta(hours=2))
         _write_merged_note(tmp_path, new)
         rxn, mol, sub = InMemoryFingerprintStore(), InMemoryFingerprintStore(), FakeSubmitter()
-        summary = await sync_entries(_ListAdapter([new]), rxn, mol, sub, cursor)
+        summary = await sync_entries(
+            _ListAdapter([new]), rxn, mol, sub, cursor, label_index=_labels(), source="test-eln"
+        )
 
         assert summary.ingested == ["new"]
         assert summary.skipped_existing == []
@@ -876,7 +924,16 @@ def test_sync_without_overlap_fetches_from_the_cursor_itself(
         cursor = datetime(2026, 1, 2, tzinfo=UTC)
         adapter = _ListAdapter([_good_entry("boundary", cursor)])
         rxn, mol, sub = InMemoryFingerprintStore(), InMemoryFingerprintStore(), FakeSubmitter()
-        summary = await sync_entries(adapter, rxn, mol, sub, cursor, apply_overlap=False)
+        summary = await sync_entries(
+            adapter,
+            rxn,
+            mol,
+            sub,
+            cursor,
+            apply_overlap=False,
+            label_index=_labels(),
+            source="test-eln",
+        )
 
         assert adapter.fetched_since == [cursor]  # no reach behind the cursor
         assert summary.ingested == ["boundary"]  # inclusive boundary still processed
@@ -905,7 +962,15 @@ def test_overlap_rerejection_logs_debug_not_warning(
 
     async def _run() -> None:
         rxn, mol, sub = InMemoryFingerprintStore(), InMemoryFingerprintStore(), FakeSubmitter()
-        summary = await sync_entries(_ListAdapter([replayed, fresh]), rxn, mol, sub, since)
+        summary = await sync_entries(
+            _ListAdapter([replayed, fresh]),
+            rxn,
+            mol,
+            sub,
+            since,
+            label_index=_labels(),
+            source="test-eln",
+        )
         assert {r.entry_id for r in summary.rejected} == {"replayed-bad", "fresh-bad"}
 
     with caplog.at_level(logging.DEBUG, logger="chemclaw.ingest.eln.sync"):
@@ -927,7 +992,9 @@ def test_sync_log_sanitizes_external_entry_ids(caplog: pytest.LogCaptureFixture)
 
     async def _run() -> None:
         rxn, mol, sub = InMemoryFingerprintStore(), InMemoryFingerprintStore(), FakeSubmitter()
-        await sync_entries(_ListAdapter([forged]), rxn, mol, sub, _EPOCH)
+        await sync_entries(
+            _ListAdapter([forged]), rxn, mol, sub, _EPOCH, label_index=_labels(), source="test-eln"
+        )
 
     with caplog.at_level(logging.WARNING):
         asyncio.run(_run())
@@ -1092,7 +1159,15 @@ def test_an_amended_entry_is_re_proposed_rather_than_dropped(
             }
         )
         rxn, mol, sub = InMemoryFingerprintStore(), InMemoryFingerprintStore(), FakeSubmitter()
-        summary = await sync_entries(_ListAdapter([corrected]), rxn, mol, sub, cursor)
+        summary = await sync_entries(
+            _ListAdapter([corrected]),
+            rxn,
+            mol,
+            sub,
+            cursor,
+            label_index=_labels(),
+            source="test-eln",
+        )
 
         assert summary.ingested == ["amended"]
         assert summary.skipped_existing == []
@@ -1127,7 +1202,15 @@ def test_an_entry_whose_note_never_merged_is_reported_as_awaiting_merge(
         blocked = _good_entry("blocked", cursor - timedelta(hours=2))
         rxn, mol, sub = InMemoryFingerprintStore(), InMemoryFingerprintStore(), FakeSubmitter()
         with caplog.at_level(logging.WARNING):
-            summary = await sync_entries(_ListAdapter([blocked]), rxn, mol, sub, cursor)
+            summary = await sync_entries(
+                _ListAdapter([blocked]),
+                rxn,
+                mol,
+                sub,
+                cursor,
+                label_index=_labels(),
+                source="test-eln",
+            )
 
         assert summary.ingested == ["blocked"]  # the proposal really was made again
         assert summary.awaiting_merge == ["blocked"]  # and it accomplished nothing new
@@ -1153,7 +1236,9 @@ def test_a_first_time_entry_is_not_reported_as_awaiting_merge(
         cursor = datetime(2026, 1, 2, tzinfo=UTC)
         fresh = _good_entry("fresh", cursor + timedelta(hours=1))
         rxn, mol, sub = InMemoryFingerprintStore(), InMemoryFingerprintStore(), FakeSubmitter()
-        summary = await sync_entries(_ListAdapter([fresh]), rxn, mol, sub, cursor)
+        summary = await sync_entries(
+            _ListAdapter([fresh]), rxn, mol, sub, cursor, label_index=_labels(), source="test-eln"
+        )
 
         assert summary.ingested == ["fresh"]
         assert summary.awaiting_merge == []
@@ -1180,7 +1265,9 @@ def test_an_entry_that_fails_to_ingest_is_only_reported_as_rejected(
             payload={"reactants": [{"smiles": "CCO"}], "products": [{"smiles": "CCCl"}]},
         )
         rxn, mol, sub = InMemoryFingerprintStore(), InMemoryFingerprintStore(), FakeSubmitter()
-        summary = await sync_entries(_ListAdapter([bad]), rxn, mol, sub, cursor)
+        summary = await sync_entries(
+            _ListAdapter([bad]), rxn, mol, sub, cursor, label_index=_labels(), source="test-eln"
+        )
 
         assert [entry.entry_id for entry in summary.rejected] == ["bad"]
         assert summary.ingested == [] and summary.awaiting_merge == []
@@ -1206,7 +1293,9 @@ def test_an_unchanged_entry_reported_as_amended_still_costs_nothing(
         touched = entry.model_copy(update={"modified_at": cursor + timedelta(hours=1)})
 
         rxn, mol, sub = InMemoryFingerprintStore(), InMemoryFingerprintStore(), FakeSubmitter()
-        summary = await sync_entries(_ListAdapter([touched]), rxn, mol, sub, cursor)
+        summary = await sync_entries(
+            _ListAdapter([touched]), rxn, mol, sub, cursor, label_index=_labels(), source="test-eln"
+        )
 
         assert summary.skipped_existing == ["touched"]
         assert sub.submissions == []
@@ -1448,7 +1537,15 @@ def test_ord_malformed_entry_does_not_abort_the_sync_batch() -> None:
             entry_id="good", created_at=datetime(2026, 2, 1, tzinfo=UTC), payload=good_payload
         )
         rxn, mol, sub = InMemoryFingerprintStore(), InMemoryFingerprintStore(), FakeSubmitter()
-        summary = await sync_entries(_OrdListAdapter([malformed, good]), rxn, mol, sub, _EPOCH)
+        summary = await sync_entries(
+            _OrdListAdapter([malformed, good]),
+            rxn,
+            mol,
+            sub,
+            _EPOCH,
+            label_index=_labels(),
+            source="test-eln",
+        )
 
         # Both land: the malformed field never poisoned the batch, and the second entry
         # (which the un-guarded AttributeError would never have let the run reach) ingests too.
@@ -1493,7 +1590,12 @@ def test_an_identified_impurity_is_findable_by_structure() -> None:
         rxn, mol, sub = InMemoryFingerprintStore(), InMemoryFingerprintStore(), FakeSubmitter()
         # Diethyl ether — an ether by-product of the esterification, charged nowhere in the record.
         await ingest_reaction(
-            _with_impurities(Impurity(name="ether", smiles="CCOCC")), rxn, mol, sub
+            _with_impurities(Impurity(name="ether", smiles="CCOCC")),
+            rxn,
+            mol,
+            sub,
+            label_index=_labels(),
+            source="test-eln",
         )
         hits = (await find_similar_molecules(mol, "CCOCC", threshold=0.99)).hits
         assert [hit.smiles for hit in hits] == ["CCOCC"]
@@ -1506,7 +1608,14 @@ def test_an_impurity_with_no_structure_is_skipped_not_fatal() -> None:
 
     async def _run() -> None:
         rxn, mol, sub = InMemoryFingerprintStore(), InMemoryFingerprintStore(), FakeSubmitter()
-        await ingest_reaction(_with_impurities(Impurity(name="RRT 0.82")), rxn, mol, sub)
+        await ingest_reaction(
+            _with_impurities(Impurity(name="RRT 0.82")),
+            rxn,
+            mol,
+            sub,
+            label_index=_labels(),
+            source="test-eln",
+        )
         # The three reaction compounds, and nothing minted from a nameless chromatographic peak.
         assert len(await mol.all_records()) == 3
         assert sub.submissions  # the run was still proposed
@@ -1528,7 +1637,9 @@ def test_an_unparseable_impurity_structure_is_skipped_and_logged(
         rxn, mol, sub = InMemoryFingerprintStore(), InMemoryFingerprintStore(), FakeSubmitter()
         bad = Impurity(name="garbled", smiles="C1CC")
         with caplog.at_level(logging.WARNING, logger="chemclaw.ingest.eln.ingest"):
-            await ingest_reaction(_with_impurities(bad), rxn, mol, sub)
+            await ingest_reaction(
+                _with_impurities(bad), rxn, mol, sub, label_index=_labels(), source="test-eln"
+            )
         assert len(await mol.all_records()) == 3
         assert sub.submissions
         assert "unparseable impurity SMILES" in caplog.text
@@ -1863,3 +1974,55 @@ def test_a_typographic_minus_survives_step_segmentation_too() -> None:
     steps = _segment_steps("Cool the solution to −78 °C. Add n-BuLi dropwise. Warm to 20 °C.")
 
     assert [step.temperature_c for step in steps] == [-78.0, None, 20.0]
+
+
+def test_ingesting_a_reaction_writes_the_label_index_record_phase() -> None:
+    """The half of the label row that cannot be reconstructed later is written at ingest.
+
+    Two things are asserted rather than one, and the second is the point: the row carries the
+    **record** form (`reactants>agents>products`, agents kept), not the fingerprint form. The
+    fingerprint deliberately drops solvent and catalyst — it has to, or a solvent swap dominates
+    DRFP similarity — and an index built from it could never answer "which solvent", which is
+    half of what the precedent questions ask.
+    """
+
+    async def _run() -> None:
+        rxn, mol, sub = InMemoryFingerprintStore(), InMemoryFingerprintStore(), FakeSubmitter()
+        labels = InMemoryLabelIndex()
+        reaction = _ester()
+        await ingest_reaction(reaction, rxn, mol, sub, label_index=labels, source="eln-json")
+
+        [row] = await labels.stale("any-version", limit=10)
+        assert (row.source, row.reaction_id) == ("eln-json", reaction.reaction_id)
+        assert row.record_smiles == reaction.reaction_smiles()
+        assert row.citation == note_id_for_reaction(reaction.reaction_id)
+        # Every component, with the role the record stated and nothing derived from it yet.
+        assert [(s.ordinal, s.role) for s in row.species] == [
+            (i, c.role.value) for i, c in enumerate(reaction.compounds())
+        ]
+        assert row.labeller_version is None
+
+    asyncio.run(_run())
+
+
+def test_the_label_row_keeps_the_agents_the_fingerprint_drops() -> None:
+    """The measured difference the two-phase design exists for, asserted rather than argued.
+
+    `reaction_fingerprints` stores `transformation_smiles()`; the label index stores
+    `reaction_smiles()`. On a reaction with a solvent, those are not the same string, and only one
+    of them can be asked which solvent was used.
+    """
+
+    async def _run() -> None:
+        rxn, mol, sub = InMemoryFingerprintStore(), InMemoryFingerprintStore(), FakeSubmitter()
+        labels = InMemoryLabelIndex()
+        solvent = Component(smiles="CC#N", role=Role.SOLVENT)
+        reaction = _ester().model_copy(update={"inputs": [*_ester().inputs, solvent]})
+        await ingest_reaction(reaction, rxn, mol, sub, label_index=labels, source="eln-json")
+
+        [row] = await labels.stale("any-version", limit=10)
+        assert "CC#N" in row.record_smiles
+        assert "CC#N" not in reaction.transformation_smiles()
+        assert "CC#N" in {s.smiles for s in row.species}
+
+    asyncio.run(_run())

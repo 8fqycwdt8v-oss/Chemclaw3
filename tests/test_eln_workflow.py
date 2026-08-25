@@ -34,6 +34,7 @@ from chemclaw.ingest.eln.ord import OrdReaction
 from chemclaw.ingest.eln.sync import IngestSummary, RejectedEntry, sync_entries
 from chemclaw.ingest.sources.registry import active_ingest_source_names
 from chemclaw.science.fingerprints.store import InMemoryFingerprintStore
+from chemclaw.science.labels.store import InMemoryLabelIndex
 from tests.conftest import FakeSubmitter
 from tests.temporal_env import pydantic_client, start_env_or_skip
 
@@ -47,6 +48,7 @@ def _swap_stores(monkeypatch: pytest.MonkeyPatch) -> tuple[FakeSubmitter, InMemo
     molecule_store = InMemoryFingerprintStore()
     monkeypatch.setattr(eln_sync, "_reaction_store", lambda: reaction_store)
     monkeypatch.setattr(eln_sync, "_molecule_store", lambda: molecule_store)
+    monkeypatch.setattr(eln_sync, "_label_index", InMemoryLabelIndex)
     monkeypatch.setattr(eln_sync, "default_submitter", lambda: fake)
     return fake, reaction_store
 
@@ -268,9 +270,9 @@ def test_eln_sync_workflow_drains_a_backlog_in_chunks(
     stored: list[datetime] = []
     overlap_flags: list[bool] = []
 
-    async def recording_sync(*args: Any, apply_overlap: bool = True) -> IngestSummary:
-        overlap_flags.append(apply_overlap)
-        return await sync_entries(*args, apply_overlap=apply_overlap)
+    async def recording_sync(*args: Any, **kwargs: Any) -> IngestSummary:
+        overlap_flags.append(bool(kwargs.get("apply_overlap", True)))
+        return await sync_entries(*args, **kwargs)
 
     monkeypatch.setattr(eln_sync, "sync_entries", recording_sync)
 

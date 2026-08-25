@@ -58,6 +58,11 @@ _BAD_DATA_TYPES = [
     "CalculationDomainError",
     "ConnectorError",
     "DataSourceError",
+    # A derived label written for a reaction whose record phase was never stored
+    # (`chemclaw.science.labels.store`). Non-retryable because the missing row is a fact about the
+    # corpus, not about this attempt: the drain must record the reaction before it can label it,
+    # and retrying the same write finds the same absence.
+    "LabelIndexError",
     # An offboarding erasure the database refused, or one asked for on a blank actor
     # (`chemclaw.agent.leaver`). Non-retryable for the same reason every entry here is: a missing
     # `DELETE ON session_owners` grant and an empty actor id are both facts about the request or the

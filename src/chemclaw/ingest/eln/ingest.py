@@ -17,11 +17,13 @@ from chemclaw.core.errors import ChemclawError
 from chemclaw.ingest.eln.note import note_from_ord_reaction
 from chemclaw.ingest.eln.ord import OrdReaction
 from chemclaw.ingest.eln.validate import validate_ord
+from chemclaw.ingest.labels.record import record_phase
 from chemclaw.kg.pr_gate import propose_note
 from chemclaw.kg.submission import NoteSubmitter
 from chemclaw.science.fingerprints.molfp.search import record_for
 from chemclaw.science.fingerprints.rxnfp.search import record_for_reaction
 from chemclaw.science.fingerprints.store import FingerprintError, FingerprintStore
+from chemclaw.science.labels.store import LabelIndex
 
 logger = logging.getLogger(__name__)
 
@@ -35,11 +37,22 @@ async def ingest_reaction(
     reaction_store: FingerprintStore,
     molecule_store: FingerprintStore,
     submitter: NoteSubmitter,
+    *,
+    label_index: LabelIndex,
+    source: str,
 ) -> str:
-    """Validate, index (reaction + compounds + impurities), PR-gate a reaction; return the ref.
+    """Validate, index (reaction + compounds + impurities + labels), PR-gate; return the ref.
 
     Raises `IngestError` (listing the problems) if the reaction is invalid, so a corrupt
     ELN entry never reaches the index or the graph.
+
+    `label_index` and `source` are keyword-only and **required**, with no default, which is
+    deliberate: the label index's record phase can only be written here, from the canonical record
+    in hand (`ingest/labels/record.py` says why), so a default of `None` would let a caller quietly
+    stop writing the half of the row that cannot be reconstructed afterwards. `source` is the
+    registry source name, and it is the other half of the label row's key — two ELNs may
+    legitimately use one entry id, which the fingerprint tables, keyed on the bare id, cannot
+    represent.
     """
     problems = validate_ord(reaction)
     if problems:
@@ -53,6 +66,12 @@ async def ingest_reaction(
     for smiles in {standard_smiles(c.smiles) for c in reaction.compounds()}:
         await molecule_store.add(record_for(smiles, smiles))
     await _index_impurities(reaction, molecule_store)
+
+    # The record phase, from the record form — agents kept, conditions and workup in columns. It
+    # is written before the PR-gate for the same reason the fingerprints are: this is a
+    # deterministic serving index derived from a validated record, not a knowledge claim a human
+    # signs off, and holding it behind review would leave every unmerged reaction unsearchable.
+    await label_index.record(record_phase(reaction, source))
 
     return await propose_note(note_from_ord_reaction(reaction), submitter)
 

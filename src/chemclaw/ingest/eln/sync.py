@@ -24,6 +24,7 @@ from chemclaw.ingest.eln.note import note_from_ord_reaction
 from chemclaw.kg.graph import load_notes
 from chemclaw.kg.submission import NoteSubmitter
 from chemclaw.science.fingerprints.store import FingerprintStore
+from chemclaw.science.labels.store import LabelIndex
 
 logger = logging.getLogger(__name__)
 
@@ -108,6 +109,8 @@ async def sync_entries(
     submitter: NoteSubmitter,
     since: datetime,
     *,
+    label_index: LabelIndex,
+    source: str,
     apply_overlap: bool = True,
 ) -> IngestSummary:
     """Fetch entries from `since` minus the overlap window, ingest each, return a summary.
@@ -120,6 +123,10 @@ async def sync_entries(
     `apply_overlap=False` fetches from `since` itself (still inclusive, per the adapter
     contract): the workflow's chunk loop reaches behind the cursor only on its first
     chunk, so draining a backlog does not re-fetch the whole overlap window per chunk.
+
+    `label_index` and `source` are required keyword arguments, passed straight through to
+    `ingest_reaction`, which explains why neither has a default: the label index's record phase
+    can only be written from the canonical record in hand, and `source` is half of its row key.
 
     Overlap replay is cheap, not just idempotent: an overlap entry whose merged note carries
     the same body has nothing left to index or to review, so it is skipped by a note-id
@@ -213,7 +220,14 @@ async def sync_entries(
                 # `merged_body is not None`, is new content and is not reported here: its merged
                 # predecessor proves the queue is moving.)
                 unmerged_replay = merged_body is None
-            await ingest_reaction(reaction, reaction_store, molecule_store, submitter)
+            await ingest_reaction(
+                reaction,
+                reaction_store,
+                molecule_store,
+                submitter,
+                label_index=label_index,
+                source=source,
+            )
         except (ChemclawError, ValidationError) as exc:
             # The shared bad-data base covers *any* per-entry failure: an adapter's
             # mapping error, a validation failure, and a fingerprint that cannot be

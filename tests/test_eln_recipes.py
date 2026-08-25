@@ -27,6 +27,7 @@ from chemclaw.ingest.eln.ord_adapter import OrdFormatError, OrdJsonAdapter
 from chemclaw.ingest.eln.sync import sync_entries
 from chemclaw.ingest.eln.validate import validate_ord
 from chemclaw.science.fingerprints.store import InMemoryFingerprintStore
+from chemclaw.science.labels.store import InMemoryLabelIndex
 from tests.conftest import FakeSubmitter
 
 _EPOCH = datetime.min.replace(tzinfo=UTC)
@@ -360,7 +361,9 @@ def test_ord_recipe_flows_through_sync() -> None:
     async def _run() -> None:
         adapter = OrdJsonAdapter(str(_ORD_EXAMPLE.parent))
         rxn, mol, sub = InMemoryFingerprintStore(), InMemoryFingerprintStore(), FakeSubmitter()
-        summary = await sync_entries(adapter, rxn, mol, sub, _EPOCH)
+        summary = await sync_entries(
+            adapter, rxn, mol, sub, _EPOCH, label_index=InMemoryLabelIndex(), source="eln-ord"
+        )
         assert summary.ingested == ["ord-2026-001"]
         assert summary.rejected == []
         assert len(sub.submissions) == 1
