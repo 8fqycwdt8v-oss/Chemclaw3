@@ -211,3 +211,63 @@ def test_an_unprojectable_payload_does_not_raise_into_the_calculation(
         )
     )
     assert written == 0
+
+
+def test_claiming_a_row_spends_its_attempt(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The attempt is spent by the claim, not by the failure report.
+
+    **This is what makes the budget correct when two runs overlap** — a scheduled drain and an
+    operator's manual one. The claim commits before anything is delivered, because a delivery can
+    take the better part of a minute and must not hold a row lock across it; so if the increment
+    happened in `mark_failed` instead, both runs would see the same pending rows, deliver them
+    twice and each record a failure. Duplicate delivery is safe (every key on the far side is a
+    content hash); an attempt budget emptying twice as fast is not, because it retires rows a
+    working destination would have accepted.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        _with_sink(monkeypatch, "alpha")
+        monkeypatch.setattr(settings, "result_publish_max_attempts", 5)
+        async with outbox._connect() as conn:
+            await _reset(conn)
+        await outbox.enqueue([_record("counted")])
+
+        # Two claims with no `mark_failed` between them — as two overlapping runs would do.
+        assert len(await outbox.claim("alpha", 10)) == 1
+        assert len(await outbox.claim("alpha", 10)) == 1
+
+        async with outbox._connect() as conn:
+            cursor = await conn.execute(
+                "SELECT attempts FROM result_publications WHERE calc_ref = 'counted'"
+            )
+            row = await cursor.fetchone()
+        assert row is not None and row[0] == 2, "each claim spends one attempt"
+
+    asyncio.run(_run())
+
+
+def test_marking_failed_does_not_double_count_the_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A claim followed by its own failure report costs exactly one attempt, not two."""
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        _with_sink(monkeypatch, "alpha")
+        monkeypatch.setattr(settings, "result_publish_max_attempts", 5)
+        async with outbox._connect() as conn:
+            await _reset(conn)
+        await outbox.enqueue([_record("once")])
+
+        claimed = await outbox.claim("alpha", 10)
+        await outbox.mark_failed([row_id for row_id, _, _ in claimed], "nope")
+
+        async with outbox._connect() as conn:
+            cursor = await conn.execute(
+                "SELECT attempts, state FROM result_publications WHERE calc_ref = 'once'"
+            )
+            row = await cursor.fetchone()
+        assert row is not None and row == (1, "pending")
+
+    asyncio.run(_run())

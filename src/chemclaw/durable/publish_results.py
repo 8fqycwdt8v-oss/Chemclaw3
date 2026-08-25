@@ -27,7 +27,7 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.core.config import settings
     from chemclaw.durable.registry import durable_activity, durable_workflow
     from chemclaw.publish import outbox
-    from chemclaw.publish.driver import SinkRejectedError
+    from chemclaw.publish.driver import ResultSink
     from chemclaw.publish.record import ResultRecord
     from chemclaw.publish.registry import ResultSinkError, build, enabled
 
@@ -61,7 +61,7 @@ class PublishOutcome(BaseModel):
         return sum(outcome.delivered for outcome in self.sinks)
 
 
-async def _drain_one(manifest_name: str, sink: object, batch_size: int) -> SinkOutcome:
+async def _drain_one(manifest_name: str, sink: ResultSink, batch_size: int) -> SinkOutcome:
     """Claim and deliver one batch for one sink.
 
     One batch per run rather than draining to empty, deliberately. A backlog then takes several
@@ -84,15 +84,19 @@ async def _drain_one(manifest_name: str, sink: object, batch_size: int) -> SinkO
         return outcome
 
     try:
-        await sink.deliver(records)  # type: ignore[attr-defined]
-    except SinkRejectedError as exc:
-        # The content is the problem and will be refused identically next time. Still counted as an
-        # attempt rather than retired immediately: a site that has just not run the DDL yet is the
-        # common case, and it fixes itself the moment they do.
-        await outbox.mark_failed(ids, str(exc))
-        outcome.failed, outcome.reason = len(ids), str(exc)[:500]
-        return outcome
+        await sink.deliver(records)
     except Exception as exc:
+        # **One handler, because there is one response.** A rejection and an outage differ in
+        # whether a retry could ever succeed, but not in what to do *now*: spend an attempt, keep
+        # the reason, leave the rows claimable until the budget runs out. Retiring a rejection
+        # immediately would be wrong for the common case — a site that has simply not applied the
+        # DDL yet, which fixes itself the moment they do — and two branches with identical bodies
+        # would be a distinction the code does not actually make.
+        #
+        # Never re-raised. A destination's failure is data about that destination; putting it into
+        # Temporal's retry loop as well would be two backoffs for one problem, and would make an
+        # operator read a workflow failure to learn what `result_publications.last_error` says more
+        # precisely.
         await outbox.mark_failed(ids, str(exc))
         outcome.failed, outcome.reason = len(ids), str(exc)[:500]
         return outcome

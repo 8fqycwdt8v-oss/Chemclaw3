@@ -44,17 +44,34 @@ _ENQUEUE = """
     ON CONFLICT (sink, calc_ref, schema_version) DO NOTHING
 """
 
+# **Claiming spends the attempt, in the same statement that selects the row.** A plain
+# `SELECT ... FOR UPDATE SKIP LOCKED` is not enough here: the lock lasts only as long as the
+# transaction, and this one has to commit before the delivery is attempted — a delivery can take
+# the better part of a minute and must not hold a row lock across it. So two runs overlapping (a
+# scheduled drain and an operator's manual one) would both see the same pending rows, deliver them
+# twice and each record a failure, double-counting the attempt budget against one destination's
+# outage.
+#
+# Incrementing inside the claim closes that: the `UPDATE` takes a row lock the other run's
+# `SKIP LOCKED` respects, and by the time the lock is released the row's attempt is already spent.
+# Duplicate *delivery* would still be safe — every key on the far side is a content hash — but the
+# accounting would not be, and an attempt budget that empties twice as fast retires rows a working
+# destination would have accepted.
+#
 # Oldest first, so a backlog drains in the order it accumulated and a burst of fresh results cannot
-# starve what was already waiting. `FOR UPDATE SKIP LOCKED` lets two drain workers share the queue
-# without either blocking on the other's batch — the standard claim, and the reason this is a
-# `SELECT ... FOR UPDATE` rather than a plain read.
+# starve what was already waiting.
 _CLAIM = """
-    SELECT id, calc_ref, document
-    FROM result_publications
-    WHERE sink = %s AND state = 'pending' AND attempts < %s
-    ORDER BY enqueued_at
-    LIMIT %s
-    FOR UPDATE SKIP LOCKED
+    UPDATE result_publications
+    SET attempts = attempts + 1
+    WHERE id IN (
+        SELECT id
+        FROM result_publications
+        WHERE sink = %s AND state = 'pending' AND attempts < %s
+        ORDER BY enqueued_at
+        LIMIT %s
+        FOR UPDATE SKIP LOCKED
+    )
+    RETURNING id, calc_ref, document
 """
 
 _MARK_DELIVERED = """
@@ -63,13 +80,14 @@ _MARK_DELIVERED = """
     WHERE id = ANY(%s)
 """
 
-# A failed attempt increments rather than transitioning, and only crosses into `failed` once it has
-# exhausted its budget. Written as one statement so a row cannot be counted twice by two workers.
+# Records why an attempt failed, and retires the row once its budget is gone. **It does not
+# increment** — `_CLAIM` already did, which is what makes the count correct under two concurrent
+# runs. A retired row is kept, never deleted: it is the record that something was not published,
+# and the backfill CLI's `--requeue` is how it comes back.
 _MARK_FAILED = """
     UPDATE result_publications
-    SET attempts = attempts + 1,
-        last_error = %s,
-        state = CASE WHEN attempts + 1 >= %s THEN 'failed' ELSE 'pending' END
+    SET last_error = %s,
+        state = CASE WHEN attempts >= %s THEN 'failed' ELSE 'pending' END
     WHERE id = ANY(%s)
 """
 
@@ -186,10 +204,14 @@ async def enqueue_payload(
 async def claim(sink: str, limit: int) -> list[tuple[int, str, dict[str, Any]]]:
     """Claim up to `limit` pending rows for `sink`, as `(id, calc_ref, document)`.
 
-    **Not a transaction the caller holds.** `FOR UPDATE SKIP LOCKED` inside a committed read gives
-    each worker a distinct slice without either blocking; the rows are then marked by id after the
-    delivery attempt. That means a worker that dies mid-delivery leaves its rows `pending`, which
-    is correct: at-least-once is what the content-addressed upserts on the far end are built for.
+    **Claiming spends the attempt** — see `_CLAIM` for why that has to happen in the same statement
+    rather than after the delivery.
+
+    **Not a transaction the caller holds.** The claim commits before anything is delivered, because
+    a delivery can take the better part of a minute and must not hold row locks across it. So a
+    worker that dies mid-delivery leaves its rows `pending` with one attempt spent, and the next
+    run picks them up — at-least-once, which is exactly what the content-addressed upserts on the
+    far end are built for.
     """
     async with _connect() as conn:
         cursor = await conn.execute(_CLAIM, (sink, settings.result_publish_max_attempts, limit))
