@@ -662,3 +662,31 @@ Note frontmatter answered the condenser's need with no new store and no migratio
 is now a `BACKLOG.md` row with its own anchor and its own trigger. *Rule: when one change would
 close a second, unrelated problem as a side effect, that is a signal to check whether the second
 problem is driving the design — and to file it rather than ride it.*
+
+## 2026-08-25 — a fixture that never varies is a test that never tests
+
+Reviewing my own merged diff found four defects, two of them producing confidently wrong output.
+Every one had a test nearby that passed, and every one got through for the same reason: **the
+fixtures never varied along the axis that broke.**
+
+- Every condenser fixture was a reaction note with the same fields. The heterogeneous case — a
+  share document beside reaction notes — fabricated four condition changes.
+- Every fake client always succeeded. One failing extraction fabricated two solvent swaps.
+- Every budget test used chunks with default provenance. A chunk carrying conflicts and a real
+  source label was charged 47% less than it costs.
+- Every document read was of a document that fits. An oversized one fetched all 16 of 16 pieces
+  past a ceiling whose comment says it prevents exactly that.
+
+*Rule for myself: for each new test, name the axis the fixture holds constant, and ask whether the
+code behaves differently at the other end of it. Absent-vs-present, fails-vs-succeeds,
+small-vs-over-the-limit, homogeneous-vs-mixed — those four axes account for all four defects.*
+
+The sharper lesson is about where the knowledge already was. `changes_between`'s docstring names
+the absent-is-not-a-value hazard exactly, and excludes fields for it. I read that docstring, quoted
+its reasoning into `_changes`'s own docstring about reagents — and then wrote the unsafe comparison
+for the three columns immediately below it. **Citing a rule is not applying it.** When I find myself
+writing "this is the hazard X avoids", the next step is to check that the code I am writing avoids
+it too, not to treat the citation as the check.
+
+And: `tasks/lessons.md`'s previous entry — measure the mechanism, not the outcome — was written in
+the same session as the code that failed it four times. A lesson recorded is not a lesson applied.

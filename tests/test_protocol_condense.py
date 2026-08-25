@@ -19,6 +19,7 @@ from chemclaw.agent.condense import (
     condense_protocols,
 )
 from chemclaw.core.config import settings
+from chemclaw.core.errors import ChemclawError
 from chemclaw.kg.note import ProcessConditions
 from chemclaw.memory.comparison import MISSING
 
@@ -370,3 +371,30 @@ def test_a_real_condition_change_is_still_reported() -> None:
     cell = _changed_cell(_run(protocols, _FakeClient()).table, "reaction-B")
     assert cell is not None
     assert "temperature 90 °C → 70 °C" in cell and "time 12 h → 18 h" in cell
+
+
+def test_the_source_registry_is_built_once_per_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`active_retrieve_sources` constructs every enabled retrieve half, in the chat process.
+
+    Measured before the hoist: twelve references rebuilt the registry twelve times, and this tool
+    accepts up to `protocol_digest_max_protocols` (24) of them. The registry's own docstring flags
+    this path as the reason its shape is a production concern rather than a tidiness one.
+    """
+    from chemclaw.agent import protocol_tools
+
+    builds = 0
+    original = protocol_tools.active_retrieve_sources
+
+    def _counted() -> Any:
+        nonlocal builds
+        builds += 1
+        return original()
+
+    monkeypatch.setattr(protocol_tools, "active_retrieve_sources", _counted)
+
+    refs = [f"sharedrive:doc-{i}" for i in range(12)]
+    with pytest.raises(ChemclawError):
+        # None resolve, so every one falls through to the share lookup — the worst case for this.
+        asyncio.run(protocol_tools.condense_protocols(refs))
+
+    assert builds == 1, f"the registry was rebuilt {builds} times for {len(refs)} references"
