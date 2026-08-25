@@ -160,6 +160,15 @@ _COUNTERS: dict[str, str] = {
     "chemclaw_verifier_degraded_total": (
         "Answers scored by the deterministic citation gate because the LLM judge was unavailable."
     ),
+    # One row per protocol the condenser was handed, labelled by what happened to it:
+    # `extracted` (its prose was read), `degraded` (the extraction failed or timed out, and the
+    # row kept its recorded figures), `oversized` (too large for one call, refused by name and
+    # never split). Labelled rather than three series because the three are one question — how
+    # much of what a turn asked to condense actually got condensed — and a reader who cannot
+    # divide them cannot answer it.
+    "chemclaw_protocol_digests_total": (
+        "Protocols handed to the condenser, by outcome (extracted / degraded / oversized)."
+    ),
     "chemclaw_jobs_started_total": "Durable jobs launched by an agent tool.",
     # The counter above counts *launches*, which on the most expensive thing this system does is the
     # least informative number available: a two-second xTB call and a six-hour DFT run increment it
@@ -402,6 +411,10 @@ _COUNTER_LABELS: dict[str, tuple[str, ...]] = {
     # Four values, fixed by a CHECK constraint in `infra/sql/027_note_proposals.sql` — the only
     # label in this registry whose cardinality is bounded by the database rather than by trust.
     "chemclaw_note_proposals_total": ("state",),
+    # Three values, fixed in `agent/condense.py`'s own `DigestSource` literal rather than by a
+    # caller: `extracted`, `degraded`, `oversized`. Bounded by the code that emits it, which is the
+    # same guarantee `state` above gets from a CHECK constraint.
+    "chemclaw_protocol_digests_total": ("outcome",),
     # Bounded by configuration exactly as `profile` is: a connector is a bundle the chart enables,
     # never a name a caller supplies, and the whole shipped fleet is six.
     "chemclaw_job_runtime_seconds_total": ("connector",),

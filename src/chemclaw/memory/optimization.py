@@ -12,20 +12,23 @@ skeleton is deterministic; the analysis (which change was the lever, what to try
 `optimization-campaign-synthesis` and `experiment-progression` skills' judgment, on top.
 """
 
-from datetime import date
-
 from pydantic import BaseModel
 
 from chemclaw.core.config import settings
 from chemclaw.core.reagents import resolve_compound_name
 from chemclaw.ingest.eln.ord import Impurity, OrdReaction
 from chemclaw.kg.note import Note
-from chemclaw.memory.progression import Progression, ProgressionStep, progression
+from chemclaw.memory.comparison import (
+    MISSING,
+    cell,
+    changes_cell,
+    date_cell,
+    drop_empty_columns,
+    ordering_caveat,
+    render_table,
+)
+from chemclaw.memory.progression import progression
 from chemclaw.memory.similarity import cluster_by_similarity, reaction_fingerprints
-
-# What a table cell shows when the record is silent. One spelling, because `_quality_columns`
-# decides a column is empty by comparing against it.
-_MISSING = "—"
 
 
 class OptimizationCampaign(BaseModel):
@@ -107,29 +110,23 @@ def optimization_campaign_note(
         *(name for name, _ in quality),
         "Changed vs previous",
     ]
-    rows = "\n".join(
-        "| "
-        + " | ".join(
-            [
-                f"[[reaction-{step.reaction_id}]]",
-                _date_cell(step.performed_at),
-                _cell(run.temperature_c),
-                _cell(run.time_h),
-                _cell(run.yield_percent),
-                *(cells[index] for _, cells in quality),
-                _changes_cell(step, first=index == 0),
-            ]
-        )
-        + " |"
+    rows = [
+        [
+            f"[[reaction-{step.reaction_id}]]",
+            date_cell(step.performed_at),
+            cell(run.temperature_c),
+            cell(run.time_h),
+            cell(run.yield_percent),
+            *(cells[index] for _, cells in quality),
+            changes_cell(step, first=index == 0),
+        ]
         for index, (step, run) in enumerate(zip(series.steps, members, strict=True))
-    )
+    ]
     body = (
         f"Optimization campaign: {len(members)} runs of the same transformation "
         f"(DRFP-similar), representative `{members[0].reaction_smiles()}`.\n\n"
-        f"{_ordering_caveat(series)}\n\n"
-        f"| {' | '.join(headers)} |\n"
-        f"|{'|'.join('---' for _ in headers)}|\n"
-        f"{rows}\n"
+        f"{ordering_caveat(series)}\n\n"
+        f"{render_table(headers, rows)}"
     )
     detail = "\n".join(block for r in members if (block := _run_detail(r)))
     if detail:
@@ -141,43 +138,6 @@ def optimization_campaign_note(
         source="memory:optimization-grouping",
         body=body,
     )
-
-
-def _ordering_caveat(series: Progression) -> str:
-    """State what the row order means, so nobody reads a trajectory into an id listing.
-
-    Three cases, because they license three different readings: a full timeline, a timeline with
-    undated runs parked at the end, and no time information at all — where the "changed vs
-    previous" column compares neighbours in an arbitrary listing and must not be read as "what
-    was tried next".
-    """
-    undated = series.undated()
-    if series.is_timeline():
-        return "Runs in the order they were performed."
-    if len(undated) < len(series.steps):
-        return (
-            "Runs in the order they were performed, except "
-            f"{len(undated)} with no recorded date, listed last: "
-            + ", ".join(f"[[reaction-{rid}]]" for rid in undated)
-            + "."
-        )
-    return (
-        "**No run carries a date**, so this is a stable id listing, not a timeline — the changes "
-        "column compares neighbouring rows, which is not evidence of what was tried next."
-    )
-
-
-def _changes_cell(step: ProgressionStep, first: bool) -> str:
-    """What this run changed: the deltas, "first run", or an explicit repeat.
-
-    A run whose conditions match its predecessor exactly is not a gap in the record — it is a
-    reproducibility check, and saying "unchanged" is what lets a reader tell the two apart.
-    """
-    if first:
-        return "first run"
-    if not step.changes:
-        return "unchanged (repeat)"
-    return "; ".join(change.describe() for change in step.changes)
 
 
 def _run_detail(reaction: OrdReaction) -> str:
@@ -200,57 +160,27 @@ def _quality_columns(members: list[OrdReaction]) -> list[tuple[str, list[str]]]:
     actually compares belong in its rows. They sit between Yield and "Changed vs previous" —
     outcomes grouped together, with the widest free-text column left last.
 
-    **A column appears only if some run in this campaign recorded it.** All three fields are
-    optional on `OrdReaction`, and a column of dashes is worse than no column: it costs width in
-    every row, invites the reader to conclude the impurity was measured and found absent, and
-    pushes the columns that do carry data off the side of a narrow view. Emptiness is decided from
-    the rendered cells rather than from a per-field predicate, so one rule covers all three and
-    "recorded" cannot come to mean something different per column. Within a column that survives,
-    a run that is missing the value keeps the table's existing `—`, which reads as "not measured
-    here" against neighbours that were.
+    What is decided *here* is which three candidates an `OrdReaction` can offer. Whether a
+    candidate survives is `comparison.drop_empty_columns`' rule — a column appears only if some run
+    recorded it — which lives there because the turn-time digest needs the same rule over its own
+    columns, and a second copy is how the two come to disagree about what `—` means.
     """
     candidates = [
-        ("Purity (%)", [_cell(run.purity_percent) for run in members]),
-        ("Major impurity", [_impurity_cell(_major_impurity(run)) for run in members]),
+        ("Purity (%)", [cell(run.purity_percent) for run in members]),
+        ("Major impurity", [_impurity_cell(run.major_impurity()) for run in members]),
         (
             "Impurity area (%)",
-            [_cell(imp.area_percent if (imp := _major_impurity(run)) else None) for run in members],
+            [cell(imp.area_percent if (imp := run.major_impurity()) else None) for run in members],
         ),
     ]
-    return [(header, cells) for header, cells in candidates if any(c != _MISSING for c in cells)]
-
-
-def _major_impurity(reaction: OrdReaction) -> Impurity | None:
-    """The impurity a chemist would call the major one, or `None` when the record cannot say.
-
-    Ranked by recorded `area_percent`, the number process development actually chases. When no
-    impurity carries an area% the list is unranked, and naming one anyway would be the same
-    fabrication `eln.note._principal_product` refuses for products — the cell would look like
-    evidence about which impurity dominated while being an artifact of the export's ordering.
-    A single recorded impurity is the exception that needs no ranking: it is the only one the
-    record names, so calling it the major one adds no claim.
-    """
-    ranked = [imp for imp in reaction.impurities if imp.area_percent is not None]
-    if ranked:
-        return max(ranked, key=lambda imp: imp.area_percent or 0.0)
-    return reaction.impurities[0] if len(reaction.impurities) == 1 else None
+    return drop_empty_columns(candidates)
 
 
 def _impurity_cell(impurity: Impurity | None) -> str:
     """Name an impurity in a table cell, by whatever identity the record carries."""
     if impurity is None:
-        return _MISSING
+        return MISSING
     return impurity.name or f"`{impurity.smiles}`"
-
-
-def _cell(value: float | None) -> str:
-    """Render an optional numeric condition/outcome for a table cell (blank when unknown)."""
-    return _MISSING if value is None else f"{value:g}"
-
-
-def _date_cell(value: date | None) -> str:
-    """Render the date a run was performed (blank when the source did not record one)."""
-    return _MISSING if value is None else value.isoformat()
 
 
 def _excerpt(reaction: OrdReaction) -> str:

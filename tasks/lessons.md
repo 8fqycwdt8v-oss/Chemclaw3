@@ -625,6 +625,71 @@ The generalisation, and it is the same one as the silent `str.replace`: **an edi
 because you made it — it is done because you checked it is there.** Both losses this session were
 invisible for the same reason, and both were one `grep` away.
 
+## 2026-08-25 — measure the mechanism, not only the outcome
+
+Four defects in one session were invisible to reasoning and obvious to a five-line measurement.
+Each had a plausible argument behind it that was simply wrong.
+
+- **A de-overlapping rule inferred from content.** "Strip the longest repeat, bounded by
+  `overlap_chars`" is correct-sounding and deleted 2,400 of 5,000 characters on a repetitive line.
+  Adding a one-character periodicity shift fixed that case and still deleted 2,800 of 6,000 on
+  period-10 content. *Rule for myself: when a rule infers a boundary from content, generate the
+  adversarial content before writing the rule — repetition, periodicity, and the empty case.*
+- **A payload that said everything twice.** The condensation returned the rendered table and the
+  rows it was rendered from. The design read fine; the number was 1.4x, which would not have been
+  worth building. *Rule: measure the thing the change exists to improve, before believing it
+  improved.*
+- **Two orderings of one list.** `rows` came back in input order while the renderer sorted
+  internally — so a column that says "changed vs previous" would have been a claim about a
+  different row. Caught by a test asserting the returned order, not by reading the code.
+- **A test that passed against the mutant it was written to catch.** The starvation guard asserted
+  only that one source survived; the shape it was guarding against starves the *other* one.
+  *Rule: after writing a regression test, break the code the way the test describes and watch it
+  fail. If it does not, the test is documentation.*
+
+The generalisation, which the repository already says and I had to relearn by doing: **prose is
+evidence about what its author believed, never about what the code does.** Three of these four had
+a docstring or a comment asserting the correct behaviour at the moment the behaviour was wrong.
+
+## 2026-08-25 — do not answer a second problem as a side effect of the first
+
+Building the condenser surfaced `read_corpus`'s full-rescan of the ELN. A derived store of mapped
+`OrdReaction`s would have closed it — and would also have been the easiest way to give the
+condenser its structured fields. Two problems, one store, and the store would have been built
+without anyone deciding to build it.
+
+Note frontmatter answered the condenser's need with no new store and no migration, and the rescan
+is now a `BACKLOG.md` row with its own anchor and its own trigger. *Rule: when one change would
+close a second, unrelated problem as a side effect, that is a signal to check whether the second
+problem is driving the design — and to file it rather than ride it.*
+
+## 2026-08-25 — a fixture that never varies is a test that never tests
+
+Reviewing my own merged diff found four defects, two of them producing confidently wrong output.
+Every one had a test nearby that passed, and every one got through for the same reason: **the
+fixtures never varied along the axis that broke.**
+
+- Every condenser fixture was a reaction note with the same fields. The heterogeneous case — a
+  share document beside reaction notes — fabricated four condition changes.
+- Every fake client always succeeded. One failing extraction fabricated two solvent swaps.
+- Every budget test used chunks with default provenance. A chunk carrying conflicts and a real
+  source label was charged 47% less than it costs.
+- Every document read was of a document that fits. An oversized one fetched all 16 of 16 pieces
+  past a ceiling whose comment says it prevents exactly that.
+
+*Rule for myself: for each new test, name the axis the fixture holds constant, and ask whether the
+code behaves differently at the other end of it. Absent-vs-present, fails-vs-succeeds,
+small-vs-over-the-limit, homogeneous-vs-mixed — those four axes account for all four defects.*
+
+The sharper lesson is about where the knowledge already was. `changes_between`'s docstring names
+the absent-is-not-a-value hazard exactly, and excludes fields for it. I read that docstring, quoted
+its reasoning into `_changes`'s own docstring about reagents — and then wrote the unsafe comparison
+for the three columns immediately below it. **Citing a rule is not applying it.** When I find myself
+writing "this is the hazard X avoids", the next step is to check that the code I am writing avoids
+it too, not to treat the citation as the check.
+
+And: `tasks/lessons.md`'s previous entry — measure the mechanism, not the outcome — was written in
+the same session as the code that failed it four times. A lesson recorded is not a lesson applied.
 ---
 
 ## 2026-08-25 — Test against the real model, not against your reading of it

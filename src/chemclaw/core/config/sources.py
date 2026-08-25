@@ -89,6 +89,20 @@ class SourcesSettings(BaseSettings):
     # `attachment_max_bytes` is measured in megabytes. 512 MB is far above any real document and
     # far below what OOMs a pod.
     document_max_expanded_bytes: int = 512 * 1024 * 1024
+    # The ceiling on one whole-document read (`ShareDocumentRetriever.read_document`), in
+    # characters of *indexed text* rather than bytes on disk: what is being bounded is what reaches
+    # a model's context, and the chunks are the only copy left by then.
+    #
+    # Deliberately larger than any single protocol a turn will condense. A whole-document read and
+    # a condensable protocol are two different limits, and collapsing them would put the refusal in
+    # the wrong place: this ceiling exists so a 400-page report cannot be pulled into the chat pod
+    # at all, while "this protocol is too large to digest" is a judgement the digest makes and
+    # *names*, with the citation, so a chemist knows which document to open themselves.
+    #
+    # 200,000 characters is roughly 50k tokens — well past the largest real SOP (the corpus's
+    # biggest protocol-shaped fixture is 6.3 kB) and well under what would exhaust a pod reading
+    # one row set.
+    document_read_max_chars: int = Field(default=200_000, ge=1_000)
 
     @property
     def vendored_dataset_path(self) -> Path:
