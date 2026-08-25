@@ -17,8 +17,8 @@ row this queue has ever carried. 223 of its rows are open
 2026-08-17). That is not "223 *further*" and the two counts do not subtract: promoting a row
 **restates** it, so a queued row is still open there under its original wording, and matching the
 two sets by title matched only 7 of the 30 rows this queue held when that was measured (it holds 41
-now — §5 added eleven, and none of those eleven is in the archive at all, because that section is
-the first thing here that is not a defect this repository found in itself). The overlap is real and
+now; §5 is the first thing here that is not a defect this repository found in itself, and none of
+its rows is in the archive at all). The overlap is real and
 unmeasurable by `grep`, which is why the number here is the archive's own and not a difference. When
 a queued row needs its full measurement history, that file has it under the review that found it.
 
@@ -436,20 +436,6 @@ repository now has a **measured** better answer to a problem this repository sol
 not revisited. That is a different kind of debt and it needs its own section, because a queue that
 only holds defects can only ever restore the system to what it already intended to be.
 
-- [ ] **~14.7k tokens of context are spent before the user says anything, and 8.6k of it is
-      deferrable** — [M]. Measured on this checkout: `_INSTRUCTIONS` 13,187 chars (~3.3k tokens), the
-      29 in-process tool schemas from `agent/chemclaw_agent.py::_capability_tools` 34,303 chars
-      (~8.6k), the skills listing `SkillsMiddleware` publishes 11,156 chars (~2.8k) — at the
-      `chars / 4` estimator `agent_context_token_budget` itself uses. Progressive disclosure works on
-      skills (38.6k tokens of bodies held back for 2.8k spent) and does nothing on tools: every
-      schema is sent on every turn, and the surface is headed for 19 servers (`Chemclaw3-mcp/MODULES.md`
-      catalogues 19, 5 built). Anthropic's `defer_loading` + tool search keeps definitions
-      discoverable without spending the context; programmatic tool calling measured −38% billed input
-      tokens on a 75-tool agent with no accuracy change. **Do the cheap half first**: a test that
-      asserts the floor, so the next tool is not free at review time and paid for on every turn
-      forever. Then put the cold tail behind search — success is the floor under ~8k with no probe
-      losing its `expects_tools` name.
-
 - [ ] **A tool schema is 38% developer rationale, and it ships on every turn** — [M], and it is
       what `§ 5`'s deferral row turned into once measured. `science/bo/problem.py`'s nested models
       carry design arguments in their class docstrings — *"One `objectives` field rather than a lead
@@ -466,17 +452,6 @@ only holds defects can only ever restore the system to what it already intended 
       lane can show every probe still reaching its tool**, because a cheaper prompt that stops
       finding tools is a regression with a good-looking metric. Blocked on the live-lane row in § 1.
 
-- [ ] **17 of 67 agent-callable tools are named by no probe, and nothing would notice the next one**
-      — [M]. Measured over `data/evals/probes/*.yaml` against
-      `agent/chemclaw_agent.py::available_tool_names()`: 232 probes, 50 tools named, 17 never —
-      `compute_interaction_energy`, `run_conformer_refinement`, `render_structure`, `read_attachment`,
-      `remember_preference`, `recall_preferences`, `forget_preference`, `list_watches`,
-      `stop_watching`, `task`, `write_todos`, and all six filesystem verbs. The hole is not random: it
-      is the *newest* surface — the scratchpad and memory tools the M-phases added, and the subagent
-      seam three ADRs argue about. `tests/test_repo_map.py` already proves the pattern for keeping a
-      declaration honest in both directions; the same shape here (fail when an agent-callable tool is
-      named by no probe) closes it permanently. Then write the 17 probes, scratchpad and memory first.
-
 - [ ] **Half the probe corpus tests one tool** — [S]. `gather_evidence` is in `expects_tools` for 116
       of 232 probes; `find_notes` 91; `expand_note` 60; the tail is thin. Two consequences worth
       separating: the corpus mostly measures one retrieval path, and ChemToolAgent's finding — that
@@ -484,6 +459,8 @@ only holds defects can only ever restore the system to what it already intended 
       questions — cannot be reproduced here. Bucket C (51 probes) scores restraint but never runs the
       same question tool-free for comparison. `evals/ab.py::compare_tool_utility` is already written
       and already registered as `plan_execute_utility`; an A/B arm over bucket A is mostly wiring.
+
+      **Blocked on a working model credential** (see §4), and the mock cannot stand in: `cli.mock_llm` emits scripted tool calls without *choosing* them in response to a question, so both arms of any comparison would measure the script. Measured 2026-08-25 through the real lane: expected-tool-reached 0/3.
 
 - [ ] **No external benchmark has ever been run** — [M]. `make eval` gates 23 metric values over 14
       case files, a **7-document** retrieval corpus and a **39-note** knowledge graph, with the
@@ -494,19 +471,7 @@ only holds defects can only ever restore the system to what it already intended 
       seam `agent/llm_provider.py` already has. ChemBench and AstaBench are the follow-ups. A number
       somebody else can also produce is the only kind that survives an argument with a chemist.
 
-- [ ] **The agent cannot execute code, and the decision on record is narrower than the consequence** —
-      [L], **answered and awaiting merge** ([`Chemclaw3-mcp` #12](https://github.com/8fqycwdt8v-oss/Chemclaw3-mcp/pull/12), `D-2026-08-25-a-sandbox-is-a-server-not-a-verb`). The capability is `servers/pyexec` there — one
-      stateless tool, no core edit here, and the `execute` verb stays withheld. This row is deleted
-      in the commit that merges that PR, not before: until it does, the tree still cannot do this. `agent/scratchpad.py::scratchpad_tools` withholds `execute` for a correct reason: deepagents
-      0.7 ships exactly one concrete sandbox (`LangSmithSandbox`, declined on content-egress grounds)
-      and `LocalShellBackend` is documented as unrestricted. That is a refusal of *two specific
-      sandboxes*. What is not on record is a decision about whether an execution substrate belongs at
-      all — and the consequence of not having one is that anything not pre-wrapped as a tool is
-      unreachable: no ad-hoc unit conversion, no fit, no re-parse of an unexpected output file. Every
-      comparable chemistry agent executes (ChemCrow, Coscientist, El Agente, OpenClaw). The number to
-      test the decision against: **El Agente Gráfico** replaced multi-agent chat with a typed execution
-      runtime where large objects stay native and measured 168.4 → 9.1 LLM requests (−94.6%), 1.65M →
-      284k tokens (−82.8%), 4.5× wall-clock, *and* rubric score 88.25% → 90.94%. An ADR either way.
+      **Blocked on a working model credential** (see the row in §4), and the mock cannot stand in: `cli.mock_llm` emits scripted tool calls without *choosing* them in response to a question, so both arms of any comparison would measure the script. Measured 2026-08-25 through the real lane: expected-tool-reached 0/3.
 
 - [ ] **`deep-research` has no index behind it** — [M]. `agent/research_tools.py::gather_evidence`
       sweeps the knowledge graph, the ELN, the mounted document share and the fingerprint store —
@@ -519,41 +484,36 @@ only holds defects can only ever restore the system to what it already intended 
       nomenclature wants structured databases. A process chemist asking "has anyone run this coupling
       on a deactivated aryl chloride" currently gets whatever those 39 notes happen to say.
 
-- [ ] **The lossless context edit and the destructive one share one trigger** — [S].
-      `agent/compaction.py::context_compaction_middleware` composes exactly the right two edits —
-      upstream's `ClearToolUsesEdit` (a re-fetchable tool result becomes a placeholder; the
-      `tool_use` record survives, so the model can re-fetch) and the first-party
-      `KeepLastConversationGroupsEdit` (older groups are deleted from the request) — and hands
-      **both** `trigger=settings.agent_context_token_budget`. One knob, default 100_000: nothing
-      reduces until 100k, and then the lossless edit and the destructive one fire in the same breath.
-      Anthropic's own composition separates them by an order of magnitude on purpose — clearing at
-      30k, compaction at 180k in the cookbook's research agent — because a lossless edit is cheap
-      enough to run early and often, and every token it reclaims early is a group the destructive
-      edit never has to reach for. Add `agent_tool_result_clear_trigger` beside the budget and give
-      `ClearToolUsesEdit` its own; `tests/test_compaction.py` already drives both edits, so the
-      assertion is a third case rather than a new harness. **The summarizer being off is not this
-      row** — `disabled_summarizer`'s argument (a summary is new model prose over content
-      `agent/framing.py` marked untrusted, and the envelope does not survive it) stands, and a first
-      draft of the 2026-08-25 review filed this row wrongly as "add the lossless edit" by reading a
-      docstring instead of the call site.
+- [ ] **`pyexec` is merged in the fleet and unreachable from any deployment here** — [S].
+      `Chemclaw3-mcp` #12 shipped `servers/pyexec` and `D-2026-08-25-a-sandbox-is-a-server-not-a-verb`
+      records the decision, but `grep -rn pyexec` in this tree finds only that ADR and `tasks/todo.md`:
+      no entry under `connectors:` in `deploy/helm/chemclaw/values.yaml:161`, so no `url`, no
+      `networkPolicy.egressDestinations` host, and nothing telling an operator to provide
+      `CHEMCLAW_PYEXEC_TOKEN`. The seam working as designed is exactly why this is easy to miss —
+      **zero core edits also means zero core changes to remind anybody** — and until the chart names
+      it the agent's Python sandbox exists and cannot be called. `chem` and `safety` are the shape to
+      copy (`values.yaml:170-177`): `enabled: true`, `server: true`, a `url`, and the two operator
+      obligations spelled out in their comment.
 
-- [ ] **Cost is metered but never evaluated** — [S]. `agent/turn_cost.py` and `core/metrics.py` record
-      what a turn spends; no case in `data/evals/cases/` scores it. HAL (21,730 rollouts, 9 models, 9
-      benchmarks) found the most expensive model on the accuracy/cost Pareto frontier in **1 of 9**
-      benchmarks, and that higher reasoning effort *reduced* accuracy in a majority of runs — neither
-      is visible to a suite that scores only accuracy. `evals/metric.py`'s `@metric` registry takes a
-      float; the meter already produces one. This is the cheapest row here and it is what makes
-      `model_routes` a decision instead of a preference.
+- [ ] **`make type` is red on `main`, and has been for longer than anyone noticed** — [S]. Two
+      errors, neither introduced by recent work — confirmed by stashing a branch and re-running:
+      `tests/test_bo_campaign_record.py:498` returns `Any` from a function declared
+      `dict[str, Any]`, and `tests/test_step_handoff.py:376` reads `.arguments` off a
+      `ToolStep | JobStep | AgentStep` union where `AgentStep` has no such attribute. Both are in
+      *tests*, which is why the suite passes and the gate does not. `make check` is documented as
+      "what CI runs" and a gate that is red at rest is a gate nobody can use to tell their own
+      breakage from the standing one — which is how the second of these survived to be found by a
+      change that had nothing to do with it.
 
-- [ ] **The `Chemclaw3-mcp` catalogue is not re-derived against releases** — [S]. `MODULES.md` files
-      `retro` as *adopted, not built*, `admet` against "ADMET-AI / DeepChem", and `nomenclature`
-      (OPSIN, MIT, local) as "the best value-to-effort ratio in the catalogue". Since those
-      assumptions were written: **Boltz-2** shipped MIT-licensed, approaching FEP accuracy on binding
-      affinity at ~1000× the efficiency; **ether0** shipped Apache-2.0 as a 24B open-weights chemistry
-      reasoning model that beats frontier general models on open-answer chemistry and molecular
-      design; RetroReasoner/Retro-R1 changed what a retrosynthesis server would wrap. A catalogue is a
-      claim about what is available, and claims go stale — the same rule this file states about its
-      own rows. Re-derive those three entries; the OPSIN one is probably still the right first build.
+- [ ] **This environment's `API-KEY` is present and rejected, which blocks three rows** — [S], and
+      it is operational rather than code. Measured 2026-08-25: `anthropic.AuthenticationError: 401`
+      from `api.anthropic.com`, with and without the session's `ANTHROPIC_BASE_URL` cleared.
+      `CLAUDE.md` documents the variable as "may not exist in every environment"; present-and-stale
+      is the case it does not cover and the worse one, because it reads as a defect rather than as a
+      missing credential. `tests/test_prompt_caching.py` now probes reachability and skips with a
+      reason naming which case it is, so the suite is honest about it — but the *live* half of the
+      eval plan (the bucket-C control arm, any external benchmark, and grading any probe on the
+      model's judgement rather than on the harness) needs a working one and nothing else.
 
 - [ ] **Memory records; it does not change what the next turn does** — [L], and it needs an ADR
       before it needs code. Six tiers exist and all six are *read on request*:

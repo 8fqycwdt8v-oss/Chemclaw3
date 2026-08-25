@@ -1,7 +1,7 @@
 # Implementation plan — closing the 2026-08-25 field benchmark
 
 **Status, 2026-08-25.** Done: W0.1, W0.2, W0.3, W0.4, W1.1, W2.1, W2.2, W3.1 (declined, with an
-ADR), W3.2 (built, `Chemclaw3-mcp` #12), W4.1 (`Chemclaw3-mcp` #13), W4.4. W1.2 and W4.3 were
+ADR), W3.2 (**merged**, `Chemclaw3-mcp` #12), W4.1 (**merged**, `Chemclaw3-mcp` #13), W4.4. W1.2 and W4.3 were
 *attempted and stopped by their own measurements* — both are written up where they stand rather than
 left looking undone. **W2.3 and W2.4 are blocked on a working model credential**, and the mock
 cannot stand in for either. W4.2 (`litsearch`) is not started: it needs a bulk-corpus build.
@@ -496,9 +496,9 @@ a replaced `__import__` in the analysis namespace instead. And the runner was de
 scientific stack; measured at 1.2-1.9 s on every call against an 11 ms empty child, so nothing is
 pre-imported. Both reversals are in `D-2026-08-25-a-sandbox-is-a-server-not-a-verb`.
 
-**Not merged, deliberately.** It runs code a language model wrote. The gates are green and the
-design is argued, but the control table in `servers/pyexec/README.md` — which half is a boundary and
-which half is not — is a thing a person should read before this ships.
+**Merged** as `Chemclaw3-mcp` #12, on a green CI (`check`, `manifests`, `offline`). The backlog row
+is deleted in the same commit, per that file's rule: until the PR merged the tree still could not do
+this, and now it can.
 
 #### The risk to state plainly in the ADR
 
