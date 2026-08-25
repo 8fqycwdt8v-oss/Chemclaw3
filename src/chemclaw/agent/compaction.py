@@ -51,6 +51,15 @@ is now one import away: a summarizer reads retrieved evidence and writes text th
 as conversation, so it is an indirect-prompt-injection surface pointed straight at the thread. The
 char/4 estimator and two deterministic edits need no credential, no extra model call, and no trust.
 
+**This prohibition is about the thread, and `agent/condense.py` is not a counter-example to it**
+(`D-2026-08-25-a-summarizer-in-the-thread-and-a-condenser-behind-a-tool`). That module does make a
+model call over retrieved evidence, and it is named here because a reader arriving at this
+paragraph as *the* prohibition would otherwise read it as a contradiction. The two reasons above
+are the replay and the envelope, and a tool result is neither: it arrives as a `ToolMessage`, framed
+on the way out, crossing every `wrap_tool_call` gate, carrying its citations, and cleared by
+`ClearToolUsesEdit` like any other result rather than becoming history. Nothing below changes for
+it, and `disabled_summarizer` stays switched off.
+
 **It tells the repeat guard, and that coupling is deliberate.** `agent/repeat_guard.py` refuses a
 third identical call on the stated grounds that the model already holds the first answer. Clearing a
 tool result is exactly what makes that false, and both modules said so and neither acted: this

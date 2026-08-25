@@ -116,6 +116,15 @@ supplies it. `FingerprintReactionRetriever`'s `records` argument is **required**
 defaulted, because a default reaching for the production store would be the forbidden import
 wearing a different hat.
 
+**`ProcessConditions` rides on the row.** `D-2026-08-25-the-structure-is-discarded-at-the-note-boundary`
+landed on `main` while this was in flight and put a run's figures into frontmatter as numbers,
+arguing for that over "a second table". The argument survives the move rather than being overridden
+by it: what it rejected was a store *just* for conditions, and the reaction row already exists here,
+so the numbers ride on it and there is still exactly one place a run's figures live.
+`agent/protocol_tools.condense_protocols` gains a record fallback beside its share-document one —
+without it every reaction reference would read as `missing`, which is the same silent hole
+`_from_share` was written to close, arriving from the other side.
+
 ## What was kept, and why
 
 - **The slug rule.** `ReactionRecord.reaction_id` still validates through `kg.note.require_note_slug`

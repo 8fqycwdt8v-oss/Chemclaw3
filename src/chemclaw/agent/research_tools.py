@@ -17,7 +17,7 @@ evidenced fact from transferred analogy, and drafting new protocols — lives in
 
 from datetime import date
 from itertools import zip_longest
-from typing import Any
+from typing import Any, Literal
 
 from chemclaw.agent.framing import defang, frame_untrusted
 from chemclaw.core.config import settings
@@ -25,7 +25,7 @@ from chemclaw.core.errors import ChemclawError
 from chemclaw.core.tool_registry import tool
 from chemclaw.ingest.eln.records import default_record_store
 from chemclaw.ingest.sources.registry import active_retrieve_sources
-from chemclaw.retrieval.evidence import EvidenceChunk, SourceRetriever
+from chemclaw.retrieval.evidence import EvidenceChunk, EvidenceSweep, SourceRetriever
 from chemclaw.retrieval.fanout import sweep_sources
 from chemclaw.retrieval.hybrid import reciprocal_rank_fusion
 from chemclaw.retrieval.retrievers import FingerprintReactionRetriever
@@ -33,6 +33,9 @@ from chemclaw.science.fingerprints.store import default_reaction_store
 
 # Test seam: swap the production reaction store for an in-memory one without a database.
 _reaction_store = default_reaction_store
+
+# Which bound cut the sweep, or `None` when nothing did.
+_Truncation = Literal["count", "chars"] | None
 
 
 def _text_retrievers() -> list[SourceRetriever]:
@@ -159,7 +162,7 @@ async def gather_evidence(
     tag: str | None = None,
     since: str | None = None,
     until: str | None = None,
-) -> list[EvidenceChunk]:
+) -> EvidenceSweep:
     """Gather cited evidence for a research question from every internal source at once.
 
     Runs each text source (the knowledge graph, and any future literature/analytics source)
@@ -183,10 +186,14 @@ async def gather_evidence(
         until: Optional ISO date (YYYY-MM-DD); keep only notes dated on or before it.
 
     Returns:
-        Evidence chunks, each with its content, the `source_note_id` to cite/expand, and which
-        retriever found it. Capped at the configured budget so a broad sweep does not flood the
-        context; if you hit the cap, narrow the query (a `note_type`/`tag`/date filter) rather
-        than assume you have seen everything.
+        The sweep: its `chunks` (each with its content, the `source_note_id` to cite or expand, and
+        which retriever found it), plus what it could not say. **Read `truncated_by` and
+        `sources_failed` before concluding anything from an absence.** `truncated_by` is set when a
+        cap cut the list — `count` means narrow the query with a `note_type`/`tag`/date filter,
+        `chars` means the sources are returning long chunks and a narrower question will reach
+        further — and `total_before_cap` says how much there was. A name in `sources_failed` means
+        that source could not be asked at all, so the answer is about less than the whole corpus
+        however complete the chunks look.
     """
     filters: dict[str, Any] = {}
     if note_type is not None:
@@ -260,7 +267,7 @@ async def gather_evidence(
     # the prompt through it — outside the envelope, where a forged delimiter would be read as the
     # envelope closing. `defang` rather than `frame_untrusted`, because a label is not evidence and
     # wrapping it would make the citation unreadable.
-    return [
+    framed = [
         chunk.model_copy(
             update={
                 "content": frame_untrusted(chunk.content, note_id=chunk.source_note_id),
@@ -273,5 +280,49 @@ async def gather_evidence(
                 "source_note_id": defang(chunk.source_note_id),
             }
         )
-        for chunk in ranked[: settings.gather_evidence_max_chunks]
+        for chunk in ranked
     ]
+    kept, truncated_by = _within_budget(framed)
+    return EvidenceSweep(
+        chunks=kept,
+        truncated_by=truncated_by,
+        total_before_cap=len(framed),
+        sources_failed=sorted(failed),
+    )
+
+
+def _within_budget(chunks: list[EvidenceChunk]) -> tuple[list[EvidenceChunk], _Truncation]:
+    """Spend both budgets down the merged ranking, and say which one ran out.
+
+    **Both, because either alone is unbounded in the other.** `gather_evidence_max_chunks` counts
+    chunks whose sizes differ ~7.5x across sources — a note excerpt is `note_excerpt_chars` (240)
+    and a share chunk is up to its binding's `chunk_chars` (1,800) — so 40 chunks is ~9.6 kB from
+    the graph and ~72 kB from a share, and nothing normalised them. A count of things cannot bound
+    anything, because what a thing costs is whatever is in it: exactly the finding
+    `agent_keep_last_conversation_groups` records, where counting groups left a 300k-token thread
+    at 180k against a 100k budget.
+
+    **Spent by walking the merged ranking, which is what keeps it fair.**
+    `D-2026-08-01-a-cap-that-starves-a-source` is about the *shape* of a cut rather than its size:
+    `ranked` is already round-robin across sources (or RRF-fused), so consuming it in order spends
+    the character budget cross-source-fairly for the same reason the count is. A second cap applied
+    the old way — per source, or over a re-sorted union — would reintroduce the starvation that
+    ADR measured to zero surviving chunks on a whole leg.
+
+    **At least one chunk always survives.** An over-budget first chunk would otherwise return an
+    empty list, which this tool's contract says means "nothing on file" — the same clamp
+    `KeepLastConversationGroupsEdit` makes for the same reason, since an empty result that reads as
+    an honest absence is worse than an oversized one.
+    """
+    budget = settings.gather_evidence_max_chars
+    kept: list[EvidenceChunk] = []
+    spent = 0
+    for chunk in chunks[: settings.gather_evidence_max_chunks]:
+        cost = len(chunk.content)
+        if kept and spent + cost > budget:
+            return kept, "chars"
+        kept.append(chunk)
+        spent += cost
+    if len(chunks) > len(kept):
+        return kept, "count"
+    return kept, None

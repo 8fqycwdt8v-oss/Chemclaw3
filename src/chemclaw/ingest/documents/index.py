@@ -30,7 +30,7 @@ import math
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 import psycopg
 from psycopg.rows import TupleRow
@@ -41,6 +41,7 @@ from chemclaw.core.config import SCHEMA_VECTOR_DIM, settings
 from chemclaw.core.errors import SubsystemUnavailableError
 from chemclaw.core.fulltext import TSQUERY_TERMS, reference_terms, reference_tokens
 from chemclaw.ingest.documents.binding import DocumentShareError
+from chemclaw.ingest.documents.chunk import Chunk
 
 
 class DocumentIndexError(SubsystemUnavailableError):
@@ -107,6 +108,50 @@ class StaleChunk(BaseModel):
     chunking_key: str
     ordinal: int
     content: str
+
+
+class StoredDocument(BaseModel):
+    """One document as the tables hold it: the path it is cited as, and its pieces in order.
+
+    The read-model `upsert` writes and nothing read until now. Separate from `DocumentText`
+    because they are different things — this is rows, that is reassembled text — and because only
+    the caller knows the cutting's overlap, so the join cannot happen down here.
+    """
+
+    doc_id: str = Field(min_length=1)
+    # `CITATION_SQL`'s rule, the smallest matching path, so a whole-document read cites the same
+    # file a chunk hit from that document cites rather than a different copy of it.
+    path: str = Field(min_length=1)
+    pieces: list[Chunk] = Field(default_factory=list)
+    modified_at: datetime | None = None
+
+    model_config = {"arbitrary_types_allowed": True}
+
+
+class DocumentText(BaseModel):
+    """A whole document, reassembled from its stored chunks, saying what that is and is not.
+
+    **Not the file's bytes.** `chunk_document` strips each piece, drops empty ones, joins blocks
+    with a blank line and hoists `[page 3]` out of the body into a coordinate — none of it
+    recoverable — so this is the text *as the crawl parsed and indexed it*. That is also the text
+    every citation a turn is holding points into, which is the property that matters: a reader
+    checking a quotation checks it against what was actually retrieved.
+
+    `truncated` is carried rather than implied. A document over the read ceiling comes back short,
+    and a shortened document that does not say so reads as a complete one — the rule
+    `FingerprintSearch.verdict` and `EvidenceChunk.conflicts_total` already follow.
+    """
+
+    doc_id: str = Field(min_length=1)
+    source: str = Field(min_length=1)
+    # The smallest path holding this document, by `CITATION_SQL`'s rule — so a whole-document read
+    # cites the same file a chunk hit from it cites, rather than picking a different copy.
+    path: str = Field(min_length=1)
+    text: str
+    chunks: int = Field(ge=0)
+    truncated: bool = False
+    coordinates: list[str] = Field(default_factory=list)
+    modified_at: datetime | None = None
 
 
 class DocumentFilter(BaseModel):
@@ -212,6 +257,22 @@ class DocumentIndex(Protocol):
 
     async def store_embeddings(self, chunks: list[ChunkRecord], key: str) -> None:
         """Replace the vector and key of existing chunks, leaving content and coordinate alone."""
+        ...
+
+    async def stored_document(
+        self, source: str, doc_id: str, chunking_key: str
+    ) -> StoredDocument | None:
+        """This document as stored under one cutting, or `None` when this share does not hold it.
+
+        The read half of what `upsert` writes, and the only way back to a whole protocol: the
+        parsed text is discarded once `doc_id` is taken from it, so these rows *are* the document.
+        Scoped by `source` and gated on the same file-row eligibility a search uses, so a caller
+        cannot read a document out of a share it was never entitled to search.
+
+        Pieces are `chunk.Chunk` rather than `ChunkRecord` — the same shape the cutter produced,
+        and deliberately without the vector. A whole-document read wants text; carrying 1,536
+        floats a piece for it would be the largest part of the payload and none of the answer.
+        """
         ...
 
     async def touch(self, source: str, paths: list[str]) -> None:
@@ -384,6 +445,37 @@ class InMemoryDocumentIndex:
         for row in [k for k in self._chunks if k[0] in touched and (k[0], k[1]) not in claimed]:
             del self._chunks[row]
             self._keys.pop(row, None)
+
+    async def stored_document(
+        self, source: str, doc_id: str, chunking_key: str
+    ) -> StoredDocument | None:
+        """This document as stored, when some path on `source` still holds it under this cutting."""
+        paths = sorted(
+            f.path
+            for f in self._files.values()
+            if f.doc_id == doc_id and f.chunking_key == chunking_key and f.source == source
+        )
+        if not paths:
+            return None
+        rows = sorted(
+            (
+                chunk
+                for (cdoc, ckey, _), chunk in self._chunks.items()
+                if cdoc == doc_id and ckey == chunking_key
+            ),
+            key=lambda c: c.ordinal,
+        )
+        return StoredDocument(
+            doc_id=doc_id,
+            # `min` mirrors `CITATION_SQL`, so the reference backend cites what Postgres cites.
+            path=paths[0],
+            pieces=[
+                Chunk(ordinal=r.ordinal, content=r.content, coordinate=r.coordinate) for r in rows
+            ],
+            modified_at=next(
+                (f.modified_at for f in self._files.values() if f.path == paths[0]), None
+            ),
+        )
 
     async def stale_chunks(self, key: str, limit: int, chunkings: set[str]) -> list[StaleChunk]:
         """Chunks of a live cutting whose vector was made by a different configuration."""
@@ -592,6 +684,9 @@ _ELIGIBLE = f"EXISTS (SELECT 1 {_FILE_MATCH}) "
 # external store. Two spellings of "which path does this content get cited as" would be two
 # citation policies, and they would diverge the first time either was tuned.
 CITATION_SQL = f"(SELECT min(f.path) {_FILE_MATCH}) AS path "
+# The same file rows' modification time, for a whole-document read: `max`, because a document
+# copied into several folders is as recent as the most recently touched copy of it.
+_MODIFIED_SQL = f"SELECT max(f.modified_at) {_FILE_MATCH}"
 
 
 class PostgresDocumentIndex:
@@ -646,6 +741,17 @@ class PostgresDocumentIndex:
             f"UPDATE document_chunks SET embedding = %(emb)s::vector({width}), "
             "embedding_key = %(key)s "
             "WHERE doc_id = %(doc)s AND chunking_key = %(chunking)s AND ordinal = %(ord)s"
+        )
+        # The whole document, in document order, gated on the same file-row eligibility a search
+        # uses — `%(tag)s`/`%(since)s`/`%(until)s` are bound NULL here because a whole-document read
+        # is addressed by id rather than filtered, but the *source* and *chunking* clauses of
+        # `_ELIGIBLE` still apply: a document is readable from the share that indexed it, under the
+        # cutting that share uses, and from nowhere else.
+        self._document = (
+            f"SELECT c.ordinal, c.content, c.coordinate, {CITATION_SQL}, "
+            f"({_MODIFIED_SQL}) AS modified_at FROM document_chunks c "
+            f"WHERE c.doc_id = %(doc)s AND c.chunking_key = %(chunking)s AND {_ELIGIBLE}"
+            "ORDER BY c.ordinal"
         )
         # `IS DISTINCT FROM`, not `<>`: NULL is every row written before the key column existed,
         # and `<>` would silently pass over exactly those.
@@ -964,6 +1070,37 @@ class PostgresDocumentIndex:
             for row in rows
             if row[5]
         ]
+
+    async def stored_document(
+        self, source: str, doc_id: str, chunking_key: str
+    ) -> StoredDocument | None:
+        """This document as stored, when some path on `source` still holds it under this cutting."""
+        params: dict[str, Any] = {
+            "doc": doc_id,
+            "chunking": chunking_key,
+            "src": source,
+            "tag": None,
+            "since": None,
+            "until": None,
+        }
+        try:
+            async with self._connection() as conn, conn.cursor() as cur:
+                await cur.execute(self._document, params)
+                rows = await cur.fetchall()
+        except psycopg.Error as exc:
+            raise DocumentIndexError(
+                "the document index did not answer, so the document was not read"
+            ) from exc
+        # Every row carries the same resolved citation; a document no live file row claims returns
+        # none at all, which is the `None` this method promises rather than an empty document.
+        if not rows or not rows[0][3]:
+            return None
+        return StoredDocument(
+            doc_id=doc_id,
+            path=rows[0][3],
+            pieces=[Chunk(ordinal=r[0], content=r[1], coordinate=r[2]) for r in rows],
+            modified_at=rows[0][4],
+        )
 
     async def search_dense(
         self, source: str, query_embedding: list[float], top_k: int, filters: DocumentFilter

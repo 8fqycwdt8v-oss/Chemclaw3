@@ -23,7 +23,9 @@ from pathlib import Path
 
 import pytest
 
+from chemclaw.agent.condense import Protocol
 from chemclaw.agent.graph_tools import expand_note
+from chemclaw.agent.protocol_tools import _from_record
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.ingest.eln.adapter import RawEntry
@@ -250,6 +252,46 @@ def test_expanding_a_citation_to_an_unknown_record_says_so(
             await expand_note("reaction-never-ingested")
 
     asyncio.run(_run())
+
+
+def test_condense_protocols_resolves_a_reaction_reference(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`condense_protocols` reads runs out of the store, not only notes out of the graph.
+
+    Runs left the graph's id space when they became rows, and they are the largest class of
+    protocol this tool exists to compare — the hits `similar_reactions` hands back. Without the
+    record fallback every one of them reads as `missing`: the tool would answer "I could not find
+    those" about the corpus it was built for, which is the silent hole `_from_share` was written to
+    close for share documents, arriving from the other side.
+
+    Asserted through `_from_record` rather than through the whole tool, because condensing calls a
+    model; what is being pinned here is the resolution, including that the figures ride along as
+    numbers rather than being left for the comparison to re-derive from prose.
+    """
+    monkeypatch.setattr(settings, "knowledge_dir", "/nonexistent-knowledge")
+
+    async def _run() -> Protocol | None:
+        store = InMemoryReactionRecordStore()
+        adapter = _ListAdapter([_entry("rxn-cond", datetime(2026, 3, 1, tzinfo=UTC))])
+        record = record_from_ord_reaction(adapter.map_to_ord(adapter._entries[0]))
+        await store.record([record])
+        monkeypatch.setattr("chemclaw.agent.protocol_tools.default_record_store", lambda: store)
+        return await _from_record(note_id_for_reaction("rxn-cond"))
+
+    protocol = asyncio.run(_run())
+    assert protocol is not None, (
+        "a reaction reference resolved to nothing — the tool would report it as `missing`"
+    )
+    assert protocol.conditions is not None and protocol.conditions.yield_percent == 85.0
+    assert "Ethanol and acetic acid" in protocol.text
+
+
+def test_condense_protocols_leaves_a_non_reaction_reference_alone() -> None:
+    """The record fallback must not swallow a share document's `source:doc_id` citation."""
+
+    async def _run() -> Protocol | None:
+        return await _from_record("share:some-document-id")
+
+    assert asyncio.run(_run()) is None
 
 
 def _campaign_citing(tmp_path: Path, target: str) -> None:

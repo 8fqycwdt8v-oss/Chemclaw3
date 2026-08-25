@@ -37,6 +37,16 @@ The elegant version was not the first one. Two things forced it:
 One hazard I introduced and then removed: routing on the `reaction-` prefix *before* the graph made
 any human-authored note under that name silently unreachable. Graph first, store second.
 
+## Merge with main (main moved mid-flight)
+- [x] Base was `bed7d69`, whose own CI run **failed**; `50cb06f` on main fixed the two mypy errors
+      that had kept main red since 2026-08-22. Merged main in rather than waiting.
+- [x] Main added `ProcessConditions` frontmatter, read by `condense.py` and `protocol_tools.py`.
+      Both sides changed the same mapping, so it is carried rather than picked: the record gains a
+      `conditions` JSONB column, and `condense_protocols` gains a record fallback — without it
+      every reaction reference would read as `missing`, silently breaking a feature main had just
+      shipped.
+- [x] Verified the exact CI command: `mypy src examples tests` → clean.
+
 ## Not done, deliberately
 The chemist's actual insight is still not captured — see the `DEFERRED.md` row. This change makes
 the ELN queryable; it does not make it teach.

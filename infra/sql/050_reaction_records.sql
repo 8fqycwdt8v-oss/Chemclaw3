@@ -33,6 +33,12 @@ CREATE TABLE IF NOT EXISTS reaction_records (
     -- When the experiment was run. `since`/`until` window on this, so a record with no date is
     -- outside every window rather than inside all of them.
     performed_at     DATE,
+    -- The setpoints and outcomes a run recorded, as numbers rather than as prose
+    -- (`kg.note.ProcessConditions`). JSONB rather than seven columns because the shape is one
+    -- model with one reader: anything comparing runs wants the whole block, and a column per field
+    -- would be a migration every time that model gains one. NULL means the entry recorded none of
+    -- them — never "all zero", which is the distinction `comparison.MISSING` renders.
+    conditions       JSONB,
     source           TEXT        NOT NULL,
     first_seen       TIMESTAMPTZ NOT NULL DEFAULT now(),
     last_seen        TIMESTAMPTZ NOT NULL DEFAULT now()

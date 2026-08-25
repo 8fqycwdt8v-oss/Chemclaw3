@@ -35,11 +35,12 @@ from typing import Any, Protocol, runtime_checkable
 
 import psycopg
 from psycopg.rows import TupleRow
+from psycopg.types.json import Jsonb
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from chemclaw.core import db
 from chemclaw.core.config import settings
-from chemclaw.kg.note import require_note_slug
+from chemclaw.kg.note import ProcessConditions, require_note_slug
 
 logger = logging.getLogger(__name__)
 
@@ -47,11 +48,12 @@ logger = logging.getLogger(__name__)
 # nothing here, and that is decided without a query.
 RECORD_TYPE = "reaction"
 
-_COLUMNS = "reaction_id, body, compound_smiles, project, performed_at, source"
+_COLUMNS = "reaction_id, body, compound_smiles, project, performed_at, conditions, source"
 
 _UPSERT = f"""
 INSERT INTO reaction_records ({_COLUMNS})
-VALUES (%(reaction_id)s, %(body)s, %(compound_smiles)s, %(project)s, %(performed_at)s, %(source)s)
+VALUES (%(reaction_id)s, %(body)s, %(compound_smiles)s, %(project)s, %(performed_at)s,
+        %(conditions)s, %(source)s)
 ON CONFLICT (reaction_id) DO UPDATE SET
     -- Every field is refreshed, because an ELN amends an entry *in place*: a yield corrected after
     -- assay, an impurity added, a retraction. The old note path compared bodies to notice that and
@@ -60,6 +62,7 @@ ON CONFLICT (reaction_id) DO UPDATE SET
     compound_smiles = EXCLUDED.compound_smiles,
     project = EXCLUDED.project,
     performed_at = EXCLUDED.performed_at,
+    conditions = EXCLUDED.conditions,
     source = EXCLUDED.source,
     last_seen = now()
 """
@@ -85,6 +88,10 @@ class ReactionRecord(BaseModel):
     compound_smiles: str | None = None
     project: str | None = None
     performed_at: date | None = None
+    # The numbers a chemist compares, kept as numbers beside the prose that renders them
+    # (`kg.note.ProcessConditions`). `None` means the entry recorded none of them, which is not the
+    # same claim as an empty block.
+    conditions: ProcessConditions | None = None
     source: str = Field(min_length=1)
 
     @field_validator("reaction_id")
@@ -259,6 +266,9 @@ class PostgresReactionRecordStore:
                             "compound_smiles": item.compound_smiles,
                             "project": item.project,
                             "performed_at": item.performed_at,
+                            "conditions": Jsonb(item.conditions.model_dump(exclude_none=True))
+                            if item.conditions
+                            else None,
                             "source": item.source,
                         }
                         for item in records
@@ -339,7 +349,8 @@ def _record(row: tuple[Any, ...]) -> ReactionRecord:
         compound_smiles=row[2],
         project=row[3],
         performed_at=row[4],
-        source=row[5],
+        conditions=ProcessConditions(**row[5]) if row[5] else None,
+        source=row[6],
     )
 
 
