@@ -187,7 +187,7 @@ def test_gather_evidence_hybrid_mode_fuses_rankings(monkeypatch: pytest.MonkeyPa
     """In hybrid mode gather_evidence returns the RRF order (the shared note first)."""
     _wire_two_sources(monkeypatch)
     monkeypatch.setattr(settings, "retrieval_mode", "hybrid")
-    out = asyncio.run(research_tools.gather_evidence("q"))
+    out = asyncio.run(research_tools.gather_evidence("q")).chunks
     assert [c.source_note_id for c in out] == ["b", "a", "c"]
 
 
@@ -202,7 +202,7 @@ def test_gather_evidence_graph_mode_round_robins_the_sources(
     """
     _wire_two_sources(monkeypatch)
     monkeypatch.setattr(settings, "retrieval_mode", "graph")
-    out = asyncio.run(research_tools.gather_evidence("q"))
+    out = asyncio.run(research_tools.gather_evidence("q")).chunks
     assert [c.source_note_id for c in out] == ["a", "b", "c"]
 
 
@@ -244,7 +244,7 @@ def test_truncation_is_fair_across_sources(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setattr(settings, "retrieval_mode", "graph")
     monkeypatch.setattr(settings, "gather_evidence_max_chunks", 40)
 
-    out = asyncio.run(research_tools.gather_evidence("q"))
+    out = asyncio.run(research_tools.gather_evidence("q")).chunks
 
     counts = Counter(chunk.retriever for chunk in out)
     assert len(out) == settings.gather_evidence_max_chunks
@@ -264,6 +264,6 @@ def test_a_single_source_keeps_its_own_ranking(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setattr(research_tools, "_text_retrievers", lambda: [_FakeSource("graph", ranked)])
     monkeypatch.setattr(settings, "retrieval_mode", "graph")
 
-    out = asyncio.run(research_tools.gather_evidence("q"))
+    out = asyncio.run(research_tools.gather_evidence("q")).chunks
 
     assert [chunk.source_note_id for chunk in out] == ["n0", "n1", "n2"]

@@ -123,6 +123,17 @@ class LlmSettings(BaseSettings):
     # verdict is one cheap structured call, and on expiry the verifier degrades to the offline
     # deterministic citation gate rather than holding the finished answer hostage.
     verifier_timeout_seconds: float = Field(default=30.0, gt=0)
+    # The per-protocol condensation call's own deadline (`agent.condense`). Per *map unit*, so
+    # one stalled extraction costs one row of the comparison and never the turn — the same
+    # degrade-per-item rule the verifier applies to the whole answer, one level down. Larger than
+    # the verifier's 30 s because the input is a whole procedure rather than a drafted answer, and
+    # far under `service_turn_timeout_seconds` so a slow endpoint cannot hold a finished turn.
+    #
+    # The model itself is routed through `model_routes` under the task key `"protocol-digest"`, so
+    # a deployment can point condensation at a cheap model without a second provider or a second
+    # import site. No enable flag: it ships on, and the deterministic degrade below every failure
+    # is what makes that honest with no credential present.
+    protocol_digest_timeout_seconds: float = Field(default=45.0, gt=0)
     # The ungrounded-parameter scan over a drafted answer: shapes a chemist would read as
     # specification — a flow rate, a gradient table, a wavelength, a back pressure, a column brand,
     # an ICH limit, a polymorph form — marked for review when no tool in the turn produced them.

@@ -1656,3 +1656,132 @@ def test_the_external_store_backend_carries_the_chunking_through_every_write() -
         assert await store.search("chunks", coarse_vector, 10) == [], "and its point went with it"
 
     asyncio.run(_run())
+
+
+def test_a_chunked_document_can_be_read_back_whole(tmp_path: Path) -> None:
+    """The address the retriever has always emitted finally has a reader.
+
+    A chunk hit cites `sharedrive:doc-…#3`; until now there was no way to ask for the other pieces,
+    because `sync._read_and_parse` discards the parsed text once `doc_id` is taken from it. A
+    protocol is atomic, so a turn that can only see one cut of it cannot reason about the procedure.
+    """
+    index = InMemoryDocumentIndex()
+    share = _long_share(tmp_path, chunk_chars=400, chunk_overlap_chars=40)
+    asyncio.run(sync_share(SOURCE, load_binding(share), index))
+    retriever = ShareDocumentRetriever(binding=share, name=SOURCE, index=index)
+
+    hits = asyncio.run(retriever.retrieve("charge the vessel", {}))
+    assert hits, "sanity: the share answers at all"
+    doc_id = hits[0].source_note_id.split(":", 1)[1].split("#", 1)[0]
+
+    whole = asyncio.run(retriever.read_document(doc_id))
+    assert whole is not None
+    assert whole.chunks > 1, "the fixture must actually be cut into several pieces"
+    # The document is *whole*: the first and last step both present, from one read.
+    assert "Step 0:" in whole.text and "Step 119:" in whole.text
+    assert whole.path == "SOPs/protocol.txt"
+    assert not whole.truncated
+
+
+def test_reading_a_document_this_share_does_not_hold_is_none_not_empty(tmp_path: Path) -> None:
+    """`None` means "could not be read". An empty document would be a different, false claim."""
+    index = InMemoryDocumentIndex()
+    share = _long_share(tmp_path, chunk_chars=400, chunk_overlap_chars=40)
+    asyncio.run(sync_share(SOURCE, load_binding(share), index))
+    retriever = ShareDocumentRetriever(binding=share, name=SOURCE, index=index)
+    assert asyncio.run(retriever.read_document("doc-nothing-here")) is None
+    assert asyncio.run(retriever.read_document("")) is None
+
+
+def test_a_whole_document_read_is_refused_without_the_shares_group(
+    tmp_path: Path, as_user: Callable[[str, set[str]], None]
+) -> None:
+    """A whole read is a strictly larger disclosure than a ranked excerpt, so it asks the same gate.
+
+    Including the reject-if-absent half: a gated share with no actor on the turn returns nothing,
+    which is `require_actor` applied to a corpus rather than to a tool.
+    """
+    index = InMemoryDocumentIndex()
+    public = _long_share(tmp_path, chunk_chars=400, chunk_overlap_chars=40)
+    asyncio.run(sync_share(SOURCE, load_binding(public), index))
+    doc_id = next(iter(index._files.values())).doc_id
+
+    gated = {**public, "required_roles": ["chemclaw.sharedrive.reader"]}
+    del gated["public"]
+    retriever = ShareDocumentRetriever(binding=gated, name=SOURCE, index=index)
+
+    # No actor at all on the turn.
+    assert asyncio.run(retriever.read_document(doc_id)) is None
+
+    as_user("someone", {"chemclaw.other"})
+    assert asyncio.run(retriever.read_document(doc_id)) is None
+
+    as_user("someone", {"chemclaw.sharedrive.reader"})
+    assert asyncio.run(retriever.read_document(doc_id)) is not None, (
+        "and the entitled caller still gets it"
+    )
+
+
+def test_an_oversized_document_comes_back_short_and_says_so(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A shortened document that does not say so reads as a complete one."""
+    index = InMemoryDocumentIndex()
+    share = _long_share(tmp_path, chunk_chars=400, chunk_overlap_chars=40)
+    asyncio.run(sync_share(SOURCE, load_binding(share), index))
+    retriever = ShareDocumentRetriever(binding=share, name=SOURCE, index=index)
+    doc_id = next(iter(index._files.values())).doc_id
+
+    monkeypatch.setattr(settings, "document_read_max_chars", 100)
+    whole = asyncio.run(retriever.read_document(doc_id))
+    assert whole is not None
+    assert whole.truncated is True
+    assert len(whole.text) == 100
+
+
+def test_both_backends_read_the_same_whole_document() -> None:
+    """The reference backend and Postgres must agree, or a test proves nothing about production."""
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        async with await connect(settings.postgres_dsn) as conn:
+            await conn.execute("TRUNCATE document_files, document_chunks")
+            await conn.commit()
+
+        (vector,) = await asyncio.to_thread(embed_texts, ["a chunk of a protocol"])
+        key = embedding_config_key()
+        file_row = FileRecord(
+            path="SOPs/protocol.txt",
+            source=SOURCE,
+            doc_id="doc-1",
+            fingerprint="1:2",
+            chunking_key="400:40",
+        )
+        chunks = [
+            ChunkRecord(
+                doc_id="doc-1",
+                chunking_key="400:40",
+                ordinal=n,
+                content=f"Step {n}: charge and hold.",
+                coordinate=f"page {n + 1}",
+                embedding=vector,
+            )
+            for n in range(4)
+        ]
+        results = []
+        for index in (PostgresDocumentIndex(), InMemoryDocumentIndex()):
+            await index.upsert([file_row], chunks, key)
+            stored = await index.stored_document(SOURCE, "doc-1", "400:40")
+            assert stored is not None, f"{type(index).__name__} did not read the document back"
+            results.append(
+                (
+                    stored.path,
+                    [(p.ordinal, p.content, p.coordinate) for p in stored.pieces],
+                )
+            )
+            # A share that does not hold it reads as absent on both.
+            assert await index.stored_document("other-share", "doc-1", "400:40") is None
+
+        assert results[0] == results[1], "the two backends disagree about the stored document"
+
+    asyncio.run(_run())

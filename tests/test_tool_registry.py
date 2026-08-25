@@ -41,6 +41,7 @@ _EXPECTED_INPROCESS_TOOLS = {
     "find_notes",
     "expand_note",
     "gather_evidence",
+    "condense_protocols",
     "find_knowledge_gaps",
     "propose_knowledge_note",
     "record_confirmed_answer",
