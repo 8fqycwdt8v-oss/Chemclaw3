@@ -20,6 +20,7 @@ from chemclaw.agent.condense import (
 )
 from chemclaw.core.config import settings
 from chemclaw.kg.note import ProcessConditions
+from chemclaw.memory.comparison import MISSING
 
 
 class _FakeStructured:
@@ -279,3 +280,93 @@ def test_the_summarizer_is_still_off_while_the_condenser_exists() -> None:
 
     assert "condense_protocols" in registered_tool_names()
     test_the_summarizer_in_the_compiled_stack_can_never_fire()
+
+
+def _changed_cell(table: str, ref: str) -> str | None:
+    """The "Changed vs previous" cell for one row, read by header rather than by position.
+
+    By header because the column set is not fixed — `drop_empty_columns` removes what nothing
+    recorded and the refusal column appears only when something was refused, so an index counted
+    from either end reads a different column depending on the fixture.
+    """
+    lines = [line for line in table.splitlines() if line.startswith("|")]
+    header = [c.strip() for c in lines[0].split("|")[1:-1]]
+    index = header.index("Changed vs previous")
+    for line in lines[2:]:
+        cells = [c.strip() for c in line.split("|")[1:-1]]
+        if cells[0] == ref:
+            return cells[index]
+    return None
+
+
+def test_a_failed_extraction_does_not_invent_a_condition_change() -> None:
+    """The defect: a transient endpoint failure manufactured two solvent swaps that never happened.
+
+    Measured before the guard, on three runs with *identical* conditions and one failed extraction:
+    `solvent 2-MeTHF -> —` on the failed row and `solvent — -> 2-MeTHF` on the one after it. Absent
+    is not a value, and this lands in the one column a chemist reads to find what moved.
+    """
+    protocols = [
+        _protocol(f"reaction-{name}", "Heat in 2-MeTHF.", temperature_c=90.0, time_h=12.0)
+        for name in ("A", "B", "C")
+    ]
+    result = _run(protocols, _FakeClient(raise_on="reaction-B"))
+
+    assert result.degraded == ["reaction-B"], "the fixture must actually degrade one row"
+    for ref in ("reaction-B", "reaction-C"):
+        assert "solvent" not in (_changed_cell(result.table, ref) or ""), (
+            f"{ref} reports a solvent change against a row whose procedure was never read"
+        )
+    # Temperature and time were recorded on both sides throughout and did not move.
+    assert _changed_cell(result.table, "reaction-B") == "unchanged"
+
+
+def test_a_protocol_without_a_field_is_not_diffed_against_one_that_has_it() -> None:
+    """A share document has no `conditions` at all, and reaction notes beside it do.
+
+    Measured before the guard: `temperature 90 °C -> —; time 12 h -> —`, then the same in reverse —
+    four changes describing fields the document does not have. `changes_between`'s docstring already
+    excludes equivalents and loadings for exactly this reason; the guard applies it to the three
+    columns that are actually compared.
+    """
+    protocols = [
+        _protocol("reaction-A", "Heat in 2-MeTHF.", temperature_c=90.0, time_h=12.0),
+        # No conditions and no prose: nothing on this row is comparable with its neighbours.
+        Protocol(ref="sharedrive:doc-9f", source="SOPs/x.pdf", text=""),
+        _protocol("reaction-C", "Heat in 2-MeTHF.", temperature_c=90.0, time_h=12.0),
+    ]
+    result = _run(protocols, _FakeClient())
+
+    for ref in ("sharedrive:doc-9f", "reaction-C"):
+        cell = _changed_cell(result.table, ref)
+        assert cell is not None and "temperature" not in cell and "time" not in cell, (
+            f"{ref} reports a change in a field one side never recorded: {cell!r}"
+        )
+
+
+def test_nothing_comparable_is_not_reported_as_unchanged() -> None:
+    """ "unchanged" is a claim that the conditions match, so it may not stand in for "no idea".
+
+    The third cell state, and the reason the guard needed one: silencing the fabricated change
+    without it would have turned every incomparable pair into a positive assertion of sameness.
+    """
+    protocols = [
+        _protocol("reaction-A", "Heat in 2-MeTHF.", temperature_c=90.0, time_h=12.0),
+        Protocol(ref="sharedrive:doc-9f", source="SOPs/x.pdf", text=""),
+    ]
+    result = _run(protocols, _FakeClient())
+    assert _changed_cell(result.table, "sharedrive:doc-9f") == MISSING
+
+
+def test_a_real_condition_change_is_still_reported() -> None:
+    """The mutant guard for the three above: they pass trivially if the column says nothing at all.
+
+    Without this, deleting the comparison entirely would satisfy every test written for the defect.
+    """
+    protocols = [
+        _protocol("reaction-A", "Heat.", temperature_c=90.0, time_h=12.0),
+        _protocol("reaction-B", "Heat.", temperature_c=70.0, time_h=18.0),
+    ]
+    cell = _changed_cell(_run(protocols, _FakeClient()).table, "reaction-B")
+    assert cell is not None
+    assert "temperature 90 °C → 70 °C" in cell and "time 12 h → 18 h" in cell
