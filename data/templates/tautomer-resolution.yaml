@@ -55,6 +55,19 @@ steps:
       species: "${steps.forms.result.smiles}"
       ranking: tautomers
       solvent: "${inputs.solvent}"
+      # **`thorough` — a conformer search per tautomer — and this default was measured, not chosen.**
+      # Acetylacetone ranked from one embedding per tautomer at GFN2 comes out 99.9% keto; it is
+      # ~80% *enol* in the gas phase. The enol is stabilised by an intramolecular hydrogen bond that
+      # exists in one planar conformer and in none of the others, so a ranking that does not search
+      # conformational space does not see the thing that makes the enol favourable — and gets the
+      # textbook case qualitatively backwards while looking entirely reasonable.
+      #
+      # This is the most expensive default in the catalogue and it is the right one: a cheap
+      # tautomer ranking that inverts the answer is worse than no ranking, because every downstream
+      # number then describes the wrong form with no sign that anything went wrong. Where the cost
+      # is not affordable, call `rank_species` directly at a lower level and say in the answer that
+      # the ranking did not search conformers.
+      level: thorough
 
   - id: report
     kind: agent

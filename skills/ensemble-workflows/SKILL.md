@@ -126,6 +126,15 @@ Ask it whenever the structure has a proton that can move between heteroatoms: he
 guanidines, thioamides, 2-pyridone/2-hydroxypyridine. Skip it for a molecule with no mobile proton,
 and say you checked — that costs a sentence and tells the reader the question was asked.
 
+**A tautomer ranking that does not search conformers can be qualitatively wrong, not just imprecise.**
+Measured: acetylacetone ranked from one embedding per tautomer at GFN2 comes out **99.9% keto**,
+against roughly 80% *enol* in the gas phase. The enol is stabilised by an intramolecular hydrogen
+bond that exists in one planar conformer and in none of the others, so a ranking that never looks
+for that conformer cannot see the thing that makes the enol favourable — and inverts the textbook
+case while looking entirely reasonable. `run_tautomer-resolution` therefore ranks at
+`level="thorough"`, a conformer search per tautomer, which is the most expensive default here and
+the right one. If you rank at a cheaper level, say so in the answer.
+
 Reading the ranking: a gap above about 3 kcal/mol is a real answer and everything downstream should
 use that form. A **small gap is also an answer, and a more important one** — both forms are
 populated, and any property that differs between them is not a single number. Report the mixture

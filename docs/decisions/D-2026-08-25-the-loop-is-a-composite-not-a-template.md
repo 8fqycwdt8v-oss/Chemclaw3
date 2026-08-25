@@ -99,6 +99,16 @@ is to change the atom count — `--deprotonate` on phenol returned 12-atom struc
 13-atom input and raised `12 positions for 13 elements`. Both were unreachable code paths until the
 binaries existed.
 
+**A tautomer ranking without a conformer search inverts the textbook case.** Running the whole
+chain — `chem`'s enumeration into a GFN2 relaxation per tautomer, Boltzmann-weighted — puts
+acetylacetone at **99.9% keto**. It is roughly **80% enol** in the gas phase. The enol's stability
+is an intramolecular hydrogen bond present in one planar conformer and absent from the others, so a
+ranking that never searches conformational space cannot see what makes the enol favourable, and the
+answer it gives is not imprecise but backwards. `run_tautomer-resolution` therefore ranks at
+`level="thorough"` — a conformer search per tautomer, the most expensive default in the catalogue.
+A cheap tautomer ranking that inverts the answer is worse than none, because every downstream
+number then describes the wrong form with nothing indicating it.
+
 **The sampled-count trap fired again, on schedule.** n-butane returns **4** conformers at `--quick`
 and **2** at `--normal`; the textbook answer is 2 and the quick pass simply dedupes less. D-101
 recorded this exact failure ("passed twice and returned 4 on the third run"), and it is why nothing
