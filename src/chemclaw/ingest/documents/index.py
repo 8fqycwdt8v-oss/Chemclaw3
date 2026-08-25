@@ -505,8 +505,21 @@ class InMemoryDocumentIndex:
             # `min` mirrors `CITATION_SQL`, so the reference backend cites what Postgres cites.
             path=paths[0],
             pieces=kept,
-            modified_at=next(
-                (f.modified_at for f in self._files.values() if f.path == paths[0]), None
+            # `max` across every matching file row, mirroring `_MODIFIED_BY_DOC` — a document
+            # copied into several folders is as recent as the most recently touched copy of it.
+            # This read the cited path's own mtime instead, so the two backends disagreed whenever
+            # a document had more than one copy with different times; the cross-backend test could
+            # not see it, because its fixture had one file row and no mtime at all.
+            modified_at=max(
+                (
+                    f.modified_at
+                    for f in self._files.values()
+                    if f.doc_id == doc_id
+                    and f.chunking_key == chunking_key
+                    and f.source == source
+                    and f.modified_at is not None
+                ),
+                default=None,
             ),
             truncated=truncated,
         )
@@ -718,6 +731,16 @@ _ELIGIBLE = f"EXISTS (SELECT 1 {_FILE_MATCH}) "
 # external store. Two spellings of "which path does this content get cited as" would be two
 # citation policies, and they would diverge the first time either was tuned.
 CITATION_SQL = f"(SELECT min(f.path) {_FILE_MATCH}) AS path "
+# The same two facts for a *whole-document* read, keyed on the bound parameters rather than on a
+# chunk row. `CITATION_SQL` and `_MODIFIED_SQL` above correlate on `c.doc_id`/`c.chunking_key` so a
+# reader must evaluate them per row; here the document is already named, so one evaluation answers
+# for the whole result and the expression can sit outside a window that would otherwise force it to
+# run once per eligible chunk. Same rule, same rows, addressed differently — see `_document`.
+_FILE_MATCH_BY_DOC = _FILE_MATCH.replace("f.doc_id = c.doc_id", "f.doc_id = %(doc)s").replace(
+    "f.chunking_key = c.chunking_key", "f.chunking_key = %(chunking)s"
+)
+_CITATION_BY_DOC = f"SELECT min(f.path) {_FILE_MATCH_BY_DOC}"
+_MODIFIED_BY_DOC = f"SELECT max(f.modified_at) {_FILE_MATCH_BY_DOC}"
 # The same file rows' modification time, for a whole-document read: `max`, because a document
 # copied into several folders is as recent as the most recently touched copy of it.
 _MODIFIED_SQL = f"SELECT max(f.modified_at) {_FILE_MATCH}"
@@ -787,10 +810,22 @@ class PostgresDocumentIndex:
         # length in `ordinal` order and keeps every piece whose *preceding* total is under the cap,
         # which is the piece set `_within_chars` keeps: everything up to the cap, plus the one that
         # crosses it. `remaining` is how the caller learns more existed without reading it.
+        # **The citation and the modification time are resolved once, outside the window.** Both
+        # are correlated on `c.doc_id` and `c.chunking_key`, which the `WHERE` pins to a single
+        # value — so they are invariant across every row of this result and were being computed per
+        # row anyway. Inside the windowed subquery that is worse than merely redundant: a window
+        # must see every eligible row before the outer filter can drop any, so the planner cannot
+        # push the cut down. Measured with `EXPLAIN (ANALYZE, BUFFERS)` on 400 chunks with a cap
+        # that keeps two: `loops=400` on both subplans and 854 buffer hits, against 54 for the scan
+        # itself — 800 of them spent resolving one path and one timestamp four hundred times.
+        #
+        # Hoisted into the outer `SELECT`, they run once each. The window still visits every row,
+        # which is inherent to a running total and is what bounds the *transfer*; what this removes
+        # is the per-row work that had nothing to do with the bound.
         self._document = (
-            "SELECT ordinal, content, coordinate, path, modified_at, remaining FROM ("
-            f"SELECT c.ordinal, c.content, c.coordinate, {CITATION_SQL}, "
-            f"({_MODIFIED_SQL}) AS modified_at, "
+            f"SELECT ordinal, content, coordinate, remaining, ({_CITATION_BY_DOC}) AS path, "
+            f"({_MODIFIED_BY_DOC}) AS modified_at FROM ("
+            "SELECT c.ordinal, c.content, c.coordinate, "
             "sum(length(c.content)) OVER (ORDER BY c.ordinal) - length(c.content) AS before, "
             "count(*) OVER () AS remaining "
             f"FROM document_chunks c "
@@ -1138,16 +1173,16 @@ class PostgresDocumentIndex:
             ) from exc
         # Every row carries the same resolved citation; a document no live file row claims returns
         # none at all, which is the `None` this method promises rather than an empty document.
-        if not rows or not rows[0][3]:
+        if not rows or not rows[0][4]:
             return None
         return StoredDocument(
             doc_id=doc_id,
-            path=rows[0][3],
+            path=rows[0][4],
             pieces=[Chunk(ordinal=r[0], content=r[1], coordinate=r[2]) for r in rows],
-            modified_at=rows[0][4],
+            modified_at=rows[0][5],
             # `remaining` counts every eligible piece; fewer rows came back than that means the
             # window stopped early.
-            truncated=len(rows) < rows[0][5],
+            truncated=len(rows) < rows[0][3],
         )
 
     async def search_dense(

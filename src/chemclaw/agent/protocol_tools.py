@@ -92,7 +92,7 @@ async def _from_share(ref: str, readers: dict[str, Any]) -> Protocol | None:
 
 
 @tool
-async def condense_protocols(protocol_refs: list[str]) -> Condensation:
+async def condense_protocols(protocol_refs: list[str]) -> str:
     """Read many whole protocols at once and return one comparison of them.
 
     Use this instead of calling `expand_note` repeatedly whenever you have more than a handful of
@@ -115,9 +115,9 @@ async def condense_protocols(protocol_refs: list[str]) -> Condensation:
             mounted share.
 
     Returns:
-        The comparison, its per-protocol rows, and what was **not** read. `complete` means every
-        reference you passed was read — it never means you have seen every protocol on file; ask
-        the search that produced these references whether *it* was truncated.
+        The comparison, followed by what was **not** read and how many protocols it covers. That
+        count is every reference you passed — it never means you have seen every protocol on file;
+        ask the search that produced these references whether *it* was truncated.
 
     Raises:
         ChemclawError: When more protocols are asked for than one turn may condense, or than one
@@ -126,7 +126,7 @@ async def condense_protocols(protocol_refs: list[str]) -> Condensation:
     """
     refs = list(dict.fromkeys(r.strip() for r in protocol_refs if r.strip()))
     if not refs:
-        return Condensation(table="", complete=True)
+        return Condensation(table="", complete=True).render()
     if len(refs) > settings.protocol_digest_max_protocols:
         raise ChemclawError(
             f"{len(refs)} protocols is more than the {settings.protocol_digest_max_protocols} "
@@ -180,10 +180,14 @@ async def condense_protocols(protocol_refs: list[str]) -> Condensation:
     if missing:
         # Said out loud rather than dropped: a comparison silently missing a protocol the caller
         # asked for reads as a complete answer about a smaller set.
-        return result.model_copy(
+        result = result.model_copy(
             update={
                 "complete": False,
                 "degraded": [*result.degraded, *missing],
             }
         )
-    return result
+    # **Rendered here, not handed over as a model.** A pydantic return is stringified by
+    # `langchain_core.tools.base._stringify`, which falls back to `str()` — pydantic's repr — for
+    # anything `json.dumps` cannot take. Returning the string means the payload measured and the
+    # payload sent are the same thing rather than one chosen by a library's fallback path.
+    return result.render()

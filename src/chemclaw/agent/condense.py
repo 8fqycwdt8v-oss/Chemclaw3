@@ -117,17 +117,61 @@ class Condensation(BaseModel):
     """
 
     table: str
-    # **Excluded from serialization, deliberately, and measured.** The table *is* these rows
-    # rendered, so a payload carrying both sends every extracted field twice — measured at 80
-    # protocols, that duplication was most of what the condensation cost, and a tool that exists to
-    # spend less context cannot afford to say everything twice. The field stays on the object
-    # because it is the structured truth the table is built from, and tests and any future
-    # programmatic caller want it; what reaches a model is the comparison.
-    rows: list[ProtocolDigest] = Field(default_factory=list, exclude=True)
+    # The structured truth the table is rendered from. Kept for tests and any programmatic caller;
+    # `render()` is what a model is given, and it sends the table rather than these.
+    #
+    # **This field carried `exclude=True` and that did nothing**, which is worth recording where
+    # someone would otherwise add it back. A tool returning a pydantic model never reaches the model
+    # as `model_dump_json()`: `langchain_core.tools.base._stringify` tries `json.dumps(content)`,
+    # which cannot serialize a `BaseModel`, and falls back to `str(content)` — pydantic's repr,
+    # which ignores `exclude`. Measured on the wire, the `ToolMessage` content was
+    # `table='' rows=[] complete=True oversized=[] degraded=[]`.
+    rows: list[ProtocolDigest] = Field(default_factory=list)
     complete: bool = True
     # The refs that were not read, so a refusal is legible as a list and not only per row.
     oversized: list[str] = Field(default_factory=list)
     degraded: list[str] = Field(default_factory=list)
+
+    def render(self) -> str:
+        """The comparison as the model receives it — the table, then what it is not.
+
+        **A string rather than this object, so the payload is not chosen by somebody else's
+        library.** A tool returning a pydantic model is stringified by
+        `langchain_core.tools.base._stringify`, which prefers `json.dumps` and falls back to
+        `str()` when that fails — as it does for every `BaseModel`. So the wire form was pydantic's
+        repr: every `ProtocolDigest` field spelled out beside the table that already renders them,
+        and a `Field(exclude=True)` that could not take effect. Measured at 80 protocols, the real
+        saving against `expand_note` per protocol was **2.7x** where the excluded-field measurement
+        claimed 9.1x.
+
+        Rendering here means the thing measured and the thing sent are the same object.
+
+        The honesty fields are prose rather than a field dump because they are the whole "do not
+        read this as the full story" contract, and `complete`'s meaning cannot be recovered from a
+        bare `True`: it says every reference *you passed* was read, never that you have seen every
+        protocol on file.
+        """
+        if not self.rows:
+            return "No protocols were given to condense."
+        lines = [self.table.rstrip()]
+        if self.oversized:
+            lines.append(
+                f"\nNot read, too large for one call and never split: {', '.join(self.oversized)}. "
+                "Open one whole with expand_note to read its procedure."
+            )
+        if self.degraded:
+            lines.append(
+                f"\nProcedure not read for: {', '.join(self.degraded)}. Their recorded figures "
+                "above are unaffected."
+            )
+        lines.append(
+            f"\n{len(self.rows)} protocol(s) compared"
+            + ("." if self.complete else ", and the ones named above were not read.")
+            + " This is every protocol you asked for; it is not every protocol on file — whether"
+            " the search that produced these references was itself truncated is that search's own"
+            " answer to give."
+        )
+        return "\n".join(lines)
 
 
 def _excerpt(text: str, limit: int) -> str:

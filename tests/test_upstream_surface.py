@@ -584,3 +584,39 @@ def test_the_pinned_versions_are_the_ones_these_assertions_were_measured_against
             f"{package} {'.'.join(map(str, found))} is below the {'.'.join(map(str, floor))} "
             "these assertions were measured against"
         )
+
+
+def test_a_pydantic_tool_return_still_reaches_the_model_as_repr() -> None:
+    """`_stringify` prefers JSON and falls back to `str()`, so a `BaseModel` arrives as its repr.
+
+    Every structured tool in this repository returns a pydantic model — `EvidenceSweep`,
+    `NoteView`, `FingerprintSearch` — and none of them reaches the model as JSON, because
+    `json.dumps` cannot take a `BaseModel` and `_stringify` falls through to `str(content)`.
+
+    **This is asserted because a fix upstream would silently change every tool's payload**, and
+    because one design decision in this tree was already made against the wrong belief about it:
+    `Condensation.rows` carried `Field(exclude=True)` and a measurement taken with
+    `model_dump_json()`, neither of which described the wire. `agent/protocol_tools` now renders a
+    string at the tool boundary rather than depending on this behaviour — the assertion is here so
+    that if upstream starts serializing models properly, whoever reads this knows the repr
+    assumption is gone and can drop the workarounds it justified rather than leave them
+    unexplained.
+    """
+    from langchain_core.tools.base import _stringify
+    from pydantic import BaseModel, Field
+
+    class _Probe(BaseModel):
+        kept: str = "x"
+        hidden: str = Field(default="y", exclude=True)
+
+    rendered = _stringify(_Probe())
+
+    assert not rendered.startswith("{"), (
+        "`_stringify` now serializes a pydantic model as JSON. Every tool's payload just changed "
+        "shape, and `Field(exclude=True)` now takes effect where it previously did not — re-check "
+        "agent/condense.Condensation and agent/protocol_tools' string rendering."
+    )
+    assert "hidden=" in rendered, (
+        "`exclude=True` now survives tool-result stringification; the comment on "
+        "`Condensation.rows` saying it does not is stale"
+    )
