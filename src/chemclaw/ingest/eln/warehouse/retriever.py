@@ -142,9 +142,21 @@ class WarehouseVectorRetriever:
             if self._vector.embedding == "server"
             else (await asyncio.to_thread(embed_texts, [query]))[0]
         )
+        dialect = warehouse.vector_dialect
+        if dialect is None:
+            # Checked here rather than at construction because resolving the driver means importing
+            # the vendor client, and a chat pod that builds this half at startup must not pay that.
+            # A `BindingError` is a `ChemclawError`, so `durable/publish.py` marks it non-retryable:
+            # a driver that cannot do similarity search will not learn to on a retry.
+            raise BindingError(
+                f"{self.name}: this binding declares a `vector:` block, but its driver offers no "
+                "similarity-search dialect. Only a warehouse whose function names this repository "
+                "has verified can serve one; rank on a vector index instead, or drop the block"
+            )
         statement, params = sql.vector_statement(
             self._vector,
             warehouse.placeholder,
+            dialect,
             embedded,
             filters,
             settings.retrieval_top_k,

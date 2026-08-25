@@ -122,6 +122,13 @@ def test_the_source_registry_offers_no_external_source() -> None:
         # the source ships disabled, so a cluster reaches a warehouse only by naming it in
         # `CHEMCLAW_DATA_SOURCES`.
         "eln-snowflake",
+        # The same corporate ELN in a lakehouse instead, and sanctioned by the same argument rather
+        # than by a new one: it is *the deployment's own system* behind the same identity boundary,
+        # its address and credentials arrive entirely from configuration, and it ships disabled. It
+        # is here as a second entry rather than folded into the row above because the two are
+        # different manifests naming different drivers — the seam working as designed (D-120), and
+        # the second warehouse D-2026-08-04 built it for.
+        "eln-databricks",
         # A mounted SMB/CIFS file share, and *not* an escalation of D-089 at all: it reaches no
         # host. The share is a read-only volume the platform mounts, so the code sees a POSIX path
         # exactly as `eln-json` sees a drop directory — no client, no credential in this repository,

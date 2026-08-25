@@ -36,7 +36,7 @@ from typing import Any
 from cryptography.hazmat.primitives import serialization
 
 from chemclaw.ingest.eln.warehouse.binding import BindingError
-from chemclaw.ingest.eln.warehouse.driver import WarehouseQueryError
+from chemclaw.ingest.eln.warehouse.driver import VectorDialect, WarehouseQueryError
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +71,39 @@ def _private_key_der(pem: str) -> bytes:
         format=serialization.PrivateFormat.PKCS8,
         encryption_algorithm=serialization.NoEncryption(),
     )
+
+
+class SnowflakeVectorDialect:
+    """Snowflake's spelling of a similarity search — the table that used to live in `sql.py`.
+
+    Moved here unchanged (`D-2026-08-25`): the function names and the `VECTOR(FLOAT, n)` cast are
+    this vendor's, and keeping them in the statement builder made a module that claims to be
+    dialect-neutral silently Snowflake-only. The strings are byte-identical to what shipped, which
+    is what `tests/test_warehouse_binding.py`'s exact-statement assertions check.
+    """
+
+    # How each metric is called and which way it sorts. One table because the two facts move
+    # together: a distance sorts ascending and a similarity descending, and a metric added with the
+    # wrong pairing would return the *least* similar rows while looking entirely correct.
+    _METRICS: dict[str, tuple[str, str]] = {
+        "cosine": ("VECTOR_COSINE_SIMILARITY", "DESC"),
+        "inner": ("VECTOR_INNER_PRODUCT", "DESC"),
+        "l2": ("VECTOR_L2_DISTANCE", "ASC"),
+    }
+
+    def similarity(self, metric: str) -> tuple[str, str]:
+        """The Snowflake function for `metric`, and the direction it sorts."""
+        try:
+            return self._METRICS[metric]
+        except KeyError:
+            raise WarehouseQueryError(
+                f"Snowflake has no similarity function for metric {metric!r}; "
+                f"this driver serves {sorted(self._METRICS)}"
+            ) from None
+
+    def query_vector(self, placeholder: str, vector: Sequence[float], dim: int) -> tuple[str, Any]:
+        """Snowflake has a native `VECTOR` type, so the list binds directly against a cast."""
+        return f"{placeholder}::VECTOR(FLOAT, {dim})", list(vector)
 
 
 class _SnowflakeCursor:
@@ -170,6 +203,11 @@ class SnowflakeWarehouse:
     def placeholder(self) -> str:
         """Snowflake binds positionally under `paramstyle='qmark'`."""
         return "?"
+
+    @property
+    def vector_dialect(self) -> VectorDialect:
+        """Snowflake serves in-warehouse similarity search on all three metrics."""
+        return SnowflakeVectorDialect()
 
     async def _connect(self) -> Any:
         """Open the connection once, or raise `ConnectionError` so the caller can retry."""

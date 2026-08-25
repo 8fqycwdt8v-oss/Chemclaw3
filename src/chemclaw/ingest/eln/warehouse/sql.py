@@ -27,15 +27,7 @@ from chemclaw.ingest.eln.warehouse.binding import (
     RelatedBinding,
     VectorBinding,
 )
-
-# How each metric is called and which way it sorts. One table because the two facts move together:
-# a distance sorts ascending and a similarity descending, and a metric added with the wrong pairing
-# would return the *least* similar rows while looking entirely correct.
-_METRICS: dict[str, tuple[str, str]] = {
-    "cosine": ("VECTOR_COSINE_SIMILARITY", "DESC"),
-    "inner": ("VECTOR_INNER_PRODUCT", "DESC"),
-    "l2": ("VECTOR_L2_DISTANCE", "ASC"),
-}
+from chemclaw.ingest.eln.warehouse.driver import VectorDialect
 
 # The alias the similarity expression gets, so ordering and reading agree on one name and a site
 # column called `score` cannot collide with it.
@@ -107,6 +99,7 @@ def related_statement(
 def vector_statement(
     vector: VectorBinding,
     placeholder: str,
+    dialect: VectorDialect,
     query: str | Sequence[float],
     filters: dict[str, Any],
     top_k: int,
@@ -121,8 +114,12 @@ def vector_statement(
     `query` is the embedded vector under `embedding: local`, and the raw query text under `server`,
     where the warehouse's own function embeds it — the two paths differ only in what stands in the
     similarity call's second argument.
+
+    **The similarity function and the query-vector binding come from the driver**, not from a table
+    here: both are dialect facts, and this module contributes structure. See
+    `chemclaw.ingest.eln.warehouse.driver.VectorDialect` for why that moved.
     """
-    function, direction = _METRICS[vector.metric]
+    function, direction = dialect.similarity(vector.metric)
     params: list[Any] = []
     if vector.embedding == "server":
         # A model-taking embedder (Cortex) binds the model name ahead of the text; a plain UDF
@@ -134,8 +131,18 @@ def vector_statement(
             embedded = f"{vector.server_embed_function}({placeholder})"
             params.append(query)
     else:
-        embedded = f"{placeholder}::VECTOR(FLOAT, {embedding_dim})"
-        params.append(list(query))
+        # `embedding: local` means the caller embedded the query, so a string here is a wiring bug
+        # rather than a binding one — and it would otherwise reach the warehouse as a vector of
+        # characters. The guard is what narrows the union as well as what reports it.
+        if isinstance(query, str):
+            raise BindingError(
+                "embedding: local expects an embedded query vector, not the query text"
+            )
+        # The one value `sql.py` cannot render itself: a 1536-float vector is a *value*, and how it
+        # is bound is the sharpest dialect difference of all. The driver returns the expression and
+        # the single parameter that fills it.
+        embedded, bound = dialect.query_vector(placeholder, query, embedding_dim)
+        params.append(bound)
 
     columns = ", ".join([vector.key, *vector.content_columns])
     predicates, filter_params = _vector_predicates(vector, placeholder, filters)

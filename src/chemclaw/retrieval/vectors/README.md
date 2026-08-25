@@ -9,6 +9,7 @@ without any caller knowing. Decision record:
 | `base.py` | the `VectorStore` Protocol, its records and its two error types | no |
 | `memory.py` | the in-memory reference — exact cosine, what the tests measure against | no |
 | `qdrant.py` | the Qdrant adapter; the vendor client is late-bound | only when called |
+| `databricks.py` | the Mosaic AI Vector Search adapter; same late binding | only when called |
 | `registry.py` | `vector_store_provider` → an implementation, imported inside its own branch | no |
 
 That last column is the layout, not an accident — the same rule
@@ -17,9 +18,30 @@ That last column is the layout, not an accident — the same rule
 everything above it is exercised in CI against a fake, on a machine with no vector database running
 and no vendor package installed.
 
-**`qdrant-client` is not a dependency of this repository.** A store nobody has configured must not
-weigh on every pod, so the adapter imports it at first use and, when it is absent, says which
-package to install rather than raising `ImportError` from inside a worker.
+**Neither vendor client is a dependency of this repository.** A store nobody has configured must
+not weigh on every pod, so each adapter imports its client at first use and, when it is absent, says
+which package to install rather than raising `ImportError` from inside a worker.
+
+## What an operator must create
+
+*Qdrant*: a collection created with **cosine** distance and a payload index on `group`. Qdrant
+returns the configured distance's score and `VectorMatch.score` is a cosine, so a collection built
+with `Distance.DOT` or `Distance.EUCLID` would return numbers in another range and every fusion
+above would silently mis-rank.
+
+*Databricks*: a **Direct Vector Access** index — a Delta Sync index computes its own embeddings from
+a source table and cannot be upserted or deleted into, which is the whole of what this seam writes.
+Its schema must declare `id` (the primary key), `embedding` (the vector column) and `group_key`
+(`group_key` rather than `group` because `GROUP` is a SQL keyword and the column is queryable from
+Databricks SQL). `vector_store_document_collection` is then a **three-level Unity Catalog name**, not
+a bare word, and `vector_store_endpoint_name` names the endpoint serving it — an index is addressed
+by the pair.
+
+**Databricks does not return a cosine, and the adapter converts.** It ranks by `1/(1 + d²)` over
+Euclidean distance. That conversion is exact only for unit vectors, so `databricks.py` normalises on
+write *and* on query and then inverts it (`cos = 1.5 − 0.5/score`). Normalising is also what makes
+its L2 ordering agree with pgvector's cosine ordering in the first place — without it the two
+backends would disagree about which document is nearest and nothing would fail.
 
 ## What moves to the store, and what does not
 
@@ -64,3 +86,8 @@ hang a `source` payload on).
 
 One module implementing three methods, one name in `registry.py`, one value in the
 `vector_store_provider` literal. No core edit, and nothing else in the tree learns the name.
+
+Two things a second adapter is easy to get wrong, both silent: **the score must be the cosine this
+seam's contract promises**, whatever the vendor ranks by — check the vendor's own definition rather
+than assuming — and **a blocking client must cross `asyncio.to_thread`**, because a retriever runs
+inside a `gather` and one synchronous call stalls every other leg of the fan-out.
