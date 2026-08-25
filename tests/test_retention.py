@@ -47,11 +47,19 @@ def test_only_spent_operational_rows_are_prunable() -> None:
     `infra/sql`, so they are absent from the schema anybody reviews. Erasure already reached them
     (`agent/leaver.py`); nothing disposed of them, so a deployment that erased no one kept every
     turn's state forever.
+
+    `result_publications` is the fifth and joins on the same test as `tool_result_blobs`: it holds
+    no record of its own. A *delivered* row is a receipt for a result that now lives both in
+    `calculation_results` and in an external results store, so pruning it loses nothing. Its
+    predicate is what keeps that true — a `pending` or `failed` row is the only record that
+    something has **not** been published, and sweeping it on a clock would turn a results-store
+    outage into a silent gap.
     """
     assert set(_PRUNABLE) == {
         "session_events",
         "session_messages",
         "tool_result_blobs",
+        "result_publications",
         "checkpoints",
     }
 

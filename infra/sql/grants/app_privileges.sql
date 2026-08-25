@@ -96,6 +96,14 @@ BEGIN
     -- group is still spelled out on its own line rather than folded into the full-DML list below.
     EXECUTE format('GRANT INSERT, UPDATE, DELETE ON session_owners TO %I', app_role);
 
+    -- The result outbox joins this group and exercises all three verbs: INSERT on enqueue, UPDATE
+    -- to mark a row delivered or to count a failed attempt, and DELETE because retention prunes
+    -- *delivered* rows. That last one is the difference between this table and the two next to it
+    -- that refuse pruning: a delivered row is a receipt for something that now lives in two
+    -- places, so keeping every one forever would be a third copy of every result this deployment
+    -- has ever computed. A pending or failed row is never pruned - it is the only record that
+    -- something has *not* been published.
+    --
     -- Full DML, because the application genuinely deletes from these: the retention sweep prunes
     -- conversation history and spent mailbox rows, artifact eviction reclaims cold blobs, a turn
     -- claim is released, a subscription is removed, a preference is unset. The two document tables
@@ -111,8 +119,8 @@ BEGIN
     EXECUTE format(
         'GRANT INSERT, UPDATE, DELETE ON '
         'session_messages, session_events, session_turns, subscriptions, user_preferences, '
-        'artifact_blobs, document_files, document_chunks, note_index, tool_result_blobs '
-        'TO %I', app_role);
+        'artifact_blobs, document_files, document_chunks, note_index, tool_result_blobs, '
+        'result_publications TO %I', app_role);
 
     -- The tables LangGraph creates for itself, which no migration in `infra/sql` declares and which
     -- therefore fell through every enumeration above until they were named here.

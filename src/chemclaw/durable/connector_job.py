@@ -53,9 +53,14 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.durable.job_record import JobRecord, note_with_run_provenance, record_job
     from chemclaw.durable.memory_jobs import publish_memory_note_activity
     from chemclaw.durable.notify import notify_session_best_effort
+    from chemclaw.durable.publish_results import JobPublishInput, publish_job_result
     from chemclaw.kg.note import Note
 
-from chemclaw.durable.publish import BAD_DATA_RETRY, publish_note_best_effort
+from chemclaw.durable.publish import (
+    BAD_DATA_RETRY,
+    publish_note_best_effort,
+    publish_result_best_effort,
+)
 from chemclaw.durable.registry import durable_workflow
 
 
@@ -371,6 +376,42 @@ class ConnectorJobWorkflow:
         )
         return result
 
+    async def _publish_result(self, job: ConnectorJobInput, result: ConnectorJobResult) -> None:
+        """Offer this run's own result to the external results store, if one is configured.
+
+        The envelope's `data` is the composite the job produced - a reaction energy, a solvent
+        screen, an ensemble - which is precisely the shape that has no `calculation_results` row
+        and therefore reaches a results store through no other path.
+
+        `calc_ref` is the workflow id rather than a cache key, because a composite has no cache
+        key: its identity is the run. That is also what makes it idempotent, since the workflow id
+        is itself derived deterministically from the job and its arguments.
+
+        Runs through an activity rather than inline: a workflow may not touch a database, and
+        `publish_result_activity` carries the same bounded retry every other best-effort step here
+        uses.
+        """
+        if not result.data:
+            return
+        job_id = workflow.info().workflow_id
+        await publish_result_best_effort(
+            publish_job_result,
+            [
+                JobPublishInput(
+                    calc_ref=job_id,
+                    calc_type=f"{job.connector}.{job.job}",
+                    payload=result.data,
+                    depends_on=list(result.calc_refs),
+                    actor=job.requested_by,
+                    session_id=job.session_id,
+                    correlation_id=job.correlation_id,
+                    job_id=job_id,
+                    rationale=job.rationale,
+                )
+            ],
+            label=f"{job.connector}:{job.job}",
+        )
+
     async def _notify_failure(self, job: ConnectorJobInput, exc: BaseException) -> None:
         """Tell the session its job failed, before the failure propagates and closes this run.
 
@@ -409,6 +450,15 @@ class ConnectorJobWorkflow:
         # expensive campaign round the retry loop — but logged at error level, because unlike a
         # failed note this loses data nothing else holds.
         await self._record_run(record)
+        # The external results store, if a deployment has one. Beside the durable record and before
+        # the note, because it is the same kind of obligation the other two are: cross-cutting, and
+        # "each connector remembers" is the discipline that fails silently. Best-effort for the
+        # same reason as its neighbours — the science is already durable by the time this runs.
+        #
+        # This is the hook that reaches the *composites*. The primitives a job consumed were each
+        # published by `cached_compute` as they were computed; what only exists here is the
+        # composite the job assembled from them, which has no cache row of its own by design.
+        await self._publish_result(job, result)
         if job.publish_to_graph and result.note is not None:
             # The same PR-gate activity the memory-synthesis jobs use — one write path into the
             # graph, on the light background queue, bounded retries, never failing the job. The

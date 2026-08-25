@@ -29,11 +29,14 @@ else — it knows no concrete source (gate G6). Sources are attached through the
 `PostgresNoteIndex` answers ranking, eligibility and the row in a single statement, and there is
 nothing to delegate. Under any other provider, `ExternalVectorNoteIndex` moves **only** the dense
 half: the text, the `tsvector`, the file fingerprint and the embedding key stay in `note_index`,
-because `ts_rank` and a fingerprint diff are not things a vector database offers.
+because `ts_rank` is not a thing a vector database offers.
 
-It is a subclass, and a small one — two of `NoteIndex`'s five methods overridden, three inherited
-untouched. Smaller than the document twin on purpose: a note is embedded whole, so the point id *is*
-the note id and there is no citation to resolve.
+It is a subclass: four of `NoteIndex`'s five methods overridden, `search_lexical` inherited
+untouched. Three of the four are the dense half, and the fourth is the one worth knowing about —
+`fingerprints` namespaces the stored `embedding_key` by the collection, so that switching provider
+does not leave every row claiming a vector the new store has never held. Still smaller than the
+document twin: a note is embedded whole, so the point id *is* the note id and there is no citation
+to resolve.
 
 **`reindex_notes` retires notes deleted from disk** (D-2026-08-25). It did not use to, on the
 argument that a stale row is harmless — true while every vector sat in a Postgres table nobody bills

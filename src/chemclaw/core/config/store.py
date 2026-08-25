@@ -11,6 +11,11 @@ from typing import Literal
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings
 
+# Qdrant's own default, and the value `vector_store_url` ships with. Named because the
+# addressability validator has to compare against it: the field is non-empty by default, so
+# "is it set" cannot be an emptiness test for any provider that is not Qdrant.
+_QDRANT_DEFAULT_URL = "http://localhost:6333"
+
 
 class StoreSettings(BaseSettings):
     """Postgres/pgvector — fingerprint store (Phase 3) and QM result cache (plan step 1.10).
@@ -143,7 +148,7 @@ class StoreSettings(BaseSettings):
     vector_store_provider: Literal["pgvector", "qdrant", "databricks"] = "pgvector"
     # Where the external store is. Unused by `pgvector`, which reads `postgres_dsn` like every
     # other store here.
-    vector_store_url: str = "http://localhost:6333"
+    vector_store_url: str = _QDRANT_DEFAULT_URL
     # Registered with the log-redaction inventory by `retrieval.vectors.qdrant.open_qdrant_client`,
     # where it is read — so a client echoing its own configuration into a traceback cannot put the
     # key in a log. Registered at the read rather than here, which is the warehouse seam's placement
@@ -186,6 +191,16 @@ class StoreSettings(BaseSettings):
             raise ValueError(
                 f"vector_store_provider={self.vector_store_provider!r} needs `vector_store_url` "
                 "to point at the store; only 'pgvector' reads `postgres_dsn` instead"
+            )
+        if (
+            self.vector_store_provider == "databricks"
+            and self.vector_store_url == _QDRANT_DEFAULT_URL
+        ):
+            raise ValueError(
+                "vector_store_provider='databricks' still has the shipped default "
+                f"vector_store_url={_QDRANT_DEFAULT_URL!r}, which is Qdrant's. The emptiness check "
+                "above cannot catch this, because the field has a non-empty default; set the "
+                "workspace URL"
             )
         if self.vector_store_provider == "databricks" and not self.vector_store_endpoint_name:
             raise ValueError(
