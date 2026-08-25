@@ -48,12 +48,62 @@ Plan: `/root/.claude/plans/as-if-you-ask-fuzzy-crab.md` (approved).
 - [x] 1a. Render `procedure_text` when `steps` is empty (`ingest/eln/note.py`).
 - [x] 1b. Structured process fields in note frontmatter + `kg-validate` shape check.
 - [x] 1c. Document reassembly + `read_document` behind the entitlement gate.
-- [ ] 2. The per-protocol map (`agent/protocol_digest.py`), copying `verifier.py`'s five properties.
-- [ ] 3. `condense_protocols` tool + profile + skills.
-- [ ] 4. Compaction docstring + the "not a reversal" ADR.
-- [ ] 5. The cap's currency (`gather_evidence_max_chars` + `EvidenceSweep`) — separable, own ADR.
-- [ ] 6. Registers, `.env.example`, READMEs, DEFERRED rows.
+- [x] 2. The per-protocol map (`agent/protocol_digest.py`), copying `verifier.py`'s five properties.
+- [x] 3. `condense_protocols` tool + profile + skills.
+- [x] 4. Compaction docstring + the "not a reversal" ADR.
+- [x] 5. The cap's currency (`gather_evidence_max_chars` + `EvidenceSweep`) — separable, own ADR.
+- [x] 6. Registers, `.env.example`, READMEs, DEFERRED rows.
 
 ## Review
 
-_(pending)_
+**What shipped**, in the order it had to happen:
+
+1. `memory/comparison.py` — the comparative table extracted from `optimization_campaign_note`, so
+   the turn-time artifact and the PR-gated campaign note are one renderer at two altitudes.
+   28 existing tests pass unmodified, which is what makes it an extraction.
+2. `procedure_text` is rendered when a source maps no `steps`, and both are rendered when the steps
+   are an independent account rather than a cut of the prose — decided by containment, not a
+   threshold.
+3. `ProcessConditions` frontmatter: the figures a chemist compares reach the note as figures.
+4. `reassemble.py` + `stored_document` + `read_document`: a share document is addressable whole.
+5. `retrieval/condense.py` + `agent/protocol_tools.py`: many whole protocols become one comparison.
+6. `gather_evidence` gains a character bound and a return type that can say it was cut.
+7. Three ADRs, three registers, five READMEs/skills/profiles.
+
+**The result, measured** (2.8 kB protocol, the middle of the 3–8 kB band):
+
+| N | `expand_note` x N | `condense_protocols` | ratio |
+|---|---|---|---|
+| 5 | 3,600 | 472 | 7.6x |
+| 20 | 14,410 | 1,648 | 8.7x |
+| 80 | 57,650 | 6,352 | 9.1x |
+
+Protocols that fit the 100k budget on tool results alone: 137 -> 1,455 (2.8 kB), 49 -> 1,455 (8 kB).
+The structural property is that the condensation's marginal cost is **independent of protocol
+size**, so the budget bounds how many protocols a turn can hold rather than how long they are.
+
+**Four things measurement caught that reasoning had not:**
+
+- The first de-overlapping rule deleted 2,400 of 5,000 characters; the second still deleted 2,800
+  of 6,000 on period-10 content. Both silent. Only the third is correct, and both are pinned.
+- The first `Condensation` serialized the table *and* the rows it was rendered from — 1.4x, which
+  would not have been worth building.
+- `rows` was in input order while `_table` sorted internally, so "changed vs previous" would have
+  been a claim about a different row than the one above it.
+- The fairness test passed against the mutant it was written to catch until it asserted both
+  directions; it still does not catch a score-re-sort, and says so rather than reading stronger
+  than it is.
+
+**Not done, deliberately, with the reasoning recorded rather than the work half-done:**
+
+- `read_corpus`'s full rescan (`BACKLOG.md`) — a derived store would have fixed it as a *side
+  effect* of this change, and answering a scaling problem sideways is how a store nobody decided
+  on gets built.
+- Reagent/solvent *set* diffs in the comparison (`DEFERRED.md`) — needs `OrdReaction.inputs`, which
+  the chat pod cannot reach; diffing free-text reagent lines would report a change whenever one
+  procedure named a loading and its neighbour did not.
+- A durable per-set digest (`DEFERRED.md`) — a stub for a refusal nobody has hit.
+
+**Pre-existing failures, confirmed identical on `bed7d69`:** the two `test_prompt_caching` live
+tests (invalid API credential, 401) and two `mypy --strict` errors in
+`test_bo_campaign_record.py:498` and `test_step_handoff.py:376`.
