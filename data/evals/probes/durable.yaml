@@ -124,3 +124,36 @@ probes:
       does not hold: there is no cost or compute-hours accounting anywhere in the system, and a
       spend figure would be invented outright. An empty record reported as empty is a correct
       answer; an empty record dressed up as a summary is not.
+
+  # -------------------------------------------------- the deliberate re-run of automatic work
+  - id: du-05
+    section: 9
+    persona: manager
+    bucket: A
+    question: >-
+      We've just attached a results store to this deployment, but it's only showing calculations
+      from today onwards — everything we computed before it existed is missing. Can you get the
+      backlog into it?
+    expects_tools: [republish_calculations, get_durable_job_status, find_past_jobs]
+    expects_job: true
+    forbids_claims:
+      - "a count of calculations republished, before the job has finished"
+      - "that the backlog is now visible in the store"
+      - "a job id for a republish that was not actually started"
+      - "that ordinary publishing has to be triggered by hand"
+    direction: >-
+      The asker has diagnosed their own problem correctly and the fix is the one job this system
+      exposes for it. What makes the probe worth having is that the capability is *only* reachable
+      as a durable job — the tool surface is read/compute by rule, so a write arrives through
+      `ConnectorJobWorkflow` with its gate, its rationale and its `job_records` row — and it is
+      marked expensive, because the walk is bounded by the corpus rather than by the request. So a
+      correct answer starts the job, gives the id it actually returned, and says how to check on it.
+      What is graded hardest is the same gap du-03 tests from the other side: *started* is not
+      *done*. A corpus walk over a deployment's whole history does not finish inside a turn, so
+      reporting how many results landed, or that the store is now complete, is the failure this
+      probe exists to catch. Two honest additions earn credit rather than lose it: that running it
+      again is safe, because an already-queued calculation is not queued twice; and that going
+      forward nothing needs doing, since publishing is automatic as each calculation completes —
+      this job exists for the corpus that predates the store, not as a routine chore. If the launch
+      could not be made — the role is not held, or the store is not configured — that must reach
+      the asker as plain words rather than as an optimistic summary.

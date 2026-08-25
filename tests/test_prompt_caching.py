@@ -21,6 +21,7 @@ that proves the provider *honoured* any of the above. It skips without a credent
 stays offline.
 """
 
+import functools
 import os
 import warnings
 from typing import Any
@@ -297,11 +298,63 @@ def test_no_cache_activity_still_meters_zero() -> None:
 
 
 # --------------------------------------------------------------------------------------------
+# The credential, and the difference between not having one and having one that is refused.
+# --------------------------------------------------------------------------------------------
+
+_CREDENTIAL_ENV = "API-KEY"
+
+
+@functools.cache
+def _live_credential() -> str | None:
+    """The credential, but only if it actually works. `None` — with a reason — otherwise.
+
+    **The guard this replaced tested for the variable rather than for the credential**, and the two
+    come apart in the environment this repository is developed in. A Claude Code Remote box for
+    this repo carries `API-KEY` set to a value `api.anthropic.com` rejects; measured 2026-08-25,
+    both tests below therefore *ran* where the intent was plainly to skip, and `make test` returned
+    `3 failed, 4251 passed` on an unmodified tree. A red suite that means "your credential is
+    stale" is a red suite nobody can read.
+
+    `count_tokens` is the probe because it is **not billed**, which is also why the second test
+    uses it for its real work. One round trip, cached for the session by `functools.cache`, so a
+    suite with thirty guarded tests still costs one call.
+
+    **Only an authentication failure becomes a skip.** A 429 or a 529 is the provider being busy,
+    not the operator being unconfigured, and folding those into "skipped" is how a suite quietly
+    stops testing. They propagate, and the test fails as it should.
+    """
+    key = os.environ.get(_CREDENTIAL_ENV)
+    if not key:
+        return None
+    import anthropic
+
+    try:
+        anthropic.Anthropic(api_key=key).messages.count_tokens(
+            model="claude-haiku-4-5-20251001",
+            messages=[{"role": "user", "content": "probe"}],
+        )
+    except anthropic.AuthenticationError:
+        return None
+    return key
+
+
+def _no_credential_reason() -> str:
+    """Why the guarded tests are skipping, in the words an operator needs.
+
+    Absent and rejected are different problems with different remedies, and the skip line is the
+    only place anybody reads which one they have.
+    """
+    if not os.environ.get(_CREDENTIAL_ENV):
+        return f"no {_CREDENTIAL_ENV} in the environment"
+    return f"{_CREDENTIAL_ENV} is set but the provider rejects it — the credential is stale"
+
+
+# --------------------------------------------------------------------------------------------
 # The only test that proves the provider honoured any of it.
 # --------------------------------------------------------------------------------------------
 
 
-@pytest.mark.skipif("API-KEY" not in os.environ, reason="needs a live Anthropic credential")
+@pytest.mark.skipif(_live_credential() is None, reason=_no_credential_reason())
 def test_live_second_call_reads_from_cache(monkeypatch: pytest.MonkeyPatch) -> None:
     """Two back-to-back calls with our own payload: the second is served from cache.
 
@@ -318,7 +371,7 @@ def test_live_second_call_reads_from_cache(monkeypatch: pytest.MonkeyPatch) -> N
 
     payload = _captured_payload(monkeypatch)
     # After the capture, which deliberately installs a dummy key so it can never reach the network.
-    monkeypatch.setenv("ANTHROPIC_API_KEY", os.environ["API-KEY"])
+    monkeypatch.setenv("ANTHROPIC_API_KEY", _live_credential() or "")
     payload["max_tokens"] = 16
     # A unique tail, so this run writes its own entry instead of reading a previous run's.
     payload["messages"] = [{"role": "user", "content": f"Reply with: OK {uuid.uuid4().hex}"}]
@@ -376,7 +429,7 @@ _MEASURED_FLOORS = {"claude-sonnet-5": 1024, "claude-haiku-4-5-20251001": 4096}
 _BELOW_HAIKU_FLOOR: set[str] = set()
 
 
-@pytest.mark.skipif("API-KEY" not in os.environ, reason="needs a live Anthropic credential")
+@pytest.mark.skipif(_live_credential() is None, reason=_no_credential_reason())
 def test_which_shipped_profiles_clear_the_cache_floor() -> None:
     """Every profile's real prefix, against the floor of the model it runs on.
 
@@ -395,7 +448,7 @@ def test_which_shipped_profiles_clear_the_cache_floor() -> None:
     from chemclaw.agent.profiles import get_profile, registered_profile_names
 
     load_profiles()
-    client = anthropic.Anthropic(api_key=os.environ["API-KEY"])
+    client = anthropic.Anthropic(api_key=_live_credential())
     model = "claude-haiku-4-5-20251001"
     floor = _MEASURED_FLOORS[model]
 

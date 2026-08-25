@@ -448,10 +448,16 @@ def test_every_durable_probe_declares_the_job_expectation_it_is_named_for() -> N
     durable = [p for p in load_probes(str(PROBE_DIR)) if p.id.startswith("du-")]
     assert durable, "no durable probes found — this test would assert nothing"
     # du-04 is deliberately the exception: it asks about the *record* of past jobs, and starting
-    # one to answer it would be the wrong instinct. Its direction says so; this pins that the
-    # exception is one probe rather than a habit.
-    expecting = [p.id for p in durable if p.expects_job]
-    assert expecting == ["du-01", "du-02", "du-03"]
+    # one to answer it would be the wrong instinct. Its direction says so; naming the exemption
+    # rather than enumerating the expectant probes is what keeps the exception a named one rather
+    # than a habit, while letting the corpus grow without editing a list here.
+    exempt = {"du-04"}
+    silent = sorted(p.id for p in durable if not p.expects_job and p.id not in exempt)
+    assert not silent, (
+        f"durable probe(s) {silent} do not declare `expects_job` — they would run, pass and prove "
+        "nothing about Temporal. Set it, or add the id to `exempt` above with the reason."
+    )
+    assert exempt <= {p.id for p in durable}
 
 
 def test_no_probe_direction_asserts_which_deployment_it_meets() -> None:

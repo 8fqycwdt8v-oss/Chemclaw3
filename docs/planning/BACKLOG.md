@@ -16,9 +16,11 @@ row this queue has ever carried. 223 of its rows are open
 (`grep -c '^- \[ \]' docs/archive/findings-2026-08.md`; the header here said "~185" until
 2026-08-17). That is not "223 *further*" and the two counts do not subtract: promoting a row
 **restates** it, so a queued row is still open there under its original wording, and matching the
-two sets by title matches only 7 of this queue's 30 rows — the overlap is real and unmeasurable by
-`grep`, which is why the number here is the archive's own and not a difference. When a queued row
-needs its full measurement history, that file has it under the review that found it.
+two sets by title matched only 7 of the 30 rows this queue held when that was measured (it holds 41
+now; §5 is the first thing here that is not a defect this repository found in itself, and none of
+its rows is in the archive at all). The overlap is real and
+unmeasurable by `grep`, which is why the number here is the archive's own and not a difference. When
+a queued row needs its full measurement history, that file has it under the review that found it.
 
 **A row must name an anchor in the tree** — a module, a line, a manifest key — so any row can be
 checked with one `grep` instead of an argument. A row that cannot name one is not ready to be
@@ -104,20 +106,16 @@ topic).
       conversion out of the `pre-upgrade` Job into a `post-upgrade` one while the schema DDL stays
       where it is (~25 lines). Needs an ADR.
 
-- [ ] **No live lane in this repo can start** — [M]. `infra/live/processes.sh:47` pins
-      `CHEMCLAW_CONNECTORS_REQUIRED=true` while **chem and safety** are enabled and never started —
-      measured, `build_composite()` serves `bo, calc, molfp, rxnfp` and `check_connectors_at_startup`
-      raises. (This row used to name `calc` as a third; `calc` kept a local app after the physics
-      move and *is* served.) `cli/connectors_dev.py:78` emits URLs only for bundles with a local
-      app, so chem and safety keep their loopback defaults and the front door never boots. Also
-      `infra/live/e2e-full-stack/up.sh:185` puts `$MCP_REPO/manifests` on `CHEMCLAW_CONNECTORS_DIR`,
-      which `connectors/calc/connector.yaml:13` explicitly forbids — it survives on
-      `connectors/registry.py:124` (`found.setdefault`) being first-dir-wins, and **that behaviour
-      is pinned**: `tests/test_connector_registry.py:293` builds two dirs holding a bundle both
-      named `alpha`, on ports 7777 and 8888, and asserts the *first* dir's endpoint is the one
-      `enabled()` returns. (This row said "no test pins" it until 2026-08-17, which invented a
-      second hazard on top of a real one — the ordering is a load-bearing dependency of the live
-      lane whether or not it is pinned, and it is.)
+- [ ] **The four-repo lane puts the fleet's manifests on `CHEMCLAW_CONNECTORS_DIR`, which one
+      manifest forbids** — [S], and it is the half of the now-closed live-lane row that did not
+      close with it. `infra/live/e2e-full-stack/up.sh:185` adds `$MCP_REPO/manifests` to that path
+      while `connectors/calc/connector.yaml:13` explicitly forbids it. It works only because
+      `connectors/registry.py:124` is first-dir-wins (`found.setdefault`), and **that behaviour is
+      pinned**: `tests/test_connector_registry.py:293` builds two directories each holding a bundle
+      named `alpha`, on ports 7777 and 8888, and asserts the first directory's endpoint is what
+      `enabled()` returns. So this is latent rather than broken — the lane depends on an ordering
+      guarantee nothing in the lane states. Either the manifest stops forbidding it or the lane
+      stops relying on the order.
 
 - [ ] **The audit trail's `agent` column can never be non-empty** — [S]. `agent/audit.py:350` reads
       `get_current_specialist()`; `set_current_specialist` has **zero callers in `src/`** and
@@ -470,6 +468,216 @@ topic).
       `serverReplicas`/`workerReplicas` defaulting to `replicas`, and extend the chart test to
       require it whenever `worker` is set.
 
+
+- [ ] **Two tests guard on a credential being *present*, not on it working, and a stale one turns a
+      skip into a red suite** — [S]. `tests/test_prompt_caching.py:304` is
+      `@pytest.mark.skipif("API-KEY" not in os.environ, ...)` and
+      `test_which_shipped_profiles_clear_the_cache_floor` reads `os.environ["API-KEY"]` directly.
+      Measured on a Claude Code Remote box for this repo on 2026-08-25: the variable is set, the
+      value is rejected — `anthropic.AuthenticationError: 401 ... 'API key is invalid.'` — so both
+      tests **ran and failed** where the intent was plainly to skip, and `make test` came back
+      `3 failed, 4251 passed, 3 skipped` on an unmodified tree. `CLAUDE.md` already warns that the
+      credential "may not exist in every environment"; what it does not cover is the worse case,
+      present-and-stale, which reads as a defect in prompt caching rather than as an absent
+      credential. Guard on reachability (a `count_tokens` probe, which is unbilled and is what the
+      second test already uses) and skip with the reason, rather than on the key being non-empty.
+
+      Beside it, and *not* a defect worth a row of its own: `tests/test_reizman.py::test_bo_campaign_finds_high_yield`
+      also failed in that run, on the 180 s `pytest-timeout`, and **passes in 49 s in isolation** —
+      it was competing with four other pytest processes. Recorded here so the next person to see it
+      red under load does not go looking for a BoFire regression.
+
+---
+
+## 5 — Where the field moved past us
+
+Filed by the 2026-08-25 field benchmark — see
+[`docs/archive/REVIEW-2026-08-25-agentic-field-benchmark.md`](../archive/REVIEW-2026-08-25-agentic-field-benchmark.md)
+for the measurements and the sources behind every figure here. These rows are unlike the four
+sections above: none of them names broken code. Each names a place where something outside this
+repository now has a **measured** better answer to a problem this repository solved earlier and has
+not revisited. That is a different kind of debt and it needs its own section, because a queue that
+only holds defects can only ever restore the system to what it already intended to be.
+
+- [ ] **One merge added eighteen tools and 32% to what every turn costs** — [M], and it is the first
+      thing the two new gates caught. The GFN multi-step work took the `default` profile's static
+      prefix from **18,805 to 24,838 tokens** — measured by `tests/test_context_floor.py`, which
+      landed in the same window and so reported a cost that had already been paid. Its ceiling was
+      raised to 27,500 deliberately rather than the merge blocked, because blocking would have
+      punished an unrelated branch; the figure and the cause are in the constant's comment.
+
+      Two things are owed. **Eighteen probes**, because those tools are in
+      `tests/test_probe_coverage.py::GRANDFATHERED` — a list that claims nothing, only records what
+      predated the gate, and that the suite forbids growing. And a look at whether the eighteen need
+      to be eighteen *advertised* names: `run_bond_strength_survey` and `survey_bond_strengths` sit
+      beside each other on one surface, and `enumerate_*`/`run_*` reads like a primitive set that a
+      profile could narrow rather than every turn carrying all of it. **Bringing the ceiling back
+      down is the commit that proves that happened.**
+
+- [ ] **A tool schema is 38% developer rationale, and it ships on every turn** — [M], and it is
+      what `§ 5`'s deferral row turned into once measured. `science/bo/problem.py`'s nested models
+      carry design arguments in their class docstrings — *"One `objectives` field rather than a lead
+      objective plus a sidecar list (W3)"* — and Pydantic turns a class docstring into the schema
+      `description`, so `convert_to_openai_tool` ships them. Measured 2026-08-25 on the `default`
+      profile: `start_optimization_campaign` is 8,063 chars of schema, 4,392 of it description and
+      **3,047 of that elaboration past the first paragraph**; `propose_knowledge_note` 4,259/2,262/663.
+      Those two are 25% of the profile's 12,536-token tool budget between them, and both are already
+      in `tests/test_context_floor.py::KNOWN_OVERSIZED`.
+
+      **Not a blanket cut.** Some elaboration is genuinely the caller's — when to supply categorical
+      descriptors changes what the model should send — so this is per-paragraph judgment: rationale
+      moves to a `#` comment, guidance stays in the docstring. **And it does not ship until the live
+      lane can show every probe still reaching its tool**, because a cheaper prompt that stops
+      finding tools is a regression with a good-looking metric. Blocked on the live-lane row in § 1.
+
+- [ ] **Half the probe corpus tests one tool** — [S]. `gather_evidence` is in `expects_tools` for 116
+      of 232 probes; `find_notes` 91; `expand_note` 60; the tail is thin. Two consequences worth
+      separating: the corpus mostly measures one retrieval path, and ChemToolAgent's finding — that
+      tool augmentation **does not consistently beat the base LLM**, and hurts on general chemistry
+      questions — cannot be reproduced here. Bucket C (51 probes) scores restraint but never runs the
+      same question tool-free for comparison. `evals/ab.py::compare_tool_utility` is already written
+      and already registered as `plan_execute_utility`; an A/B arm over bucket A is mostly wiring.
+
+      **Blocked on a working model credential** (see §4), and the mock cannot stand in: `cli.mock_llm` emits scripted tool calls without *choosing* them in response to a question, so both arms of any comparison would measure the script. Measured 2026-08-25 through the real lane: expected-tool-reached 0/3.
+
+- [ ] **No external benchmark has ever been run** — [M]. `make eval` gates 23 metric values over 14
+      case files, a **7-document** retrieval corpus and a **39-note** knowledge graph, with the
+      science half resting on one solubility value, one BO regret replay and two mass balances. It is
+      honest and it is not comparable to anything. ChemRAG-Bench (1,932 expert-curated chemistry QA
+      pairs) is the best first target because it scores the retrieval half — where this system's
+      science actually lives — and it runs against an OpenAI-compatible endpoint, which is exactly the
+      seam `agent/llm_provider.py` already has. ChemBench and AstaBench are the follow-ups. A number
+      somebody else can also produce is the only kind that survives an argument with a chemist.
+
+      **Blocked on a working model credential** (see the row in §4), and the mock cannot stand in: `cli.mock_llm` emits scripted tool calls without *choosing* them in response to a question, so both arms of any comparison would measure the script. Measured 2026-08-25 through the real lane: expected-tool-reached 0/3.
+
+- [ ] **`deep-research` has no index behind it** — [M]. `agent/research_tools.py::gather_evidence`
+      sweeps the knowledge graph, the ELN, the mounted document share and the fingerprint store —
+      every one internal. `skills/deep-research/SKILL.md` describes a capability whose corpus is
+      whatever notes exist (39 on this checkout). `Chemclaw3-mcp/MODULES.md` files `litsearch`
+      (Europe PMC / OpenAlex / Crossref bulk, built at image time, no egress) as *proposed*, and says
+      in as many words that it "gives Chemclaw3's existing `deep-research` skill a real index".
+      ChemRAG measured **+17.4% average relative gain** from a chemistry corpus and — the design input
+      that matters — that corpus choice is task-dependent: reaction prediction wants literature,
+      nomenclature wants structured databases. A process chemist asking "has anyone run this coupling
+      on a deactivated aryl chloride" currently gets whatever those 39 notes happen to say.
+
+- [ ] **`pyexec` is merged in the fleet and unreachable from any deployment here** — **[M], not
+      [S], and the sizing changed when somebody looked.** `Chemclaw3-mcp` #12 shipped
+      `servers/pyexec` and `D-2026-08-25-a-sandbox-is-a-server-not-a-verb` records the decision, but
+      `grep -rn pyexec` in this tree finds only that ADR and `tasks/todo.md`: no entry under
+      `connectors:` in `deploy/helm/chemclaw/values.yaml:161`, so no `url`, no
+      `networkPolicy.egressDestinations` host, and nothing telling an operator to provide
+      `CHEMCLAW_PYEXEC_TOKEN`. The seam working as designed is why it is easy to miss — **zero core
+      edits also means zero core changes to remind anybody.**
+
+      **The obvious fix is wrong, and this is the part worth reading before starting.** Copying
+      `chem`/`safety` means adding a manifest stub under `src/chemclaw/connectors/pyexec/`. But
+      `registry.enabled()` is *"discovery is enablement until you say otherwise"* — an empty
+      `connectors_enabled` loads every discovered bundle — so shipping that stub would:
+
+      1. put `run_python` on the agent surface of **every fresh checkout**, by default;
+      2. make the front door dial `127.0.0.1:8899`, which under the `connectors_required=true` the
+         chart ships means **it refuses to boot** unless somebody is running the sandbox;
+      3. trip `tests/test_probe_coverage.py` (no probe names `run_python`) and raise the context
+         floor.
+
+      Turning a code-execution tool on by default is a decision, not a wiring change, and (2) makes
+      it a breaking one for every existing deployment. **So this needs an ADR about the default
+      before it needs a diff**, and the branch point is whether `CHEMCLAW_CONNECTORS_ENABLED` stops
+      meaning "empty loads everything" — which is a chart-wide behavioural change with its own
+      blast radius. Whichever way it goes, the change also owes a `run_python` probe, an
+      `egressPorts` entry for 8899 (the egress rule restricts by port independently of the peer
+      list, so a destination with no matching port still drops), and the token obligation in the
+      comment `chem` already models.
+
+- [ ] **This environment's `API-KEY` is present and rejected, which blocks three rows** — [S], and
+      it is operational rather than code. Measured 2026-08-25: `anthropic.AuthenticationError: 401`
+      from `api.anthropic.com`, with and without the session's `ANTHROPIC_BASE_URL` cleared.
+      `CLAUDE.md` documents the variable as "may not exist in every environment"; present-and-stale
+      is the case it does not cover and the worse one, because it reads as a defect rather than as a
+      missing credential. `tests/test_prompt_caching.py` now probes reachability and skips with a
+      reason naming which case it is, so the suite is honest about it — but the *live* half of the
+      eval plan (the bucket-C control arm, any external benchmark, and grading any probe on the
+      model's judgement rather than on the harness) needs a working one and nothing else.
+
+- [ ] **Memory records; it does not change what the next turn does** — [L], and it needs an ADR
+      before it needs code. Six tiers exist and all six are *read on request*:
+      `memory/campaign.py`, `interaction.py`, `failure.py`, `playbook.py`, `progression.py`,
+      `observations.py`, surfaced by `recall_observations`, `find_past_jobs` and `record_failure`.
+      Nothing in that set changes the agent's behaviour on the next turn unless a human writes a
+      `SKILL.md`: `skills/playbook-distillation/SKILL.md` is the distillation *judgment*, and the
+      PR-gate is where a distilled playbook becomes knowledge — but the loop is manual end to end and
+      nobody has measured how often it closes. The 2026 work (SkillRL, SkillForge and the
+      self-evolving surveys) is specifically about abstracting recurring trajectories into reusable
+      procedure automatically. **The PR-gate is the right control for that, not an argument against
+      it** — a proposed skill is exactly the shape the gate already carries. What is owed first is a
+      measurement rather than a mechanism: over the sessions on disk, how many recurring trajectories
+      *are* there, and would a distilled one have changed a later answer? A generator built before
+      that number is a routing hypothesis nobody measured, which is the mistake
+      `D-2026-08-15` already made once here.
+
+      **Attempted 2026-08-25, and the corpus to measure does not exist.** Against a live Postgres:
+      `session_messages` 12 (all from that day's own probe run), `session_turns` 0, `observations` 0,
+      `note_proposals` 0, `audit_events` 3. The five notes under `knowledge/playbook/` are committed
+      examples, not distillations of anything. So this row is blocked on **deployment history**
+      rather than on effort — nobody can count recurring trajectories in a database that has never
+      served a user. Its trigger is therefore a deployment with real sessions in it, and until then
+      building the generator would be building against an imagined corpus, which is the row's own
+      objection.
+
+### The upstream-capability register — what our pinned dependencies now ship that we build ourselves
+
+*Re-derived 2026-08-25, and re-derive it whenever a dependency is bumped.* `make upstream-check` and
+`tests/test_upstream_surface.py` guard the *shapes* this repository borrows — the coupling that
+breaks on a bump. Nothing guarded its **decisions** against upstream shipping the thing, which is
+why the Temporal LangGraph plugin sat five weeks old and reached no list here. This is prose rather
+than a test, deliberately: what is being watched is judgement, and a test cannot hold one.
+
+Pinned at the time of writing: `temporalio` 1.31.0 · `langchain` 1.3.15 · `langgraph` 1.2.11 ·
+`langchain-core` 1.5.5 · `deepagents` 0.7.6.
+
+| Upstream ships | We | Standing |
+| --- | --- | --- |
+| `temporalio.contrib.langgraph.LangGraphPlugin` — graph nodes as activities, durable `interrupt()` | run two durability layers | **declined**, `D-2026-08-25-the-plugin-solves-an-interrupt-we-do-not-use` — we use no `interrupt()`; the human gate is already a Temporal workflow |
+| `langchain.agents.middleware.ContextEditingMiddleware` / `ClearToolUsesEdit` | use it, on its own trigger since 2026-08-25 | **adopted** |
+| `SummarizationMiddleware` | construct it switched off (`disabled_summarizer`) | **declined** — a summary is new model prose over content `agent/framing.py` marked untrusted, and the envelope does not survive it |
+| `ModelCallLimitMiddleware` | subclass our own cap | **reverted**, `D-2026-08-15-an-after-model-counter-is-a-counter-that-can-be-skipped` — measured, a cap of 2 ran 4 model calls |
+| `ToolErrorMiddleware`, `ToolRetryMiddleware` | neither | **declined** — both trigger on raised exceptions and MCP tools never raise |
+| `HumanInTheLoopMiddleware` | our own plan gate | **open** — its own row; the gate predates it and the shapes have not been compared |
+| `deepagents.SkillsMiddleware` | use it, narrowed at the backend | **adopted**, with the narrowing on the backend because deepagents publishes skill *paths* into the prompt |
+| `deepagents` `execute` filesystem verb | withhold it | **declined**, and answered elsewhere — `D-2026-08-25-a-sandbox-is-a-server-not-a-verb` puts the capability in the fleet instead |
+| LangSmith tracing | first-party OTel + OpenInference | **declined** — proprietary, no OSS self-host, and its core value is prompt/response content in a third party |
+
+**How to use this.** On a dependency bump, read the release notes against the middle column and ask
+one question per row: *does upstream now do this, and better?* A row that changes answer needs an
+ADR, not an edit here. A capability upstream ships that this table does not mention is the gap this
+register exists to catch — add the row in the same pull request that notices it.
+
+- [ ] **Memory records; it does not change what the next turn does** — [L], and it needs an ADR
+      before it needs code. Six tiers exist and all six are *read on request*:
+      `memory/campaign.py`, `interaction.py`, `failure.py`, `playbook.py`, `progression.py`,
+      `observations.py`, surfaced by `recall_observations`, `find_past_jobs` and `record_failure`.
+      Nothing in that set changes the agent's behaviour on the next turn unless a human writes a
+      `SKILL.md`: `skills/playbook-distillation/SKILL.md` is the distillation *judgment*, and the
+      PR-gate is where a distilled playbook becomes knowledge — but the loop is manual end to end and
+      nobody has measured how often it closes. The 2026 work (SkillRL, SkillForge and the
+      self-evolving surveys) is specifically about abstracting recurring trajectories into reusable
+      procedure automatically. **The PR-gate is the right control for that, not an argument against
+      it** — a proposed skill is exactly the shape the gate already carries. What is owed first is a
+      measurement rather than a mechanism: over the sessions on disk, how many recurring trajectories
+      *are* there, and would a distilled one have changed a later answer? A generator built before
+      that number is a routing hypothesis nobody measured, which is the mistake
+      `D-2026-08-15` already made once here.
+
+- [ ] **Nothing watches for upstream shipping a decision we made ourselves** — [S], and it is the
+      meta-row the four above are instances of. `make upstream-check` guards the six *shapes* this
+      repo borrows against a dependency bump — the coupling that breaks. Nothing guards its
+      *decisions* against upstream shipping the thing: the Temporal LangGraph plugin row above is five
+      weeks old and reached no list here. `tests/test_upstream_surface.py` is the right precedent
+      (two of its assertions are *absences*, so upstream fixing something turns the workaround red).
+      The cheap version is a dated section in this file, re-derived when a dependency is bumped,
+      listing what each pinned upstream now ships that this repository implements itself.
 
 ---
 

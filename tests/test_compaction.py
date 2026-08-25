@@ -262,6 +262,13 @@ def test_a_turn_clears_stale_tool_results_before_it_drops_conversation(
     guess that stops isolating anything still passes: with a two-group window the cleared results
     were themselves dropped and the placeholder assertion failed while both edits worked exactly as
     specified.
+
+    **Both thresholds are now pinned, and forgetting the second is how this test failed when the
+    two were split.** The tool-result edit stopped reading `agent_context_token_budget` and took
+    `agent_tool_result_clear_trigger` instead; this test set only the budget, so the clear edit sat
+    below its own (default 30k) trigger and cleared nothing while asserting nine. Setting the
+    trigger to 0 says what the test means — *this edit is armed* — instead of relying on one number
+    happening to arm both.
     """
     thread = _thread(10, with_tool_calls=True, filler="x" * 200)
     # The request the graph will build, and what it costs once the tool-result edit has run on it.
@@ -269,6 +276,7 @@ def test_a_turn_clears_stale_tool_results_before_it_drops_conversation(
     ClearToolUsesEdit(trigger=0, keep=1, placeholder=TOOL_RESULT_PLACEHOLDER).apply(
         after_clearing, count_tokens=_count
     )
+    monkeypatch.setattr(settings, "agent_tool_result_clear_trigger", 0)
     monkeypatch.setattr(settings, "agent_context_token_budget", _count(after_clearing))
     monkeypatch.setattr(settings, "agent_keep_last_tool_groups", 1)
     monkeypatch.setattr(settings, "agent_keep_last_conversation_groups", 2)
@@ -283,6 +291,60 @@ def test_a_turn_clears_stale_tool_results_before_it_drops_conversation(
     assert calls_without_adjacent_results(sent) == set(), "clearing stranded a tool call"
     assert not any(TOOL_RESULT_PLACEHOLDER in str(m.content) for m in state["messages"]), (
         "graph state was edited; the policy narrows the request, not the thread"
+    )
+
+
+def test_the_lossless_edit_fires_alone_between_its_trigger_and_the_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The band the split created: clearing is armed, the window is not, and no group is lost.
+
+    Before the two thresholds were separated there was no such band. Both edits read
+    `agent_context_token_budget`, so nothing reduced until the budget and then the lossless edit
+    and the destructive one fired in the same breath — the expensive instrument doing work the free
+    one could have done first. This is that band existing, stated as a condition: a thread costing
+    more than the clear trigger and less than the budget comes back with its old tool results
+    placeheld and **every conversation group intact**.
+
+    The two numbers are measured off the thread rather than chosen, so the test cannot pass by a
+    coincidence of defaults.
+    """
+    thread = _thread(10, with_tool_calls=True, filler="x" * 200)
+    request: list[AnyMessage] = [*thread, HumanMessage(content="and now?")]
+    cost = _count(request)
+
+    # Armed: below what the thread costs. Inert: above it.
+    monkeypatch.setattr(settings, "agent_tool_result_clear_trigger", cost - 1)
+    monkeypatch.setattr(settings, "agent_context_token_budget", cost + 1)
+    monkeypatch.setattr(settings, "agent_keep_last_tool_groups", 1)
+    monkeypatch.setattr(settings, "agent_keep_last_conversation_groups", 2)
+
+    sent, state = _turn_sending(thread)
+
+    cleared = [m for m in sent if TOOL_RESULT_PLACEHOLDER in str(m.content)]
+    assert cleared, "the lossless edit did not fire between its own trigger and the budget"
+    assert len(sent) == len(request), (
+        "the conversation window fired too; the point of the split is that it does not have to"
+    )
+    assert calls_without_adjacent_results(sent) == set(), "clearing stranded a tool call"
+    assert not any(TOOL_RESULT_PLACEHOLDER in str(m.content) for m in state["messages"]), (
+        "graph state was edited; the policy narrows the request, not the thread"
+    )
+
+
+def test_the_two_edits_do_not_share_one_threshold(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The composition reads two settings, and the lossless one is the lower.
+
+    Asserted on the constructed middleware rather than on behaviour, because this is a claim about
+    *wiring*: a future edit that points both edits back at one setting would keep every behavioural
+    test above passing at the shipped defaults and quietly delete the band.
+    """
+    monkeypatch.setattr(settings, "agent_tool_result_clear_trigger", 12_345)
+    monkeypatch.setattr(settings, "agent_context_token_budget", 99_999)
+    editing = context_compaction_middleware()[0]
+    triggers = [edit.trigger for edit in editing.edits]
+    assert triggers == [12_345, 99_999], (
+        f"expected the lossless edit on its own lower trigger, got {triggers}"
     )
 
 
