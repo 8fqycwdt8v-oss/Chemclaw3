@@ -1,13 +1,19 @@
 ---
 name: reaction-search
 description: >-
-  Judgment for finding structurally related molecules and reactions with the fingerprint
-  tools: molecule similarity vs. substructure vs. reaction similarity, what Tanimoto counts
-  as precedent, and how to combine with metadata filters and the knowledge graph.
+  Judgment for finding structurally related molecules and reactions, and for the faceted
+  precedent search over the labelled corpus: which question each tool answers, what Tanimoto
+  counts as precedent, how to read a frequency roll-up, how to turn a neighbourhood into a
+  readable comparison, and what a coverage sentence obliges you to say.
 tools:
   - similar_molecules
   - substructure_matches
   - similar_reactions
+  - substrate_precedent
+  - conditions_for_similar_product
+  - reagent_frequency
+  - reactions_making_substructure
+  - workup_precedent
   - condense_protocols
 ---
 
@@ -33,8 +39,27 @@ correctly but uses them well (G6).
   this?"* — DRFP captures the *difference* between reactants and products, so it finds
   reactions of the same type (same bond changes) even on different substrates. Query with a
   full reaction SMILES (`reactants>>products`); reactions have no substructure search.
+- **Facet questions are a different tool family.** Similarity answers "is there anything like
+  this?". It cannot answer "as *what*", "which ligand", "under what conditions", "with a product
+  carrying this group", or "how was it worked up" — those are properties of the recipe, and DRFP
+  deliberately throws the recipe away (see the next bullet). Ask them of the precedent tools:
+  - `substrate_precedent(smiles, role=...)` — *has this substrate been used, and as what?* `role`
+    is `starting-material`, `product`, `reagent`, `solvent`, `catalyst`, `ligand`, `base` or
+    `additive`. Exact on the structure: for "like this", run `similar_molecules` first and ask
+    about each neighbour, so a near-miss is never presented as a match.
+  - `conditions_for_similar_product(product_smiles)` — *what conditions worked for similar
+    products?* Neighbours in fingerprint space, then their recorded recipes, temperatures, times
+    and yields, each with a document to cite.
+  - `reagent_frequency(named_reaction=..., roles=["ligand"])` — *which ligands were used for
+    Buchwald couplings?* Leave `roles` out and add `product_functional_group=...` for *which
+    workhorse conditions were used when the product carries this group*.
+  - `reactions_making_substructure(smarts)` — *find reactions whose product matches this SMARTS.*
+    Screened with a pattern fingerprint and verified exactly, so a hit truly contains the motif.
+  - `workup_precedent(reagent_smiles)` — *how do we work this up?* Verbatim instructions only from
+    runs that recorded one.
 - If unsure, combine: substructure/similarity narrows the molecules, reaction similarity
-  finds the transformations that produced or consumed them.
+  finds the transformations that produced or consumed them, and the precedent tools say what was
+  actually in the flask.
 - **DRFP scores the whole reaction, including reagents.** If the indexed corpus encodes full
   conditions as reactants (ligand, base, additive — common for HTE/screening data, not just
   the two core substrates), a query built from only the core substrates can score well below
@@ -45,10 +70,31 @@ correctly but uses them well (G6).
   "no precedent exists." If a core-substrate-only query returns nothing, say that caveat, try
   widening the query with plausible reagents/conditions, or fall back to `similar_molecules` on
   the substrates before concluding there is no precedent.
+- **Coverage is part of the answer, not a footnote.** Every precedent tool returns a `coverage`
+  block and a `verdict` sentence saying how much of the *matching* corpus is actually labelled. On
+  a partly-labelled corpus every count is a lower bound, and you must say so in the same breath as
+  the number. "None found" over an unlabelled corpus means *the question was not answered* — never
+  render it as "there is no precedent".
 - **An unbuilt index is not an empty answer.** Every fingerprint search returns a `verdict`
   beside its `hits`. When `index_empty` is true, nothing has been indexed and the search never
   ran: report that the fingerprint index has not been populated and that an operator must build
   it. Do not say "we have no precedent for this" — that claim needs a corpus to be false about.
+
+## Reading a frequency roll-up
+
+`reagent_frequency` counts what the corpus *did*, which is not the same as what you should do.
+
+- **Popularity is the field's default, not a recommendation.** XPhos leading a Buchwald ligand
+  table means it was tried most, usually because it was tried first. Say "most commonly used",
+  never "best".
+- **Read `count` beside `share`, and both beside `reactions_in_scope`.** Three of four is not
+  evidence; three hundred of four hundred is. The denominator is reactions that recorded *that
+  role* — a run whose ligand nobody wrote down is not evidence that no ligand was used.
+- **`median_yield_percent` is over the runs that reported a yield**, and it is `null` when none
+  did. A null is not a zero and must not be rendered as one.
+- **Prefer `rxno_id` to `named_reaction`.** NameRxn, Rxn-INSIGHT and RXNO are three name strings
+  for one transformation. Matching the string answers from whichever fraction of the corpus used
+  that spelling — silently, and looking complete.
 
 ## What Tanimoto counts as precedent
 

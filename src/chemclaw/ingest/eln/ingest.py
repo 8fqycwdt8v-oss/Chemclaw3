@@ -25,9 +25,11 @@ from chemclaw.ingest.eln.ord import OrdReaction
 from chemclaw.ingest.eln.record import record_from_ord_reaction
 from chemclaw.ingest.eln.records import ReactionRecord, ReactionRecordStore
 from chemclaw.ingest.eln.validate import validate_ord
+from chemclaw.ingest.labels.record import record_phase
 from chemclaw.science.fingerprints.molfp.search import record_for
 from chemclaw.science.fingerprints.rxnfp.search import record_for_reaction
 from chemclaw.science.fingerprints.store import FingerprintError, FingerprintStore
+from chemclaw.science.labels.store import LabelIndex
 
 logger = logging.getLogger(__name__)
 
@@ -41,8 +43,11 @@ async def ingest_reaction(
     reaction_store: FingerprintStore,
     molecule_store: FingerprintStore,
     record_store: ReactionRecordStore,
+    *,
+    label_index: LabelIndex,
+    source: str,
 ) -> ReactionRecord:
-    """Validate, index (reaction + compounds + impurities), store the record; return it.
+    """Validate, index (reaction + compounds + impurities + labels), store the record; return it.
 
     Raises `IngestError` (listing the problems) if the reaction is invalid, so a corrupt
     ELN entry never reaches the index or the corpus.
@@ -50,6 +55,15 @@ async def ingest_reaction(
     Returns the stored record rather than a reference, because there is no longer anything to refer
     *to*: the transcription is the row, available the moment this returns instead of whenever
     somebody got round to merging a pull request.
+
+    `label_index` and `source` are keyword-only and **required**, with no default, which is
+    deliberate: the label index's record phase can only be written here, from the canonical record
+    in hand (`ingest/labels/record.py` says why), so a default of `None` would let a caller quietly
+    stop writing the half of the row that cannot be reconstructed afterwards. `source` is the
+    registry source name, and it is the other half of the label row's key — two ELNs may
+    legitimately use one entry id, which the fingerprint tables, keyed on the bare id, cannot
+    represent. `ReactionRecord` keys on the bare id and carries its own `source` column beside it;
+    the label row needs the pair *in* the key because a facet count must not merge two sites' runs.
     """
     problems = validate_ord(reaction)
     if problems:
@@ -63,6 +77,13 @@ async def ingest_reaction(
     for smiles in {standard_smiles(c.smiles) for c in reaction.compounds()}:
         await molecule_store.add(record_for(smiles, smiles))
     await _index_impurities(reaction, molecule_store)
+
+    # The label index's record phase, from the record form — agents kept, conditions and workup in
+    # columns. A fourth deterministic serving index beside the three above, derived from the same
+    # validated record: what `reaction_records` holds is the transcription a hit expands into,
+    # while this holds the facets a hit is *found* by, and neither can be reconstructed from the
+    # other.
+    await label_index.record(record_phase(reaction, source))
 
     record = record_from_ord_reaction(reaction)
     await record_store.record([record])

@@ -23,6 +23,7 @@ from typing import Any
 
 from chemclaw.ingest.eln.warehouse.binding import (
     BindingError,
+    CorpusBinding,
     EntryBinding,
     RelatedBinding,
     VectorBinding,
@@ -72,6 +73,36 @@ def entry_statement(
         f"LIMIT {placeholder}"
     )
     return sql, [since, limit]
+
+
+def corpus_statement(
+    corpus: CorpusBinding, placeholder: str, after: str, limit: int
+) -> tuple[str, list[Any]]:
+    """One bounded page of a bulk reaction corpus, resuming strictly after `after`.
+
+    **Keyset, not offset, and not a datetime.** `OFFSET n` on a multi-million-row table makes the
+    warehouse walk and discard n rows on every page, so a drain gets quadratically slower exactly
+    as it gets further in; and a datetime cursor is meaningless for a versioned release that was
+    loaded all at once. Resuming after the last key seen is O(index seek) per page and is what
+    makes a stopped drain resumable at no cost.
+
+    An empty `after` starts at the beginning, which is the first pass and also a full re-drain.
+    Re-drainng is safe: every write the corpus drain makes is an id-keyed upsert.
+
+    `SELECT *` for the same reason `entry_statement` uses it — the binding names the columns it
+    reads by path, and a projection would have to know a schema nobody can see yet.
+    """
+    cursor = corpus.cursor_column
+    predicate = f"{cursor} > {placeholder}" if after else "1 = 1"
+    if corpus.where:
+        predicate += f" AND ({corpus.where})"
+    sql = (
+        f"SELECT * FROM {corpus.relation} "  # identifier checked by `binding._check_identifier`
+        f"WHERE {predicate} "
+        f"ORDER BY {cursor} ASC "
+        f"LIMIT {placeholder}"
+    )
+    return sql, ([after, limit] if after else [limit])
 
 
 def related_statement(

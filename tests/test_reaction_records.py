@@ -44,6 +44,7 @@ from chemclaw.kg.note import Note, note_id_for_reaction
 from chemclaw.kg.validate import external_citations, unresolved_citations, validate
 from chemclaw.retrieval.retrievers import FingerprintReactionRetriever
 from chemclaw.science.fingerprints.store import InMemoryFingerprintStore
+from chemclaw.science.labels.store import InMemoryLabelIndex
 from tests.pg import migrated_db_or_skip
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
@@ -112,7 +113,9 @@ def test_ingesting_a_reaction_opens_no_pull_request(monkeypatch: pytest.MonkeyPa
         )
         adapter = _ListAdapter([_entry("no-pr", datetime(2026, 3, 1, tzinfo=UTC))])
         reaction = adapter.map_to_ord(adapter._entries[0])
-        return await ingest_reaction(reaction, rxn, mol, rec)
+        return await ingest_reaction(
+            reaction, rxn, mol, rec, label_index=InMemoryLabelIndex(), source="test-eln"
+        )
 
     record = asyncio.run(_run())
     assert record.reaction_id == "no-pr"
@@ -152,7 +155,15 @@ def test_a_sync_run_does_not_read_the_corpus_it_is_not_replaying() -> None:
             ]
         )
         replayed = _entry("replayed", cursor - datetime.resolution)
-        await sync_entries(_ListAdapter([replayed]), rxn, mol, rec, cursor)
+        await sync_entries(
+            _ListAdapter([replayed]),
+            rxn,
+            mol,
+            rec,
+            cursor,
+            label_index=InMemoryLabelIndex(),
+            source="test-eln",
+        )
 
     asyncio.run(_run())
     assert asked == [1], (
@@ -191,7 +202,9 @@ def test_the_unchanged_check_keys_on_the_record_id_not_the_entry_id() -> None:
         )
         # An earlier run's record, stored under the *reaction* id.
         await rec.record([record_from_ord_reaction(adapter.map_to_ord(replayed))])
-        summary = await sync_entries(adapter, rxn, mol, rec, cursor)
+        summary = await sync_entries(
+            adapter, rxn, mol, rec, cursor, label_index=InMemoryLabelIndex(), source="test-eln"
+        )
         return summary.skipped_existing, summary.ingested
 
     skipped, ingested = asyncio.run(_run())
@@ -218,7 +231,9 @@ def test_a_structural_hit_still_expands_into_its_recipe(monkeypatch: pytest.Monk
             InMemoryReactionRecordStore(),
         )
         adapter = _ListAdapter([_entry("rxn-recipe", datetime(2026, 3, 1, tzinfo=UTC))])
-        await sync_entries(adapter, rxn, mol, rec, _EPOCH)
+        await sync_entries(
+            adapter, rxn, mol, rec, _EPOCH, label_index=InMemoryLabelIndex(), source="test-eln"
+        )
 
         monkeypatch.setattr(settings, "fingerprint_similarity_threshold", 0.0)
         retriever = FingerprintReactionRetriever(rxn, rec)

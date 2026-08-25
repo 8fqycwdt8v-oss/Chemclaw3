@@ -16,7 +16,11 @@ is a perfectly
 2. **`config:` the half's constructor will not accept.** Free-form config is the deliberate trade
    (the callable's signature *is* the schema, so there is no second model to keep in step with the
    adapter) and this is what makes it safe: the kwargs are bound against the real signature here.
-3. **An enabled source no manifest declares.** `data_sources` naming a missing source would
+3. **A `labels:` block that does not match the source.** A `provides` naming a group the source
+   has no column for is not inert: it is read by the coverage report, so the manifest's claim ends
+   up in a sentence a chemist reads. And a `labels:` block on a source that contributes no
+   reactions at all is a policy nothing will ever apply.
+4. **An enabled source no manifest declares.** `data_sources` naming a missing source would
    otherwise be a corpus that silently stops being searched — indistinguishable, from the chemist's
    side, from a corpus with no matches.
 
@@ -40,6 +44,8 @@ import inspect
 from collections.abc import Sequence
 
 from chemclaw.core.config import settings
+from chemclaw.ingest.eln.warehouse.binding import CorpusBinding, load_binding
+from chemclaw.ingest.sources.manifest import DataSourceManifest
 from chemclaw.ingest.sources.registry import (
     DataSourceError,
     discovered,
@@ -85,6 +91,54 @@ def _check_construction(name: str) -> list[str]:
     return []
 
 
+def _check_labels(name: str, manifest: DataSourceManifest) -> list[str]:
+    """Rule 3: a `labels:` block must describe a source that actually contributes reactions.
+
+    Two checks, and both are about a claim reaching a chemist rather than about a crash. A block on
+    a source with neither an ingest half nor a `corpus:` binding is a policy nothing will ever
+    apply — it looks like labelling is configured when nothing is being labelled. And a `provides`
+    naming a group the binding maps no column for is a lie the coverage report repeats: it would
+    say "this source provided the name" for rows where nothing did.
+
+    The binding is read straight out of `config:` rather than by constructing the half, so this
+    runs in the default gate and needs no driver.
+    """
+    if manifest.labels is None:
+        return []
+    binding = _corpus_binding(manifest)
+    if manifest.ingest is None and binding is None:
+        return [
+            f"data source {name!r} declares a `labels:` block but has no `ingest:` half and no "
+            "`corpus:` binding, so it contributes no reactions and nothing would ever label them"
+        ]
+    if binding is None:
+        return []
+    overclaimed = manifest.labels.provides - binding.label_groups()
+    if overclaimed:
+        named = ", ".join(sorted(g.value for g in overclaimed))
+        return [
+            f"data source {name!r} claims to provide {named}, but its `corpus:` binding maps no "
+            "column for it — the coverage report would repeat that claim to a chemist"
+        ]
+    return []
+
+
+def _corpus_binding(manifest: DataSourceManifest) -> CorpusBinding | None:
+    """The manifest's `corpus:` binding, or `None` when it declares no warehouse binding at all.
+
+    A malformed binding is not reported here: `--construct` builds the half and surfaces it with
+    the binding validator's own message, which names the offending path. Two reports of one typo in
+    two vocabularies is what the `resolved` guard above exists to avoid.
+    """
+    raw = manifest.config.get("binding")
+    if not isinstance(raw, dict):
+        return None
+    try:
+        return load_binding(raw).corpus
+    except ValueError:
+        return None
+
+
 def validate_datasources(construct: bool = False) -> list[str]:
     """Return every problem found across the discovered manifests (empty means valid)."""
     problems: list[str] = []
@@ -106,6 +160,7 @@ def validate_datasources(construct: bool = False) -> list[str]:
             if reference is not None:
                 resolved += _check_half(name, field, reference, manifest.config)
         problems += resolved
+        problems += _check_labels(name, manifest)
         # Only when the references themselves are sound — building a source whose half does not
         # resolve would report the same typo twice, in two different vocabularies.
         if construct and not resolved:

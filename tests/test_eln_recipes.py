@@ -41,6 +41,7 @@ from chemclaw.ingest.eln.sync import sync_entries
 from chemclaw.ingest.eln.validate import validate_ord
 from chemclaw.kg.note import ProcessConditions
 from chemclaw.science.fingerprints.store import InMemoryFingerprintStore
+from chemclaw.science.labels.store import InMemoryLabelIndex
 from tests.pg import migrated_db_or_skip
 
 _EPOCH = datetime.min.replace(tzinfo=UTC)
@@ -378,7 +379,9 @@ def test_ord_recipe_flows_through_sync() -> None:
             InMemoryFingerprintStore(),
             InMemoryReactionRecordStore(),
         )
-        summary = await sync_entries(adapter, rxn, mol, rec, _EPOCH)
+        summary = await sync_entries(
+            adapter, rxn, mol, rec, _EPOCH, label_index=InMemoryLabelIndex(), source="eln-ord"
+        )
         assert summary.ingested == ["ord-2026-001"]
         assert summary.rejected == []
         assert len(await rec.all_records()) == 1

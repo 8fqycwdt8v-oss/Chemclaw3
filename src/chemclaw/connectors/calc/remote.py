@@ -28,24 +28,25 @@ noise against an SCF and measurable against a cache hit — `calculation_key` is
 the hit path, so that is the one worth watching.
 """
 
-import json
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
-from datetime import timedelta
 from typing import Any
 
-import httpx
 from mcp import ClientSession
-from mcp.client.streamable_http import streamablehttp_client
-from mcp.shared.exceptions import McpError
-from mcp.types import INVALID_PARAMS, INVALID_REQUEST, METHOD_NOT_FOUND, PARSE_ERROR
 from pydantic import BaseModel, ConfigDict
 
-from chemclaw.connectors.registry import _CONNECT_TIMEOUT_SECONDS, _READ_TIMEOUT_GRACE_SECONDS
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError, SubsystemUnavailableError
 from chemclaw.core.ids import stable_hash
+from chemclaw.core.mcp_session import (
+    McpConnectFailed,
+    McpCredentialRefused,
+    McpRequestRefused,
+    McpServerFault,
+    invoke,
+    open_session,
+)
 from chemclaw.science.calc.store import (
     CALCULATION_EPOCH,
     CalculationKey,
@@ -86,147 +87,39 @@ class CalcToolError(ChemclawError):
     """
 
 
-# The JSON-RPC codes that blame the request rather than the server. Named here rather than inline
-# because the classification they drive — retry or do not retry — is the whole reason
-# `CalcToolError` and `CalcServerError` are two classes.
-_REQUEST_FAULT_CODES = frozenset({PARSE_ERROR, INVALID_REQUEST, METHOD_NOT_FOUND, INVALID_PARAMS})
-
-# What the calculation server says when a tool raised something that was *not* a deliberate domain
-# message. `Chemclaw3-mcp`'s `mcp_server_kit.app._sanitize_tool_errors` re-raises a `ValueError`
-# cause untouched — that is the worded refusal, "unknown ALPB solvent …" — and replaces everything
-# else with this exact string, logging the real exception server-side.
-#
-# **Matching it is the difference between a retry and a dead job.** FastMCP turns *every* exception
-# in a tool body into `isError=True`, so an xtb subprocess timeout, a non-zero exit, a full scratch
-# directory and an OOM all arrive here looking exactly like an unparameterised solvent — and
-# `CalcToolError` is registered non-retryable in `durable/publish.py`. Traced:
-# `Chemclaw3-mcp:servers/calc/src/chemclaw_mcp_calc/engine/xtb_cli.py` makes `CliError` a
-# `RuntimeError` *deliberately* so it takes the sanitized path, which means the
-# single most likely infrastructure fault on that server (a loaded pod timing out one Hessian in a
-# six-species reaction job) failed the whole durable job on attempt 1 with `activity_max_attempts`
-# untouched. That is the exact inversion `CalcServerError` was split out to prevent, reached through
-# the one door nobody had checked.
-#
-# A string is a weak contract, and it is the only signal on the wire: both shapes are `isError` with
-# a message. If the server ever rewords it, this stops matching and the behaviour degrades to what
-# it was before — a misclassification, not a new failure — which is why the constant is here with
-# the other repo's file named rather than inlined at the call site.
-_SERVER_INTERNAL_ERROR = "an internal error occurred"
-
-
-def _short_connect_client(
-    headers: dict[str, str] | None = None,
-    timeout: httpx.Timeout | None = None,
-    auth: httpx.Auth | None = None,
-) -> httpx.AsyncClient:
-    """The MCP client, but with a *connect* bound that matches every other connector's.
-
-    `streamablehttp_client(timeout=…)` composes one `httpx.Timeout` for connect, write and pool
-    alike, so setting it to `calc_server_timeout_seconds` — which has to be large, because these are
-    the calculations themselves — also gave a black-holed endpoint 900 s to accept a TCP connection.
-    Measured: `connect 900.0, write 900.0, pool 900.0`. A deleted pod or a NetworkPolicy drop
-    therefore stalled a durable activity for fifteen minutes per attempt, while `_beating` reported
-    it healthy the whole time, before Temporal retried into the same wall.
-
-    `connectors/registry.py` already draws this distinction for every other connector, with the
-    reason written out: a slow *answer* is normal here and must be waited for, while a host that
-    will not accept a connection is not going to start after 15 minutes. This reuses that module's
-    constant rather than a second copy, so the two cannot drift.
-
-    The read bound is untouched — it is the one the session's own bound must beat, and getting that
-    ordering wrong is the measured hang `calc_session` documents.
-
-    **The client is built here rather than delegated to `mcp.shared._httpx_utils`**, which is the
-    SDK's own factory and a *private* module. `tests/test_third_party_layering.py` keeps its
-    private-import allow-list deliberately empty — the two rows it once held were removed rather
-    than re-blessed — and a row here would have been the third. What that factory adds over a plain
-    client is `follow_redirects=True`, so that is what is restated, next to the reason: an MCP
-    endpoint behind an ingress that redirects `/mcp` to `/mcp/` is ordinary, and httpx does not
-    follow by default. `connectors/registry.py` builds its own client for every other connector for
-    the same reason.
-    """
-    bound = timeout if timeout is not None else httpx.Timeout(settings.calc_server_timeout_seconds)
-    return httpx.AsyncClient(
-        headers=headers,
-        auth=auth,
-        follow_redirects=True,
-        timeout=httpx.Timeout(
-            bound.read,
-            connect=_CONNECT_TIMEOUT_SECONDS,
-            write=bound.write,
-            pool=bound.pool,
-        ),
-    )
+# The transport, the timeout ordering, the credential-rejection walk and the internal-error
+# string all live in `core/mcp_session.py` now — this file worked them out against a live server
+# and the reaction labeller became the second client that needs every one of them. What stays
+# here is the part that genuinely differs: which of the two error classes a failure belongs in,
+# and the wording a chemist reads.
 
 
 @asynccontextmanager
 async def calc_session() -> AsyncIterator[ClientSession]:
-    """Open one MCP session to the calculation server, with our bearer attached.
+    """Open one MCP session to the calculation server, and name its failures for a chemist.
 
-    The credential is a connection header rather than a per-call one for the reason
-    `connectors.identity` records: MCP's per-call header callback is not applied to the
-    `initialize()` that opens the connection, so a credential passed that way 401s at connect.
-
-    **Both timeouts are set, and which one fires matters more than either value.**
-    `connectors/registry.py` records the measurement: when httpx's read timeout trips first,
-    `mcp.client.streamable_http` catches it at debug level and does not reconnect, so the answer is
-    lost *silently* and the caller waits forever; when `ClientSession`'s bound trips, `send_request`
-    raises `McpError` naming it. So the session bound must be the one that wins.
-
-    This function had neither. `read_timeout_seconds` was unset — which upstream documents as *wait
-    forever* — and `timeout=` on `streamablehttp_client` sets connect/write/pool only, leaving the
-    read timeout at the un-overridden `sse_read_timeout` default of 300 s rather than the 900 s
-    `calc_server_timeout_seconds` names. So the only live bound was the invisible one, at a value
-    nothing configured: a CREST search past five minutes never returned, while `durable/heartbeat`
-    kept heartbeating on its timer so Temporal saw a healthy activity and the job burned its full
-    four hours.
+    Everything about *how* the session is opened — the connection-scoped bearer, the short connect
+    bound behind a long read bound, the ordering that keeps the MCP session's timeout the one that
+    trips — is `core.mcp_session.open_session`. What this adds is the classification: a refused
+    credential is bad data (a 401 never comes back on its own, so a durable job must not spend
+    `activity_max_attempts` being told the same thing), and an unreachable host is an outage.
     """
-    token = _token()
-    headers = {"Authorization": f"Bearer {token}"} if token else None
-    bound = settings.calc_server_timeout_seconds
-    # `@asynccontextmanager` re-injects whatever the caller's `async with` body raises back into
-    # this generator at the `yield`. So the guard below must know whether it is looking at a
-    # *connection* failure or at the caller's own exception travelling through — see the flag's
-    # own comment at the yield.
-    connected = False
     try:
-        async with streamablehttp_client(
+        async with open_session(
             settings.calc_server_url,
-            headers=headers,
-            timeout=timedelta(seconds=bound),
-            sse_read_timeout=timedelta(seconds=bound + _READ_TIMEOUT_GRACE_SECONDS),
-            # So a host that will not accept a connection fails in seconds rather than in
-            # quarter-hours — see the factory.
-            httpx_client_factory=_short_connect_client,
-        ) as (read, write, _):
-            async with ClientSession(
-                read, write, read_timeout_seconds=timedelta(seconds=bound)
-            ) as session:
-                await session.initialize()
-                # Past this point every exception arriving here came *out of the caller's block*,
-                # not out of the connection. Relabelling those was a live defect: `cached_remote`
-                # runs the store's own I/O inside this block, so a Postgres outage
-                # (`core/db.py::connect` raises a builtin `ConnectionError`) was reported to the
-                # chemist as "the calculation service is not answering" — the wrong subsystem —
-                # and, worse, a `ChemclawError` from the store came back out as a
-                # `CalcServerError`, which is *retryable*. That inverts the one distinction
-                # `CalcToolError` exists to draw, so a durable job burned its whole retry budget
-                # on bad data. Transport faults that happen *during* a call are still classified,
-                # but by `_call`, which is the only place that knows a call was in flight.
-                connected = True
-                yield session
-    except Exception as exc:
-        if connected:
-            raise
-        rejected = _auth_rejection(exc)
-        if rejected is not None:
-            raise CalcToolError(
-                f"the calculation service refused this client's credential "
-                f"(HTTP {rejected} from {settings.calc_server_url}). The service is running and "
-                f"answering; it does not accept the bearer taken from "
-                f"{settings.calc_server_token_env}. Set that variable to the value the server "
-                f"verifies — retrying will not help."
-            ) from exc
+            token_env=settings.calc_server_token_env,
+            timeout_seconds=settings.calc_server_timeout_seconds,
+        ) as session:
+            yield session
+    except McpCredentialRefused as exc:
+        raise CalcToolError(
+            f"the calculation service refused this client's credential "
+            f"(HTTP {exc.status} from {settings.calc_server_url}). The service is running and "
+            f"answering; it does not accept the bearer taken from "
+            f"{settings.calc_server_token_env}. Set that variable to the value the server "
+            f"verifies — retrying will not help."
+        ) from exc
+    except McpConnectFailed as exc:
         raise CalcServerError(
             "the calculation service is not answering, so no calculation was run. This is an "
             "outage rather than a problem with what was asked; the same request will work once "
@@ -234,123 +127,30 @@ async def calc_session() -> AsyncIterator[ClientSession]:
         ) from exc
 
 
-def _auth_rejection(exc: BaseException) -> int | None:
-    """The HTTP status if this connect failure was the server *refusing the credential*.
-
-    A rejection is not an outage, and the difference is the retry. `CalcServerError` is
-    `SubsystemUnavailableError` — retryable, because an unreachable host comes back. A 401 never
-    comes back on its own: the identical call is refused identically until someone changes a
-    setting, so a durable job that treats it as transient spends `activity_max_attempts` and a
-    heartbeat-detection window each time to be told the same thing.
-
-    This is the distinction `CalcServerError` and `CalcToolError` were split to draw, applied at
-    the one boundary that still collapsed it. Measured against a live server: a bad bearer surfaces
-    here as `httpx.HTTPStatusError` (401) nested inside the `ExceptionGroup` that
-    `streamablehttp_client`'s task group raises, so neither `except httpx.HTTPStatusError` nor a
-    single `__cause__` hop finds it — the tree has to be walked.
-
-    Only 401 and 403 count. Every other status is left to the caller's outage path, because a 500
-    or a 502 genuinely is the server failing and genuinely may pass on retry.
-
-    Args:
-        exc: The exception raised while opening the session.
-
-    Returns:
-        The refusing status code, or `None` when this was not an authentication failure.
-    """
-    seen: set[int] = set()
-    stack: list[BaseException] = [exc]
-    while stack:
-        current = stack.pop()
-        if id(current) in seen:
-            continue
-        seen.add(id(current))
-        if isinstance(current, httpx.HTTPStatusError) and current.response.status_code in (
-            401,
-            403,
-        ):
-            return current.response.status_code
-        stack.extend(getattr(current, "exceptions", ()))
-        for nested in (current.__cause__, current.__context__):
-            if nested is not None:
-                stack.append(nested)
-    return None
-
-
-def _token() -> str | None:
-    """The bearer from the configured environment variable, or `None` if unset.
-
-    Unset is not an error here, and the reason is that the server decides: a development server
-    started without a credential accepts an unauthenticated call, and forcing one would make this
-    module refuse a request the server would have served. A server that *does* enforce one answers
-    401, which surfaces as a `CalcServerError` — an outage from this side, with the status and the
-    address on `__cause__` for the operator who can fix it.
-    """
-    import os
-
-    return os.environ.get(settings.calc_server_token_env) or None
-
-
 async def _call(session: ClientSession, tool: str, arguments: dict[str, Any]) -> Any:
-    """Invoke one tool and return its decoded payload, or raise the failure the caller can act on.
+    """Invoke one tool and return its decoded payload, in this service's error vocabulary.
 
-    A refused tool call is a `CalcToolError` — the server was reached and said no, which no retry
-    changes — and it carries the server's own message, because that message is the whole content of
-    the refusal (which solvent is unparameterised, which atom index is out of range).
-
-    This is also the one place that can classify a failure of the call *itself*, because it is the
-    only place that knows a call was in flight — `calc_session`'s guard deliberately stops at the
-    connection. Two shapes arrive here and they are opposites. A JSON-RPC error whose code blames
-    the *request* (`-32700`/`-32600`/`-32601`/`-32602`) is bad data by the same test as any other
-    refusal: FastMCP answers `-32602` for arguments that fail a tool's own schema before its body
-    ever runs, which is exactly the "atom index past the molecule" class. Everything else —
-    `-32603`, a dropped socket, a read timeout — is the server, and retrying is the only thing that
-    fixes it.
+    `core.mcp_session.invoke` does the calling and draws the one distinction that matters — the
+    server refused you, versus the server broke — and this maps the two onto the classes a durable
+    activity's retry policy reads. A refusal carries the server's own message, because that message
+    is the whole content of the refusal (which solvent is unparameterised, which atom index is out
+    of range).
     """
-    # **The transport failure is converted here, not by the session context manager.** It used to
-    # be caught by a blanket `except Exception` in `calc_session` that spanned the `yield` — so
-    # anything the *caller's* body raised re-entered there too, and `cached_compute`'s body is
-    # `store.get()`/`store.put()`. A Postgres pool exhaustion was therefore reported to the chemist
-    # as "the calculation service is not answering", reclassified as a retryable outage, and the
-    # `ValidationError` that would have failed fast was erased by the conversion. Converting at the
-    # call is what lets that catch be narrowed to the connection it is about.
     try:
-        result = await session.call_tool(tool, arguments)
-    except McpError as exc:
-        if exc.error.code in _REQUEST_FAULT_CODES:
-            raise CalcToolError(f"{tool} was refused: {exc.error.message}") from exc
-        raise CalcServerError(
-            f"the calculation service failed while running {tool}, so no result was produced. "
-            "This is an outage rather than a problem with what was asked."
-        ) from exc
-    except Exception as exc:
-        raise CalcServerError(
-            f"the calculation service stopped answering during {tool}, so no result was produced. "
-            "This is an outage rather than a problem with what was asked."
-        ) from exc
-    if result.isError:
-        message = _text(result.content)
-        if _SERVER_INTERNAL_ERROR in message:
-            # The server's own "this was a bug or an infrastructure fault" notice — see the
-            # constant. Retryable, because the identical call may well succeed once the pod is not
-            # out of scratch space, and because the alternative is failing an expensive durable job
-            # on its first attempt.
+        return await invoke(session, tool, arguments)
+    except McpRequestRefused as exc:
+        raise CalcToolError(str(exc)) from exc
+    except McpServerFault as exc:
+        if exc.internal:
             raise CalcServerError(
                 f"the calculation service hit an internal error running {tool}, so no result was "
                 "produced. This is a fault on the calculation service rather than a problem with "
                 "what was asked; the same request may work on a retry."
-            )
-        raise CalcToolError(f"{tool} failed: {message}")
-    text = _text(result.content)
-    try:
-        return json.loads(text)
-    except ValueError as exc:
-        raise CalcToolError(f"{tool} returned no JSON: {text[:200]}") from exc
-
-
-def _text(content: Any) -> str:
-    """The text of an MCP content list, joined — the shape every tool here answers in."""
-    return "".join(getattr(block, "text", "") for block in content)
+            ) from exc
+        raise CalcServerError(
+            f"the calculation service stopped answering during {tool}, so no result was produced. "
+            "This is an outage rather than a problem with what was asked."
+        ) from exc
 
 
 class KeyedCalculation(BaseModel):

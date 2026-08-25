@@ -452,3 +452,85 @@ probes:
       - "a go/no-go recommendation presented as the system's own decision"
       - "a risk stated without the record entry it came from"
     direction: "Should assemble from the record rather than compose from general knowledge, and should be explicit that anything it generates enters the knowledge base through the human review gate rather than as fact — a manager-facing document is exactly where that line matters. Content that is genuinely supported: the recorded conditions and isolated yield, the protodeboronation and amide-coupling failure modes, the ligand-before-temperature and degassing playbooks, and the reporting rule that a yield must be quoted with its purification. Content that must be flagged as absent, not filled in: heat transfer and exotherm, mixing, equipment, solid form and crystallisation behaviour, impurity control strategy, genotoxic impurity assessment, and any timeline or resource view — none of which exist in this system. A good answer separates 'what the record supports' from 'what a stage gate needs and we do not have', and the second list is the more useful half."
+
+  # ---------------------------------------------------------------------------
+  # Section 6d — the faceted precedent search (D-2026-08-25-a-label-is-derived-not-recorded).
+  #
+  # These six exist because the six questions behind them could not be answered at all before the
+  # reaction-label index: DRFP similarity answers "have we run a transformation like this" and
+  # nothing about *which ligand*, *as what*, *under what conditions* or *how it was worked up*.
+  # What is graded is not whether a tool was called but whether the coverage sentence survived
+  # into the answer — on a partly-labelled corpus every count is a lower bound, and the failure
+  # mode is a complete-sounding answer drawn from whatever fraction happened to be labelled.
+  # ---------------------------------------------------------------------------
+
+  - id: rx-35
+    section: 6
+    persona: lab_technician
+    bucket: A
+    question: "Has 4-bromoanisole (COc1ccc(Br)cc1) been used as a starting material anywhere else in our records, or only in the coupling I know about?"
+    expects_tools: [substrate_precedent, similar_molecules, gather_evidence, find_notes]
+    forbids_claims:
+      - "a count presented as complete when the coverage sentence says the corpus is partly labelled"
+      - "a claim that the compound is unused, when nothing matching has been labelled yet"
+      - "a reaction cited without the note or document it came from"
+    direction: "The question names a role, so the role filter is the point: `substrate_precedent` with `role='starting-material'` answers it directly, where a similarity search would return the compound's neighbours and not its uses. A good answer distinguishes the two empty results the tool distinguishes — no precedent in a labelled corpus is a finding, nothing labelled yet is not — and quotes the coverage sentence rather than a bare number. If it falls back to `similar_molecules`, it must say that those are structural neighbours rather than recorded uses."
+
+  - id: rx-36
+    section: 6
+    persona: lab_technician
+    bucket: A
+    question: "Which ligands have actually been used for Buchwald-Hartwig aminations in the corpus, and how often?"
+    expects_tools: [reagent_frequency, gather_evidence, find_notes]
+    forbids_claims:
+      - "a recommendation of the most frequent ligand as the best one for a new substrate"
+      - "a share or percentage quoted without the number of reactions behind it"
+      - "a claim that a ligand was never used, from an unlabelled or capped selection"
+    direction: "`reagent_frequency(named_reaction=..., roles=['ligand'])` is the whole answer, and the graded behaviour is how the table is read. Popularity is the field's default, not a recommendation — the answer must say so. Counts must appear beside the number of reactions in scope, because three of four is not evidence. A null median yield means nobody recorded one and must not render as zero. And the coverage sentence has to reach the reader: a ligand absent from a partly-labelled corpus may simply live in an unlabelled row."
+
+  - id: rx-37
+    section: 6
+    persona: lab_leader
+    bucket: A
+    question: "We are making N-cyclohexylaniline (c1ccc(NC2CCCCC2)cc1). What conditions have worked for products like it?"
+    expects_tools: [conditions_for_similar_product, similar_molecules, gather_evidence]
+    forbids_claims:
+      - "a predicted yield for the proposed conditions"
+      - "a set of conditions presented as recommended rather than as recorded precedent"
+      - "a precedent quoted without its citation"
+    direction: "Two passes, and the answer should show both: structural neighbours of the product, then what was actually charged to make them — ligand, base, solvent, temperature, time, yield — each with the note or patent to follow. The distinction that matters is recorded versus recommended: these are conditions that were run, on a similar product, by someone else. Similarity is not causation, and a close neighbour is a candidate precedent to confirm against the record, never an outcome asserted on structure alone."
+
+  - id: rx-38
+    section: 6
+    persona: lab_leader
+    bucket: A
+    question: "Find reactions in the corpus whose product contains a secondary aryl amine — SMARTS c1ccccc1[NX3;H1]."
+    expects_tools: [reactions_making_substructure, substructure_matches, gather_evidence]
+    forbids_claims:
+      - "a claim that the result set is complete when the screen reported truncation"
+      - "a hit described as containing the motif without the exact match having been made"
+    direction: "The product-side substructure search answers this exactly: the corpus is screened on a pattern fingerprint and then verified with RDKit, so a hit genuinely contains the motif and a miss genuinely does not. The graded behaviour is the cap — the screen is bounded, and a bounded screen that found nothing is not a corpus that contains nothing. If the answer reports a count, it must say whether that count is a total or a lower bound."
+
+  - id: rx-39
+    section: 6
+    persona: lab_leader
+    bucket: A
+    question: "What are the workhorse conditions for a Buchwald-Hartwig where the product carries a secondary amine — what do people actually use?"
+    expects_tools: [reagent_frequency, gather_evidence, find_notes]
+    forbids_claims:
+      - "a single recommended condition set presented as the answer"
+      - "counts drawn from a functional-group filter the answer does not name"
+      - "a claim of completeness over a partly-labelled corpus"
+    direction: "One call, not two: `reagent_frequency` with both a named reaction and a product functional group, and no role filter — 'conditions' means every role, so ligand, base, solvent and catalyst all come back ranked. The answer should present them as what the field does, per role, with counts and medians, and should say what it filtered on so a chemist can tell whether the denominator is the one they meant. A single 'recommended' recipe synthesised from the top of each column is precisely the over-claim to avoid: those reagents were not necessarily used together."
+
+  - id: rx-40
+    section: 6
+    persona: lab_technician
+    bucket: A
+    question: "How do people usually work up a reaction that used tert-butoxide (CC(C)(C)[O-])? I would rather not guess at the quench."
+    expects_tools: [workup_precedent, gather_evidence, find_notes]
+    forbids_claims:
+      - "a quench procedure composed by the model rather than quoted from a record"
+      - "a safety assessment of the quench"
+      - "a workup presented as standard practice when only a handful of records support it"
+    direction: "This is the one precedent question no structural index can answer, and it is answered by showing what other people actually did: verbatim workup text from runs that recorded one, each with its citation. Reactions that used the reagent and wrote nothing down are not workup precedents and should not pad the answer. The answer must stay a report of the record — quoting and comparing procedures, noting how many there are — and must not synthesise a recommended quench, which is a safety-relevant judgment the corpus does not license."

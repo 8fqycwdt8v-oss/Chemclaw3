@@ -22,6 +22,7 @@ from chemclaw.ingest.eln.ingest import ingest_reaction
 from chemclaw.ingest.eln.record import record_from_ord_reaction
 from chemclaw.ingest.eln.records import ReactionRecordStore
 from chemclaw.science.fingerprints.store import FingerprintStore
+from chemclaw.science.labels.store import LabelIndex
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +95,8 @@ async def sync_entries(
     record_store: ReactionRecordStore,
     since: datetime,
     *,
+    label_index: LabelIndex,
+    source: str,
     apply_overlap: bool = True,
 ) -> IngestSummary:
     """Fetch entries from `since` minus the overlap window, ingest each, return a summary.
@@ -107,11 +110,20 @@ async def sync_entries(
     contract): the workflow's chunk loop reaches behind the cursor only on its first
     chunk, so draining a backlog does not re-fetch the whole overlap window per chunk.
 
+    `label_index` and `source` are required keyword arguments, passed straight through to
+    `ingest_reaction`, which explains why neither has a default: the label index's record phase
+    can only be written from the canonical record in hand, and `source` is half of its row key.
+
     Overlap replay is cheap, not just idempotent: an overlap entry whose stored record carries the
     same body has nothing left to index or store, so it is skipped by one indexed lookup over the
     replayed ids. That lookup used to be a parse of every merged note in the corpus, which is what
     made this loop outgrow its own activity timeout at ~700k entries; it is now bounded by the
     page, not by the corpus.
+
+    The skip covers the label row too, and correctly: a byte-identical body is a byte-identical
+    canonical record, so its record phase is the row already stored. An *amended* body falls
+    through and re-records, which is what re-derives the labels — `labeller_version` is left
+    untouched by the record upsert only when the record smiles is unchanged.
     """
     entries = await adapter.fetch_new_entries(_fetch_floor(since) if apply_overlap else since)
     ingested: list[str] = []
@@ -183,7 +195,14 @@ async def sync_entries(
                     # because the transcription asserts nothing either way.
                     skipped_existing.append(raw.entry_id)
                     continue
-            await ingest_reaction(reaction, reaction_store, molecule_store, record_store)
+            await ingest_reaction(
+                reaction,
+                reaction_store,
+                molecule_store,
+                record_store,
+                label_index=label_index,
+                source=source,
+            )
         except (ChemclawError, ValidationError) as exc:
             # The shared bad-data base covers *any* per-entry failure: an adapter's
             # mapping error, a validation failure, and a fingerprint that cannot be

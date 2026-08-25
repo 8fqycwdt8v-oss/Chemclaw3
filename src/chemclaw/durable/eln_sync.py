@@ -36,6 +36,7 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.ingest.sources.base import IngestHalf
     from chemclaw.ingest.sources.registry import active_ingest_source_names, make_data_source
     from chemclaw.science.fingerprints.store import default_molecule_store, default_reaction_store
+    from chemclaw.science.labels.store import default_label_index
 
 from chemclaw.durable.heartbeat import beating
 from chemclaw.durable.publish import BAD_DATA_RETRY
@@ -43,6 +44,7 @@ from chemclaw.durable.publish import BAD_DATA_RETRY
 # Module-level indirection so tests swap the production stores for in-memory ones.
 _reaction_store = default_reaction_store
 _molecule_store = default_molecule_store
+_label_index = default_label_index
 _record_store = default_record_store
 
 
@@ -162,6 +164,8 @@ async def sync_eln_entries(source: str, since: datetime, apply_overlap: bool = T
             _molecule_store(),
             _record_store(),
             since,
+            label_index=_label_index(),
+            source=source,
             apply_overlap=apply_overlap,
         ),
         f"eln sync {source}",

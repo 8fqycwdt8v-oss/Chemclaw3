@@ -236,6 +236,16 @@ topic).
       needs is a policy answer: which predictors are calibrated enough to override their published
       RMSE. `calibration_conformal_coverage` / `_min_samples` come back with the caller.
 
+**`reaction_fingerprints` keys on a bare reaction id, so two sources collide on one row.**
+`science/fingerprints/store.py` writes `reaction_fingerprints.id = reaction.reaction_id` with no
+source column, while `ingest/sources/eln-snowflake/datasource.yaml` puts the source name into
+`provenance` precisely "so two ELNs with colliding entry ids stay distinguishable in the graph".
+Two sources using one entry id therefore share a fingerprint row and a `reaction-<id>` note id:
+the second ingest overwrites the first, silently, and a similarity hit cites the wrong run. Found
+while designing the label index, which uses a composite `(source, reaction_id)` key and does not
+inherit it — so the fix is to give the fingerprint tables the same key, and it is a migration plus
+`note_id_for_reaction`. Not urgent while one ELN is enabled anywhere; not detectable at all when
+it happens.
 ## 3 — Work that is lost, dropped or invisible
 
 - [ ] **A decided approval hold can be reopened** — [M]. `agent/interaction_tools.py::start_approval`

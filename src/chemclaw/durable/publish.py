@@ -58,6 +58,15 @@ _BAD_DATA_TYPES = [
     "CalculationDomainError",
     "ConnectorError",
     "DataSourceError",
+    # A derived label written for a reaction whose record phase was never stored
+    # (`chemclaw.science.labels.store`). Non-retryable because the missing row is a fact about the
+    # corpus, not about this attempt: the drain must record the reaction before it can label it,
+    # and retrying the same write finds the same absence.
+    "LabelIndexError",
+    # The labelling server reached and refused: a reaction SMILES RDKit cannot parse, a species
+    # list that does not match the reaction (`chemclaw.ingest.labels.labeller`). Its retryable
+    # sibling is `LabelServerError`, which means nobody answered at all.
+    "LabelToolError",
     # The result-publication seam (D-2026-08-25). Both are bad data by the same test as every entry
     # here: a sink whose manifest cannot be resolved, or a record a destination has *answered*
     # about and refused, fails identically on every retry. Its retryable neighbour is

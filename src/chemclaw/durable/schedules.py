@@ -43,10 +43,12 @@ from chemclaw.core.config import settings
 from chemclaw.core.ids import stable_hash
 from chemclaw.core.temporal_client import connect
 from chemclaw.durable.artifact_eviction import ArtifactEvictionWorkflow
+from chemclaw.durable.corpus_sync import ReactionCorpusWorkflow, corpus_sources
 from chemclaw.durable.digest import DigestWorkflow
 from chemclaw.durable.document_sync import DocumentShareSyncWorkflow, share_sources
 from chemclaw.durable.eln_sync import ElnSyncWorkflow
 from chemclaw.durable.eval_drift import EvalDriftWorkflow
+from chemclaw.durable.label_sync import ReactionLabelWorkflow, label_policies
 from chemclaw.durable.note_index import NoteReindexWorkflow
 from chemclaw.durable.observation_jobs import ObservationSynthesisWorkflow
 from chemclaw.durable.publish_results import PublishResultsWorkflow
@@ -89,6 +91,8 @@ OWNED_SCHEDULE_IDS = frozenset(
         "artifact-eviction",
         "observations",
         "document-sync",
+        "reaction-labels",
+        "reaction-corpus",
     }
 )
 
@@ -152,6 +156,20 @@ def planned_schedules() -> list[PlannedSchedule]:
     if share_sources():
         share_every = timedelta(minutes=settings.document_sync_schedule_minutes)
         schedules.append(PlannedSchedule("document-sync", DocumentShareSyncWorkflow, share_every))
+    # The labelling drain earns a Schedule only where some enabled source declares a `labels:`
+    # block — the third time this file asks the manifests instead of adding a flag, and for the
+    # third time because `CHEMCLAW_DATA_SOURCES` plus a declaration already answers it. A
+    # deployment with no reaction corpus would otherwise ask the labelling server for its version
+    # every hour and then label nothing.
+    if label_policies():
+        label_every = timedelta(minutes=settings.label_sync_schedule_minutes)
+        schedules.append(PlannedSchedule("reaction-labels", ReactionLabelWorkflow, label_every))
+    # And the corpus drain earns one only where a source declares a `corpus:` binding. Daily
+    # rather than hourly: a release changes when a vendor ships one, so an hourly re-walk would
+    # read a warehouse to learn nothing.
+    if corpus_sources():
+        corpus_every = timedelta(minutes=settings.corpus_sync_schedule_minutes)
+        schedules.append(PlannedSchedule("reaction-corpus", ReactionCorpusWorkflow, corpus_every))
     # Digests only earn a Schedule where someone has subscribed (gap IDEA-1); otherwise the job
     # would sweep the corpus daily to deliver nothing.
     if settings.digest_enabled:
