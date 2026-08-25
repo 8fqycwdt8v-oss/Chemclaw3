@@ -173,11 +173,15 @@ def _unit(vector: list[float]) -> list[float]:
 def cosine_from_score(score: float) -> float:
     """Invert Databricks' `1/(1 + d²)` back to the cosine this seam's contract promises.
 
-    Exact for unit vectors, which is why `_unit` is applied on both sides. Clamped into [0, 1] after
-    the conversion rather than instead of it: the clamp only absorbs floating-point rounding at the
-    identical-vector end, where `VectorMatch` would otherwise reject a self-similarity a hair over
-    1.0. A negative cosine survives the conversion as a negative number and is dropped by the
-    caller's floor, which is the behaviour `base.py` specifies.
+    Exact for unit vectors, which is why `_unit` is applied on both sides.
+
+    Clamped into [0, 1] after the conversion rather than instead of it. At the top end the clamp
+    absorbs floating-point rounding, where `VectorMatch` would otherwise reject a self-similarity a
+    hair over 1.0. At the bottom it floors a negative cosine to exactly `0.0` — so what reaches the
+    caller is not the negative number itself but a zero, which `_matches` then drops on its `> 0`
+    test. The outcome is the one `base.py` specifies (non-positive similarity is not a hit); this
+    docstring used to describe the mechanism as a negative surviving the conversion, which its own
+    clamp made false.
     """
     if score <= 0.0:
         return 0.0
@@ -320,4 +324,13 @@ def _rows(response: Any) -> list[dict[str, Any]]:
         return [dict(zip(names, values, strict=False)) for values in data]
     if isinstance(response, list):
         return [dict(row) for row in response if isinstance(row, dict)]
+    # Never silently: tolerant parsing is here to absorb a client-version change, and returning an
+    # empty list without a word would turn one into "this corpus has no matches" on every search —
+    # the failure the tolerance exists to prevent, inverted. `qdrant._matches` warns per dropped
+    # point for the same reason.
+    logger.warning(
+        "databricks returned a response shape this adapter does not read (%s); treating it as no "
+        "matches. If the client was upgraded, `_rows` in this module is what needs teaching",
+        type(response).__name__,
+    )
     return []

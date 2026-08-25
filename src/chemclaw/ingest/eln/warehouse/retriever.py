@@ -242,8 +242,16 @@ class WarehouseVectorRetriever:
         Computed here rather than applied to the results because eligibility has to reach the index
         *before* its top-k. Filter afterwards and a narrow tag over a wide corpus returns nothing at
         all, since the k nearest vectors all belonged to something else.
+
+        **What counts as "filtered" is the predicate list, not the query's keys.** It used to be the
+        latter, and that silently dropped the binding's own `where:` on every query that carried no
+        mapped filter: the same binding restricted the corpus when the model happened to pass a date
+        and did not when it did not. `where:` is the binding author's statement about which rows are
+        *ever* eligible, so asking `sql` what it would actually emit is the only reading that makes
+        the two paths agree — the scanned one has always applied it unconditionally.
         """
-        if not any(key in filters for key in self._vector.filter_columns):
+        predicates, _ = sql.vector_predicates(self._vector, "?", filters)
+        if not predicates:
             return None
         cap = settings.vector_store_max_scope_keys
         warehouse = self._connection()
@@ -255,11 +263,17 @@ class WarehouseVectorRetriever:
             # Refused rather than truncated: a silently cut eligibility set is a wrong answer that
             # reads as a thin corpus, and the operator's lever (a narrower filter, or a higher cap)
             # only exists if they are told.
-            raise WarehouseQueryError(
+            message = (
                 f"{self.name}: the filter matches more than {cap} rows, which is more eligibility "
                 "than an index filter can carry. Narrow the query's filters, or raise "
                 "CHEMCLAW_VECTOR_STORE_MAX_SCOPE_KEYS if the index can take it"
             )
+            # Logged here as well as raised, because `retrieve` catches this alongside every other
+            # warehouse failure and logs a generic "search failed" at WARNING with the real message
+            # only at DEBUG. This is the one case where the message *is* the fix, and an operator
+            # reading a default-level log would otherwise see a broad filter as an empty corpus.
+            logger.warning("%s", message)
+            raise WarehouseQueryError(message)
         return {str(row[self._vector.key]) for row in rows if row.get(self._vector.key)}
 
     def _chunks(self, rows: list[dict[str, Any]]) -> list[EvidenceChunk]:
