@@ -25,9 +25,9 @@ from pydantic import ValidationError
 
 from chemclaw.ingest.eln.adapter import RawEntry
 from chemclaw.ingest.eln.json_adapter import JsonExportAdapter
-from chemclaw.ingest.eln.note import note_from_ord_reaction
 from chemclaw.ingest.eln.ord import Component, Impurity, OrdReaction, Role
 from chemclaw.ingest.eln.ord_adapter import OrdJsonAdapter
+from chemclaw.ingest.eln.record import record_from_ord_reaction
 
 
 def _reaction(**overrides: object) -> OrdReaction:
@@ -79,19 +79,19 @@ def test_outcome_quality_never_leaks_into_structure() -> None:
     assert [c.smiles for c in plain.compounds()] == [c.smiles for c in enriched.compounds()]
 
 
-def test_the_note_time_scopes_itself_from_the_experiment_date() -> None:
-    """`valid_from` finally has a source, so F10-G2's bi-temporal fields are fed (KNW-1)."""
-    note = note_from_ord_reaction(_reaction(performed_at=date(2026, 3, 1)))
-    assert note.valid_from == date(2026, 3, 1)
-    # `valid_to` stays open: a result does not expire on its own, it is superseded.
-    assert note.valid_to is None
-    assert note.is_current(date(2026, 6, 1))
-    assert not note.is_current(date(2026, 1, 1))  # not yet run at that time
+def test_the_record_time_scopes_itself_from_the_experiment_date() -> None:
+    """The date a `since`/`until` window narrows on finally has a source (KNW-1)."""
+    record = record_from_ord_reaction(_reaction(performed_at=date(2026, 3, 1)))
+    assert record.performed_at == date(2026, 3, 1)
+    # There is no `valid_to`: a result does not expire on its own, it is superseded — which is a
+    # claim a human makes in a note, not something a transcription can say about itself.
+    assert record.is_current(date(2026, 6, 1))
+    assert not record.is_current(date(2026, 1, 1))  # not yet run at that time
 
 
 def test_the_note_renders_purity_and_the_impurity_profile() -> None:
     """Retrieval reads bodies, so an impurity-driven question has to be able to match here."""
-    note = note_from_ord_reaction(
+    note = record_from_ord_reaction(
         _reaction(
             yield_percent=88.0,
             purity_percent=98.4,
@@ -105,7 +105,7 @@ def test_the_note_renders_purity_and_the_impurity_profile() -> None:
 
 def test_a_reaction_without_impurities_renders_no_empty_section() -> None:
     """An absent profile must not render a misleading empty heading."""
-    assert "## Impurities" not in note_from_ord_reaction(_reaction(yield_percent=50.0)).body
+    assert "## Impurities" not in record_from_ord_reaction(_reaction(yield_percent=50.0)).body
 
 
 def test_json_adapter_maps_date_purity_and_impurities(tmp_path: Path) -> None:

@@ -19,7 +19,6 @@ from chemclaw.core.config import settings
 from chemclaw.ingest.eln.adapter import RawEntry, parse_iso_utc
 from chemclaw.ingest.eln.ingest import IngestError, ingest_reaction
 from chemclaw.ingest.eln.json_adapter import ElnFormatError, JsonExportAdapter
-from chemclaw.ingest.eln.note import note_from_ord_reaction
 from chemclaw.ingest.eln.ord import (
     Component,
     Impurity,
@@ -30,14 +29,13 @@ from chemclaw.ingest.eln.ord import (
     StepKind,
 )
 from chemclaw.ingest.eln.ord_adapter import OrdFormatError, OrdJsonAdapter
+from chemclaw.ingest.eln.record import record_from_ord_reaction
+from chemclaw.ingest.eln.records import InMemoryReactionRecordStore
 from chemclaw.ingest.eln.sync import sync_entries
 from chemclaw.ingest.eln.validate import validate_ord
-from chemclaw.kg.note import cited_links, note_id_for_reaction
-from chemclaw.kg.render import render_note
-from chemclaw.retrieval.retrievers import GraphRetriever
+from chemclaw.kg.note import cited_ids, cited_links, note_id_for_reaction
 from chemclaw.science.fingerprints.molfp.search import find_similar_molecules
 from chemclaw.science.fingerprints.store import InMemoryFingerprintStore
-from tests.conftest import FakeSubmitter
 
 _EPOCH = datetime.min.replace(tzinfo=UTC)
 
@@ -494,44 +492,51 @@ def test_naive_timestamp_is_read_as_utc(tmp_path: Path) -> None:
 # --- note + ingest + sync -------------------------------------------------------------
 
 
-def test_note_from_ord_reaction() -> None:
-    """A reaction becomes an agent `reaction` note with SMILES + conditions, no dangling link."""
-    note = note_from_ord_reaction(_ester())
-    assert note.type == "reaction"
-    assert note.created_by == "agent"
-    assert note.id == "reaction-rxn-1"
-    assert "CCO.CC(=O)O>>CCOC(C)=O" in note.body
-    assert "temperature: 80.0 °C" in note.body
-    assert note.outgoing_links() == []
+def test_record_from_ord_reaction() -> None:
+    """A reaction becomes a transcription record with SMILES + conditions and no forged link."""
+    record = record_from_ord_reaction(_ester())
+    assert record.reaction_id == "rxn-1"
+    assert record.source.startswith("eln:")
+    assert "CCO.CC(=O)O>>CCOC(C)=O" in record.body
+    assert "temperature: 80.0 °C" in record.body
+    assert cited_ids(record.body) == []
 
 
-def test_ingest_indexes_and_proposes() -> None:
-    """A valid reaction is indexed (reaction + compounds) and proposed via the PR-gate."""
+def test_ingest_indexes_and_records() -> None:
+    """A valid reaction is indexed (reaction + compounds) and stored as a queryable record."""
 
     async def _run() -> None:
-        rxn, mol, sub = InMemoryFingerprintStore(), InMemoryFingerprintStore(), FakeSubmitter()
-        ref = await ingest_reaction(_ester(), rxn, mol, sub)
-        assert ref == "pr://note/reaction-rxn-1"
+        rxn, mol, rec = (
+            InMemoryFingerprintStore(),
+            InMemoryFingerprintStore(),
+            InMemoryReactionRecordStore(),
+        )
+        record = await ingest_reaction(_ester(), rxn, mol, rec)
+        assert record.reaction_id == "rxn-1"
         assert len(await rxn.all_records()) == 1  # the reaction fingerprint
         assert len(await mol.all_records()) == 3  # ethanol, acetic acid, ethyl acetate
-        assert sub.submissions[0].files[0].path.startswith("knowledge/reaction/reaction-rxn-1")
+        assert (await rec.read("rxn-1")) is not None  # readable at once, with no PR to merge
 
     asyncio.run(_run())
 
 
 def test_ingest_rejects_invalid_without_side_effects() -> None:
-    """An invalid reaction raises and writes nothing to the index or the graph (G4)."""
+    """An invalid reaction raises and writes nothing to the index or the corpus (G4)."""
 
     async def _run() -> None:
-        rxn, mol, sub = InMemoryFingerprintStore(), InMemoryFingerprintStore(), FakeSubmitter()
+        rxn, mol, rec = (
+            InMemoryFingerprintStore(),
+            InMemoryFingerprintStore(),
+            InMemoryReactionRecordStore(),
+        )
         bad = _ester().model_copy(
             update={"outcomes": [Component(smiles="CCCl", role=Role.PRODUCT)]}
         )
         with pytest.raises(IngestError, match="mass balance"):
-            await ingest_reaction(bad, rxn, mol, sub)
+            await ingest_reaction(bad, rxn, mol, rec)
         assert await rxn.all_records() == []
         assert await mol.all_records() == []
-        assert sub.submissions == []
+        assert await rec.all_records() == []
 
     asyncio.run(_run())
 
@@ -571,8 +576,12 @@ def test_sync_ingests_batch_and_skips_bad_entries() -> None:
             def map_to_ord(self, raw: RawEntry) -> OrdReaction:
                 return JsonExportAdapter().map_to_ord(raw)
 
-        rxn, mol, sub = InMemoryFingerprintStore(), InMemoryFingerprintStore(), FakeSubmitter()
-        summary = await sync_entries(_Adapter(), rxn, mol, sub, _EPOCH)
+        rxn, mol, rec = (
+            InMemoryFingerprintStore(),
+            InMemoryFingerprintStore(),
+            InMemoryReactionRecordStore(),
+        )
+        summary = await sync_entries(_Adapter(), rxn, mol, rec, _EPOCH)
 
         assert summary.ingested == ["good"]  # the good entry survives both bad ones
         assert {r.entry_id for r in summary.rejected} == {"bad-balance", "unmappable"}
@@ -580,7 +589,7 @@ def test_sync_ingests_batch_and_skips_bad_entries() -> None:
         assert "mass balance" in reasons["bad-balance"]
         assert "cannot map" in reasons["unmappable"]
         assert summary.next_cursor == datetime(2026, 3, 1, tzinfo=UTC)  # newest seen
-        assert len(sub.submissions) == 1  # only the good entry proposed a note
+        assert len(await rec.all_records()) == 1  # only the good entry became a record
 
     asyncio.run(_run())
 
@@ -610,8 +619,12 @@ def test_sync_logs_the_outcome_and_each_rejection(caplog: pytest.LogCaptureFixtu
             return JsonExportAdapter().map_to_ord(raw)
 
     async def _run() -> None:
-        rxn, mol, sub = InMemoryFingerprintStore(), InMemoryFingerprintStore(), FakeSubmitter()
-        await sync_entries(_Adapter(), rxn, mol, sub, _EPOCH)
+        rxn, mol, rec = (
+            InMemoryFingerprintStore(),
+            InMemoryFingerprintStore(),
+            InMemoryReactionRecordStore(),
+        )
+        await sync_entries(_Adapter(), rxn, mol, rec, _EPOCH)
 
     with caplog.at_level(logging.INFO):
         asyncio.run(_run())
@@ -648,8 +661,12 @@ def test_sync_rejects_degenerate_reaction_without_aborting_batch() -> None:
             def map_to_ord(self, raw: RawEntry) -> OrdReaction:
                 return JsonExportAdapter().map_to_ord(raw)
 
-        rxn, mol, sub = InMemoryFingerprintStore(), InMemoryFingerprintStore(), FakeSubmitter()
-        summary = await sync_entries(_Adapter(), rxn, mol, sub, _EPOCH)
+        rxn, mol, rec = (
+            InMemoryFingerprintStore(),
+            InMemoryFingerprintStore(),
+            InMemoryReactionRecordStore(),
+        )
+        summary = await sync_entries(_Adapter(), rxn, mol, rec, _EPOCH)
 
         assert summary.ingested == ["good"]
         assert [r.entry_id for r in summary.rejected] == ["degenerate"]
@@ -698,8 +715,12 @@ def test_sync_rejects_non_slug_entry_id_without_aborting_batch() -> None:
     async def _run() -> None:
         bad_id = _good_entry("EXP 2024/001", datetime(2026, 1, 1, tzinfo=UTC))
         good = _good_entry("good", datetime(2026, 2, 1, tzinfo=UTC))
-        rxn, mol, sub = InMemoryFingerprintStore(), InMemoryFingerprintStore(), FakeSubmitter()
-        summary = await sync_entries(_ListAdapter([bad_id, good]), rxn, mol, sub, _EPOCH)
+        rxn, mol, rec = (
+            InMemoryFingerprintStore(),
+            InMemoryFingerprintStore(),
+            InMemoryReactionRecordStore(),
+        )
+        summary = await sync_entries(_ListAdapter([bad_id, good]), rxn, mol, rec, _EPOCH)
 
         assert summary.ingested == ["good"]
         assert [r.entry_id for r in summary.rejected] == ["EXP 2024/001"]
@@ -719,8 +740,12 @@ def test_future_dated_entry_is_rejected_and_does_not_poison_cursor() -> None:
     async def _run() -> None:
         future = _good_entry("future", datetime(2062, 7, 23, tzinfo=UTC))
         good = _good_entry("good", datetime(2026, 1, 1, tzinfo=UTC))
-        rxn, mol, sub = InMemoryFingerprintStore(), InMemoryFingerprintStore(), FakeSubmitter()
-        summary = await sync_entries(_ListAdapter([future, good]), rxn, mol, sub, _EPOCH)
+        rxn, mol, rec = (
+            InMemoryFingerprintStore(),
+            InMemoryFingerprintStore(),
+            InMemoryReactionRecordStore(),
+        )
+        summary = await sync_entries(_ListAdapter([future, good]), rxn, mol, rec, _EPOCH)
 
         assert summary.ingested == ["good"]
         assert [r.entry_id for r in summary.rejected] == ["future"]
@@ -750,8 +775,12 @@ def test_a_future_amendment_stamp_costs_the_cursor_and_not_the_entry() -> None:
             update={"modified_at": datetime(2062, 7, 23, tzinfo=UTC)}
         )
         good = _good_entry("good", datetime(2026, 2, 1, tzinfo=UTC))
-        rxn, mol, sub = InMemoryFingerprintStore(), InMemoryFingerprintStore(), FakeSubmitter()
-        summary = await sync_entries(_ListAdapter([amended, good]), rxn, mol, sub, _EPOCH)
+        rxn, mol, rec = (
+            InMemoryFingerprintStore(),
+            InMemoryFingerprintStore(),
+            InMemoryReactionRecordStore(),
+        )
+        summary = await sync_entries(_ListAdapter([amended, good]), rxn, mol, rec, _EPOCH)
 
         assert summary.ingested == ["amended", "good"]
         assert summary.rejected == []
@@ -779,8 +808,12 @@ def test_sync_fetches_an_overlap_window_behind_the_cursor(
         cursor = datetime(2026, 1, 1, 2, 0, tzinfo=UTC)
         late = _good_entry("late", cursor - timedelta(minutes=20))
         adapter = _ListAdapter([late])
-        rxn, mol, sub = InMemoryFingerprintStore(), InMemoryFingerprintStore(), FakeSubmitter()
-        summary = await sync_entries(adapter, rxn, mol, sub, cursor)
+        rxn, mol, rec = (
+            InMemoryFingerprintStore(),
+            InMemoryFingerprintStore(),
+            InMemoryReactionRecordStore(),
+        )
+        summary = await sync_entries(adapter, rxn, mol, rec, cursor)
 
         assert adapter.fetched_since == [cursor - timedelta(seconds=1800)]
         assert summary.ingested == ["late"]
@@ -789,23 +822,19 @@ def test_sync_fetches_an_overlap_window_behind_the_cursor(
         # the entry sits inside the replay window with no merged note, so the *next* run fetches
         # and proposes it again. "Will come back until someone merges it" is what a single run can
         # establish; "was proposed before" is not (this entry never was).
-        assert summary.awaiting_merge == ["late"]
         assert summary.next_cursor == cursor  # the cursor never moves backwards
 
     asyncio.run(_run())
 
 
-def _write_merged_note(knowledge: Path, entry: RawEntry) -> None:
-    """Lay the merged reaction note for `entry` — exactly what an approved PR leaves behind.
+async def _seed_record(store: InMemoryReactionRecordStore, entry: RawEntry) -> None:
+    """Store the record for `entry` — exactly what an earlier sync run leaves behind.
 
-    Rendered from the entry rather than stubbed, because the sync now compares the note's *body*
-    and not only its id: a stub would make "already merged" and "unchanged" indistinguishable
-    again, which is the very thing being fixed.
+    Rendered from the entry rather than stubbed, because the sync compares the stored *body* and
+    not only its id: a stub would make "already ingested" and "unchanged" indistinguishable, which
+    is what dropped every in-place ELN amendment before the body comparison existed.
     """
-    note = note_from_ord_reaction(JsonExportAdapter().map_to_ord(entry))
-    note_dir = knowledge / "reaction"
-    note_dir.mkdir(parents=True, exist_ok=True)
-    (note_dir / f"{note.id}.md").write_text(render_note(note), encoding="utf-8")
+    await store.record([record_from_ord_reaction(JsonExportAdapter().map_to_ord(entry))])
 
 
 def test_sync_skips_overlap_entry_whose_note_already_merged(
@@ -824,13 +853,16 @@ def test_sync_skips_overlap_entry_whose_note_already_merged(
         monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
         cursor = datetime(2026, 1, 2, tzinfo=UTC)
         late = _good_entry("late", cursor - timedelta(hours=2))
-        _write_merged_note(tmp_path, late)
-        rxn, mol, sub = InMemoryFingerprintStore(), InMemoryFingerprintStore(), FakeSubmitter()
-        summary = await sync_entries(_ListAdapter([late]), rxn, mol, sub, cursor)
+        rxn, mol, rec = (
+            InMemoryFingerprintStore(),
+            InMemoryFingerprintStore(),
+            InMemoryReactionRecordStore(),
+        )
+        await _seed_record(rec, late)
+        summary = await sync_entries(_ListAdapter([late]), rxn, mol, rec, cursor)
 
         assert summary.skipped_existing == ["late"]
         assert summary.ingested == []  # a replay skip is not a fresh ingest
-        assert sub.submissions == []  # no PR-gate git cycle
         assert await rxn.all_records() == []  # no fingerprint re-upserts
         assert summary.next_cursor == cursor
 
@@ -850,13 +882,17 @@ def test_sync_still_ingests_new_entry_even_if_its_note_exists(
         monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
         cursor = datetime(2026, 1, 2, tzinfo=UTC)
         new = _good_entry("new", cursor + timedelta(hours=2))
-        _write_merged_note(tmp_path, new)
-        rxn, mol, sub = InMemoryFingerprintStore(), InMemoryFingerprintStore(), FakeSubmitter()
-        summary = await sync_entries(_ListAdapter([new]), rxn, mol, sub, cursor)
+        rxn, mol, rec = (
+            InMemoryFingerprintStore(),
+            InMemoryFingerprintStore(),
+            InMemoryReactionRecordStore(),
+        )
+        await _seed_record(rec, new)
+        summary = await sync_entries(_ListAdapter([new]), rxn, mol, rec, cursor)
 
         assert summary.ingested == ["new"]
         assert summary.skipped_existing == []
-        assert len(sub.submissions) == 1
+        assert len(await rec.all_records()) == 1
 
     asyncio.run(_run())
 
@@ -875,8 +911,12 @@ def test_sync_without_overlap_fetches_from_the_cursor_itself(
         monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))  # no merged notes
         cursor = datetime(2026, 1, 2, tzinfo=UTC)
         adapter = _ListAdapter([_good_entry("boundary", cursor)])
-        rxn, mol, sub = InMemoryFingerprintStore(), InMemoryFingerprintStore(), FakeSubmitter()
-        summary = await sync_entries(adapter, rxn, mol, sub, cursor, apply_overlap=False)
+        rxn, mol, rec = (
+            InMemoryFingerprintStore(),
+            InMemoryFingerprintStore(),
+            InMemoryReactionRecordStore(),
+        )
+        summary = await sync_entries(adapter, rxn, mol, rec, cursor, apply_overlap=False)
 
         assert adapter.fetched_since == [cursor]  # no reach behind the cursor
         assert summary.ingested == ["boundary"]  # inclusive boundary still processed
@@ -904,8 +944,12 @@ def test_overlap_rerejection_logs_debug_not_warning(
     )
 
     async def _run() -> None:
-        rxn, mol, sub = InMemoryFingerprintStore(), InMemoryFingerprintStore(), FakeSubmitter()
-        summary = await sync_entries(_ListAdapter([replayed, fresh]), rxn, mol, sub, since)
+        rxn, mol, rec = (
+            InMemoryFingerprintStore(),
+            InMemoryFingerprintStore(),
+            InMemoryReactionRecordStore(),
+        )
+        summary = await sync_entries(_ListAdapter([replayed, fresh]), rxn, mol, rec, since)
         assert {r.entry_id for r in summary.rejected} == {"replayed-bad", "fresh-bad"}
 
     with caplog.at_level(logging.DEBUG, logger="chemclaw.ingest.eln.sync"):
@@ -926,8 +970,12 @@ def test_sync_log_sanitizes_external_entry_ids(caplog: pytest.LogCaptureFixture)
     )
 
     async def _run() -> None:
-        rxn, mol, sub = InMemoryFingerprintStore(), InMemoryFingerprintStore(), FakeSubmitter()
-        await sync_entries(_ListAdapter([forged]), rxn, mol, sub, _EPOCH)
+        rxn, mol, rec = (
+            InMemoryFingerprintStore(),
+            InMemoryFingerprintStore(),
+            InMemoryReactionRecordStore(),
+        )
+        await sync_entries(_ListAdapter([forged]), rxn, mol, rec, _EPOCH)
 
     with caplog.at_level(logging.WARNING):
         asyncio.run(_run())
@@ -981,7 +1029,7 @@ def test_a_single_product_reaction_note_says_which_compound_it_is_about() -> Non
     the record the whole time — it goes into the body as part of the reaction SMILES — it simply
     never reached the field.
     """
-    assert note_from_ord_reaction(_ester()).compound_smiles == "CCOC(C)=O"
+    assert record_from_ord_reaction(_ester()).compound_smiles == "CCOC(C)=O"
 
 
 def test_a_multi_product_reaction_names_no_principal_compound() -> None:
@@ -998,7 +1046,7 @@ def test_a_multi_product_reaction_names_no_principal_compound() -> None:
             ]
         }
     )
-    assert note_from_ord_reaction(two_products).compound_smiles is None
+    assert record_from_ord_reaction(two_products).compound_smiles is None
 
 
 def test_solvent_and_catalyst_go_in_the_agent_slot() -> None:
@@ -1058,7 +1106,7 @@ def test_the_record_form_keeps_the_solvent_the_fingerprint_form_drops_it() -> No
     assert "C1CCOC1" in reaction.reaction_smiles()
     assert "C1CCOC1" not in reaction.transformation_smiles()
     # And the note a human reviews still shows it, which is what the split is protecting.
-    assert "C1CCOC1" in note_from_ord_reaction(reaction).body
+    assert "C1CCOC1" in record_from_ord_reaction(reaction).body
 
 
 def test_an_amended_entry_is_re_proposed_rather_than_dropped(
@@ -1080,8 +1128,6 @@ def test_an_amended_entry_is_re_proposed_rather_than_dropped(
         monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
         cursor = datetime(2026, 1, 2, tzinfo=UTC)
         original = _good_entry("amended", cursor - timedelta(hours=2))
-        _write_merged_note(tmp_path, original)
-
         corrected = original.model_copy(
             update={
                 "payload": {
@@ -1091,72 +1137,20 @@ def test_an_amended_entry_is_re_proposed_rather_than_dropped(
                 "modified_at": cursor + timedelta(hours=1),
             }
         )
-        rxn, mol, sub = InMemoryFingerprintStore(), InMemoryFingerprintStore(), FakeSubmitter()
-        summary = await sync_entries(_ListAdapter([corrected]), rxn, mol, sub, cursor)
+        rxn, mol, rec = (
+            InMemoryFingerprintStore(),
+            InMemoryFingerprintStore(),
+            InMemoryReactionRecordStore(),
+        )
+        await _seed_record(rec, original)
+        summary = await sync_entries(_ListAdapter([corrected]), rxn, mol, rec, cursor)
 
         assert summary.ingested == ["amended"]
         assert summary.skipped_existing == []
         # Not awaiting merge: a merged predecessor is proof the review queue moves, so this is new
         # content going in front of a human rather than the same claim going round again.
-        assert summary.awaiting_merge == []
-        assert len(sub.submissions) == 1
-        assert "31" in sub.submissions[0].files[0].content
-
-    asyncio.run(_run())
-
-
-def test_an_entry_whose_note_never_merged_is_reported_as_awaiting_merge(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    """A proposal nobody merged is re-proposed forever, and the summary has to say so.
-
-    `ingested` counts entries whose note was *proposed* through the PR-gate — proposed, because
-    that is as far as an automated step may take a knowledge claim. So an entry whose PR the
-    `kg-validate` hazard gate blocks, or that a reviewer simply never got to, is re-proposed on
-    every subsequent run and counted again each time, while an operator reading the summary sees a
-    steady ingest count and no indication that nothing is landing.
-
-    Asserted through a real `sync_entries` run over an empty knowledge dir (nothing merged) with
-    the entry inside the replay window, plus the WARNING that carries the same fact to an operator
-    who reads logs rather than workflow results.
-    """
-
-    async def _run() -> None:
-        monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))  # nothing merged, ever
-        cursor = datetime(2026, 1, 2, tzinfo=UTC)
-        blocked = _good_entry("blocked", cursor - timedelta(hours=2))
-        rxn, mol, sub = InMemoryFingerprintStore(), InMemoryFingerprintStore(), FakeSubmitter()
-        with caplog.at_level(logging.WARNING):
-            summary = await sync_entries(_ListAdapter([blocked]), rxn, mol, sub, cursor)
-
-        assert summary.ingested == ["blocked"]  # the proposal really was made again
-        assert summary.awaiting_merge == ["blocked"]  # and it accomplished nothing new
-        assert len(sub.submissions) == 1
-        assert "blocked" in caplog.text and "re-proposed every run" in caplog.text
-
-    asyncio.run(_run())
-
-
-def test_a_first_time_entry_is_not_reported_as_awaiting_merge(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A brand-new entry's note is unmerged too, and reporting it would make the field noise.
-
-    Every fresh proposal is unmerged for as long as review takes; what `awaiting_merge` reports is
-    the narrower thing an operator can act on — an entry the sync will keep re-proposing because it
-    is inside the replay window. A new entry is past the cursor, so the next run never sees it
-    again, and it belongs in `ingested` alone.
-    """
-
-    async def _run() -> None:
-        monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
-        cursor = datetime(2026, 1, 2, tzinfo=UTC)
-        fresh = _good_entry("fresh", cursor + timedelta(hours=1))
-        rxn, mol, sub = InMemoryFingerprintStore(), InMemoryFingerprintStore(), FakeSubmitter()
-        summary = await sync_entries(_ListAdapter([fresh]), rxn, mol, sub, cursor)
-
-        assert summary.ingested == ["fresh"]
-        assert summary.awaiting_merge == []
+        stored = await rec.read("amended")
+        assert stored is not None and "31" in stored.body
 
     asyncio.run(_run())
 
@@ -1179,11 +1173,15 @@ def test_an_entry_that_fails_to_ingest_is_only_reported_as_rejected(
             created_at=cursor - timedelta(hours=2),
             payload={"reactants": [{"smiles": "CCO"}], "products": [{"smiles": "CCCl"}]},
         )
-        rxn, mol, sub = InMemoryFingerprintStore(), InMemoryFingerprintStore(), FakeSubmitter()
-        summary = await sync_entries(_ListAdapter([bad]), rxn, mol, sub, cursor)
+        rxn, mol, rec = (
+            InMemoryFingerprintStore(),
+            InMemoryFingerprintStore(),
+            InMemoryReactionRecordStore(),
+        )
+        summary = await sync_entries(_ListAdapter([bad]), rxn, mol, rec, cursor)
 
         assert [entry.entry_id for entry in summary.rejected] == ["bad"]
-        assert summary.ingested == [] and summary.awaiting_merge == []
+        assert summary.ingested == []
 
     asyncio.run(_run())
 
@@ -1202,14 +1200,19 @@ def test_an_unchanged_entry_reported_as_amended_still_costs_nothing(
         monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
         cursor = datetime(2026, 1, 2, tzinfo=UTC)
         entry = _good_entry("touched", cursor - timedelta(hours=2))
-        _write_merged_note(tmp_path, entry)
         touched = entry.model_copy(update={"modified_at": cursor + timedelta(hours=1)})
 
-        rxn, mol, sub = InMemoryFingerprintStore(), InMemoryFingerprintStore(), FakeSubmitter()
-        summary = await sync_entries(_ListAdapter([touched]), rxn, mol, sub, cursor)
+        rxn, mol, rec = (
+            InMemoryFingerprintStore(),
+            InMemoryFingerprintStore(),
+            InMemoryReactionRecordStore(),
+        )
+        await _seed_record(rec, entry)
+        summary = await sync_entries(_ListAdapter([touched]), rxn, mol, rec, cursor)
 
         assert summary.skipped_existing == ["touched"]
-        assert sub.submissions == []
+        assert summary.ingested == []
+        assert await rxn.all_records() == []  # no fingerprint re-upserts either
 
     asyncio.run(_run())
 
@@ -1447,8 +1450,12 @@ def test_ord_malformed_entry_does_not_abort_the_sync_batch() -> None:
         good = RawEntry(
             entry_id="good", created_at=datetime(2026, 2, 1, tzinfo=UTC), payload=good_payload
         )
-        rxn, mol, sub = InMemoryFingerprintStore(), InMemoryFingerprintStore(), FakeSubmitter()
-        summary = await sync_entries(_OrdListAdapter([malformed, good]), rxn, mol, sub, _EPOCH)
+        rxn, mol, rec = (
+            InMemoryFingerprintStore(),
+            InMemoryFingerprintStore(),
+            InMemoryReactionRecordStore(),
+        )
+        summary = await sync_entries(_OrdListAdapter([malformed, good]), rxn, mol, rec, _EPOCH)
 
         # Both land: the malformed field never poisoned the batch, and the second entry
         # (which the un-guarded AttributeError would never have let the run reach) ingests too.
@@ -1466,10 +1473,13 @@ def test_a_search_hit_id_is_the_note_id_the_ingest_wrote() -> None:
     chemist was told the procedure was not in the graph — with the note on disk. Asserted as an
     equality between the two ends rather than against a literal, so the test still holds if the
     prefix ever changes and fails if only one end changes.
+
+    The record is keyed on the bare ELN id and the citation carries the prefix, so the round trip
+    is now that `expand_note` strips exactly what `note_id_for_reaction` adds.
     """
     reaction = _ester()
-    written = note_from_ord_reaction(reaction).id
-    assert note_id_for_reaction(reaction.reaction_id) == written
+    cited = note_id_for_reaction(record_from_ord_reaction(reaction).reaction_id)
+    assert cited.removeprefix("reaction-") == reaction.reaction_id
 
 
 # --- impurity structures reach the molecule index -------------------------------------
@@ -1490,10 +1500,14 @@ def test_an_identified_impurity_is_findable_by_structure() -> None:
     """
 
     async def _run() -> None:
-        rxn, mol, sub = InMemoryFingerprintStore(), InMemoryFingerprintStore(), FakeSubmitter()
+        rxn, mol, rec = (
+            InMemoryFingerprintStore(),
+            InMemoryFingerprintStore(),
+            InMemoryReactionRecordStore(),
+        )
         # Diethyl ether — an ether by-product of the esterification, charged nowhere in the record.
         await ingest_reaction(
-            _with_impurities(Impurity(name="ether", smiles="CCOCC")), rxn, mol, sub
+            _with_impurities(Impurity(name="ether", smiles="CCOCC")), rxn, mol, rec
         )
         hits = (await find_similar_molecules(mol, "CCOCC", threshold=0.99)).hits
         assert [hit.smiles for hit in hits] == ["CCOCC"]
@@ -1505,11 +1519,15 @@ def test_an_impurity_with_no_structure_is_skipped_not_fatal() -> None:
     """An ELN routinely records only a chromatographic name; that is not an error (KNW-2)."""
 
     async def _run() -> None:
-        rxn, mol, sub = InMemoryFingerprintStore(), InMemoryFingerprintStore(), FakeSubmitter()
-        await ingest_reaction(_with_impurities(Impurity(name="RRT 0.82")), rxn, mol, sub)
+        rxn, mol, rec = (
+            InMemoryFingerprintStore(),
+            InMemoryFingerprintStore(),
+            InMemoryReactionRecordStore(),
+        )
+        await ingest_reaction(_with_impurities(Impurity(name="RRT 0.82")), rxn, mol, rec)
         # The three reaction compounds, and nothing minted from a nameless chromatographic peak.
         assert len(await mol.all_records()) == 3
-        assert sub.submissions  # the run was still proposed
+        assert await rec.all_records()  # the run was still recorded
 
     asyncio.run(_run())
 
@@ -1525,12 +1543,16 @@ def test_an_unparseable_impurity_structure_is_skipped_and_logged(
     """
 
     async def _run() -> None:
-        rxn, mol, sub = InMemoryFingerprintStore(), InMemoryFingerprintStore(), FakeSubmitter()
+        rxn, mol, rec = (
+            InMemoryFingerprintStore(),
+            InMemoryFingerprintStore(),
+            InMemoryReactionRecordStore(),
+        )
         bad = Impurity(name="garbled", smiles="C1CC")
         with caplog.at_level(logging.WARNING, logger="chemclaw.ingest.eln.ingest"):
-            await ingest_reaction(_with_impurities(bad), rxn, mol, sub)
+            await ingest_reaction(_with_impurities(bad), rxn, mol, rec)
         assert len(await mol.all_records()) == 3
-        assert sub.submissions
+        assert await rec.all_records()
         assert "unparseable impurity SMILES" in caplog.text
 
     asyncio.run(_run())
@@ -1539,29 +1561,36 @@ def test_an_unparseable_impurity_structure_is_skipped_and_logged(
 # --- the note carries its project, and its scale --------------------------------------
 
 
-def test_a_reaction_note_is_reachable_by_its_project_tag(tmp_path: Path) -> None:
+def test_a_reaction_record_is_reachable_by_its_project_tag() -> None:
     """`gather_evidence(tag=…)` is documented as the project filter and was inert on reactions.
 
-    Proven through the retriever's own eligibility gate rather than by reading `note.tags`: the
-    tag is worth setting only because a filtered sweep reaches the note, and a wrong tag must
-    still exclude it.
+    Proven through the store's own eligibility gate rather than by reading a field: the project is
+    worth recording only because a filtered sweep reaches the record, and a wrong tag must still
+    exclude it.
     """
 
     async def _run() -> None:
-        note = note_from_ord_reaction(_ester().model_copy(update={"project": "prj-alpha"}))
-        (tmp_path / "reaction").mkdir()
-        (tmp_path / "reaction" / f"{note.id}.md").write_text(render_note(note), encoding="utf-8")
-        retriever = GraphRetriever(str(tmp_path))
-        found = await retriever.retrieve("eln entry", {"tag": "prj-alpha"})
-        assert [chunk.source_note_id for chunk in found] == [note.id]
-        assert await retriever.retrieve("eln entry", {"tag": "prj-beta"}) == []
+        store = InMemoryReactionRecordStore()
+        record = record_from_ord_reaction(_ester().model_copy(update={"project": "prj-alpha"}))
+        await store.record([record])
+        assert await store.eligible(["rxn-1"], {"tag": "prj-alpha"}) == {"rxn-1"}
+        assert await store.eligible(["rxn-1"], {"tag": "prj-beta"}) == set()
 
     asyncio.run(_run())
 
 
 def test_a_reaction_with_no_project_invents_no_tag() -> None:
-    """A record without a project gets no tag — never a placeholder that a filter would match."""
-    assert note_from_ord_reaction(_ester()).tags == []
+    """A record without a project gets no project — never a placeholder a filter would match."""
+
+    async def _run() -> None:
+        store = InMemoryReactionRecordStore()
+        await store.record([record_from_ord_reaction(_ester())])
+        stored = await store.read("rxn-1")
+        assert stored is not None and stored.project is None
+        # No project means no tag can match it — not that every tag matches.
+        assert await store.eligible(["rxn-1"], {"tag": "prj-alpha"}) == set()
+
+    asyncio.run(_run())
 
 
 def _charged(*inputs: Component) -> OrdReaction:
@@ -1575,7 +1604,7 @@ def test_the_notes_scale_is_the_reactant_charge_not_the_flask() -> None:
     The solvent here outweighs the reactants nine to one, so any implementation that sums the
     whole charge reports ~100 g for a 10.6 g run.
     """
-    note = note_from_ord_reaction(
+    note = record_from_ord_reaction(
         _charged(
             Component(smiles="CCO", role=Role.REACTANT, mass_mg=4600),
             Component(smiles="CC(=O)O", role=Role.REACTANT, mass_mg=6000),
@@ -1587,7 +1616,7 @@ def test_the_notes_scale_is_the_reactant_charge_not_the_flask() -> None:
 
 def test_scale_falls_back_to_millimoles_when_no_mass_was_recorded() -> None:
     """An ELN records mass or moles, not always both; the note reports whichever it has."""
-    note = note_from_ord_reaction(
+    note = record_from_ord_reaction(
         _charged(
             Component(smiles="CCO", role=Role.REACTANT, amount_mmol=100),
             Component(smiles="CC(=O)O", role=Role.REACTANT, amount_mmol=120),
@@ -1607,7 +1636,7 @@ def test_a_mixed_unit_record_reports_both_charges_rather_than_dropping_one() -> 
     charge: a 2.5x under-report of the single number this bullet exists to make legible, in the
     direction that makes a pilot batch read as a bench run.
     """
-    note = note_from_ord_reaction(
+    note = record_from_ord_reaction(
         _charged(
             Component(smiles="CCO", role=Role.REACTANT, mass_mg=4600),
             Component(smiles="CC(=O)O", role=Role.REACTANT, amount_mmol=120),
@@ -1618,7 +1647,7 @@ def test_a_mixed_unit_record_reports_both_charges_rather_than_dropping_one() -> 
 
 def test_a_reactant_recording_both_units_is_counted_once() -> None:
     """Mass is the preferred form, so a species carrying both must not also swell the mmol half."""
-    note = note_from_ord_reaction(
+    note = record_from_ord_reaction(
         _charged(
             Component(smiles="CCO", role=Role.REACTANT, mass_mg=4600, amount_mmol=100),
             Component(smiles="CC(=O)O", role=Role.REACTANT, amount_mmol=120),
@@ -1629,7 +1658,7 @@ def test_a_reactant_recording_both_units_is_counted_once() -> None:
 
 def test_the_charge_sheet_lists_every_input_with_what_was_recorded() -> None:
     """The machine-legible form behind the one-line scale: who carried the mass, per species."""
-    note = note_from_ord_reaction(
+    note = record_from_ord_reaction(
         _charged(
             Component(smiles="CCO", role=Role.REACTANT, mass_mg=4600, amount_mmol=100),
             Component(smiles="Cc1ccccc1", role=Role.SOLVENT),
@@ -1641,7 +1670,7 @@ def test_the_charge_sheet_lists_every_input_with_what_was_recorded() -> None:
 
 def test_a_record_with_no_amounts_says_nothing_about_scale() -> None:
     """Silence, not a fabricated zero: nothing was charged *on the record*, so nothing is said."""
-    body = note_from_ord_reaction(
+    body = record_from_ord_reaction(
         _charged(
             Component(smiles="CCO", role=Role.REACTANT),
             Component(smiles="CC(=O)O", role=Role.REACTANT),
@@ -1666,7 +1695,7 @@ def test_scale_survives_the_retrieval_excerpt_of_a_procedure_heavy_note() -> Non
         )
         for i in range(1, 13)
     ]
-    note = note_from_ord_reaction(
+    note = record_from_ord_reaction(
         _charged(
             Component(smiles="CCO", role=Role.REACTANT, mass_mg=4600),
             Component(smiles="CC(=O)O", role=Role.REACTANT, mass_mg=6000),
@@ -1728,11 +1757,12 @@ def test_one_non_utf8_ord_export_does_not_abort_the_directory(
 def test_eln_free_text_cannot_forge_a_knowledge_graph_relation() -> None:
     """A chemist's prose reaches the note body verbatim, so it must not be able to spell a link.
 
-    `kg.note` parses the rendered body for `[[rel:id]]`, and `contradicts`/`supersedes` are in the
-    allowed vocabulary — so a free-text field could forge a real edge into a PR-gated note. The gate
-    cannot catch it: the note is well-formed, and `kg-validate` only objects to a target that does
-    not exist, so naming a *real* note passes review. Every free-text field is checked here rather
-    than one, because the escape is applied to the assembled body and each field is a way in.
+    `kg.note` parses a body for `[[rel:id]]`, and `contradicts`/`supersedes` are in the allowed
+    vocabulary — so a free-text field could forge a real edge. The transcription is no longer a
+    note, which makes this *more* important rather than less: the body is served verbatim by
+    `expand_note` and quoted into report drafts, and nothing reviews it on the way. Every free-text
+    field is checked here rather than one, because the escape is applied to the assembled body and
+    each field is a way in.
     """
     reaction = _ester()
     reaction.hypothesis = "this run [[contradicts:reaction-1234]] the earlier one"
@@ -1743,11 +1773,11 @@ def test_eln_free_text_cannot_forge_a_knowledge_graph_relation() -> None:
     ]
     reaction.attributes = {"[[contradicts:reaction-5]]": "v", "note": "[[contradicts:reaction-6]]"}
 
-    note = note_from_ord_reaction(reaction)
+    record = record_from_ord_reaction(reaction)
 
-    assert note.outgoing_relations() == [], "the ELN must not be able to author a graph edge"
-    # Neutralized, not deleted: a reviewer still reads what the chemist actually wrote.
-    assert "contradicts:reaction-1234" in note.body
+    assert cited_links(record.body) == [], "the ELN must not be able to author a graph edge"
+    # Neutralized, not deleted: a reader still sees what the chemist actually wrote.
+    assert "contradicts:reaction-1234" in record.body
 
 
 @pytest.mark.parametrize("brackets", [2, 3, 4, 5, 6])
@@ -1763,10 +1793,9 @@ def test_no_depth_of_opening_bracket_spells_a_relation(brackets: int) -> None:
     reaction = _ester()
     reaction.hypothesis = "[" * brackets + "contradicts:reaction-1234]]"
 
-    note = note_from_ord_reaction(reaction)
+    record = record_from_ord_reaction(reaction)
 
-    assert note.outgoing_relations() == [], f"{brackets} opening brackets forged an edge"
-    assert not cited_links(note.body), "no link of any kind may survive the escape"
+    assert not cited_links(record.body), f"{brackets} opening brackets forged an edge"
 
 
 def test_mass_balance_catches_a_new_element_and_nothing_weaker() -> None:

@@ -23,6 +23,7 @@ from chemclaw.agent.framing import defang, frame_untrusted
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.core.tool_registry import tool
+from chemclaw.ingest.eln.records import default_record_store
 from chemclaw.ingest.sources.registry import active_retrieve_sources
 from chemclaw.retrieval.evidence import EvidenceChunk, SourceRetriever
 from chemclaw.retrieval.fanout import sweep_sources
@@ -87,7 +88,7 @@ class _AnchoredRetriever:
 
     def __init__(self, store: Any, reaction_smiles: str) -> None:
         """Bind the store and the anchor this retriever will answer with."""
-        self._inner = FingerprintReactionRetriever(store)
+        self._inner = FingerprintReactionRetriever(store, default_record_store())
         self._anchor = reaction_smiles
 
     async def retrieve(self, _query: str, _filters: dict[str, Any]) -> list[EvidenceChunk]:

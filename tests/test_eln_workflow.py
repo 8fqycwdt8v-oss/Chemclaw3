@@ -2,7 +2,7 @@
 
 Runs the real `ElnSyncWorkflow` on Temporal's time-skipping server (CI; skips offline),
 proving the durable path ingests the seed ELN corpus end-to-end: fetch → map → validate →
-index (in-memory here) → PR-gate (fake). Stores and submitter are swapped via the module
+index (in-memory here) → record store (in-memory here). Stores are swapped via the module
 factories so no database or git is needed. The per-source-cursor behavior (D-054) is proven by
 a second server test with an in-memory cursor store, plus offline unit tests of the named-source
 activity and the summary fold.
@@ -31,24 +31,26 @@ from chemclaw.durable.eln_sync import (
 )
 from chemclaw.ingest.eln.adapter import RawEntry
 from chemclaw.ingest.eln.ord import OrdReaction
+from chemclaw.ingest.eln.records import InMemoryReactionRecordStore
 from chemclaw.ingest.eln.sync import IngestSummary, RejectedEntry, sync_entries
 from chemclaw.ingest.sources.registry import active_ingest_source_names
 from chemclaw.science.fingerprints.store import InMemoryFingerprintStore
-from tests.conftest import FakeSubmitter
 from tests.temporal_env import pydantic_client, start_env_or_skip
 
 _EPOCH = datetime.min.replace(tzinfo=UTC)
 
 
-def _swap_stores(monkeypatch: pytest.MonkeyPatch) -> tuple[FakeSubmitter, InMemoryFingerprintStore]:
-    """Point the sync at in-memory stores + a fake submitter; return the submitter and rxn store."""
-    fake = FakeSubmitter()
+def _swap_stores(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[InMemoryReactionRecordStore, InMemoryFingerprintStore]:
+    """Point the sync at in-memory stores; return the record store and the reaction index."""
+    record_store = InMemoryReactionRecordStore()
     reaction_store = InMemoryFingerprintStore()
     molecule_store = InMemoryFingerprintStore()
     monkeypatch.setattr(eln_sync, "_reaction_store", lambda: reaction_store)
     monkeypatch.setattr(eln_sync, "_molecule_store", lambda: molecule_store)
-    monkeypatch.setattr(eln_sync, "default_submitter", lambda: fake)
-    return fake, reaction_store
+    monkeypatch.setattr(eln_sync, "_record_store", lambda: record_store)
+    return record_store, reaction_store
 
 
 def test_active_ingest_source_names(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -61,7 +63,7 @@ def test_active_ingest_source_names(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_sync_eln_entries_ingests_one_named_source(monkeypatch: pytest.MonkeyPatch) -> None:
     """The activity syncs exactly the named source (offline; no Temporal server needed)."""
-    fake, reaction_store = _swap_stores(monkeypatch)
+    records, reaction_store = _swap_stores(monkeypatch)
     beats: list[object] = []
     env = ActivityEnvironment()
     env.on_heartbeat = lambda *details: beats.append(details)
@@ -70,7 +72,7 @@ def test_sync_eln_entries_ingests_one_named_source(monkeypatch: pytest.MonkeyPat
     assert set(chunk.summary.ingested) == {"eln-2026-001", "eln-2026-002"}
     assert chunk.summary.rejected == []
     assert chunk.has_more is False  # nothing beyond the batch bound remains
-    assert len(fake.submissions) == 2
+    assert len(asyncio.run(records.all_records())) == 2
     # The activity heartbeats while it ingests, so a dead worker is caught within the
     # heartbeat timeout instead of only at the (much larger) start-to-close.
     assert beats
@@ -159,7 +161,6 @@ def test_merge_folds_per_source_summaries() -> None:
     a = IngestSummary(
         ingested=["a1"],
         skipped_existing=["a0"],
-        awaiting_merge=["a1"],
         rejected=[],
         next_cursor=early,
     )
@@ -168,7 +169,6 @@ def test_merge_folds_per_source_summaries() -> None:
     merged = _merge([a, b], _EPOCH)
     assert merged.ingested == ["a1", "b1"]
     assert merged.skipped_existing == ["a0"]
-    assert merged.awaiting_merge == ["a1"]
     assert merged.rejected == [reject]
     assert merged.next_cursor == late
     # No source ran → the cursor holds at the passed floor.
@@ -177,7 +177,7 @@ def test_merge_folds_per_source_summaries() -> None:
 
 def test_eln_sync_workflow_ingests_seed_corpus(monkeypatch: pytest.MonkeyPatch) -> None:
     """The workflow ingests every seed ELN entry and reports them, durably."""
-    fake, reaction_store = _swap_stores(monkeypatch)
+    records, reaction_store = _swap_stores(monkeypatch)
 
     async def _run() -> None:
         async with await start_env_or_skip() as env:
@@ -199,7 +199,7 @@ def test_eln_sync_workflow_ingests_seed_corpus(monkeypatch: pytest.MonkeyPatch) 
         # The seed corpus (data/eln-exports) has two valid reactions.
         assert set(summary.ingested) == {"eln-2026-001", "eln-2026-002"}
         assert summary.rejected == []
-        assert len(fake.submissions) == 2  # both proposed a reaction note
+        assert len(await records.all_records()) == 2  # both became readable records
         assert len(await reaction_store.all_records()) == 2
 
     asyncio.run(_run())

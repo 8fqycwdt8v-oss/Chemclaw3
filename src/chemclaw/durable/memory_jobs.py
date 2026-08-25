@@ -4,9 +4,13 @@ Thin Temporal wrappers over `chemclaw.memory.jobs`: each activity reads the full
 the
 configured active ingest sources (`chemclaw.ingest.sources.registry`, the same set the ELN sync
 ingests — no new
-store) and proposes campaign / playbook notes via the PR-gate. Temporal Schedules drive them
-periodically, like the ELN sync. No new infrastructure — only new note types produced by reusing
-existing pieces (Phase 5, G1).
+store) and proposes campaign / playbook notes via the PR-gate. No new infrastructure — only new
+note types produced by reusing existing pieces (Phase 5, G1).
+
+**Started on demand, never on a Schedule** (D-2026-08-25). These three used to fire hourly and open
+pull requests with nobody having asked, which is knowledge arriving on a timer. The mining is
+unchanged — it is the *trigger* that moved — so a chemist or an agent workflow starts one when
+there is a reason to look at what the corpus now supports.
 """
 
 import logging

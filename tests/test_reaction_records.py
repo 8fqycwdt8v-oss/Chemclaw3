@@ -1,0 +1,367 @@
+"""The transcription tier: what removing the PR-gate from ELN ingest had to keep (D-2026-08-25).
+
+Four claims, each of which the change would be wrong without:
+
+1. Ingest performs **no git operation at all** — the property the whole change is for, asserted
+   against a submitter that raises rather than by reading the diff.
+2. A sync run's cost does not grow with the corpus. The old loop parsed every merged note per
+   chunk, which is what made it outgrow `eln_sync_timeout_seconds` at ~700k entries.
+3. The capability survives end to end: a structural hit still expands into its recipe, with no
+   note file on disk and no git repository configured.
+4. A campaign citing `[[reaction-<id>]]` still passes `kg-validate` now that reactions are rows,
+   and a citation to a record that does not exist is still caught — by the half of the check that
+   can see the store.
+
+`tests/test_eln.py` covers the mapping and the sync loop's own bookkeeping; this file covers the
+seam between the tier and everything that reads it.
+"""
+
+import asyncio
+from collections.abc import Sequence
+from datetime import UTC, date, datetime
+from pathlib import Path
+
+import pytest
+
+from chemclaw.agent.graph_tools import expand_note
+from chemclaw.core.config import settings
+from chemclaw.core.errors import ChemclawError
+from chemclaw.ingest.eln.adapter import RawEntry
+from chemclaw.ingest.eln.ingest import ingest_reaction
+from chemclaw.ingest.eln.json_adapter import JsonExportAdapter
+from chemclaw.ingest.eln.ord import OrdReaction
+from chemclaw.ingest.eln.record import record_from_ord_reaction
+from chemclaw.ingest.eln.records import (
+    InMemoryReactionRecordStore,
+    PostgresReactionRecordStore,
+    ReactionRecord,
+    default_record_store,
+)
+from chemclaw.ingest.eln.sync import sync_entries
+from chemclaw.kg.note import Note, note_id_for_reaction
+from chemclaw.kg.validate import external_citations, unresolved_citations, validate
+from chemclaw.retrieval.retrievers import FingerprintReactionRetriever
+from chemclaw.science.fingerprints.store import InMemoryFingerprintStore
+from tests.pg import migrated_db_or_skip
+
+_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+
+
+def _entry(entry_id: str, created_at: datetime) -> RawEntry:
+    """One well-formed free-text ELN export entry."""
+    return RawEntry(
+        entry_id=entry_id,
+        created_at=created_at,
+        payload={
+            "id": entry_id,
+            "timestamp": created_at.isoformat(),
+            "reactants": [
+                {"smiles": "CCO", "role": "reactant", "mass_mg": 460},
+                {"smiles": "CC(=O)O", "role": "reactant", "mass_mg": 600},
+            ],
+            "products": [{"smiles": "CCOC(C)=O", "yield_percent": 85}],
+            "procedure": "Ethanol and acetic acid were stirred at 80 °C for 3 h.",
+            "operator": "chemist-a",
+        },
+    )
+
+
+class _ListAdapter(JsonExportAdapter):
+    """An adapter serving a fixed entry list, recording what it was asked for."""
+
+    def __init__(self, entries: list[RawEntry]) -> None:
+        """Serve `entries` regardless of the cursor."""
+        super().__init__("/nonexistent")
+        self._entries = entries
+
+    async def fetch_new_entries(self, since: datetime) -> list[RawEntry]:
+        """Return the fixed list."""
+        return self._entries
+
+
+class _ExplodingSubmitter:
+    """A `NoteSubmitter` that fails if anything tries to open a PR.
+
+    The assertion is the *absence* of a call, and an absence is only worth asserting if calling
+    would be loud. A counter would pass just as well with the call removed for the wrong reason.
+    """
+
+    async def submit(self, submission: object) -> str:
+        """Fail — ingest must never reach the PR-gate."""
+        raise AssertionError(f"ELN ingest opened a pull request: {submission!r}")
+
+
+def test_ingesting_a_reaction_opens_no_pull_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The point of the change, asserted where it would break rather than in the diff.
+
+    Every path out of `ingest_reaction` to git is stubbed with something that raises, so a future
+    edit re-introducing the gate fails here instead of quietly costing a reviewer 202 ms of
+    serialized git per ELN entry and a human merge per experiment.
+    """
+    monkeypatch.setattr(
+        "chemclaw.kg.git_submitter.default_submitter", lambda: _ExplodingSubmitter()
+    )
+
+    async def _run() -> ReactionRecord:
+        rxn, mol, rec = (
+            InMemoryFingerprintStore(),
+            InMemoryFingerprintStore(),
+            InMemoryReactionRecordStore(),
+        )
+        adapter = _ListAdapter([_entry("no-pr", datetime(2026, 3, 1, tzinfo=UTC))])
+        reaction = adapter.map_to_ord(adapter._entries[0])
+        return await ingest_reaction(reaction, rxn, mol, rec)
+
+    record = asyncio.run(_run())
+    assert record.reaction_id == "no-pr"
+
+
+def test_a_sync_run_does_not_read_the_corpus_it_is_not_replaying() -> None:
+    """Cost is bounded by the page, not by how much has already been ingested.
+
+    The old loop answered "is this entry unchanged?" by parsing every merged note on disk, once
+    per chunk that touched a replay — 425 µs and 2.9 kB per note, linear — so at ~700k entries the
+    lookup alone outlived the activity's 300 s start-to-close and the sync wedged permanently.
+
+    Asserted by counting what the store is *asked* for rather than by timing, because a timing
+    assertion on a small fixture proves nothing: the defect was the shape of the query, and the
+    shape is what this pins. A replay asks for exactly the ids in the batch; a run with no replay
+    at all asks for nothing.
+    """
+    asked: list[int] = []
+
+    class _CountingStore(InMemoryReactionRecordStore):
+        """Records how many ids each unchanged-entry lookup asked for."""
+
+        async def bodies(self, reaction_ids: Sequence[str]) -> dict[str, str]:
+            """Count the request, then answer it."""
+            asked.append(len(reaction_ids))
+            return await super().bodies(reaction_ids)
+
+    async def _run() -> None:
+        cursor = datetime(2026, 1, 2, tzinfo=UTC)
+        rxn, mol = InMemoryFingerprintStore(), InMemoryFingerprintStore()
+        rec = _CountingStore()
+        # A corpus far larger than the batch: none of it may be read.
+        await rec.record(
+            [
+                ReactionRecord(reaction_id=f"old-{i}", body=f"body {i}", source="eln:test")
+                for i in range(500)
+            ]
+        )
+        replayed = _entry("replayed", cursor - datetime.resolution)
+        await sync_entries(_ListAdapter([replayed]), rxn, mol, rec, cursor)
+
+    asyncio.run(_run())
+    assert asked == [1], (
+        f"the unchanged-entry lookup asked for {asked}; it must be keyed on the batch (1 id), "
+        "never on the 500-record corpus — that is the growth this tier exists to remove"
+    )
+
+
+def test_the_unchanged_check_keys_on_the_record_id_not_the_entry_id() -> None:
+    """A record id is not an entry id, and a source where they differ must still skip a replay.
+
+    `RawEntry.entry_id` is whatever the source keys its rows on; `OrdReaction.reaction_id` is a
+    separately declared field — in a warehouse binding, two different columns. Looking the store up
+    by one and reading the answer by the other misses on every such source, and misses *silently*:
+    the upsert is idempotent, so the run stays correct and simply re-ingests everything forever
+    while `skipped_existing` reports nothing. This is the shape of that bug, so the fixture makes
+    the two ids deliberately unequal.
+    """
+
+    class _RenamingAdapter(_ListAdapter):
+        """An adapter whose reaction id is not its entry id — what a warehouse binding allows."""
+
+        def map_to_ord(self, raw: RawEntry) -> OrdReaction:
+            """Map as usual, then rename the reaction so it differs from the entry id."""
+            reaction = super().map_to_ord(raw)
+            return reaction.model_copy(update={"reaction_id": f"exp-{raw.entry_id}"})
+
+    async def _run() -> tuple[list[str], list[str]]:
+        cursor = datetime(2026, 1, 2, tzinfo=UTC)
+        replayed = _entry("row-4711", cursor - datetime.resolution)
+        adapter = _RenamingAdapter([replayed])
+        rxn, mol, rec = (
+            InMemoryFingerprintStore(),
+            InMemoryFingerprintStore(),
+            InMemoryReactionRecordStore(),
+        )
+        # An earlier run's record, stored under the *reaction* id.
+        await rec.record([record_from_ord_reaction(adapter.map_to_ord(replayed))])
+        summary = await sync_entries(adapter, rxn, mol, rec, cursor)
+        return summary.skipped_existing, summary.ingested
+
+    skipped, ingested = asyncio.run(_run())
+    assert (skipped, ingested) == (["row-4711"], []), (
+        "the replay was re-ingested, so the unchanged-entry lookup is keyed on the entry id while "
+        "the record is stored under the reaction id"
+    )
+
+
+def test_a_structural_hit_still_expands_into_its_recipe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The capability the user asked to keep: "same product / similar reaction", with the prose.
+
+    End to end with **no note file on disk and no git repository configured**, which is what makes
+    this a test of the new path rather than of a leftover of the old one. The chunk a structural
+    hit yields is a citation, so the recipe question is answered by handing that citation to
+    `expand_note` — exactly the round trip a chemist takes.
+    """
+    monkeypatch.setattr(settings, "knowledge_dir", "/nonexistent-knowledge")
+
+    async def _run() -> tuple[list[str], str]:
+        rxn, mol, rec = (
+            InMemoryFingerprintStore(),
+            InMemoryFingerprintStore(),
+            InMemoryReactionRecordStore(),
+        )
+        adapter = _ListAdapter([_entry("rxn-recipe", datetime(2026, 3, 1, tzinfo=UTC))])
+        await sync_entries(adapter, rxn, mol, rec, _EPOCH)
+
+        monkeypatch.setattr(settings, "fingerprint_similarity_threshold", 0.0)
+        retriever = FingerprintReactionRetriever(rxn, rec)
+        chunks = await retriever.retrieve("CCO.CC(=O)O>>CCOC(C)=O", {})
+        cited = [chunk.source_note_id for chunk in chunks]
+
+        # Patched where `graph_tools` bound the name, not where it is defined: it imports the
+        # function directly, so patching the source module would leave the real store in place.
+        monkeypatch.setattr("chemclaw.agent.graph_tools.default_record_store", lambda: rec)
+        view = await expand_note(cited[0])
+        return cited, view.body
+
+    cited, body = asyncio.run(_run())
+    assert cited == [note_id_for_reaction("rxn-recipe")]
+    assert "80.0 °C" in body and "Ethanol and acetic acid" in body, (
+        "a structural hit must expand into the run's conditions and procedure; a citation with no "
+        "readable body is the D-018 failure this change was supposed to remove"
+    )
+
+
+def test_expanding_a_citation_to_an_unknown_record_says_so(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A missing record is a clear error, not a silently empty view."""
+    monkeypatch.setattr(
+        "chemclaw.agent.graph_tools.default_record_store", lambda: InMemoryReactionRecordStore()
+    )
+
+    async def _run() -> None:
+        with pytest.raises(ChemclawError, match="no reaction record"):
+            await expand_note("reaction-never-ingested")
+
+    asyncio.run(_run())
+
+
+def _campaign_citing(tmp_path: Path, target: str) -> None:
+    """Write a campaign note whose body cites `target`, as `memory.campaign` renders one."""
+    directory = tmp_path / "campaign"
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "campaign-x.md").write_text(
+        "---\nid: campaign-x\ntype: campaign\ncreated_by: agent\n---\n\n"
+        f"1. [[{target}]]: `CCO.CC(=O)O>>CCOC(C)=O`\n",
+        encoding="utf-8",
+    )
+
+
+def test_a_campaign_citing_a_reaction_record_is_not_dangling(tmp_path: Path) -> None:
+    """Reactions left the graph's id space, so the offline check must stop calling them broken.
+
+    Without this, every campaign, playbook and optimization note fails `kg-validate` the moment
+    transcriptions stop being files — for links that resolve perfectly well.
+    """
+    _campaign_citing(tmp_path, note_id_for_reaction("rxn-1"))
+    assert validate(tmp_path) == []
+
+
+def test_a_citation_to_a_missing_record_is_still_caught() -> None:
+    """The other half: what `dangling_links` gave up, the store has to answer for.
+
+    Offline validation can no longer tell a real run id from a typo'd one — that is the stated cost
+    of the namespace rule. This is the check that takes it back, and it is why `kg-validate` is run
+    in CI with a database rather than without one.
+    """
+
+    async def _run() -> tuple[list[str], list[str]]:
+        store = InMemoryReactionRecordStore()
+        await store.record(
+            [ReactionRecord(reaction_id="real", body="a real run", source="eln:test")]
+        )
+        citations = external_citations(
+            [
+                Note(
+                    id="campaign-x",
+                    type="campaign",
+                    created_by="agent",
+                    body="1. [[reaction-real]] then [[reaction-typo]]",
+                )
+            ]
+        )
+        # The store is a parameter, so the check needs no patching at all — which is the point of
+        # `RecordExistence` being a Protocol the caller satisfies.
+        return [target for _, target in citations], await unresolved_citations(citations, store)
+
+    cited, problems = asyncio.run(_run())
+    assert cited == ["reaction-real", "reaction-typo"]
+    assert len(problems) == 1 and "reaction-typo" in problems[0]
+
+
+def test_the_postgres_store_and_the_in_memory_one_answer_alike() -> None:
+    """The two backends must agree, or the ingest tests prove something the deployment does not.
+
+    Exercises the durable store against a real database: the upsert (including the amendment
+    overwrite), the body lookup, and every arm of the eligibility filter — which is the one piece
+    written twice, once as `ReactionRecord.passes` and once as SQL.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        durable = PostgresReactionRecordStore()
+        memory = InMemoryReactionRecordStore()
+        records = [
+            ReactionRecord(
+                reaction_id="pg-alpha",
+                body="alpha body",
+                project="prj-alpha",
+                performed_at=date(2026, 3, 1),
+                source="eln:test",
+            ),
+            ReactionRecord(
+                reaction_id="pg-undated", body="undated body", project=None, source="eln:test"
+            ),
+        ]
+        for store in (durable, memory):
+            await store.record(records)
+
+        ids = ["pg-alpha", "pg-undated", "pg-absent"]
+        cases: list[dict[str, object]] = [
+            {},
+            {"type": "reaction"},
+            {"type": "playbook"},
+            {"tag": "prj-alpha"},
+            {"tag": "prj-nope"},
+            {"since": date(2026, 1, 1)},
+            {"since": date(2026, 6, 1)},
+            {"until": date(2026, 6, 1)},
+            {"since": date(2026, 1, 1), "until": date(2026, 6, 1)},
+        ]
+        for filters in cases:
+            assert await durable.eligible(ids, filters) == await memory.eligible(ids, filters), (
+                f"the SQL filter and `ReactionRecord.passes` disagree on {filters}"
+            )
+
+        assert await durable.bodies(ids) == await memory.bodies(ids)
+        assert await durable.known(ids) == {"pg-alpha", "pg-undated"}
+
+        # An amendment overwrites in place — no second row, no versioning scheme.
+        amended = records[0].model_copy(update={"body": "alpha body, yield corrected to 31%"})
+        await durable.record([amended])
+        stored = await durable.read("pg-alpha")
+        assert stored is not None and stored.body == amended.body
+        assert await durable.known(["pg-alpha"]) == {"pg-alpha"}
+
+    asyncio.run(_run())
+
+
+def test_the_default_store_is_the_durable_one() -> None:
+    """`default_record_store` must not quietly hand back an in-memory store."""
+    assert isinstance(default_record_store(), PostgresReactionRecordStore)

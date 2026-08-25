@@ -225,7 +225,7 @@ def _major_impurity(reaction: OrdReaction) -> Impurity | None:
 
     Ranked by recorded `area_percent`, the number process development actually chases. When no
     impurity carries an area% the list is unranked, and naming one anyway would be the same
-    fabrication `eln.note._principal_product` refuses for products — the cell would look like
+    fabrication `eln.record._principal_product` refuses for products — the cell would look like
     evidence about which impurity dominated while being an artifact of the export's ordering.
     A single recorded impurity is the exception that needs no ranking: it is the only one the
     record names, so calling it the major one adds no claim.

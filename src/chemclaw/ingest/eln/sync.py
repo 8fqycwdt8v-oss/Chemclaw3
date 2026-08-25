@@ -6,10 +6,9 @@ reaction that fails validation) is recorded and skipped, never aborting the whol
 (G4) — the summary says exactly what was ingested and what was rejected and why. Because
 every write is idempotent, re-running from an earlier cursor is safe. Deps are injected, so
 this whole flow is tested in-memory; `chemclaw.durable.eln_sync` wraps it as a Temporal activity
-with production stores, adapter, and submitter.
+with production stores and adapter.
 """
 
-import asyncio
 import logging
 import re
 from datetime import UTC, datetime, timedelta
@@ -18,11 +17,10 @@ from pydantic import BaseModel, Field, ValidationError
 
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
-from chemclaw.ingest.eln.adapter import ElnAdapter, entry_window
+from chemclaw.ingest.eln.adapter import ElnAdapter, RawEntry, entry_window
 from chemclaw.ingest.eln.ingest import ingest_reaction
-from chemclaw.ingest.eln.note import note_from_ord_reaction
-from chemclaw.kg.graph import load_notes
-from chemclaw.kg.submission import NoteSubmitter
+from chemclaw.ingest.eln.record import record_from_ord_reaction
+from chemclaw.ingest.eln.records import ReactionRecordStore
 from chemclaw.science.fingerprints.store import FingerprintStore
 
 logger = logging.getLogger(__name__)
@@ -57,7 +55,7 @@ class IngestSummary(BaseModel):
     amendment, which is what the adapters filter on), which the scheduler persists and
     passes as `since` next run. Fetching is inclusive at the cursor (see `ElnAdapter`),
     so an entry stamped exactly at `next_cursor` may be re-fetched next run — harmless,
-    because ingestion is idempotent (id-keyed upserts + idempotent note branch), and it
+    because ingestion is idempotent (id-keyed upserts throughout), and it
     guarantees a same-second entry exported after this run is never skipped.
 
     The cursor advances past *rejected* entries too (a rejection is deterministic bad
@@ -70,33 +68,21 @@ class IngestSummary(BaseModel):
     skip every later real entry forever. `next_cursor` also never regresses below the
     run's `since`, even though the fetch reaches an overlap window behind it.
 
-    **Three of the lists describe an entry that was *not* rejected, and they say three
-    different things — the middle one used to be silent.** An entry is *ingested* when
-    this run indexed its fingerprints and opened its note on a branch — proposed, which is
-    as far as an automated step is allowed to take a knowledge claim (the PR-gate: a human
-    merges). It is
-    *skipped_existing* when its note already sits merged in the knowledge dir with the
-    same body, so there was nothing to index or review again and the run short-circuited
-    the fingerprint upserts and the git cycle. Those are the two ends; `awaiting_merge` is
-    what lies between them, and the terminology used to collapse it into the first one —
-    `skipped_existing` called its entries "fully ingested by an earlier run" while
-    `ingested` counted entries that were only *proposed*.
+    **Both non-rejected lists describe work this run did or skipped, and they say different
+    things.** An entry is *ingested* when this run indexed its fingerprints and wrote its
+    transcription — which, since D-2026-08-25, is the whole of what ingesting means: the record is
+    queryable the moment the write returns, with no review queue between the entry and a chemist.
+    It is *skipped_existing* when the corpus already holds a byte-identical body, so there was
+    nothing to index or store again.
 
-    `awaiting_merge` is the subset of `ingested` that sits inside the replay window with
-    no merged note — so **the next run will propose it again**, and every run after that,
-    until a human merges it. That is the operator-facing claim, and it is deliberately the
-    one a single run can actually establish: whether the entry was proposed before is not
-    knowable from here (a late-landing export file lands in the same window on its first
-    sync), but whether it is coming back is. A PR `kg-validate` fails and a PR nobody has
-    looked at both live here, indefinitely, and without this an operator sees a healthy
-    steady ingest count with no sign that the same entries are going round.
-    A subset rather than a fourth disjoint bucket because the work really did happen — the
-    run paid for the ingest — it just may not have accomplished anything new.
+    There used to be a third list, `awaiting_merge`, for entries proposed into a review queue that
+    had not moved — the operator-facing signal that the same entries were going round every run
+    while the ingest count read as steady progress. It is gone because the queue is: nothing waits
+    on a human to become readable, so an ingested entry is simply ingested.
     """
 
     ingested: list[str]
     skipped_existing: list[str] = Field(default_factory=list)
-    awaiting_merge: list[str] = Field(default_factory=list)
     rejected: list[RejectedEntry]
     next_cursor: datetime
 
@@ -105,7 +91,7 @@ async def sync_entries(
     adapter: ElnAdapter,
     reaction_store: FingerprintStore,
     molecule_store: FingerprintStore,
-    submitter: NoteSubmitter,
+    record_store: ReactionRecordStore,
     since: datetime,
     *,
     apply_overlap: bool = True,
@@ -121,20 +107,17 @@ async def sync_entries(
     contract): the workflow's chunk loop reaches behind the cursor only on its first
     chunk, so draining a backlog does not re-fetch the whole overlap window per chunk.
 
-    Overlap replay is cheap, not just idempotent: an overlap entry whose merged note carries
-    the same body has nothing left to index or to review, so it is skipped by a note-id
-    lookup instead of re-running fingerprint upserts plus a PR-gate git submission cycle.
-    A replay-window entry with *no* merged note is the opposite case — the review queue
-    has not moved, so this run proposes it and the next one will too — and it is reported
-    under `awaiting_merge`, because an entry stuck in review forever must not read as a
-    fresh ingest every hour.
+    Overlap replay is cheap, not just idempotent: an overlap entry whose stored record carries the
+    same body has nothing left to index or store, so it is skipped by one indexed lookup over the
+    replayed ids. That lookup used to be a parse of every merged note in the corpus, which is what
+    made this loop outgrow its own activity timeout at ~700k entries; it is now bounded by the
+    page, not by the corpus.
     """
     entries = await adapter.fetch_new_entries(_fetch_floor(since) if apply_overlap else since)
     ingested: list[str] = []
     skipped_existing: list[str] = []
-    awaiting_merge: list[str] = []
     rejected: list[RejectedEntry] = []
-    merged: dict[str, str] | None = None
+    stored: dict[str, str] | None = None
     cursor = since
     horizon = datetime.now(UTC) + timedelta(seconds=settings.eln_sync_future_tolerance_seconds)
     for raw in entries:
@@ -158,8 +141,8 @@ async def sync_entries(
         # earlier form of this guard checked `entry_window` and so rejected that entry outright,
         # and — because the fetch filters on the same watermark — re-fetched and re-rejected it on
         # every run, forever, costing the corpus a real experiment for a typo. So the entry ingests
-        # and only the cursor refuses the value. It is re-fetched each run and, once its note is
-        # merged, skipped by the body comparison below at the cost of one lookup.
+        # and only the cursor refuses the value. It is re-fetched each run and, once its record is
+        # stored, skipped by the body comparison below at the cost of one lookup.
         if raw.created_at > horizon:
             rejected.append(
                 RejectedEntry(
@@ -181,39 +164,26 @@ async def sync_entries(
             )
         else:
             cursor = max(cursor, window)
-        # Whether this entry will come back on the next run: it is inside the replay window and
-        # its note is not merged. Decided inside the try (it needs the mapped note) and recorded
-        # after it, so an entry that then fails to ingest is only ever reported as rejected.
-        unmerged_replay = False
         try:
             reaction = adapter.map_to_ord(raw)
-            note = note_from_ord_reaction(reaction)
+            record = record_from_ord_reaction(reaction)
             if raw.created_at <= since:
-                # The entry was seen before, so what is merged decides whether there is anything
+                # The entry was seen before, so what is stored decides whether there is anything
                 # new in it. An *amendment* arrives here too: an ELN corrects an entry in place and
                 # `created_at` does not move, so a corrected entry is by definition an old one —
                 # which is also why the adapter has to widen its fetch window (`entry_window`) or
-                # this branch never sees it at all. The lookup is loaded lazily, once per run and
-                # off the event loop, and only when a replay actually happened.
-                if merged is None:
-                    merged = await asyncio.to_thread(_merged_note_bodies)
-                merged_body = merged.get(note.id)
-                if merged_body == note.body.strip():
-                    # Byte-identical to what is merged: nothing to review, so skip the whole
-                    # ingest. A *different* body falls through and is re-proposed, which the
-                    # PR-gate renders as a diff for a human — which is what a git-backed graph is
-                    # for, and why an amendment needs no separate versioning scheme.
+                # this branch never sees it at all. Loaded lazily, once per run, and only when a
+                # replay actually happened; keyed on the ids this batch holds, never on the corpus.
+                if stored is None:
+                    stored = await record_store.bodies(_replay_record_ids(adapter, entries, since))
+                if stored.get(record.reaction_id) == record.body:
+                    # Byte-identical to what is stored: nothing to index or write, so skip the
+                    # whole ingest. A *different* body falls through and overwrites the record,
+                    # which is what an amendment is — no versioning scheme and no review needed,
+                    # because the transcription asserts nothing either way.
                     skipped_existing.append(raw.entry_id)
                     continue
-                # A replay-window entry with no merged note at all will be fetched and proposed
-                # again next run, and every run after that, until a human merges it. Proposing is
-                # right — the branch is idempotent and the PR-gate is where a knowledge claim
-                # belongs — but it is not progress, and reporting it as a plain ingest is what let
-                # a permanently blocked entry look like a fresh one forever. (An amendment,
-                # `merged_body is not None`, is new content and is not reported here: its merged
-                # predecessor proves the queue is moving.)
-                unmerged_replay = merged_body is None
-            await ingest_reaction(reaction, reaction_store, molecule_store, submitter)
+            await ingest_reaction(reaction, reaction_store, molecule_store, record_store)
         except (ChemclawError, ValidationError) as exc:
             # The shared bad-data base covers *any* per-entry failure: an adapter's
             # mapping error, a validation failure, and a fingerprint that cannot be
@@ -228,29 +198,15 @@ async def sync_entries(
             )
             continue
         ingested.append(raw.entry_id)
-        if unmerged_replay:
-            awaiting_merge.append(raw.entry_id)
     # The summary is a return value the scheduler stores; also log the outcome so an admin
     # running this under a Temporal Schedule sees it without opening the workflow result, and
     # gets a WARNING trail of exactly which entries were rejected and why.
     logger.info(
-        "eln sync: ingested=%d rejected=%d skipped_existing=%d awaiting_merge=%d",
+        "eln sync: ingested=%d rejected=%d skipped_existing=%d",
         len(ingested),
         len(rejected),
         len(skipped_existing),
-        len(awaiting_merge),
     )
-    if awaiting_merge:
-        # WARNING, not INFO, and on every run: this is the one outcome nothing else reports. These
-        # entries were proposed into a review queue that has not moved — nobody is working it, or
-        # `kg-validate` is failing the branch — so the next run proposes them again,
-        # while the ingest count above reads as steady progress.
-        logger.warning(
-            "eln sync proposed %d entry/entries whose notes are still unmerged; they will be "
-            "re-proposed every run until a human merges or rejects them: %s",
-            len(awaiting_merge),
-            ", ".join(_log_safe(entry_id) for entry_id in awaiting_merge),
-        )
     for entry in rejected:
         # An overlap-window rejection (`created_at <= since`) is a replay: the cursor advances
         # past sane-timestamped rejections, so this entry was already warned about when first
@@ -267,35 +223,38 @@ async def sync_entries(
     return IngestSummary(
         ingested=ingested,
         skipped_existing=skipped_existing,
-        awaiting_merge=awaiting_merge,
         rejected=rejected,
         next_cursor=cursor,
     )
 
 
-def _merged_note_bodies() -> dict[str, str]:
-    """Every merged note's id mapped to its body (the already-*merged* check).
+def _replay_record_ids(adapter: ElnAdapter, entries: list[RawEntry], since: datetime) -> list[str]:
+    """The record ids the replay-window entries of this batch map to.
 
-    Why: the hourly overlap replay must not pay a full ingest (fingerprint upserts + the
-    PR-gate's fetch/checkout/push dance) per already-merged entry just to discover it was a
-    no-op. Reads through the graph loader's stat-fingerprint cache, so a run where nothing
-    merged costs a directory stat, and each replayed entry costs one dict lookup.
+    **A record id is not an entry id**, and assuming it was is a defect this function exists to
+    prevent. `RawEntry.entry_id` is whatever the source keys its rows on; `OrdReaction.reaction_id`
+    is a separately declared field — in a warehouse binding, literally two different columns:
+    `ingest/eln/warehouse/binding.py` requires `reaction_id` in the reaction map, while `entry.key`
+    names the fetch key. Looking the store up by entry id and reading the answer by record id
+    misses on every source where the two differ, which costs nothing visible: the upsert is
+    idempotent, so
+    the run stays correct and simply re-ingests everything forever while `skipped_existing` reports
+    nothing. A silently dead optimization is worse than an absent one.
 
-    **The body, not just the id.** An id-only check treats "already seen" and "unchanged" as the
-    same thing, and they are not: an ELN amends an entry *in place* — a yield corrected after
-    assay, an impurity added, a retraction — while keeping its `created_at`. Every such correction
-    was therefore dropped, silently, with the sync reporting it as `skipped_existing`. The
-    docstring justified that with "ELN exports are immutable", which is an assumption about
-    someone else's system that v1 cannot make.
+    Mapping runs twice per replayed entry — here and in the loop — which is ~84 µs of pure
+    function. A mapping failure is **ignored here on purpose**: the loop below has the one `except`
+    that knows how to record a rejection, and reporting it twice (or reporting it from here, out of
+    order) is how one bad entry ends up in the summary as two.
     """
-    knowledge = settings.knowledge_path
-    if not knowledge.is_dir():
-        return {}
-    # Stripped, and compared against a stripped body: reading a note back through
-    # `kg.note.read_note` drops the rendered file's trailing newline, so an exact comparison would
-    # call every merged note amended and re-propose the entire corpus on the first overlap replay.
-    # Trailing whitespace is not an amendment.
-    return {note.id: note.body.strip() for note in load_notes(knowledge)}
+    ids: list[str] = []
+    for raw in entries:
+        if raw.created_at > since:
+            continue
+        try:
+            ids.append(adapter.map_to_ord(raw).reaction_id)
+        except (ChemclawError, ValidationError):
+            continue
+    return ids
 
 
 def _fetch_floor(since: datetime) -> datetime:

@@ -54,7 +54,7 @@ class Component(BaseModel):
     # coefficients. Nor could it today, even if the check were written: measured across every
     # shipped fixture, **no outcome carries a mass at all** (inputs do), so a
     # products-cannot-outweigh-inputs check would be a no-op on the whole corpus. `mass_mg` is
-    # read by `ingest/eln/note.py` for the charge sheet and the note's scale, which is real.
+    # read by `ingest/eln/record.py` for the charge sheet and the record's scale, which is real.
     amount_mmol: float | None = Field(default=None, ge=0.0)
     mass_mg: float | None = Field(default=None, ge=0.0)
     # Whatever else the source recorded about this species — a lot number, a supplier, an
@@ -208,7 +208,7 @@ class OrdReaction(BaseModel):
     # site's own tables onto this model from a YAML binding, and no schema written today can name
     # the columns a corporate ELN will carry — a lot number, an equivalents figure, an assay, a
     # vessel id, whichever of a dozen child tables the site keeps. Without somewhere for them to
-    # land, each newly-interesting column costs an edit to this model, to `eln.note` and to their
+    # land, each newly-interesting column costs an edit to this model, to `eln.record` and to their
     # tests; with it, that column is a line of YAML. That is the whole trade, and it is the reason
     # this field is here rather than a set of typed ones.
     #

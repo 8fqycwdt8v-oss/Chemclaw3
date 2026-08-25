@@ -1,16 +1,20 @@
-"""Map a canonical ORD reaction to an agent knowledge-graph note (plan step 4.5).
+"""Map a canonical ORD reaction to an ELN transcription record (D-2026-08-25).
 
-The pure mapping from an `OrdReaction` to a `reaction` note, proposed through the **same**
-PR-gate as every other agent note (D-005) — no second write path. Kept separate from the
-sync activity so it is tested directly. The note records the reaction SMILES, headline
-conditions (scale first), the charge sheet behind that scale, and the full **step-by-step
-procedure** in prose so a detailed development recipe survives ingestion intact (a human
-reviewer signs off on the recipe, not just a SMILES). Its `tags` are the record's project, so
-the documented project filter (`gather_evidence(tag=…)`) reaches reaction notes at all. It
-carries no `[[wikilink]]` (a dangling link would fail `chemclaw.kg.validate` on the very PR this
-opens); compound cross-links are a later step once compound notes exist. That last sentence is
-enforced by `_without_wikilinks` rather than merely asserted — the source's free text reaches this
-body verbatim, so until it was enforced the ELN could spell a relation the graph then believed.
+The pure mapping from an `OrdReaction` to the `ReactionRecord` the transcription tier stores. It
+records the reaction SMILES, headline conditions (scale first), the charge sheet behind that scale,
+the impurity profile, and the full **step-by-step procedure** in prose, so a detailed development
+recipe survives ingestion intact and a chemist who reaches this record from a structure search gets
+the recipe rather than an id.
+
+**Nothing here infers anything**, which is why the result is data rather than a PR-gated note
+(`chemclaw.ingest.eln.records`): every field is read from the entry or rendered from fields that
+were, so there is no claim for a reviewer to accept or reject. What a human *asserts* about these
+runs is a playbook or a campaign in `knowledge/`, gated as it always was, citing this record as
+`reaction-<id>`.
+
+The record carries no `[[wikilink]]`, and that is enforced by `_without_wikilinks` rather than
+merely asserted — the source's free text reaches this body verbatim, and a record that could spell
+a relation would let an ELN write an edge into the graph that cites it.
 """
 
 import re
@@ -23,7 +27,7 @@ from chemclaw.ingest.eln.ord import (
     ReactionStep,
     Role,
 )
-from chemclaw.kg.note import Note, note_id_for_reaction
+from chemclaw.ingest.eln.records import ReactionRecord
 
 # Each `[` that another `[` follows. A lookahead so the match consumes one character and the next
 # is re-examined, which is what makes the substitution unable to manufacture the delimiter it is
@@ -63,8 +67,8 @@ def _without_wikilinks(body: str) -> str:
     return _OPENING_BRACKET_PAIR.sub("[ ", body)
 
 
-def note_from_ord_reaction(reaction: OrdReaction) -> Note:
-    """Map an `OrdReaction` to an agent-authored `reaction` note (idempotent id)."""
+def record_from_ord_reaction(reaction: OrdReaction) -> ReactionRecord:
+    """Map an `OrdReaction` to the transcription record the corpus stores (idempotent id)."""
     body = _without_wikilinks(
         f"Reaction `{reaction.reaction_smiles()}` from ELN entry {reaction.reaction_id}.\n\n"
         f"{_hypothesis_block(reaction)}"
@@ -74,41 +78,37 @@ def note_from_ord_reaction(reaction: OrdReaction) -> Note:
         f"{_procedure_block(reaction)}"
         f"{_attribute_block(reaction)}"
     )
-    return Note(
-        id=note_id_for_reaction(reaction.reaction_id),
-        type="reaction",
-        created_by="agent",
+    return ReactionRecord(
+        # The ELN's own id, unprefixed. `reaction-<id>` is the *citation* spelling
+        # (`kg.note.note_id_for_reaction`) and belongs to whoever cites this, not to the row.
+        reaction_id=reaction.reaction_id,
         source=reaction.provenance,
         compound_smiles=_principal_product(reaction),
-        # The project is the one grouping key the record already carries, and it reached the graph
-        # from nowhere on the largest note class: `gather_evidence(tag=…)` is documented as the
-        # project filter and matched nothing on reactions. Exactly the project and nothing else —
-        # a derived tag vocabulary (a scale band, an outcome word) would be a taxonomy this mapping
-        # invented, filterable against a scheme no chemist agreed to and no other note class uses.
-        # `memory.campaign` already tags its notes with the projects behind them; one convention.
-        tags=[reaction.project] if reaction.project else [],
-        # The experiment's own date is what makes the note time-scopable (gap KNW-1). F10-G2 added
-        # `valid_from`/`valid_to` to answer "what did we know at time T", and for the largest note
-        # class nothing populated them — a reaction became valid-since-forever. A run is evidence
-        # from the day it was run; `valid_to` stays open (a result does not expire on its own, it
-        # is superseded, which is a separate edit).
-        valid_from=reaction.performed_at,
+        # The project is the one grouping key the entry already carries, and the whole of what a
+        # `tag=` filter narrows on here. Exactly the project and nothing else — a derived
+        # vocabulary (a scale band, an outcome word) would be a taxonomy this mapping invented,
+        # filterable against a scheme no chemist agreed to and no other note class uses.
+        project=reaction.project or None,
+        # The experiment's own date is what makes the record time-scopable (gap KNW-1): "what have
+        # I tried on this step in the last two weeks" is a `since`/`until` window over this column.
+        # A run is evidence from the day it was run, and it has no expiry — a result does not
+        # lapse on its own, it is superseded, which is a claim a human makes in a note.
+        performed_at=reaction.performed_at,
         body=body,
     )
 
 
 def _principal_product(reaction: OrdReaction) -> str | None:
-    """The molecule this note is *about*, when the record names exactly one product.
+    """The molecule this record is *about*, when the entry names exactly one product.
 
-    The largest note class in the graph carried no `compound_smiles` at all, which is why nothing
-    that groups by compound could ever see a reaction: `kg.conflicts` groups on
-    `(type, compound_smiles)`, `find_notes` searches it, and every future by-compound question
-    starts there. The structure was in the record the whole time — it goes into the body as part
-    of the reaction SMILES — it simply never reached the field.
+    The column every by-compound question starts from: "what else have we made this way", and the
+    join a playbook uses when it groups runs by what they produced. The structure is in the entry
+    either way — it goes into the body as part of the reaction SMILES — this is what puts it
+    somewhere a query can reach without parsing prose.
 
-    **Only when there is one outcome.** "The molecule this note is about" has no honest answer for
-    a reaction that reports a product and two by-products, and picking the first (or the largest
-    by amount, which an ELN often omits) would file the note under a compound the chemist did not
+    **Only when there is one outcome.** "The molecule this record is about" has no honest answer
+    for a reaction reporting a product and two by-products, and picking the first (or the largest
+    by amount, which an ELN often omits) would file the run under a compound the chemist did not
     mean. A wrong `compound_smiles` is worse than none: it is what a by-compound search would
     return, and it would look right.
     """

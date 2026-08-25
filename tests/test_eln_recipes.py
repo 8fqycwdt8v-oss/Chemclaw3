@@ -21,13 +21,13 @@ import pytest
 
 from chemclaw.ingest.eln.adapter import RawEntry
 from chemclaw.ingest.eln.json_adapter import JsonExportAdapter
-from chemclaw.ingest.eln.note import note_from_ord_reaction
 from chemclaw.ingest.eln.ord import Component, OrdReaction, ReactionStep, Role, StepKind
 from chemclaw.ingest.eln.ord_adapter import OrdFormatError, OrdJsonAdapter
+from chemclaw.ingest.eln.record import record_from_ord_reaction
+from chemclaw.ingest.eln.records import InMemoryReactionRecordStore
 from chemclaw.ingest.eln.sync import sync_entries
 from chemclaw.ingest.eln.validate import validate_ord
 from chemclaw.science.fingerprints.store import InMemoryFingerprintStore
-from tests.conftest import FakeSubmitter
 
 _EPOCH = datetime.min.replace(tzinfo=UTC)
 _ORD_EXAMPLE = Path("data/eln-exports/ord/ord-2026-001.json")
@@ -348,7 +348,7 @@ def test_workup_reagent_satisfies_mass_balance() -> None:
 def test_note_renders_numbered_procedure() -> None:
     """A reaction with steps renders a numbered Procedure section in its note body."""
     reaction = _prose_reaction(_DETAILED_PROCEDURE)
-    body = note_from_ord_reaction(reaction).body
+    body = record_from_ord_reaction(reaction).body
     assert "## Procedure" in body
     assert "1. Charge substrate and THF to the reactor (_addition_)" in body
     assert "6. Concentrate and recrystallize from heptane (_purification_)" in body
@@ -359,11 +359,15 @@ def test_ord_recipe_flows_through_sync() -> None:
 
     async def _run() -> None:
         adapter = OrdJsonAdapter(str(_ORD_EXAMPLE.parent))
-        rxn, mol, sub = InMemoryFingerprintStore(), InMemoryFingerprintStore(), FakeSubmitter()
-        summary = await sync_entries(adapter, rxn, mol, sub, _EPOCH)
+        rxn, mol, rec = (
+            InMemoryFingerprintStore(),
+            InMemoryFingerprintStore(),
+            InMemoryReactionRecordStore(),
+        )
+        summary = await sync_entries(adapter, rxn, mol, rec, _EPOCH)
         assert summary.ingested == ["ord-2026-001"]
         assert summary.rejected == []
-        assert len(sub.submissions) == 1
-        assert "## Procedure" in sub.submissions[0].files[0].content  # recipe reached the note
+        assert len(await rec.all_records()) == 1
+        assert "## Procedure" in (await rec.all_records())[0].body  # recipe reached the record
 
     asyncio.run(_run())
