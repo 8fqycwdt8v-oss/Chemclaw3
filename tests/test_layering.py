@@ -362,6 +362,13 @@ _ALLOWED_MODULE_EDGES: set[Edge] = {
     ("chemclaw.publish", "chemclaw.core"),
     ("chemclaw.publish", "chemclaw.ingest"),
     ("chemclaw.durable", "chemclaw.publish"),
+    ("chemclaw.cli", "chemclaw.publish"),
+    # The `results` bundle's job re-queues stored calculations, and the walk it runs is
+    # `publish.backfill`. That module is in the publish layer rather than in `cli/` *because* of
+    # this edge: the walk began in the CLI, which made this a connector importing a terminal
+    # entrypoint, and the gate caught it. A connector reaching down into publish is ordinary; the
+    # inversion was not.
+    ("chemclaw.connectors", "chemclaw.publish"),
     ("chemclaw.retrieval", "chemclaw.core"),
     ("chemclaw.retrieval", "chemclaw.kg"),
     ("chemclaw.retrieval", "chemclaw.science"),
