@@ -494,18 +494,6 @@ only holds defects can only ever restore the system to what it already intended 
       seam `agent/llm_provider.py` already has. ChemBench and AstaBench are the follow-ups. A number
       somebody else can also produce is the only kind that survives an argument with a chemist.
 
-- [ ] **Two durability layers are maintained where upstream now ships one** — [L]. Temporal's
-      LangGraph plugin reached public preview on 2026-07-16 (Temporal Python SDK ≥1.27, Python ≥3.11):
-      the graph runs as a workflow, each node as an activity, execution is checkpointed at every node,
-      and `interrupt()` pauses **durably** and resumes on a signal. This repository hand-built the
-      equivalent — `agent/checkpointer.py` on its own autocommit pool, `agent/plan_approval_store.py`,
-      the job→session push-back in `durable/` — and carries two open defects in exactly that seam (*"A
-      decided approval hold can be reopened"*, *"A rejoined durable run never reaches the second
-      chemist"*) plus the durable-approval-store row this file already holds. **This row asks for an
-      evaluation, not a migration**: does `interrupt()`-as-signal close those three together, and what
-      does it cost in the D-2026-08-10 §3 line that layer 1's checkpointer holds turn state and
-      nothing else. An ADR either way.
-
 - [ ] **The agent cannot execute code, and the decision on record is narrower than the consequence** —
       [L], **answered and awaiting merge** ([`Chemclaw3-mcp` #12](https://github.com/8fqycwdt8v-oss/Chemclaw3-mcp/pull/12), `D-2026-08-25-a-sandbox-is-a-server-not-a-verb`). The capability is `servers/pyexec` there — one
       stateless tool, no core edit here, and the `execute` verb stays withheld. This row is deleted
@@ -566,6 +554,50 @@ only holds defects can only ever restore the system to what it already intended 
       design; RetroReasoner/Retro-R1 changed what a retrosynthesis server would wrap. A catalogue is a
       claim about what is available, and claims go stale — the same rule this file states about its
       own rows. Re-derive those three entries; the OPSIN one is probably still the right first build.
+
+- [ ] **Memory records; it does not change what the next turn does** — [L], and it needs an ADR
+      before it needs code. Six tiers exist and all six are *read on request*:
+      `memory/campaign.py`, `interaction.py`, `failure.py`, `playbook.py`, `progression.py`,
+      `observations.py`, surfaced by `recall_observations`, `find_past_jobs` and `record_failure`.
+      Nothing in that set changes the agent's behaviour on the next turn unless a human writes a
+      `SKILL.md`: `skills/playbook-distillation/SKILL.md` is the distillation *judgment*, and the
+      PR-gate is where a distilled playbook becomes knowledge — but the loop is manual end to end and
+      nobody has measured how often it closes. The 2026 work (SkillRL, SkillForge and the
+      self-evolving surveys) is specifically about abstracting recurring trajectories into reusable
+      procedure automatically. **The PR-gate is the right control for that, not an argument against
+      it** — a proposed skill is exactly the shape the gate already carries. What is owed first is a
+      measurement rather than a mechanism: over the sessions on disk, how many recurring trajectories
+      *are* there, and would a distilled one have changed a later answer? A generator built before
+      that number is a routing hypothesis nobody measured, which is the mistake
+      `D-2026-08-15` already made once here.
+
+### The upstream-capability register — what our pinned dependencies now ship that we build ourselves
+
+*Re-derived 2026-08-25, and re-derive it whenever a dependency is bumped.* `make upstream-check` and
+`tests/test_upstream_surface.py` guard the *shapes* this repository borrows — the coupling that
+breaks on a bump. Nothing guarded its **decisions** against upstream shipping the thing, which is
+why the Temporal LangGraph plugin sat five weeks old and reached no list here. This is prose rather
+than a test, deliberately: what is being watched is judgement, and a test cannot hold one.
+
+Pinned at the time of writing: `temporalio` 1.31.0 · `langchain` 1.3.15 · `langgraph` 1.2.11 ·
+`langchain-core` 1.5.5 · `deepagents` 0.7.6.
+
+| Upstream ships | We | Standing |
+| --- | --- | --- |
+| `temporalio.contrib.langgraph.LangGraphPlugin` — graph nodes as activities, durable `interrupt()` | run two durability layers | **declined**, `D-2026-08-25-the-plugin-solves-an-interrupt-we-do-not-use` — we use no `interrupt()`; the human gate is already a Temporal workflow |
+| `langchain.agents.middleware.ContextEditingMiddleware` / `ClearToolUsesEdit` | use it, on its own trigger since 2026-08-25 | **adopted** |
+| `SummarizationMiddleware` | construct it switched off (`disabled_summarizer`) | **declined** — a summary is new model prose over content `agent/framing.py` marked untrusted, and the envelope does not survive it |
+| `ModelCallLimitMiddleware` | subclass our own cap | **reverted**, `D-2026-08-15-an-after-model-counter-is-a-counter-that-can-be-skipped` — measured, a cap of 2 ran 4 model calls |
+| `ToolErrorMiddleware`, `ToolRetryMiddleware` | neither | **declined** — both trigger on raised exceptions and MCP tools never raise |
+| `HumanInTheLoopMiddleware` | our own plan gate | **open** — its own row; the gate predates it and the shapes have not been compared |
+| `deepagents.SkillsMiddleware` | use it, narrowed at the backend | **adopted**, with the narrowing on the backend because deepagents publishes skill *paths* into the prompt |
+| `deepagents` `execute` filesystem verb | withhold it | **declined**, and answered elsewhere — `D-2026-08-25-a-sandbox-is-a-server-not-a-verb` puts the capability in the fleet instead |
+| LangSmith tracing | first-party OTel + OpenInference | **declined** — proprietary, no OSS self-host, and its core value is prompt/response content in a third party |
+
+**How to use this.** On a dependency bump, read the release notes against the middle column and ask
+one question per row: *does upstream now do this, and better?* A row that changes answer needs an
+ADR, not an edit here. A capability upstream ships that this table does not mention is the gap this
+register exists to catch — add the row in the same pull request that notices it.
 
 - [ ] **Memory records; it does not change what the next turn does** — [L], and it needs an ADR
       before it needs code. Six tiers exist and all six are *read on request*:

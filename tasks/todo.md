@@ -349,37 +349,28 @@ W3.1 is a spike whose deliverable may be "no". **W3.2 is no longer a spike**: it
 concrete proposal, so its ADR decides a design rather than a direction, and the build follows it in
 `Chemclaw3-mcp`.
 
-### W3.1 — Evaluate the Temporal LangGraph plugin · [L] → ADR
+### W3.1 — Evaluate the Temporal LangGraph plugin · **done: declined**
 
-*Row: § 5 #5.*
+*Row: § 5 #5, now deleted. ADR: `D-2026-08-25-the-plugin-solves-an-interrupt-we-do-not-use`.*
 
-**What is already known** and does not need re-deriving: the plugin reached public preview
-2026-07-16, needs Temporal Python SDK ≥ 1.27 and Python ≥ 3.11, and **this repo already ships
-`temporalio` 1.31.0 on Python 3.11** — so the version bar is met today. Graph runs as a workflow,
-node as an activity, checkpoint per node, `interrupt()` durable and signal-resumed.
+The spike was budgeted five days and took under an hour, because the first of its three questions
+settles the other two.
 
-**The spike answers three questions and nothing else.** Timebox: five days.
+**`interrupt()` is not used anywhere in this system.** `grep -rn "interrupt(" src/` returns two
+hits and both are prose in `agent/checkpointer.py` explaining that a checkpointer would be needed
+*if* one were used. The human gate is `agent/interaction_tools.py::start_approval` calling
+`client.start_workflow` — it is **already a Temporal workflow**. So the plugin's headline feature is
+a thing this repository arrived at from the other direction, and it closes neither defect the row
+attributed to it: the reopened-hold bug is a missing `id_reuse_policy`, a few lines, entirely
+independent of the plugin.
 
-1. Does `interrupt()`-as-signal close **"A decided approval hold can be reopened"**? That row's fix
-   is to read the prior run's terminal outcome and refuse restart only on an actual decision —
-   expiry deliberately *completes*. Does the plugin's own id-reuse posture make that easier, harder,
-   or unchanged?
-2. Does it close the queued **durable approval store** row, and what happens to
-   `agent/plan_approval_store.py`'s two-backend design (which follows the session store precisely so
-   the approval cannot outlive or be outlived by the mode it authorises)?
-3. What does it cost against **`agent/checkpointer.py`'s three measured reasons for its own pool** —
-   `CREATE INDEX CONCURRENTLY` outside a transaction, the per-saver `asyncio.Lock` that `alist`
-   yields inside, and pipeline mode on a borrowed connection. If the plugin's durability replaces
-   the saver, all three arguments are moot; if it sits beside it, there are now three layers.
-
-**The line the ADR must not cross.** `D-2026-08-10 §3`: Temporal keeps every long or expensive job,
-layer 1's checkpointer holds turn state and nothing else. A plugin that makes every model call a
-Temporal activity is a much larger change than "durable interrupts" and needs to be argued as one.
-
-**Deliverable.** An ADR, plus — if the answer is yes — a migration plan as its own document. Not
-code in the same change.
-
----
+Two other facts worth carrying. The plugin **is already installed** —
+`temporalio.contrib.langgraph` ships in the `temporalio` 1.31.0 this repo already pins, so the
+version bar the row worried about was never the obstacle. (An earlier check looked for
+`temporalio.contrib.langchain` and concluded it was absent; the wrong module name is exactly how a
+spike reaches a confident wrong answer, and it is recorded in the ADR.) And adopting it would mean
+annotating node metadata on a graph this repository does not author: measured, every node of a real
+compiled agent has `metadata=None`, and those nodes are `create_deep_agent`'s.
 
 ### W3.2 — `pyexec`: a Python analysis sandbox, as an offline MCP server · [L] → ADR + build
 
