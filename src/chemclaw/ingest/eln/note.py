@@ -135,7 +135,9 @@ def _conditions(reaction: OrdReaction) -> ProcessConditions | None:
         major_impurity=(impurity.name or impurity.smiles) if impurity else None,
         impurity_area_percent=impurity.area_percent if impurity else None,
     )
-    return conditions if conditions.model_dump(exclude_none=True) else None
+    # An explicit field check rather than a `model_dump(exclude_none=True)`: serializing the whole
+    # model to ask whether any of it is set is work for an answer the fields already give.
+    return conditions if any(dict(conditions).values()) else None
 
 
 def _principal_product(reaction: OrdReaction) -> str | None:

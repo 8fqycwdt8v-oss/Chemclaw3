@@ -61,8 +61,14 @@ class RetrievalSettings(BaseSettings):
     # Both bounds apply, and the count is kept rather than replaced — it is ENV-visible and
     # deployments set it, which is `agent_keep_last_tool_groups`' argument for keeping a name whose
     # meaning has been refined. ~60,000 characters is ~15k tokens against
-    # `agent_context_token_budget`'s 100,000: it leaves a graph-only deployment byte-identical and
-    # stops a share-heavy sweep at roughly 33 chunks.
+    # `agent_context_token_budget`'s 100,000.
+    #
+    # **Counted over the serialized chunk, not its `content`**, which is what makes that 15k figure
+    # true. The first implementation charged `content` alone — measured, a 47% under-count on a
+    # realistic chunk carrying conflicts and provenance, so this budget really spent about 114,000
+    # characters. The default is unchanged because it was always right *for the payload*; what
+    # changed is that it is now measured against the payload, so a share-heavy sweep keeps roughly
+    # half as many chunks as it did — which is the behaviour this setting always claimed.
     #
     # Spent by walking the already round-robin (or RRF-fused) ranking, so it is spent
     # cross-source-fairly for exactly the reason the count is —

@@ -341,8 +341,25 @@ def _changes(
     would report a change every time one procedure happened to name a loading and its neighbour
     did not, which is the noise `changes_between` excludes amounts to avoid.
 
-    A run that repeats its predecessor exactly is not a gap in the record — it is a reproducibility
-    check, and saying "unchanged" is what lets a reader tell the two apart.
+    **A field is compared only when both sides recorded it**, and getting that wrong is what this
+    function shipped doing. `number_change` and `text_change` treat *absent* as a value, which is
+    safe in `optimization.py` — every member there is an `OrdReaction` from one DRFP campaign, so
+    the set is homogeneous by construction — and is a fabrication engine here, where the set is
+    arbitrary by design. Measured before the guard: three runs with *identical* conditions and one
+    failed extraction rendered `solvent 2-MeTHF → —` then `solvent — → 2-MeTHF`, two swaps that
+    never happened, invented by a transient endpoint failure; a share document between two reaction
+    notes rendered `temperature 90 °C → —; time 12 h → —` and back, for fields the document does
+    not have. This is exactly the hazard the paragraph above cites `changes_between` for — stated
+    correctly about reagents, and then not applied to the three columns that *are* compared.
+
+    Absent-to-present is a difference in what was **recorded**, never a change in the process, and
+    the two are not distinguishable to a reader once they are in the same column.
+
+    Three outcomes, because "unchanged" is itself a claim: nothing comparable at all renders
+    `MISSING`, everything comparable and equal renders "unchanged", and the rest is the list. A run
+    that repeats its predecessor exactly is not a gap in the record — it is a reproducibility check,
+    and saying "unchanged" is what lets a reader tell the two apart, which is precisely why it must
+    not also be what a reader sees when nothing could be compared.
     """
     if previous is None:
         return "first"
@@ -350,18 +367,32 @@ def _changes(
     after_p, after_r = current
     before_c = before_p.conditions or ProcessConditions()
     after_c = after_p.conditions or ProcessConditions()
-    changes: list[ConditionChange] = [
-        change
-        for change in (
+    comparable = 0
+    changes: list[ConditionChange] = []
+    for change, both in (
+        (
             number_change("temperature", before_c.temperature_c, after_c.temperature_c, "°C"),
+            before_c.temperature_c is not None and after_c.temperature_c is not None,
+        ),
+        (
             number_change("time", before_c.time_h, after_c.time_h, "h"),
+            before_c.time_h is not None and after_c.time_h is not None,
+        ),
+        (
             text_change("solvent", before_r.solvent, after_r.solvent),
-        )
-        if change is not None
-    ]
-    if not changes:
-        return "unchanged"
-    return "; ".join(change.describe() for change in changes)
+            bool(before_r.solvent) and bool(after_r.solvent),
+        ),
+    ):
+        if not both:
+            continue
+        comparable += 1
+        if change is not None:
+            changes.append(change)
+    if changes:
+        return "; ".join(change.describe() for change in changes)
+    # Nothing was comparable at all, so there is nothing to say — and "unchanged" would be a claim
+    # about conditions nobody recorded on one side or the other.
+    return "unchanged" if comparable else MISSING
 
 
 def _table(protocols: list[Protocol], rows: list[ProtocolDigest]) -> str:
