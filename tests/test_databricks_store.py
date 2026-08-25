@@ -265,3 +265,25 @@ async def test_a_client_failure_becomes_one_retryable_error_type(method: str) ->
             await store.search(COLLECTION, [1.0], 3)
         else:
             await store.delete(COLLECTION, ["n-1"])
+
+
+@_sync
+async def test_an_unreadable_response_shape_warns_rather_than_reading_as_no_matches(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Tolerant parsing must not turn a client-version change into a silently empty corpus.
+
+    `_rows` reads two shapes and falls through for anything else. Falling through *quietly* would
+    make every search return nothing with no trace — the failure the tolerance exists to absorb,
+    inverted, and the one an operator has no way to notice.
+    """
+    import logging
+
+    class _Odd(_FakeIndex):
+        def similarity_search(self, **kwargs: Any) -> Any:
+            return "an unexpected envelope"
+
+    with caplog.at_level(logging.WARNING):
+        assert await _store(_Odd()).search(COLLECTION, [1.0, 0.0], 5) == []
+
+    assert any("does not read" in record.getMessage() for record in caplog.records)

@@ -6,9 +6,9 @@ than a rewrite, because everything except the dense half is *identical*: the tex
 the file fingerprint, the embedding key and the lexical ranking are relational work that does not
 move and must not be duplicated.
 
-**Two of the five `NoteIndex` methods are overridden; three are inherited untouched.** That ratio is
-the whole argument. `fingerprints` reads a column, `search_lexical` is `ts_rank` over a GIN index,
-and neither has anything to do with where a vector is kept.
+**Four of the five `NoteIndex` methods are overridden; `search_lexical` is inherited untouched**,
+because `ts_rank` over a GIN index has nothing to do with where a vector is kept. Three of the four
+are the dense half. The fourth, `fingerprints`, is the one that is not obvious — see below.
 
 **Why this is smaller than the document twin, and does not pretend otherwise.** There, a point is
 one chunk of a document and the store's answer has to be rejoined to a catalogue to become a
@@ -31,6 +31,21 @@ removes. A crash the other way round — a catalogue row whose vector never land
 permanent, because the row's fingerprint would then match on every subsequent run and it would never
 be re-embedded. That is `external_index.py`'s argument verbatim, and it is about ordering rather
 than atomicity, so it holds when the two halves are in different systems.
+
+**`fingerprints` is overridden because a stored key must say *where the vector went*, not only
+which model made it.** `embedding_config_key()` is `provider:endpoint:dDIM:model` — it answers "is
+this vector still valid", and it cannot answer "is this vector reachable". Those came apart the
+moment a second backend existed: a deployment already running an external store for its *documents*
+gets its notes moved here by one shared `vector_store_provider`, and every `note_index` row still
+carries a matching key while the store holds nothing. `reindex_notes` would compute `changed = []`,
+embed nothing, write nothing, and `search_dense` would query an empty collection — zero dense note
+hits, no error, until somebody ran `--full` by hand. That is exactly the defect `infra/sql/039` was
+written about, one backend over.
+
+So the key this subclass *stores* is namespaced by the collection. On a provider switch the rows
+carry the bare key, this index asks for the namespaced one, nothing matches, and every note is
+re-embedded into the store it is now supposed to live in. Self-healing by the mechanism 039
+established, with no `VectorStore` method added and no effect on the pgvector path.
 
 **The embedding column stays in `note_index` and stays NULL.** Not dropped: the schema is shared
 with the default deployment, and a migration that removed it would fork the two. `_row_vector`
@@ -61,6 +76,19 @@ class ExternalVectorNoteIndex(PostgresNoteIndex):
         """`NULL`: the vector went to the store, and nothing here reads this column."""
         return None
 
+    def _stored_key(self, embedding_key: str) -> str:
+        """The `embedding_key` written to and read from `note_index`, namespaced by the store.
+
+        One function so the write and the read cannot disagree — a second spelling of "which
+        configuration made this row" is how they stop agreeing, which is the argument
+        `ingest/documents/external_index.py::point_id` makes about addresses.
+        """
+        return f"{embedding_key}@{self._collection}"
+
+    async def fingerprints(self, embedding_key: str) -> dict[str, str]:
+        """Fingerprints of rows this store actually holds vectors for."""
+        return await super().fingerprints(self._stored_key(embedding_key))
+
     async def upsert(self, records: list[NoteRecord], embedding_key: str) -> None:
         """Send the vectors, then commit the catalogue rows. That order is load-bearing."""
         if not records:
@@ -69,7 +97,7 @@ class ExternalVectorNoteIndex(PostgresNoteIndex):
             self._collection,
             [VectorPoint(id=record.note_id, vector=record.embedding) for record in records],
         )
-        await super().upsert(records, embedding_key)
+        await super().upsert(records, self._stored_key(embedding_key))
 
     async def retire_absent(self, keep: set[str]) -> int:
         """Delete the catalogue rows first, then the points they addressed.
