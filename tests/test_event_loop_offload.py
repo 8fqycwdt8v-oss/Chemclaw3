@@ -106,5 +106,5 @@ def test_gather_evidence_runs_its_sources_concurrently() -> None:
         patch.setattr(
             research_tools, "_text_retrievers", lambda: [_SlowRetriever(), _SlowRetriever()]
         )
-        assert asyncio.run(research_tools.gather_evidence("anything")) == []
+        assert asyncio.run(research_tools.gather_evidence("anything")).chunks == []
     assert peak == 2

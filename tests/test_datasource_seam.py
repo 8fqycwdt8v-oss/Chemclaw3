@@ -152,7 +152,7 @@ def test_a_new_source_is_a_folder_and_a_config_token(
     monkeypatch.setattr(settings, "data_sources_dir", str(tmp_path))
     monkeypatch.setattr(settings, "data_sources", "fake")
 
-    chunks = asyncio.run(research_tools.gather_evidence("solubility"))
+    chunks = asyncio.run(research_tools.gather_evidence("solubility")).chunks
     assert any("hit:solubility" in c.content for c in chunks)  # framed, but the payload survives
 
 

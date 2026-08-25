@@ -50,6 +50,50 @@ class RetrievalSettings(BaseSettings):
     # question over a large corpus fills only as much context as it needs (the agent narrows the
     # query or drills in with expand_note when the sweep is truncated).
     gather_evidence_max_chunks: int = Field(default=40, ge=1)
+    # The same cap in the currency the count cannot express. `gather_evidence_max_chunks` counts
+    # chunks whose sizes differ by roughly **7.5x** across sources — a note-backed chunk is
+    # excerpted to `note_excerpt_chars` (240) while a mounted share's chunk is up to its binding's
+    # `chunk_chars` (1,800) — and nothing normalised them, so 40 chunks is ~9.6 kB from the graph
+    # and ~72 kB from a share. A count of things cannot bound anything, because what a thing costs
+    # is whatever is in it: the same finding as `agent_keep_last_conversation_groups`, where the
+    # count-only version left a 300k-token thread at 180k against a 100k budget.
+    #
+    # Both bounds apply, and the count is kept rather than replaced — it is ENV-visible and
+    # deployments set it, which is `agent_keep_last_tool_groups`' argument for keeping a name whose
+    # meaning has been refined. ~60,000 characters is ~15k tokens against
+    # `agent_context_token_budget`'s 100,000: it leaves a graph-only deployment byte-identical and
+    # stops a share-heavy sweep at roughly 33 chunks.
+    #
+    # Spent by walking the already round-robin (or RRF-fused) ranking, so it is spent
+    # cross-source-fairly for exactly the reason the count is —
+    # `D-2026-08-01-a-cap-that-starves-a-source` is about the *shape* of a cut, and a second cap
+    # in a different currency applied the old way would reintroduce the starvation it fixed.
+    gather_evidence_max_chars: int = Field(default=60_000, ge=1_000)
+    # ── Condensing many whole protocols into one comparison (`agent.condense`) ────────────
+    # Asking for similar reactions returns many protocols, and a protocol is atomic: it cannot be
+    # split, so the unit that must fit is one whole procedure. These bound what a single turn may
+    # condense, in the two currencies that actually bind — how many protocols, and how much text —
+    # because either alone is unbounded in the other.
+    #
+    # `protocol_digest_max_chars` is one *map unit's* ceiling, ~6k tokens. An ELN procedure with a
+    # charge sheet runs 3–8 kB, so this holds the ordinary case whole and refuses the outlier rather
+    # than splitting it — a head-truncated protocol would return conditions with the outcome
+    # silently missing, because yield and purity are at the *end*, and a row whose outcome looks
+    # unmeasured against neighbours that measured it is worse than a row that says "not read".
+    protocol_digest_max_chars: int = Field(default=24_000, ge=1_000)
+    # How many protocols one turn-time call may take. Sized against `fingerprint_top_k` (10) and
+    # `fingerprint_max_top_k` (100): two pages of similar reactions plus what the text sources add.
+    # Small enough that the refusal above it is reachable in practice rather than theoretical.
+    protocol_digest_max_protocols: int = Field(default=24, ge=1)
+    # The other half of the same bound, in the currency the count cannot express. 24 x 24k is 576k
+    # characters; a count alone would not bound that at all. This is the
+    # `agent_keep_last_conversation_groups` lesson — a count of things cannot bound anything,
+    # because what a thing costs is whatever is in it.
+    protocol_digest_total_max_chars: int = Field(default=400_000, ge=10_000)
+    # Map concurrency against one endpoint on the interactive path — `fan_out`'s role, on an
+    # `asyncio.Semaphore` rather than on Temporal, because `durable.orchestrator.fan_out` starts
+    # child *workflows* and is unreachable from a tool.
+    protocol_digest_max_parallel: int = Field(default=4, ge=1)
     # Rank-before-truncate for the evidence sweep (KM-5): when `gather_evidence` exceeds its cap
     # it keeps the highest-scored chunks, not an arbitrary disk-order slice. Graph hits score by
     # note `confidence` (this default when a note has none), structural hits by their similarity

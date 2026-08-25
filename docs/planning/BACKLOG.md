@@ -291,6 +291,23 @@ topic).
 
 ## 4 — Operating it
 
+- [ ] **`read_corpus` re-reads the entire ELN from `datetime.min` on every call** — [M].
+      `durable/memory_jobs.py:63` calls `fetch_new_entries(datetime.min)` on every ingest half, so
+      each of the three memory jobs (`build_campaign_notes_activity`,
+      `build_playbook_notes_activity`, `build_optimization_notes_activity`) walks the whole record
+      from the beginning of time, and `all_reactions()` is called once per activity. On the two
+      file-drop exports this costs nothing; against a real Snowflake ELN it is a full table scan
+      per activity per scheduled run. `ElnAdapter` (`ingest/eln/adapter.py:128`) has exactly two
+      methods and neither is a fetch-by-id, so there is no cheaper read to reach for — closing this
+      means either a fetch-by-id on the adapter protocol (every source pays) or a derived store of
+      mapped `OrdReaction`s.
+      **Found while building the protocol condenser and deliberately not fixed there**
+      (`D-2026-08-25-the-structure-is-discarded-at-the-note-boundary` records the reasoning): a
+      derived store would have answered it as a side effect, and answering a scaling problem as a
+      side effect of a retrieval change is how a store nobody decided on gets built. It is also the
+      trigger on the `DEFERRED.md` row for reagent/solvent set diffs in the turn-time comparison —
+      one change answers both.
+
 - [ ] **Postgres and Temporal are neither deployed nor owned** — [L]. The chart dials
       `chemclaw-temporal-frontend.temporal.svc:7233` and namespace `chemclaw`; there is no subchart
       and no statement of who runs either. `docs/guides/runbook.md:925` states what this system
