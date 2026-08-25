@@ -199,24 +199,28 @@ class ShareDocumentRetriever:
         """
         if not doc_id.strip() or not self._entitled():
             return None
+        ceiling = settings.document_read_max_chars
         try:
             stored = await self._backend().stored_document(
-                self.name, doc_id, self._binding.chunking_key
+                self.name, doc_id, self._binding.chunking_key, ceiling
             )
         except Exception:
             logger.exception("%s: could not read document %s", self.name, doc_id)
             return None
         if stored is None or not stored.pieces:
             return None
-        text = join_chunks([p.content for p in stored.pieces], self._binding.chunk_overlap_chars)
-        ceiling = settings.document_read_max_chars
+        text = join_chunks(
+            [p.content for p in stored.pieces], self._binding.chunk_overlap_chars, ceiling
+        )
         return DocumentText(
             doc_id=doc_id,
             source=self.name,
             path=stored.path,
             text=text[:ceiling],
             chunks=len(stored.pieces),
-            truncated=len(text) > ceiling,
+            # From the backend, which knows whether more pieces existed. Inferring it from the
+            # assembled string would mean having built the thing the ceiling exists to avoid.
+            truncated=stored.truncated or len(text) > ceiling,
             # First-seen order, deduped: the coordinates a reader can check the text against.
             coordinates=list(dict.fromkeys(p.coordinate for p in stored.pieces if p.coordinate)),
             modified_at=stored.modified_at,

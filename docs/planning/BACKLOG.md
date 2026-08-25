@@ -147,6 +147,20 @@ topic).
 
 ## 2 — Answers that are wrong without saying so
 
+- [ ] **`changes_between` diffs against *absent* and can report a change nobody made** — [S].
+      `memory/progression.py::number_change` and `_species_change` treat a missing value as a value:
+      a run recording no temperature beside one that does yields `temperature 90 °C → —`, which
+      renders in `optimization_campaign_note`'s "Changed vs previous" column as a change. That
+      function's own docstring identifies the hazard and excludes equivalents and loadings for it —
+      it just does not apply the same rule to the two setpoints and the species sets it *does* diff.
+      Bounded in practice, which is why this is [S] and not larger: a campaign's members are all
+      `OrdReaction`s from one DRFP cluster, so both sides usually record the same fields.
+      **The turn-time condenser hit the unbounded version of this** and fixed it in `_changes`
+      (`agent/condense.py`) rather than in the shared helper, because changing the helper alters
+      merged campaign-note output and `tests/test_optimization.py`. Closing this means moving the
+      "both sides recorded it" rule into `progression` and accepting that diff — one rule instead of
+      two, which is the right end state.
+
 - [ ] **A solvate collapses onto whichever fragment is larger** — [M], and worse than filed: it is
       not only the cache key, it is the **knowledge-graph note id**. Measured,
       `standard_smiles("CCN.C1CCOC1")` returns THF, and `compound_id("CCN.C1CCOC1")` equals

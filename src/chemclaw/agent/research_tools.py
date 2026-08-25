@@ -312,12 +312,23 @@ def _within_budget(chunks: list[EvidenceChunk]) -> tuple[list[EvidenceChunk], _T
     empty list, which this tool's contract says means "nothing on file" — the same clamp
     `KeepLastConversationGroupsEdit` makes for the same reason, since an empty result that reads as
     an honest absence is worse than an oversized one.
+
+    **What is charged is the serialized chunk, not its content**, and the first version of this
+    function got that wrong in the same way the count cap it replaces was wrong. `content` is only
+    part of what reaches the model: `source_note_id`, `retriever`, `score`, `conflicts_with`,
+    `conflicts_total`, `created_by`, `source` and `confidence` all ride beside it, inside JSON
+    scaffolding. Measured on one realistic chunk carrying conflicts and provenance — **300
+    characters of content against 569 serialized, a 47% under-count**, so a 60,000-character budget
+    was really spending about 114,000. Fixing a cap's currency and then measuring the wrong quantity
+    is the same error one level down.
     """
     budget = settings.gather_evidence_max_chars
     kept: list[EvidenceChunk] = []
     spent = 0
     for chunk in chunks[: settings.gather_evidence_max_chunks]:
-        cost = len(chunk.content)
+        # One extra serialization for at most `gather_evidence_max_chunks` chunks, which buys the
+        # only number that means anything here: what this chunk actually costs the context window.
+        cost = len(chunk.model_dump_json())
         if kept and spent + cost > budget:
             return kept, "chars"
         kept.append(chunk)
