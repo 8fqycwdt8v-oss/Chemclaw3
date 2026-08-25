@@ -495,7 +495,9 @@ only holds defects can only ever restore the system to what it already intended 
       nothing else. An ADR either way.
 
 - [ ] **The agent cannot execute code, and the decision on record is narrower than the consequence** —
-      [L]. `agent/scratchpad.py::scratchpad_tools` withholds `execute` for a correct reason: deepagents
+      [L], **answered and awaiting merge** ([`Chemclaw3-mcp` #12](https://github.com/8fqycwdt8v-oss/Chemclaw3-mcp/pull/12), `D-2026-08-25-a-sandbox-is-a-server-not-a-verb`). The capability is `servers/pyexec` there — one
+      stateless tool, no core edit here, and the `execute` verb stays withheld. This row is deleted
+      in the commit that merges that PR, not before: until it does, the tree still cannot do this. `agent/scratchpad.py::scratchpad_tools` withholds `execute` for a correct reason: deepagents
       0.7 ships exactly one concrete sandbox (`LangSmithSandbox`, declined on content-egress grounds)
       and `LocalShellBackend` is documented as unrestricted. That is a refusal of *two specific
       sandboxes*. What is not on record is a decision about whether an execution substrate belongs at

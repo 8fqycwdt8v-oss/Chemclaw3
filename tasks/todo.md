@@ -1,7 +1,7 @@
 # Implementation plan — closing the 2026-08-25 field benchmark
 
-**Status: W3.2 in progress (the `pyexec` server, in `Chemclaw3-mcp`). Everything else is planned
-and not started.**
+**Status: W3.2 is built and open as [`Chemclaw3-mcp` #12](https://github.com/8fqycwdt8v-oss/Chemclaw3-mcp/pull/12),
+not merged. Everything else is planned and not started.**
 
 The findings and their measurements are in
 [`docs/archive/REVIEW-2026-08-25-agentic-field-benchmark.md`](../docs/archive/REVIEW-2026-08-25-agentic-field-benchmark.md);
@@ -430,11 +430,25 @@ calculator with a scientific library on it.
 5. The ADR records the decision and, importantly, **what was declined**: a shell, a persistent
    namespace, and `LangSmithSandbox`.
 
-#### Acceptance
+#### Acceptance — met, and here is what each one returned
 
-`make check` green in `Chemclaw3-mcp`; `make offline-run` green with the network removed;
-`assert_manifest_matches` green against a running server; and, from a Chemclaw3 checkout, the tool
-appears with no diff under `src/`.
+`make check` in `Chemclaw3-mcp`: **985 passed**, ruff clean, `mypy --strict` clean.
+`make offline-run`: **985 passed with the network removed**. `assert_manifest_matches` green against
+a running server. And from this checkout, with the server up and `CHEMCLAW_CONNECTORS_DIR` pointed
+at the fleet's manifests: `run_python` appears on the agent surface, a live call returns
+`{"ok": true, "result": {"mean": 3.0, "sd": 2.16}}`, `import os` is refused over the same wire, and
+`git diff src/` is **empty**.
+
+**What the build changed about the plan, both times because a measurement said so.** The import
+guard was designed as a `sys.modules` purge plus a `meta_path` finder; it broke `scipy.optimize`'s
+lazy `import sys` *and* did not hold, because `import` reads `sys.modules` before any finder. It is
+a replaced `__import__` in the analysis namespace instead. And the runner was designed to warm the
+scientific stack; measured at 1.2-1.9 s on every call against an 11 ms empty child, so nothing is
+pre-imported. Both reversals are in `D-2026-08-25-a-sandbox-is-a-server-not-a-verb`.
+
+**Not merged, deliberately.** It runs code a language model wrote. The gates are green and the
+design is argued, but the control table in `servers/pyexec/README.md` — which half is a boundary and
+which half is not — is a thing a person should read before this ships.
 
 #### The risk to state plainly in the ADR
 
