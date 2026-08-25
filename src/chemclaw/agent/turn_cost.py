@@ -1,5 +1,12 @@
 """The durable ledger of what one turn cost, and who it cost it for.
 
+**The record itself lives in `chemclaw.core.turn_cost`; this module is the machinery.** `TurnCost`
+is re-exported here because every writer already imports it from this module and the split is about
+layering rather than about call sites: `chemclaw.evals` scores these records and is deliberately
+forbidden from importing `chemclaw.agent`, so the shape had to be somewhere both may read. What
+stays here is everything with behaviour — the sink protocol, the backend choice, and the
+fire-and-forget write below.
+
 **Why a table and not a label.** Spend was already measured — `chemclaw_tokens_total` and its four
 siblings, labelled `profile`. That answers "what is this deployment spending" and cannot answer
 "what did this team spend last quarter", and the gap is structural rather than an oversight in the
@@ -24,50 +31,27 @@ would under-report the one case that matters.
 
 import asyncio
 import logging
-from datetime import datetime
 from typing import Protocol
-
-from pydantic import BaseModel, ConfigDict, Field
 
 from chemclaw.core.config import settings
 from chemclaw.core.metrics_bridge import degraded
+from chemclaw.core.turn_cost import TurnCost
 
 logger = logging.getLogger(__name__)
+
+# Re-exported: see the module docstring.
+__all__ = [
+    "NullTurnCostSink",
+    "TurnCost",
+    "TurnCostSink",
+    "default_turn_cost_sink",
+    "record_turn_cost",
+]
 
 # Strong references to the in-flight writes. Without them the event loop keeps only a weak one and
 # a cost row can be garbage-collected mid-write — the documented `asyncio.create_task` hazard, and
 # an invisible one here because the loss is a row nobody is watching for.
 _PENDING: set[asyncio.Task[None]] = set()
-
-
-class TurnCost(BaseModel):
-    """What one completed turn spent, and the identity to bill it to.
-
-    `correlation_id` is the key rather than a fresh id because it already identifies the turn
-    uniquely, already keys `audit_events`, and is already on every log line — so the ledger joins to
-    the trail and the logs with no new correspondence to maintain.
-    """
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    correlation_id: str = Field(min_length=1)
-    session_id: str = ""
-    actor: str = ""
-    # `default` rather than empty for a session on no profile, matching the metric label exactly, so
-    # a sum here and a sum there answer the same question the same way.
-    profile: str = "default"
-    input_tokens: int = Field(default=0, ge=0)
-    output_tokens: int = Field(default=0, ge=0)
-    cache_read_tokens: int = Field(default=0, ge=0)
-    cache_write_tokens: int = Field(default=0, ge=0)
-    duration_seconds: float = Field(default=0.0, ge=0)
-    # False when the turn was torn down *before it answered* — `chemclaw.api.runner` books
-    # `completed=answered`, so a disconnect or wall-clock deadline that lands after the answer is a
-    # completed turn that keeps its history, and only one that lands before it is not. Recorded
-    # rather than filtered: those turns spent real tokens, and a ledger that kept only the tidy ones
-    # would be wrong in the direction that hides a runaway.
-    completed: bool = True
-    recorded_at: datetime | None = None
 
 
 class TurnCostSink(Protocol):

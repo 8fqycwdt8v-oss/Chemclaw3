@@ -11,7 +11,10 @@ KUBE_VERSION ?= 1.29.0
 # aggregates over two different case-sets are different quantities, and a delta between them looks
 # like a result while meaning nothing. Bump this together with a `make eval-baseline` refresh
 # whenever the case-set itself changes — the mismatch is the tripwire that says you forgot.
-EVAL_CASE_SET_VERSION ?= autonomy-2026-08-01
+# Bumped when the case set itself changes, because a baseline is only comparable to the set it was
+# recorded on — `eval-baseline-check` refuses to compare two versions rather than reporting a drift
+# between different quantities. 2026-08-25 added `autonomy-turn-cost`.
+EVAL_CASE_SET_VERSION ?= autonomy-2026-08-25
 
 # The two patterns that classify `deps-audit`'s output. Named here rather than inlined in the
 # recipe so `tests/test_deploy_chart.py` can assert the classification against the same strings
@@ -112,7 +115,11 @@ eval-baseline-check:  ## Score the case-set against data/evals/baseline.json and
 	uv run python -m chemclaw.evals.harness --case-set-version $(EVAL_CASE_SET_VERSION) --baseline
 
 eval-baseline:  ## Regenerate data/evals/baseline.json from a scoring run (after a reviewed change).
-	uv run python -m chemclaw.cli.refresh_baseline
+# The version is passed, and it has to be: `refresh_baseline` defaults to "unversioned" while
+# `eval-baseline-check` asks for $(EVAL_CASE_SET_VERSION), so the two targets used to disagree and a
+# regenerated baseline failed the very check it was regenerated for. Found by running them in
+# sequence, which is what adding a case makes you do.
+	uv run python -m chemclaw.cli.refresh_baseline --case-set-version $(EVAL_CASE_SET_VERSION)
 
 eln-validate:  ## Validate the ELN export's reactions (RDKit structure + mass balance).
 	uv run python -m chemclaw.ingest.eln.validate
