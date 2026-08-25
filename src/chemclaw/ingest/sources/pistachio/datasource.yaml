@@ -1,0 +1,76 @@
+# Pistachio — the patent reaction corpus — read from the deployment's own Databricks, and searched
+# in a Mosaic AI Vector Search index. Discovered but NOT enabled; `CHEMCLAW_DATA_SOURCES` decides.
+#
+# **Retrieve-only, and there is no ingest half by design.** Pistachio is *precedent*, not this
+# site's knowledge: a patent reaction did not happen in this lab, nobody here can vouch for it, and
+# nothing about it should become a knowledge-graph note. It answers "has this transformation been
+# done before" with a citation, and the graph keeps holding only what this site did and reviewed.
+#
+# **Why a third-party corpus is here at all**, given that `tests/test_no_egress.py` sanctions the
+# ELN sources on the grounds that they are the deployment's own systems and D-089 is about
+# third-party ones. The distinction D-089 draws is about a *runtime dependency on somebody else's
+# service*: a corpus this system fetches from a vendor at question time, whose availability,
+# licensing and content are outside the deployment's control. This is not that. It is the site's own
+# licensed copy, loaded into the site's own lakehouse by the site, reached with the same credential
+# and through the same peer as the ELN beside it, and adding no egress destination that connector
+# does not already have. The argument is made in full in
+# `docs/decisions/D-2026-08-25-a-lakehouse-arrives-on-two-seams-not-one.md`; the row in that test
+# carries the short form.
+#
+# **This file is the schema.** Nothing in `chemclaw.ingest.eln.warehouse` names a table or a column.
+# The values below describe a plausible Pistachio landing table and are meant to be replaced with
+# the site's own — better still, by mounting a folder holding your copy of this file and putting it
+# first in `CHEMCLAW_DATA_SOURCES_DIR`, so your schema is not a change to this repository.
+name: pistachio
+description: >-
+  Reactions extracted from the patent literature, held in the deployment's Databricks and searched
+  by embedding similarity. Precedent and prior art — cited as evidence, never ingested as knowledge.
+
+retrieve: chemclaw.ingest.eln.warehouse.retriever:WarehouseVectorRetriever
+
+config:
+  binding:
+    connection:
+      driver: chemclaw.ingest.eln.warehouse.databricks:DatabricksWarehouse
+      # See `eln-databricks/datasource.yaml` for what each of these means on Databricks — the words
+      # are this seam's, and three of them name a different thing here than they do on Snowflake.
+      # A separate token from the ELN's is worth having: this corpus is licensed, its grants are
+      # different, and one credential per corpus is what makes revoking one of them possible.
+      account_env: DATABRICKS_HOST
+      password_env: PISTACHIO_DATABRICKS_TOKEN
+      warehouse: 0123456789abcdef
+      database: pistachio
+      schema: public
+      query_timeout_seconds: 60
+
+    vector:
+      # **Ranked in the index, resolved in the warehouse.** At ~10^7 reactions a per-row
+      # `vector_cosine_similarity` is a full scan of the corpus on every question. So the vectors
+      # live in a Vector Search index and this relation is queried only to turn the winning keys
+      # into text — the same split `ingest/documents/external_index.py` makes between a store and a
+      # catalogue, with Databricks SQL as the catalogue.
+      #
+      # A three-level Unity Catalog name. The endpoint serving it is a deployment fact and comes
+      # from CHEMCLAW_VECTOR_STORE_ENDPOINT_NAME, not from here.
+      index: pistachio.public.reaction_index
+      relation: v_reaction
+      key: reaction_id
+      # No `vector_column`: the index holds the vectors, and naming one here is refused rather than
+      # ignored, because a binding that half-declares both shapes would silently take one of them.
+      content_columns: [reaction_smiles, title, patent_number, publication_year]
+      # `cosine` because that is what `VectorMatch.score` is, and `local` because an index-ranked
+      # source embeds the query here and sends the vector — there is no statement for a warehouse
+      # embedding function to appear in. Both are enforced by the binding rather than assumed.
+      metric: cosine
+      embedding: local
+      # A filtered search sends its eligibility to the index *before* the top-k, as a set of keys
+      # computed by these columns — filter afterwards and a narrow year range over ten million
+      # reactions returns nothing, because the k nearest all belonged to something else. A filter
+      # matching more rows than CHEMCLAW_VECTOR_STORE_MAX_SCOPE_KEYS is refused, never truncated.
+      filter_columns: {since: publication_date, until: publication_date}
+      # **False, and this is the one setting not to copy from an ELN binding.** `suppress_ingested`
+      # drops a hit whose reaction already became a note, which is right when the source is the ELN
+      # those notes came from. Nothing here is ever ingested, so every check would be a wasted
+      # filesystem probe — and a Pistachio reaction id colliding with an ELN one would silently
+      # hide a legitimate hit.
+      suppress_ingested: false
