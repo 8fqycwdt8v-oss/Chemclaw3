@@ -105,6 +105,21 @@ _COUNTERS: dict[str, str] = {
     # invisible in every other signal — a live turn made 29 tool calls and emitted an empty answer
     # with no error, and only a count makes that a trend anyone can watch rather than an anecdote.
     "chemclaw_turn_empty_answers_total": "Turns that ended without producing any answer text.",
+    # The result-publication path (D-2026-08-25). Three counters and a gauge, because the three
+    # failure modes are genuinely different and one series carrying all of them would be
+    # unactionable: a record that could not be *queued* is a local database problem, a record that
+    # could not be *delivered* is the external store's, and a queue that is growing is neither
+    # failing nor working. `chemclaw_results_queued_total` against
+    # `chemclaw_results_published_total` is what says whether the drain is keeping up.
+    "chemclaw_results_queued_total": (
+        "Computed results projected and queued for an external results store."
+    ),
+    "chemclaw_results_published_total": (
+        "Computed results confirmed durable at an external results store."
+    ),
+    "chemclaw_result_publish_failures_total": (
+        "Result publications that could not be queued or delivered."
+    ),
     "chemclaw_audit_sink_failures_total": (
         "Audit records that could not be persisted (the trail is incomplete)."
     ),

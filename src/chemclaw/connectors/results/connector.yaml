@@ -1,0 +1,43 @@
+# Republishing computed results to the external results store, as a durable job.
+#
+# **A jobs-only bundle** — the `qm` shape, no `endpoint:` — because the capability it exposes is a
+# *write*, and this system's agent-facing tool surface is read/compute only by rule
+# (`cli/validate_connectors.py` refuses a `write_`/`submit_`/`update_`-prefixed tool outright). A
+# job is the sanctioned shape for a mutating capability, and it inherits what that rule exists to
+# protect: `require_actor()`, the expensive-action gate, a mandatory rationale, the plan gate,
+# dry-run refusal, and a `job_records` row — all through `ConnectorJobWorkflow`, with no code here.
+#
+# **Ordinary publishing is not this.** Every calculation is published automatically as it completes
+# (D-2026-08-25) — a chemist never has to remember to save a result, and the audit story is
+# stronger when they cannot forget. What this bundle adds is the deliberate act: republish a
+# corpus after attaching a new store, or re-queue what a destination refused while it was down.
+name: results
+description: >-
+  Republish computed results to the configured external results store. Ordinary publishing is
+  automatic; this is the deliberate re-run for a newly attached store, or for results a destination
+  refused while it was unavailable.
+
+jobs:
+  - name: republish_calculations
+    workflow: RepublishResultsWorkflow
+    summary: Re-queue stored calculations for delivery to the external results store.
+    description: >-
+      Walks the calculation cache and the durable job record and queues everything that has not
+      already been published, then optionally returns publications that exhausted their retries to
+      the queue.
+
+      Use it after attaching a results store to a deployment that has been running — publishing
+      hooks a calculation as it completes, so without this a new store would receive only what is
+      computed from that moment on, while the far larger corpus behind it stays invisible. Use it
+      also once a destination that was refusing deliveries has been fixed.
+
+      Safe to run twice: a calculation already queued for a sink is not queued again. Safe to run
+      while the system is live: it writes to the same queue the automatic path does. Results this
+      release has no projector for are skipped and counted, not treated as failures — a deployment
+      legitimately holds rows from calculators that no longer ship.
+    params_model: chemclaw.connectors.results.specs:RepublishSpec
+    # A full corpus walk over two never-pruned tables, on a deployment that may have been running
+    # for years. That is the same unbounded cost `sample_conformers` carries the gate for: bounded
+    # by the data rather than by the request, so an authenticated chemist is not enough — it needs
+    # the privileged role.
+    expensive: true

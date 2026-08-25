@@ -291,6 +291,22 @@ topic).
 
 ## 4 — Operating it
 
+- [ ] **The results store has no live target** — [M]. `D-2026-08-25-a-cache-is-not-a-record` ships
+      the whole path — `src/chemclaw/publish/`, the canonical schema in `schema/result-store/`, two
+      drivers, the outbox (migration 050) and the drain — and it is proven end to end against a
+      local Postgres running the shipped DDL (`tests/test_publish_sql.py`). What has not happened is
+      an actual deployment pointing at an actual results database: `CHEMCLAW_RESULT_SINKS` is empty
+      by default and `src/chemclaw/publish/sinks/postgres/sink.yaml` addresses a host nobody runs.
+      Attaching one is configuration (`make sink-schema`, apply, set the variable), so this is a
+      deployment action rather than code — but until it happens, no number below has been measured
+      against a real corpus.
+- [ ] **Nothing has measured how many rows a real corpus produces** — [M]. The volume risk named in
+      `D-2026-08-25`: `cached_compute` publishes on every miss, and a conformer search projects one
+      record with ~47 conformer rows plus their structures. Before publishing is enabled by default
+      anywhere, run `python -m chemclaw.cli.backfill_publications --dry-run` against a populated
+      deployment and count rows-per-calculation per `calc_type`. That growth curve is also what
+      decides the deliberately open question of whether `property_value` needs partitioning, and on
+      what — a partition key chosen before the row count is known would be a guess.
 - [ ] **Postgres and Temporal are neither deployed nor owned** — [L]. The chart dials
       `chemclaw-temporal-frontend.temporal.svc:7233` and namespace `chemclaw`; there is no subchart
       and no statement of who runs either. `docs/guides/runbook.md:925` states what this system

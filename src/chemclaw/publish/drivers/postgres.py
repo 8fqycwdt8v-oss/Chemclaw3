@@ -1,0 +1,144 @@
+"""A `Warehouse` over psycopg, so a Postgres results store needs no vendor client.
+
+The most likely target a site actually runs, and until this existed the SQL sink could only reach
+one: `ingest/eln/warehouse/snowflake.py` is the only shipped `Warehouse`, and it is a Snowflake
+client. This is the same Protocol over `psycopg`, which this repository already depends on.
+
+**It lives here rather than beside the Snowflake driver, and the reason is direction.** That module
+exists to *read* a site's ELN; this one exists to *write* this system's own results. They implement
+one Protocol because a connection is a connection — that is the reuse the Protocol was for — but a
+reader looking for "how does publishing reach Postgres" should find it in the publishing package.
+
+Credentials come from the binding's named environment variables, exactly as the Snowflake driver's
+do, so the two are configured the same way and a deployment moving between them changes a manifest
+rather than a mechanism.
+"""
+
+from collections.abc import AsyncIterator, Sequence
+from contextlib import asynccontextmanager
+from typing import Any
+
+import psycopg
+from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
+
+from chemclaw.ingest.eln.warehouse.driver import WarehouseCursor, WarehouseQueryError
+
+
+class _PostgresCursor:
+    """One in-flight statement, returning column-keyed dicts."""
+
+    def __init__(self, cursor: psycopg.AsyncCursor[Any]) -> None:
+        """Wrap an open psycopg cursor."""
+        self._cursor = cursor
+
+    async def execute(self, sql: str, params: Sequence[Any]) -> None:
+        """Run `sql` with `params` bound positionally, adapting JSON values on the way.
+
+        **The JSON wrapping lives here rather than in the row builder**, for the same reason
+        `placeholder` is a property of the connection: how a document is bound is a dialect fact.
+        psycopg rejects a bare `dict` — it adapts one only through its `Jsonb` wrapper, and a
+        mapping reaching it unwrapped fails with "cannot adapt type 'dict'" rather than being
+        silently stringified. A Snowflake driver wants a JSON *string* for the same column, so a
+        row builder that wrapped for one would break the other.
+
+        A programming error from the server — an undefined column, a type mismatch — is re-raised
+        as `WarehouseQueryError`, which `durable/publish.py` marks non-retryable by class name: a
+        statement naming a column the site has not created fails identically forever, and the fix
+        is DDL rather than a wait. A *connection* failure passes through as itself, because that
+        one genuinely is worth retrying.
+        """
+        adapted = [Jsonb(value) if isinstance(value, dict | list) else value for value in params]
+        try:
+            await self._cursor.execute(sql, adapted)
+        except psycopg.OperationalError:
+            # The server went away. Retryable, so it must not be flattened into a query error.
+            raise
+        except psycopg.Error as exc:
+            raise WarehouseQueryError(f"{exc.__class__.__name__}: {exc}") from exc
+
+    async def fetchall(self) -> list[dict[str, Any]]:
+        """Every remaining row, keyed by column name."""
+        rows = await self._cursor.fetchall()
+        return [dict(row) for row in rows]
+
+
+class PostgresWarehouse:
+    """A `Warehouse` backed by psycopg. Built by `warehouse.connect.open_warehouse`.
+
+    Its keyword arguments are the binding's `connection:` block, which is why they are named for
+    that block's fields rather than for psycopg's: `database` and `schema` and `password` are what
+    an operator writes, and this translates.
+
+    **One connection, opened lazily and held.** The data-source seam builds a half and never
+    disposes it — there is no lifecycle hook to close one from — so a connection lives for the
+    sink's life by design, which the Protocol's own docstring records.
+    """
+
+    def __init__(
+        self,
+        *,
+        host: str = "",
+        port: int = 5432,
+        user: str = "",
+        password: str = "",
+        database: str = "",
+        schema: str = "",
+        dsn: str = "",
+        query_timeout_seconds: int = 60,
+    ) -> None:
+        """Hold the connection parameters; connect on the first cursor.
+
+        A `dsn` wins when given, because a site with an existing connection string should not have
+        to decompose it. `schema` becomes a `search_path` option rather than a qualified table name
+        in every statement, which is what keeps the SQL generator free of site-specific identifiers.
+        """
+        options = [f"-c statement_timeout={int(query_timeout_seconds * 1000)}"]
+        if schema:
+            options.append(f"-c search_path={schema}")
+        self._options = " ".join(options)
+        self._dsn = dsn
+        self._parts: dict[str, Any] = {
+            key: value
+            for key, value in (
+                ("host", host),
+                ("port", port),
+                ("user", user),
+                ("password", password),
+                ("dbname", database),
+            )
+            if value
+        }
+        self._conn: psycopg.AsyncConnection[Any] | None = None
+
+    @property
+    def placeholder(self) -> str:
+        """The psycopg parameter marker."""
+        return "%s"
+
+    async def _connection(self) -> psycopg.AsyncConnection[Any]:
+        """The live connection, opened on first use and reopened if it was closed."""
+        if self._conn is None or self._conn.closed:
+            if self._dsn:
+                self._conn = await psycopg.AsyncConnection.connect(
+                    self._dsn, options=self._options, row_factory=dict_row, autocommit=True
+                )
+            else:
+                self._conn = await psycopg.AsyncConnection.connect(
+                    options=self._options, row_factory=dict_row, autocommit=True, **self._parts
+                )
+        return self._conn
+
+    @asynccontextmanager
+    async def cursor(self) -> AsyncIterator[WarehouseCursor]:
+        """A cursor for one statement, released on exit.
+
+        `autocommit` on the connection, so each upsert commits on its own. That is correct for this
+        writer rather than a shortcut: every statement it issues is an upsert onto a
+        content-addressed key, so a batch that fails halfway leaves a partial but *correct* state
+        that the outbox's retry completes — which is the property that makes at-least-once delivery
+        safe here.
+        """
+        conn = await self._connection()
+        async with conn.cursor() as cursor:
+            yield _PostgresCursor(cursor)

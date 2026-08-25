@@ -65,6 +65,7 @@ from chemclaw.core.config.kg import KgSettings
 from chemclaw.core.config.llm import LlmSettings
 from chemclaw.core.config.memory import MemorySettings
 from chemclaw.core.config.observability import ObservabilitySettings
+from chemclaw.core.config.publish import PublishSettings
 from chemclaw.core.config.reports import ReportSettings
 from chemclaw.core.config.retrieval import (
     NOTE_INDEX_SOURCES,
@@ -97,6 +98,7 @@ __all__ = [
     "LlmSettings",
     "MemorySettings",
     "ObservabilitySettings",
+    "PublishSettings",
     "ReportSettings",
     "RetrievalSettings",
     "ServiceSettings",
@@ -128,6 +130,7 @@ class Settings(
     MemorySettings,
     RetrievalSettings,
     ReportSettings,
+    PublishSettings,
 ):
     """Environment configuration, loaded from process env then a local `.env`.
 

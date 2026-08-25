@@ -1,0 +1,202 @@
+"""Draining the result outbox to whatever external stores a deployment enabled.
+
+The half of the publish path that runs *away* from the calculation. `publish/outbox.py` writes a
+projected record locally in the same act that produces it; this job carries those rows to their
+destination, retries what fails, and gives up loudly rather than silently once a row has spent its
+attempt budget.
+
+**One workflow, one activity per sink.** Per sink, because two enabled destinations are two failure
+domains: one being unreachable must not hold up the other, and a batch that fails for one must not
+mark the other's rows. That is also why `result_publications` carries a row per (sink, calculation)
+rather than one row with a set of destinations.
+
+**A failed batch leaves its rows `pending` and the run succeeds.** The alternative — failing the
+workflow — would put a destination's outage into Temporal's retry loop as well as into this table's
+`attempts` column, two backoffs for one problem, and would make an operator read a workflow failure
+to learn something `result_publications` already says more precisely. What the run returns instead
+is a per-sink account, so a scheduled run's history is the record of how publishing is going.
+"""
+
+import logging
+from datetime import timedelta
+
+from pydantic import BaseModel, Field
+from temporalio import activity, workflow
+
+with workflow.unsafe.imports_passed_through():
+    from chemclaw.core.config import settings
+    from chemclaw.durable.registry import durable_activity, durable_workflow
+    from chemclaw.publish import outbox
+    from chemclaw.publish.driver import SinkRejectedError
+    from chemclaw.publish.record import ResultRecord
+    from chemclaw.publish.registry import ResultSinkError, build, enabled
+
+from chemclaw.durable.publish import BAD_DATA_RETRY
+
+logger = logging.getLogger(__name__)
+
+
+class SinkOutcome(BaseModel):
+    """What one drain pass achieved against one sink."""
+
+    sink: str
+    delivered: int = 0
+    failed: int = 0
+    # Why the last batch failed, when one did. Carried into the workflow result so a scheduled
+    # run's own history says what is wrong, rather than only that something is.
+    reason: str = ""
+
+
+class PublishOutcome(BaseModel):
+    """What one drain pass achieved overall."""
+
+    sinks: list[SinkOutcome] = Field(default_factory=list)
+    # Sinks that were skipped, and why — a disabled subsystem, an unbuildable driver. Named rather
+    # than counted, because "nothing was published" is ambiguous and this is what disambiguates it.
+    skipped: list[str] = Field(default_factory=list)
+
+    @property
+    def delivered(self) -> int:
+        """Total records delivered across every sink."""
+        return sum(outcome.delivered for outcome in self.sinks)
+
+
+async def _drain_one(manifest_name: str, sink: object, batch_size: int) -> SinkOutcome:
+    """Claim and deliver one batch for one sink.
+
+    One batch per run rather than draining to empty, deliberately. A backlog then takes several
+    scheduled passes to clear, which is the right shape: it bounds how long a single activity holds
+    a connection and how much a single failure re-attempts, and the schedule is frequent enough
+    that a real backlog still drains steadily. An operator in a hurry runs the backfill CLI.
+    """
+    outcome = SinkOutcome(sink=manifest_name)
+    claimed = await outbox.claim(manifest_name, batch_size)
+    if not claimed:
+        return outcome
+    ids = [row_id for row_id, _, _ in claimed]
+    try:
+        records = [ResultRecord.model_validate(document) for _, _, document in claimed]
+    except Exception as exc:
+        # The row was projected by an older writer whose record shape this one cannot parse. That
+        # will not fix itself on a retry, so it spends an attempt rather than looping forever.
+        await outbox.mark_failed(ids, f"stored document is not a readable record: {exc}")
+        outcome.failed, outcome.reason = len(ids), str(exc)[:500]
+        return outcome
+
+    try:
+        await sink.deliver(records)  # type: ignore[attr-defined]
+    except SinkRejectedError as exc:
+        # The content is the problem and will be refused identically next time. Still counted as an
+        # attempt rather than retired immediately: a site that has just not run the DDL yet is the
+        # common case, and it fixes itself the moment they do.
+        await outbox.mark_failed(ids, str(exc))
+        outcome.failed, outcome.reason = len(ids), str(exc)[:500]
+        return outcome
+    except Exception as exc:
+        await outbox.mark_failed(ids, str(exc))
+        outcome.failed, outcome.reason = len(ids), str(exc)[:500]
+        return outcome
+
+    await outbox.mark_delivered(ids)
+    outcome.delivered = len(ids)
+    return outcome
+
+
+@durable_activity("background")
+@activity.defn
+async def drain_result_publications() -> PublishOutcome:
+    """Deliver one batch to each enabled sink, and report what happened.
+
+    Never raises for a destination's own failure — see the module docstring. It *does* raise if the
+    outbox itself is unreadable, because that is this deployment's database rather than someone
+    else's service, and a job that cannot read its own queue has nothing useful to report.
+    """
+    outcome = PublishOutcome()
+    try:
+        manifests = enabled()
+    except ResultSinkError as exc:
+        outcome.skipped.append(f"sink configuration is invalid: {exc}")
+        return outcome
+    if not manifests:
+        outcome.skipped.append("no result sink enabled (CHEMCLAW_RESULT_SINKS is empty)")
+        return outcome
+
+    for manifest in manifests:
+        try:
+            # Built per run rather than cached, so a rotated credential takes effect on the next
+            # pass instead of the next restart.
+            sink = build(manifest)
+        except ResultSinkError as exc:
+            outcome.skipped.append(f"{manifest.name}: {exc}")
+            continue
+        outcome.sinks.append(
+            await _drain_one(manifest.name, sink, settings.result_publish_batch_size)
+        )
+
+    # **No pending gauge, deliberately.** The backlog is
+    # `chemclaw_results_queued_total - chemclaw_results_published_total`, which is already exact
+    # and costs nothing; a gauge would need a `COUNT(*)` on every scrape to say the same thing.
+    # `pending_counts()` stays for the CLI, where an operator asks once rather than every 15s.
+    return outcome
+
+
+@durable_workflow("background")
+@workflow.defn
+class PublishResultsWorkflow:
+    """Carry queued results to their external stores on a cadence."""
+
+    @workflow.run
+    async def run(self) -> PublishOutcome:
+        """Run one drain pass and return the per-sink account."""
+        return await workflow.execute_activity(
+            drain_result_publications,
+            start_to_close_timeout=timedelta(
+                seconds=settings.result_publish_timeout_seconds
+                * max(1, len(settings.result_sink_list))
+            ),
+            retry_policy=BAD_DATA_RETRY,
+        )
+
+
+class JobPublishInput(BaseModel):
+    """What a finished connector job hands the publish activity.
+
+    A model rather than positional arguments because it crosses the Temporal wire: an argument
+    added later is additive here and a signature change there.
+    """
+
+    calc_ref: str
+    calc_type: str
+    payload: dict[str, object] = Field(default_factory=dict)
+    depends_on: list[str] = Field(default_factory=list)
+    actor: str = ""
+    session_id: str = ""
+    correlation_id: str = ""
+    job_id: str = ""
+    rationale: str = ""
+
+
+@durable_activity("background")
+@activity.defn
+async def publish_job_result(request: JobPublishInput) -> int:
+    """Queue one finished job's composite result. Returns how many rows were written.
+
+    Never raises: `outbox.enqueue_payload` is best-effort by construction, and a completed durable
+    job must not be failed by a publish that could not be queued.
+    """
+    from chemclaw.publish.record import Publication
+
+    return await outbox.enqueue_payload(
+        calc_ref=request.calc_ref,
+        calc_type=request.calc_type,
+        payload=dict(request.payload),
+        depends_on=list(request.depends_on),
+        publication=Publication(
+            tenant_id="",  # filled from the sink's manifest at write time
+            actor=request.actor,
+            session_id=request.session_id,
+            correlation_id=request.correlation_id,
+            job_id=request.job_id,
+            rationale=request.rationale,
+        ),
+    )

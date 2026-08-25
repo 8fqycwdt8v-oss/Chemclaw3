@@ -359,4 +359,38 @@ async def cached_compute(
     await store.put(
         StoredResult(key=key, result=result, compute_seconds=elapsed, structure_id=structure_id)
     )
+    await _publish_best_effort(key, result, elapsed, structure_id)
     return result, False
+
+
+async def _publish_best_effort(
+    key: CalculationKey, result: ResultPayload, elapsed: float, structure_id: str
+) -> None:
+    """Offer a freshly computed primitive to the external results store, if one is configured.
+
+    **On the miss branch only.** A cache *hit* returns without touching this, which keeps the write
+    off the hottest read in the system — the same reason `calculation_results` deliberately carries
+    no `last_access_at` and the artifact store does. A repeat call therefore costs exactly what it
+    cost before this existed.
+
+    **Imported inside the function, and that is load-bearing rather than stylistic.** `science` may
+    not import a capability layer at module scope (`tests/test_layering.py`), and the publish path
+    pulls in the projection machinery and RDKit canonicalization — which a deployment with no sink
+    configured should never load at all. `publishing_enabled()` is a list lookup, so the whole
+    subsystem costs one comparison when it is off.
+
+    Never raises. The calculation succeeded and is already persisted; a results store that cannot
+    be queued to is strictly less important than returning the science.
+    """
+    from chemclaw.publish.outbox import enqueue_payload
+
+    await enqueue_payload(
+        calc_ref=key.as_str(),
+        calc_type=key.calc_type,
+        payload=result,
+        calc_version=key.calc_version,
+        input_hash=key.input_hash,
+        params_hash=key.params_hash,
+        structure_id=structure_id,
+        compute_seconds=elapsed,
+    )

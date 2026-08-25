@@ -446,8 +446,9 @@ startup instead. Verify a bundle standalone with `uvicorn chemclaw.connectors.<n
 `/healthz`; tool *discovery* needs no database, but *invoking* a search does.
 
 **What ships today.** The bundles are `molfp` and `rxnfp` (fingerprint search), `calc` (the fast
-calculators and the calibration ledger), `bo` (Bayesian optimization) and `qm` (the durable QM/DFT
-run behind the Nextflow launcher) — plus `chem` (bench chemistry over RDKit) and `safety` (the
+calculators and the calibration ledger), `bo` (Bayesian optimization), `qm` (the durable QM/DFT
+run behind the Nextflow launcher) and `results` (re-queueing stored calculations for an external
+results store, §(xvi)) — plus `chem` (bench chemistry over RDKit) and `safety` (the
 hazard screen), which this release **declares but does not run**: both are served by
 `Chemclaw3-mcp`, so each needs its host in `networkPolicy.egressDestinations` and its bearer
 (`CHEMCLAW_CHEM_TOKEN`, `CHEMCLAW_SAFETY_TOKEN`) provided, or every call to them is refused. The
@@ -459,9 +460,12 @@ even though the `calc` bundle's own tools, cache and durable jobs stay in this r
 the address in `connectors.chem.url` instead (D-2026-08-09). Two things that are the operator's,
 because the chart cannot do them: add the host to `networkPolicy.egressDestinations`, and provide
 `CHEMCLAW_CHEM_TOKEN` — that server enforces a bearer on `/mcp` itself, so a missing credential is
-a refused call rather than an open one. `calc`, `bo` and `qm` each declare `jobs:` and therefore own durable work, so
-each runs a second Deployment for its own Temporal worker; set `worker: true` on a bundle in the
-chart to get one. `tests/test_repo_map.py` derives both sets from the `connector.yaml` files on
+a refused call rather than an open one. `calc`, `bo`, `qm` and `results` each declare `jobs:` and therefore own
+durable work, so each runs a second Deployment for its own Temporal worker; set `worker: true` on a
+bundle in the chart to get one. `results` is the second jobs-only bundle after `qm` — it declares no
+`endpoint:`, so `server: false` and it renders no app pod; its one job re-queues stored
+calculations for an external results store, and is inert until `CHEMCLAW_RESULT_SINKS` names one
+(§(xvi)). `tests/test_repo_map.py` derives both sets from the `connector.yaml` files on
 disk, so this paragraph is checked rather than remembered.
 
 **What stays in core is a rule, not an omission** (D-115), and `tests/test_tool_registry.py` pins the
@@ -1131,7 +1135,71 @@ owner.
 The dry run executes the deletes and rolls back, so the number you sign off on is the number that
 will be deleted rather than a second query's guess at it.
 
-## (xvi) The other commands with no section of their own
+## (xvi) Attach an external results database
+
+Every calculation this system performs is projected into a typed scientific record and delivered to
+a database **it does not own** (`D-2026-08-25-a-cache-is-not-a-record`). Publishing is **off until
+you attach one**: `CHEMCLAW_RESULT_SINKS` is empty by default, and with no sink named the enqueue
+costs one list lookup and no database work at all.
+
+**1. Create the schema.** This system never holds DDL privileges on the store it publishes to, so
+apply the DDL with a principal that does — the same split `postgres_migration_dsn` and
+`postgres_dsn` already make for this system's own database.
+
+```
+make sink-schema > results-schema.sql        # DDL + the registry seed, in the order to apply them
+psql "$RESULTS_ADMIN_DSN" -v ON_ERROR_STOP=1 -f results-schema.sql
+```
+
+The seed is *generated* from `chemclaw.publish.properties` and `chemclaw.publish.solvents` rather
+than checked in, because those are what the writer canonicalizes against: a seed file that had
+drifted from them would build a database whose foreign keys reject rows this system considers valid.
+Re-run it after any upgrade — the inserts are idempotent, and a new calculator ships registry rows
+rather than migrations.
+
+**2. Point a sink at it.** Mount a folder holding your own `sink.yaml` and put it first on
+`CHEMCLAW_RESULT_SINKS_DIR`, so your address is not a change to this repository:
+
+```
+CHEMCLAW_RESULT_SINKS_DIR=/etc/chemclaw/sinks
+CHEMCLAW_RESULT_SINKS=postgres
+RESULTS_DB_USER=... RESULTS_DB_PASSWORD=...        # the target's own credentials,
+                                                  # unprefixed: not settings of this system
+```
+
+The manifest names *environment variables*, never values; they are read at connect time, so a
+rotated secret is picked up by the next connection rather than the next deploy. `make sink-validate`
+checks that the driver resolves and takes its config, and it runs in CI.
+
+**3. Backfill.** Publishing hooks a calculation as it completes, so a store attached to a running
+deployment would otherwise receive only what is computed from that moment on — while
+`calculation_results` and `job_records`, neither ever pruned, hold everything before it.
+
+```
+python -m chemclaw.cli.backfill_publications --dry-run    # what would be queued
+python -m chemclaw.cli.backfill_publications              # queue it
+```
+
+Safe to run twice and safe to run live: the outbox's identity index makes a second pass a no-op.
+A chemist can do the same thing as a durable job (`republish_calculations`, the `results` bundle).
+
+**Watching it.** `chemclaw_results_queued_total` minus `chemclaw_results_published_total` **is** the
+backlog — there is deliberately no pending gauge, because that subtraction is exact and free while a
+gauge would need a `COUNT(*)` per scrape. A rising difference means the destination is down or too
+slow; `chemclaw_result_publish_failures_total` and the `last_error` column say which.
+
+**When a destination has been down.** Rows that spent their attempt budget move to `state='failed'`
+and are **kept** — they are the record that something was never published. Once the cause is fixed:
+
+```
+python -m chemclaw.cli.backfill_publications --requeue
+```
+
+Only *delivered* rows are ever pruned (`CHEMCLAW_RETENTION_RESULT_PUBLICATIONS_DAYS`), and that
+predicate is the policy: sweeping a pending or failed row on a clock would turn an outage into a
+silent gap.
+
+## (xvii) The other commands with no section of their own
 
 Two operations exist as `make` targets and had no entry here. One is yours to run; the other is
 automated and listed so nobody runs it by hand wondering why.
