@@ -16,9 +16,11 @@ row this queue has ever carried. 223 of its rows are open
 (`grep -c '^- \[ \]' docs/archive/findings-2026-08.md`; the header here said "~185" until
 2026-08-17). That is not "223 *further*" and the two counts do not subtract: promoting a row
 **restates** it, so a queued row is still open there under its original wording, and matching the
-two sets by title matches only 7 of this queue's 30 rows — the overlap is real and unmeasurable by
-`grep`, which is why the number here is the archive's own and not a difference. When a queued row
-needs its full measurement history, that file has it under the review that found it.
+two sets by title matched only 7 of the 30 rows this queue held when that was measured (it holds 41
+now — §5 added eleven, and none of those eleven is in the archive at all, because that section is
+the first thing here that is not a defect this repository found in itself). The overlap is real and
+unmeasurable by `grep`, which is why the number here is the archive's own and not a difference. When
+a queued row needs its full measurement history, that file has it under the review that found it.
 
 **A row must name an anchor in the tree** — a module, a line, a manifest key — so any row can be
 checked with one `grep` instead of an argument. A row that cannot name one is not ready to be
@@ -407,6 +409,130 @@ topic).
       `serverReplicas`/`workerReplicas` defaulting to `replicas`, and extend the chart test to
       require it whenever `worker` is set.
 
+
+## 5 — Where the field moved past us
+
+Filed by the 2026-08-25 field benchmark — see
+[`docs/archive/REVIEW-2026-08-25-agentic-field-benchmark.md`](../archive/REVIEW-2026-08-25-agentic-field-benchmark.md)
+for the measurements and the sources behind every figure here. These rows are unlike the four
+sections above: none of them names broken code. Each names a place where something outside this
+repository now has a **measured** better answer to a problem this repository solved earlier and has
+not revisited. That is a different kind of debt and it needs its own section, because a queue that
+only holds defects can only ever restore the system to what it already intended to be.
+
+- [ ] **~14.7k tokens of context are spent before the user says anything, and 8.6k of it is
+      deferrable** — [M]. Measured on this checkout: `_INSTRUCTIONS` 13,187 chars (~3.3k tokens), the
+      29 in-process tool schemas from `agent/chemclaw_agent.py::_capability_tools` 34,303 chars
+      (~8.6k), the skills listing `SkillsMiddleware` publishes 11,156 chars (~2.8k) — at the
+      `chars / 4` estimator `agent_context_token_budget` itself uses. Progressive disclosure works on
+      skills (38.6k tokens of bodies held back for 2.8k spent) and does nothing on tools: every
+      schema is sent on every turn, and the surface is headed for 19 servers (`Chemclaw3-mcp/MODULES.md`
+      catalogues 19, 5 built). Anthropic's `defer_loading` + tool search keeps definitions
+      discoverable without spending the context; programmatic tool calling measured −38% billed input
+      tokens on a 75-tool agent with no accuracy change. **Do the cheap half first**: a test that
+      asserts the floor, so the next tool is not free at review time and paid for on every turn
+      forever. Then put the cold tail behind search — success is the floor under ~8k with no probe
+      losing its `expects_tools` name.
+
+- [ ] **17 of 67 agent-callable tools are named by no probe, and nothing would notice the next one**
+      — [M]. Measured over `data/evals/probes/*.yaml` against
+      `agent/chemclaw_agent.py::available_tool_names()`: 232 probes, 50 tools named, 17 never —
+      `compute_interaction_energy`, `run_conformer_refinement`, `render_structure`, `read_attachment`,
+      `remember_preference`, `recall_preferences`, `forget_preference`, `list_watches`,
+      `stop_watching`, `task`, `write_todos`, and all six filesystem verbs. The hole is not random: it
+      is the *newest* surface — the scratchpad and memory tools the M-phases added, and the subagent
+      seam three ADRs argue about. `tests/test_repo_map.py` already proves the pattern for keeping a
+      declaration honest in both directions; the same shape here (fail when an agent-callable tool is
+      named by no probe) closes it permanently. Then write the 17 probes, scratchpad and memory first.
+
+- [ ] **Half the probe corpus tests one tool** — [S]. `gather_evidence` is in `expects_tools` for 116
+      of 232 probes; `find_notes` 91; `expand_note` 60; the tail is thin. Two consequences worth
+      separating: the corpus mostly measures one retrieval path, and ChemToolAgent's finding — that
+      tool augmentation **does not consistently beat the base LLM**, and hurts on general chemistry
+      questions — cannot be reproduced here. Bucket C (51 probes) scores restraint but never runs the
+      same question tool-free for comparison. `evals/ab.py::compare_tool_utility` is already written
+      and already registered as `plan_execute_utility`; an A/B arm over bucket A is mostly wiring.
+
+- [ ] **No external benchmark has ever been run** — [M]. `make eval` gates 23 metric values over 14
+      case files, a **7-document** retrieval corpus and a **39-note** knowledge graph, with the
+      science half resting on one solubility value, one BO regret replay and two mass balances. It is
+      honest and it is not comparable to anything. ChemRAG-Bench (1,932 expert-curated chemistry QA
+      pairs) is the best first target because it scores the retrieval half — where this system's
+      science actually lives — and it runs against an OpenAI-compatible endpoint, which is exactly the
+      seam `agent/llm_provider.py` already has. ChemBench and AstaBench are the follow-ups. A number
+      somebody else can also produce is the only kind that survives an argument with a chemist.
+
+- [ ] **Two durability layers are maintained where upstream now ships one** — [L]. Temporal's
+      LangGraph plugin reached public preview on 2026-07-16 (Temporal Python SDK ≥1.27, Python ≥3.11):
+      the graph runs as a workflow, each node as an activity, execution is checkpointed at every node,
+      and `interrupt()` pauses **durably** and resumes on a signal. This repository hand-built the
+      equivalent — `agent/checkpointer.py` on its own autocommit pool, `agent/plan_approval_store.py`,
+      the job→session push-back in `durable/` — and carries two open defects in exactly that seam (*"A
+      decided approval hold can be reopened"*, *"A rejoined durable run never reaches the second
+      chemist"*) plus the durable-approval-store row this file already holds. **This row asks for an
+      evaluation, not a migration**: does `interrupt()`-as-signal close those three together, and what
+      does it cost in the D-2026-08-10 §3 line that layer 1's checkpointer holds turn state and
+      nothing else. An ADR either way.
+
+- [ ] **The agent cannot execute code, and the decision on record is narrower than the consequence** —
+      [L]. `agent/scratchpad.py::scratchpad_tools` withholds `execute` for a correct reason: deepagents
+      0.7 ships exactly one concrete sandbox (`LangSmithSandbox`, declined on content-egress grounds)
+      and `LocalShellBackend` is documented as unrestricted. That is a refusal of *two specific
+      sandboxes*. What is not on record is a decision about whether an execution substrate belongs at
+      all — and the consequence of not having one is that anything not pre-wrapped as a tool is
+      unreachable: no ad-hoc unit conversion, no fit, no re-parse of an unexpected output file. Every
+      comparable chemistry agent executes (ChemCrow, Coscientist, El Agente, OpenClaw). The number to
+      test the decision against: **El Agente Gráfico** replaced multi-agent chat with a typed execution
+      runtime where large objects stay native and measured 168.4 → 9.1 LLM requests (−94.6%), 1.65M →
+      284k tokens (−82.8%), 4.5× wall-clock, *and* rubric score 88.25% → 90.94%. An ADR either way.
+
+- [ ] **`deep-research` has no index behind it** — [M]. `agent/research_tools.py::gather_evidence`
+      sweeps the knowledge graph, the ELN, the mounted document share and the fingerprint store —
+      every one internal. `skills/deep-research/SKILL.md` describes a capability whose corpus is
+      whatever notes exist (39 on this checkout). `Chemclaw3-mcp/MODULES.md` files `litsearch`
+      (Europe PMC / OpenAlex / Crossref bulk, built at image time, no egress) as *proposed*, and says
+      in as many words that it "gives Chemclaw3's existing `deep-research` skill a real index".
+      ChemRAG measured **+17.4% average relative gain** from a chemistry corpus and — the design input
+      that matters — that corpus choice is task-dependent: reaction prediction wants literature,
+      nomenclature wants structured databases. A process chemist asking "has anyone run this coupling
+      on a deactivated aryl chloride" currently gets whatever those 39 notes happen to say.
+
+- [ ] **Compaction drops what a narrower argument would let it keep** — [M].
+      `agent/compaction.py::disabled_summarizer` turns upstream's summarizer off for a reason that is
+      right: a summary is new model prose over content `agent/framing.py` marked untrusted, and the
+      envelope does not survive it. So the conversation window **deletes** older groups instead. The
+      objection is to *summarisation*, and it does not reach the lossless half: replacing a
+      re-fetchable tool result with a placeholder (Anthropic's `clear_tool_uses_20250919`) invents no
+      prose and so cannot launder an envelope — and in Anthropic's own research-agent measurement the
+      lossless half did most of the work (peak 335k → 173k). LangChain's `context_editing` middleware
+      is the in-stack form. Keep the window as the floor; add clearing above it.
+
+- [ ] **Cost is metered but never evaluated** — [S]. `agent/turn_cost.py` and `core/metrics.py` record
+      what a turn spends; no case in `data/evals/cases/` scores it. HAL (21,730 rollouts, 9 models, 9
+      benchmarks) found the most expensive model on the accuracy/cost Pareto frontier in **1 of 9**
+      benchmarks, and that higher reasoning effort *reduced* accuracy in a majority of runs — neither
+      is visible to a suite that scores only accuracy. `evals/metric.py`'s `@metric` registry takes a
+      float; the meter already produces one. This is the cheapest row here and it is what makes
+      `model_routes` a decision instead of a preference.
+
+- [ ] **The `Chemclaw3-mcp` catalogue is not re-derived against releases** — [S]. `MODULES.md` files
+      `retro` as *adopted, not built*, `admet` against "ADMET-AI / DeepChem", and `nomenclature`
+      (OPSIN, MIT, local) as "the best value-to-effort ratio in the catalogue". Since those
+      assumptions were written: **Boltz-2** shipped MIT-licensed, approaching FEP accuracy on binding
+      affinity at ~1000× the efficiency; **ether0** shipped Apache-2.0 as a 24B open-weights chemistry
+      reasoning model that beats frontier general models on open-answer chemistry and molecular
+      design; RetroReasoner/Retro-R1 changed what a retrosynthesis server would wrap. A catalogue is a
+      claim about what is available, and claims go stale — the same rule this file states about its
+      own rows. Re-derive those three entries; the OPSIN one is probably still the right first build.
+
+- [ ] **Nothing watches for upstream shipping a decision we made ourselves** — [S], and it is the
+      meta-row the four above are instances of. `make upstream-check` guards the six *shapes* this
+      repo borrows against a dependency bump — the coupling that breaks. Nothing guards its
+      *decisions* against upstream shipping the thing: the Temporal LangGraph plugin row above is five
+      weeks old and reached no list here. `tests/test_upstream_surface.py` is the right precedent
+      (two of its assertions are *absences*, so upstream fixing something turns the workaround red).
+      The cheap version is a dated section in this file, re-derived when a dependency is bumped,
+      listing what each pinned upstream now ships that this repository implements itself.
 
 ---
 
