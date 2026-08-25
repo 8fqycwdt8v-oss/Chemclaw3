@@ -189,6 +189,51 @@ def test_the_smiles_route_still_asks_the_smiles_tool(monkeypatch: pytest.MonkeyP
     assert server.count("compute_properties_at") == 0
 
 
+def test_a_fukui_ranking_runs_at_the_named_conformer(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The regiochemistry question a chemist asks *after* a conformer search.
+
+    `predict_site_reactivity` was the one geometry-describing calculator that could not take a
+    handle, because the server had `compute_properties_at` and no `compute_fukui_at`. That gap is
+    what `DEFERRED.md` carried, and the honest consequence while it stood was that "which site is
+    reactive in this conformer" was answered on a fresh force-field embedding.
+    """
+    server = install(monkeypatch, FakeCalcServer())
+    store = InMemoryStore()
+    monkeypatch.setattr(tools, "default_store", lambda: store)
+
+    summary = _run(tools.optimize_geometry("CCO"))
+    _run(tools.predict_site_reactivity("CCO", structure_id=summary.structure_id))
+
+    sent = server.arguments("compute_fukui_at")
+    assert len(sent) == 1
+    assert Structure.model_validate(sent[0]["structure"]).structure_id == summary.structure_id
+    # The SMILES route is untouched, so no stored `xtb.fukui` row is orphaned.
+    assert server.count("predict_site_reactivity") == 0
+
+
+def test_a_second_fukui_mode_at_one_geometry_costs_no_calculation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One row serves every mode, at a named geometry exactly as at an embedded one.
+
+    The three single points behind a Fukui ranking do not depend on the mode — the server computes
+    all three indices and `ranked_for` sorts locally — so `compute_fukui_at` is keyed with an empty
+    params tuple. Keying on `mode` would write three rows for one calculation and, worse, make a
+    cache hit authoritative about an ordering it never chose.
+    """
+    server = install(monkeypatch, FakeCalcServer())
+    store = InMemoryStore()
+    monkeypatch.setattr(tools, "default_store", lambda: store)
+
+    summary = _run(tools.optimize_geometry("CCO"))
+    at = summary.structure_id
+    electrophilic = _run(tools.predict_site_reactivity("CCO", "electrophilic", structure_id=at))
+    nucleophilic = _run(tools.predict_site_reactivity("CCO", "nucleophilic", structure_id=at))
+
+    assert server.count("compute_fukui_at") == 1, "the second mode ran a second calculation"
+    assert electrophilic.sites[0].index != nucleophilic.sites[0].index, "the ranking did not move"
+
+
 def test_a_conformer_search_hands_back_addresses_that_all_resolve(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

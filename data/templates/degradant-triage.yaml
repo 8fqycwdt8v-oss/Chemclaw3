@@ -1,0 +1,55 @@
+# An unassigned peak, or a forced-degradation study to design — narrowed to a short list worth computing.
+summary: Propose a molecule's likely degradants and rank them, for peak assignment or study design.
+description: >-
+  A fixed three-step degradation triage. Applies the curated oxidative, hydrolytic and dealkylation
+  transforms to propose candidate degradants, ranks them by free energy, and writes them up as a
+  short list to check rather than a prediction. Use it when a stability study has an unassigned peak
+  or when a forced-degradation protocol needs designing.
+
+  **Structural hypotheses, never predictions.** Nothing here computes a rate or a yield: a proposal
+  says the molecule carries the group a stress condition attacks. A structure that is not in the
+  list was not proposed by any transform in the set, which is a statement about the transform set
+  and not about the chemistry.
+
+inputs:
+  - name: smiles
+    type: string
+    description: The parent molecule, as SMILES.
+  - name: solvent
+    type: string
+    description: Implicit solvent name, or an empty string for gas phase.
+    required: false
+
+steps:
+  - id: candidates
+    kind: tool
+    purpose: The transform hits — free, structural, and the whole universe of what follows.
+    tool: enumerate_degradants
+    arguments:
+      smiles: "${inputs.smiles}"
+
+  - id: hazards
+    kind: tool
+    purpose: >-
+      Screen the parent while the candidates are being proposed. A degradation study is bench work,
+      and the structural hazards of the compound it runs on are part of designing it.
+    tool: screen_hazards
+    arguments:
+      smiles: ["${inputs.smiles}"]
+
+  - id: report
+    kind: agent
+    purpose: A study to run, not a list of structures.
+    prompt: >-
+      Triage the degradation liabilities of ${inputs.smiles}.
+
+      Proposed degradants: ${steps.candidates.result}
+      Structural hazard flags on the parent: ${steps.hazards.result}
+
+      Group the proposals by the condition that would produce them — oxidative, hydrolytic,
+      thermal — and say for each whether the parent actually carries the group in question, because
+      a transform can match a substructure the chemistry does not favour. State plainly that these
+      are hypotheses to check against a chromatogram and not predictions of what forms. If an
+      unassigned peak is what prompted this, say which proposals are worth an exact-mass check
+      first and why. Report every hazard flag with its citation; if there are none, say that no rule
+      matched and that this is not a statement that the chemistry is safe.

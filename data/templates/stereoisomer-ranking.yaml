@@ -1,0 +1,50 @@
+# Which diastereomer, and by how much — over the isomers the drawing left open.
+summary: Expand a molecule's unspecified stereocentres and rank the isomers by free energy.
+description: >-
+  A fixed three-step stereochemical analysis. Expands the stereocentres and double bonds the SMILES
+  left unassigned, ranks the resulting isomers by free energy, and reports which is favoured and by
+  how much. Use it when a route can give more than one diastereomer and the question is which is
+  thermodynamically preferred — not which one a kinetically controlled reaction produces, which this
+  cannot answer because there are no transition states here. A fully specified structure returns
+  itself, which is a real answer and costs one calculation.
+
+inputs:
+  - name: smiles
+    type: string
+    description: The molecule, with the centres you want expanded left unspecified.
+  - name: solvent
+    type: string
+    description: Implicit solvent name, or an empty string for gas phase.
+    required: false
+
+steps:
+  - id: isomers
+    kind: tool
+    purpose: Expand only what was left open, preserving every centre the chemist stated.
+    tool: enumerate_stereoisomers
+    arguments:
+      smiles: "${inputs.smiles}"
+
+  - id: ranking
+    kind: job
+    purpose: Free energies across the isomers.
+    job: rank_species
+    arguments:
+      species: "${steps.isomers.result.smiles}"
+      ranking: stereoisomers
+      solvent: "${inputs.solvent}"
+
+  - id: report
+    kind: agent
+    purpose: Say which is favoured, and that thermodynamics is not the whole question.
+    prompt: >-
+      Report the stereoisomer ranking of ${inputs.smiles}.
+
+      Isomers expanded: ${steps.isomers.result.count}
+      Free-energy ranking: ${steps.ranking.result}
+
+      Name the favoured isomer and the gap to the next. Then state the limit that matters most
+      here: this is an *equilibrium* ordering, and most stereoselective reactions are under kinetic
+      control — so unless the step equilibrates, the favoured isomer here is not a prediction of
+      the major product. Say which of the two questions the chemist is asking. Quote the reported
+      uncertainty; a gap inside it is not a ranking.
