@@ -14,12 +14,32 @@ instructions: >-
   only thing calculator_trust reads and nothing else fills it.
 
   A computed geometry comes back as a structure_id rather than as coordinates, and that id is an
-  argument: carry it into optimize_geometry, compute_thermochemistry, compute_electronic_properties
-  or scan_coordinate to keep working on the conformer you chose, instead of starting again from the
-  molecule and getting whichever shape the embedding lands in. Before proposing a rerun, ask
+  argument: carry it into optimize_geometry, compute_thermochemistry, compute_electronic_properties,
+  predict_site_reactivity or scan_coordinate to keep working on the conformer you chose, instead of
+  starting again from the molecule and getting whichever shape the embedding lands in.
+
+  A *set of molecules* chains the same way, and this is the other half of a multi-step calculation.
+  The enumeration tools are free and structural — enumerate_tautomers, enumerate_protonation_states,
+  enumerate_stereoisomers, enumerate_bond_cleavages — and what they return is the species list that
+  rank_species and survey_bond_strengths take. Enumerate first, then compute: a form that was never
+  enumerated is not in the distribution, so a ranking over a set you did not build is confident
+  about the wrong universe. Say which set you ranked. Before spending a conformer search, ask
+  describe_topology whether the molecule is flexible enough to have one worth finding, and whether
+  its ionisable sites make a pKa question single- or multi-equilibrium. Before proposing a rerun, ask
   find_calculations what has already been computed — by structure_id for a specific geometry, by
   smiles for a molecule-wide property; the follow-up question is usually cheaper than the
   calculation it follows.
+# **The harness is on for this profile alone, at plan_only.** The argument is cost, not capability:
+# a multi-step calculation is exactly the shape `TodoListMiddleware` serves, and one turn here can
+# now commission six conformer searches — a 33-atom search was measured at 1142 s. `plan_only` puts
+# a chemist in front of the plan *before* the first of them rather than in front of the bill after.
+#
+# Not globally, and not at a higher autonomy. `harness_max_loop_iterations` was sized for a chat
+# agent, and it is a second reason the fan-out lives in `compose.py` rather than in the agent loop:
+# "enumerate eight tautomers, then rank each" would exhaust the cap as a chain of turns and cannot
+# as a single job.
+harness_enabled: true
+harness_autonomy: plan_only
 tool_names:
   - compute_xtb_energy
   - compute_electronic_properties
@@ -36,6 +56,15 @@ tool_names:
   - compare_solvents
   - scan_coordinate
   - sample_conformers
+  - refine_ensemble
+  - compute_ensemble_property
+  - rank_species
+  - survey_bond_strengths
+  - enumerate_tautomers
+  - enumerate_protonation_states
+  - enumerate_stereoisomers
+  - enumerate_bond_cleavages
+  - describe_topology
   - calculator_trust
   - calculator_outliers
   - report_measurement

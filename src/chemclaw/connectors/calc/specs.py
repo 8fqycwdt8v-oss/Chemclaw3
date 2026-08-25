@@ -54,6 +54,18 @@ _SYMMETRY_NUMBERS_DESCRIPTION = (
 )
 
 
+class BondCleavageSpec(BaseModel):
+    """One bond to break, as `chem`'s `enumerate_bond_cleavages` reports it.
+
+    A model rather than a tuple because it crosses the Temporal wire and a positional payload is
+    one field-order change away from computing a different bond than the caller named.
+    """
+
+    atoms: list[int] = Field(min_length=2, max_length=2)
+    bond: str = Field(min_length=1)
+    fragments: list[str] = Field(min_length=2, max_length=2)
+
+
 class ReactionJobSpec(BaseModel):
     """A durable reaction-energy request (xTB plan X4)."""
 
@@ -136,11 +148,119 @@ class ComplexJobSpec(BaseModel):
         return self
 
 
+class RefinedEnsembleJobSpec(BaseModel):
+    """A durable free-energy-weighted conformer ensemble.
+
+    The Literals below are re-declared rather than imported from `science/calc/models.py`, exactly
+    as every other member of this union does it, and for the module-level reason: this file is a
+    leaf the chat service imports on every `build_langgraph_agent`.
+    """
+
+    kind: Literal["refined_ensemble"] = "refined_ensemble"
+    smiles: str = Field(min_length=1)
+    solvent: str | None = None
+    temperature_k: float | None = None
+    top_n: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "How many of the lowest-energy conformers get their own optimization and Hessian. "
+            "Each one is minutes of CPU, so this is the cost knob; the result reports what share "
+            "of the ensemble population the refined members actually cover."
+        ),
+    )
+    structure_id: str | None = Field(default=None, description=_STRUCTURE_ID_DESCRIPTION)
+
+
+class EnsemblePropertyJobSpec(BaseModel):
+    """A durable Boltzmann-averaged property over a conformer ensemble."""
+
+    kind: Literal["ensemble_property"] = "ensemble_property"
+    smiles: str = Field(min_length=1)
+    prop: Literal["dipole_debye", "homo_ev", "lumo_ev", "gap_ev", "charges", "fukui"] = (
+        "dipole_debye"
+    )
+    solvent: str | None = None
+    temperature_k: float | None = None
+    max_members: int | None = Field(default=None, ge=1)
+
+
+class SpeciesRankingJobSpec(BaseModel):
+    """A durable free-energy ranking over a set of distinct species.
+
+    `species` is a list of SMILES the caller enumerated — `chem`'s `enumerate_tautomers`,
+    `enumerate_protonation_states` and `enumerate_stereoisomers` each produce one. It is not
+    enumerated here: this bundle computes, and deciding *which* forms exist is a cheminformatics
+    question answered before any calculation is worth starting.
+    """
+
+    kind: Literal["species_ranking"] = "species_ranking"
+    species: list[str] = Field(
+        min_length=1,
+        description=(
+            "The SMILES to rank against each other. A form that is not in this list is not ranked, "
+            "so the distribution describes exactly the set given — enumerate first."
+        ),
+    )
+    labels: list[str] | None = Field(
+        default=None,
+        description=(
+            "An optional name per species, in the same order, for the result to report instead of "
+            "a bare SMILES. Must be the same length as `species` if given."
+        ),
+    )
+    ranking: Literal["tautomers", "microstates", "stereoisomers", "custom"] = "custom"
+    solvent: str | None = None
+    temperature_k: float | None = None
+    level: Literal["quick", "standard", "thorough"] = "standard"
+
+    @model_validator(mode="after")
+    def _labels_match_species(self) -> "SpeciesRankingJobSpec":
+        """Refuse a mismatched label list rather than silently pairing the wrong names to forms."""
+        if self.labels is not None and len(self.labels) != len(self.species):
+            raise ValueError(
+                f"{len(self.labels)} labels for {len(self.species)} species: give one label per "
+                "species in the same order, or none at all"
+            )
+        return self
+
+
+class BondSurveyJobSpec(BaseModel):
+    """A durable bond-dissociation survey over every breakable bond of one molecule.
+
+    Like `SpeciesRankingJobSpec`, the enumeration arrives rather than happening here:
+    `chem`'s `enumerate_bond_cleavages` produces the fragment pairs, written with explicit radical
+    electrons so the open shell needs no declared spin state.
+    """
+
+    kind: Literal["bond_survey"] = "bond_survey"
+    smiles: str = Field(min_length=1)
+    cleavages: list[BondCleavageSpec] = Field(
+        min_length=1,
+        description=(
+            "The bonds to break, as `enumerate_bond_cleavages` reports them. Every entry costs one "
+            "reaction energy, so a whole-molecule survey of a drug-sized structure is the "
+            "expensive case this job exists for."
+        ),
+    )
+    solvent: str | None = None
+    temperature_k: float | None = None
+    level: Literal["quick", "standard", "thorough"] = "quick"
+
+
 # What an xTB job may be asked to do, discriminated on `kind`. A closed, typed union
 # rather than a free-form request is the same boundary rule the proposal sets for the
 # expert escape hatch: a model-authored payload can select among calculations we
 # defined, and can never describe one we did not.
 XtbJobSpec = Annotated[
-    ReactionJobSpec | SolventScreenJobSpec | ScanJobSpec | EnsembleJobSpec | ComplexJobSpec,
+    ReactionJobSpec
+    | SolventScreenJobSpec
+    | ScanJobSpec
+    | EnsembleJobSpec
+    | ComplexJobSpec
+    | RefinedEnsembleJobSpec
+    | EnsemblePropertyJobSpec
+    | SpeciesRankingJobSpec
+    | BondSurveyJobSpec,
     Field(discriminator="kind"),
 ]
