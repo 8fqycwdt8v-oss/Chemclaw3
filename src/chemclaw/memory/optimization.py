@@ -167,29 +167,13 @@ def _quality_columns(members: list[OrdReaction]) -> list[tuple[str, list[str]]]:
     """
     candidates = [
         ("Purity (%)", [cell(run.purity_percent) for run in members]),
-        ("Major impurity", [_impurity_cell(_major_impurity(run)) for run in members]),
+        ("Major impurity", [_impurity_cell(run.major_impurity()) for run in members]),
         (
             "Impurity area (%)",
-            [cell(imp.area_percent if (imp := _major_impurity(run)) else None) for run in members],
+            [cell(imp.area_percent if (imp := run.major_impurity()) else None) for run in members],
         ),
     ]
     return drop_empty_columns(candidates)
-
-
-def _major_impurity(reaction: OrdReaction) -> Impurity | None:
-    """The impurity a chemist would call the major one, or `None` when the record cannot say.
-
-    Ranked by recorded `area_percent`, the number process development actually chases. When no
-    impurity carries an area% the list is unranked, and naming one anyway would be the same
-    fabrication `eln.note._principal_product` refuses for products — the cell would look like
-    evidence about which impurity dominated while being an artifact of the export's ordering.
-    A single recorded impurity is the exception that needs no ranking: it is the only one the
-    record names, so calling it the major one adds no claim.
-    """
-    ranked = [imp for imp in reaction.impurities if imp.area_percent is not None]
-    if ranked:
-        return max(ranked, key=lambda imp: imp.area_percent or 0.0)
-    return reaction.impurities[0] if len(reaction.impurities) == 1 else None
 
 
 def _impurity_cell(impurity: Impurity | None) -> str:

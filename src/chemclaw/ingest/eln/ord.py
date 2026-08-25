@@ -239,6 +239,26 @@ class OrdReaction(BaseModel):
             raise ValueError("step indices must be contiguous starting at 1")
         return self
 
+    def major_impurity(self) -> "Impurity | None":
+        """The impurity a chemist would call the major one, or `None` when the record cannot say.
+
+        Ranked by recorded `area_percent`, the number process development actually chases. When no
+        impurity carries an area% the list is unranked, and naming one anyway would be the same
+        fabrication `eln.note._principal_product` refuses for products — the answer would look like
+        evidence about which impurity dominated while being an artifact of the export's ordering.
+        A single recorded impurity is the exception that needs no ranking: it is the only one the
+        record names, so calling it the major one adds no claim.
+
+        **On the record rather than on a consumer**, because two consumers now ask it — the
+        comparative table and the reaction note's own frontmatter — and "which impurity is the
+        major one" is a property of the reaction, not of either artifact. Two copies of this rule
+        would be two answers to a question a chemist reads as one.
+        """
+        ranked = [imp for imp in self.impurities if imp.area_percent is not None]
+        if ranked:
+            return max(ranked, key=lambda imp: imp.area_percent or 0.0)
+        return self.impurities[0] if len(self.impurities) == 1 else None
+
     def step_components(self) -> list[Component]:
         """Every species introduced by a step (e.g. a mid-procedure reagent or a quench).
 

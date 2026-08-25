@@ -14,6 +14,7 @@ body verbatim, so until it was enforced the ELN could spell a relation the graph
 """
 
 import re
+from typing import Literal
 
 from chemclaw.ingest.eln.ord import (
     Component,
@@ -23,7 +24,7 @@ from chemclaw.ingest.eln.ord import (
     ReactionStep,
     Role,
 )
-from chemclaw.kg.note import Note, note_id_for_reaction
+from chemclaw.kg.note import Note, ProcessConditions, note_id_for_reaction
 
 # Each `[` that another `[` follows. A lookahead so the match consumes one character and the next
 # is re-examined, which is what makes the substitution unable to manufacture the delimiter it is
@@ -93,8 +94,48 @@ def note_from_ord_reaction(reaction: OrdReaction) -> Note:
         # from the day it was run; `valid_to` stays open (a result does not expire on its own, it
         # is superseded, which is a separate edit).
         valid_from=reaction.performed_at,
+        # The numbers a chemist compares, kept as numbers. The body renders them as prose for a
+        # human; this is the same facts in the form anything comparing runs can read without
+        # re-deriving them from the sentences it just wrote (`ProcessConditions` says why).
+        conditions=_conditions(reaction),
         body=body,
     )
+
+
+# The outcome classes worth writing down, spelled rather than derived from `.value`. `SUCCESS` is
+# absent on purpose — the field defaults to it on every record and every source that does not report
+# one, so writing it would turn "the ELN did not say" into an assertion that the run worked. Written
+# out because the frontmatter type is a `Literal`: a fourth `OutcomeClass` member does not silently
+# become a new frontmatter value, it fails to type-check here, which is where the decision belongs.
+_NON_DEFAULT_OUTCOMES: dict[OutcomeClass, Literal["failure", "inconclusive"]] = {
+    OutcomeClass.FAILURE: "failure",
+    OutcomeClass.INCONCLUSIVE: "inconclusive",
+}
+
+
+def _conditions(reaction: OrdReaction) -> ProcessConditions | None:
+    """The run's setpoints and outcomes as frontmatter, or `None` when it recorded none of them.
+
+    `None` rather than an all-empty block: a note carrying `conditions: {}` would claim the
+    question was asked and answered emptily, where the honest reading is that this note is not
+    about a run with recorded conditions at all. Same rule as `_quality_columns` dropping a column
+    nothing filled.
+
+    `outcome_class` is written only when it is *not* the default. The field defaults to success on
+    every record and every source that does not report it, so writing it unconditionally would turn
+    "the ELN did not say" into an assertion that the run worked.
+    """
+    impurity = reaction.major_impurity()
+    conditions = ProcessConditions(
+        temperature_c=reaction.temperature_c,
+        time_h=reaction.time_h,
+        yield_percent=reaction.yield_percent,
+        purity_percent=reaction.purity_percent,
+        outcome=_NON_DEFAULT_OUTCOMES.get(reaction.outcome_class),
+        major_impurity=(impurity.name or impurity.smiles) if impurity else None,
+        impurity_area_percent=impurity.area_percent if impurity else None,
+    )
+    return conditions if conditions.model_dump(exclude_none=True) else None
 
 
 def _principal_product(reaction: OrdReaction) -> str | None:
@@ -268,8 +309,9 @@ def _procedure_block(reaction: OrdReaction) -> str:
 
     **The prose branch exists because without it a whole class of source lost its protocol
     silently.** This function used to return `""` whenever `steps` was empty, and
-    `chemclaw.ingest.eln.warehouse.binding` excludes `steps` from what a binding may map on the stated grounds that
-    "a warehouse records a protocol as prose, which lands in `procedure_text` verbatim". Both
+    `chemclaw.ingest.eln.warehouse.binding` excludes `steps` from what a binding may map, on the
+    stated grounds that "a warehouse records a protocol as prose, which lands in
+    `procedure_text` verbatim". Both
     statements were true and nothing rendered that prose: measured, a warehouse-shaped reaction
     carrying 251 characters of procedure produced a 63-character note body containing none of it,
     and `procedure_text` had three writers and exactly one reader in the tree — a 240-character

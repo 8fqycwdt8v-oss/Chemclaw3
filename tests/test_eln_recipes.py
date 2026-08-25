@@ -17,15 +17,26 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 
+import frontmatter
 import pytest
 
 from chemclaw.ingest.eln.adapter import RawEntry
 from chemclaw.ingest.eln.json_adapter import JsonExportAdapter
 from chemclaw.ingest.eln.note import note_from_ord_reaction
-from chemclaw.ingest.eln.ord import Component, OrdReaction, ReactionStep, Role, StepKind
+from chemclaw.ingest.eln.ord import (
+    Component,
+    Impurity,
+    OrdReaction,
+    OutcomeClass,
+    ReactionStep,
+    Role,
+    StepKind,
+)
 from chemclaw.ingest.eln.ord_adapter import OrdFormatError, OrdJsonAdapter
 from chemclaw.ingest.eln.sync import sync_entries
 from chemclaw.ingest.eln.validate import validate_ord
+from chemclaw.kg.note import Note
+from chemclaw.kg.render import render_note
 from chemclaw.science.fingerprints.store import InMemoryFingerprintStore
 from tests.conftest import FakeSubmitter
 
@@ -434,3 +445,82 @@ def test_derived_steps_do_not_swallow_the_chemists_own_account() -> None:
     assert reaction.steps, "the fixture must exercise the both-present branch"
     assert "### Procedure as recorded" in body
     assert "catalytic amount of sulfuric acid" in body
+
+
+def test_the_numbers_a_chemist_compares_reach_the_note_as_numbers() -> None:
+    """The setpoints and outcomes must survive ingestion as data, not only as sentences.
+
+    `OrdReaction` is never persisted — it exists transiently inside `read_corpus`, which re-reads
+    the whole ELN from the beginning of time, on a worker the chat pod does not import from. So
+    without this, anything comparing runs at turn time had to re-derive these numbers from the prose
+    the ingest had just finished rendering them into.
+    """
+    reaction = OrdReaction(
+        reaction_id="R1",
+        inputs=[Component(smiles="c1ccccc1Br", role=Role.REACTANT)],
+        outcomes=[Component(smiles="c1ccccc1-c1ccccc1", role=Role.PRODUCT)],
+        provenance="snowflake:eln",
+        temperature_c=90.0,
+        time_h=12.0,
+        yield_percent=78.0,
+        purity_percent=99.1,
+        impurities=[
+            Impurity(name="des-bromo", area_percent=0.7),
+            Impurity(name="homocoupling", area_percent=0.2),
+        ],
+    )
+    conditions = note_from_ord_reaction(reaction).conditions
+    assert conditions is not None
+    assert (conditions.temperature_c, conditions.time_h) == (90.0, 12.0)
+    assert (conditions.yield_percent, conditions.purity_percent) == (78.0, 99.1)
+    # Ranked by area%, which is the number process development actually chases.
+    assert conditions.major_impurity == "des-bromo"
+    assert conditions.impurity_area_percent == 0.7
+
+
+def test_a_note_about_no_recorded_run_carries_no_conditions_block() -> None:
+    """`conditions: {}` would claim the question was asked and answered emptily."""
+    reaction = OrdReaction(
+        reaction_id="R2",
+        inputs=[Component(smiles="CC", role=Role.REACTANT)],
+        outcomes=[Component(smiles="CCO", role=Role.PRODUCT)],
+        provenance="x",
+    )
+    assert note_from_ord_reaction(reaction).conditions is None
+
+
+def test_a_successful_run_does_not_assert_its_own_success() -> None:
+    """`outcome_class` defaults to success on every source that does not report one.
+
+    Writing it unconditionally would turn "the ELN did not say" into a claim that the run worked —
+    and a failure that reads as an ordinary run is the one row in a comparison nobody may misread.
+    """
+    base = {
+        "reaction_id": "R3",
+        "inputs": [Component(smiles="CC", role=Role.REACTANT)],
+        "outcomes": [Component(smiles="CCO", role=Role.PRODUCT)],
+        "provenance": "x",
+        "yield_percent": 12.0,
+    }
+    assert note_from_ord_reaction(OrdReaction(**base)).conditions.outcome is None  # type: ignore[union-attr]
+    failed = OrdReaction(
+        **base, outcome_class=OutcomeClass.FAILURE, failure_reason="decomposed on scale"
+    )
+    assert note_from_ord_reaction(failed).conditions.outcome == "failure"  # type: ignore[union-attr]
+
+
+def test_the_conditions_block_round_trips_through_the_file_form() -> None:
+    """Frontmatter that does not survive `render_note` -> `read_note` is frontmatter nobody has."""
+    reaction = OrdReaction(
+        reaction_id="R4",
+        inputs=[Component(smiles="CC", role=Role.REACTANT)],
+        outcomes=[Component(smiles="CCO", role=Role.PRODUCT)],
+        provenance="x",
+        temperature_c=-78.0,
+        time_h=0.5,
+        yield_percent=61.5,
+    )
+    note = note_from_ord_reaction(reaction)
+    post = frontmatter.loads(render_note(note))
+    parsed = Note(body=post.content, **{k: v for k, v in post.metadata.items() if k != "body"})
+    assert parsed.conditions == note.conditions
