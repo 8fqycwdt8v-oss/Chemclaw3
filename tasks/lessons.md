@@ -690,3 +690,28 @@ it too, not to treat the citation as the check.
 
 And: `tasks/lessons.md`'s previous entry — measure the mechanism, not the outcome — was written in
 the same session as the code that failed it four times. A lesson recorded is not a lesson applied.
+
+## 2026-08-25 — take the number off the wire, not off a serializer you chose
+
+I measured the condenser's saving with `model_dump_json()` and shipped the figure in a commit, an
+ADR and a PR body. Production never calls it: LangChain's `_stringify` tries `json.dumps`, fails on
+a pydantic model, and falls back to `str()`. The real saving was **2.7×**, not 9.1× — and the
+`Field(exclude=True)` the measurement was built on had no effect at all.
+
+The tell was available the whole time and I did not look for it: I never once read a `ToolMessage`.
+Every measurement went through an object I built and a serializer I picked.
+
+*Rule for myself: when measuring what something costs a model, obtain the bytes from the production
+path — drive the compiled graph, read the message it produced — and never from a representation I
+selected. If I cannot name the function that turns my return value into what the model sees, I have
+not measured it.*
+
+This is the same error as the previous entry, one level up. There I charged `content` instead of the
+serialized chunk; here I serialized with the wrong function entirely. Both are "I measured the
+mechanism I assumed was running." The previous entry's rule — measure the mechanism, not the outcome
+— was necessary and not sufficient, because I did measure a mechanism. It was the wrong one, and
+what distinguishes the right one is that **something else in the system actually calls it.**
+
+An honest note on sequence: three review passes over the same diff found three defects of this
+family, each after I had written a lesson about the family. Recording a rule and applying it are
+different acts, and the second one has to happen at the moment of writing the code, not afterwards.
