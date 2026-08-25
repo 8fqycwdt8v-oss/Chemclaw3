@@ -128,8 +128,8 @@ def changes_between(previous: OrdReaction, current: OrdReaction) -> list[Conditi
     changes = [
         change
         for change in (
-            _number_change("temperature", previous.temperature_c, current.temperature_c, "°C"),
-            _number_change("time", previous.time_h, current.time_h, "h"),
+            number_change("temperature", previous.temperature_c, current.temperature_c, "°C"),
+            number_change("time", previous.time_h, current.time_h, "h"),
         )
         if change is not None
     ]
@@ -141,10 +141,16 @@ def changes_between(previous: OrdReaction, current: OrdReaction) -> list[Conditi
     return changes
 
 
-def _number_change(
+def number_change(
     variable: str, before: float | None, after: float | None, unit: str
 ) -> ConditionChange | None:
-    """A setpoint change, or None when the two runs agree (including both being unrecorded)."""
+    """A setpoint change, or None when the two runs agree (including both being unrecorded).
+
+    Public because the turn-time condenser diffs the same two setpoints off note frontmatter, where
+    it has numbers but not the `OrdReaction` species sets `changes_between` also walks. One rule for
+    "did this setpoint move, and how is that written" — two copies would render `90 °C -> 70 °C` in
+    the campaign note and something subtly different in the comparison a chemist reads beside it.
+    """
     if before == after:
         return None
     return ConditionChange(
@@ -152,6 +158,20 @@ def _number_change(
         before=_quantity(before, unit),
         after=_quantity(after, unit),
     )
+
+
+def text_change(variable: str, before: str | None, after: str | None) -> ConditionChange | None:
+    """A change in a condition the record only carries as words, or None when they agree.
+
+    The condenser's counterpart to `_species_change`: a solvent read out of a procedure is a name,
+    not a structure, so it cannot be canonicalised and compared the way `_species` does. Compared
+    case- and whitespace-insensitively, because "2-MeTHF" and "2-methf " are one solvent written
+    twice and reporting a swap between them would be noise in the one column a reader scans for
+    real changes. What is *displayed* is what was written.
+    """
+    if " ".join((before or "").split()).casefold() == " ".join((after or "").split()).casefold():
+        return None
+    return ConditionChange(variable=variable, before=before or "—", after=after or "—")
 
 
 def _species_change(

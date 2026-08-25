@@ -40,9 +40,11 @@ from chemclaw.ingest.documents.index import (
     DocumentHit,
     DocumentIndex,
     DocumentIndexError,
+    DocumentText,
     default_document_index,
     require_schema_vector_width,
 )
+from chemclaw.ingest.documents.reassemble import join_chunks
 from chemclaw.retrieval.evidence import EvidenceChunk
 from chemclaw.retrieval.hybrid import reciprocal_rank_fusion
 
@@ -173,6 +175,56 @@ class ShareDocumentRetriever:
             logger.exception("%s: unexpected search failure, returning no evidence", self.name)
             return []
         return hits
+
+    async def read_document(self, doc_id: str) -> DocumentText | None:
+        """Return one whole document of this share, or `None` when it cannot be read.
+
+        **Why this exists.** A protocol is atomic — an SOP is one procedure and half of one is
+        misleading rather than merely shorter — but the share stores documents cut into
+        `chunk_chars` pieces, and `sync._read_and_parse` discards the parsed text once `doc_id` is
+        taken from it. So the pieces are the document, and until now nothing read them back: a chunk
+        hit cited `sharedrive:doc-9f2a…#3` and there was no way to ask for the other pieces of it.
+        This is the reader for the address the retriever has been emitting all along.
+
+        **Entitled exactly as `retrieve` is, and that is load-bearing rather than symmetric.** A
+        whole-document read is a strictly larger disclosure than a ranked excerpt, so the share's
+        one security decision — you are in the AD group or you see nothing — has to be asked here
+        too, including the reject-if-absent rule for a gated share with no actor on the turn.
+
+        **Never raises**, for `retrieve`'s reasons and one more: the caller is a turn assembling
+        several protocols, and one unreadable document must cost that document rather than the
+        answer. `None` means "could not be read"; a `DocumentText` with `truncated` set means "read,
+        and there was more" — two different facts, kept apart, because a shortened document that
+        does not say so reads as a complete one.
+        """
+        if not doc_id.strip() or not self._entitled():
+            return None
+        ceiling = settings.document_read_max_chars
+        try:
+            stored = await self._backend().stored_document(
+                self.name, doc_id, self._binding.chunking_key, ceiling
+            )
+        except Exception:
+            logger.exception("%s: could not read document %s", self.name, doc_id)
+            return None
+        if stored is None or not stored.pieces:
+            return None
+        text = join_chunks(
+            [p.content for p in stored.pieces], self._binding.chunk_overlap_chars, ceiling
+        )
+        return DocumentText(
+            doc_id=doc_id,
+            source=self.name,
+            path=stored.path,
+            text=text[:ceiling],
+            chunks=len(stored.pieces),
+            # From the backend, which knows whether more pieces existed. Inferring it from the
+            # assembled string would mean having built the thing the ceiling exists to avoid.
+            truncated=stored.truncated or len(text) > ceiling,
+            # First-seen order, deduped: the coordinates a reader can check the text against.
+            coordinates=list(dict.fromkeys(p.coordinate for p in stored.pieces if p.coordinate)),
+            modified_at=stored.modified_at,
+        )
 
     async def _search(self, query: str, filters: dict[str, Any]) -> list[EvidenceChunk]:
         """Run both legs and fuse them by rank.
