@@ -1,80 +1,56 @@
-# Backlog / DEFERRED sweep — 2026-08-26
+# Solvent capability review — 2026-08-26
 
-## Task
-Work the queue rather than add to it: pick the rows in `docs/planning/BACKLOG.md` that are
-closable **offline and in full**, re-measure each against `HEAD` first (the file's own rule),
-implement, prove, and delete the row in the commit that closes it.
+Started from a question: can the GFN2/MCP stack predict values in solvent, and answer
+"which solvent is X more stable in" / "tautomer ΔG across solvents"?
 
-`DEFERRED.md` was read end to end: **no row's trigger has fired.** Every one is gated on a
-cluster, a tenant, a licence, an upstream release or a corpus none of which this environment
-has. Nothing to close there — which is itself the answer to "what should be done" for that file.
+Answer: yes, through GFN2-xTB's ALPB implicit continuum. Eight `servers/calc` primitives and all
+nine `calc` durable jobs take a solvent; `compute_xtb_energy`, `predict_pka` (water-calibrated),
+`predict_solubility` (ESOL, aqueous) and `predict_logd` do not. Reviewing that surface turned up
+three things worth changing.
 
-## Selected rows (7)
+## Done
 
-Rejected as not-now, with the reason, so the next session does not re-derive it:
-`CalculationKey` escaping (needs an ADR + a full-cache-invalidation migration plan),
-`fetch_artifact` (waits on the fleet's `vibspectrum`), tool-result framing (ADR-sized, needs a
-content-field convention), the pydantic-repr row (blast radius is every tool at once),
-`observations_status_idx` and `session_owners` disposal (both need a product call, not a diff),
-the whole of §5 (blocked on a working model credential or on deployment history).
+- [x] **`compare_solvents` was two capabilities under one name.** `props` served an MCP tool
+      (tabulated properties, microseconds); `calc` declares a durable job (ΔG per solvent, minutes).
+      Measured with both enabled: 21 endpoint tools + 9 jobs = 30 declared, 29 distinct. The registry
+      checked job-vs-job only; `connector_tool_names()` is a set union and `_narrow` keys by name, so
+      the loser vanished with no error.
+      - [x] `registry._declared_tool_names()` refuses a collision across the enabled set — job/job,
+            job/tool and tool/tool. `job_tools()` calls it; `connector-validate` inherits it.
+      - [x] `props.compare_solvents` → `compare_solvent_properties` (Chemclaw3-mcp, same branch).
+      - [x] Verified both ways against the real manifests: renamed → 72 declared, 72 distinct, loads;
+            old name restored → `ConnectorError` naming both claimants and both kinds.
+      - [x] ADR `D-2026-08-26-a-tool-name-is-one-capability-or-it-is-neither`.
+- [x] **`props.compare_solvents` took an unbounded list** — a CONFIRMED/high finding from the
+      2026-08-16 audit, never fixed. 100 000 x "dcm" = a 700 KB request (accepted, 70% of the 1 MB
+      cap) returning 81 601 345 B after 14.83 s, `/healthz` stuck 14.47 s behind it. Bounded to the
+      corpus size, asserted at the transport because `@server.tool()` returns the undecorated
+      function and a direct call skips validation.
 
-- [x] **1 · §1 The audit trail's `agent` column can never be non-empty.** `set_current_specialist`
-      has zero callers in `src/`; `record_handoff` has none anywhere. Delete the contextvar trio,
-      `record_handoff`, `HandoffSignal` and the audit write. Keep `HandoffEvent` (a union member is
-      a three-repo change) and the SQL column (a merged migration is never edited). ADR.
-- [x] **2 · §2 `changes_between` diffs against *absent*.** Move `_changes`'s "both sides recorded
-      it" rule out of `agent/condense.py` and into `memory/progression.py`, one rule instead of two.
-- [x] **3 · §3 A rejoined durable run never reaches the second chemist.** `handle.describe()` on
-      the `WorkflowAlreadyStartedError` path; announce when the status is RUNNING.
-- [x] **4 · §4 `connectors.<name>.enabled` never reaches the agent.** A `chemclaw.connectorsEnabled`
-      helper mirroring `connectorUrls`; delete the sentence pointing at the absent key.
-- [x] **5 · §4 One `replicas` knob drives two differently-shaped Deployments.** Split into
-      `serverReplicas`/`workerReplicas` defaulting to `replicas`; fix the `nil | int` = 0 hole a
-      `url:` bundle with a worker leaves in the connection ceiling.
-- [x] **6 · §4 Egress is still port-scoped by default.** Empty `egressDestinations` under an
-      enabled policy must `fail`, with an explicit `allowAnyDestination: true` escape hatch.
-- [x] **7 · §4 Three credentials are plain `str`.** `SecretStr` on `llm_api_key`, `hpc_api_token`,
-      `temporal_api_key` — defence in depth beside the redacting filter, which stays.
+## Next
 
-## Verification
-`make lint type test` with the Postgres/Temporal stack **up** (`dockerd` + `make up` +
-`make db-migrate`) — a green run that skipped ~157 Postgres tests proves nothing about the
-durable layer. Report what was skipped.
+- [ ] **`rank_species` takes one solvent, so "tautomer ΔG in water vs toluene" is N jobs and a
+      manual diff.** `compose.solvent_comparison` is already this shape for reactions (fan out over
+      solvents plus gas phase, rank, warn when `spread_kcal <= uncertainty_kcal`). A second instance
+      makes that warning the extraction point rather than a copy. Own ADR.
+
+## Not doing, and why
+
+- **A per-compound ΔG_solvation job.** Nothing computes one today (grep: zero hits outside the ALPB
+  refusal message) and it is expressible as gas-phase vs solvated single points — but for one solute
+  the answer is a solubility argument `props.solvent_swap_candidates` already makes from measured
+  Hansen data, and ALPB's absolute solvation energies are much weaker than its relative ones. Worth
+  an ADR deciding it, not a build.
+- **pKa in a non-aqueous solvent.** `pka_solvent` is fixed at `water` and folded into `calc_version`
+  as one of seven calibration settings. A second solvent needs a calibration set that does not exist
+  here; it is a data problem, not a code one.
 
 ## Review
 
-**Three ADRs**, one per decision rather than one per commit:
-`an-attribution-nothing-can-write-is-not-an-attribution` (row 1),
-`a-knob-that-renders-nothing-is-not-a-knob` (rows 4–6, one failure with three faces),
-`a-credential-is-a-type-not-a-convention` (row 7). Rows 2 and 3 are defect fixes with tests and
-need no decision recorded.
-
-**Two rows were wrong as written, and correcting them was part of the work** — which is what the
-file's own header asks for.
-
-1. **Row 2 asked for too much.** `BACKLOG.md` said the "both sides recorded it" rule should cover
-   the two setpoints *and* the species sets. Applied to species, `test_a_reagent_added_mid_procedure_is_diffed_too`
-   went red — correctly. A setpoint is an optional scalar, so `None` means nobody wrote it down; a
-   role's species set is derived from a components list that is *present either way*, so an empty
-   `reagent` set is the record saying the run used no reagent. That is a real change and the most
-   common one a series carries. The rule now covers optional scalars and stops there, with the
-   asymmetry pinned by a test so nobody "unifies" it later.
-2. **Row 7 was three fields and is seven.** A settings object where some secrets hide in a `repr`
-   and others do not teaches the wrong rule. Two things surfaced on the way: `llm_fallback_api_key`
-   was in no redaction list at all — the one credential nothing covered — and both readers in
-   `core/logging.py` test `isinstance(value, str)`, which a `SecretStr` is not, so the "hardening"
-   would have silently switched the redaction off for exactly the fields it hardened.
-
-**One new row queued**, from the same measurement: `hpc_artifact_store_token`,
-`llm_fallback_api_key` and `temporal_api_key` are typed and read and have no chart Secret key, so a
-deployment cannot set them at all. Typing them did not fix that and the row says so.
-
-**Nothing was closable in `DEFERRED.md`.** Every row is gated on a cluster, a tenant, a licence, an
-upstream release or a corpus this environment does not have. That is the answer to "what should be
-done" there, not an omission.
-
-**What the fail-closed chart costs.** `helm template` on the shipped defaults now needs
-`--set networkPolicy.allowAnyDestination=true`. Three call sites pay it and a test asserts every
-shipped-defaults render carries it, so the next one added without it fails offline. `helm` is not
-installed here, so the render itself is unproven until `make helm-validate` runs on a machine that
-has it — every assertion added is over template *text*, like the rest of that suite.
+The two shipped changes are one defect each, both measured before and after rather than argued.
+The registry guard is the half that generalises: neither repository imports the other, both grow
+tool surfaces independently, and nothing made a name mean one thing across the set a deployment
+enables. `compute_xtb_energy`'s docstring still invites comparing "the same molecule in another
+solvent" while taking no solvent argument — reachable via `compute_electronic_properties`, which
+returns the total energy, so it is a prose defect rather than a capability gap. Folded into the
+next change rather than shipped alone.
