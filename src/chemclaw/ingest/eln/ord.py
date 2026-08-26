@@ -18,6 +18,7 @@ purely additive procedural overlay (it never feeds the reaction SMILES / fingerp
 
 from datetime import date
 from enum import StrEnum
+from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -97,6 +98,11 @@ class ReactionStep(BaseModel):
     duration_h: float | None = Field(default=None, ge=0.0)
 
 
+# Where a record's `performed_at` came from. "stated" is the source's own experiment date; "entry"
+# is the entry's creation timestamp, filled in by the seam when the source has no date column.
+DateSource = Literal["stated", "entry"]
+
+
 class OutcomeClass(StrEnum):
     """How an experiment turned out (gap KNW-3).
 
@@ -163,16 +169,40 @@ class OrdReaction(BaseModel):
     # fallback ordering when the product->reactant graph is cyclic. Optional because a source may
     # genuinely not record it, never because we do not care.
     performed_at: date | None = None
+    # **Where `performed_at` came from, because the two sources are not equally strong.** A date the
+    # source stated is when the run was performed. The seam's fallback (`adapter.DatedIngest`) uses
+    # the entry's *creation* timestamp, which is when the record was written — usually the same day,
+    # and sometimes three weeks of bench work transcribed in one afternoon.
+    #
+    # Without this the weaker fact is indistinguishable from the stronger one, and the consequence
+    # is not cosmetic: `Progression.is_timeline()` goes true and the campaign note asserts "Runs in
+    # the order they were performed" over what may be one afternoon of typing. That is precisely the
+    # failure this field's own ADR is about (`D-2026-08-26-silence-is-not-a-successful-run`) — a
+    # value the source could not supply reading as one it did — so the fallback carries its
+    # provenance, exactly as `condense.DigestSource` does for a value read out of prose.
+    date_source: DateSource = "stated"
     # Outcome quality beyond yield (gap KNW-2). `purity_percent` is the headline assay/area figure
     # for the product; `impurities` is the profile behind it. Both optional — an early-route entry
     # may report yield only — and both deliberately excluded from the reaction SMILES and every
     # fingerprint: they are *outcomes*, not structure.
     purity_percent: float | None = Field(default=None, ge=0.0, le=100.0)
     impurities: list[Impurity] = Field(default_factory=list)
-    # How the experiment turned out, and (for a failure) why in the chemist's own words. Defaults
-    # to SUCCESS so every existing record and every source that does not report it keeps today's
-    # meaning — the field adds the ability to say "this failed", it does not reinterpret silence.
-    outcome_class: OutcomeClass = OutcomeClass.SUCCESS
+    # How the experiment turned out, and (for a failure) why in the chemist's own words.
+    #
+    # **`None` is "the source did not say", and that is not the same as success.** This defaulted to
+    # SUCCESS, on the argument that silence had always meant an ordinary run and reinterpreting it
+    # would retroactively weaken the corpus. That argument holds for a source with a status column
+    # that happened to be null. It does not hold for a source that cannot state an outcome at all —
+    # an ELN keeping its results in free text — where the default made **every** record assert a
+    # success nobody claimed, and did it silently, on the one field whose whole purpose is that a
+    # failure must not read as an ordinary run (`OutcomeClass`). A corpus of unread prose came out
+    # as a 100% success rate. See `D-2026-08-26-silence-is-not-a-successful-run`.
+    #
+    # `None` is deliberately not folded into `INCONCLUSIVE`: that value means the run carries no
+    # evidence about the chemistry, which is itself a statement somebody made. "Nobody has read the
+    # prose yet" is a different fact, and collapsing the two teaches the corpus something untrue —
+    # the same argument `OutcomeClass` already makes for keeping INCONCLUSIVE apart from FAILURE.
+    outcome_class: OutcomeClass | None = None
     failure_reason: str | None = None
 
     @model_validator(mode="after")

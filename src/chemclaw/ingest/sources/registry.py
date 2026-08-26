@@ -155,6 +155,31 @@ def _build_half(manifest: DataSourceManifest, reference: str, **extra: Any) -> A
         ) from exc
 
 
+def _build_ingest_half(manifest: DataSourceManifest) -> Any:
+    """Build the ingest half and wrap it in the seam's normalisation.
+
+    **The one construction point for both production readers**, which is what makes this the place
+    the rule belongs. `map_to_ord` has six callers and no shared downstream: the durable sync
+    reaches it through `make_data_source`, and `durable.memory_jobs.read_corpus` — the miner that
+    builds the optimization-campaign note, and the one that runs no validator — reaches it through
+    `active_ingest_sources`. Both resolve here, so a normalisation applied here is applied to both,
+    and to any adapter a deployment attaches without a line of code in this repository.
+
+    Today that normalisation is exactly one rule (`DatedIngest`); the wrapper exists rather than an
+    inline two-liner because the alternative is putting the rule in one of the two callers, where
+    the other silently does not get it. That is the shape of the defect it is fixing.
+
+    The import is lazy to match this module's discipline rather than to fix anything: measured,
+    `sources.base` already imports `ingest.eln.adapter` for the protocol, so `ingest.eln.ord` and
+    rdkit are in the registry's closure before this line and a module-scope import here would cost
+    nothing today. It is written lazily anyway because that dependency is an accident of where a
+    Protocol happens to live, and this file's stated property should not rest on it.
+    """
+    from chemclaw.ingest.eln.adapter import DatedIngest
+
+    return DatedIngest(_build_half(manifest, manifest.ingest or ""))
+
+
 def _build_retrieve_half(manifest: DataSourceManifest) -> Any:
     """Build the retrieve half, telling it which source it is.
 
@@ -194,7 +219,7 @@ def make_data_source(name: str) -> DataSource:
         raise DataSourceError(f"unknown data source {name!r}; valid sources: {valid}")
     return SourceSpec(
         name=manifest.name,
-        ingest=_build_half(manifest, manifest.ingest) if manifest.ingest else None,
+        ingest=_build_ingest_half(manifest) if manifest.ingest else None,
         retrieve=_build_retrieve_half(manifest) if manifest.retrieve else None,
     )
 
@@ -223,7 +248,7 @@ def active_manifests() -> list[DataSourceManifest]:
 def active_ingest_sources() -> list[IngestHalf]:
     """The ingest halves of the enabled sources — a retrieve-only source is never imported."""
     return [
-        _build_half(manifest, manifest.ingest)
+        _build_ingest_half(manifest)
         for manifest in active_manifests()
         if manifest.ingest is not None
     ]

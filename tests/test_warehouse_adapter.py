@@ -17,6 +17,7 @@ from chemclaw.ingest.eln.ord import Role
 from chemclaw.ingest.eln.records import InMemoryReactionRecordStore
 from chemclaw.ingest.eln.sync import sync_entries
 from chemclaw.ingest.eln.warehouse.adapter import WarehouseElnAdapter
+from chemclaw.ingest.eln.warehouse.binding import BindingError, load_binding
 from chemclaw.science.fingerprints.store import InMemoryFingerprintStore
 from chemclaw.science.labels.store import InMemoryLabelIndex
 from tests import warehouse_fake
@@ -414,10 +415,15 @@ def test_a_missing_credential_fails_naming_the_variable(
 def test_a_null_column_leaves_the_schema_default_rather_than_rejecting_the_row() -> None:
     """A field the source was silent about is omitted, not passed as `None`.
 
-    The two are not the same for every field. `outcome_class` is not optional and defaults to
-    SUCCESS, so passing the silence through would reject an otherwise-perfect reaction over the one
-    thing the schema already has an answer for — and it would do it to every row whose status column
-    happens to be NULL, which on a real ELN is most of the old ones.
+    The two are not the same for every field: `reaction_id` omitted raises "field required", which
+    names the actual problem, where an explicit `None` would raise a type error about a value the
+    source never had.
+
+    `outcome_class` is the worked example and it changed meaning, which is why it is still the one
+    tested here. It used to be non-optional with a SUCCESS default, so a NULL status column came out
+    as a claim that the run worked. Since `D-2026-08-26-silence-is-not-a-successful-run` the model
+    carries the silence itself, and the row says nobody stated an outcome — while a value that *is*
+    present still maps exactly as before.
     """
     binding = _binding()
     binding["ingest"]["reaction"]["outcome_class"] = {
@@ -428,12 +434,13 @@ def test_a_null_column_leaves_the_schema_default_rather_than_rejecting_the_row()
     tables["V_REACTION"][0]["RESULT_FLAG"] = None
 
     reaction = _one_reaction(binding, tables)
-    assert reaction.outcome_class.value == "success", "the model's own default applied"
+    assert reaction.outcome_class is None, "a NULL status column states nothing, and says so"
 
     tables["V_REACTION"][0]["RESULT_FLAG"] = "FAIL"
     tables["V_REACTION"][0]["FAILURE_NOTE"] = "decomposed on scale"
     binding["ingest"]["reaction"]["failure_reason"] = {"path": "root.FAILURE_NOTE"}
-    assert _one_reaction(binding, tables).outcome_class.value == "failure", "and a value still maps"
+    mapped = _one_reaction(binding, tables).outcome_class
+    assert mapped is not None and mapped.value == "failure", "and a value still maps"
 
 
 def test_a_missing_reaction_id_names_the_field_rather_than_a_type_error() -> None:
@@ -529,3 +536,61 @@ def test_a_page_of_amended_rows_does_not_stall_the_sync_forever() -> None:
         return seen
 
     assert "NEW-1" in asyncio.run(_run()), "the reaction created after the amendments is reachable"
+
+
+def test_a_binding_may_name_the_intent_column_but_not_carve_one_out_of_prose() -> None:
+    """The rule `json_adapter` states in Python was reachable through YAML, and now is not.
+
+    `ingest.eln.json_adapter` reads `hypothesis` from the entry's own field and refuses to guess one
+    from the procedure, "because a hypothesis extracted by pattern-matching would be
+    indistinguishable, downstream, from one the chemist wrote". The binding vocabulary has a `regex`
+    transform, so a site whose objective lives inside the protocol text could write exactly that
+    guess in a manifest — and it loaded, validated, ingested, and rendered a `Tested:` line no
+    reader could tell from the chemist's own words. One half of a codebase refusing what the
+    other permits
+    is not a rule (D-2026-08-26-silence-is-not-a-successful-run).
+
+    A plain column is untouched: an `OBJECTIVE` column *is* the chemist's own field, which is what
+    this maps. And the fallback chain is checked too, because a rule about a field that stops at its
+    first binding is a rule with a documented way around it.
+    """
+    # A column holding the stated aim is exactly what this field is for — including with its
+    # padding trimmed. Only transforms that can put text in the field which the cell does not hold
+    # are refused; a rule that also failed `strip` would reject a chemist's own OBJECTIVE column at
+    # worker startup, accusing the binding of carving intent out of prose.
+    allowed_shapes = (
+        {"path": "root.OBJECTIVE"},
+        {"path": "root.OBJECTIVE", "transform": [{"strip": {}}]},
+    )
+    for allowed in allowed_shapes:
+        plain = _binding()
+        plain["ingest"]["reaction"]["hypothesis"] = allowed
+        ingest = load_binding(plain).ingest
+        assert ingest is not None and ingest.reaction["hypothesis"].path == "root.OBJECTIVE"
+
+    for label, field in (
+        (
+            "regex carves a substring out of prose",
+            {"path": "root.NOTES", "transform": [{"regex": {"pattern": "Aim:(.+)"}}]},
+        ),
+        (
+            "default invents one outright",
+            {"path": "root.X", "transform": [{"default": {"value": "routine"}}]},
+        ),
+        (
+            "value_map substitutes one",
+            {"path": "root.X", "transform": [{"value_map": {"map": {"a": "b"}}}]},
+        ),
+        (
+            "and a fallback is part of the chain",
+            {
+                "path": "root.X",
+                "fallback": {"path": "root.NOTES", "transform": [{"regex": {"pattern": "(.+)"}}]},
+            },
+        ),
+    ):
+        derived = _binding()
+        derived["ingest"]["reaction"]["hypothesis"] = field
+        with pytest.raises(BindingError, match="derive a run's stated intent"):
+            load_binding(derived)
+        assert label  # names which shape failed, when one of them stops failing

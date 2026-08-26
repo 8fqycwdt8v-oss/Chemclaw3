@@ -121,8 +121,11 @@ eval-baseline:  ## Regenerate data/evals/baseline.json from a scoring run (after
 # sequence, which is what adding a case makes you do.
 	uv run python -m chemclaw.cli.refresh_baseline --case-set-version $(EVAL_CASE_SET_VERSION)
 
-eln-validate:  ## Validate the ELN export's reactions (RDKit structure + mass balance).
-	uv run python -m chemclaw.ingest.eln.validate
+eln-validate:  ## Validate every enabled ingest source's reactions (RDKit structure + mass balance).
+	@# The validator asks the registry what is attached, so the shipped gate has to say which
+	@# sources it covers. Both file-drop adapters, which is what CI has always checked — a
+	@# deployment runs the same command against its own CHEMCLAW_DATA_SOURCES.
+	CHEMCLAW_DATA_SOURCES=eln-json,eln-ord uv run python -m chemclaw.ingest.eln.validate
 
 skill-validate:  ## Validate SKILL.md frontmatter (name/description present, name matches dir).
 	uv run python -m chemclaw.cli.validate_skills

@@ -696,6 +696,28 @@ register exists to catch — add the row in the same pull request that notices i
 
 ---
 
+## The turn-time comparison cannot diff what the ELN gives structured
+
+On a prose-only ELN the *mined* `optimization-campaign` note produces excellent condition deltas —
+`solvent DMF → 2-MeTHF`, `reagent cesium carbonate → potassium carbonate` — because
+`memory.progression.changes_between` reads the species set of each role off `OrdReaction.inputs`.
+The **turn-time** comparison cannot: `agent.condense._changes` diffs `ProcessConditions` plus the
+solvent its prose reader extracted, and `reaction_records` keeps `reaction_id, body,
+compound_smiles, project, performed_at, conditions, source` — the component list survives only as
+prose inside `body`. So on the one schema where the components are the *most* reliable thing the
+source provides, the artifact a chemist is answered with in the turn is the one that cannot use them.
+
+Measured (`D-2026-08-26-silence-is-not-a-successful-run`, four runs): the mined note named all three
+swaps; the turn-time table rendered `—` in every "Changed vs previous" cell.
+
+Nothing is wrong today — the campaign note is retrievable, `experiment-progression` already starts
+from it, and the two artifacts together answer the question. What is unresolved is whether the
+deterministic delta should be available without a mining pass. The cheap shape is a column on
+`reaction_records` carrying the per-role canonical species sets (a projection, not the charge list,
+so it stays a serving copy rather than a second record); the expensive one is handing `Protocol` a
+component list, which `agent.condense` deliberately does not have because a share document has none.
+Wants its own ADR and a measurement of what the extra column costs on a real corpus.
+
 ## Everything else
 
 223 open findings live in [`docs/archive/findings-2026-08.md`](../archive/findings-2026-08.md)

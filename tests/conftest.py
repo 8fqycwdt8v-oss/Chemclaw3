@@ -27,6 +27,7 @@ from _pytest.terminal import TerminalReporter
 
 from chemclaw.connectors.registry import discovered as _connectors_discovered
 from chemclaw.core.config import settings
+from chemclaw.ingest.sources.registry import discovered as _sources_discovered
 from chemclaw.kg.submission import NoteSubmission
 from chemclaw.templates.registry import discovered as _templates_discovered
 from tests.pg import create_test_schema, drop_test_schema, schema_dsn
@@ -92,10 +93,11 @@ def isolated_postgres_schema() -> Iterator[None]:
 
 @pytest.fixture(autouse=True)
 def _fresh_discovery_caches() -> Iterator[None]:
-    """Clear the connector and template `@cache`d discovery registries around every test.
+    """Clear the connector, template and data-source `@cache`d discovery registries per test.
 
-    `chemclaw.connectors.registry.discovered` and `chemclaw.templates.registry.discovered` are
-    `@cache`d for production, where the bundle/template layout is fixed for the process's life.
+    `chemclaw.connectors.registry.discovered`, `chemclaw.templates.registry.discovered` and
+    `chemclaw.ingest.sources.registry.discovered` are `@cache`d for production, where the
+    bundle/template/source layout is fixed for the process's life.
     Most of the suite calls them expecting the real, on-disk default; a handful of tests repoint
     `connectors_dir` / `templates_dir` at a `tmp_path` fixture bundle instead. `monkeypatch`
     restores the setting afterwards, but it has no idea a `functools.cache` sits downstream, so a
@@ -104,12 +106,22 @@ def _fresh_discovery_caches() -> Iterator[None]:
     this (`docs/planning/BACKLOG.md`). Clearing both directions, autouse, turns "remember to clear
     the cache" from a per-file convention every new test has to rediscover into an invariant nothing
     can forget — and it is cheap: clearing an empty `functools.cache` is O(1).
+
+    **The data-source registry is the third of the same kind and was the one not here**, cleared
+    instead by a per-file autouse fixture in `tests/test_datasource_seam.py`. That worked for as
+    long as every test repointing `data_sources_dir` lived in that file, and stopped the moment one
+    did not: a single test elsewhere pointing the registry at its own `tmp_path` manifests poisoned
+    the cache for the rest of the session, and 50 tests in four unrelated files failed reading a
+    corpus of one fixture source. Which is precisely the failure the docstring above already
+    describes, in the one registry it did not cover.
     """
     _connectors_discovered.cache_clear()
     _templates_discovered.cache_clear()
+    _sources_discovered.cache_clear()
     yield
     _connectors_discovered.cache_clear()
     _templates_discovered.cache_clear()
+    _sources_discovered.cache_clear()
 
 
 @pytest.fixture(autouse=True)

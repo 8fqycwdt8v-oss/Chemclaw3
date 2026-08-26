@@ -2054,3 +2054,61 @@ def test_the_label_row_keeps_the_agents_the_fingerprint_drops() -> None:
         assert "CC#N" in {s.smiles for s in row.species}
 
     asyncio.run(_run())
+
+
+def test_the_validator_checks_the_sources_that_are_attached(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`eln-validate` asks the registry what is enabled instead of naming two adapters.
+
+    It constructed `JsonExportAdapter` and `OrdJsonAdapter` by name, which was right while they were
+    the only two and became a gate looking somewhere other than where the data comes in the moment
+    an ELN could be attached through a manifest (D-120). A site whose ELN arrives that way was
+    outside the only check that maps and mass-balances entries before they land — and this printed
+    `OK` regardless, which is the shape `CLAUDE.md` records as "a README is not a gate", in the one
+    file whose whole job is being one (D-2026-08-26-silence-is-not-a-successful-run).
+
+    Two properties, and the second is the one that bites: the failure is labelled with the *source
+    name*, so an operator is sent to the manifest to fix rather than to a format; and an empty
+    enabled set does not print `OK`.
+    """
+    from chemclaw.ingest.eln.validate import main
+
+    export = tmp_path / "drop"
+    export.mkdir()
+    # A product carrying an element no input supplies: the mass-balance check's own case, so the
+    # entry maps cleanly and is rejected on chemistry rather than on parsing.
+    (export / "bad.json").write_text(
+        json.dumps(
+            {
+                "id": "eln-bad",
+                "timestamp": "2026-05-04T09:00:00Z",
+                "reactants": [{"smiles": "CCO", "role": "reactant"}],
+                "products": [{"smiles": "CCBr"}],
+                "procedure": "Heat.",
+            }
+        ),
+        encoding="utf-8",
+    )
+    manifests = tmp_path / "manifests"
+    (manifests / "eln-under-test").mkdir(parents=True)
+    (manifests / "eln-under-test" / "datasource.yaml").write_text(
+        "name: eln-under-test\n"
+        "description: The ELN this deployment actually attached.\n"
+        "ingest: chemclaw.ingest.eln.json_adapter:JsonExportAdapter\n"
+        f"config:\n  export_dir: {export}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(settings, "data_sources_dir", str(manifests))
+    monkeypatch.setattr(settings, "data_sources", "eln-under-test")
+
+    assert main() == 1
+    reported = capsys.readouterr().out
+    assert "eln-under-test/eln-bad" in reported, "the manifest's name, not 'free-text'"
+    assert "mass balance" in reported
+
+    monkeypatch.setattr(settings, "data_sources", "")
+    assert main() == 0, "a retrieve-only deployment is a configuration, not a failure"
+    nothing = capsys.readouterr().out
+    assert "not a pass" in nothing, "but it must never read as one"
+    assert "OK" not in nothing

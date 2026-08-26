@@ -418,8 +418,10 @@ class ProcessConditions(BaseModel):
     yield_percent: float | None = Field(default=None, ge=0.0, le=100.0)
     purity_percent: float | None = Field(default=None, ge=0.0, le=100.0)
     # `OrdReaction.outcome_class`'s value. Carried because a failure that reads as an ordinary run
-    # is the one row in a comparison a chemist must not misread — and because `outcome_class`
-    # defaults to success, so silence here means "the source did not say", not "it worked".
+    # is the one row in a comparison a chemist must not misread. Silence here means "the source did
+    # not say", not "it worked" — and since `D-2026-08-26-silence-is-not-a-successful-run` that is
+    # true of the field it is copied from as well, so a stated success now arrives as `"success"`
+    # rather than being erased into the same `None` as an unassessed run.
     outcome: Literal["success", "failure", "inconclusive"] | None = None
     # `OrdReaction.major_impurity()`'s answer, by whatever identity the record carries. A process
     # campaign is rarely optimizing yield; it is optimizing the impurity the yield hides.

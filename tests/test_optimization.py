@@ -8,6 +8,7 @@ git).
 
 import asyncio
 import re
+from datetime import date
 
 from chemclaw.ingest.eln.ord import Component, Impurity, OrdReaction, Role
 from chemclaw.kg.pr_gate import propose_note
@@ -77,7 +78,9 @@ def test_note_lays_out_runs_with_citations() -> None:
     assert note.type == "optimization-campaign"
     assert note.created_by == "agent"
     assert "[[reaction-run-1]]" in note.body and "[[reaction-run-2]]" in note.body
-    assert "| 80 | — | 85 |" in note.body  # run-1 row: temp, (no time), yield
+    # Temp then yield, with no Time column at all: nothing in this campaign recorded a time, and a
+    # column of dashes is what `drop_empty_columns` exists to remove.
+    assert "| 80 | 85 |" in note.body
     assert "diethyl ether impurity" in note.body  # process/observation detail is surfaced
     assert set(note.outgoing_links()) == {"reaction-run-1", "reaction-run-2"}
 
@@ -138,6 +141,19 @@ def _row(body: str, reaction_id: str) -> list[str]:
     return _cells(next(line for line in body.splitlines() if line.startswith(start)))
 
 
+def _cell(body: str, reaction_id: str, header: str) -> str:
+    """One run's cell under a named column.
+
+    Addressed by header rather than by index, because which columns exist is now a property of what
+    the campaign recorded: since every column but `Run` and `Changed vs previous` goes through
+    `drop_empty_columns`, a fixture that records no time shifts every position after it. A
+    positional assertion in that world tests the column layout while claiming to test a value.
+    """
+    headers = _headers(body)
+    assert header in headers, f"{header!r} is not a column of this table: {headers}"
+    return _row(body, reaction_id)[headers.index(header)]
+
+
 def _note(runs: list[OrdReaction]) -> str:
     """The campaign note body for these runs — the artifact built for side-by-side reading."""
     return optimization_campaign_note(
@@ -168,19 +184,22 @@ def test_the_table_compares_purity_and_the_impurity_profile() -> None:
         ),
     ]
     body = _note(runs)
+    # No run in this fixture carries a date or a time, so neither column appears — the same
+    # `drop_empty_columns` rule the quality columns have always been under, now applied to the
+    # setpoints too. The ordering caveat above the table is what says the runs are undated.
     assert _headers(body) == [
         "Run",
-        "Performed",
         "Temp (°C)",
-        "Time (h)",
         "Yield (%)",
         "Purity (%)",
         "Major impurity",
         "Impurity area (%)",
         "Changed vs previous",
     ]
-    assert _row(body, "run-1")[5:8] == ["91", "des-ethyl", "6.2"]
-    assert _row(body, "run-2")[5:8] == ["99.1", "des-ethyl", "0.3"]
+    for run, purity, area in (("run-1", "91", "6.2"), ("run-2", "99.1", "0.3")):
+        assert _cell(body, run, "Purity (%)") == purity
+        assert _cell(body, run, "Major impurity") == "des-ethyl"
+        assert _cell(body, run, "Impurity area (%)") == area
 
 
 def test_a_campaign_that_recorded_no_quality_data_keeps_a_clean_table() -> None:
@@ -191,15 +210,8 @@ def test_a_campaign_that_recorded_no_quality_data_keeps_a_clean_table() -> None:
     the table is exactly the one it was before they existed.
     """
     body = _note([_ester("run-1", 80, 85), _ester("run-2", 100, 92)])
-    assert _headers(body) == [
-        "Run",
-        "Performed",
-        "Temp (°C)",
-        "Time (h)",
-        "Yield (%)",
-        "Changed vs previous",
-    ]
-    assert len(_row(body, "run-1")) == 6
+    assert _headers(body) == ["Run", "Temp (°C)", "Yield (%)", "Changed vs previous"]
+    assert len(_row(body, "run-1")) == 4
     assert "None" not in body
 
 
@@ -212,8 +224,8 @@ def test_a_column_survives_for_the_one_run_that_recorded_it() -> None:
     body = _note(runs)
     assert "Purity (%)" in _headers(body)
     assert "Major impurity" not in _headers(body)
-    assert _row(body, "run-1")[5] == "99.4"
-    assert _row(body, "run-2")[5] == "—"
+    assert _cell(body, "run-1", "Purity (%)") == "99.4"
+    assert _cell(body, "run-2", "Purity (%)") == "—"
 
 
 def test_the_major_impurity_is_the_largest_by_area_not_the_first_listed() -> None:
@@ -230,7 +242,8 @@ def test_the_major_impurity_is_the_largest_by_area_not_the_first_listed() -> Non
         _ester("run-2", 100, 92),
     ]
     body = _note(runs)
-    assert _row(body, "run-1")[5:7] == ["des-ethyl", "5.8"]
+    assert _cell(body, "run-1", "Major impurity") == "des-ethyl"
+    assert _cell(body, "run-1", "Impurity area (%)") == "5.8"
 
 
 def test_several_unranked_impurities_name_no_major_one() -> None:
@@ -244,8 +257,8 @@ def test_several_unranked_impurities_name_no_major_one() -> None:
     )
     lone = _ester("run-2", 100, 92).model_copy(update={"impurities": [Impurity(name="des-ethyl")]})
     body = _note([two_unranked, lone])
-    assert _row(body, "run-1")[5] == "—"
-    assert _row(body, "run-2")[5] == "des-ethyl"
+    assert _cell(body, "run-1", "Major impurity") == "—"
+    assert _cell(body, "run-2", "Major impurity") == "des-ethyl"
     assert "Impurity area (%)" not in _headers(body)  # nobody recorded one
 
 
@@ -277,6 +290,26 @@ def test_an_impurity_name_cannot_add_a_column_to_the_campaign_table() -> None:
     assert len(_row(body, "run-1")) == len(_headers(body)), (
         "the impurity name added a column, so every cell after it reads under the wrong heading"
     )
-    assert _row(body, "run-1")[5:8] == ["91", r"des-ethyl \| 99.9", "6.2"], (
+    assert [
+        _cell(body, "run-1", h) for h in ("Purity (%)", "Major impurity", "Impurity area (%)")
+    ] == ["91", r"des-ethyl \| 99.9", "6.2"], (
         "the name is evidence and must survive, escaped rather than dropped"
     )
+
+
+def test_a_partly_dated_campaign_keeps_its_date_column() -> None:
+    """The rule is emptiness, not datedness: one recorded value keeps the column for every row.
+
+    The complement of the setpoint columns disappearing on a prose-only ELN. A campaign where *some*
+    runs carry a date is exactly the case a chemist must be able to read — the dated ones are a
+    trajectory and the undated ones are parked at the end — so the column stays and the caveat above
+    the table names the runs with no place in time.
+    """
+    dated = _ester("run-1", 80, 85).model_copy(update={"performed_at": date(2026, 5, 4)})
+    undated = _ester("run-2", 100, 92)
+    body = _note([dated, undated])
+
+    assert "Performed" in _headers(body)
+    assert _cell(body, "run-1", "Performed") == "2026-05-04"
+    assert _cell(body, "run-2", "Performed") == "—"
+    assert "[[reaction-run-2]]" in body.split("|")[0], "the caveat names the undated run"
