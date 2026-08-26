@@ -1009,6 +1009,14 @@ helm upgrade --install chemclaw deploy/helm/chemclaw \
   --set networkPolicy.allowAnyDestination=true   # or list networkPolicy.egressDestinations
 ```
 
+**The pipeline does exactly the three steps above.** `Jenkinsfile` builds with
+`CHEMCLAW_REVISION`, publishes, reads the digest back from the registry and passes it as
+`image.digest` — and `deploy/jenkins/targets/openshift.sh` refuses any value that is not a
+`sha256:` digest, so the tag path cannot be taken by accident. Run it by hand when Jenkins is not
+available; the commands are the same commands. `deploy/jenkins/README.md` is the reference, and
+`D-2026-08-26-a-release-is-a-descriptor-and-a-target` is why a release is a file rather than a set
+of build numbers.
+
 **No calculation binaries.** This image once installed xtb (LGPL-3.0) and crest (GPL-3.0), with a
 build flag for declining to redistribute the second. Neither ships now: the physics moved to
 `Chemclaw3-mcp` (`D-2026-08-16-the-physics-leaves-the-cache-stays`), so nothing in `src/` invokes
