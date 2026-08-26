@@ -1,7 +1,7 @@
 """`get_durable_job_status` is the one *status tool* for a finished durable job.
 
 It became the only one in D-118: the QM/DFT job was the last runner with a tool of its own
-(`agents/job_status.py`, which knew the `qm-` id prefix and the bespoke `QMJobResult` shape), and
+(`agents/job_status.py`, which knew the DFT job's id prefix and its bespoke result shape), and
 it is a declared `qm` connector job now. Everything a launcher in this system hands an id for
 therefore returns `ConnectorJobResult`.
 
@@ -79,7 +79,7 @@ def test_a_completed_job_hands_over_its_result_in_one_call(
             "data": {"total_energy_hartree": -154.75, "converged": True},
         },
     )
-    status = asyncio.run(get_durable_job_status("qm-compute_dft_energy-abc"))
+    status = asyncio.run(get_durable_job_status("calc-sample_conformers-abc"))
     assert status.status == "completed"
     assert status.summary is not None and "Hartree" in status.summary
     assert status.result["total_energy_hartree"] == -154.75
@@ -90,7 +90,7 @@ def test_a_completed_job_that_is_not_the_envelope_is_a_hard_error(
 ) -> None:
     """A foreign result shape raises instead of degrading to a bare `completed`.
 
-    The fallback existed for exactly one job — the HPC/DFT run, which returned `QMJobResult` and
+    The fallback existed for exactly one job — the removed DFT run, which returned its own type and
     was collected by its own tool. With that job on the connector seam nothing legitimately
     returns anything else, so a non-envelope result means the id belongs to a workflow no launcher
     in this system started, and the honest answer is to say so rather than to report a finished
@@ -108,7 +108,7 @@ def test_a_running_job_reports_the_status_alone(monkeypatch: pytest.MonkeyPatch)
         return _Client(_Handle(WorkflowExecutionStatus.RUNNING, None))
 
     monkeypatch.setattr(durable_tools, "connect", _connect)
-    status = asyncio.run(get_durable_job_status("qm-compute_dft_energy-abc"))
+    status = asyncio.run(get_durable_job_status("calc-sample_conformers-abc"))
     assert status.status == "running"
     assert status.summary is None and status.result == {}
 

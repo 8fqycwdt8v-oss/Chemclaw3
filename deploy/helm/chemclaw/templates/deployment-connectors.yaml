@@ -1,7 +1,7 @@
 {{- /* The pods one enabled connector bundle gets: an app Deployment + Service when it serves
        MCP tools (`server`), a Temporal worker Deployment when it owns durable jobs (`worker`), or
-       both. The `qm` bundle is the first with only the second half — it declares no `endpoint:`,
-       so rendering an app pod for it would crash-loop on a `server/app.py` that does not exist.
+       both. The `results` bundle has only the second half — it declares no `endpoint:`, so
+       rendering an app pod for it would crash-loop on a `server/app.py` that does not exist.
 
        This is what the connector seam buys operationally: a capability scales, fails and carries its
        dependencies independently of the chat service. The image is the same single artifact — the
@@ -139,8 +139,8 @@ spec:
               value: "connector-worker-{{ $name }}"
             {{- /* The bundle's own activity ceiling when it declares one, else the shared default.
                    Same argument as `resources` below and it belongs to the same shape of bundle:
-                   a worker whose activities are long *waits* rather than database work (`qm` holds
-                   one slot per in-flight HPC job for up to 24 h) is bounded by memory, not by the
+                   a worker whose activities are long *waits* rather than database work (`calc`
+                   holds one slot for a whole CREST search) is bounded by memory, not by the
                    connection pool, so the number that protects the pool would throttle it for no
                    reason. An explicit `env` entry beats the same key arriving through `envFrom`,
                    which is how the ConfigMap's fleet-wide value reaches every other worker. */}}
@@ -155,8 +155,8 @@ spec:
           {{- include "chemclaw.workerProbes" $ | nindent 10 }}
           resources:
             {{- /* The bundle's own sizing when it declares one, else the shared worker budget.
-                   A capability whose worker is shaped differently from the rest (the `qm` bundle
-                   holds an open HPC poll per in-flight job) says so in its own entry rather than
+                   A capability whose worker is shaped differently from the rest (a bundle that
+                   holds a slot per in-flight search) says so in its own entry rather than
                    adding a key to the global `resources:` block. */}}
             {{- toYaml (default $.Values.resources.worker $cfg.resources) | nindent 12 }}
           {{- /* The mTLS mount is this container's only one, so the key itself is conditional:

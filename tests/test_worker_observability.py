@@ -200,7 +200,7 @@ def test_a_worker_may_not_admit_more_activities_than_its_pool_can_serve() -> Non
     An activity borrows a connection for a fraction of its runtime, so a ceiling *at* the pool
     width already leaves the pool mostly idle — equal is the point at which no activity can be the
     one that waits, and above it is where a shortage becomes retry churn. A deployment may still
-    raise the ceiling deliberately (the `qm` bundle does, because its activities are HPC waits
+    raise the ceiling deliberately (the `calc` bundle does, because a CREST search holds a slot
     rather than database work); what must not happen is the shipped default drifting above the
     shipped pool by accident.
     """

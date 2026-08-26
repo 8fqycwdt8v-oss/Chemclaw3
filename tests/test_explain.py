@@ -92,10 +92,10 @@ def test_a_failed_tool_call_is_not_hidden() -> None:
         order=["c-4"],
         turns={"c-4": [("user", "compute the barrier")]},
         calls={
-            "c-4": [ToolCall("compute_dft_energy", "error", "cluster unreachable", 9.0, "u", "")]
+            "c-4": [ToolCall("sample_conformers", "error", "cluster unreachable", 9.0, "u", "")]
         },
     )
-    assert "compute_dft_energy" in report and "error" in report
+    assert "sample_conformers" in report and "error" in report
 
 
 def test_pre_join_rows_are_labelled_rather_than_silently_grouped() -> None:

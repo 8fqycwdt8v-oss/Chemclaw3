@@ -270,7 +270,7 @@ class TemplateWorkflow:
         # It also *authorizes* the step, as the run's requester, and returns the validated payload
         # (D-168). The arguments are handed to it rather than substituted into the child start
         # below, because a payload that has not been through `prepare_job_launch` is precisely what
-        # this step used to start an HPC job with.
+        # this step used to start an expensive job with.
         resolved = await workflow.execute_local_activity(
             authorize_job_step,
             JobStepInput(

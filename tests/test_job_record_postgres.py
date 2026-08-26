@@ -87,8 +87,8 @@ def test_a_past_run_is_found_by_the_reason_it_was_run() -> None:
             _CAMPAIGN.model_copy(
                 update={
                     "job_id": "pg-qm-barrier-1",
-                    "connector": "qm",
-                    "job": "compute_dft_energy",
+                    "connector": "calc",
+                    "job": "sample_conformers",
                     "rationale": "the reviewer questioned the reported barrier",
                     "note_id": "",
                 }
@@ -100,7 +100,7 @@ def test_a_past_run_is_found_by_the_reason_it_was_run() -> None:
         # A listing carries the reason itself, so a hit is recognisable without a second lookup.
         assert by_reason[0].rationale.startswith("the Tuesday batch stalled")
 
-        by_connector = await read_job_record_summaries("", "qm", 50)
+        by_connector = await read_job_record_summaries("", "calc", 50)
         assert [m.job_id for m in by_connector] == ["pg-qm-barrier-1"]
 
         # Both filters empty = the recent runs, newest first, bounded by the limit.

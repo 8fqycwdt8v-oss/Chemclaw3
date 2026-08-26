@@ -67,7 +67,8 @@ _TERMINAL = {
 
 # The job the smoke runs. `compute_reaction_energy` is chosen for three reasons and none of them
 # is convenience: it is a *real* durable job (the same `ConnectorJobWorkflow` wrapper every job
-# uses), its engine is `tblite` in-process so it needs no HPC and no external binary, and it writes
+# uses), its engine is `tblite` in-process so it needs no cluster and no external
+# binary, and it writes
 # to the calculation cache — which is what makes the never-recompute guarantee (D-011) observable
 # rather than asserted. A QM job would need a cluster; a BO campaign would need rounds of
 # observations before it wrote anything.

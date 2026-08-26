@@ -2124,7 +2124,7 @@ async def _barriers(
     already skips it. More than one means the geometry is not a saddle in any useful sense, so that
     barrier stays electronic and says so.
     """
-    if len(rotamers) < 2:
+    if not rotamers:
         return []
     by_angle = sorted(range(len(rotamers)), key=lambda index: rotamers[index].dihedral_degrees)
     barriers: list[RotationBarrier] = []
@@ -2196,8 +2196,17 @@ def _highest_between(
 
 
 def _between(angle: float, one: float, other: float, period_degrees: float) -> bool:
-    """Is `angle` on the arc from `one` to `other` that does not pass through the other well?"""
-    forward = (other - one) % period_degrees
+    """Is `angle` on the arc from `one` to `other` that does not pass through the other well?
+
+    **A zero-length forward arc means the whole period, and that case is the important one.** Two
+    wells at the same angle is one well and its own image a period away — which is what a hindered
+    rotation with a single populated form looks like, and it is the shape the whole capability
+    exists for. N,N-dimethylacetamide has exactly one planar amide per 180 degrees; measured against
+    the live GFN2 server, its profile rises to 18.1 kcal/mol at 96 degrees and the well returns to
+    itself. Reading the arc as empty reported **no barrier at all** for it: the number was computed
+    and then dropped.
+    """
+    forward = (other - one) % period_degrees or period_degrees
     offset = (angle - one) % period_degrees
     return 0.0 < offset < forward
 
@@ -2262,13 +2271,19 @@ def _profile_warnings(profile: dict[float, float], torsion: Torsion, step: float
         (ring[index][0], (ring[index][1] - ring[index - 1][1]) * HARTREE_TO_KCAL)
         for index in range(1, len(ring))
     ]
+    sizes = sorted(abs(jump) for _, jump in jumps)
+    typical = sizes[len(sizes) // 2]
     biggest = max(jumps, key=lambda jump: abs(jump[1]))
-    if abs(biggest[1]) > settings.xtb_reaction_uncertainty_kcal:
+    if (
+        typical > 0.0
+        and abs(biggest[1]) > settings.xtb_rotation_discontinuity_ratio * typical
+        and abs(biggest[1]) > settings.xtb_reaction_uncertainty_kcal
+    ):
         warnings.append(
             f"the profile steps {biggest[1]:+.1f} kcal/mol between {biggest[0] - step:g} and "
-            f"{biggest[0]:g} degrees — a discontinuity that size usually means a point relaxed "
-            "into a different basin than its neighbours, and it is worth looking at rather than "
-            "smoothing over"
+            f"{biggest[0]:g} degrees, against a typical step of {typical:.1f} — a step that far "
+            "out of line usually means a point relaxed into a different basin than its neighbours, "
+            "and it is worth looking at rather than smoothing over"
         )
     if len(profile) < 4:
         warnings.append(

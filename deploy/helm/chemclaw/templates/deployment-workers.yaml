@@ -2,8 +2,8 @@
 {{- /* connector-job wrapper). It serves `/healthz`, `/readyz` and `/metrics` on the `metrics` */ -}}
 {{- /* port; this used to say "no probe HTTP port — liveness is the Temporal poll itself", */ -}}
 {{- /* which asserted a guarantee nothing checked (see `chemclaw.workerProbes`). */ -}}
-{{- /* The heavy `hpc-jobs` worker used to sit above this one; it went with the QM/DFT job into */ -}}
-{{- /* the `qm` connector bundle, whose worker is rendered by deployment-connectors.yaml. */ -}}
+{{- /* Core's only worker. Every expensive workflow belongs to a connector bundle, whose own */ -}}
+{{- /* worker is rendered by deployment-connectors.yaml (D-118). */ -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:

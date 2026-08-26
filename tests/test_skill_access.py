@@ -140,13 +140,13 @@ def test_one_reachable_tool_keeps_the_skill() -> None:
     `property-lookup` profile — including `calculation-selection`, which that profile's own
     instructions tell the model to load.
     """
-    declared = {"deep-research": frozenset({"gather_evidence", "compute_dft_energy"})}
+    declared = {"deep-research": frozenset({"gather_evidence", "sample_conformers"})}
     assert "deep-research" in _scoped_names(declared, available={"gather_evidence"})
 
 
 def test_a_skill_with_no_reachable_tool_is_dropped() -> None:
     """When every declared tool is gone, the judgment goes with it."""
-    declared = {"deep-research": frozenset({"gather_evidence", "compute_dft_energy"})}
+    declared = {"deep-research": frozenset({"gather_evidence", "sample_conformers"})}
     scoped = _scoped_names(declared, available={"predict_pka"})
 
     assert "deep-research" not in scoped
@@ -168,7 +168,7 @@ def test_the_narrowings_compose_and_only_ever_remove() -> None:
     every = _skill_names({})
     permits = skill_permits(
         enabled=["deep-research", "knowledge-graph-query"],
-        declared={"deep-research": frozenset({"compute_dft_energy"})},
+        declared={"deep-research": frozenset({"sample_conformers"})},
         available={"predict_pka"},
         gates={"knowledge-graph-query": ["process-chemist"]},
     )

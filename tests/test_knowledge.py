@@ -1,85 +1,23 @@
-"""Tests for the result→note bridge and the git submitter (plan step 2.8).
+"""Tests for the git submitter behind the PR-gate (plan step 2.8), and the boundary it enforces.
 
-The bridge is a *mapping* now, not an activity: the `qm` bundle builds the note and core publishes
-it through the PR-gate from the job envelope (D-118), which is why nothing here submits a note on
-the QM job's behalf any more — `tests/test_connector_job_workflow.py` owns that half.
+A bundle *builds* a note and cannot *publish* one: core publishes whatever note the job envelope
+carries (D-118), which is why nothing here submits a note on a connector's behalf —
+`tests/test_connector_job_workflow.py` owns that half, and the last test in this file asserts that
+no bundle has a second way in.
 """
 
+import ast
 import asyncio
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
-from temporalio.client import Client
-from temporalio.worker import Worker
 
-from chemclaw.connectors.qm.knowledge import note_from_qm_result
-from chemclaw.connectors.qm.specs import QMJobResult, QmJobSpec
-from chemclaw.connectors.qm.workflows import QMJobWorkflow
-from chemclaw.core.chem import compound_id
 from chemclaw.core.config import settings
-from chemclaw.durable.connector_job import ConnectorJobResult
-from chemclaw.ingest.eln.compound import compound_dependencies
 from chemclaw.kg.git_submitter import GitNoteSubmitter, GitSubmitError
 from chemclaw.kg.note import Note
 from chemclaw.kg.submission import NoteFile, NoteSubmission
-from tests.temporal_env import QM_ACTIVITIES, pydantic_client, start_env_or_skip
-
-_RESULT = QMJobResult(
-    molecule_smiles="CCO",
-    method="B3LYP",
-    basis_set="def2-SVP",
-    total_energy_hartree=-154.75,
-    converged=True,
-    requested_by="oid-42",
-)
-
-
-def test_note_from_qm_result_maps_fields() -> None:
-    """The result becomes an agent job-result note linking to its compound."""
-    note = note_from_qm_result(_RESULT)
-    assert note.type == "job-result"
-    assert note.created_by == "agent"
-    assert note.compound_smiles == "CCO"
-    assert note.source == "qm:oid-42"  # provenance carried
-    assert note.id.startswith("job-")
-
-
-def test_a_job_result_links_its_compound_and_brings_it_along() -> None:
-    """The crosslink, and the reason it is now safe to make (STO-7).
-
-    This assertion used to read `note.outgoing_links() == []`, with a comment explaining that a
-    wikilink to a possibly-absent compound note would dangle and fail `kg-validate` on the very PR
-    that added it. That was true, and it made every computed result a graph island — the
-    calculation store and the note graph could not reference each other in either direction.
-
-    What changed is the PR-gate: a submission carries a note *with its dependencies*, so the link
-    and its target land together and the link resolves on the branch it is proposed on.
-    """
-    note = note_from_qm_result(_RESULT)
-    expected = compound_id("CCO")
-    assert note.outgoing_links() == [expected]
-
-    # ...and the note it links is minted into the same submission, so the link is not dangling.
-    dependencies = compound_dependencies(note)
-    assert [dependency.id for dependency in dependencies] == [expected]
-    assert dependencies[0].type == "compound"
-
-
-def test_the_bundle_has_no_way_to_write_the_note_itself() -> None:
-    """The QM bundle *builds* a note and cannot *publish* one — the review asymmetry, structurally.
-
-    It used to own a `write_knowledge_node` activity that called `propose_note` directly, which
-    made "the agent proposes, a human decides" a convention the bundle chose to honour rather than a
-    boundary it could not cross. Core publishes whatever note the job envelope carries now, so a
-    connector reaching the graph would first have to import the PR-gate — and no bundle does.
-    """
-    import chemclaw.connectors.qm.knowledge as qm_knowledge
-
-    assert not hasattr(qm_knowledge, "write_knowledge_node")
-    source = Path(qm_knowledge.__file__).read_text(encoding="utf-8")
-    assert "pr_gate" not in source and "propose_note" not in source
 
 
 def _clone(remote: Path, dest: Path) -> Path:
@@ -584,93 +522,39 @@ def test_git_command_timeout_kills_the_child_and_raises(
     assert killed["value"] is True
 
 
-def test_qm_workflow_hands_its_note_to_core_in_the_envelope() -> None:
-    """A completed QM run returns the note for core to PR-gate, rather than writing it.
+def test_no_connector_bundle_can_reach_the_pr_gate_itself() -> None:
+    """The review asymmetry, structurally rather than by convention.
 
-    The bundle's half of the publish contract, proven on a real server: whether that note reaches
-    the graph is `publish_to_graph` in `connectors/qm/connector.yaml`, and the publishing itself is
-    `ConnectorJobWorkflow`'s (covered by `tests/test_connector_job_workflow.py`).
+    A bundle used to own a `write_knowledge_node` activity calling `propose_note` directly, which
+    made "the agent proposes, a human decides" something the bundle chose to honour rather than a
+    boundary it could not cross. Core publishes the envelope's note now, so a connector reaching
+    the graph would first have to import the PR-gate.
+
+    Asserted over **every** bundle rather than against one module's attribute, which is what it
+    used to be: that spelling named the `qm` bundle, so it went dark the day that bundle was
+    removed (`D-2026-08-26-semiempirical-is-the-whole-tier`) and would have protected nothing
+    while still reading as a control. `chemclaw.connectors -> chemclaw.kg` is an allowed edge in
+    `tests/test_layering.py` — bundles legitimately build `Note` objects — so this is the rule that
+    narrows it to *building*.
     """
-
-    async def _run() -> ConnectorJobResult:
-        async with await start_env_or_skip() as env:
-            client: Client = pydantic_client(env)
-            async with Worker(
-                client,
-                task_queue="test-qm-pub",
-                workflows=[QMJobWorkflow],
-                activities=QM_ACTIVITIES,
-            ):
-                result: ConnectorJobResult = await client.execute_workflow(
-                    QMJobWorkflow.run,
-                    QmJobSpec(molecule_smiles="CCO", method="B3LYP", basis_set="def2-SVP"),
-                    id="qm-publish-test",
-                    task_queue="test-qm-pub",
-                )
-                return result
-
-    result = asyncio.run(_run())
-    assert result.note is not None
-    assert result.note.type == "job-result"
-    assert result.note.created_by == "agent"  # so the PR-gate is the only way in
-
-
-def test_the_energy_line_carries_its_own_trust_and_not_a_bare_number() -> None:
-    """F8-T1: a retrieval excerpt used to quote a confident figure with nothing attached.
-
-    The bare `total energy: {x:.6f} Hartree` is what made this a defect — the number is
-    indistinguishable from one the SCF never converged to, and the excerpt that quotes it back is
-    a blind character prefix that cannot pick up a qualifier placed anywhere else.
-    """
-    body = note_from_qm_result(_RESULT).body
-    line = next(ln for ln in body.splitlines() if ln.startswith("- total energy:"))
-    # The unit is on the value line, and so is the statement about its uncertainty.
-    assert "Hartree" in line
-    assert "no uncertainty established" in line, (
-        "the energy line states no uncertainty, which is the honest answer for an absolute "
-        "energy — but it must say so rather than stay silent"
+    bundles = Path("src/chemclaw/connectors")
+    offenders = []
+    for path in sorted(bundles.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        # Imports and calls only — a *docstring* naming the gate is the point being made, not a
+        # violation of it, and `connectors/manifest.py` makes exactly that point.
+        for node in ast.walk(tree):
+            reached = (
+                isinstance(node, ast.ImportFrom) and (node.module or "").endswith("kg.pr_gate")
+            ) or (
+                isinstance(node, ast.Import)
+                and any(alias.name.endswith("kg.pr_gate") for alias in node.names)
+            )
+            named = isinstance(node, ast.Name) and node.id == "propose_note"
+            if reached or named:
+                offenders.append(str(path.relative_to("src")))
+                break
+    assert offenders == [], (
+        f"{offenders} reach the PR-gate from inside a connector: a bundle returns its note in the "
+        "job envelope and core decides whether it is proposed"
     )
-
-
-def test_a_diverged_scf_is_flagged_on_the_number_itself() -> None:
-    """Convergence is the QM domain question, and it has to reach the value a reader quotes.
-
-    `- converged: False` on its own line is a fact a *human* can join up; a skill or a retrieval
-    excerpt quoting the energy cannot. This is the mutation that matters: hard-code `in_domain`
-    to True and a non-converged energy renders exactly like a converged one.
-    """
-    diverged = _RESULT.model_copy(update={"converged": False})
-    line = next(
-        ln
-        for ln in note_from_qm_result(diverged).body.splitlines()
-        if ln.startswith("- total energy:")
-    )
-    assert "OUT OF DOMAIN" in line
-    assert "did not converge" in line
-
-    converged = next(
-        ln
-        for ln in note_from_qm_result(_RESULT).body.splitlines()
-        if ln.startswith("- total energy:")
-    )
-    assert "OUT OF DOMAIN" not in converged
-
-
-def test_the_job_summary_and_the_note_agree_about_the_energy() -> None:
-    """Two renderings of one number, and the summary is the line the chemist reads first.
-
-    `_envelope`'s summary is what `get_durable_job_status` hands back on completion. It had its own
-    hand-rolled `(converged)` / `(NOT converged)` parenthetical, so fixing only the note would have
-    left the more-read surface saying less — and nothing in the suite rendered it at all, since the
-    one test naming that string builds it as fixture data rather than calling `_envelope`.
-    """
-    from chemclaw.connectors.qm.workflows import _envelope
-
-    for converged in (True, False):
-        envelope = _envelope(_RESULT.model_copy(update={"converged": converged}), "")
-        summary, note = envelope.summary, envelope.note
-        assert summary is not None and note is not None
-        energy_line = next(ln for ln in note.body.splitlines() if ln.startswith("- total energy:"))
-        # The summary ends with exactly the rendering the note's energy line carries.
-        assert summary.endswith(energy_line.removeprefix("- total energy: "))
-        assert ("OUT OF DOMAIN" in summary) is (not converged)
