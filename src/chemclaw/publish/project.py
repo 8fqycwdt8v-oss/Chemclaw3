@@ -1039,9 +1039,14 @@ def _rotation(
         if rotamer.get("relative_kcal") is not None
     ]
     barriers = payload.get("barriers") or []
-    # The barrier out of the *most populated* well, which is the one that decides configurational
-    # stability — not the highest point of the profile, and not an average over directions.
-    highest = max(barriers, key=lambda barrier: barrier["forward_kcal"], default=None)
+    # **The barrier out of the most populated well**, which is what decides configurational
+    # stability — not the highest point of the profile and not an average over directions. The
+    # rotamers arrive most-populated first, so that well is ordinal 0, and its barrier is the one
+    # leaving it. The comment used to say this while the code took `max(forward_kcal)`; on
+    # n-butane those are different barriers, and the one described here is the one a record about
+    # configurational stability wants.
+    leaving = [barrier for barrier in barriers if barrier.get("from_rotamer") == 0]
+    highest = max(leaving or barriers, key=lambda barrier: barrier["forward_kcal"], default=None)
     lifetime = (highest or {}).get("interconversion") or {}
     uncertainty = payload.get("uncertainty_kcal")
     facts = _kept(
@@ -1050,7 +1055,7 @@ def _rotation(
         # half-life below is exponential in it.
         _fact(
             "rotational_barrier",
-            payload.get("highest_barrier_kcal"),
+            (highest or {}).get("forward_kcal"),
             "kcal/mol",
             uncertainty=uncertainty,
             uncertainty_kind="reported",

@@ -746,7 +746,9 @@ class RotationProfile(BaseModel):
     points: list[ScanPoint]
     rotamers: list[Rotamer]
     barriers: list[RotationBarrier]
-    highest_barrier_kcal: float
+    # `None` when no barrier was resolved — a profile too coarse to place a pass between two
+    # wells, or one whose wells left their basins. Zero would be a claim of free rotation.
+    highest_barrier_kcal: float | None = None
     uncertainty_kcal: float
     # What the profile itself says about how far to trust it: a step that may have driven over a
     # maximum, a point that relaxed into another basin, a well that would not settle. The three

@@ -108,7 +108,9 @@ def embed(smiles: str, multiplicity: int = 1) -> dict[str, Any]:
     }
 
 
-def harmonic_hessian(structure: dict[str, Any], *, imaginary: bool = False) -> dict[str, Any]:
+def harmonic_hessian(
+    structure: dict[str, Any], *, imaginary: bool = False, curvature: float = 0.5
+) -> dict[str, Any]:
     """A well-formed Hessian payload for `structure`, optionally carrying one negative eigenvalue.
 
     Not physics: a diagonal matrix whose spectrum is chosen, base64-encoded exactly as the server
@@ -123,7 +125,12 @@ def harmonic_hessian(structure: dict[str, Any], *, imaginary: bool = False) -> d
     size = 3 * len(structure["elements"])
     diagonal = np.full(size, 0.5)
     if imaginary:
-        diagonal[0] = -0.5
+        # `curvature` is how *steep* the downhill direction is. It matters because the imaginary
+        # mode is skipped in the RRHO sum, so a saddle's free energy is missing that mode's
+        # zero-point term — and a stiff one (the 0.5 default) removes several kcal/mol, which can
+        # outweigh a small electronic barrier and invert a free-energy barrier's sign. A torsional
+        # pass is shallow, so the torsional surface uses a shallow one.
+        diagonal[0] = -curvature
     matrix = np.diag(diagonal)
 
     def pack(array: np.ndarray) -> str:
@@ -170,6 +177,16 @@ _BARRIER_HARTREE = 0.004
 _GAUCHE_HARTREE = 0.0016
 _WELLS = (60.0, 180.0, 300.0)
 
+# What releasing a constrained geometry buys, in Hartree — about 0.13 kcal/mol, the order the live
+# server gives on n-butane. Small on purpose: a barrier measured from the wrong zero is wrong by
+# exactly this, and a test that needed a large number to see it would not be testing the real case.
+_RELAXATION_HARTREE = 2.0e-4
+
+# How steep the downhill direction is at a torsional pass. Small, because a torsional saddle is
+# shallow: the imaginary mode is skipped in the RRHO sum, so a stiff one would take several
+# kcal/mol of zero-point energy out of the pass and invert a small free-energy barrier.
+_SADDLE_CURVATURE = 0.5
+
 
 def torsional_energy(degrees: float) -> float:
     """The synthetic torsional potential at one dihedral, in Hartree above its own minimum."""
@@ -177,6 +194,27 @@ def torsional_energy(degrees: float) -> float:
     threefold = _BARRIER_HARTREE * (1.0 + math.cos(3.0 * radians)) / 2.0
     onefold = _GAUCHE_HARTREE * (1.0 + math.cos(radians)) / 2.0
     return threefold + onefold
+
+
+def torsional_surface_energy(structure: dict[str, Any], atoms: tuple[int, int, int, int]) -> float:
+    """This surface's energy for a geometry, in Hartree — the one definition all three tools use.
+
+    `scan_point`, `relax_structure` and `compute_hessian` must agree about what a geometry is worth,
+    or a composite that compares two of them compares two different surfaces. They did not: the
+    Hessian payload reported `-1.0 * atom_count` for *every* geometry, so a free-energy barrier
+    computed as `G(pass) - G(well)` lost its electronic term entirely and came out negative — an
+    artefact of this fake that looked exactly like a defect in the composite.
+    """
+    angle = dihedral_of(structure, atoms)
+    relaxed = _RELAXATION_HARTREE if _near_a_well(angle) else 0.0
+    return -1.0 * len(structure["elements"]) + torsional_energy(angle) - relaxed
+
+
+def _near_a_well(degrees: float, tolerance: float = 20.0) -> bool:
+    """Is this geometry close enough to a minimum of the synthetic potential to be one?"""
+    return any(
+        min(abs(degrees - well), 360.0 - abs(degrees - well)) <= tolerance for well in _WELLS
+    )
 
 
 def _nearest_well(degrees: float) -> float:
@@ -367,7 +405,12 @@ class FakeCalcServer:
             settled = _nearest_well(dihedral_of(structure, self._torsion))
             structure = with_dihedral(structure, self._torsion, settled)
             result = self._optimization(structure, arguments.get("solvent"))
-            result["energy_hartree"] += torsional_energy(settled)
+            # **A released well sits below the constrained point it came from**, by more than the
+            # torsional term alone: letting go of the dihedral lets every *other* coordinate relax
+            # too. Without this the fake's release lowered nothing, so the composite's barrier
+            # arithmetic could mix the constrained and released energy zeros and no test could see
+            # it — measured on the live GFN2 server as 0.118 kcal/mol on n-butane.
+            result["energy_hartree"] += torsional_energy(settled) - _RELAXATION_HARTREE
             return result
         return self._optimization(structure, arguments.get("solvent"))
 
@@ -407,6 +450,24 @@ class FakeCalcServer:
 
     def _compute_hessian(self, arguments: dict[str, Any]) -> dict[str, Any]:
         saddle = self._saddle_first and self.count("compute_hessian") == 1
+        if self._torsion is not None and not saddle:
+            # **A geometry at a torsional maximum really is a first-order saddle**, so when this
+            # server is modelling a torsional surface it says so. Without this the pass Hessian
+            # reported zero imaginary modes, `_free_energy_barrier` took its "not a saddle" exit on
+            # every call, and the whole `thorough` free-energy path was unreachable from the suite
+            # — which is how it came to add a molecule's entire absolute thermal correction to an
+            # electronic barrier and report 70 kcal/mol with nothing red.
+            saddle = not _near_a_well(dihedral_of(arguments["structure"], self._torsion))
+            payload = harmonic_hessian(
+                arguments["structure"], imaginary=saddle, curvature=_SADDLE_CURVATURE
+            )
+            # The energy *this surface* gives that geometry, so a free energy computed from this
+            # Hessian is comparable with the scan point and the relaxation beside it.
+            payload["electronic_energy_hartree"] = torsional_surface_energy(
+                arguments["structure"], self._torsion
+            )
+            payload["solvent"] = arguments.get("solvent")
+            return payload
         payload = harmonic_hessian(arguments["structure"], imaginary=saddle)
         payload["solvent"] = arguments.get("solvent")
         return payload

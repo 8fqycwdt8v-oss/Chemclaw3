@@ -119,6 +119,50 @@ class TestTheBondIsCheckedNotTrusted:
             asyncio.run(compose.rotation_profile(InMemoryStore(), _BUTANE, wide))
 
 
+class TestTheDihedralIsCheckedToo:
+    """The handle guards `bond`; these guard `atoms`, which is what is actually driven.
+
+    Every one of these returned a **full profile with a plausible barrier and no error** before the
+    check existed — the exact silent-wrong-answer shape the handle was introduced to remove, one
+    field along from where it was being watched for.
+    """
+
+    def test_a_negative_index_is_refused(self, server: FakeCalcServer) -> None:
+        """Python indexes backwards from the end, so this drove a real but different dihedral."""
+        with pytest.raises(ValueError, match="not four atoms"):
+            _profile(server, bond=_torsion(atoms=[-1, 1, 2, 3]))
+        assert server.count("scan_point") == 0
+
+    def test_an_index_past_the_molecule_is_refused_before_the_geometry_arithmetic(
+        self, server: FakeCalcServer
+    ) -> None:
+        """It used to escape as a bare numpy IndexError from inside the dihedral computation."""
+        with pytest.raises(ValueError, match="not four atoms"):
+            _profile(server, bond=_torsion(atoms=[0, 1, 2, 99]))
+
+    def test_a_repeated_atom_is_refused(self, server: FakeCalcServer) -> None:
+        """Four atoms with one repeated do not define an angle, and returned a barrier anyway."""
+        with pytest.raises(ValueError, match="repeats an atom"):
+            _profile(server, bond=_torsion(atoms=[0, 1, 2, 2]))
+
+    def test_a_dihedral_that_does_not_turn_about_its_own_bond_is_refused(
+        self, server: FakeCalcServer
+    ) -> None:
+        """The middle pair *is* the bond; anything else profiles a different rotation."""
+        with pytest.raises(ValueError, match="does not turn about the bond"):
+            _profile(server, bond=_torsion(atoms=[1, 0, 2, 3]))
+
+    def test_a_dihedral_that_is_not_a_bonded_chain_is_refused(self, server: FakeCalcServer) -> None:
+        """Four atoms bonded in sequence is what a dihedral means."""
+        with pytest.raises(ValueError, match="not a bonded chain"):
+            _profile(server, bond=_torsion(atoms=[3, 1, 2, 0]))
+
+    def test_a_step_that_cannot_resolve_the_period_is_refused(self, server: FakeCalcServer) -> None:
+        """One or two points over a period makes every well and barrier in it an artefact."""
+        with pytest.raises(ValueError, match="cannot resolve"):
+            _profile(server, bond=_torsion(period_degrees=20.0), step_degrees=30.0)
+
+
 class TestTheProfile:
     """What the composite finds on a surface whose wells and barriers are known in advance."""
 
@@ -314,6 +358,72 @@ class TestTheWarnings:
         server.overrides["scan_point"] = _one_point_adrift
         warnings = _profile(server).warnings
         assert [warning for warning in warnings if "different basin" in warning], warnings
+
+
+class TestTheBarrierArithmetic:
+    """One energy zero, and a free energy that is one.
+
+    Both defects here were invisible to this file as it stood: the mixed zero is small on the
+    fake's own surface, and the `thorough` path could not run at all because the fake's pass
+    Hessians reported no imaginary mode.
+    """
+
+    def test_a_barrier_is_measured_from_the_released_well_not_the_scan_point(
+        self, server: FakeCalcServer
+    ) -> None:
+        """The two zeros the code used to mix, checked as a number rather than as a rule.
+
+        A barrier's height above its own well plus that well's height above the lowest well is the
+        pass's height above the **lowest released minimum**. The profile's own `relative_kcal` is
+        measured from the lowest **constrained** scan point instead, and releasing a well lowers
+        it — so the first quantity must come out *larger* than the second, by exactly the lowest
+        well's relaxation. On the live GFN2 server that gap is 0.118 kcal/mol on n-butane; mixing
+        the two zeros understated every barrier by it, and could in principle make one negative.
+        """
+        profile = _profile(server)
+        assert profile.barriers, "the premise failed: no barrier to measure"
+        above_lowest_well = max(
+            barrier.forward_kcal + profile.rotamers[barrier.from_rotamer].relative_kcal
+            for barrier in profile.barriers
+        )
+        above_lowest_point = max(point.relative_kcal for point in profile.points)
+        assert above_lowest_well > above_lowest_point, (
+            f"the highest pass is {above_lowest_well:.3f} above the lowest released well and "
+            f"{above_lowest_point:.3f} above the lowest scan point; releasing lowers a well, so "
+            "the first must be the larger — equal means the two zeros are still being mixed"
+        )
+
+    def test_a_thorough_barrier_is_a_free_energy_difference_not_an_absolute_correction(
+        self, server: FakeCalcServer
+    ) -> None:
+        """The defect that produced 70 kcal/mol barriers, and the reason nothing caught it.
+
+        `G - E` for a molecule is its whole thermal-plus-entropic term — tens of kcal/mol — and it
+        was added to an electronic barrier whose well had none subtracted. A free-energy barrier is
+        `G(pass) - G(well)`, so on a surface whose Hessian is the same everywhere the thermal terms
+        cancel and the answer must stay close to the electronic barrier rather than exploding.
+        """
+        electronic = _profile(server)
+        free = _profile(server, level="thorough")
+        assert [barrier.basis for barrier in free.barriers] == ["G"] * len(free.barriers)
+        for barrier in free.barriers:
+            assert barrier.forward_kcal < 20.0, (
+                f"a {barrier.forward_kcal:.1f} kcal/mol barrier on a surface whose highest pass is "
+                f"{electronic.highest_barrier_kcal} — an absolute correction has been added"
+            )
+        assert free.highest_barrier_kcal is not None
+        assert electronic.highest_barrier_kcal is not None
+        assert free.highest_barrier_kcal == pytest.approx(electronic.highest_barrier_kcal, abs=1.0)
+
+    def test_a_rotamer_geometry_and_its_free_energy_describe_one_structure(
+        self, server: FakeCalcServer
+    ) -> None:
+        """Above `quick` the refinement may move the geometry, and the result must move with it."""
+        profile = _profile(server, level="standard")
+        for rotamer in profile.rotamers:
+            assert rotamer.relative_g_kcal is not None
+            assert rotamer.structure_id.startswith("st_")
+        assert len({rotamer.structure_id for rotamer in profile.rotamers}) == len(profile.rotamers)
 
 
 class TestTheCache:
