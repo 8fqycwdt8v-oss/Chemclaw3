@@ -213,8 +213,17 @@ class SpeciesRankingJobSpec(BaseModel):
     solvent: str | None = None
     temperature_k: float | None = None
     level: Literal["quick", "standard", "thorough"] = "standard"
+    # Its own description, shorter and — the part that matters — *true here*. The reaction specs'
+    # text says the job "reports no free energy at all" for a species left out, which is their
+    # behaviour and not this one's: a ranking has no useful E-only substitute above `quick`, so it
+    # ranks anyway and warns. Reusing that string would have been the more wrong of the two.
     symmetry_numbers: dict[str, int] | None = Field(
-        default=None, description=_SYMMETRY_NUMBERS_DESCRIPTION
+        default=None,
+        description=(
+            "Rotational symmetry number per species, keyed by its exact SMILES: 1 = none, "
+            "2 = a C2 axis, 6 = ethane, 12 = benzene. One left out is ranked at sigma=1 and "
+            "warned about; the error is R*ln(sigma), 0.41 kcal/mol per factor of two."
+        ),
     )
 
     @model_validator(mode="after")
