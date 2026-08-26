@@ -260,6 +260,33 @@ def test_two_connectors_cannot_claim_one_job_name(
         job_tools()
 
 
+def test_a_job_cannot_take_the_name_of_another_connectors_endpoint_tool(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The collision that was live: one name, an MCP tool on one bundle and a job on another.
+
+    `props` served `compare_solvents` (a table lookup) while `calc` declared a durable job of the
+    same name (a semiempirical calculation per species per solvent), and the deployment that brings
+    them together is the documented one. It raised nothing: `connector_tool_names()` is a set union,
+    so 30 declared names came back as 29 and the loser simply was not on the agent's surface.
+    """
+    _bundle(tmp_path, "alpha", _http_manifest("alpha", tools="run_thing"))
+    _bundle(tmp_path, "beta", f"name: beta\ndescription: two\n{_JOB_BLOCK}")
+    _use(monkeypatch, tmp_path)
+    with pytest.raises(ConnectorError, match="already provides as a tool"):
+        job_tools()
+
+
+def test_one_connector_cannot_declare_a_job_and_a_tool_with_one_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Within a bundle too: the old dict keyed by job name would have absorbed this silently."""
+    _bundle(tmp_path, "alpha", _http_manifest("alpha", tools="run_thing") + _JOB_BLOCK)
+    _use(monkeypatch, tmp_path)
+    with pytest.raises(ConnectorError, match="already provides as a tool"):
+        job_tools()
+
+
 def test_connector_tool_names_spans_endpoints_and_jobs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

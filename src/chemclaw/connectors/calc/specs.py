@@ -301,6 +301,53 @@ class SpeciesRankingJobSpec(BaseModel):
         return self
 
 
+class SpeciesSolventScreenJobSpec(BaseModel):
+    """A durable ranking of one species set in each of several media.
+
+    `SpeciesRankingJobSpec` with `solvent` replaced by `solvents`, and its rule about the set being
+    the answer's universe applies unchanged — this fans a ranking out over media, it enumerates no
+    more than that one does.
+    """
+
+    kind: Literal["species_solvents"] = "species_solvents"
+    species: list[str] = Field(
+        min_length=1,
+        description="The SMILES to rank against each other, in every medium. Enumerate first.",
+    )
+    labels: list[str] | None = Field(
+        default=None,
+        description="An optional name per species, in the same order and the same length.",
+    )
+    ranking: Literal["tautomers", "microstates", "stereoisomers", "custom"] = "custom"
+    solvents: list[str] = Field(
+        min_length=1,
+        description="ALPB solvent names. The gas phase is always added and need not be listed.",
+    )
+    temperature_k: float | None = None
+    level: Literal["quick", "standard", "thorough"] = "standard"
+    # One map covers the whole screen: the same species appear in every medium, and a rotational
+    # symmetry number is a property of the molecule rather than of what surrounds it. It does not
+    # cancel across the media either, since every medium ranks the same set.
+    symmetry_numbers: dict[str, int] | None = Field(
+        default=None,
+        description=(
+            "Rotational symmetry number per species, keyed by its exact SMILES: 1 = none, "
+            "2 = a C2 axis, 6 = ethane, 12 = benzene. One left out is ranked at sigma=1 and "
+            "warned about; the error is R*ln(sigma), 0.41 kcal/mol per factor of two."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _labels_match_species(self) -> "SpeciesSolventScreenJobSpec":
+        """Refuse a mismatched label list rather than silently pairing the wrong names to forms."""
+        if self.labels is not None and len(self.labels) != len(self.species):
+            raise ValueError(
+                f"{len(self.labels)} labels for {len(self.species)} species: give one label per "
+                "species in the same order, or none at all"
+            )
+        return self
+
+
 class BondSurveyJobSpec(BaseModel):
     """A durable bond-dissociation survey over every breakable bond of one molecule.
 
@@ -338,6 +385,7 @@ XtbJobSpec = Annotated[
     | RefinedEnsembleJobSpec
     | EnsemblePropertyJobSpec
     | SpeciesRankingJobSpec
+    | SpeciesSolventScreenJobSpec
     | BondSurveyJobSpec,
     Field(discriminator="kind"),
 ]

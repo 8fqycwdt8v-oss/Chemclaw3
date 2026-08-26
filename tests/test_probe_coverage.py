@@ -119,7 +119,6 @@ _GRANDFATHERED_AT_INTRODUCTION: frozenset[str] = frozenset(
         "run_stereoisomer_ranking",
         "run_tautomer_resolution",
         "survey_bond_strengths",
-        "transform_structure",
     }
 )
 

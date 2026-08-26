@@ -7,6 +7,7 @@ tools:
   - refine_ensemble
   - compute_ensemble_property
   - rank_species
+  - rank_species_across_solvents
   - survey_bond_strengths
   - enumerate_tautomers
   - enumerate_protonation_states
@@ -102,13 +103,19 @@ them.
 
 ## When the question is about a *set*, not a structure
 
-Everything above answers about one structure. Four jobs answer about a set, and the judgment for
+Everything above answers about one structure. Five jobs answer about a set, and the judgment for
 all of them is in **`ensemble-workflows`** — load it before using any of them, and before deciding
 that a single-structure answer is good enough.
 
 - **Which form is this molecule actually in?** → `rank_species` over `enumerate_tautomers`, or the
   fixed sequence `run_tautomer_resolution`. Ask this *first* on anything with a mobile proton
   between heteroatoms: every other number here describes whichever tautomer was drawn.
+- **Does the form change with the solvent?** → `rank_species_across_solvents`, the same ranking
+  in each medium plus the gas phase. Reach for it whenever the question spans two solvents — an
+  assay in water and a crystallisation out of toluene — rather than running `rank_species` twice
+  and comparing: the ranking is sorted by energy, so two payloads are not a diff, and the result's
+  `dominance_changes` is the finding. If it is true, no single-structure number above is a number
+  about "the compound" without naming the medium.
 - **What is charged, at which pH?** → `enumerate_protonation_states` then `rank_species`, or
   `run_microspecies_profile`. This is the amphoteric and polyprotic case `predict_pka` and
   `predict_logd` refuse; it is not a substitute for them on a single site, where they are calibrated

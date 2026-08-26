@@ -1058,6 +1058,69 @@ class SpeciesDistribution(BaseModel):
         return max(self.species, key=lambda candidate: candidate.population)
 
 
+class SpeciesStanding(BaseModel):
+    """Where one species stands in one medium. `solvent=None` is the gas phase."""
+
+    solvent: str | None
+    relative_kcal: float
+    population: float
+
+
+class SpeciesSolventResponse(BaseModel):
+    """How one species responds to the medium, across every medium the screen ran.
+
+    The transpose of the per-medium distributions, and it earns its place rather than making the
+    reader do it: the question a solvent screen over tautomers is asked is "how much of form B do I
+    get in DMSO against toluene", which is one row here and a scan across N payloads otherwise.
+
+    `population_swing` and `relative_swing_kcal` are the ranges over `standings`. The energy swing
+    is the one to compare against the method's uncertainty — a population swing looks large whenever
+    the species sits near 50%, because the Boltzmann factor is steepest there, and looks small at
+    the ends however far the energy moved.
+    """
+
+    smiles: str
+    label: str = ""
+    standings: list[SpeciesStanding]
+    population_swing: float
+    relative_swing_kcal: float
+
+
+class SpeciesSolventComparison(BaseModel):
+    """One species set ranked in each of several media — which form dominates, and where.
+
+    The distribution job answered in one solvent, so "which tautomer dominates in water against
+    toluene" was N jobs and a comparison nobody had a shape for. This is that comparison, and the
+    gas phase is always included for the same reason `SolventComparisonResult` includes it: "the
+    medium barely matters here" is a real answer and is invisible without a reference point.
+
+    **`dominance_changes` is the headline.** A ranking that reorders between two media is a
+    qualitatively different claim from one that merely shifts — every downstream number that
+    describes "the compound" (a pKa, a Fukui ranking, a dipole, a reaction free energy) describes
+    whichever form was drawn, so a solvent that changes which form is major changes what all of them
+    are about.
+
+    `largest_swing_kcal` is the widest relative-energy range any species shows. When it is not
+    larger than `uncertainty_kcal`, the calculation has **not** distinguished the media, and
+    `warnings` says so — an implicit continuum resolving a few tenths of a kcal/mol between two
+    solvents is reading its own noise.
+    """
+
+    kind: Literal["tautomers", "microstates", "stereoisomers", "custom"]
+    method: str
+    temperature_k: float
+    level: ReactionLevel
+    # One per medium, gas phase first, then the solvents in the order they were asked for. Kept
+    # whole rather than reduced to the responses: each carries its own warnings, its structure ids
+    # and its conformer counts, and a caller that wants "the answer in DMSO" wants that payload.
+    distributions: list[SpeciesDistribution]
+    responses: list[SpeciesSolventResponse]
+    dominance_changes: bool
+    largest_swing_kcal: float
+    uncertainty_kcal: float
+    warnings: list[str] = Field(default_factory=list)
+
+
 class DissociatedBond(BaseModel):
     """One bond's dissociation energy, and the fragments it was computed from."""
 

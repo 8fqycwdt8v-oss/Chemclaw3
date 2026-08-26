@@ -170,19 +170,22 @@ def test_the_bad_names_keep_the_order_they_were_given_in() -> None:
 
 
 def test_every_declared_job_that_takes_a_solvent_declares_the_precondition() -> None:
-    """The rule is only worth anything on the jobs that can violate it — all nine of them.
+    """The rule is only worth anything on the jobs that can violate it — all eleven of them.
 
-    Derived from the manifests and their params models rather than a written-down list, so a tenth
+    Derived from the manifests and their params models rather than a written-down list, so a new
     solvent-taking job — in this bundle or a new one — fails here rather than in a live run. It
     sweeps every *discovered* bundle, not just the enabled ones, because enablement is a
     deployment's choice and the guard is not.
 
     The count is pinned deliberately and updating it is the point: the four multi-step jobs added by
-    `D-2026-08-25-the-loop-is-a-composite-not-a-template` each take a solvent, and so does
-    `profile_rotation` (`D-2026-08-26-a-torsion-is-named-not-indexed`) — every one of them came
-    through this assertion to get here. A sweep that adapted silently would let the tenth arrive
-    with no precondition and fail thirty seconds into a durable run with tblite's own "String value
-    for epsilon was not found among database of solvents".
+    `D-2026-08-25-the-loop-is-a-composite-not-a-template` each take a solvent, and so do
+    `profile_rotation` (`D-2026-08-26-a-torsion-is-named-not-indexed`) and
+    `rank_species_across_solvents` (`D-2026-08-26-a-solvent-is-an-argument-not-a-job`), the latter
+    taking `solvents`, plural. Every one of them came through this assertion to get here — two of
+    them on branches that did not know about each other, which is exactly when a sweep that adapted
+    silently would let the next one arrive with no precondition and fail thirty seconds into a
+    durable run with tblite's own "String value for epsilon was not found among database of
+    solvents".
     """
     from chemclaw.connectors.jobs import _params_model
     from chemclaw.connectors.registry import discovered
@@ -196,7 +199,7 @@ def test_every_declared_job_that_takes_a_solvent_declares_the_precondition() -> 
             assert (
                 job.precondition == "chemclaw.science.calc.solvents:require_supported_solvents"
             ), f"job {job.name!r} takes a solvent but declares precondition {job.precondition!r}"
-    assert checked == 10, f"expected the ten solvent-taking calc jobs, swept {checked}"
+    assert checked == 11, f"expected the eleven solvent-taking calc jobs, swept {checked}"
 
 
 def test_the_launcher_refuses_the_screen_before_it_starts_any_durable_work() -> None:
