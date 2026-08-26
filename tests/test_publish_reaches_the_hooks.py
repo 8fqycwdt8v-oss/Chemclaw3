@@ -5,43 +5,117 @@ correctly, and it proved that while the composite half of the system published n
 `project()` directly with a `payload_kind` it supplies by hand, which no production call site did.
 `test_publish_sql.py` calls `records_from_solvent_screen()` by hand, which nothing called either.
 Both suites were green across a seam whose headline claim — "every composite reaches the results
-store" — was false for all four shipped jobs.
+store" — was false for every shipped job.
 
 The error is one level up from `tasks/lessons.md`'s "measure the mechanism, not the outcome":
 a projector *is* a mechanism, and testing it is still testing a mechanism I chose rather than the
 one something else calls. So every test here starts at a real hook — the envelope a connector job
 returns, the row the backfill reads, the payload the cache writes — and asserts what comes out the
 far end. A projector that no path can reach fails here and passes there, which is the whole point.
+
+**And this file made the same mistake one level down, which is why it now derives its own inputs.**
+Its first version hardcoded four `(calc_type, payload_kind)` pairs "each with the model its
+workflow returns". None of the three claims held: the bundles ship eleven jobs, one of the four
+named a tool, and the two `calc` pairs named the inner models while the workflow named the
+envelope. So it started at a hook it had written down rather than at the hook — and stayed green
+while all nine calc jobs published nothing. What it parametrises over now is read from the things
+that decide the answer: `XtbJobResult`'s own member fields, the connector manifests, and the fake
+that states the calculation server's key contract. A new job, result shape or cache type reaches
+these assertions with no edit here, and anything that genuinely cannot route yet is named in
+`_NOT_YET_PUBLISHED` or `_PRIMITIVES_NOT_PUBLISHED` rather than quietly omitted. Both sets are
+kept even when empty: an empty exclusion is what makes the next unroutable shape fail loudly
+instead of being added to a list nobody re-reads.
 """
 
 import asyncio
 import copy
-from typing import Any
+from typing import Any, get_args
 
 import pytest
+from pydantic import BaseModel
 
+from chemclaw.connectors.calc.results import XtbJobResult
+from chemclaw.connectors.calc.workflows import job_envelope
+from chemclaw.connectors.registry import discovered
 from chemclaw.durable.connector_job import ConnectorJobResult, job_record_for
 from chemclaw.publish.project import PAYLOAD_PROJECTORS, projector_for, records_for
 from chemclaw.science.calc.models import (
+    BondDissociationSurvey,
     Conformer,
     ConformerEnsemble,
+    DissociatedBond,
+    EnsembleProperty,
+    RankedSpecies,
     ReactionEnergyResult,
+    RefinedConformer,
+    RefinedEnsemble,
     SolventComparisonResult,
     SolventEffect,
+    SpeciesDistribution,
     SpeciesEnergy,
     Structure,
     ThermochemistryResult,
     VibrationalMode,
+    WeightedValue,
+)
+from tests.calc_server_fake import _KEYED
+
+# The shapes a durable job can publish, **derived rather than listed**.
+#
+# This was a hand-written tuple of four `(calc_type, payload_kind)` pairs, and every one of the
+# three things it said was wrong. It named four jobs where the bundles ship eleven. One of its
+# four, `calc.compute_thermochemistry`, is a *tool* and not a job at all. And it paired the two
+# `calc` routes with the inner domain models, while `CalcJobWorkflow` set `payload_kind` from
+# `type(result).__name__` on the **envelope** — so the file whose whole premise is "start at a
+# real hook" asserted a pairing no hook produced, and all nine calc jobs published nothing while
+# it stayed green.
+#
+# So the list is now read off the two things that decide it: the member fields of `XtbJobResult`
+# (a tenth result shape is one field there and appears here with no edit) and `qm`'s own return
+# type. A route is not asserted alongside them because a route never identifies a shape — that
+# was the original error — and `test_a_route_never_routes_on_its_own` keeps that honest.
+_ENVELOPE_MEMBERS: tuple[str, ...] = tuple(
+    sorted(
+        annotation.__name__
+        for field in XtbJobResult.model_fields.values()
+        for annotation in get_args(field.annotation)
+        if isinstance(annotation, type) and issubclass(annotation, BaseModel)
+    )
 )
 
-# The four connector jobs this repository ships, each with the model its workflow returns. The
-# `calc_type` is what the hook builds — `<connector>.<job>` — and is deliberately included so the
-# assertion below is about the pair, which is what `projector_for` actually receives.
-_SHIPPED_JOBS: tuple[tuple[str, str], ...] = (
-    ("calc.compute_reaction_energy", "ReactionEnergyResult"),
-    ("calc.compare_solvents", "SolventComparisonResult"),
-    ("calc.compute_thermochemistry", "ThermochemistryResult"),
-    ("qm.compute_dft_energy", "QMJobResult"),
+# Shapes that reach a hook and have no projector yet, so this file stays green while saying so out
+# loud. **Empty, and that is the point of keeping it**: the four multi-step results from
+# `D-2026-08-25-the-loop-is-a-composite-not-a-template` were named here for exactly one release and
+# `D-2026-08-26-a-projector-per-shape-the-loop-produces` emptied it. A shape not named here must
+# route, so a tenth member field on `XtbJobResult` fails immediately rather than joining a silent
+# set — which is the whole reason this is a declared exclusion rather than an omission.
+_NOT_YET_PUBLISHED: frozenset[str] = frozenset()
+
+# What the `qm` bundle returns. Listed rather than derived because it has no envelope to derive
+# from — the workflow returns its domain model directly, which is precisely why `qm` was the one
+# bundle publishing before this change.
+_QM_RESULT = "QMJobResult"
+
+# Every `calc_type` the calculation server stamps on a cache row, read off the fake that states
+# its key contract rather than re-listed here. A calculator that gains a cache type appears in this
+# parametrisation with no edit — which is the half that was missing when `developability` shipped
+# unroutable behind a projector table that said `descriptors`.
+_STAMPED_CALC_TYPES: tuple[str, ...] = tuple(
+    sorted({calc_type for calc_type, _ in _KEYED.values()})
+)
+
+# The one stamped type with no projector, declared for the same reason as `_NOT_YET_PUBLISHED`
+# above. A Hessian's scientific value is realised in `ThermochemistryResult`, which is a *tool*
+# composite — neither cached nor a job — so publishing frequencies needs a third hook and a
+# decision, not a projector. Tracked in `docs/planning/BACKLOG.md`.
+_PRIMITIVES_NOT_PUBLISHED: frozenset[str] = frozenset({"xtb.hess"})
+
+# The routes the hooks build, `<connector>.<job>`, read off the manifests so a new job cannot be
+# added without this file seeing it.
+_JOB_ROUTES: tuple[str, ...] = tuple(
+    f"{name}.{job.name}"
+    for name, (_directory, manifest) in sorted(discovered().items())
+    for job in manifest.jobs
 )
 
 
@@ -121,23 +195,350 @@ def _thermochemistry() -> ThermochemistryResult:
     )
 
 
-@pytest.mark.parametrize(("calc_type", "payload_kind"), _SHIPPED_JOBS)
-def test_every_shipped_job_routes_to_a_projector(calc_type: str, payload_kind: str) -> None:
-    """A composite's `calc_type` names a route, so only `payload_kind` can identify its shape.
+@pytest.mark.parametrize("route", _JOB_ROUTES)
+def test_a_route_never_routes_on_its_own(route: str) -> None:
+    """`<connector>.<job>` names where a result came from, never what shape it is.
 
-    This is the assertion whose absence let the seam ship inert. `<connector>.<job>` matches none
-    of the projector prefixes — they are `xtb.*`, `dft`, `pka`, `logd`, `solubility`,
-    `descriptors` — so before the envelope carried `payload_kind` every one of these resolved to
-    `None` and every composite was dropped with a debug line.
+    Asserted for every job in every manifest rather than for a chosen few, because the failure it
+    guards is a prefix growing until it collides with a connector name — at which point a
+    composite would be projected by accident, as whatever calculator owns that prefix.
     """
-    assert projector_for(calc_type) is None, (
-        f"{calc_type!r} resolved a projector from its route alone, which means a prefix now "
-        "collides with a connector name — the pair below would then be routed by accident"
+    assert projector_for(route) is None, (
+        f"{route!r} resolved a projector from its route alone: a `_CALC_TYPE_PROJECTORS` prefix "
+        "now collides with a connector name, so this job's results would be projected as the "
+        "wrong shape rather than by their `payload_kind`"
     )
-    assert projector_for(calc_type, payload_kind) is not None, (
-        f"{calc_type!r} carrying {payload_kind!r} routes to no projector; its results would be "
-        "silently dropped at the enqueue"
+
+
+@pytest.mark.parametrize("payload_kind", _ENVELOPE_MEMBERS)
+def test_every_shape_a_calc_job_can_return_routes_to_a_projector(payload_kind: str) -> None:
+    """Every member `XtbJobResult` can carry is a shape some job publishes — or admits it cannot.
+
+    This is the assertion whose absence let the seam ship inert, and the reason it is written
+    against the envelope's *fields* rather than against a list of jobs: nine jobs share one
+    workflow and one envelope, so the envelope's members are the complete set of shapes this
+    bundle can hand the publish path, and they cannot drift from it.
+    """
+    routed = projector_for("calc.any_job", payload_kind) is not None
+    if payload_kind in _NOT_YET_PUBLISHED:
+        assert not routed, (
+            f"{payload_kind!r} now routes to a projector — delete it from `_NOT_YET_PUBLISHED`. "
+            "That set is an exclusion with a deadline, and a stale entry is a claim that a shape "
+            "is unpublished when it is not"
+        )
+        return
+    assert routed, (
+        f"a calc job returning {payload_kind!r} routes to no projector; its results would be "
+        "silently dropped at the enqueue. Add one to `PAYLOAD_PROJECTORS`, or — if it genuinely "
+        "cannot be published yet — name it in `_NOT_YET_PUBLISHED` so the gap is declared"
     )
+
+
+@pytest.mark.parametrize("calc_type", _STAMPED_CALC_TYPES)
+def test_every_calc_type_the_server_stamps_routes_to_a_projector(calc_type: str) -> None:
+    """The primitive twin of the test above, and it failed for the same kind of reason.
+
+    The cache hook (`science/calc/store.py::publish_stored_result`) passes no `payload_kind` — it
+    holds an untyped dict from an MCP call and has nothing to name — so a primitive is routed by
+    its `calc_type` prefix alone, and that prefix is stamped by the *server*, not chosen here.
+    `_CALC_TYPE_PROJECTORS` said `descriptors`; the server has always stamped `developability`, so
+    every descriptor panel was dropped at the enqueue while `test_publish_projection.py` exercised
+    the spelling nothing emits.
+
+    Parametrised over `calc_server_fake._KEYED` because that map is this repository's statement of
+    the server's key contract — the same one `test_calc_remote.py` and the composite suites are
+    driven against. If it drifts from the real server, more than this test is wrong.
+    """
+    if calc_type in _PRIMITIVES_NOT_PUBLISHED:
+        assert projector_for(calc_type) is None, (
+            f"{calc_type!r} now routes — delete it from `_PRIMITIVES_NOT_PUBLISHED`"
+        )
+        return
+    assert projector_for(calc_type) is not None, (
+        f"the server stamps {calc_type!r} and no projector prefix matches it, so every one of "
+        "those results is dropped at the enqueue with a debug line"
+    )
+
+
+def test_the_qm_bundle_returns_its_domain_model_and_routes() -> None:
+    """`qm` has no envelope: its workflow returns `QMJobResult`, which is why it always published.
+
+    Kept as its own test rather than folded into the parametrisation above, because the thing
+    worth asserting is the *difference* — one bundle wraps its result and one does not, and the
+    publish path has to work for both.
+    """
+    assert projector_for("qm.compute_dft_energy", _QM_RESULT) is not None
+
+
+def test_what_the_calc_workflow_returns_projects_into_records() -> None:
+    """The whole hook, through the function `CalcJobWorkflow.run` itself calls.
+
+    Every other test in this file starts one step *after* the workflow — it builds the envelope by
+    hand — and that is exactly the gap the seam shipped through: a hand-built envelope carried
+    `ReactionEnergyResult` while the workflow's own `type(result).__name__` carried `XtbJobResult`,
+    which routes nowhere. Measured on the shipped code, the production pair queued 0 rows where the
+    hand-built one queued 1.
+
+    So this calls `job_envelope`, which is what the workflow calls — not a copy of its body, which
+    is the mistake one level up. Asserting it without a worker is sound because the function is
+    pure: the workflow applies it in workflow code, where a replay must produce byte-identical
+    output from an activity result already in history.
+    """
+    envelope = job_envelope(
+        XtbJobResult(kind="reaction", summary="ΔE = -38.2 kcal/mol", reaction=_reaction())
+    )
+
+    assert envelope.payload_kind == "ReactionEnergyResult", (
+        "the workflow must name the shape it computed, not the envelope it wrapped it in"
+    )
+    assert "reaction" not in envelope.data, (
+        "`data` must be the domain result itself; a wrapper key here means the science is a level "
+        "down and `payload_kind` is naming the wrapper"
+    )
+    records = records_for(
+        calc_ref="calc-job-1",
+        calc_type="calc.compute_reaction_energy",
+        payload=envelope.data,
+        payload_kind=envelope.payload_kind,
+    )
+    assert records, "what the production hook returns projected nothing"
+    assert records[0].subject.members, "the projected record names no species"
+
+
+def _refined() -> RefinedEnsemble:
+    """A free-energy-refined ensemble: two of forty-seven members re-scored."""
+    return RefinedEnsemble(
+        smiles="CCO",
+        method="GFN2-xTB",
+        solvent="thf",
+        temperature_k=298.15,
+        conformers=[
+            RefinedConformer(
+                structure=_structure(),
+                relative_kcal=0.0,
+                population=0.8,
+                degeneracy=1,
+                gibbs_free_energy_hartree=-154.15,
+                electronic_energy_hartree=-154.2,
+                is_minimum=True,
+            ),
+            RefinedConformer(
+                structure=_structure(2.0),
+                relative_kcal=0.9,
+                population=0.2,
+                degeneracy=2,
+                gibbs_free_energy_hartree=-154.14,
+                electronic_energy_hartree=-154.19,
+                is_minimum=True,
+            ),
+        ],
+        total_found=47,
+        refined_count=2,
+        refined_population_covered=0.62,
+        refined_conformational_entropy_cal_per_mol_k=0.9,
+        refined_ensemble_correction_kcal=-0.27,
+    )
+
+
+def _averaged() -> EnsembleProperty:
+    """A Boltzmann-averaged scalar property over an ensemble."""
+    return EnsembleProperty(
+        smiles="CCO",
+        property_name="dipole_debye",
+        method="GFN2-xTB",
+        solvent="thf",
+        temperature_k=298.15,
+        members_averaged=5,
+        total_found=47,
+        value=WeightedValue(mean=1.68, minimum=1.41, maximum=1.93, spread=0.52),
+        population_covered=0.91,
+    )
+
+
+def _distribution() -> SpeciesDistribution:
+    """A ranked tautomer population."""
+    return SpeciesDistribution(
+        kind="tautomers",
+        method="GFN2-xTB",
+        solvent="water",
+        temperature_k=298.15,
+        level="standard",
+        species=[
+            RankedSpecies(
+                smiles="CC(=O)CC(=O)C",
+                label="diketo",
+                relative_kcal=0.0,
+                population=0.93,
+                gibbs_free_energy_hartree=-345.1,
+                electronic_energy_hartree=-345.2,
+                structure_id=_structure().structure_id,
+                conformers_found=4,
+            ),
+            RankedSpecies(
+                smiles="CC(O)=CC(=O)C",
+                label="enol",
+                relative_kcal=1.5,
+                population=0.07,
+                gibbs_free_energy_hartree=-345.09,
+                electronic_energy_hartree=-345.18,
+                conformers_found=3,
+            ),
+        ],
+        enumerated=2,
+        uncertainty_kcal=2.0,
+    )
+
+
+def _bond_survey_result() -> BondDissociationSurvey:
+    """A homolytic bond dissociation survey with a named weakest bond."""
+    return BondDissociationSurvey(
+        smiles="CCO",
+        method="GFN2-xTB",
+        solvent=None,
+        temperature_k=298.15,
+        mode="homolytic",
+        bonds=[
+            DissociatedBond(
+                atoms=[0, 1],
+                bond="C-C",
+                fragments=["[CH3]", "[CH2]O"],
+                dissociation_energy_kcal=88.4,
+            ),
+            DissociatedBond(
+                atoms=[1, 2],
+                bond="C-O",
+                fragments=["CC", "[OH]"],
+                dissociation_energy_kcal=71.2,
+                is_weakest=True,
+            ),
+        ],
+        considered=2,
+        uncertainty_kcal=4.0,
+    )
+
+
+# The four multi-step shapes, each with the envelope field its job populates. Driven through
+# `job_envelope` rather than through `project()`, because "has a projector" and "the hook reaches
+# that projector" are the two different claims this file exists to keep apart.
+_MULTI_STEP: tuple[tuple[str, str, Any], ...] = (
+    ("refined", "RefinedEnsemble", _refined),
+    ("averaged", "EnsembleProperty", _averaged),
+    ("distribution", "SpeciesDistribution", _distribution),
+    ("bonds", "BondDissociationSurvey", _bond_survey_result),
+)
+
+
+@pytest.mark.parametrize(("field", "expected_kind", "build"), _MULTI_STEP)
+def test_each_multi_step_result_projects_through_its_job_envelope(
+    field: str, expected_kind: str, build: Any
+) -> None:
+    """The seven jobs `the-loop-is-a-composite` added, from envelope to projected record.
+
+    Each of these ran, cost real compute and published nothing for a release: their shapes reached
+    the hook and `PAYLOAD_PROJECTORS` had an entry for none of them. Asserting through
+    `job_envelope` is what makes this a statement about the seven jobs rather than about four
+    functions.
+    """
+    envelope = job_envelope(XtbJobResult(kind=field, summary="s", **{field: build()}))
+
+    assert envelope.payload_kind == expected_kind
+    records = records_for(
+        calc_ref=f"calc-job-{field}",
+        calc_type=f"calc.{field}",
+        payload=envelope.data,
+        payload_kind=envelope.payload_kind,
+    )
+    assert records, f"{expected_kind} projected no record"
+    record = records[0]
+    assert record.subject.members, "the projected record names nothing it is about"
+    # Something quantitative survived — a record with a subject and no facts is a row that says a
+    # calculation happened and nothing about what it found.
+    assert record.properties or record.sites or record.conformers or record.candidates
+
+
+def test_a_refined_ensemble_publishes_electronic_energies_and_free_energy_populations() -> None:
+    """The one place two ensemble shapes could silently disagree, asserted rather than argued.
+
+    `_refined_ensemble`'s docstring commits to `energy_hartree` carrying the *electronic* energy
+    even though the ranking is by G, so that "the same conformer, E-weighted and G-weighted" is a
+    comparison on one column. If that ever changes to the Gibbs energy, the two ensemble kinds stop
+    being comparable and nothing else in the suite would notice.
+    """
+    envelope = job_envelope(XtbJobResult(kind="refined", summary="s", refined=_refined()))
+    record = records_for(
+        calc_ref="calc-job-refined",
+        calc_type="calc.refine_ensemble",
+        payload=envelope.data,
+        payload_kind=envelope.payload_kind,
+    )[0]
+
+    assert [c.energy_hartree for c in record.conformers] == [-154.2, -154.19]
+    assert [c.relative_kcal for c in record.conformers] == [0.0, 0.9]
+    assert [c.population for c in record.conformers] == [0.8, 0.2]
+    assert record.level.treatment == "free-energy-weighted-top-n", (
+        "the treatment is what disambiguates the relative energies; without it the electronic "
+        "absolutes and the free-energy relatives read as one scale"
+    )
+    named = {fact.property for fact in record.properties}
+    assert "refined_conformational_entropy" in named and "conformational_entropy" not in named, (
+        "the refined subset's entropy must not be published under the ensemble-wide name"
+    )
+
+
+def test_a_bond_survey_publishes_pairs_and_hoists_the_weakest() -> None:
+    """A bond is an atom *pair*, and 'which breaks first' must be a scalar predicate.
+
+    Both are decisions `_bond_survey` states, and both are invisible from the routing test: a
+    projector that emitted one site per bond with `atom_j = -1` would route identically and make
+    every bond unaddressable.
+    """
+    envelope = job_envelope(XtbJobResult(kind="bonds", summary="s", bonds=_bond_survey_result()))
+    record = records_for(
+        calc_ref="calc-job-bonds",
+        calc_type="calc.survey_bond_strengths",
+        payload=envelope.data,
+        payload_kind=envelope.payload_kind,
+    )[0]
+
+    assert [(s.atom_i, s.atom_j) for s in record.sites] == [(0, 1), (1, 2)]
+    assert all(site.property == "bond_dissociation_energy" for site in record.sites)
+    scalars = {fact.property: fact for fact in record.properties}
+    assert scalars["weakest_bond"].value_text == "C-O"
+    assert scalars["weakest_bond_dissociation_energy"].value == 71.2
+    assert scalars["weakest_bond_dissociation_energy"].uncertainty == 4.0
+
+
+def test_a_species_distribution_publishes_candidates_not_subject_members() -> None:
+    """A ranked set is what a calculation *produced*, never what it was *about*.
+
+    `CandidateFact` shipped with the schema and had no producer at all until this projector; the
+    distinction it encodes is the one that keeps a compound's tautomer set from colliding with the
+    compound.
+    """
+    envelope = job_envelope(
+        XtbJobResult(kind="distribution", summary="s", distribution=_distribution())
+    )
+    record = records_for(
+        calc_ref="calc-job-dist",
+        calc_type="calc.rank_species",
+        payload=envelope.data,
+        payload_kind=envelope.payload_kind,
+    )[0]
+
+    assert record.subject.kind == "system"
+    assert [c.score for c in record.candidates] == [0.93, 0.07]
+    assert all(c.score_property == "population" for c in record.candidates)
+    assert record.candidates[0].detail["label"] == "diketo"
+
+
+def test_an_envelope_carrying_no_result_is_a_loud_failure() -> None:
+    """A job that produced nothing must not report success with a `kind` describing an absence.
+
+    The alternative — returning the bookkeeping fields alone — is what the publish path used to
+    receive, and it is indistinguishable at the far end from a result this release cannot read.
+    """
+    with pytest.raises(ValueError, match="carried 0"):
+        XtbJobResult(kind="reaction", summary="nothing ran").outcome()
 
 
 def test_the_envelope_carries_the_shape_its_data_came_from() -> None:

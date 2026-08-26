@@ -48,6 +48,7 @@ from chemclaw.science.calc.models import (
     EnsemblePayload,
     EnsembleSearch,
     HessianPayload,
+    Interconversion,
     Structure,
     ThermochemistryResult,
     VibrationalMode,
@@ -439,6 +440,73 @@ def rt_kcal(temperature_k: float) -> float:
     wrong at any other temperature the caller asks for.
     """
     return _GAS_CONSTANT_CAL * temperature_k / 1000.0
+
+
+def rate_from_barrier(barrier_kcal: float, temperature_k: float) -> float:
+    """The Eyring rate constant, in s^-1, for a free-energy barrier in kcal/mol.
+
+    `k = (kB T / h) exp(-dG‡ / RT)`, with the transmission coefficient at 1 — the convention every
+    tabulated barrier in the literature is quoted under, so a computed number and a measured one
+    can be compared without a conversion nobody states.
+
+    Arithmetic over a result rather than a calculation, which is why it lives here beside the RRHO
+    and Boltzmann halves rather than behind the wire: it needs no binary, and it is what the model
+    would otherwise be asked to do in its head at the exact point where one kcal/mol is a factor
+    of five.
+    """
+    exponent = -barrier_kcal * 1000.0 / (_GAS_CONSTANT_CAL * temperature_k)
+    return (_BOLTZMANN * temperature_k / _PLANCK) * math.exp(exponent)
+
+
+def half_life_from_barrier(
+    barrier_kcal: float, temperature_k: float, uncertainty_kcal: float | None = None
+) -> Interconversion:
+    """How long a rotamer survives at `temperature_k`, with the band the method's error implies.
+
+    `t½ = ln2 / k` for a first-order process, which an interconversion is. The band is the same
+    arithmetic at `barrier ± uncertainty`: a *lower* barrier is a *shorter* half-life, so the
+    fastest end comes from the minus side.
+
+    Args:
+        barrier_kcal: The free-energy barrier out of the populated well, in kcal/mol.
+        temperature_k: The temperature the lifetime is quoted at — the process temperature, not
+            298 K, when the question is whether something racemizes during manufacture.
+        uncertainty_kcal: The method's uncertainty; the configured semiempirical value by default.
+
+    Returns:
+        The rate, the half-life, and the shortest and longest half-life the barrier's uncertainty
+        allows.
+    """
+    band = settings.xtb_reaction_uncertainty_kcal if uncertainty_kcal is None else uncertainty_kcal
+    rate = rate_from_barrier(barrier_kcal, temperature_k)
+    return Interconversion(
+        barrier_kcal=barrier_kcal,
+        temperature_k=temperature_k,
+        rate_per_second=rate,
+        half_life_seconds=math.log(2.0) / rate,
+        half_life_seconds_fastest=math.log(2.0)
+        / rate_from_barrier(barrier_kcal - band, temperature_k),
+        half_life_seconds_slowest=math.log(2.0)
+        / rate_from_barrier(barrier_kcal + band, temperature_k),
+        uncertainty_kcal=band,
+    )
+
+
+def barrier_from_half_life(half_life_seconds: float, temperature_k: float) -> float:
+    """The barrier a required lifetime implies — Eyring read backwards, in kcal/mol.
+
+    The question a formulation or a specification actually asks: *what barrier would this compound
+    need for a two-year shelf life?* Answering it turns a computed barrier from a number into a
+    comparison against a requirement, which is what decides whether an experiment is worth running.
+
+    The exact inverse of `rate_from_barrier`, so the two cannot drift into disagreeing about the
+    prefactor.
+    """
+    if half_life_seconds <= 0:
+        raise ValueError(f"a half-life is positive; got {half_life_seconds}")
+    rate = math.log(2.0) / half_life_seconds
+    prefactor = _BOLTZMANN * temperature_k / _PLANCK
+    return -_GAS_CONSTANT_CAL * temperature_k * math.log(rate / prefactor) / 1000.0
 
 
 def boltzmann_populations(

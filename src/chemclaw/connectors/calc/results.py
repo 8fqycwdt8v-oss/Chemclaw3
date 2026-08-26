@@ -26,9 +26,11 @@ from chemclaw.science.calc.models import (
     MicrostatePka,
     ReactionEnergyResult,
     RefinedEnsemble,
+    RotationProfile,
     ScanResult,
     SolventComparisonResult,
     SpeciesDistribution,
+    SpeciesSolventComparison,
 )
 
 
@@ -49,13 +51,50 @@ class XtbJobResult(BaseModel):
     reaction: ReactionEnergyResult | None = None
     solvents: SolventComparisonResult | None = None
     scan: ScanResult | None = None
+    # The rotational profile (D-2026-08-26-a-torsion-is-named-not-indexed). Additive and defaulted
+    # like the four below, and for the same reason: this crosses the Temporal wire and histories are
+    # in flight, so a result decoded from an older one simply has none.
+    rotation: RotationProfile | None = None
     ensemble: ConformerEnsemble | None = None
     interaction: InteractionResult | None = None
     pka: MicrostatePka | None = None
-    # The four multi-step results. Additive and defaulted like `calc_refs` above and for the same
+    # The six multi-step results. Additive and defaulted like `calc_refs` above and for the same
     # reason: this crosses the Temporal wire and histories are in flight, so a result decoded from
     # an older one simply has none of them.
     refined: RefinedEnsemble | None = None
     averaged: EnsembleProperty | None = None
     distribution: SpeciesDistribution | None = None
+    # The distribution fanned out over media (D-2026-08-26-a-solvent-is-an-argument-not-a-job).
+    species_solvents: SpeciesSolventComparison | None = None
     bonds: BondDissociationSurvey | None = None
+
+    def outcome(self) -> BaseModel:
+        """The one result shape this job actually produced.
+
+        **Why this exists.** This class is bookkeeping around a domain result: `kind` and `summary`
+        say which member is set and how to read it in one line, and every consumer that wants the
+        science wants the member. `type(envelope).__name__` is therefore never the answer to "what
+        shape is this" — it is always `XtbJobResult` — and answering it that way is what left the
+        whole composite half of `chemclaw.publish` dropping its input with a debug line while every
+        test passed (`D-2026-08-25-a-cache-is-not-a-record`'s headline claim). `qm` has no wrapper
+        and is the one bundle that published; this is how `calc` stops being the exception.
+
+        **Members are recognised by type, not by a name list.** A member is a `BaseModel`; the
+        envelope's own three fields are a `str`, a `str` and a `list[str]`. So a tenth result shape
+        is one field on this class and nothing else — no list here to forget to extend, which is
+        the failure mode this whole change is about.
+
+        Pure, and it has to be: `CalcJobWorkflow` calls it in workflow code, where a replay must
+        produce byte-identical output from an activity result already in history.
+
+        Raises:
+            ValueError: if the envelope carries no member or more than one. A job that produced no
+                result must not report success, and `kind` would be describing something absent.
+        """
+        members = [value for _, value in self if isinstance(value, BaseModel)]
+        if len(members) != 1:
+            raise ValueError(
+                f"an xTB job envelope carries exactly one result; {self.kind!r} carried "
+                f"{len(members)}. This is a dispatch bug in `run_xtb_calculation`, not bad input."
+            )
+        return members[0]

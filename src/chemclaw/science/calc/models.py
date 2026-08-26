@@ -644,6 +644,139 @@ class ScanResult(BaseModel):
     minimum_structure: Structure
 
 
+class Interconversion(BaseModel):
+    """What a barrier means as a rate, with the uncertainty that decides whether it means anything.
+
+    **The band is not decoration.** Eyring is exponential in the barrier, so the method's own
+    ±3 kcal/mol (`xtb_reaction_uncertainty_kcal`) is roughly five orders of magnitude in half-life
+    at room temperature. `skills/atropisomer-assessment` puts the consequence plainly: a computed
+    26 kcal/mol spans "hours" to "years" and therefore spans two ICH classes. A single number here
+    would read exactly like a measurement, which is the one thing it is not — so the fast and slow
+    ends travel with the mean and every caller that reports one reports all three.
+    """
+
+    barrier_kcal: float
+    temperature_k: float
+    rate_per_second: float
+    half_life_seconds: float
+    # The half-life at the barrier plus and minus the method's uncertainty. Named for what they
+    # are to a chemist — the shortest and longest lifetime consistent with this calculation —
+    # rather than for the sign of the shift that produced them.
+    half_life_seconds_fastest: float
+    half_life_seconds_slowest: float
+    uncertainty_kcal: float
+
+
+class Torsion(BaseModel):
+    """The bond a rotational profile is about, as `chem`'s `enumerate_torsions` described it.
+
+    A model rather than five loose arguments because these five values travel together through the
+    composite and into the result, and because `BondCleavageSpec` next door records what a
+    positional payload costs: a tuple is one field-order change away from computing a different
+    bond than the caller named. It is *checked* rather than trusted — `_verified_torsion` recomputes
+    the handle from the molecule being calculated and refuses a mismatch.
+
+    `connectors/calc/specs.py::TorsionSpec` is the same shape on the wire, deliberately declared
+    separately: that module is a leaf the chat service imports on every agent build and may not
+    import `science` (D-118), so the wire shape and the domain shape are two files by rule. The
+    activity maps one onto the other field by field.
+    """
+
+    torsion_id: str
+    atoms: list[int] = Field(min_length=0, max_length=4)
+    bond: list[int] = Field(min_length=2, max_length=2)
+    label: str
+    symmetry_order: int = Field(default=1, ge=1)
+    period_degrees: float = Field(default=360.0, gt=0.0, le=360.0)
+
+
+class Rotamer(BaseModel):
+    """One populated minimum of a torsion profile — a released geometry, not a scan point.
+
+    The distinction is the whole reason this model exists beside `ScanPoint`. Every point of a
+    relaxed scan is *constrained*: the dihedral is frozen and everything else relaxes around it, so
+    the lowest point of a profile is not a minimum of the molecule, it is the best of a set of
+    partially-optimized geometries. A rotamer is what the well becomes once the constraint is
+    released and the geometry is optimized freely — which is the structure any later calculation
+    should start from, and the reason `structure_id` here is worth carrying.
+    """
+
+    dihedral_degrees: float
+    structure_id: str
+    relative_kcal: float
+    population: float
+    # How many times this rotamer occurs in a full turn. The profile is scanned over one period, so
+    # a well found there stands for `symmetry_order` copies of itself — and a population that
+    # ignores that is wrong in the same way, and by the same arithmetic, as an ensemble population
+    # that ignores conformer degeneracy (measured on n-butane: 73% against the correct 59.2%).
+    degeneracy: int = Field(default=1, ge=1)
+    # Free energy relative to the lowest rotamer, above `level="quick"`. `None` says the ranking is
+    # electronic, which is a different claim and one a reader must not have to infer.
+    relative_g_kcal: float | None = None
+
+
+class RotationBarrier(BaseModel):
+    """The cost of getting from one rotamer to the next, in the direction it is quoted.
+
+    **Directional, because a barrier is.** `forward_kcal` is measured from `from_rotamer` and
+    `reverse_kcal` from `to_rotamer`, and the two are equal only when the wells are degenerate. The
+    one that decides configurational stability is the barrier out of the *populated* well, so
+    reporting a single "the barrier" for a pair of unequal wells is reporting the wrong number half
+    the time.
+    """
+
+    from_rotamer: int
+    to_rotamer: int
+    at_degrees: float
+    forward_kcal: float
+    reverse_kcal: float
+    # `E` when the barrier is electronic, `G` when a Hessian was taken at the pass and its one
+    # imaginary mode dropped — the standard transition-state treatment, applied to a geometry that
+    # is a constrained maximum rather than an optimized saddle. Named on the barrier rather than on
+    # the profile because a run can produce both: a pass with two imaginary modes falls back to `E`
+    # and says so in the warnings.
+    basis: Literal["E", "G"] = "E"
+    # Rate and lifetime at the profile's temperature, with the band the method's uncertainty
+    # implies. Absent only when the arithmetic could not be done.
+    interconversion: Interconversion | None = None
+
+
+class RotationProfile(BaseModel):
+    """A torsion driven through one full period: the profile, its rotamers, and their barriers.
+
+    What `ScanResult` is not. A scan reports points and the highest one relative to the lowest; this
+    reports the *wells as released minima*, the barrier between each adjacent pair in both
+    directions, the populations at a temperature, and the half-life each barrier implies. Those are
+    the four things a chemist asking "which rotamer is it in and can I separate them" needs, and
+    every one of them was previously left to be worked out by hand from a profile.
+    """
+
+    smiles: str | None
+    input_structure_id: str
+    method: str
+    solvent: str | None
+    temperature_k: float
+    level: ReactionLevel
+    # The bond this profile is about, in the form a reader can check it by: the handle, the atoms,
+    # and the label a chemist recognises. Carried on the result rather than only on the request,
+    # because the answer has to say which bond it is about.
+    torsion_id: str
+    atoms: list[int]
+    label: str
+    symmetry_order: int
+    period_degrees: float
+    points: list[ScanPoint]
+    rotamers: list[Rotamer]
+    barriers: list[RotationBarrier]
+    highest_barrier_kcal: float
+    uncertainty_kcal: float
+    # What the profile itself says about how far to trust it: a step that may have driven over a
+    # maximum, a point that relaxed into another basin, a well that would not settle. The three
+    # pathologies `skills/conformational-analysis` asks a human to spot by eye — checked here,
+    # because a check nobody runs is a check that does not exist.
+    warnings: list[str] = Field(default_factory=list)
+
+
 class EnsembleMember(BaseModel):
     """One structure of a CREST ensemble, with the energy it was ranked by.
 
@@ -974,6 +1107,69 @@ class SpeciesDistribution(BaseModel):
     def dominant(self) -> RankedSpecies:
         """The most populated species — the form every other number should be about."""
         return max(self.species, key=lambda candidate: candidate.population)
+
+
+class SpeciesStanding(BaseModel):
+    """Where one species stands in one medium. `solvent=None` is the gas phase."""
+
+    solvent: str | None
+    relative_kcal: float
+    population: float
+
+
+class SpeciesSolventResponse(BaseModel):
+    """How one species responds to the medium, across every medium the screen ran.
+
+    The transpose of the per-medium distributions, and it earns its place rather than making the
+    reader do it: the question a solvent screen over tautomers is asked is "how much of form B do I
+    get in DMSO against toluene", which is one row here and a scan across N payloads otherwise.
+
+    `population_swing` and `relative_swing_kcal` are the ranges over `standings`. The energy swing
+    is the one to compare against the method's uncertainty — a population swing looks large whenever
+    the species sits near 50%, because the Boltzmann factor is steepest there, and looks small at
+    the ends however far the energy moved.
+    """
+
+    smiles: str
+    label: str = ""
+    standings: list[SpeciesStanding]
+    population_swing: float
+    relative_swing_kcal: float
+
+
+class SpeciesSolventComparison(BaseModel):
+    """One species set ranked in each of several media — which form dominates, and where.
+
+    The distribution job answered in one solvent, so "which tautomer dominates in water against
+    toluene" was N jobs and a comparison nobody had a shape for. This is that comparison, and the
+    gas phase is always included for the same reason `SolventComparisonResult` includes it: "the
+    medium barely matters here" is a real answer and is invisible without a reference point.
+
+    **`dominance_changes` is the headline.** A ranking that reorders between two media is a
+    qualitatively different claim from one that merely shifts — every downstream number that
+    describes "the compound" (a pKa, a Fukui ranking, a dipole, a reaction free energy) describes
+    whichever form was drawn, so a solvent that changes which form is major changes what all of them
+    are about.
+
+    `largest_swing_kcal` is the widest relative-energy range any species shows. When it is not
+    larger than `uncertainty_kcal`, the calculation has **not** distinguished the media, and
+    `warnings` says so — an implicit continuum resolving a few tenths of a kcal/mol between two
+    solvents is reading its own noise.
+    """
+
+    kind: Literal["tautomers", "microstates", "stereoisomers", "custom"]
+    method: str
+    temperature_k: float
+    level: ReactionLevel
+    # One per medium, gas phase first, then the solvents in the order they were asked for. Kept
+    # whole rather than reduced to the responses: each carries its own warnings, its structure ids
+    # and its conformer counts, and a caller that wants "the answer in DMSO" wants that payload.
+    distributions: list[SpeciesDistribution]
+    responses: list[SpeciesSolventResponse]
+    dominance_changes: bool
+    largest_swing_kcal: float
+    uncertainty_kcal: float
+    warnings: list[str] = Field(default_factory=list)
 
 
 class DissociatedBond(BaseModel):

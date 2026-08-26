@@ -165,6 +165,18 @@ class CalculatorSettings(BaseSettings):
     # optimization on the calculation server, so this bounds the cost of a single agent call —
     # and it is read *here* because the scan is composed here, one remote point at a time.
     xtb_scan_max_points: int = 24
+    # A rotational profile's coarse step, in degrees. 30 covers a full turn in twelve constrained
+    # optimizations and resolves every well of an ordinary torsion; the barrier *height* it gives
+    # is then refined, because a coarse grid steps over a maximum rather than landing on it —
+    # which is precisely what `skills/conformational-analysis` asks a human to notice and rescan.
+    xtb_rotation_step_degrees: float = Field(default=30.0, gt=0.0, le=120.0)
+    # How many extra points each maximum is resolved with, spread across the two coarse steps
+    # around it. Four puts a point every fifth of a step there, which is where the barrier is read.
+    xtb_rotation_refine_points: int = Field(default=4, ge=0)
+    # Two released minima closer than this (degrees) are the same rotamer. Well below the smallest
+    # real separation between torsional minima (60 degrees for a three-fold rotor) and well above
+    # the spread of an optimizer settling into one basin from two neighbouring start points.
+    xtb_rotation_merge_degrees: float = Field(default=15.0, gt=0.0, lt=60.0)
     # How many times a geometry that lands on a saddle point may be displaced along its
     # imaginary mode and re-optimized, and how far (Angstrom, the largest atom's motion).
     # One attempt clears the ordinary case — a force field's eclipsed methyl held by

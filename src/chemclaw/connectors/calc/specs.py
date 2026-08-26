@@ -66,6 +66,41 @@ class BondCleavageSpec(BaseModel):
     fragments: list[str] = Field(min_length=2, max_length=2)
 
 
+# A model rather than four bare indices, for the reason `BondCleavageSpec` states and one more. The
+# stated one: a positional payload is one field-order change away from computing a different bond
+# than the caller named. The additional one is measured — an atom index is not a name at all.
+# `(4, 5)` is the amide C-N of `c1ccc(NC(C)=O)cc1` and an aromatic *ring* bond of
+# `CC(=O)Nc1ccccc1`, the same compound rewritten, really bonded, in range. A scan driven from a
+# stale index therefore runs and reports a plausible barrier for a question nobody asked.
+#
+# `torsion_id` closes that: a handle derived from the molecule rather than from the order its atoms
+# happen to appear in. The job recomputes it from the structure it is about to calculate and
+# refuses a mismatch, so the handle is a checksum on the indices rather than decoration.
+#
+# `science/calc/models.py::Torsion` is the same shape inside the calculation. Two files by rule:
+# this module is a leaf the chat service imports on every agent build and may not import `science`
+# (D-118).
+#
+# **The rationale is here rather than in the docstring, and that is not a style choice.** Pydantic
+# publishes a model's docstring as its JSON-schema `description`, so every word of it is bound to
+# the model on every turn — this nested pair cost ~400 tokens of the agent's static prefix, which
+# `tests/test_context_floor.py` refuses. What a caller needs is in the tool's own description; what
+# a maintainer needs is here.
+class TorsionSpec(BaseModel):
+    """The bond to rotate, exactly as `chem`'s `enumerate_torsions` reported it."""
+
+    # No per-field descriptions, deliberately: this whole model is *copied* from an
+    # `enumerate_torsions` entry rather than assembled, so prose telling a model how to fill each
+    # field would be tokens spent teaching it to do the one thing the tool tells it not to. The
+    # tool's own description says where the value comes from; the schema says only its shape.
+    torsion_id: str = Field(min_length=1)
+    atoms: list[int] = Field(min_length=4, max_length=4)
+    bond: list[int] = Field(min_length=2, max_length=2)
+    label: str = Field(min_length=1)
+    symmetry_order: int = Field(default=1, ge=1)
+    period_degrees: float = Field(default=360.0, gt=0.0, le=360.0)
+
+
 class ReactionJobSpec(BaseModel):
     """A durable reaction-energy request (xTB plan X4)."""
 
@@ -112,6 +147,35 @@ class ScanJobSpec(BaseModel):
     structure_id: str | None = Field(default=None, description=_STRUCTURE_ID_DESCRIPTION)
 
 
+# Distinct from `ScanJobSpec`, which drives any internal coordinate and reports points. This one is
+# about a torsion specifically, and everything it adds follows from that: the bond is named rather
+# than indexed, the scan covers one *period* rather than always 360 degrees, the wells are released
+# from their constraint into real rotamers, and the barriers between them are directional and carry
+# a half-life. In a comment rather than the docstring for the schema-size reason above.
+class RotationJobSpec(BaseModel):
+    """A durable rotational profile about one named bond."""
+
+    kind: Literal["rotation"] = "rotation"
+    smiles: str = Field(min_length=1)
+    torsion: TorsionSpec
+    solvent: str | None = None
+    temperature_k: float | None = None
+    # The cost knob: every point is a constrained optimization, so halving this doubles the
+    # profile. The maxima are refined regardless, so a smaller step buys resolution of the *wells*
+    # rather than of the barrier.
+    step_degrees: float | None = Field(default=None, gt=0.0, le=120.0)
+    level: Literal["quick", "standard", "thorough"] = "quick"
+    # The short form of `_STRUCTURE_ID_DESCRIPTION`, and the one place that shared string is not
+    # reused. This tool's schema is the second largest on the agent's surface — nested models are
+    # expensive — and `tests/test_context_floor.py` refuses a tool over 900 tokens rather than
+    # letting the cost land in a bill nobody reads. What the long version adds is *where* handles
+    # come from, which this tool's own description already says.
+    structure_id: str | None = Field(
+        default=None,
+        description="A conformer to profile in, as `st_...`; a barrier depends on which one.",
+    )
+
+
 class EnsembleJobSpec(BaseModel):
     """A durable conformer/tautomer/protomer search request (xTB plan X6)."""
 
@@ -137,16 +201,21 @@ class MicrostatePkaJobSpec(BaseModel):
     branch: Literal["auto", "acid", "base"] = Field(
         default="auto",
         description=(
-            "Which equilibrium to compute. `auto` asks the acid question of anything carrying a "
-            "proton on N, O or S and the base question of a nitrogen compound without one. Name it "
-            "explicitly for a molecule that is both — an aminophenol has an acid pKa and a "
-            "conjugate-acid pKaH, and they are different numbers."
+            "`auto` asks the acid question of an O-H/S-H molecule and the base question of a "
+            "nitrogen one. Name it for a molecule that is both: an aminophenol has an acid pKa "
+            "and a conjugate-acid pKaH, and they are different numbers."
         ),
     )
     solvent: str | None = None
     temperature_k: float | None = None
     effort: Literal["quick", "normal", "extensive"] = "quick"
-    structure_id: str | None = Field(default=None, description=_STRUCTURE_ID_DESCRIPTION)
+
+    # **No `structure_id`, and its absence is the point.** Every other geometry-taking spec here
+    # accepts one so a caller can carry a chosen conformer forward; this job's *first* act is a
+    # metadynamics conformer search, which re-samples whatever it is handed. A starting geometry
+    # therefore survives into nothing the answer depends on, and offering the argument would
+    # advertise a control that does not control anything — while costing every turn the
+    # description that explains it.
 
 
 class ComplexJobSpec(BaseModel):
@@ -263,6 +332,53 @@ class SpeciesRankingJobSpec(BaseModel):
         return self
 
 
+class SpeciesSolventScreenJobSpec(BaseModel):
+    """A durable ranking of one species set in each of several media.
+
+    `SpeciesRankingJobSpec` with `solvent` replaced by `solvents`, and its rule about the set being
+    the answer's universe applies unchanged — this fans a ranking out over media, it enumerates no
+    more than that one does.
+    """
+
+    kind: Literal["species_solvents"] = "species_solvents"
+    species: list[str] = Field(
+        min_length=1,
+        description="The SMILES to rank against each other, in every medium. Enumerate first.",
+    )
+    labels: list[str] | None = Field(
+        default=None,
+        description="An optional name per species, in the same order and the same length.",
+    )
+    ranking: Literal["tautomers", "microstates", "stereoisomers", "custom"] = "custom"
+    solvents: list[str] = Field(
+        min_length=1,
+        description="ALPB solvent names. The gas phase is always added and need not be listed.",
+    )
+    temperature_k: float | None = None
+    level: Literal["quick", "standard", "thorough"] = "standard"
+    # One map covers the whole screen: the same species appear in every medium, and a rotational
+    # symmetry number is a property of the molecule rather than of what surrounds it. It does not
+    # cancel across the media either, since every medium ranks the same set.
+    symmetry_numbers: dict[str, int] | None = Field(
+        default=None,
+        description=(
+            "Rotational symmetry number per species, keyed by its exact SMILES: 1 = none, "
+            "2 = a C2 axis, 6 = ethane, 12 = benzene. One left out is ranked at sigma=1 and "
+            "warned about; the error is R*ln(sigma), 0.41 kcal/mol per factor of two."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _labels_match_species(self) -> "SpeciesSolventScreenJobSpec":
+        """Refuse a mismatched label list rather than silently pairing the wrong names to forms."""
+        if self.labels is not None and len(self.labels) != len(self.species):
+            raise ValueError(
+                f"{len(self.labels)} labels for {len(self.species)} species: give one label per "
+                "species in the same order, or none at all"
+            )
+        return self
+
+
 class BondSurveyJobSpec(BaseModel):
     """A durable bond-dissociation survey over every breakable bond of one molecule.
 
@@ -294,12 +410,14 @@ XtbJobSpec = Annotated[
     ReactionJobSpec
     | SolventScreenJobSpec
     | ScanJobSpec
+    | RotationJobSpec
     | EnsembleJobSpec
     | MicrostatePkaJobSpec
     | ComplexJobSpec
     | RefinedEnsembleJobSpec
     | EnsemblePropertyJobSpec
     | SpeciesRankingJobSpec
+    | SpeciesSolventScreenJobSpec
     | BondSurveyJobSpec,
     Field(discriminator="kind"),
 ]

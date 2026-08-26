@@ -151,26 +151,18 @@ topic).
       payloads be JSON, or should each tool render its own boundary as `condense_protocols` now does
       — deserves deciding rather than defaulting.
 
-- [ ] **Seven `chem` enumerations and `compute_fukui_at` are declared here and served nowhere** —
-      [S], and it is a live gap rather than a plan. `src/chemclaw/connectors/chem/connector.yaml`
-      names `enumerate_tautomers`, `enumerate_protonation_states`, `enumerate_stereoisomers`,
-      `enumerate_bond_cleavages`, `enumerate_degradants`, `transform_structure` and
-      `describe_topology`; six of the seven templates added by
-      `D-2026-08-25-the-loop-is-a-composite-not-a-template` call one of them, and
-      `connectors/calc/compose.py::ensemble_property` calls `compute_fukui_at` for its `fukui`
-      field. All eight are implemented in `Chemclaw3-mcp` (`servers/chem/.../engine/species.py`,
-      `servers/calc/.../tools.py`) on branch `claude/chemclaw-gfn-workflows-5eie2t` **which was
-      never pushed** — that repository was outside the session's GitHub scope and `add_repo` with
-      push access was never approved, so the work exists only in that session's container and is
-      lost with it.
-      **What this costs until it lands:** `make template-validate` passes, because `chem` is a
-      bundle this repository declares and does not run, so those tools are name-checked and
-      argument-unchecked — the count it reports rose from 1 to 6 for exactly this reason. `make
-      connector-validate` against a running server is what would catch it, and the live lane is
-      where it will surface. Re-implementing is the fallback and the ADR's "What was measured
-      rather than assumed" section is the specification: it records the per-search `xtb` binary
-      requirement, the `protonated.xyz`/`protomers.xyz` filename, and the element-list defect that
-      only appears once a search changes the atom count.
+- [ ] **The `chem` enumerations and `compute_fukui_at` are served, pending that PR's merge** —
+      [S], and what is left is a version bump rather than an implementation.
+      `Chemclaw3-mcp#18` adds the six enumerations this repository's `chem` manifest declares plus
+      the `compute_fukui_at` that `connectors/calc/compose.py::ensemble_property` calls, so the six
+      templates `D-2026-08-25-the-loop-is-a-composite-not-a-template` added can complete. Delete
+      this row once that PR is merged **and the live lane has run one of those templates end to
+      end** — `make template-validate` cannot see the difference (`chem` is a bundle this
+      repository declares and does not run, so its tools are name-checked and argument-unchecked),
+      and `make connector-validate` against a running server is what would.
+      **`transform_structure` was the seventh name and is now gone from the manifest** rather than
+      implemented: it had no caller, no template, no skill reference and no documented signature in
+      either repository, so serving it would have meant inventing its contract.
 
 - [ ] **A solvate collapses onto whichever fragment is larger** — [M], and worse than filed: it is
       not only the cache key, it is the **knowledge-graph note id**. Measured,
@@ -243,21 +235,19 @@ while designing the label index, which uses a composite `(source, reaction_id)` 
 inherit it — so the fix is to give the fingerprint tables the same key, and it is a migration plus
 `note_id_for_reaction`. Not urgent while one ELN is enabled anywhere; not detectable at all when
 it happens.
+
 ## 3 — Work that is lost, dropped or invisible
 
-- [ ] **Every `calc` composite is dropped by the publish seam** — [M]. Measured while adding
-      `predict_pka_ensemble`: `projector_for("calc.compute_reaction_energy", "XtbJobResult")` is
-      `None`, and `XtbJobResult` is what `CalcJobWorkflow` stamps as `payload_kind`, so all nine of
-      this bundle's durable composites queue nothing. This is the *same* defect
-      `D-2026-08-26-a-route-is-not-a-shape` found and fixed for the jobs whose result model is the
-      shape — `qm` returns a `QMJobResult` and `bo` its own, both of which have projectors, while
-      `calc` returns an **envelope** carrying one populated optional field. So the ADR's rule holds
-      and this bundle sits outside its reach. The cached *primitives* underneath still publish
-      through the store hook, so the loss is the composite record — the reaction energy, the
-      ensemble, the ranking — not the parts. Fix: have the envelope name the shape it actually
-      carries (the populated field's model name) rather than its own class, which routes all nine at
-      once and needs no new projector for eight of them. `MicrostatePka` is the ninth and would need
-      one, so this row and that model land together.
+- [ ] **A Hessian is cached and never published, and neither is the thermochemistry built from
+      it** — [M], and the two halves are one question. `xtb.hess` is a `calc_type` the server
+      stamps and `_CALC_TYPE_PROJECTORS` has no prefix for it, so vibrational frequencies never
+      reach a results store; `ThermochemistryResult`, which is where a Hessian's scientific value
+      is actually realised, has a projector but **no hook at all** — it is a *tool* composite, so
+      it is neither written to the cache (composites are not cached, D-011) nor returned by a job
+      envelope. Publishing frequencies therefore needs a third hook, not a projector, which is why
+      this is a decision rather than a one-line addition. Named in
+      `tests/test_publish_reaches_the_hooks.py::_PRIMITIVES_NOT_PUBLISHED` so the gap is declared
+      and not merely absent.
 
 - [ ] **A decided approval hold can be reopened** — [M]. `agent/interaction_tools.py::start_approval`
       passes no `id_reuse_policy`, so temporalio's default lets a decided hold be started again under
@@ -348,6 +338,18 @@ it happens.
       Closing this is one experiment: add `pytest-xdist`, run `-n auto` on a branch, compare the
       job's wall time and its failure set against the serial run on the same commit. If it is not
       a clear win, say so and delete this row.
+
+- [ ] **Two of the four deployables have no chart, so a release changes their bytes and nothing
+      else** — [M]. `D-2026-08-26-a-release-is-a-descriptor-and-a-target` deploys `Chemclaw3_ui`
+      and each `Chemclaw3-mcp` server with `oc set image` against a Deployment an operator created
+      by hand, because neither repository describes itself deployably: the fleet has seven
+      `Containerfile`s and a per-server `networkpolicy.yaml`, the UI has a `Dockerfile` and a
+      compose file for local work. That is the honest minimum — it changes the image and claims
+      nothing else — and it means a release cannot move a port, a probe, a resource limit or an
+      env var for either, and cannot create either from nothing. A chart per repository (or one
+      chart for the fleet, whose seven servers differ only in name, port and token env) closes it.
+      Not written from here, because doing so would be inventing somebody's Service, Route and
+      limits; it wants one real namespace to be written against.
 
 - [ ] **Turn the image scan back on, with its contradiction resolved** — [M].
       Carried forward unchanged from the SBOM work and re-confirmed by the 2026-08-26 CI review:

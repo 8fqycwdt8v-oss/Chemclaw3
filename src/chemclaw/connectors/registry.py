@@ -560,23 +560,54 @@ def _bundle_content_dirs(kind: str, declares: Callable[[ConnectorManifest], bool
     return dirs
 
 
+def _declared_tool_names() -> dict[str, tuple[str, str]]:
+    """Every tool name the enabled bundles advertise, mapped to `(connector, kind)`.
+
+    **One name is one capability, whichever half of a bundle's surface declares it.** The name is
+    the authorization key — `state_changing_tool_names` and the plan gate both look a capability up
+    by it — so two capabilities sharing one name means one bundle's gate silently applies to the
+    other's work. It is also what the model calls: it has one name and gets whichever tool survived
+    the merge.
+
+    This used to check jobs against *jobs* only, and the gap was not hypothetical. `props` served an
+    MCP tool `compare_solvents` (tabulated physical properties, microseconds) while `calc` declared
+    a durable job `compare_solvents` (one reaction computed per solvent, minutes), and the wiring
+    that brings them together — this fleet's `manifests/` on `connectors_dir` — is the documented
+    one. Measured with both enabled: 21 endpoint tools plus 9 jobs is 30 declared names and 29
+    distinct. Nothing raised, because `connector_tool_names()` is a set union and
+    `agent.chemclaw_agent._narrow` keys its lookup by name, so the loser vanished with no error.
+
+    Raises:
+        ConnectorError: naming both claimants and what each declares the name as. Loud at build
+            time is the whole point — the alternative is a capability that is simply absent from
+            the agent's surface, which reads as a broken tool rather than a misconfiguration.
+    """
+    owner: dict[str, tuple[str, str]] = {}
+    for manifest in enabled():
+        served = () if manifest.endpoint is None else manifest.endpoint.tools
+        declared = [(name, "tool") for name in served]
+        declared += [(job.name, "job") for job in manifest.jobs]
+        for name, kind in declared:
+            claimed = owner.get(name)
+            if claimed is not None:
+                connector, as_kind = claimed
+                raise ConnectorError(
+                    f"connector {manifest.name!r} declares {kind} {name!r}, which connector "
+                    f"{connector!r} already provides as a {as_kind}"
+                )
+            owner[name] = (manifest.name, kind)
+    return owner
+
+
 def job_tools() -> list[CapabilityTool]:
     """The generated launcher for every job declared by an enabled connector.
 
-    Two connectors declaring the same job name is a configuration error, not a last-one-wins:
-    the name is the authorization key, so a collision would silently make one connector's gate
-    apply to the other's work.
+    Two enabled connectors claiming one name is a configuration error rather than a last-one-wins,
+    and the check is `_declared_tool_names`'s because the collision is not specific to jobs — see
+    there for the rule and for the collision that was live when it was written.
     """
-    tools: dict[str, CapabilityTool] = {}
-    for manifest in enabled():
-        for job in manifest.jobs:
-            if job.name in tools:
-                raise ConnectorError(
-                    f"connector {manifest.name!r} declares job {job.name!r}, "
-                    "which another enabled connector already provides"
-                )
-            tools[job.name] = build_job_tool(manifest.name, job)
-    return list(tools.values())
+    _declared_tool_names()
+    return [build_job_tool(manifest.name, job) for manifest in enabled() for job in manifest.jobs]
 
 
 def job_names() -> list[str]:
@@ -615,9 +646,9 @@ def find_job(name: str) -> tuple[str, JobSpec]:
     """Resolve a declared job name to its connector and spec, or raise naming the valid ones.
 
     The lookup a template's `job` step needs: it names a job the way the model does, and has to turn
-    that into the connector, workflow type and queue `ConnectorJobWorkflow` requires. Job names are
-    already unique across enabled connectors (`job_tools` refuses a collision), so one name resolves
-    to exactly one job.
+    that into the connector, workflow type and queue `ConnectorJobWorkflow` requires. Every declared
+    name is unique across the enabled connectors — `_declared_tool_names` refuses a collision with
+    an endpoint tool as well as with another job — so one name resolves to exactly one job.
     """
     for manifest in enabled():
         for job in manifest.jobs:

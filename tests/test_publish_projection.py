@@ -32,19 +32,28 @@ from chemclaw.science.calc.models import (
     LogdResult,
     OptimizationSummary,
     PkaResult,
+    RankedSpecies,
     ReactionEnergyResult,
+    Rotamer,
+    RotationBarrier,
+    RotationProfile,
     ScanPoint,
     ScanResult,
     SiteReactivityResult,
     SolubilityResult,
     SolventComparisonResult,
     SolventEffect,
+    SpeciesDistribution,
     SpeciesEnergy,
+    SpeciesSolventComparison,
+    SpeciesSolventResponse,
+    SpeciesStanding,
     Structure,
     ThermochemistryResult,
     VibrationalMode,
     XtbResult,
 )
+from chemclaw.science.calc.thermo import half_life_from_barrier
 
 
 def _structure(z: float = 1.0, smiles: str = "CCO") -> Structure:
@@ -160,6 +169,54 @@ def _cases() -> list[tuple[str, str, Any, dict[str, Any]]]:
         maximum_relative_kcal=2.8,
         minimum_structure=_structure(),
     )
+    rotation = RotationProfile(
+        smiles="CCCC",
+        input_structure_id=_structure().structure_id,
+        method="GFN2-xTB",
+        solvent=None,
+        temperature_k=298.15,
+        level="quick",
+        torsion_id="tor_6b25409b2bd410a6",
+        atoms=[0, 1, 2, 3],
+        label="the C1-C2 bond",
+        symmetry_order=1,
+        period_degrees=360.0,
+        points=[
+            ScanPoint(value=60.0, energy_hartree=-158.0, relative_kcal=0.75),
+            ScanPoint(value=120.0, energy_hartree=-157.996, relative_kcal=2.76),
+            ScanPoint(value=180.0, energy_hartree=-158.001, relative_kcal=0.0),
+        ],
+        rotamers=[
+            Rotamer(
+                dihedral_degrees=180.0,
+                structure_id=_structure().structure_id,
+                relative_kcal=0.0,
+                population=0.59,
+                degeneracy=1,
+            ),
+            Rotamer(
+                dihedral_degrees=60.0,
+                structure_id=_structure().structure_id,
+                relative_kcal=0.75,
+                population=0.41,
+                degeneracy=1,
+            ),
+        ],
+        barriers=[
+            RotationBarrier(
+                from_rotamer=0,
+                to_rotamer=1,
+                at_degrees=120.0,
+                forward_kcal=2.76,
+                reverse_kcal=2.01,
+                basis="E",
+                interconversion=half_life_from_barrier(2.76, 298.15),
+            )
+        ],
+        highest_barrier_kcal=2.76,
+        uncertainty_kcal=3.0,
+        warnings=[],
+    )
     scan_payload = scan.model_dump(mode="json")
     scan_payload["minimum_structure"]["structure_id"] = scan.minimum_structure.structure_id
     interaction = InteractionResult(
@@ -176,8 +233,70 @@ def _cases() -> list[tuple[str, str, Any, dict[str, Any]]]:
     interaction_payload = interaction.model_dump(mode="json")
     interaction_payload["structure"]["structure_id"] = interaction.structure.structure_id
 
+    ranked = [
+        RankedSpecies(
+            smiles="CC(=O)CC(C)=O",
+            label="keto",
+            relative_kcal=0.0,
+            population=0.82,
+            gibbs_free_energy_hartree=-267.2,
+            electronic_energy_hartree=-267.3,
+            structure_id=_structure().structure_id,
+            conformers_found=4,
+        ),
+        RankedSpecies(
+            smiles="CC(=O)C=C(C)O",
+            label="enol",
+            relative_kcal=0.9,
+            population=0.18,
+            gibbs_free_energy_hartree=-267.1,
+            electronic_energy_hartree=-267.2,
+            structure_id=_structure(1.1).structure_id,
+            conformers_found=3,
+        ),
+    ]
+    distribution = SpeciesDistribution(
+        kind="tautomers",
+        method="GFN2-xTB",
+        solvent="thf",
+        temperature_k=298.15,
+        level="standard",
+        species=ranked,
+        enumerated=3,
+        uncertainty_kcal=3.0,
+        sampled=True,
+    )
+    gas_phase = distribution.model_copy(update={"solvent": None})
+
     simple: list[tuple[str, str, Any]] = [
         ("ReactionEnergyResult", "reaction.energy", _reaction()),
+        ("SpeciesDistribution", "calc.rank_species", distribution),
+        (
+            "SpeciesSolventComparison",
+            "calc.rank_species_across_solvents",
+            SpeciesSolventComparison(
+                kind="tautomers",
+                method="GFN2-xTB",
+                temperature_k=298.15,
+                level="standard",
+                distributions=[gas_phase, distribution],
+                responses=[
+                    SpeciesSolventResponse(
+                        smiles="CC(=O)CC(C)=O",
+                        label="keto",
+                        standings=[
+                            SpeciesStanding(solvent=None, relative_kcal=0.0, population=0.9),
+                            SpeciesStanding(solvent="thf", relative_kcal=0.0, population=0.82),
+                        ],
+                        population_swing=0.08,
+                        relative_swing_kcal=0.0,
+                    )
+                ],
+                dominance_changes=False,
+                largest_swing_kcal=0.4,
+                uncertainty_kcal=3.0,
+            ),
+        ),
         (
             "SolventComparisonResult",
             "reaction.solvent_screen",
@@ -342,6 +461,9 @@ def _cases() -> list[tuple[str, str, Any, dict[str, Any]]]:
         )
     )
     cases.append(("ScanResult", "xtb.scan", scan, scan_payload))
+    cases.append(
+        ("RotationProfile", "calc.profile_rotation", rotation, rotation.model_dump(mode="json"))
+    )
     cases.append(("InteractionResult", "xtb.complex", interaction, interaction_payload))
     return cases
 
@@ -516,6 +638,77 @@ def test_a_solvent_screen_publishes_its_parts_as_well_as_its_aggregate() -> None
         assert any(f.property == "reaction_delta_g" for f in part.properties)
 
 
+def test_a_species_solvent_screen_publishes_each_medium_as_its_own_distribution() -> None:
+    """The same rule as the reaction screen: never store an aggregate whose parts are not stored.
+
+    Here the parts are the distributions verbatim, so "which tautomer dominates in DMSO" answers
+    over media screened together *and* over the medium computed on its own — one shape, both routes.
+    """
+    from chemclaw.publish.project import records_from_species_solvent_screen
+
+    ranked = [
+        RankedSpecies(
+            smiles="CC(=O)CC(C)=O",
+            label="keto",
+            relative_kcal=0.0,
+            population=0.8,
+            electronic_energy_hartree=-267.3,
+        ),
+        RankedSpecies(
+            smiles="CC(=O)C=C(C)O",
+            label="enol",
+            relative_kcal=1.0,
+            population=0.2,
+            electronic_energy_hartree=-267.2,
+        ),
+    ]
+
+    def _in(solvent: str | None) -> SpeciesDistribution:
+        return SpeciesDistribution(
+            kind="tautomers",
+            method="GFN2-xTB",
+            solvent=solvent,
+            temperature_k=298.15,
+            level="standard",
+            species=ranked,
+            enumerated=2,
+            uncertainty_kcal=3.0,
+        )
+
+    screen = SpeciesSolventComparison(
+        kind="tautomers",
+        method="GFN2-xTB",
+        temperature_k=298.15,
+        level="standard",
+        distributions=[_in(None), _in("water"), _in("toluene")],
+        responses=[],
+        dominance_changes=True,
+        largest_swing_kcal=4.2,
+        uncertainty_kcal=3.0,
+    )
+    records = records_from_species_solvent_screen(
+        calc_ref="screen-9",
+        payload=screen.model_dump(mode="json"),
+        calc_type="calc.rank_species_across_solvents",
+    )
+
+    assert len(records) == 4, "the comparison plus one distribution per medium"
+    parts = records[1:]
+    # `solvent=None` is the gas phase — a real state, per `Conditions` — not a missing value.
+    assert [record.conditions.solvent for record in parts] == [None, "water", "toluene"]
+    assert all(record.depends_on == ["screen-9"] for record in parts)
+    # Each part stands on its own: the populations are what a distribution is for, and they reach
+    # the record as ranked candidates rather than as property facts.
+    for part in parts:
+        assert [candidate.score for candidate in part.candidates] == [0.8, 0.2]
+        assert {candidate.detail["label"] for candidate in part.candidates} == {"keto", "enol"}
+    # And the aggregate carries the finding, as a flag rather than a number.
+    assert any(flag.flag == "dominance_changes_with_medium" for flag in records[0].flags)
+    # The comparison itself carries no solvent, the same as a reaction screen's aggregate: it is
+    # *about* the media rather than run in one.
+    assert records[0].conditions.solvent is None
+
+
 class _TrackingDict(dict[str, Any]):
     """A payload that records which keys a projector read.
 
@@ -556,6 +749,15 @@ _DELIBERATELY_UNREAD: dict[str, dict[str, str]] = {
     },
     "OptimizationSummary": {},
     "ScanResult": {},
+    "RotationProfile": {
+        "warnings": (
+            "advice to a reader about this profile's own resolution, not a property of the "
+            "molecule — the same treatment every other result's warnings get here"
+        ),
+        "input_structure_id": "read as the subject member's structure_id, like every other shape",
+        "uncertainty_kcal": "published as the barrier fact's own uncertainty, not as a fact",
+        "atoms": "folded into the point series' x_label, exactly as a scan's are",
+    },
     "InteractionResult": {
         "sampled": "a Literal[True] marker; constant, so it carries no information",
     },
@@ -572,6 +774,19 @@ _DELIBERATELY_UNREAD: dict[str, dict[str, str]] = {
         ),
     },
     "EnsemblePayload": {},
+    "SpeciesDistribution": {
+        "sampled": (
+            "whether a conformer search ran under each species, which `reaction_level` already "
+            "says — it is true exactly at level='thorough', so publishing both would store one "
+            "fact twice"
+        )
+    },
+    "SpeciesSolventComparison": {
+        "responses": (
+            "the transpose of `distributions`, each of which publishes as its own record — "
+            "reading it too would store every relative energy and population twice"
+        )
+    },
 }
 
 

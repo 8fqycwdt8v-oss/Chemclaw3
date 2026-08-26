@@ -731,3 +731,45 @@ def test_a_cleared_tool_result_is_still_marked_in_response_metadata() -> None:
         "agent/compaction.py::_cleared_calls reads it to tell agent/repeat_guard.py which calls "
         "lost their answers."
     )
+
+
+def test_a_client_session_exposes_the_id_its_next_request_will_claim() -> None:
+    """`core/mcp_session.cancel_on_timeout` cancels by id, and the id comes from `_request_id`.
+
+    The MCP SDK generates a request id *inside* `send_request` and publishes it nowhere, so a
+    caller that wants to send `notifications/cancelled` for a request it just gave up on has to
+    read the counter beforehand. That is a private attribute and therefore a real coupling: if it
+    is renamed, a timed-out call goes back to being abandoned silently while the server runs the
+    tool to completion — which is the defect that function exists to fix, restored with every test
+    green.
+    """
+    from mcp.shared.session import BaseSession
+
+    assert "_request_id" in getattr(BaseSession, "__annotations__", {}) or hasattr(
+        BaseSession, "_request_id"
+    ), (
+        "BaseSession no longer declares `_request_id`; core/mcp_session.py::cancel_on_timeout "
+        "reads it to learn which request id to cancel when a call outlives its read bound"
+    )
+
+
+def test_a_read_bound_timeout_arrives_as_a_408_mcp_error() -> None:
+    """And `cancel_on_timeout` tells that timeout apart from a server error by exactly that code.
+
+    408 is the SDK's own invention around its `anyio.fail_after` — no server sends it — which is
+    what makes it usable as the signal. A change here does not fail open in the dangerous
+    direction (a missed timeout means no cancellation, i.e. today's behaviour), but it does mean
+    the fix silently stops working, so it is pinned rather than trusted.
+    """
+    import inspect
+
+    import httpx
+    from mcp.shared import session as mcp_session
+
+    source = inspect.getsource(mcp_session.BaseSession.send_request)
+    assert "REQUEST_TIMEOUT" in source, (
+        "mcp.shared.session.send_request no longer raises its read-bound timeout as "
+        f"httpx.codes.REQUEST_TIMEOUT ({int(httpx.codes.REQUEST_TIMEOUT)}); "
+        "core/mcp_session.py::cancel_on_timeout matches on that code to decide when to send "
+        "notifications/cancelled"
+    )

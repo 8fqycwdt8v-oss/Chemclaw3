@@ -31,6 +31,7 @@ from typing import Any
 from chemclaw.core.chem import canonical_smiles, compound_id
 from chemclaw.publish.properties import to_canonical
 from chemclaw.publish.record import (
+    CandidateFact,
     Conditions,
     ConformerFact,
     FlagFact,
@@ -387,6 +388,86 @@ def _solvent_screen(
     )
 
 
+def _species_solvent_screen(
+    payload: dict[str, Any],
+) -> tuple[Subject, Conditions, TheoryLevel, dict[str, Any]]:
+    """One species set ranked across media — the aggregate; each medium publishes its own record.
+
+    Same rule as `_solvent_screen`: never store an aggregate whose parts are not also stored. The
+    per-medium distributions are published as ordinary `SpeciesDistribution` records at their own
+    `Conditions`, so "which tautomer dominates in DMSO" answers over media that were never screened
+    together — and this record carries only what is about the *comparison*: the largest swing, and
+    whether the dominant form reordered.
+
+    `dominance_changes` is a flag rather than a property, and at `warning` severity, because it is
+    not a measurement: it says every other number describing "the compound" is about a different
+    species depending on the medium, which is a caveat a reader must meet without asking for it.
+
+    The subject is a `system` and the vocabulary is `_species_distribution`'s, deliberately: this is
+    that projector's aggregate, and a comparison whose subject kind or `distribution_kind` differed
+    from its own parts' would not join to them.
+    """
+    distributions = list(payload.get("distributions") or [])
+    first = distributions[0] if distributions else {}
+    species = list(first.get("species") or [])
+    subject = Subject(
+        kind="system",
+        members=[
+            SubjectMember(
+                ordinal=index,
+                role="subject",
+                compound_id=_identify(entry.get("smiles"))[0],
+                smiles=_identify(entry.get("smiles"))[1],
+            )
+            for index, entry in enumerate(species)
+        ],
+        label=f"{payload.get('kind') or 'custom'} across {len(distributions)} media",
+    )
+    # No solvent on the comparison itself: it is *about* the media rather than run in one — the
+    # same reason `_solvent_screen` leaves it off.
+    conditions = Conditions(temperature_k=payload.get("temperature_k"))
+    level = TheoryLevel(
+        method=payload.get("method") or "unknown",
+        family="semiempirical",
+        engine="xtb",
+        treatment=payload.get("level") or "",
+    )
+    facts = _kept(
+        _fact(
+            "solvent_swing",
+            payload.get("largest_swing_kcal"),
+            "kcal/mol",
+            uncertainty=payload.get("uncertainty_kcal"),
+            uncertainty_kind="reported",
+        ),
+        _fact("media_compared", float(len(distributions)) if distributions else None, ""),
+        _text("distribution_kind", payload.get("kind")),
+        _text("reaction_level", payload.get("level")),
+    )
+    flags = _warnings(list(payload.get("warnings") or []))
+    if payload.get("dominance_changes"):
+        flags.append(
+            FlagFact(
+                ordinal=len(flags),
+                flag="dominance_changes_with_medium",
+                severity="warning",
+                message=(
+                    "the most populated species is not the same in every medium, so any property "
+                    "computed for 'the compound' describes a different form depending on solvent"
+                ),
+            )
+        )
+    return (
+        subject,
+        conditions,
+        level,
+        {
+            "properties": facts,
+            "flags": flags,
+        },
+    )
+
+
 def _ensemble(payload: dict[str, Any]) -> tuple[Subject, Conditions, TheoryLevel, dict[str, Any]]:
     """A conformer ensemble: one subject, N conformer rows.
 
@@ -464,6 +545,342 @@ def _ensemble(payload: dict[str, Any]) -> tuple[Subject, Conditions, TheoryLevel
         _text("conformer_treatment", payload.get("treatment")),
     )
     return subject, conditions, level, {"properties": facts, "conformers": conformers}
+
+
+def _refined_ensemble(
+    payload: dict[str, Any],
+) -> tuple[Subject, Conditions, TheoryLevel, dict[str, Any]]:
+    """A conformer ensemble re-weighted by free energy over its top N members.
+
+    Shares `_ensemble`'s subject and conformer rows, and deliberately does **not** share its
+    property names. `RefinedEnsemble` renamed its own entropy and correction to `refined_*` because
+    they are computed over the refined subset and renormalized within it — the ensemble-wide names
+    mean something else one model away — and publishing them under the shared names would put two
+    meanings in one column, which is the exact confusion the model's own comment exists to prevent.
+
+    **`energy_hartree` carries the electronic energy, not the Gibbs energy**, even though the
+    ranking here is by G. `ConformerFact` holds one absolute energy, and the electronic one is the
+    value that means the same thing in both ensemble shapes — so "the same conformer, E-weighted
+    and G-weighted" is a comparison on one column rather than on two that silently differ. The free
+    energy is not lost: it is what `relative_kcal` and `population` express, and
+    `TheoryLevel.treatment` (`free-energy-weighted-top-n`) is what says so. The per-member
+    *absolute* G is the one thing this does not publish, and that is a stated omission rather than
+    an oversight — there is no second absolute-energy column to put it in.
+    """
+    smiles = payload.get("smiles")
+    subject = Subject(kind="ensemble", members=[_molecule(smiles)], label=smiles or "")
+    conditions = Conditions(
+        solvent=canonical_solvent(payload.get("solvent")),
+        solvent_model="alpb" if payload.get("solvent") else "",
+        temperature_k=payload.get("temperature_k"),
+    )
+    level = TheoryLevel(
+        method=payload.get("method") or "unknown",
+        family="semiempirical",
+        engine="crest",
+        treatment=payload.get("treatment") or "",
+    )
+    conformers: list[ConformerFact] = []
+    for index, member in enumerate(payload.get("conformers") or []):
+        structure_id = (member.get("structure") or {}).get("structure_id") or ""
+        if not structure_id:
+            logger.warning("publish: refined member %d has no structure_id; skipped", index)
+            continue
+        conformers.append(
+            ConformerFact(
+                ordinal=index,
+                structure_id=structure_id,
+                energy_hartree=member.get("electronic_energy_hartree"),
+                relative_kcal=member.get("relative_kcal"),
+                population=member.get("population"),
+                degeneracy=int(member.get("degeneracy", 1)),
+            )
+        )
+    facts = _kept(
+        _fact("total_conformers", payload.get("total_found"), ""),
+        _fact("refined_conformers", payload.get("refined_count"), ""),
+        _fact("refined_population_covered", payload.get("refined_population_covered"), ""),
+        _fact(
+            "refined_conformational_entropy",
+            payload.get("refined_conformational_entropy_cal_per_mol_k"),
+            "cal/(mol*K)",
+        ),
+        _fact(
+            "refined_ensemble_correction",
+            payload.get("refined_ensemble_correction_kcal"),
+            "kcal/mol",
+        ),
+        _text("conformer_treatment", payload.get("treatment")),
+    )
+    return (
+        subject,
+        conditions,
+        level,
+        {
+            "properties": facts,
+            "conformers": conformers,
+            "flags": _warnings(list(payload.get("warnings") or [])),
+        },
+    )
+
+
+# Which registered property an ensemble average is *of*, by the name the job was asked for.
+# `EnsembleProperty.property_name` is the tool's own vocabulary (`EnsembleProperties`), and the
+# registry's is the cross-calculator one — a scalar average has to land on the same name a single
+# -point calculation of it lands on, or "the dipole of this molecule" is two columns depending on
+# whether an ensemble was averaged. The two per-atom entries map to a *site* property instead,
+# which is why this table names the scope as well as the property.
+_AVERAGED_PROPERTIES: dict[str, tuple[str, str, str]] = {
+    # asked-for name -> (registered property, unit, scope)
+    "dipole_debye": ("dipole", "debye", "calculation"),
+    "homo_ev": ("homo", "ev", "calculation"),
+    "lumo_ev": ("lumo", "ev", "calculation"),
+    "gap_ev": ("homo_lumo_gap", "ev", "calculation"),
+    "charges": ("partial_charge", "e", "site"),
+    "fukui": ("fukui_zero", "", "site"),
+}
+
+
+def _ensemble_property(
+    payload: dict[str, Any],
+) -> tuple[Subject, Conditions, TheoryLevel, dict[str, Any]]:
+    """One property, Boltzmann-averaged over a conformer ensemble.
+
+    **The average lands on the same registered name a single-point calculation of it lands on**, so
+    "the dipole of this molecule" is one column whether or not an ensemble was averaged;
+    `TheoryLevel.treatment` and `members_averaged` are what say an average was taken. The
+    alternative — `dipole_averaged` beside `dipole` — is the registry split
+    `test_no_two_properties_of_one_dimension_land_on_the_same_subject` exists to catch.
+
+    **The spread is not published, and that is a decision.** `WeightedValue` carries min, max and
+    spread, and each is in the averaged property's *own* unit — debye here, eV there, dimensionless
+    for a Fukui index. One registered `property_spread` would therefore have no canonical unit, and
+    a per-property companion name for each is the registry bloat this table exists to avoid. What
+    is published is the mean, which is the value the job was asked for; `population_covered` says
+    how much of the ensemble stands behind it.
+    """
+    smiles = payload.get("smiles")
+    subject = Subject(kind="ensemble", members=[_molecule(smiles)], label=smiles or "")
+    conditions = Conditions(
+        solvent=canonical_solvent(payload.get("solvent")),
+        solvent_model="alpb" if payload.get("solvent") else "",
+        temperature_k=payload.get("temperature_k"),
+    )
+    level = TheoryLevel(
+        method=payload.get("method") or "unknown",
+        family="semiempirical",
+        engine="xtb",
+        treatment="boltzmann-averaged",
+    )
+    asked = str(payload.get("property_name") or "")
+    mapped = _AVERAGED_PROPERTIES.get(asked)
+    if mapped is None:
+        # A property this release cannot name is dropped rather than stored under the tool's own
+        # vocabulary: an unregistered name is refused at write time anyway, and storing it under a
+        # made-up one would put a value nobody can find beside values they can.
+        raise ProjectionError(
+            f"ensemble average of {asked!r} has no registered property; add it to "
+            "`_AVERAGED_PROPERTIES` and to `publish.properties`"
+        )
+    name, unit, scope = mapped
+    facts = _kept(
+        _fact("members_averaged", payload.get("members_averaged"), ""),
+        _fact("total_conformers", payload.get("total_found"), ""),
+        _fact("population_covered", payload.get("population_covered"), ""),
+    )
+    sites: list[SiteFact] = []
+    value = payload.get("value") or {}
+    if scope == "calculation" and value.get("mean") is not None:
+        fact = _fact(name, value["mean"], unit)
+        if fact is not None:
+            facts.append(fact)
+    for atom in payload.get("per_atom") or []:
+        mean = (atom.get("value") or {}).get("mean")
+        if mean is None:
+            continue
+        sites.append(
+            SiteFact(
+                atom_i=int(atom.get("index", 0)),
+                element=str(atom.get("element") or ""),
+                property=name,
+                value=to_canonical(name, float(mean), unit),
+            )
+        )
+    return (
+        subject,
+        conditions,
+        level,
+        {
+            "properties": facts,
+            "sites": sites,
+            "flags": _warnings(list(payload.get("warnings") or [])),
+        },
+    )
+
+
+def _species_distribution(
+    payload: dict[str, Any],
+) -> tuple[Subject, Conditions, TheoryLevel, dict[str, Any]]:
+    """A ranked population over related species: tautomers, microstates, stereoisomers.
+
+    **The species are candidates, not subject members.** A subject's members are what the
+    calculation was *about* — for a reaction, its reactants and products — while these are what it
+    *produced*: an open-ended ranked set whose length is the enumeration's, not the question's.
+    `CandidateFact` is the shape for exactly that ("one ranked output ... what does this suggest,
+    and how strongly"), and this is its first producer; the table it writes has existed since the
+    schema shipped with nothing to fill it.
+
+    The subject is therefore the enumeration itself, as a `system` — there is no single molecule
+    this is about, and calling it one would make the tautomer set of a compound collide with the
+    compound.
+    """
+    species = list(payload.get("species") or [])
+    if not species:
+        raise ProjectionError("a species distribution with no species has nothing to publish")
+    members = [
+        SubjectMember(
+            ordinal=index,
+            role="subject",
+            compound_id=_identify(item.get("smiles"))[0],
+            smiles=_identify(item.get("smiles"))[1],
+            structure_id=str(item.get("structure_id") or ""),
+        )
+        for index, item in enumerate(species)
+    ]
+    subject = Subject(kind="system", members=members, label=str(payload.get("kind") or ""))
+    conditions = Conditions(
+        solvent=canonical_solvent(payload.get("solvent")),
+        solvent_model="alpb" if payload.get("solvent") else "",
+        temperature_k=payload.get("temperature_k"),
+    )
+    level = TheoryLevel(
+        method=payload.get("method") or "unknown",
+        family="semiempirical",
+        engine="xtb",
+        treatment="boltzmann-populated",
+    )
+    uncertainty = payload.get("uncertainty_kcal")
+    candidates = [
+        CandidateFact(
+            ordinal=index,
+            kind="compound",
+            smiles=_identify(item.get("smiles"))[1],
+            compound_id=_identify(item.get("smiles"))[0],
+            score=item.get("population"),
+            score_property="population",
+            # The tool's own extra fields, verbatim and never a predicate — the relative energy
+            # that produced the population, the label a chemist reads, and how many conformers
+            # stood behind each species.
+            detail={
+                "relative_kcal": item.get("relative_kcal"),
+                "label": item.get("label") or "",
+                "structure_id": item.get("structure_id") or "",
+                "conformers_found": item.get("conformers_found", 0),
+                "electronic_energy_hartree": item.get("electronic_energy_hartree"),
+                "gibbs_free_energy_hartree": item.get("gibbs_free_energy_hartree"),
+            },
+        )
+        for index, item in enumerate(species)
+    ]
+    facts = _kept(
+        _fact("species_enumerated", payload.get("enumerated"), ""),
+        _text("distribution_kind", payload.get("kind")),
+        _text("reaction_level", payload.get("level")),
+        _fact(
+            "relative_energy",
+            species[0].get("relative_kcal"),
+            "kcal/mol",
+            uncertainty=uncertainty,
+            uncertainty_kind="reported" if uncertainty is not None else "",
+        ),
+    )
+    return (
+        subject,
+        conditions,
+        level,
+        {
+            "properties": facts,
+            "candidates": candidates,
+            "flags": _warnings(list(payload.get("warnings") or [])),
+        },
+    )
+
+
+def _bond_survey(
+    payload: dict[str, Any],
+) -> tuple[Subject, Conditions, TheoryLevel, dict[str, Any]]:
+    """Bond dissociation energies across one molecule's breakable bonds.
+
+    **Each bond is a `SiteFact` pair, which is what that shape is for** — `atom_j >= 0` makes it a
+    pair rather than a single site, the same representation a bond order uses. The alternative, a
+    `PropertyFact` per bond with a synthetic member ordinal, is the cardinality mistake `SiteFact`'s
+    own docstring argues against: a 33-atom molecule contributes one calculation-scope energy and
+    dozens of bonds, and folding those into the scalar table builds the index that answers "pKa
+    between 4 and 6" over rows that are overwhelmingly bond energies.
+
+    The weakest bond is published as a calculation-scope fact as well as being flagged on its site
+    row, because "which bond breaks first" is the question this survey exists to answer and it
+    should not require a window function over the site table to ask.
+    """
+    smiles = payload.get("smiles")
+    if not smiles:
+        raise ProjectionError("a bond survey with no subject SMILES has nothing to publish")
+    subject = Subject(kind="molecule", members=[_molecule(smiles)], label=str(smiles))
+    conditions = Conditions(
+        solvent=canonical_solvent(payload.get("solvent")),
+        solvent_model="alpb" if payload.get("solvent") else "",
+        temperature_k=payload.get("temperature_k"),
+    )
+    level = TheoryLevel(
+        method=payload.get("method") or "unknown",
+        family="semiempirical",
+        engine="xtb",
+        treatment=str(payload.get("mode") or ""),
+    )
+    sites: list[SiteFact] = []
+    weakest: dict[str, Any] | None = None
+    for bond in payload.get("bonds") or []:
+        atoms = list(bond.get("atoms") or [])
+        energy = bond.get("dissociation_energy_kcal")
+        if len(atoms) != 2 or energy is None:
+            # A bond that names anything other than its two atoms, or carries no energy, cannot be
+            # addressed or ranked. Skipped loudly rather than stored unusable.
+            logger.warning("publish: bond %r has no atom pair or no energy; skipped", atoms)
+            continue
+        sites.append(
+            SiteFact(
+                atom_i=int(atoms[0]),
+                atom_j=int(atoms[1]),
+                element=str(bond.get("bond") or ""),
+                property="bond_dissociation_energy",
+                value=to_canonical("bond_dissociation_energy", float(energy), "kcal/mol"),
+            )
+        )
+        if bond.get("is_weakest"):
+            weakest = bond
+    uncertainty = payload.get("uncertainty_kcal")
+    facts = _kept(
+        _fact("bonds_considered", payload.get("considered"), ""),
+        _text("dissociation_mode", payload.get("mode")),
+        _text("weakest_bond", None if weakest is None else str(weakest.get("bond") or "")),
+        _fact(
+            "weakest_bond_dissociation_energy",
+            None if weakest is None else weakest.get("dissociation_energy_kcal"),
+            "kcal/mol",
+            uncertainty=uncertainty,
+            uncertainty_kind="reported" if uncertainty is not None else "",
+        ),
+    )
+    return (
+        subject,
+        conditions,
+        level,
+        {
+            "properties": facts,
+            "sites": sites,
+            "flags": _warnings(list(payload.get("warnings") or [])),
+        },
+    )
 
 
 def _interaction(
@@ -566,6 +983,99 @@ def _scan(payload: dict[str, Any]) -> tuple[Subject, Conditions, TheoryLevel, di
     facts = [*facts, *_kept(_text("produced_structure", produced))]
     extra: dict[str, Any] = {"properties": facts, "points": points}
     return subject, conditions, level, extra
+
+
+def _rotation(
+    payload: dict[str, Any],
+) -> tuple[Subject, Conditions, TheoryLevel, dict[str, Any]]:
+    """A rotational profile: points as a series, rotamers as conformers, the barrier as a fact.
+
+    Three shapes because the result genuinely has three, and each already exists here: the profile
+    is a `PointFact` series exactly as a scan's is, a rotamer is a geometry with a degeneracy —
+    which is what `ConformerFact` is for — and the barrier plus the lifetime it implies are
+    per-compound numbers a site will query.
+
+    **The barrier is published, and the *count* of rotatable bonds already was.** That asymmetry is
+    what `D-2026-08-25-a-cache-is-not-a-record` built this seam to remove: `rotatable_bonds` is a
+    descriptor and `rotational_barrier` is the science.
+    """
+    smiles = payload.get("smiles")
+    subject = Subject(
+        kind="geometry",
+        members=[_molecule(smiles, payload.get("input_structure_id") or "")],
+        label=smiles or "",
+    )
+    conditions = Conditions(
+        solvent=canonical_solvent(payload.get("solvent")),
+        solvent_model="alpb" if payload.get("solvent") else "",
+        temperature_k=payload.get("temperature_k"),
+    )
+    level = TheoryLevel(
+        method=payload.get("method") or "unknown", family="semiempirical", engine="xtb"
+    )
+    atoms = payload.get("atoms") or []
+    x_label = f"dihedral({','.join(str(atom) for atom in atoms)})"
+    points = [
+        PointFact(
+            series="rotation",
+            ordinal=index,
+            property="point_relative_energy",
+            value=float(point["relative_kcal"]),
+            x_value=point.get("value"),
+            x_unit="degree",
+            x_label=x_label,
+        )
+        for index, point in enumerate(payload.get("points") or [])
+    ]
+    conformers = [
+        ConformerFact(
+            ordinal=index,
+            structure_id=rotamer.get("structure_id") or "",
+            relative_kcal=float(rotamer["relative_kcal"]),
+            population=rotamer.get("population"),
+            degeneracy=int(rotamer.get("degeneracy", 1)),
+        )
+        for index, rotamer in enumerate(payload.get("rotamers") or [])
+        if rotamer.get("relative_kcal") is not None
+    ]
+    barriers = payload.get("barriers") or []
+    # The barrier out of the *most populated* well, which is the one that decides configurational
+    # stability — not the highest point of the profile, and not an average over directions.
+    highest = max(barriers, key=lambda barrier: barrier["forward_kcal"], default=None)
+    lifetime = (highest or {}).get("interconversion") or {}
+    uncertainty = payload.get("uncertainty_kcal")
+    facts = _kept(
+        # The barrier carries the method's uncertainty as the record's own uncertainty, exactly as
+        # a reaction energy does — it is the number a reader has to hold this one against, and the
+        # half-life below is exponential in it.
+        _fact(
+            "rotational_barrier",
+            payload.get("highest_barrier_kcal"),
+            "kcal/mol",
+            uncertainty=uncertainty,
+            uncertainty_kind="reported",
+        ),
+        _fact("interconversion_half_life", lifetime.get("half_life_seconds"), "s"),
+        _fact("rotamer_count", len(conformers), ""),
+        _fact("torsion_symmetry_order", payload.get("symmetry_order"), ""),
+        _fact("torsion_period", payload.get("period_degrees"), "degree"),
+        _text("torsion_label", payload.get("label") or ""),
+        _text("torsion_id", payload.get("torsion_id") or ""),
+        _text("reaction_level", payload.get("level")),
+        # Which energy the barrier is: electronic, or a free energy from a Hessian at the pass. A
+        # reader must never have to infer this from the level.
+        _text("barrier_basis", (highest or {}).get("basis") or ""),
+    )
+    return (
+        subject,
+        conditions,
+        level,
+        {
+            "properties": facts,
+            "points": points,
+            "conformers": conformers,
+        },
+    )
 
 
 def _thermochemistry(
@@ -812,6 +1322,65 @@ def _pka(payload: dict[str, Any]) -> tuple[Subject, Conditions, TheoryLevel, dic
     )
 
 
+def _microstate_pka(
+    payload: dict[str, Any],
+) -> tuple[Subject, Conditions, TheoryLevel, dict[str, Any]]:
+    """A pKa computed from two sampled macrostates — the same property as `_pka`, differently made.
+
+    It is a *separate* projector rather than a reuse of `_pka`, and the reason is the record rather
+    than the shapes: the two pipelines carry separate calibrations and separate ledger histories
+    (`D-2026-08-26-a-pka-is-a-macrostate-not-a-microstate`), so a query that could not tell them
+    apart would average a rule-enumerated single conformer against a sampled macrostate and call the
+    result "the computed pKa". The `method` string is what keeps them distinguishable in the store,
+    and it names the sampler.
+
+    Three facts beyond the number, each answering something the value alone cannot:
+
+    - `pka_site` is the winning microstate's *perceived* constitution — which proton this is about.
+      Absent when perception declined, which is a real state and not a missing value.
+    - `microstates_within_rt` is why the number is a macrostate's: more than one and the molecule
+      has no single conjugate base, so a site-resolved pKa is a different question.
+    - `deprotonation_free_energy` is the quantity actually computed; the pKa is a linear map of it,
+      and a refit changes the second without changing the first.
+
+    The solvent and the temperature are **conditions**, not properties: an aqueous pKa at 298 K and
+    the same free energy in acetonitrile are different rows of one table, and `_pka`'s own subject
+    shape (one molecule) is right here too — the ensembles are how it was computed, not what it is
+    about.
+    """
+    return (
+        Subject(
+            kind="molecule",
+            members=[_molecule(payload.get("smiles"))],
+            label=payload.get("smiles") or "",
+        ),
+        Conditions(
+            solvent=payload.get("solvent"),
+            temperature_k=payload.get("temperature_k"),
+        ),
+        TheoryLevel(
+            method=payload.get("method") or "unknown",
+            family="semiempirical",
+            engine="crest",
+        ),
+        {
+            "properties": _kept(
+                _fact(
+                    "pka",
+                    payload.get("pka"),
+                    "",
+                    uncertainty=payload.get("uncertainty"),
+                    uncertainty_kind="reported",
+                ),
+                _fact("deprotonation_free_energy", payload.get("delta_g_kcal"), "kcal/mol"),
+                _fact("microstates_within_rt", payload.get("microstates_within_rt"), ""),
+                _text("pka_site", payload.get("site_smiles")),
+                _text("pka_branch", payload.get("branch")),
+            )
+        },
+    )
+
+
 def _solubility(payload: dict[str, Any]) -> tuple[Subject, Conditions, TheoryLevel, dict[str, Any]]:
     """A predicted aqueous solubility, carrying its applicability-domain flag.
 
@@ -930,19 +1499,28 @@ def _dft(payload: dict[str, Any]) -> tuple[Subject, Conditions, TheoryLevel, dic
 # what a payload means.
 _Projector = Callable[[dict[str, Any]], tuple[Subject, Conditions, TheoryLevel, dict[str, Any]]]
 
+
 PAYLOAD_PROJECTORS: dict[str, _Projector] = {
     "ReactionEnergyResult": _reaction,
     "SolventComparisonResult": _solvent_screen,
+    # The aggregate over `SpeciesDistribution`, which is registered below with its siblings.
+    "SpeciesSolventComparison": _species_solvent_screen,
     "ConformerEnsemble": _ensemble,
+    "RefinedEnsemble": _refined_ensemble,
+    "EnsembleProperty": _ensemble_property,
+    "SpeciesDistribution": _species_distribution,
+    "BondDissociationSurvey": _bond_survey,
     "EnsemblePayload": _ensemble,
     "InteractionResult": _interaction,
     "ScanResult": _scan,
+    "RotationProfile": _rotation,
     "ThermochemistryResult": _thermochemistry,
     "ElectronicProperties": _electronic_properties,
     "SiteReactivityResult": _site_reactivity,
     "OptimizationResult": _optimization,
     "OptimizationSummary": _optimization,
     "PkaResult": _pka,
+    "MicrostatePka": _microstate_pka,
     "SolubilityResult": _solubility,
     "LogdResult": _logd,
     "DescriptorProfile": _descriptors,
@@ -951,21 +1529,32 @@ PAYLOAD_PROJECTORS: dict[str, _Projector] = {
 }
 
 # Longest prefix wins, so `xtb.properties` reaches `_electronic_properties` rather than being
-# swallowed by a shorter `xtb.` entry. The families are the ones `STRUCTURE_KEYED_PREFIXES` and the
-# calc server's own tool set produce.
+# swallowed by a shorter `xtb.` entry.
+#
+# **An entry here is a `calc_type` something has actually stamped** — today's server, or a release
+# whose rows a deployment still holds. Four entries met neither test and were deleted:
+# `descriptors`, `logd`, `xtb.thermo` and `xtb.energy` name spellings that no version of this
+# system ever wrote (checked against `XtbTask` and each engine's `CALC_TYPE` before and after
+# `D-2026-08-16-the-physics-leaves-the-cache-stays`; the descriptor panel has always stamped
+# `developability`, and logD has never had a cache row at all). The cost was not the dead rows —
+# it was that `descriptors` *looked* like the descriptor panel's route, so every
+# `predict_developability_profile` result was dropped by `enqueue_payload` with a debug line while
+# `test_publish_projection.py` exercised the dead spelling and never the live one.
+#
+# `xtb.scan` stays and is the reason the rule is not simply "what the server stamps now": `scan`
+# was an `XtbTask` before the move and is not one today, and `calculation_results` is never
+# pruned, so those rows are still there for the backfill to find. A retired calculator keeps its
+# projector; a spelling that never existed does not get one.
 _CALC_TYPE_PROJECTORS: tuple[tuple[str, _Projector], ...] = (
     ("xtb.properties", _electronic_properties),
     ("xtb.conformers", _ensemble),
     ("xtb.complex", _interaction),
-    ("xtb.thermo", _thermochemistry),
     ("xtb.fukui", _site_reactivity),
     ("xtb.scan", _scan),
     ("xtb.opt", _optimization),
-    ("xtb.energy", _single_point),
     ("xtb.sp", _single_point),
     ("solubility", _solubility),
-    ("descriptors", _descriptors),
-    ("logd", _logd),
+    ("developability", _descriptors),
     ("pka", _pka),
     ("dft", _dft),
 )
@@ -1100,6 +1689,46 @@ def records_from_solvent_screen(
     return records
 
 
+def records_from_species_solvent_screen(
+    *, calc_ref: str, payload: dict[str, Any], depends_on: list[str] | None = None, **common: Any
+) -> list[ResultRecord]:
+    """A species screen as its comparison **plus** one distribution record per medium.
+
+    The same rule and the same shape as `records_from_solvent_screen`: an aggregate whose parts are
+    not also stored makes "which tautomer dominates in DMSO" answerable only over screens that
+    happened to include DMSO, and unanswerable for the medium computed on its own. Each part is a
+    full `SpeciesDistribution` — the payload the single-solvent job publishes — so both routes to
+    that question land on one shape.
+
+    The parts are the distributions verbatim rather than reconstructed, because this composite
+    already holds them whole; the reaction screen has to rebuild its parts only because a
+    `SolventEffect` is narrower than the `ReactionEnergyResult` it came from.
+    """
+    comparison = project(
+        calc_ref=calc_ref,
+        payload=payload,
+        payload_kind="SpeciesSolventComparison",
+        depends_on=list(depends_on or []),
+        **common,
+    )
+    records = [comparison]
+    part_common = {key: value for key, value in common.items() if key != "calc_type"}
+    part_common["calc_type"] = "species_ranking.solvent_screen_part"
+    for index, distribution in enumerate(payload.get("distributions") or []):
+        records.append(
+            project(
+                # A derived ref, so a part is addressable and idempotent without colliding with a
+                # standalone `rank_species` run of the same set in the same medium.
+                calc_ref=f"{calc_ref}#medium{index}",
+                payload=distribution,
+                payload_kind="SpeciesDistribution",
+                depends_on=[calc_ref],
+                **part_common,
+            )
+        )
+    return records
+
+
 # The payload kinds whose projection is more than one record. Keyed by model name rather than by
 # `calc_type` for the same reason the projector table is: a model name is exact, and a composite's
 # `calc_type` is a route (`<connector>.<job>`) that names no shape.
@@ -1108,6 +1737,7 @@ _MultiProjector = Callable[..., list[ResultRecord]]
 
 _MULTI_RECORD_PROJECTORS: dict[str, _MultiProjector] = {
     "SolventComparisonResult": records_from_solvent_screen,
+    "SpeciesSolventComparison": records_from_species_solvent_screen,
 }
 
 

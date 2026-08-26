@@ -175,6 +175,36 @@ _DEFINITIONS: tuple[PropertyDefinition, ...] = (
         "Correction from the lowest conformer to the Boltzmann-weighted ensemble.",
     ),
     _d(
+        "refined_conformational_entropy",
+        "molar_entropy",
+        "cal/(mol*K)",
+        "The -T*S_conf term over the *refined subset*, with populations renormalized within it. "
+        "Its own name because it is not `conformational_entropy` measured differently: it is over "
+        "N states rather than all of them, so it is systematically too small.",
+    ),
+    _d(
+        "refined_ensemble_correction",
+        "energy_difference",
+        "kcal/mol",
+        "Correction from the lowest conformer to the free-energy-weighted top N. The "
+        "`ensemble_correction` twin over the refined subset, named apart for the same reason.",
+    ),
+    _d(
+        "bond_dissociation_energy",
+        "energy_difference",
+        "kcal/mol",
+        "Energy to break one bond into the two fragments named on the site row. Homolytic or "
+        "heterolytic per `dissociation_mode`; the two are not comparable.",
+        scope="site",
+    ),
+    _d(
+        "weakest_bond_dissociation_energy",
+        "energy_difference",
+        "kcal/mol",
+        "The lowest dissociation energy in a survey, hoisted so 'which bond breaks first' is a "
+        "scalar predicate rather than a window function over the site table.",
+    ),
+    _d(
         "solvent_spread",
         "energy_difference",
         "kcal/mol",
@@ -182,11 +212,27 @@ _DEFINITIONS: tuple[PropertyDefinition, ...] = (
         "uncertainty before reading a ranking.",
     ),
     _d(
+        "solvent_swing",
+        "energy_difference",
+        "kcal/mol",
+        "Widest range any one species' relative energy shows across the media a screen compared. "
+        "Compare against the method uncertainty before reading a solvent effect.",
+    ),
+    _d(
         "max_relative_energy",
         "energy_difference",
         "kcal/mol",
         "Highest point of a relaxed scan relative to its minimum. An upper bound on a ground- "
         "state barrier, not a transition state.",
+    ),
+    _d(
+        "rotational_barrier",
+        "energy_difference",
+        "kcal/mol",
+        "Barrier to rotation about one named bond, out of the populated rotamer. From a relaxed "
+        "profile with its maximum resolved, so it is a ground-state barrier estimate and not an "
+        "optimized transition state; `barrier_basis` says whether it is electronic or a free "
+        "energy.",
     ),
     _d(
         "relative_energy",
@@ -312,6 +358,37 @@ _DEFINITIONS: tuple[PropertyDefinition, ...] = (
         kind="integer",
     ),
     _d(
+        "refined_conformers",
+        "count",
+        "",
+        "Ensemble members re-scored by free energy. Below `total_conformers` by design: the "
+        "refinement is one Hessian per member, so it is bounded to the top N.",
+        kind="integer",
+    ),
+    _d(
+        "species_enumerated",
+        "count",
+        "",
+        "Species the enumeration produced before ranking — tautomers, protonation microstates or "
+        "stereoisomers. Above the number carried as candidates when any failed to converge.",
+        kind="integer",
+    ),
+    _d(
+        "members_averaged",
+        "count",
+        "",
+        "Ensemble members that entered a Boltzmann average. Read it beside "
+        "`population_covered`: five members can be 99% of the ensemble or 40% of it.",
+        kind="integer",
+    ),
+    _d(
+        "bonds_considered",
+        "count",
+        "",
+        "Bonds the dissociation survey attempted, including any that failed to converge.",
+        kind="integer",
+    ),
+    _d(
         "binding_modes",
         "count",
         "",
@@ -334,6 +411,27 @@ _DEFINITIONS: tuple[PropertyDefinition, ...] = (
         "without that temperature.",
         scope="conformer",
     ),
+    _d(
+        "media_compared",
+        "count",
+        "",
+        "How many media a screen ranked in, the gas-phase reference included.",
+        kind="integer",
+    ),
+    _d(
+        "refined_population_covered",
+        "dimensionless",
+        "",
+        "The electronic-energy-weighted population fraction the refined members account for. The "
+        "number that says whether refining the top N described the ensemble or a corner of it.",
+    ),
+    _d(
+        "population_covered",
+        "dimensionless",
+        "",
+        "The population fraction standing behind a Boltzmann-averaged property. An average over "
+        "40% of the ensemble is a different claim from one over 99% of it.",
+    ),
     _d("hydrogen_bond_donors", "count", "", "Lipinski hydrogen-bond donor count.", kind="integer"),
     _d(
         "hydrogen_bond_acceptors",
@@ -343,7 +441,37 @@ _DEFINITIONS: tuple[PropertyDefinition, ...] = (
         kind="integer",
     ),
     _d("rotatable_bonds", "count", "", "Rotatable bond count.", kind="integer"),
+    _d(
+        "torsion_symmetry_order",
+        "count",
+        "",
+        "How many times a torsion profile repeats in a full turn — the reason a scan covers "
+        "360/N degrees rather than 360.",
+        kind="integer",
+    ),
+    _d(
+        "rotamer_count",
+        "count",
+        "",
+        "How many populated rotamers a torsion profile resolved.",
+        kind="integer",
+    ),
     _d("aromatic_rings", "count", "", "Aromatic ring count.", kind="integer"),
+    _d("torsion_period", "angle", "degree", "The range one full repeat of a torsion covers."),
+    # --- time: the first quantity here that is a duration -------------------------------------
+    #
+    # Seconds across twenty orders of magnitude, deliberately unconverted: a rotamer half-life runs
+    # from microseconds to geological time, and a registry that offered "hours" would invite a
+    # comparison between two rows quoted in different units. The band the number carries is in the
+    # payload; what is queryable is the mean.
+    _d(
+        "interconversion_half_life",
+        "time",
+        "s",
+        "Half-life for interconversion over the barrier, by Eyring at the stated temperature. "
+        "Exponential in the barrier, so read it with the uncertainty in the payload: a few "
+        "kcal/mol is several orders of magnitude here.",
+    ),
     _d(
         "lipinski_violations",
         "count",
@@ -419,6 +547,29 @@ _DEFINITIONS: tuple[PropertyDefinition, ...] = (
     ),
     _d("fukui_mode", "category", "", "Which Fukui index the sites were ranked by.", kind="text"),
     _d(
+        "torsion_label",
+        "category",
+        "",
+        "The bond a rotational profile is about, in the words a chemist recognises.",
+        kind="text",
+    ),
+    _d(
+        "torsion_id",
+        "category",
+        "",
+        "The content-addressed handle of that bond, stable across every way of writing the "
+        "molecule — so two records about one bond can be matched without comparing atom indices.",
+        kind="text",
+    ),
+    _d(
+        "barrier_basis",
+        "category",
+        "",
+        "Whether a reported barrier is electronic (E) or a free energy from a Hessian at the "
+        "pass (G).",
+        kind="text",
+    ),
+    _d(
         "scan_coordinate",
         "category",
         "",
@@ -448,6 +599,29 @@ _DEFINITIONS: tuple[PropertyDefinition, ...] = (
         "ensembles are not comparable without it - a quick search finds fewer conformers than an "
         "extensive one on the same molecule, so a population difference may be an effort "
         "difference.",
+        kind="text",
+    ),
+    _d(
+        "distribution_kind",
+        "category",
+        "",
+        "What a ranked species set enumerated: tautomers, microstates, stereoisomers or a "
+        "caller-supplied list.",
+        kind="text",
+    ),
+    _d(
+        "dissociation_mode",
+        "category",
+        "",
+        "Whether a bond survey broke bonds homolytically (radicals) or heterolytically (ions). "
+        "Energies from the two modes are not comparable.",
+        kind="text",
+    ),
+    _d(
+        "weakest_bond",
+        "category",
+        "",
+        "The bond label the survey found weakest, e.g. 'C-H'. The site row carries which atoms.",
         kind="text",
     ),
     _d(

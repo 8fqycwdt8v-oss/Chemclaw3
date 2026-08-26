@@ -172,6 +172,29 @@ jobs:
     params_model: chemclaw.connectors.calc.specs:ScanJobSpec
     precondition: chemclaw.science.calc.solvents:require_supported_solvents
 
+  - name: profile_rotation
+    workflow: CalcJobWorkflow
+    inline_wait_seconds: 20
+    summary: Rotational profile about one named bond — its rotamers, and the barriers between them.
+    description: >-
+      Answers "which rotamer is it in, and can the two be separated?". Drives one torsion through a
+      full period, releases each well into a real rotamer with its own structure_id, resolves each
+      maximum finely, and reports the barrier between each adjacent pair in both directions with the
+      half-life it implies.
+
+      **Take `torsion` from `chem`'s enumerate_torsions and pass the entry through unchanged; never
+      work the atom indices out.** An index is not a name — the same pair names an amide C-N in one
+      way of writing a compound and a ring bond in another — so a hand-assembled torsion answers
+      about a different bond. Say back which one you chose, by its label, before spending anything;
+      if the chemist's words match several, ask.
+
+      `quick` ranks rotamers by electronic energy, `standard` by free energy (a Hessian each),
+      `thorough` adds one at each pass for a ΔG‡. Quote the half-life as the **range** the result
+      carries, never its middle: Eyring is exponential, so the uncertainty spans two atropisomer
+      classes. Ring bonds are refused — that question is sample_conformers.
+    params_model: chemclaw.connectors.calc.specs:RotationJobSpec
+    precondition: chemclaw.science.calc.solvents:require_supported_solvents
+
   - name: sample_conformers
     workflow: CalcJobWorkflow
     inline_wait_seconds: 20
@@ -204,24 +227,20 @@ jobs:
     inline_wait_seconds: 20
     summary: pKa from sampled conformers and every protonation microstate (CREST + GFN2-xTB).
     description: >-
-      A different calculation from `predict_pka` rather than a more accurate one, and the
-      difference is *which question it answers*. CREST removes (or adds) every proton in turn,
-      optimises each product and ranks them, so the site is decided by energy rather than by a
-      structural rule, and both macrostates are summed over every microstate that carries
-      population. Minutes to hours; expect a job id.
+      A different calculation from `predict_pka`, not a more accurate one. CREST removes (or adds)
+      every proton in turn and ranks the products, so the site is decided by energy rather than by
+      a structural rule, and both macrostates are summed over their populated microstates. Minutes
+      to hours; expect a job id.
 
-      **Not the more accurate tool.** Over the same 31 reference compounds: RMSE 1.31 (acids) and
-      1.05 (bases) against `predict_pka`'s 1.34 and 1.16, ranking slightly worse, for two
-      metadynamics searches against a cached millisecond lookup. Choose it when the **site** is
-      the question — a polyfunctional molecule where "the pKa" is ambiguous, a proton no rule
-      offers (imide, sulfonamide, C-H), or where the number of populated microstates is itself the
-      finding. For a value, or to rank close analogues, use `predict_pka`.
+      **Measured over the same 31 reference compounds it is level with `predict_pka` on error and
+      ranks slightly worse**, for two metadynamics searches against a cached millisecond lookup.
+      Choose it when the *site* is the question — a polyfunctional molecule, a proton no rule
+      offers (imide, sulfonamide, C-H), or where the number of populated microstates is the
+      finding. For a value, or to rank analogues, use `predict_pka`.
 
-      Reports `site_smiles` (perceived from the winning geometry) and how many microstates lie
-      within RT of the best; more than one means there is no single conjugate base. **Read
-      `warnings` first** — the aliphatic-amine limit is unchanged, being the solvent model rather
-      than the enumeration, and this job warns where `predict_pka` refuses. Load
-      `ionization-and-partitioning` before using the value.
+      Reports `site_smiles` and how many microstates lie within RT. Read `warnings` first: the
+      aliphatic-amine limit is unchanged (it is the solvent model, not the enumeration) and this
+      job warns where `predict_pka` refuses. Load `ionization-and-partitioning` before using it.
     params_model: chemclaw.connectors.calc.specs:MicrostatePkaJobSpec
     precondition: chemclaw.science.calc.solvents:require_supported_solvents
     # Two CREST searches, so the same unbounded-cost gate the other two sampling jobs carry.
@@ -334,6 +353,32 @@ jobs:
       per species for a free energy; `thorough` adds a conformer search per species and is the
       expensive case.
     params_model: chemclaw.connectors.calc.specs:SpeciesRankingJobSpec
+    precondition: chemclaw.science.calc.solvents:require_supported_solvents
+    expensive: true
+
+  - name: rank_species_across_solvents
+    workflow: CalcJobWorkflow
+    inline_wait_seconds: 20
+    summary: Rank the same tautomers, microstates or stereoisomers in several solvents at once.
+    description: >-
+      `rank_species` answers in one medium, so "which tautomer dominates in water against toluene"
+      was a job per solvent and a comparison assembled by hand. This runs the ranking in each
+      solvent plus the gas phase and reports how it moves — the shift, rather than absolute
+      distributions each carrying the method's full error. It is what implicit solvation is best at:
+      every medium ranks the same species, so the continuum model's systematic error largely
+      cancels in the relative energies.
+
+      **Lead with `dominance_changes`.** A ranking that reorders between media is a different claim
+      from one that merely shifts: a pKa, a Fukui ranking and a dipole all describe whichever form
+      was drawn, so a solvent that changes the major form changes what all of them are about. Read
+      `largest_swing_kcal` against `uncertainty_kcal` — inside it, the media were not distinguished.
+      In `responses`, read the energy swing rather than the population swing, which looks large near
+      50% and small at the ends however far the energy moved.
+
+      **Enumerate first; this does not** — use `chem`'s enumerate_tautomers,
+      enumerate_protonation_states or enumerate_stereoisomers. A form not in `species` was not
+      ranked in any medium. Cost is species x media, checked before the first calculation.
+    params_model: chemclaw.connectors.calc.specs:SpeciesSolventScreenJobSpec
     precondition: chemclaw.science.calc.solvents:require_supported_solvents
     expensive: true
 

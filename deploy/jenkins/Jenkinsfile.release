@@ -1,0 +1,133 @@
+// The four-repository rollout: one environment, one descriptor, one apply.
+//
+// Each repository's own pipeline builds and publishes its images and archives a `release.json`
+// naming what it produced. This joins those rows into a single descriptor and applies it, in an
+// order that is not alphabetical and is not negotiable:
+//
+//   1. the `Chemclaw3-mcp` tool fleet, then
+//   2. `Chemclaw3` core, which *dials* it — under `CHEMCLAW_CONNECTORS_REQUIRED=true` an
+//      unreachable connector is a hard startup failure of the front door, so the reverse order
+//      turns a rollout into a crash-loop that reads as a core defect, then
+//   3. `Chemclaw3_ui`, which is useless before the API it proxies answers.
+//
+// `Chemclaw3_mock` is deliberately absent from every environment above `dev`: it is a test double
+// (a stand-in HPC launcher, ELN source, Entra tenant and vendor MCP tool), and deploying it beside
+// the real integrations would give the system two answers to the same question. Its pipeline gates
+// it and the dev-environment e2e lane runs it; nothing promotes it.
+//
+// Why digests as parameters rather than a rebuild here: a promotion must move *bytes that were
+// already tested*, not rebuild from a branch and hope the result is the same. `staging` and `prod`
+// runs of this job take the exact digests `dev` was verified with.
+pipeline {
+  agent any
+
+  options { timestamps(); disableConcurrentBuilds(); timeout(time: 60, unit: 'MINUTES') }
+
+  parameters {
+    choice(name: 'ENVIRONMENT', choices: ['dev', 'staging', 'prod'], description: 'Which environment to apply.')
+    choice(name: 'DEPLOY_TARGET', choices: ['openshift', 'databricks'], description: 'Where it lands.')
+    booleanParam(name: 'DRY_RUN', defaultValue: true, description: 'Render and diff only. Default true, deliberately.')
+    string(name: 'NAMESPACE', defaultValue: '', description: 'Target namespace (openshift target).')
+    string(name: 'IMAGE_REGISTRY', defaultValue: '', description: 'Registry and org holding all four repositories images.')
+    string(name: 'CORE_DIGEST', defaultValue: '', description: 'sha256:... for the Chemclaw3 image. Required.')
+    string(name: 'UI_DIGEST', defaultValue: '', description: 'sha256:... for the Chemclaw3_ui image. Empty = leave the UI as it is.')
+    text(name: 'MCP_DIGESTS', defaultValue: '',
+         description: 'One `server=sha256:...` per line, from the Chemclaw3-mcp pipeline. Empty = leave the fleet as it is.')
+    booleanParam(name: 'ALLOW_ANY_EGRESS_DESTINATION', defaultValue: false,
+                 description: 'State that any-destination egress is intended (the chart refuses to render without a posture).')
+    string(name: 'CLUSTER_CREDENTIALS_ID', defaultValue: 'chemclaw-openshift', description: 'Cluster API token credential.')
+    string(name: 'DATABRICKS_CREDENTIALS_ID', defaultValue: 'chemclaw-databricks', description: 'Databricks PAT credential.')
+    string(name: 'CLUSTER_API', defaultValue: '', description: 'Cluster API URL (openshift target).')
+    string(name: 'DATABRICKS_HOST', defaultValue: '', description: 'Workspace URL (databricks target).')
+  }
+
+  stages {
+    stage('Compose the descriptor') {
+      steps {
+        script {
+          if (!params.CORE_DIGEST?.startsWith('sha256:')) {
+            error 'CORE_DIGEST must be the digest the registry assigned, not a tag (runbook §(xiv)).'
+          }
+          def valuesFile = "deploy/jenkins/environments/${params.ENVIRONMENT}.yaml"
+          def components = [:]
+          def order = []
+
+          params.MCP_DIGESTS.readLines().findAll { it.trim() }.each { line ->
+            def (name, digest) = line.trim().split('=', 2)
+            if (!digest?.startsWith('sha256:')) { error "MCP digest for '${name}' is not a digest: ${digest}" }
+            def key = "mcp-${name}"
+            components[key] = [
+              kind: 'deployment', repo: 'Chemclaw3-mcp',
+              deployment: "chemclaw3-mcp-${name}", container: name,
+              image: "${params.IMAGE_REGISTRY}/chemclaw-mcp-${name}", digest: digest,
+            ]
+            order << key
+          }
+
+          components['core'] = [
+            kind: 'helm', release: 'chemclaw', chart: 'deploy/helm/chemclaw', repo: 'Chemclaw3',
+            image: "${params.IMAGE_REGISTRY}/chemclaw", digest: params.CORE_DIGEST,
+            values: fileExists(valuesFile) ? valuesFile : '',
+          ]
+          order << 'core'
+
+          if (params.UI_DIGEST) {
+            components['ui'] = [
+              kind: 'deployment', repo: 'Chemclaw3_ui',
+              deployment: 'chemclaw3-ui', container: 'ui',
+              image: "${params.IMAGE_REGISTRY}/chemclaw3-ui", digest: params.UI_DIGEST,
+            ]
+            order << 'ui'
+          }
+
+          writeFile file: 'release.json', text: groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson([
+            environment: params.ENVIRONMENT, order: order, components: components,
+          ]))
+          archiveArtifacts artifacts: 'release.json', fingerprint: true
+          echo readFile('release.json')
+        }
+      }
+    }
+
+    stage('Apply') {
+      steps {
+        script {
+          if (params.DEPLOY_TARGET == 'openshift') {
+            withCredentials([string(credentialsId: params.CLUSTER_CREDENTIALS_ID, variable: 'CLUSTER_TOKEN')]) {
+              sh """
+                set -euo pipefail
+                oc login --token="\${CLUSTER_TOKEN}" --server='${params.CLUSTER_API}' >/dev/null
+                NAMESPACE='${params.NAMESPACE}' DRY_RUN='${params.DRY_RUN}' \
+                ALLOW_ANY_EGRESS_DESTINATION='${params.ALLOW_ANY_EGRESS_DESTINATION}' \
+                  deploy/jenkins/targets/openshift.sh release.json
+              """
+            }
+          } else {
+            withCredentials([string(credentialsId: params.DATABRICKS_CREDENTIALS_ID, variable: 'DATABRICKS_TOKEN')]) {
+              sh """
+                set -euo pipefail
+                DATABRICKS_HOST='${params.DATABRICKS_HOST}' DRY_RUN='${params.DRY_RUN}' \
+                  deploy/jenkins/targets/databricks.sh release.json
+              """
+            }
+          }
+        }
+      }
+    }
+
+    // The front door's `/readyz` probes the connectors it dials, so this is the one check that sees
+    // the fleet and the core as a system rather than as three successful rollouts.
+    stage('Smoke the environment') {
+      when { expression { params.DEPLOY_TARGET == 'openshift' && !params.DRY_RUN } }
+      steps {
+        sh """
+          set -euo pipefail
+          host="\$(oc get route chemclaw -n '${params.NAMESPACE}' -o jsonpath='{.spec.host}')"
+          curl -fsS --max-time 20 "https://\${host}/readyz" >/dev/null \\
+            || { echo 'the environment is not ready: /readyz failed' >&2; exit 1; }
+          echo "environment ${params.ENVIRONMENT} is ready"
+        """
+      }
+    }
+  }
+}

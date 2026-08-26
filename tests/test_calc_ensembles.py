@@ -444,6 +444,149 @@ def test_a_published_survey_names_the_method_the_server_ran(
     )
 
 
+# --- species distributions across media ---------------------------------------------------------
+
+
+def test_a_species_screen_ranks_every_form_in_every_medium_and_includes_the_gas_phase(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The fan-out's contract: N species x (M solvents + 1 reference), each relaxed once.
+
+    The gas phase is prepended rather than asked for, for the reason `solvent_comparison` prepends
+    it: "the medium barely matters here" is a real answer and is invisible without a reference
+    point. So two tautomers in two solvents is six relaxations, not four.
+    """
+    server = install(monkeypatch, FakeCalcServer())
+    store = InMemoryStore()
+
+    comparison = _run(
+        compose.species_solvent_comparison(
+            store,
+            [("CC(=O)CC(C)=O", "keto"), ("CC(O)=CC(C)=O", "enol")],
+            ["water", "toluene"],
+            kind="tautomers",
+        )
+    )
+
+    assert server.count("relax_structure") == 6, "2 species x (2 solvents + gas phase)"
+    assert [d.solvent for d in comparison.distributions] == [None, "water", "toluene"]
+    assert comparison.kind == "tautomers"
+    # Every species appears in every medium's standings, in media order.
+    assert {response.label for response in comparison.responses} == {"keto", "enol"}
+    for response in comparison.responses:
+        assert [standing.solvent for standing in response.standings] == [None, "water", "toluene"]
+
+
+def test_a_screen_that_reorders_the_ranking_says_so_rather_than_only_shifting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`dominance_changes` is the finding, and it has to survive the sort.
+
+    `species_ranking` returns its species sorted by relative energy, so the same index is a
+    different form in two media exactly when the ranking reorders — which is why the transpose is
+    keyed by SMILES. Here the enol is stabilised in water enough to overtake the keto form, and the
+    result must report a changed dominant rather than two distributions a reader has to diff.
+    """
+    # Keyed on the **canonical** SMILES, which is what reaches the server:
+    # `require_canonical_smiles` rewrites the enol `CC(O)=CC(C)=O` to `CC(=O)C=C(C)O` before
+    # any structure is embedded.
+    keto, enol = "CC(=O)CC(C)=O", "CC(=O)C=C(C)O"
+    server = install(
+        monkeypatch,
+        FakeCalcServer(
+            solvent_shifts={
+                # Keto 2 kcal/mol lower in the gas phase, enol 3 kcal/mol lower again in water:
+                # the ordering is unambiguous in both media rather than resting on a tie-break.
+                (keto, ""): -0.0032,
+                (enol, "water"): -0.0080,
+            }
+        ),
+    )
+
+    comparison = _run(
+        compose.species_solvent_comparison(
+            InMemoryStore(),
+            [(keto, "keto"), (enol, "enol")],
+            ["water"],
+            kind="tautomers",
+            level="quick",
+        )
+    )
+
+    assert server.count("relax_structure") == 4
+    assert comparison.dominance_changes is True
+    assert comparison.distributions[0].dominant.label == "keto", "gas phase"
+    assert comparison.distributions[1].dominant.label == "enol", "water"
+    assert comparison.largest_swing_kcal > 1.0
+    assert any("dominant form is not the same" in warning for warning in comparison.warnings)
+
+
+def test_a_screen_the_method_cannot_resolve_refuses_to_report_a_difference(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A continuum model resolving tenths of a kcal/mol between media is reading its own noise.
+
+    The fake's energy is a function of atom count, so with no shift every medium is identical and
+    the swing is exactly zero — the strongest form of the case this warning exists for.
+    """
+    install(monkeypatch, FakeCalcServer())
+
+    comparison = _run(
+        compose.species_solvent_comparison(
+            InMemoryStore(),
+            [("CCO", "a"), ("COC", "b")],
+            ["water", "thf"],
+            level="quick",
+        )
+    )
+
+    assert comparison.largest_swing_kcal == 0.0
+    assert comparison.dominance_changes is False
+    assert any("does not distinguish them" in warning for warning in comparison.warnings)
+
+
+def test_screening_the_same_species_in_a_medium_already_computed_pays_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every part is keyed on its solvent, so a screen that adds a medium reuses the rest.
+
+    This is the D-011 property the whole split turns on, at the shape where it pays most: a chemist
+    who ranked tautomers in water and then asks for toluene should pay for toluene alone.
+    """
+    server = install(monkeypatch, FakeCalcServer())
+    store = InMemoryStore()
+    species = [("CCO", "a"), ("COC", "b")]
+
+    _run(compose.species_solvent_comparison(store, species, ["water"], level="quick"))
+    first = server.count("relax_structure")
+    _run(compose.species_solvent_comparison(store, species, ["water", "toluene"], level="quick"))
+
+    assert first == 4, "2 species x (water + gas phase)"
+    assert server.count("relax_structure") == first + 2, "only toluene is new"
+
+
+def test_a_screen_counts_its_whole_fan_out_against_the_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`species x media` is the number that surprises, so it is the number the fence checks.
+
+    Counting one medium would let five solvents through a ceiling sized for one, which is the
+    direction a preflight must never be wrong in.
+    """
+    install(monkeypatch, FakeCalcServer())
+    monkeypatch.setattr(calc_settings, "calc_max_primitive_calls", 10)
+
+    with pytest.raises(ValueError, match="would run 16 calculations"):
+        _run(
+            compose.species_solvent_comparison(
+                InMemoryStore(),
+                [("CCO", "a"), ("COC", "b")],
+                ["water", "toluene", "thf"],
+                level="quick",
+            )
+        )
+
+
 # --- pKa from macrostates ---------------------------------------------------------------------
 
 

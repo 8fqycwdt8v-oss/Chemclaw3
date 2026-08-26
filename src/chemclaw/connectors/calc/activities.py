@@ -52,9 +52,11 @@ from chemclaw.connectors.calc.specs import (
     MicrostatePkaJobSpec,
     ReactionJobSpec,
     RefinedEnsembleJobSpec,
+    RotationJobSpec,
     ScanJobSpec,
     SolventScreenJobSpec,
     SpeciesRankingJobSpec,
+    SpeciesSolventScreenJobSpec,
     XtbJobSpec,
 )
 from chemclaw.connectors.queues import bundle_queue
@@ -62,7 +64,7 @@ from chemclaw.core.chem import require_canonical_smiles
 from chemclaw.core.config import settings
 from chemclaw.durable.heartbeat import beating
 from chemclaw.durable.registry import durable_activity
-from chemclaw.science.calc.models import Structure
+from chemclaw.science.calc.models import RotationProfile, Structure, Torsion
 from chemclaw.science.calc.postgres_store import default_store
 from chemclaw.science.calc.postgres_structures import default_structure_store
 from chemclaw.science.calc.structures import require_structure
@@ -201,6 +203,35 @@ async def _dispatch(spec: XtbJobSpec) -> XtbJobResult:
             ),
             scan=scan,
         )
+    if isinstance(spec, RotationJobSpec):
+        rotation = await compose.rotation_profile(
+            store,
+            spec.smiles,
+            Torsion(
+                torsion_id=spec.torsion.torsion_id,
+                atoms=spec.torsion.atoms,
+                bond=spec.torsion.bond,
+                label=spec.torsion.label,
+                symmetry_order=spec.torsion.symmetry_order,
+                period_degrees=spec.torsion.period_degrees,
+            ),
+            subject=await _subject(spec.structure_id, spec.smiles),
+            solvent=spec.solvent,
+            temperature_k=spec.temperature_k,
+            step_degrees=spec.step_degrees,
+            level=spec.level,
+            progress=activity.heartbeat,
+            run=_beating,
+        )
+        return XtbJobResult(
+            kind=spec.kind,
+            # The barrier and the lifetime it implies, in the one line a completion push-back and a
+            # job listing show. The band is in it rather than only in the payload for the reason
+            # `refine_ensemble` puts its coverage there: it is exactly the qualifier a reader would
+            # otherwise never see, and here a single half-life reads like a measurement.
+            summary=_rotation_summary(rotation),
+            rotation=rotation,
+        )
     if isinstance(spec, EnsembleJobSpec):
         ensemble, _ = await compose.conformer_ensemble(
             store,
@@ -223,7 +254,6 @@ async def _dispatch(spec: XtbJobSpec) -> XtbJobResult:
         pka = await compose.microstate_pka(
             store,
             spec.smiles,
-            subject=await _subject(spec.structure_id, spec.smiles),
             branch=spec.branch,
             solvent=spec.solvent,
             temperature_k=spec.temperature_k,
@@ -340,6 +370,36 @@ async def _dispatch(spec: XtbJobSpec) -> XtbJobResult:
             ),
             distribution=distribution,
         )
+    if isinstance(spec, SpeciesSolventScreenJobSpec):
+        labels = spec.labels or [""] * len(spec.species)
+        screen = await compose.species_solvent_comparison(
+            store,
+            list(zip(spec.species, labels, strict=True)),
+            spec.solvents,
+            kind=spec.ranking,
+            temperature_k=spec.temperature_k,
+            level=spec.level,
+            symmetry_numbers=spec.symmetry_numbers,
+            progress=activity.heartbeat,
+            run=_beating,
+        )
+        # The summary is what a completion push-back and a job listing show, so it carries the one
+        # finding that changes what every downstream number is about: whether the major form is the
+        # same everywhere. "shifts" and "reorders" are different answers and a reader must not have
+        # to open the payload to tell which happened.
+        verdict = (
+            "the dominant form changes with the medium"
+            if screen.dominance_changes
+            else f"{screen.distributions[0].dominant.label or 'the same form'} dominates in all"
+        )
+        return XtbJobResult(
+            kind=spec.kind,
+            summary=(
+                f"{spec.ranking} of {len(spec.species)} across {len(screen.distributions)} "
+                f"media: {verdict}, largest swing {screen.largest_swing_kcal:.1f} kcal/mol"
+            ),
+            species_solvents=screen,
+        )
     if isinstance(spec, BondSurveyJobSpec):
         survey = await compose.bond_dissociation_survey(
             store,
@@ -364,3 +424,45 @@ async def _dispatch(spec: XtbJobSpec) -> XtbJobResult:
             bonds=survey,
         )
     raise ValueError(f"unsupported xTB job kind: {spec!r}")
+
+
+def _rotation_summary(rotation: RotationProfile) -> str:
+    """One readable line: which bond, how many rotamers, how high the pass and how long it holds."""
+    if not rotation.barriers:
+        return (
+            f"{rotation.smiles}: {rotation.label} has {len(rotation.rotamers)} rotamer(s) and no "
+            "resolved barrier between them"
+        )
+    highest = max(rotation.barriers, key=lambda barrier: barrier.forward_kcal)
+    lifetime = highest.interconversion
+    span = (
+        ""
+        if lifetime is None
+        else (
+            f", t1/2 {_readable(lifetime.half_life_seconds)} "
+            f"({_readable(lifetime.half_life_seconds_fastest)} to "
+            f"{_readable(lifetime.half_life_seconds_slowest)} at "
+            f"±{lifetime.uncertainty_kcal:.0f} kcal/mol)"
+        )
+    )
+    return (
+        f"{rotation.smiles}: {rotation.label}, {len(rotation.rotamers)} rotamers, highest barrier "
+        f"{highest.forward_kcal:.1f} kcal/mol ({highest.basis}){span}"
+    )
+
+
+def _readable(seconds: float) -> str:
+    """A duration in the unit a chemist would say it in — seconds to years, one significant step.
+
+    A half-life from a barrier spans twenty orders of magnitude across the range this job covers, so
+    `4.36e+04 s` is technically the answer and "12 hours" is the one somebody can act on.
+    """
+    for limit, divisor, unit in (
+        (90.0, 1.0, "s"),
+        (5400.0, 60.0, "min"),
+        (172800.0, 3600.0, "h"),
+        (63072000.0, 86400.0, "days"),
+    ):
+        if seconds < limit:
+            return f"{seconds / divisor:.3g} {unit}"
+    return f"{seconds / 31557600.0:.3g} years"
