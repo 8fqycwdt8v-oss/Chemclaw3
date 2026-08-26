@@ -37,7 +37,7 @@ from chemclaw.agent.repeat_guard import begin_call_watch, end_call_watch
 from chemclaw.agent.state import turn_config, turn_input
 from chemclaw.agent.tool_invocation import invoke_governed
 from chemclaw.agent.turn_cost import TurnCost, record_turn_cost
-from chemclaw.agent.turn_usage import TurnUsage, graph_usage_tokens
+from chemclaw.agent.turn_usage import TurnUsage, llm_result_usage
 from chemclaw.connectors.jobs import prepare_job_launch
 from chemclaw.connectors.queues import bundle_queue
 from chemclaw.connectors.registry import find_job, open_connector_specs
@@ -451,10 +451,10 @@ class _StepMeter(AsyncCallbackHandler):
     out of `ainvoke` with no result to read. The only place the numbers exist is the moment each
     call returns them, which is what `on_llm_end` is.
 
-    `graph_usage_tokens` is the same reader the chat path uses (`agent/turn_usage.py`), so the two
-    paths cannot disagree about what a cached token costs. It is handed the generation's `message`,
-    and meters 0 for a generation that carries none — the duck-typing that keeps a provider
-    reporting no usage from failing a step.
+    `llm_result_usage` is the same reader the chat path's off-stream meter uses
+    (`agent/turn_usage.py`), which is itself `graph_usage_tokens` over the callback's payload — so
+    no two paths can disagree about what a cached token costs, and a generation carrying no usage
+    meters 0 rather than failing a step.
 
     **One `on_llm_end` per model call, whether the provider streamed or not**, which is why this
     cannot double-count: LangChain aggregates a stream's chunks and fires this hook once with the
@@ -475,9 +475,7 @@ class _StepMeter(AsyncCallbackHandler):
             kwargs: `run_id`, `parent_run_id` and the rest of the callback contract, unused here —
                 a step's spend is one number, not a per-call breakdown.
         """
-        for generation in response.generations:
-            for candidate in generation:
-                self.usage.add(graph_usage_tokens(getattr(candidate, "message", None)))
+        self.usage.add(llm_result_usage(response))
 
 
 @durable_activity("background")

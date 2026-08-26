@@ -118,10 +118,11 @@ def test_a_composite_reaches_an_external_database_and_answers_a_question(
         )
         assert queued == 3, "the comparison and both of its parts must be queued"
 
+        # **No `writer_version`**, exactly as the shipped `sink.yaml` declares none: the column is
+        # asserted below to carry the deployment's revision rather than the empty string.
         sink = SqlResultSink(
             name="e2e",
             tenant_id="site-a",
-            writer_version="test",
             connection={
                 "driver": "chemclaw.publish.drivers.postgres:PostgresWarehouse",
                 "dsn": dsn,
@@ -156,6 +157,13 @@ def test_a_composite_reaches_an_external_database_and_answers_a_question(
                 "each part must edge back to the aggregate, or the verdict is untraceable"
             )
 
+            stamped = await _rows(conn, "SELECT DISTINCT writer_version FROM calculation")
+            assert stamped == [(settings.deployment_revision,)], (
+                "which ChemClaw3 wrote the row is what makes 'why is in_domain null for "
+                "everything before March' answerable; nothing computed it, so every row said '' "
+                "— recorded, and blank"
+            )
+
             publication = await _rows(
                 conn, "SELECT actor, tenant_id FROM calculation_publication LIMIT 1"
             )
@@ -184,3 +192,70 @@ async def _rows(conn: psycopg.AsyncConnection[Any], sql: str) -> list[Any]:
     """Run one question and return its rows."""
     cursor = await conn.execute(sql)
     return list(await cursor.fetchall())
+
+
+def test_a_same_named_table_in_another_schema_does_not_decide_the_columns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The probe asks `information_schema` by table *name*; the writes go through `search_path`.
+
+    Unqualified, the two do not agree about which table they are talking about the moment the
+    target database holds a same-named relation in another schema the runtime role can see — an
+    archive of last year's shape, a staging copy, a second tenant. `found["calculation"]` becomes
+    the *union*, so the writer keeps a column the site's own table does not have and every
+    `calculation` row is refused by the server. The mirror case is worse: the DDL applied to a
+    schema that is not on `search_path` makes the "the target has no …" guard pass while every
+    write fails.
+
+    Reproduced here as the realistic half — a site one release behind, beside an archive schema
+    that still carries the column it dropped.
+    """
+    from chemclaw.publish.drivers.sql import SqlResultSink
+    from chemclaw.publish.project import project
+
+    other = f"{_STORE}_archive"
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        dsn = settings.postgres_dsn
+        await _create_store(dsn)
+        async with await psycopg.AsyncConnection.connect(dsn, autocommit=True) as conn:
+            # The site is one release behind: its `calculation` has no `compute_seconds`.
+            await conn.execute(f"ALTER TABLE {_STORE}.calculation DROP COLUMN compute_seconds")
+            # And an archive schema, visible to the same role, still does.
+            await conn.execute(f"DROP SCHEMA IF EXISTS {other} CASCADE")
+            await conn.execute(f"CREATE SCHEMA {other}")
+            await conn.execute(
+                f"CREATE TABLE {other}.calculation "
+                "(calc_ref VARCHAR(512) PRIMARY KEY, compute_seconds DOUBLE PRECISION)"
+            )
+
+        record = project(
+            calc_ref="probe-1",
+            calc_type="reaction.solvent_screen",
+            payload=_screen().model_dump(mode="json"),
+            payload_kind="SolventComparisonResult",
+            compute_seconds=12.5,
+        )
+        sink = SqlResultSink(
+            name="probe",
+            tenant_id="site-a",
+            connection={
+                "driver": "chemclaw.publish.drivers.postgres:PostgresWarehouse",
+                "dsn": dsn,
+                "schema": _STORE,
+            },
+        )
+        try:
+            # Must not raise: the probe has to be qualified by the same schema the writes are.
+            await sink.deliver([record])
+        finally:
+            await sink.aclose()
+
+        async with await psycopg.AsyncConnection.connect(dsn, autocommit=True) as conn:
+            await conn.execute(f"SET search_path={_STORE}")
+            landed = await _rows(conn, "SELECT calc_ref FROM calculation")
+            assert landed == [("probe-1",)]
+            await conn.execute(f"DROP SCHEMA IF EXISTS {other} CASCADE")
+
+    asyncio.run(_run())

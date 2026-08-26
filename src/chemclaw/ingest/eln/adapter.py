@@ -146,3 +146,30 @@ class ElnAdapter(Protocol):
     def map_to_ord(self, raw: RawEntry) -> OrdReaction:
         """Map one raw entry to a canonical `OrdReaction` (the ELN-specific step)."""
         ...
+
+
+@runtime_checkable
+class BoundedFetch(Protocol):
+    """An adapter whose fetch is bounded by a page size of its own, and says when it hit it."""
+
+    def fetch_truncated(self) -> bool:
+        """Whether the last `fetch_new_entries` stopped at its own limit with rows still waiting."""
+        ...
+
+
+def fetch_was_truncated(adapter: object) -> bool:
+    """Whether `adapter`'s last fetch was cut short by its own page limit; `False` if it cannot say.
+
+    **Only the side that issued the `LIMIT` knows this**, and the durable sync has to: it decides
+    whether to come back for another chunk, and its wedge guard turns "more waiting, cursor did not
+    move" into a loud stop. Inferring it from the batch is not possible — a fetch that returns only
+    rows at or behind the cursor is an ordinary quiet day *and* the signature of a source truncating
+    inside a block of tied watermarks, and treating the two alike either cries wolf on every idle
+    run or misses the truncation entirely. It missed it: a source stuck on a tie reported
+    `has_more=False` and read as a day with no new entries.
+
+    Optional rather than a method on `ElnAdapter` because the file-drop adapters read a whole
+    directory and have no page to be cut short by, so `False` is the true answer for them and a
+    method they would all have to implement would only be a way to get it wrong.
+    """
+    return adapter.fetch_truncated() if isinstance(adapter, BoundedFetch) else False

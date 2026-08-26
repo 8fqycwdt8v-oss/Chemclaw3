@@ -143,6 +143,22 @@ def _signing_key(token: str) -> Any:
         # Not an `InvalidTokenError` — this is the class that used to escape every handler here
         # and surface as a 500.
         raise AuthError(f"no signing key matches kid {kid!r}: {exc}") from exc
+    except (ValueError, jwt.PyJWTError) as exc:
+        # **The IdP answered, and what it said is unusable.** The two arms above cover a refused
+        # connection and a key set we could read but not match; neither covers a *successful* HTTP
+        # response carrying something other than a JWKS — an intercepting proxy's HTML error page
+        # (`json.load` raises `json.JSONDecodeError`, a `ValueError`, which PyJWT's client does not
+        # convert) or a tenant answering JSON that is not a key set (`PyJWKSet.from_dict` raises
+        # `PyJWKSetError`, a `PyJWTError` that is neither a `PyJWKClientError` nor an
+        # `InvalidTokenError`). Both escaped every handler in this module and became HTTP 500s for
+        # callers holding perfectly valid tokens.
+        #
+        # `IdentityProviderUnavailable`, not `AuthError`, for the reason that class exists: we
+        # could not reach a usable tenant to decide, so it is our outage and a 503 — answering 401
+        # would blame the credential for a dependency failure. Placed last so the two specific arms
+        # above keep their meanings; `AuthError` raised inside the `try` is neither of these types
+        # and passes through untouched.
+        raise IdentityProviderUnavailable(f"tenant JWKS unusable: {exc}") from exc
 
 
 def validate_token(token: str) -> Principal:

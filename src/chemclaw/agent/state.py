@@ -55,14 +55,84 @@ reverted it, so both fields below are first-party and `agent/loop_cap.py` subcla
 the delegated design survived here in prose after the code went back: the two comments on the
 fields below disagreed with each other, one describing a subclass that no longer existed and the
 other describing the counter that had returned. A reader had no way to tell which half was current.
+
+**Both fields are `UntrackedValue` *subclasses* rather than the class itself, and the reason is a
+fan-out.** The two channels cross the subagent boundary on purpose, so a superstep with more than
+one `task` call in it delivers more than one value for each of them — which bare `UntrackedValue`
+refuses with `InvalidUpdateError`, killing the turn after every helper has already spent its
+tokens. The classes below say what a concurrent write *means* for each field instead of refusing
+it; see their own docstrings for why `guard=False`, the escape hatch the error message names, is
+the wrong answer to it.
 """
 
+from collections.abc import Sequence
 from typing import Annotated, Any, NotRequired
 
 from langchain.agents.middleware.todo import PlanningState
 from langgraph.channels.untracked_value import UntrackedValue
 
 from chemclaw.core.config import settings
+
+
+class TurnTotal(UntrackedValue[int]):
+    """An untracked counter that **folds** a superstep's writes instead of refusing them.
+
+    `UntrackedValue` raises `InvalidUpdateError` when one superstep delivers two values for its
+    key, and here that is a shipped failure rather than a hypothetical. `SubAgentMiddleware`'s
+    `task` tool returns each helper's whole final state as a `Command` update, and `model_calls` is
+    deliberately neither excluded nor private so that one budget spans the team — so two `task`
+    calls in one assistant message, which the helper's own description invites ("or several at
+    once"), delivered two values into one superstep and lost the whole turn. Reproduced on the
+    graph `build_langgraph_agent` compiles; `tests/test_subagents.py` drives it.
+
+    **`guard=False` is the escape hatch the error message names, and it is the wrong one.** It
+    keeps whichever value arrived last, so every other branch's spend is discarded and a fan-out
+    silently under-counts the shared budget — which is per-specialist allowances again, regression
+    3 in `agent/loop_cap.py`'s list of reasons this counter is first-party at all.
+
+    So the fold is **additive over each writer's own advance**, which is exact rather than merely
+    defined. Every branch of a superstep was handed the same value when it began —
+    `SubAgentMiddleware` builds each helper's input from the parent's state — so `value - base` is
+    what that branch spent, and the sum of the advances is what the team spent. Measured on the
+    real graph at a fan-out of two: 4 model calls made, 4 counted. `max` counts 3.
+
+    One writer is the degenerate case and is unchanged: `base + (value - base) == value`, exactly
+    what `UntrackedValue` would have stored. A branch reporting *fewer* calls than it was handed
+    contributes 0 rather than a negative advance — this count is what a cap is compared against,
+    and a write must not be able to walk it back.
+    """
+
+    def update(self, values: Sequence[int]) -> bool:
+        """Store the base plus every writer's advance on it."""
+        if not values:
+            return False
+        # `is_available()` rather than a comparison against `MISSING`: that sentinel lives in
+        # langgraph's `_internal` package, and this is the public question with the same answer.
+        base = int(self.value) if self.is_available() else 0
+        self.value = base + sum(max(int(value) - base, 0) for value in values)
+        return True
+
+
+class TurnFlag(UntrackedValue[bool]):
+    """An untracked flag that stays set once any writer in the turn has set it.
+
+    The same `InvalidUpdateError` reaches `loop_capped`, for the same reason: it crosses the
+    subagent boundary beside `model_calls`. Here last-writer-wins would be worse than a miscount —
+    of two helpers finishing in one superstep, the uncapped one's `False` could overwrite the
+    capped one's `True` and a truncated turn would be reported as complete, which is the defect
+    `agent/loop_cap.py` exists to fix, arriving through the channel instead of through an
+    inference.
+
+    So the fold is `or`, and it also folds in the value already stored: a cap that fired is a fact
+    about the turn, and nothing that did not hit one may unwrite it.
+    """
+
+    def update(self, values: Sequence[bool]) -> bool:
+        """Set the flag if anything in this superstep set it, and never clear it."""
+        if not values:
+            return False
+        self.value = any(values) or (self.is_available() and bool(self.value))
+        return True
 
 
 class ChemclawState(PlanningState):
@@ -82,16 +152,6 @@ class ChemclawState(PlanningState):
     therefore unreadable by the time anyone asks, which is why neither field below delegates to it.
     """
 
-    # Whether the runaway guard stopped this turn — the *fact*, beside the count in `model_calls`
-    # below. Both are first-party: `loop_cap.enforce_loop_cap` reads the count in `before_model` and
-    # writes this on the branch that fires, in the same hook, so the two cannot disagree about
-    # whether a cap was reached. The `UntrackedValue` shape is copied from upstream's
-    # `run_model_call_count`; the counting is not (see the module docstring).
-    #
-    # Untracked, because a session whose third turn hit the cap would otherwise report every later
-    # turn as capped, marking complete answers partial forever. The cost is that
-    # `get_state(config).values` does not carry it: the value lives only in what the run returns,
-    # which is where every reader already looks.
     # How many model calls *this turn* has made — the runaway guard's counter
     # (`agent/loop_cap.py`). A field rather than a framework internal, and that survived an attempt
     # to delegate it: `ModelCallLimitMiddleware` counts in `after_model`, which any middleware
@@ -99,14 +159,25 @@ class ChemclawState(PlanningState):
     # challenge gate's revision jump skipped the increment and the cap let one extra model call
     # through per round. `before_model` cannot be skipped that way. See the module docstring.
     #
-    # `UntrackedValue` is what makes "this turn" true of it: the channel is never written to a
+    # Untracked is what makes "this turn" true of it: the channel is never written to a
     # checkpoint, so a new run of the graph on the same `thread_id` starts it empty and
     # `enforce_loop_cap`'s `state.get("model_calls", 0)` reads 0. It is also *not* private, which is
     # what lets one budget span a whole team turn: `SubAgentMiddleware` strips private keys in both
-    # directions, so a private counter would give every specialist a fresh allowance.
-    model_calls: NotRequired[Annotated[int, UntrackedValue]]
+    # directions, so a private counter would give every specialist a fresh allowance. That second
+    # property is exactly what puts two writes in one superstep, which is `TurnTotal`'s subject.
+    model_calls: NotRequired[Annotated[int, TurnTotal(int)]]
 
-    loop_capped: NotRequired[Annotated[bool, UntrackedValue]]
+    # Whether the runaway guard stopped this turn — the *fact*, beside the count above. Both are
+    # first-party: `loop_cap.enforce_loop_cap` reads the count in `before_model` and writes this on
+    # the branch that fires, in the same hook, so the two cannot disagree about whether a cap was
+    # reached. The untracked shape is copied from upstream's `run_model_call_count`; the counting
+    # is not (see the module docstring).
+    #
+    # Untracked, because a session whose third turn hit the cap would otherwise report every later
+    # turn as capped, marking complete answers partial forever. The cost is that
+    # `get_state(config).values` does not carry it: the value lives only in what the run returns,
+    # which is where every reader already looks.
+    loop_capped: NotRequired[Annotated[bool, TurnFlag(bool)]]
 
 
 def turn_input(message: str) -> dict[str, Any]:

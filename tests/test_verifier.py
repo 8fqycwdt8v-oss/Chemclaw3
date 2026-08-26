@@ -17,9 +17,11 @@ import pytest
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+from langchain_core.language_models import GenericFakeChatModel
 from pydantic import SecretStr, ValidationError
 
 from chemclaw.agent.framing import ENVELOPE_TAG
+from chemclaw.agent.turn_usage import TurnUsage, reset_turn_usage, set_turn_usage
 from chemclaw.agent.verifier import (
     ClaimCheck,
     VerificationResult,
@@ -69,8 +71,14 @@ class _FakeVerifierClient:
         self.methods.append(kwargs.get("method"))
         return self
 
-    async def ainvoke(self, prompt: str) -> Any:
-        """Return the preset structured value, as a provider-enforced schema would."""
+    async def ainvoke(self, prompt: str, config: Any = None) -> Any:
+        """Return the preset structured value, as a provider-enforced schema would.
+
+        `config` is accepted and ignored: the caller passes `off_stream_metering()` there, and a
+        fake that refused the keyword would make every test below exercise the *degrade* path while
+        still asserting the judge's verdict — which is how a fake stops testing what it claims to.
+        The metering itself is asserted against a real chat model, below.
+        """
         return self._value
 
 
@@ -1029,3 +1037,98 @@ def test_a_degraded_openai_compatible_judge_is_still_routed_to_a_human_by_score_
     assert review.confidence == 1.0
     assert review.review_required is True
     assert "verified by the citation gate only; the judge did not run" in review.unsupported
+
+
+class _MeteredJudge(GenericFakeChatModel):
+    """A judge that reports usage the way a provider does — through the callback machinery.
+
+    A real `BaseChatModel` rather than the duck-typed fake above, because the property under test is
+    that the call's usage reaches a callback at all: `with_structured_output(...)` returns the
+    *parsed* model, so nothing about the token count survives into the caller's return value, and a
+    fake that skipped LangChain's runnable machinery would prove nothing about where the number
+    goes.
+    """
+
+    def with_structured_output(self, schema: Any, **kwargs: Any) -> Any:
+        """The provider-enforced-schema chain: this model, then the parse it guarantees."""
+        from langchain_core.runnables import RunnableLambda
+
+        return self | RunnableLambda(lambda _message: VerificationResult(claims=[], confidence=0.9))
+
+    def _generate(self, messages: Any, stop: Any = None, run_manager: Any = None, **kw: Any) -> Any:
+        """One answer, carrying the usage block a provider returns."""
+        from langchain_core.messages import AIMessage
+        from langchain_core.outputs import ChatGeneration, ChatResult
+
+        message = AIMessage(
+            content="judged",
+            usage_metadata={"input_tokens": 900, "output_tokens": 30, "total_tokens": 930},
+        )
+        return ChatResult(generations=[ChatGeneration(message=message)])
+
+
+def test_the_judges_tokens_are_booked_against_the_turn(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The judge is a model call this turn paid for, and something has to count it.
+
+    **It is the one call a turn makes that no stream carries.** Every model call inside the graph —
+    the model node's own, and the ones a tool body makes, which inherit the graph's callbacks
+    through LangChain's ambient config — is metered off the `messages` stream by
+    `api/graph_stream`. `score_answer` runs from `api/runner_answer.build_answer_event`, after that
+    stream is exhausted, so its tokens reached neither `BudgetTracker.record`, nor
+    `chemclaw_tokens_total`, nor the `turn_costs` row. Measured against this fake before
+    `off_stream_metering()` existed: 930 tokens spent, 0 booked — with `budget_enabled` on, which
+    is what the chart ships.
+
+    That is the same defect `agent/turn_usage.py`'s own docstring says it changed packages to close
+    for the template path, on the one path neither module mentioned.
+    """
+    monkeypatch.setattr(settings, "verifier_enabled", True)
+    ledger = TurnUsage()
+
+    token = set_turn_usage(ledger)
+    try:
+        result = asyncio.run(
+            verify_answer(
+                "Yield was 90%.", [_chunk("reaction-x")], client=_MeteredJudge(messages=iter([]))
+            )
+        )
+    finally:
+        reset_turn_usage(token)
+
+    assert result.verified_by == "judge", "the judge degraded; this measures nothing"
+    assert ledger.total == 930, (
+        f"the judge spent 930 tokens and {ledger.total} were booked against the turn"
+    )
+    assert (ledger.input, ledger.output) == (900, 30), "the split the cost row is priced on"
+
+
+def test_the_judge_meters_nothing_off_the_request_path() -> None:
+    """No ambient ledger is the CLI, a test and the eval harness, and it must not fail the call.
+
+    The config is passed unconditionally — it is a property of *where* the call runs, not of who is
+    watching — so "nobody is metering" has to be an ordinary outcome rather than an error.
+    """
+    result = asyncio.run(
+        verify_answer(
+            "Yield was 90%.", [_chunk("reaction-x")], client=_MeteredJudge(messages=iter([]))
+        )
+    )
+    assert result is not None
+
+
+def test_the_runner_publishes_the_ledger_the_judge_books_into() -> None:
+    """The other half: a call that books into an ambient nobody stamps books into nothing.
+
+    `off_stream_metering()` is correct and inert unless the turn's ledger is the ambient one, which
+    is the failure shape this repository keeps meeting — a decision that is right and wired to
+    nothing. So the production stamper is driven rather than a hand-set contextvar:
+    `api/runner._turn_ambient` is the one place a turn's ambients are established, and what is
+    asserted is that the object it publishes is the very ledger `_book_turn_spend` later reads.
+    """
+    from chemclaw.agent.turn_usage import _ledger
+    from chemclaw.api.runner import _turn_ambient
+
+    ledger = TurnUsage()
+    with _turn_ambient("s-1", "oid-abc", frozenset({"chemist"}), False, "cid-1", ledger):
+        assert _ledger.get() is ledger, "the turn's ledger is not what an off-stream call finds"
+    assert _ledger.get() is None, "the ledger outlived the turn that owned it"

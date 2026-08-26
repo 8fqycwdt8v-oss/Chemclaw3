@@ -120,6 +120,13 @@ _BREAKS_PREVIOUS_IMAGE = re.compile(
 # an exempted migration still fails — an exemption is granted to statements somebody read, not to a
 # filename.
 _REVIEWED_ROLLBACK_BREAKS: dict[str, tuple[str, tuple[str, ...]]] = {
+    "056_reaction_record_identity.sql": (
+        "D-2026-08-26-a-transcription-is-keyed-by-its-source",
+        (
+            "ALTER TABLE reaction_records DROP CONSTRAINT",
+            "ALTER TABLE reaction_records ADD PRIMARY KEY",
+        ),
+    ),
     "041_document_chunk_identity.sql": (
         "D-2026-08-08-a-rollback-that-is-not-a-schema-step",
         (

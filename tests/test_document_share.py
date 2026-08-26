@@ -225,6 +225,64 @@ def test_a_symlink_out_of_the_mount_is_not_followed(tmp_path: Path) -> None:
     assert crawl_share(binding).files == []
 
 
+def test_a_symlink_cycle_inside_the_mount_is_walked_once(tmp_path: Path) -> None:
+    """`_within_mount` checks escape, and a cycle is the case it cannot see.
+
+    With `follow_symlinks: true`, `descend` admitted any link whose resolved target is inside the
+    mount — which is exactly what `Projects/sub/current -> ..` is, and what a convenience link like
+    `Data/Archive/all -> /mnt/share/Data` is on any decade-old drive. The walk then recursed through
+    it, emitting the same file under an unbounded family of mount-relative paths until `scandir`
+    failed on path length, at which point the root was recorded as *failed* — so `prune_share`
+    refused to sweep, and from the first cycle onward the share's index was never pruned again:
+    deleted documents stayed searchable and citable forever. Before that, the cycle ate the bounded
+    chunk's `limit`, so a large share could drain without ever reaching its real files.
+    """
+    mount = tmp_path / "mount"
+    (mount / "Projects" / "sub").mkdir(parents=True)
+    (mount / "Projects" / "sub" / "a.txt").write_text("real content")
+    (mount / "Projects" / "sub" / "loop").symlink_to(mount / "Projects")
+
+    binding = load_binding(
+        {
+            "mount": str(mount),
+            "roots": [{"path": "Projects"}],
+            "public": True,
+            "follow_symlinks": True,
+        }
+    )
+    result = crawl_share(binding)
+
+    assert [ref.path for ref in result.files] == ["Projects/sub/a.txt"]
+    assert result.failed_roots == [], "a cycle disabled the share's pruning for good"
+
+
+def test_two_roots_linked_to_one_directory_index_it_once(tmp_path: Path) -> None:
+    """The other shape of the same fault: `Archive/all -> Data`, two roots over one tree.
+
+    Not a cycle — the walk terminates — but the same file is emitted under two mount-relative paths,
+    so the index carries it twice and a citation names whichever copy the ranking picked. The walk's
+    visited set covers both because it is keyed on the directory's identity rather than on its path.
+    """
+    mount = tmp_path / "mount"
+    (mount / "Data").mkdir(parents=True)
+    (mount / "Data" / "report.txt").write_text("one report")
+    (mount / "Archive").mkdir()
+    (mount / "Archive" / "all").symlink_to(mount / "Data")
+
+    binding = load_binding(
+        {
+            "mount": str(mount),
+            "roots": [{"path": "Archive"}, {"path": "Data"}],
+            "public": True,
+            "follow_symlinks": True,
+        }
+    )
+    result = crawl_share(binding)
+
+    assert [ref.path for ref in result.files] == ["Archive/all/report.txt"]
+    assert result.failed_roots == []
+
+
 # --- the binding --------------------------------------------------------------------------------
 
 

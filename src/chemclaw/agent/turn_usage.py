@@ -17,11 +17,33 @@ implementation serve both, instead of the durable path growing a second one that
 
 What a *caller* does with the numbers (book them against the budget, publish the counters, write
 the cost row) stays with the caller, because that part is the lifecycle.
+
+**A model call made *inside* a graph node is already counted, and that is measured rather than
+assumed.** LangChain carries the invocation config in a contextvar, so a chat model a tool body
+builds and `ainvoke`s with no config of its own still inherits the graph's callbacks — LangGraph's
+`StreamMessagesHandler` among them — and its chunks ride the same `messages` stream
+`api/graph_stream` meters. Driven on a compiled graph through the protocol condenser's exact
+fan-out shape (`asyncio.gather` under a semaphore, inside `asyncio.timeout`): three inner calls of
+55 tokens, 165 metered. So `agent/condense.py` needs nothing here — and adding it would not merely
+be redundant, it would *unmeter* that call: an explicit `config={"callbacks": …}` **replaces** the
+inherited ones rather than joining them, measured at 55 booked to the ambient ledger and 0 seen by
+the stream. On the template path, where the step's meter is the graph's callback and there is no
+ambient ledger at all, the same move would lose those tokens outright.
+
+**A call made outside the graph is the one nothing sees**, and there is exactly one: the verifier's
+judge, which `api/runner_answer.build_answer_event` runs after the stream is exhausted. The ambient
+ledger below is what that call books itself into — task-local for the same reasons
+`agent/loop_cap.py` gives its watch (concurrent turns cannot see each other's, and it is simply
+absent off the request path, where nothing is metering anyway).
 """
 
 from collections.abc import Mapping
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any
+
+from langchain_core.callbacks import AsyncCallbackHandler
+from langchain_core.outputs import LLMResult
 
 
 @dataclass(slots=True)
@@ -148,3 +170,90 @@ def graph_usage_tokens(chunk: Any) -> TurnUsage:
         # chunk, or the keys moved under us — see the docstring for what the second one costs.
         unreadable=0 if total else 1,
     )
+
+
+def llm_result_usage(response: LLMResult) -> TurnUsage:
+    """What one finished model call reported, summed over the generations the callback hands back.
+
+    The shape is upstream's: `generations` is a list per prompt, each a list of candidates, and a
+    chat call's single generation is the degenerate case of that rather than a different thing. A
+    candidate whose message carries no usage meters 0, which is `graph_usage_tokens`' duck-typing
+    doing its job — a provider reporting nothing must not fail a turn.
+
+    One implementation because two callbacks read the same object: `durable/template_activities.
+    _StepMeter`, which meters a template step's whole graph, and `_OffStreamMeter` below, which
+    meters the one call that runs outside a graph. They book into different ledgers and agree about
+    the arithmetic by construction.
+
+    Args:
+        response: The `on_llm_end` payload for one finished model call.
+
+    Returns:
+        That call's usage.
+    """
+    usage = TurnUsage()
+    for generation in response.generations:
+        for candidate in generation:
+            usage.add(graph_usage_tokens(getattr(candidate, "message", None)))
+    return usage
+
+
+# The turn's ledger, made ambient so a model call that no stream carries can still find it. `None`
+# off the request path — the CLI, a test, an eval — where nothing is metering and there is nothing
+# to book into, which is what makes `off_stream_metering()` safe to pass unconditionally.
+_ledger: ContextVar[TurnUsage | None] = ContextVar("chemclaw_turn_usage", default=None)
+
+
+def set_turn_usage(usage: TurnUsage) -> object:
+    """Make `usage` the ledger this turn's off-stream calls book into; returns a reset token."""
+    return _ledger.set(usage)
+
+
+def reset_turn_usage(token: object) -> None:
+    """Tear the turn's ledger down (mirrors every other ambient's reset)."""
+    _ledger.reset(token)  # type: ignore[arg-type]
+
+
+class _OffStreamMeter(AsyncCallbackHandler):
+    """Books every model call made under it into the turn's ambient ledger.
+
+    A *callback* rather than a read of the returned value, because the value is not a message:
+    `with_structured_output(...).ainvoke(...)` returns the parsed model, and the `usage_metadata`
+    lives on the raw response the parser consumed. `include_raw=True` would expose it and would
+    also change the caller's error contract — a parse failure stops raising and starts arriving as
+    a field — so the metering would be paid for in the one place the verifier's degrade path
+    depends on. The callback sees the call regardless of what the chain does with its output, and
+    it is the same hook the template path already meters on.
+
+    The ledger is mutated rather than rebound, for the reason `agent/loop_cap.py` gives: a call
+    driven from a task of its own still books into the ledger its caller is holding.
+    """
+
+    async def on_llm_end(self, response: LLMResult, **kwargs: Any) -> None:
+        """Add what one finished off-stream model call reported to this turn's total.
+
+        Args:
+            response: The call's result.
+            kwargs: `run_id`, `parent_run_id` and the rest of the callback contract, unused here —
+                a turn's spend is one number, not a per-call breakdown.
+        """
+        ledger = _ledger.get()
+        if ledger is not None:
+            ledger.add(llm_result_usage(response))
+
+
+def off_stream_metering() -> dict[str, Any]:
+    """The invocation config a model call outside the graph passes so its tokens are counted.
+
+    Passed at the call site rather than baked into the client, because it is a property of *where
+    the call runs*, not of which model it runs on: the same provider seam builds the judge and the
+    condenser, and the condenser's calls are already metered by the stream they ride (see the
+    module docstring). **Attaching this to an in-graph call would take that call off the stream**,
+    since an explicit `callbacks` list replaces the inherited one instead of joining it — so this
+    is not belt-and-braces, and it belongs only where nothing else is watching.
+
+    Returns:
+        The `config` mapping to hand `ainvoke`. Harmless off the request path: with no ambient
+        ledger the handler books nothing.
+    """
+    return {"callbacks": [_OffStreamMeter()]}

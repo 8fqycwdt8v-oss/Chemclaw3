@@ -2,11 +2,13 @@
 
 One real adapter, not a universal abstraction: many ELNs export each experiment as a JSON
 file, so this reads `*.json` from a directory (`settings.eln_export_dir`), one file per
-entry. It shows both mapping paths the plan calls for (step 4.4): **structured** fields map
-deterministically, and headline conditions missing from the structured fields are recovered
-from the **free-text** procedure by deterministic regex (temperature, time). Genuinely
-unstructured cases the regex cannot resolve are escalated to the `eln-reaction-extraction`
-skill (per-field LLM), which is judgment and lives outside this deterministic adapter.
+entry. **Structured** fields map deterministically, and that is the whole of what becomes a
+recorded condition: a headline setpoint the entry does not state is left absent rather than read
+out of the prose, because the first regex match in a procedure is the *addition* temperature far
+more often than the reaction's, and a transcription nobody reviews may not present a derived number
+as a recorded one (`D-2026-08-26-a-transcription-may-not-infer-a-setpoint`). Genuinely
+unstructured cases are escalated to the `eln-reaction-extraction` skill (per-field LLM), which is
+judgment and lives outside this deterministic adapter.
 
 A detailed development recipe is more than its headline conditions, so the free-text
 procedure is also **segmented into ordered steps** (`OrdReaction.steps`) and preserved
@@ -68,8 +70,7 @@ logger = logging.getLogger(__name__)
 # eight dash characters that occur in practice silently dropped the sign, and `−78 °C` — a
 # dry-ice/acetone lithiation, one of the most common cryogenic conditions there is — was ingested as
 # `+78 °C`. A 156-degree error in the wrong direction, rendered into the proposed note as
-# `temperature: 78.0 °C`, and entirely plausible to the reviewer at the PR-gate because the verbatim
-# prose beside it still reads `−78`.
+# `temperature: -78 °C` on the step that says so, beside verbatim prose still reading `−78`.
 _MINUS_SIGNS = "-‐‑‒–—―−"
 
 # The temperature pattern *requires* the degree sign: "80 °C" is unambiguously a temperature,
@@ -206,8 +207,13 @@ class JsonExportAdapter:
             reaction_id=raw.entry_id,
             inputs=inputs,
             outcomes=outcomes,
-            temperature_c=_condition(payload, "temperature_c", _TEMPERATURE, procedure),
-            time_h=_condition(payload, "time_h", _TIME_HOURS, procedure),
+            # **The structured field or nothing.** These two are the run's setpoints, they are
+            # stored in typed columns a chemist compares runs on, and there is no longer a reviewer
+            # between them and the corpus — so a number this module *derived* may not be written
+            # where a recorded one goes. See `_number`, and `_segment_steps` for where a prose
+            # number does belong.
+            temperature_c=_number(payload, "temperature_c"),
+            time_h=_number(payload, "time_h"),
             yield_percent=_product_number(payload, "yield_percent"),
             purity_percent=_product_number(payload, "purity_percent"),
             impurities=_impurities(payload),
@@ -270,7 +276,7 @@ def _search(pattern: re.Pattern[str], text: str) -> float | None:
     Typographic dashes are normalised to the ASCII hyphen-minus first: `_TEMPERATURE` now *matches*
     the whole minus family (see `_MINUS_SIGNS`), and `float("−78")` raises `ValueError` on every one
     of them but U+002D. Normalising here rather than in the pattern keeps the matched text faithful
-    to the source prose, which is what the reviewer at the PR-gate compares against.
+    to the source prose, which is what a chemist reads beside the number in `procedure_text`.
     """
     match = pattern.search(text)
     return float(match.group(1).translate(_TO_ASCII_MINUS)) if match else None
@@ -302,19 +308,28 @@ def _component(item: Any, default_role: Role) -> Component:
     )
 
 
-def _condition(
-    payload: dict[str, Any], key: str, pattern: re.Pattern[str], text: str
-) -> float | None:
-    """A condition value: the structured field if present, else the prose regex fallback.
+def _number(payload: dict[str, Any], key: str) -> float | None:
+    """A recorded condition: the structured field, or `None` when the entry does not state one.
 
-    The structured field wins whenever it is present — including a legitimate `0` (an
-    ice-bath 0 °C), which a truthiness check would wrongly discard and overwrite with a
-    prose match.
+    `None` and not a regex over the procedure — a correction, not a simplification. The fallback
+    took the **first** match in the whole prose, which is the *addition* temperature and the
+    *addition* time in every procedure that starts by charging a vessel, so an entry reading
+    "cool to 0 °C … add dropwise over 0.5 h … warm to 80 °C and stir for 12 h" was recorded as a
+    reaction run at 0 °C for 0.5 h. Deterministic, and wrong; and since D-2026-08-25 removed the
+    PR-gate from this path on the grounds that the transcription infers nothing, nobody saw it
+    before it was queryable. A missing number a chemist can read out of `procedure_text` is a
+    smaller harm than a wrong one stored as recorded fact, which is what a `since`/`until`
+    comparison, `condense_protocols` and a cited campaign note all read.
+
+    The prose is not discarded: it is kept verbatim in `procedure_text`, and each segment carries
+    the temperature and time *it* states on its own `ReactionStep`, which is the scope those numbers
+    actually have. `D-2026-08-26-a-transcription-may-not-infer-a-setpoint` records the decision.
+
+    A structured `0` is a real value — an ice-bath 0 °C — so the check is `is not None`, never
+    truthiness.
     """
-    structured = payload.get(key)
-    if structured is not None:
-        return float(structured)
-    return _search(pattern, text)
+    value = payload.get(key)
+    return float(value) if value is not None else None
 
 
 def _product_number(payload: dict[str, Any], field: str) -> float | None:

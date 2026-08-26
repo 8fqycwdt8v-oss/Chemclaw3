@@ -27,7 +27,7 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.core.config import settings
     from chemclaw.durable.registry import durable_activity, durable_workflow
     from chemclaw.publish import outbox
-    from chemclaw.publish.driver import ResultSink
+    from chemclaw.publish.driver import ResultSink, SinkUnavailableError
     from chemclaw.publish.record import ResultRecord
     from chemclaw.publish.registry import ResultSinkError, build, enabled
 
@@ -101,13 +101,10 @@ async def _drain_one(manifest_name: str, sink: ResultSink, batch_size: int) -> S
 
     try:
         await sink.deliver(records)
-    except Exception as exc:
-        # **One handler, because there is one response.** A rejection and an outage differ in
-        # whether a retry could ever succeed, but not in what to do *now*: spend an attempt, keep
-        # the reason, leave the rows claimable until the budget runs out. Retiring a rejection
-        # immediately would be wrong for the common case — a site that has simply not applied the
-        # DDL yet, which fixes itself the moment they do — and two branches with identical bodies
-        # would be a distinction the code does not actually make.
+    except SinkUnavailableError as exc:
+        # **An outage is genuinely batch-wide**, and is the one case that stays so: nothing in this
+        # batch reached the destination and nothing in it would on a second try, so the whole claim
+        # spends one attempt and stays claimable until the budget runs out.
         #
         # Never re-raised. A destination's failure is data about that destination; putting it into
         # Temporal's retry loop as well would be two backoffs for one problem, and would make an
@@ -117,6 +114,43 @@ async def _drain_one(manifest_name: str, sink: ResultSink, batch_size: int) -> S
         outcome.failed += len(ids)
         outcome.reason = str(exc)[:500]
         return outcome
+    except Exception as exc:
+        # **A refusal is about one record, so it is re-attempted one record at a time.** This used
+        # to share the handler above, which made the delivery side do the opposite of the parse
+        # side ten lines up: one record the sink would not take marked *every* id in the claim
+        # failed. Because `SqlResultSink` writes record-by-record on an autocommit connection, the
+        # records before the poison were already durable at the far end while being booked
+        # `failed`, and the ones after it were never attempted at all — and because `_CLAIM` is
+        # `ORDER BY enqueued_at`, the poison stayed at the head of the queue and re-collected the
+        # same neighbours every pass until the whole group had spent its attempts. At a batch size
+        # of 100 that is up to 99 good records retired per poison, recoverable only by an operator
+        # running `--requeue`.
+        #
+        # The replay is free of duplication because every write on the far side is an upsert onto a
+        # content hash, so re-sending a record that already landed is a no-op. It costs one
+        # delivery per record for the one pass in which a refusal occurs, which is bounded by the
+        # batch size and is the smaller harm by far.
+        outcome.reason = str(exc)[:500]
+        delivered: list[int] = []
+        refused: list[int] = []
+        for row_id, record in zip(ids, records, strict=True):
+            try:
+                await sink.deliver([record])
+            except SinkUnavailableError as outage:
+                # The destination went away mid-replay: everything not yet delivered is the
+                # outage's, not the poison's, and must stay claimable.
+                refused.extend(ids[len(delivered) + len(refused) :])
+                outcome.reason = str(outage)[:500]
+                break
+            except Exception as refusal:
+                refused.append(row_id)
+                outcome.reason = str(refusal)[:500]
+            else:
+                delivered.append(row_id)
+        if refused:
+            await outbox.mark_failed(refused, outcome.reason)
+        ids = delivered
+        outcome.failed += len(refused)
 
     await outbox.mark_delivered(ids)
     outcome.delivered = len(ids)

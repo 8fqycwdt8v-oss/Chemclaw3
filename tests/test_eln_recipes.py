@@ -548,13 +548,13 @@ def test_the_conditions_block_round_trips_through_the_stored_form() -> None:
 
     async def _run() -> None:
         memory = InMemoryReactionRecordStore()
-        await memory.record([record])
+        await memory.record([record], "eln-json")
         from_memory = await memory.read("R4")
         assert from_memory is not None and from_memory.conditions == record.conditions
 
         await migrated_db_or_skip()
         durable = PostgresReactionRecordStore()
-        await durable.record([record])
+        await durable.record([record], "eln-json")
         from_pg = await durable.read("R4")
         assert from_pg is not None and from_pg.conditions == record.conditions
 

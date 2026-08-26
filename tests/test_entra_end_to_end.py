@@ -444,6 +444,38 @@ def test_an_unreachable_issuer_answers_503_and_not_401(issuer: _JwksIssuer) -> N
     assert res.json()["detail"] == "identity provider unavailable"
 
 
+@pytest.mark.parametrize(
+    ("name", "body"),
+    [
+        ("an HTML error page from a proxy", "<html><body>502 Bad Gateway</body></html>"),
+        ("valid JSON that is not a key set", '{"error": "tenant not found"}'),
+    ],
+)
+def test_an_issuer_answering_with_something_that_is_not_a_key_set_answers_503(
+    issuer: _JwksIssuer, name: str, body: str
+) -> None:
+    """A 200 carrying anything but a JWKS is still "we could not reach the tenant to decide".
+
+    `IdentityProviderUnavailable` exists so that failure is a 503 rather than a 401, and its
+    reasoning — "an IdP failure is our outage, not the caller's bad credential" — covers a
+    *successful* HTTP response carrying junk exactly as it covers a refused connection. That is the
+    common shape of an intercepting proxy, a captive portal or a tenant misconfiguration, and it
+    used to be a bare HTTP 500: the wrong contract for the client ("this request is broken, do not
+    retry"), a page for the on-call as an application bug, and a 5xx spike naming nothing.
+
+    Two shapes because they fail in two different libraries: the HTML page dies in `json.load`
+    (`json.JSONDecodeError`, a `ValueError`, which PyJWT's client does not convert), and the JSON
+    one dies in `PyJWKSet.from_dict` (`PyJWKSetError` — a `PyJWTError` that is neither a
+    `PyJWKClientError` nor an `InvalidTokenError`, so every handler in `api/auth.py` missed it).
+    """
+    token = _sign(_KEY_A, "kid-a", oid="u-alice")
+    issuer.publish(body)
+    with _client() as client:
+        res = client.post("/sessions", headers=_bearer(token))
+    assert res.status_code == 503, name
+    assert res.json()["detail"] == "identity provider unavailable"
+
+
 def test_the_probes_stay_open_while_everything_else_is_closed() -> None:
     """Enforcement does not reach the kubelet or the scrape, and reaches everything else.
 

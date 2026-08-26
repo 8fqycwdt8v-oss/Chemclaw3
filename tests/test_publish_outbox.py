@@ -380,3 +380,148 @@ def test_the_drain_closes_every_sink_it_builds(monkeypatch: pytest.MonkeyPatch) 
         )
 
     asyncio.run(_run())
+
+
+def test_one_refused_record_does_not_retire_its_neighbours(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The delivery side of the poison-row rule the parse side above already holds.
+
+    `_drain_one` protected against an unreadable *document* per row and against a refused *record*
+    per batch, so one record the sink would not take marked every id in the claim failed — up to
+    `batch_size - 1` neighbours retired once they had spent their attempts, and because `_CLAIM` is
+    `ORDER BY enqueued_at` the poison sat at the head of the queue and re-collected the same
+    neighbours on every pass. Worse, `SqlResultSink` writes record-by-record on an autocommit
+    connection: the records *before* the poison are already durable at the far end while being
+    booked `failed`, and the ones after it are never attempted at all.
+
+    Measured on the shipped code with a sink refusing the third of five: `delivered=0 failed=5` on
+    every pass, two rows written to the far end three times over and marked failed anyway.
+    """
+    from chemclaw.durable import publish_results
+    from chemclaw.publish.driver import SinkRejectedError
+
+    delivered: list[str] = []
+
+    class _PickySink:
+        """Refuses exactly one record, exactly as a `VARCHAR` overflow or a missing FK would."""
+
+        async def deliver(self, records: Any) -> None:
+            for record in records:
+                if record.calc_ref == "poison":
+                    raise SinkRejectedError("value too long for column")
+                delivered.append(record.calc_ref)
+
+        async def aclose(self) -> None:
+            """Holds nothing; present because `ResultSink` requires it of every sink."""
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        _with_sink(monkeypatch, "alpha")
+        async with outbox._connect() as conn:
+            await _reset(conn)
+        # Enqueued in this order, so the refused one sits in the middle of the claim: the rows
+        # before it are the ones the batch-wide handler retired *after* they had been written.
+        assert await outbox.enqueue([_record(ref) for ref in ("a-1", "a-2", "poison", "z-1")]) == 4
+
+        outcome = await publish_results._drain_one("alpha", _PickySink(), 10)
+
+        assert sorted(set(delivered)) == ["a-1", "a-2", "z-1"], (
+            "every record the sink accepts must be delivered, including the ones queued after "
+            f"the refused one; delivered={delivered}"
+        )
+        assert outcome.delivered == 3
+        assert outcome.failed == 1, "exactly the refused record is charged with the failure"
+
+        async with outbox._connect() as conn:
+            cursor = await conn.execute(
+                "SELECT calc_ref, state FROM result_publications ORDER BY calc_ref"
+            )
+            rows = {row[0]: row[1] for row in await cursor.fetchall()}
+        assert rows == {
+            "a-1": "delivered",
+            "a-2": "delivered",
+            "poison": "pending",
+            "z-1": "delivered",
+        }, f"a row committed at the far end must never be booked failed; got {rows}"
+
+    asyncio.run(_run())
+
+
+def test_an_unreachable_destination_still_fails_the_whole_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other half of the same rule, and why it is not one handler.
+
+    A rejection is a statement about one record; an outage is a statement about the destination.
+    Re-attempting a batch record-by-record against a sink that cannot be reached would multiply one
+    outage into `batch_size` connection attempts per pass and learn nothing, so the unavailable
+    case stays batch-wide — one `deliver` call, every row left pending.
+    """
+    from chemclaw.durable import publish_results
+    from chemclaw.publish.driver import SinkUnavailableError
+
+    attempts: list[int] = []
+
+    class _DownSink:
+        async def deliver(self, records: Any) -> None:
+            attempts.append(len(records))
+            raise SinkUnavailableError("destination is down")
+
+        async def aclose(self) -> None:
+            """Holds nothing; present because `ResultSink` requires it of every sink."""
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        _with_sink(monkeypatch, "alpha")
+        async with outbox._connect() as conn:
+            await _reset(conn)
+        await outbox.enqueue([_record(ref) for ref in ("d-1", "d-2", "d-3")])
+
+        outcome = await publish_results._drain_one("alpha", _DownSink(), 10)
+
+        assert attempts == [3], (
+            f"an outage must cost one delivery attempt, not one per row: {attempts}"
+        )
+        assert outcome.delivered == 0
+        assert outcome.failed == 3
+
+    asyncio.run(_run())
+
+
+def test_a_projection_that_cannot_succeed_is_not_counted_as_a_publish_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A projector that raises is a code gap, and must not read as a destination's bad day.
+
+    Both were `chemclaw_result_publish_failures_total`, whose declared population is "could not be
+    queued or delivered" — so a projector raising on *every* payload of a shape looked exactly like
+    a transient publish failure, and the most expensive calculation in the tier reached the result
+    store never while the only visible signal was a counter that also rises when a warehouse is
+    slow. A projection failure never fixes itself: it is a permanent gap until code changes.
+    """
+    from chemclaw.core.metrics import METRICS
+
+    _with_sink(monkeypatch, "alpha")
+    projection_before = METRICS.value("chemclaw_result_projection_failures_total")
+    publish_before = METRICS.value("chemclaw_result_publish_failures_total")
+
+    # A reaction with no products: `_reaction` raises `ProjectionError` deliberately, which is the
+    # same escape route an unregistered property takes out of `to_canonical`.
+    written = asyncio.run(
+        outbox.enqueue_payload(
+            calc_ref="broken@v1:a:b",
+            calc_type="reaction.energy",
+            payload_kind="ReactionEnergyResult",
+            payload={"reactants": ["CCO"], "products": []},
+        )
+    )
+
+    assert written == 0
+    assert METRICS.value("chemclaw_result_projection_failures_total") == projection_before + 1, (
+        "a payload this release cannot project must be counted as such"
+    )
+    assert METRICS.value("chemclaw_result_publish_failures_total") == publish_before, (
+        "nothing was queued and nothing was delivered, so the publish counter must not move — "
+        "it is what an operator reads to decide whether a destination is unhealthy"
+    )

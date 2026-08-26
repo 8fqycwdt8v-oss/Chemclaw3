@@ -238,8 +238,8 @@ def create_app(
         a leaked entry (see `chemclaw.api.state._claim_turn_slot`) can therefore delay an
         eviction by at most one lease, never wedge it.
         """
-        deadline = app.state.active_turns.get(session_id)
-        return deadline is not None and deadline > time.monotonic()
+        lease = app.state.active_turns.get(session_id)
+        return lease is not None and lease.deadline > time.monotonic()
 
     # Bounded LRU of live sessions, each carrying its owner Entra oid so a session can only be
     # posted to / streamed by its creator (defense-in-depth beyond the unguessable uuid4 id).
@@ -269,16 +269,16 @@ def create_app(
     # turn that cannot get one within the admission timeout is shed with 503. Built here so it
     # binds to the app's event loop on first await.
     app.state.turn_semaphore = asyncio.Semaphore(settings.service_max_concurrent_turns)
-    # Per-session turn serialization: session id → monotonic lease deadline for the turn in
-    # flight. Two concurrent turns on one session would drive `agent.run` against the same
-    # AgentSession state at once, interleaving two turns' messages in one thread — so a second
-    # turn is rejected with 409 while one runs, matching the admission semaphore's
-    # shed-don't-queue semantics (a queued turn would silently pin a second permit and still
-    # interleave from the user's point of view; a 409 tells the client — a double-submit or a
-    # second tab — to wait for the running turn). A deadline map rather than a bare set because
-    # an entry can leak (see `chemclaw.api.state._claim_turn_slot`, which owns the claim's
-    # atomicity and expiry); this is also the pin set `_turn_in_flight` above reads for the live
-    # cache's eviction.
+    # Per-session turn serialization: session id → the lease held by the turn in flight
+    # (`chemclaw.api.state.TurnLease`). Two concurrent turns on one session would drive
+    # `agent.run` against the same AgentSession state at once, interleaving two turns' messages
+    # in one thread — so a second turn is rejected with 409 while one runs, matching the
+    # admission semaphore's shed-don't-queue semantics (a queued turn would silently pin a
+    # second permit and still interleave from the user's point of view; a 409 tells the client —
+    # a double-submit or a second tab — to wait for the running turn). A lease map rather than a
+    # bare set because an entry can leak (see `chemclaw.api.state._claim_turn_slot`, which owns
+    # the claim's atomicity, its identity and its expiry); this is also the pin set
+    # `_turn_in_flight` above reads for the live cache's eviction.
     app.state.active_turns = {}
     # The same gate at the width the deployment actually has (D-121). The map above is one
     # process's view, and the chart runs the front door at two replicas, so the second POST can
@@ -305,7 +305,7 @@ def create_app(
     METRICS.bind_gauge(
         "chemclaw_turns_in_flight",
         lambda: float(
-            sum(1 for deadline in app.state.active_turns.values() if deadline > time.monotonic())
+            sum(1 for lease in app.state.active_turns.values() if lease.deadline > time.monotonic())
         ),
     )
     METRICS.bind_gauge(
@@ -335,6 +335,11 @@ def create_app(
     # turn every rollout into a needless gap.
     app.state.database_reachable = True
     app.state.database_probed_at = float("-inf")
+    # The probe tasks currently in flight, keyed by probe name. Both readiness probes are
+    # single-flight (`chemclaw.api.routes.ops._shared_probe`): the cache window suppresses
+    # sequential repeats, and this is what makes a *burst* of unauthenticated probes cost one
+    # connector fan-out and one pooled checkout instead of one per caller.
+    app.state.readiness_probes = {}
     # The pool gauges are deliberately *not* bound here any more (D-119's saturation signal, plus
     # the connection-budget pair). `chemclaw.core.db.pooling` binds them, so every process that
     # opens a pool reports on it rather than only the one process that happened to have the

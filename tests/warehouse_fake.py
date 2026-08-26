@@ -145,12 +145,14 @@ class WatermarkWarehouse(FakeWarehouse):
         entry_relation: str,
         created_at: str,
         modified_at: str | None = None,
+        key: str = "",
     ) -> None:
         """Serve `entry_relation` under its declared watermark columns; other tables as canned."""
         super().__init__(tables)
         self._entry_relation = entry_relation
         self._created_at = created_at
         self._modified_at = modified_at
+        self._key = key
 
     def _watermark(self, row: dict[str, Any]) -> Any:
         """The value the entry statement filters and orders on: COALESCE(modified, created)."""
@@ -158,14 +160,39 @@ class WatermarkWarehouse(FakeWarehouse):
             return row[self._modified_at]
         return row[self._created_at]
 
+    def _rank(self, row: dict[str, Any]) -> tuple[Any, str]:
+        """The total order the statement asks for: the watermark, then the entry key.
+
+        The key is the tiebreaker the page's `LIMIT` needs to be meaningful. Without it the
+        warehouse is free to return the rows of one watermark value in any order, so a page cut out
+        of a tie is a different subset each time and no cursor of any shape could resume it.
+        """
+        return self._watermark(row), str(row.get(self._key, ""))
+
     def respond(self, sql: str, params: list[Any]) -> list[dict[str, Any]]:
-        """Rows at or after the bound cursor, oldest watermark first, cut to the bound limit."""
+        """Rows at or after the bound cursor, in `(watermark, key)` order, cut to the bound limit.
+
+        Two shapes of parameter list, matching the two the engine builds: `[since, limit]` for a
+        page starting at the cursor, and `[block, block, after_key, limit]` for one continuing
+        *inside* a watermark block that a page could not hold — which is the only way a source
+        whose watermark is a DATE, or a bulk reload that stamped one instant on every row, can ever
+        be got past.
+        """
         rows = super().respond(sql, params)
         if f" {self._entry_relation} " not in sql:
             return rows
-        since, limit = params[0], params[1]
-        keep = sorted((row for row in rows if self._watermark(row) >= since), key=self._watermark)
-        return keep[:limit]
+        if len(params) == 4:
+            block, after_key, limit = params[0], str(params[2]), params[3]
+            keep = [
+                row
+                for row in rows
+                if self._watermark(row) > block
+                or (self._watermark(row) == block and str(row.get(self._key, "")) > after_key)
+            ]
+        else:
+            since, limit = params[0], params[1]
+            keep = [row for row in rows if self._watermark(row) >= since]
+        return sorted(keep, key=self._rank)[:limit]
 
 
 # The warehouse `open_fake` will hand out next. A module-level slot because `connection.driver` is
@@ -224,14 +251,29 @@ class KeysetWarehouse(FakeWarehouse):
         self._corpus_relation = corpus_relation
         self._cursor = cursor_column
 
+    def _rank(self, row: dict[str, Any]) -> tuple[int, str]:
+        """The order the warehouse walks: NULL first, then the cursor value as text.
+
+        NULLs first because that is what an ASC sort does on Spark, which is the engine the first
+        real corpus (Pistachio on Databricks) is drained from — so a row with no cursor value lands
+        on *page one*, where it decides what the next page resumes after. Ranking them last here
+        would put the one row that can break a keyset resume where no bounded test ever reaches it.
+        """
+        value = row.get(self._cursor)
+        return (0, "") if value is None else (1, str(value))
+
     def respond(self, sql: str, params: list[Any]) -> list[dict[str, Any]]:
         """The next page of the corpus relation, or a canned table for anything else."""
         if f" {self._corpus_relation} " not in sql:
             return super().respond(sql, params)
-        rows = sorted(self.tables[self._corpus_relation], key=lambda r: str(r[self._cursor]))
+        rows = sorted(self.tables[self._corpus_relation], key=self._rank)
         if len(params) == 2:
             after, limit = str(params[0]), int(params[1])
-            rows = [r for r in rows if str(r[self._cursor]) > after]
+            # `> ?` against a NULL column is NULL, never true — so a NULL row is *dropped* by any
+            # resumed page, exactly as the warehouse drops it, and cannot be re-read by rewinding.
+            rows = [
+                r for r in rows if r.get(self._cursor) is not None and str(r[self._cursor]) > after
+            ]
         else:
             limit = int(params[0])
         return [dict(row) for row in rows[:limit]]

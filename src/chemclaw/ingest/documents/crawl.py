@@ -129,6 +129,48 @@ class _Walk:
         self.after = after
         self.limit = limit
         self.result = CrawlResult()
+        # The identity — `(st_dev, st_ino)` — of every directory this pass has already walked, so
+        # a link back into the mount is followed once instead of forever. See `enter`.
+        self.visited: set[tuple[int, int]] = set()
+
+    def enter(self, directory: Path, relative: str) -> bool:
+        """Claim `directory` for this walk; False when it is one already walked.
+
+        **`_within_mount` checks escape, and a cycle is the case it cannot see.** A link whose
+        target resolves *inside* the mount is exactly what a convenience link is —
+        `Projects/sub/current -> ..`, `Data/Archive/all -> /mnt/share/Data`, both ordinary on a
+        decade-old drive — so with `follow_symlinks: true` the walk recursed through it, emitting
+        the same file under an unbounded family of mount-relative paths until `scandir` failed on
+        path length. That `OSError` is caught and records the root as *failed*, which is right for
+        its own purpose and fatal here: `prune_share` refuses to sweep on any failed root, so from
+        the first cycle onward the share's index was never pruned again and deleted documents
+        stayed searchable and citable. Before that, the cycle ate the bounded chunk's `limit`.
+
+        Keyed on the directory's identity rather than on its path, which also covers the acyclic
+        version of the same fault — two roots reaching one tree through a link, indexing every file
+        twice under two paths and two tag sets. The binding already refuses roots that overlap
+        *lexically*; this is the same rule where the overlap is in the filesystem instead of in the
+        string, and first walked wins, deterministically, because the roots are walked in order.
+
+        A directory that cannot be `stat`ed is **entered anyway**: `scandir` is about to fail on it
+        too, and that failure is what marks the root failed and stops the sweep. Swallowing it here
+        would turn a half-mounted share back into "these files are not there", which is the one
+        wrong answer this module is built around avoiding.
+        """
+        try:
+            stat = directory.stat()
+        except OSError:
+            return True
+        identity = (stat.st_dev, stat.st_ino)
+        if identity in self.visited:
+            logger.warning(
+                "%s is a link back to a directory this share has already walked; not descending "
+                "again (the file it holds is indexed under the path that reached it first)",
+                relative,
+            )
+            return False
+        self.visited.add(identity)
+        return True
 
     def _accept(self, entry: os.DirEntry[str], relative: str, root: RootBinding) -> bool:
         """Record one file if it passes every filter; return False once the chunk is full."""
@@ -205,6 +247,8 @@ class _Walk:
                 logger.warning("%s links outside the mount; skipping", relative)
                 continue
             if entry.is_dir(follow_symlinks=self.binding.follow_symlinks):
+                if not self.enter(Path(entry.path), relative):
+                    continue
                 if not self.descend(Path(entry.path), root):
                     return False
                 continue
@@ -266,6 +310,11 @@ def crawl_share(
                 binding.mount,
             )
             walk.result.failed_roots.append(root.path)
+            continue
+        # The root itself is claimed too, for the same reason it is resolved above: `descend` never
+        # sees the directory it was handed, so two roots that reach one tree — declared distinct,
+        # linked together on the share — would otherwise each walk it in full.
+        if not walk.enter(directory, root.path):
             continue
         try:
             if not walk.descend(directory, root):

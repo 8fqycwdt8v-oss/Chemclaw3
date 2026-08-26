@@ -13,7 +13,9 @@ surface the same defect hours later inside a background worker, detached from it
 
 **Enqueue never raises into its caller.** Every call site is a *completed* calculation, and a
 publish that cannot be queued is strictly less important than the science being returned. Failures
-are counted (`chemclaw_result_publish_failures_total`) and logged at warning, which is the same
+are counted (`chemclaw_result_publish_failures_total`, or
+`chemclaw_result_projection_failures_total` when the payload is what could not be read) and logged
+at warning, which is the same
 polarity `publish_note_best_effort` and `notify_session_best_effort` already take for the two other
 things that happen after a result is durable.
 """
@@ -214,8 +216,13 @@ async def enqueue_payload(
         # The comment below has always stated the right policy; the tuple was narrower than the
         # argument. A publish is best-effort by construction: nothing it can raise is worth failing
         # a calculation that already succeeded and is already persisted.
+        # **Counted apart from a publish failure**, because it is a different question with a
+        # different answer: a queue write or a delivery that failed may succeed on the next pass,
+        # while a projector that raises will raise on every payload of that shape until code
+        # changes. One series carrying both made the second look like the first — see the counter's
+        # own declaration for the case that proved it.
         logger.exception("publish: could not project %s (%s)", calc_ref, calc_type)
-        record_metric(lambda m: m.increment("chemclaw_result_publish_failures_total"))
+        record_metric(lambda m: m.increment("chemclaw_result_projection_failures_total"))
         return 0
     if publication is not None:
         records = [record.model_copy(update={"publications": [publication]}) for record in records]

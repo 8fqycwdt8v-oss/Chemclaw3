@@ -49,9 +49,9 @@ def watermark_expression(entry: EntryBinding) -> str:
 
 
 def entry_statement(
-    entry: EntryBinding, placeholder: str, since: datetime, limit: int
+    entry: EntryBinding, placeholder: str, since: datetime, limit: int, after_key: str = ""
 ) -> tuple[str, list[Any]]:
-    """Every reaction at or after the cursor, oldest first, bounded.
+    """Every reaction at or after the cursor, oldest first, bounded — as a composite keyset.
 
     **Oldest first and bounded together.** The durable sync drains a source in chunks, persisting
     its cursor after each one; that only makes progress if each fetch returns the *earliest*
@@ -59,20 +59,46 @@ def entry_statement(
     what keeps a first sync of a warehouse with a decade of history from being one query that tries
     to materialise the decade.
 
+    **The entry key is the tiebreaker, and it is what makes the `LIMIT` mean anything.** Ordering on
+    the watermark alone leaves the rows sharing one value in whatever order the warehouse felt like,
+    so the page cut out of a block of ties is a different subset on every fetch — and, worse, the
+    cursor is that same timestamp, so it can only ever advance *to* the tie value. More rows sharing
+    a watermark than `fetch_limit` allows then truncated the source **permanently and silently**:
+    every later fetch returned the same first page, nothing was rejected, and the run logged
+    `ingested=0 rejected=0`. Two ordinary shapes produce it — a `created_at:` bound to a DATE
+    column, and the bulk `UPDATE … SET LAST_MODIFIED_TS = now()` of a warehouse reload.
+    `corpus_statement` next door has used a unique keyset for exactly this reason from the start.
+
+    `after_key` continues *inside* one watermark block: the page starts strictly after
+    `(since, after_key)` in that total order, which is the only way past a block bigger than a page.
+    An empty `after_key` is the ordinary page, inclusive at the cursor for the reason the adapter's
+    contract gives. The two forms bind `[since, limit]` and `[since, since, after_key, limit]`.
+
+    The cursor predicate is parenthesised as a whole because the continuation form is an `OR`, and
+    `A OR B AND (where)` would silently apply the site's `where:` to only half of it.
+
     `SELECT *` because the binding's `attributes.include: ['*']` means "every column the row has",
     and a projection would have to know them — which is the thing nobody knows today.
     """
     watermark = watermark_expression(entry)
-    predicate = f"{watermark} >= {placeholder}"
+    if after_key:
+        predicate = (
+            f"({watermark} > {placeholder} OR "
+            f"({watermark} = {placeholder} AND {entry.key} > {placeholder}))"
+        )
+        params: list[Any] = [since, since, after_key]
+    else:
+        predicate = f"({watermark} >= {placeholder})"
+        params = [since]
     if entry.where:
         predicate += f" AND ({entry.where})"
     sql = (
         f"SELECT * FROM {entry.relation} "  # identifier checked by `binding._check_identifier`
         f"WHERE {predicate} "
-        f"ORDER BY {watermark} ASC "
+        f"ORDER BY {watermark} ASC, {entry.key} ASC "
         f"LIMIT {placeholder}"
     )
-    return sql, [since, limit]
+    return sql, [*params, limit]
 
 
 def corpus_statement(

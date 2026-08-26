@@ -6,9 +6,12 @@ pins that allowlist to exactly these. `/schedules` lives beside them because it 
 audience: an operator asking "is the machinery running", not a chemist asking about chemistry.
 """
 
+import asyncio
 import logging
 import time
+from collections.abc import Callable, Coroutine
 from http import HTTPStatus
+from typing import Any, TypeVar
 
 import psycopg
 from fastapi import FastAPI, Request
@@ -16,7 +19,7 @@ from starlette.responses import Response
 
 from chemclaw.api import app as front_door
 from chemclaw.api.deps import CurrentUser
-from chemclaw.api.state import state
+from chemclaw.api.state import FrontDoorState, state
 from chemclaw.connectors.health import ConnectorHealth
 from chemclaw.core import db
 from chemclaw.core.config import settings
@@ -25,6 +28,11 @@ from chemclaw.durable.schedules import ScheduleHealth, describe_schedules
 
 log = logging.getLogger(__name__)
 
+# What one readiness probe answers with. Named so `_shared_probe` can be one function over both —
+# a connector sweep and a database verdict share every line of the single-flight bookkeeping and
+# differ only in what they return.
+_Probed = TypeVar("_Probed")
+
 
 async def healthz() -> dict[str, str]:
     """Liveness: the process is up."""
@@ -32,24 +40,69 @@ async def healthz() -> dict[str, str]:
 
 
 async def _connector_health(request: Request) -> list[ConnectorHealth]:
-    """The connector sweep, re-probed at most once per `service_readiness_cache_seconds`.
+    """The connector sweep: at most once per `service_readiness_cache_seconds`, and once at a time.
 
     Monotonic, not wall-clock: a clock adjustment must not make the last sweep look
-    arbitrarily fresh. A concurrent second caller inside the window reads the same snapshot;
-    two callers racing past the window both probe once, which is a wasted sweep and not a
-    correctness problem, so it is not worth a lock on a readiness route.
+    arbitrarily fresh.
+
+    **The window alone only suppressed sequential repeats, and the concurrency is chosen by the
+    caller.** This docstring used to trade away a lock on the grounds that "two callers racing past
+    the window both probe once, which is a wasted sweep and not a correctness problem" — true of
+    two, and the number is not two. The read, the `await` and the cache write are a check-then-act,
+    so *every* request in flight while a sweep runs misses: measured on the real app, 50 concurrent
+    probes inside one 5 s window did 50 full connector fan-outs. This route is unauthenticated by
+    necessity (a kubelet cannot present a token) and therefore also outside `require_principal`'s
+    per-principal budget, so one credential-less TCP connection bought N outbound connections to
+    the connector fleet, with no ceiling anywhere in the path.
+
+    Single-flight rather than a lock: a lock would serialise the waiters behind one probe *each*,
+    while what they all want is the same answer. Everyone reads the one result.
     """
     front = state(request)
     window = settings.service_readiness_cache_seconds
-    now = time.monotonic()
-    if window and now - front.connector_health_at < window:
+    if window and time.monotonic() - front.connector_health_at < window:
         return front.connector_health
+    return await _shared_probe(front, "connectors", lambda: _sweep_connectors(front))
+
+
+async def _sweep_connectors(front: FrontDoorState) -> list[ConnectorHealth]:
+    """Probe every connector once and refresh the readiness snapshot with what came back."""
     # Through the front-door module so the suite's patch seam (`chemclaw.api.app.
     # probe_connectors`) keeps reaching the probe this route actually runs.
     health = await front_door.probe_connectors()
     front.connector_health = health
-    front.connector_health_at = now
+    front.connector_health_at = time.monotonic()
     return health
+
+
+async def _shared_probe(
+    front: FrontDoorState, name: str, probe: Callable[[], Coroutine[Any, Any, _Probed]]
+) -> _Probed:
+    """Run `probe` once for every caller that finds the cache stale at the same moment.
+
+    The in-flight task is kept on `app.state` under `name`, and the check-and-start is atomic on
+    the event loop — there is no `await` between reading the slot and writing the new task — which
+    is exactly the property the cache read alone did not have.
+
+    `shield`, because the awaiting caller does not own the probe: an unauthenticated client that
+    hangs up mid-probe would otherwise cancel the task every other caller is waiting on, which
+    would hand this route's amplification back to whoever asked for it. The done-callback retrieves
+    a failed probe's exception so an abandoned one cannot surface as `Task exception was never
+    retrieved`; a caller still sees the failure by awaiting it.
+    """
+    inflight = front.readiness_probes.get(name)
+    if inflight is None or inflight.done():
+        inflight = asyncio.create_task(probe())
+        inflight.add_done_callback(_drain)
+        front.readiness_probes[name] = inflight
+    probed: _Probed = await asyncio.shield(inflight)
+    return probed
+
+
+def _drain(task: "asyncio.Task[Any]") -> None:
+    """Retrieve a finished probe's outcome, so a failed one nobody awaited is not a traceback."""
+    if not task.cancelled():
+        task.exception()
 
 
 async def _database_reachable(request: Request) -> bool:
@@ -70,9 +123,19 @@ async def _database_reachable(request: Request) -> bool:
     """
     front = state(request)
     window = settings.service_readiness_cache_seconds
-    now = time.monotonic()
-    if window and now - front.database_probed_at < window:
+    if window and time.monotonic() - front.database_probed_at < window:
         return front.database_reachable
+    return await _shared_probe(front, "database", lambda: _probe_database(front))
+
+
+async def _probe_database(front: FrontDoorState) -> bool:
+    """Ask Postgres one bounded question and cache the answer.
+
+    Single-flight for a sharper reason than the connector sweep: each miss borrows from the shared
+    pool, so 50 concurrent probes requested 50 checkouts against `pg_pool_max_size` — and every
+    authenticated request needing the store in that window queued behind them and, past
+    `pg_pool_timeout_seconds`, was shed 503.
+    """
     try:
         async with db.connection(
             settings.session_store_dsn or settings.postgres_dsn,
@@ -84,7 +147,7 @@ async def _database_reachable(request: Request) -> bool:
         log.warning("readiness: Postgres did not answer", exc_info=True)
         reachable = False
     front.database_reachable = reachable
-    front.database_probed_at = now
+    front.database_probed_at = time.monotonic()
     return reachable
 
 

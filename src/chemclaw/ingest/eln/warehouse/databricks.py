@@ -42,7 +42,7 @@ leg of the fan-out for the length of a warehouse query.
 import asyncio
 import json
 import logging
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -99,10 +99,17 @@ class DatabricksVectorDialect:
 class _DatabricksCursor:
     """One statement against a Databricks SQL warehouse, returning column-keyed rows."""
 
-    def __init__(self, cursor: Any, client: Any) -> None:
-        """Wrap a client cursor, keeping the client module for its error types."""
+    def __init__(self, cursor: Any, client: Any, on_session_lost: Callable[[], None]) -> None:
+        """Wrap a client cursor, keeping the client module for its error types.
+
+        `on_session_lost` is the warehouse's own eviction: the transient arm below decides that the
+        session is gone, and deciding that while leaving the handle cached is what turned an
+        overnight warehouse auto-stop into a permanent outage. The two are one decision, so they
+        are made in one place.
+        """
         self._cursor = cursor
         self._client = client
+        self._on_session_lost = on_session_lost
 
     async def execute(self, sql: str, params: Sequence[Any]) -> None:
         """Run the statement, translating a client error into the engine's own two types."""
@@ -112,7 +119,9 @@ class _DatabricksCursor:
             await asyncio.to_thread(self._cursor.execute, sql, list(params))
         except self._client.OperationalError as exc:
             # Network, session or timeout. Transient by nature, so `ConnectionError` — which
-            # Temporal retries — exactly as `chemclaw.core.db` splits the same two cases.
+            # Temporal retries — exactly as `chemclaw.core.db` splits the same two cases. And the
+            # handle goes with it: a retry against the same dead session is not a retry.
+            self._on_session_lost()
             raise ConnectionError(f"warehouse unreachable: {exc}") from exc
         except self._client.Error as exc:
             # A relation or column the binding names and the warehouse does not have. Identical on
@@ -238,13 +247,42 @@ class DatabricksWarehouse:
                 raise ConnectionError(f"cannot connect to the warehouse: {exc}") from exc
         return self._connection
 
+    def _session_lost(self) -> None:
+        """Forget the open session, so the next call opens a new one.
+
+        **The one thing this driver was missing.** `_connect` memoizes and nothing ever cleared it,
+        while a Databricks SQL session is emphatically not permanent: it expires, and the warehouse
+        behind it can be stopped or scaled to zero overnight. Every statement afterwards failed
+        against the same dead handle for the life of the pod — in the retriever, swallowed by the
+        `except Exception` backstop so the ELN simply stopped answering while the pod read healthy;
+        in a sync activity, on every attempt and every Temporal retry.
+
+        The seam has no lifecycle hook to close a connection from (`driver.Warehouse` says why it
+        has no `close`), and it does not need one: what has to be dropped is the *session*, not the
+        configured warehouse, and the trigger is a failure this driver already recognises. One
+        reconnect on the next call is the whole cost, and `ConnectionError` already tells Temporal
+        to come back.
+        """
+        self._connection = None
+
     @asynccontextmanager
     async def cursor(self) -> AsyncIterator[_DatabricksCursor]:
-        """A cursor for one statement, closed on exit whatever happened inside."""
+        """A cursor for one statement, closed on exit whatever happened inside.
+
+        Opening the cursor is inside the translation too, and it was the gap that made the rest of
+        it moot: `connection.cursor()` on an expired session raises the client's own `Error` from
+        *outside* `_DatabricksCursor.execute`, so it was neither the retryable `ConnectionError`
+        nor the reportable `WarehouseQueryError` — it escaped as a vendor class no caller in this
+        tree knows, and the retriever's backstop turned it into an empty result.
+        """
         connection = await self._connect()
         client = _client()
-        raw = await asyncio.to_thread(connection.cursor)
         try:
-            yield _DatabricksCursor(raw, client)
+            raw = await asyncio.to_thread(connection.cursor)
+        except client.Error as exc:
+            self._session_lost()
+            raise ConnectionError(f"warehouse session is gone: {exc}") from exc
+        try:
+            yield _DatabricksCursor(raw, client, self._session_lost)
         finally:
             await asyncio.to_thread(raw.close)

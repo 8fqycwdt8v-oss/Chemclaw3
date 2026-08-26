@@ -23,6 +23,7 @@ from typing import Any
 
 import httpx
 
+from chemclaw.core.config import settings
 from chemclaw.core.logging import register_secret_env
 from chemclaw.publish.driver import SinkRejectedError, SinkUnavailableError
 from chemclaw.publish.record import ResultRecord
@@ -58,7 +59,8 @@ class HttpResultSink:
                 the endpoint takes no credential, which is only sensible on a loopback or a
                 mesh-authenticated address.
             timeout_seconds: Per-request ceiling.
-            writer_version: The ChemClaw release stamped on each published record.
+            writer_version: The ChemClaw release stamped on each published record. Defaults to
+                this deployment's own revision; a manifest sets it only to override that.
             verify_tls: Left settable only so a site with an internal CA can point at its own
                 bundle by other means; **never set this false** — an unverified TLS connection to a
                 results store is an unauthenticated one.
@@ -72,7 +74,10 @@ class HttpResultSink:
         self._url = url
         self._token_env = token_env
         self._timeout = timeout_seconds
-        self._writer_version = writer_version
+        # Defaulted like the SQL sink's, and for the same reason: nothing computed a writer
+        # version, so this crossed to every endpoint as `''` — a provenance field that reads as
+        # "recorded, and blank". `deployment_revision` is what the audit trail already stamps.
+        self._writer_version = writer_version or settings.deployment_revision
         self._verify = verify_tls
         if token_env:
             # Registered before it is ever read, so a traceback that echoes configuration cannot

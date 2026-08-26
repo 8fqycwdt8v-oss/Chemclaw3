@@ -10,6 +10,7 @@ Every test here therefore asks the same question twice: is it hidden, and is it 
 
 import asyncio
 import inspect
+import logging
 import tempfile
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -19,13 +20,14 @@ import pytest
 from deepagents.backends import FilesystemBackend
 from deepagents.backends.protocol import BackendProtocol
 
-from chemclaw.agent.skill_backend import REFUSED, NarrowedSkillsBackend
+from chemclaw.agent.authz import AuthorizationError
+from chemclaw.agent.skill_backend import REFUSED, NarrowedSkillsBackend, SkillsReadOnlyRefusal
 
 _SKILLS = ("alpha", "beta", "gamma")
 
 # The verbs the gate refuses outright rather than narrowing, sync and async. Written down in one
 # place because two tests need the same answer: one calls every name here and requires a
-# `PermissionError`, the other requires that this set plus the reach probes account for every
+# `SkillsReadOnlyRefusal`, the other requires that this set plus the reach probes account for every
 # public method the backend exposes. Neither is a list of what upstream had when it was written —
 # the second test fails if it becomes one.
 _WRITE_METHODS = frozenset(
@@ -140,7 +142,13 @@ def test_the_skills_tree_is_read_only(tree: str) -> None:
     assert set(writes) == _WRITE_METHODS, "every write verb the gate refuses must be called here"
 
     for name, call in writes.items():
-        assert _call(call) == "refused: PermissionError", f"{name} did not refuse"
+        assert _call(call) == "refused: SkillsReadOnlyRefusal", f"{name} did not refuse"
+
+    # The *type* is the contract, not the class name: `SkillsReadOnlyRefusal` is an
+    # `AuthorizationError` so that `tool_authz.surface_authorization_denials` — which sits outside
+    # the catch-all converter — is the one that answers the model. A bare `PermissionError` is
+    # neither of the chain's two deliberately-worded families, so it read as an unclassified crash.
+    assert issubclass(SkillsReadOnlyRefusal, AuthorizationError)
 
     assert Path(tree, "alpha", "SKILL.md").exists(), "a refused write still changed the tree"
 
@@ -216,7 +224,7 @@ def _call(probe: Callable[[], Any]) -> Any:
     try:
         result = probe()
         return asyncio.run(_awaited(result)) if inspect.isawaitable(result) else result
-    except (PermissionError, ValueError, NotImplementedError) as exc:
+    except (SkillsReadOnlyRefusal, ValueError, NotImplementedError) as exc:
         return f"refused: {type(exc).__name__}"
 
 
@@ -291,3 +299,63 @@ def test_the_read_tool_carries_no_authority_of_its_own(tree: str) -> None:
     the backend, which is exactly where `NarrowedSkillsBackend` puts it.
     """
     assert REFUSED in _read(_backend(tree, _only_alpha), "/beta/SKILL.md")
+
+
+def test_a_refused_skills_write_reaches_the_model_as_a_refusal(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The refusal must cross the real chain worded as a refusal, not as an unclassified crash.
+
+    **Driven through a compiled graph rather than by calling a converter**, because what is under
+    test is the classification *reaching* the model: `surface_authorization_denials` sits outside
+    `surface_domain_errors`, and only the composed chain shows which of the two answered. The
+    raising tool is bound through `connectors=` — the seam `tests/test_tool_authz.py` already uses
+    for a tool whose failure behaviour is the subject — so the refusal travels the same path a
+    backend's would.
+
+    Measured before `SkillsReadOnlyRefusal` existed: `PermissionError` is neither a `ChemclawError`
+    nor an `AuthorizationError`, so it fell into `surface_domain_errors`' catch-all, the model was
+    told "that tool failed unexpectedly and returned nothing" — the opposite of what happened, and
+    an invitation to retry — and `logger.exception` wrote a full traceback at ERROR, a line any
+    model can produce at will by naming a skills path in `write_file`.
+
+    Both are asserted, because the log half is what a wording change alone would leave behind.
+    """
+    from langchain_core.messages import ToolMessage
+    from langchain_core.tools import tool
+
+    from chemclaw.agent.audit import NullAuditSink
+    from chemclaw.agent.langgraph_agent import build_langgraph_agent
+    from chemclaw.agent.state import turn_config, turn_input
+    from tests.fakes_langgraph import ScriptedChatModel
+
+    @tool
+    def rewrite_a_skill(path: str) -> str:
+        """Stand in for the filesystem verb that reaches `NarrowedSkillsBackend.write`."""
+        NarrowedSkillsBackend(root_dir=".", permits=lambda _: True).write(path, "mine now")
+        raise AssertionError("the backend accepted a write to the skills tree")
+
+    graph = build_langgraph_agent(
+        model=ScriptedChatModel(
+            [{"name": "rewrite_a_skill", "args": {"path": "/alpha/SKILL.md"}}, "done"]
+        ),
+        audit_sink=NullAuditSink(),
+        connectors=[rewrite_a_skill],
+    )
+
+    with caplog.at_level(logging.ERROR):
+        final = asyncio.run(graph.ainvoke(turn_input("rewrite that skill"), config=turn_config()))
+
+    # Selected by type, not by `name`: `tool_authz._refusal_message` builds the `ToolMessage` from
+    # the call id alone, so a refusal carries no tool name — which is itself worth pinning, since a
+    # reader that filtered on the name would silently find nothing and pass.
+    answered = next(message for message in final["messages"] if isinstance(message, ToolMessage))
+    assert answered.text.startswith("Refused:"), (
+        "the system prompt's own rule is that a result beginning `Refused:` is an access-control "
+        f"decision rather than a fault; the model was told {answered.text!r}"
+    )
+    assert "read-only" in answered.text, "the refusal lost the sentence that says why"
+    assert not [record for record in caplog.records if record.levelno >= logging.ERROR], (
+        "a refusal any model can trigger at will logged at ERROR: "
+        f"{[record.getMessage() for record in caplog.records]}"
+    )

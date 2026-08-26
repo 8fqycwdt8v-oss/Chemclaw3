@@ -204,6 +204,87 @@ def test_readyz_reuses_its_database_verdict_inside_the_window(
     assert probes == 1
 
 
+def test_concurrent_readiness_probes_cost_one_connector_sweep(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fifty simultaneous `/readyz` probes must cost one sweep, not fifty.
+
+    The cache is a check-then-act with an `await` between the check and the write, so the window
+    only ever suppressed *sequential* repeats: under concurrency every in-flight request misses.
+    Measured on the real app, 50 concurrent probes inside one 5 s window did 50 full connector
+    fan-outs. `/readyz` is unauthenticated by necessity and therefore also outside
+    `require_principal`'s per-principal budget, so the amplification factor is chosen by the
+    caller — which is what makes one unauthenticated TCP connection worth N outbound connections
+    to the connector fleet.
+    """
+    monkeypatch.setattr(settings, "session_store", "memory")
+    monkeypatch.setattr(settings, "service_readiness_cache_seconds", 60.0)
+    sweeps = 0
+
+    async def _counting_probe() -> list[Any]:
+        nonlocal sweeps
+        sweeps += 1
+        # A suspension point, because the real sweep is an HTTP fan-out: without one there is no
+        # window for a second caller to miss the cache, and the test would pass against the defect.
+        await asyncio.sleep(0.05)
+        return []
+
+    monkeypatch.setattr("chemclaw.api.app.probe_connectors", _counting_probe)
+
+    async def _run() -> None:
+        app = _app()
+        async with asgi_client(app) as client:
+            responses = await asyncio.gather(*(client.get("/readyz") for _ in range(50)))
+        assert {res.status_code for res in responses} == {200}
+
+    asyncio.run(_run())
+    assert sweeps == 1, f"50 concurrent probes triggered {sweeps} connector sweeps"
+
+
+def test_concurrent_readiness_probes_cost_one_database_checkout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The same, for the probe that borrows from a 16-connection pool.
+
+    Under `session_store="postgres"` (what the chart ships) each miss checks out a pooled
+    connection, so 50 concurrent probes requested 50 checkouts against `pg_pool_max_size=16` —
+    and every authenticated request needing the store in that window waits behind them and, past
+    `pg_pool_timeout_seconds`, is shed 503.
+    """
+    monkeypatch.setattr(settings, "session_store", "postgres")
+    monkeypatch.setattr(settings, "service_readiness_cache_seconds", 60.0)
+    monkeypatch.setattr("chemclaw.api.app.probe_connectors", _no_probe)
+    checkouts = 0
+
+    @asynccontextmanager
+    async def _counting_connection(*_args: Any, **_kwargs: Any) -> AsyncIterator[Any]:
+        nonlocal checkouts
+        checkouts += 1
+        await asyncio.sleep(0.05)
+
+        class _Conn:
+            async def execute(self, _sql: str) -> None:
+                return None
+
+        yield _Conn()
+
+    monkeypatch.setattr("chemclaw.api.routes.ops.db.connection", _counting_connection)
+
+    async def _run() -> None:
+        app = _app()
+        async with asgi_client(app) as client:
+            responses = await asyncio.gather(*(client.get("/readyz") for _ in range(50)))
+        assert {res.status_code for res in responses} == {200}
+
+    asyncio.run(_run())
+    assert checkouts == 1, f"50 concurrent probes requested {checkouts} pooled connections"
+
+
+async def _no_probe() -> list[Any]:
+    """A connector sweep that answers instantly, for the tests that are about the other probe."""
+    return []
+
+
 def test_static_chat_page_is_served() -> None:
     """The browser chat surface is served at the root, with security headers, and still loads."""
     with _client(_FakeAgent()) as client:

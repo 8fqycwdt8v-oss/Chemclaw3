@@ -29,6 +29,7 @@ instead of being added to a list nobody re-reads.
 
 import asyncio
 import copy
+from collections.abc import Callable
 from typing import Any, get_args
 
 import pytest
@@ -45,19 +46,30 @@ from chemclaw.science.calc.models import (
     ConformerEnsemble,
     DissociatedBond,
     EnsembleProperty,
+    InteractionResult,
+    MicrostatePka,
     RankedSpecies,
     ReactionEnergyResult,
     RefinedConformer,
     RefinedEnsemble,
+    Rotamer,
+    RotationBarrier,
+    RotationProfile,
+    ScanPoint,
+    ScanResult,
     SolventComparisonResult,
     SolventEffect,
     SpeciesDistribution,
     SpeciesEnergy,
+    SpeciesSolventComparison,
+    SpeciesSolventResponse,
+    SpeciesStanding,
     Structure,
     ThermochemistryResult,
     VibrationalMode,
     WeightedValue,
 )
+from chemclaw.science.calc.thermo import half_life_from_barrier
 from tests.calc_server_fake import _KEYED
 
 # The shapes a durable job can publish, **derived rather than listed**.
@@ -415,43 +427,264 @@ def _bond_survey_result() -> BondDissociationSurvey:
     )
 
 
-# The four multi-step shapes, each with the envelope field its job populates. Driven through
-# `job_envelope` rather than through `project()`, because "has a projector" and "the hook reaches
-# that projector" are the two different claims this file exists to keep apart.
-_MULTI_STEP: tuple[tuple[str, str, Any], ...] = (
-    ("refined", "RefinedEnsemble", _refined),
-    ("averaged", "EnsembleProperty", _averaged),
-    ("distribution", "SpeciesDistribution", _distribution),
-    ("bonds", "BondDissociationSurvey", _bond_survey_result),
-)
+def _ensemble_result(smiles: str = "CCO", search: str = "conformers") -> ConformerEnsemble:
+    """A two-member conformer ensemble, as a CREST search returns one."""
+    return ConformerEnsemble(
+        smiles=smiles,
+        method="GFN2-xTB",
+        search=search,  # type: ignore[arg-type]
+        effort="quick",
+        solvent="thf",
+        temperature_k=298.15,
+        conformers=[
+            Conformer(relative_kcal=0.0, population=0.7, degeneracy=1, structure=_structure(1.0)),
+            Conformer(relative_kcal=0.9, population=0.3, degeneracy=2, structure=_structure(1.1)),
+        ],
+        total_found=12,
+        conformational_entropy_cal_per_mol_k=1.4,
+        ensemble_correction_kcal=-0.4,
+    )
 
 
-@pytest.mark.parametrize(("field", "expected_kind", "build"), _MULTI_STEP)
-def test_each_multi_step_result_projects_through_its_job_envelope(
-    field: str, expected_kind: str, build: Any
-) -> None:
-    """The seven jobs `the-loop-is-a-composite` added, from envelope to projected record.
+def _solvent_screen() -> SolventComparisonResult:
+    """A reaction compared across two media — the shape that decomposes into parts."""
+    return SolventComparisonResult(
+        reactants=["C=C", "C=CC=C"],
+        products=["C1CCCCC1"],
+        method="GFN2-xTB",
+        temperature_k=298.15,
+        level="standard",
+        effects=[
+            SolventEffect(
+                solvent="thf", delta_e_kcal=-38.0, delta_h_kcal=-36.0, delta_g_kcal=-22.0
+            ),
+            SolventEffect(
+                solvent="toluene", delta_e_kcal=-37.5, delta_h_kcal=-35.5, delta_g_kcal=-24.8
+            ),
+        ],
+        best_solvent="toluene",
+        spread_kcal=2.8,
+        uncertainty_kcal=3.0,
+    )
 
-    Each of these ran, cost real compute and published nothing for a release: their shapes reached
-    the hook and `PAYLOAD_PROJECTORS` had an entry for none of them. Asserting through
-    `job_envelope` is what makes this a statement about the seven jobs rather than about four
-    functions.
+
+def _species_solvent_screen() -> SpeciesSolventComparison:
+    """A ranked species set fanned out over two media."""
+    gas = _distribution().model_copy(update={"solvent": None})
+    return SpeciesSolventComparison(
+        kind="tautomers",
+        method="GFN2-xTB",
+        temperature_k=298.15,
+        level="standard",
+        distributions=[gas, _distribution()],
+        responses=[
+            SpeciesSolventResponse(
+                smiles="CC(=O)CC(=O)C",
+                label="diketo",
+                standings=[
+                    SpeciesStanding(solvent=None, relative_kcal=0.0, population=0.95),
+                    SpeciesStanding(solvent="water", relative_kcal=0.0, population=0.93),
+                ],
+                population_swing=0.02,
+                relative_swing_kcal=0.0,
+            )
+        ],
+        dominance_changes=False,
+        largest_swing_kcal=0.4,
+        uncertainty_kcal=2.0,
+    )
+
+
+def _scan() -> ScanResult:
+    """A relaxed scan along one dihedral."""
+    return ScanResult(
+        smiles="CCCC",
+        input_structure_id=_structure().structure_id,
+        method="GFN2-xTB",
+        solvent=None,
+        coordinate="dihedral",
+        atoms=[0, 1, 2, 3],
+        unit="degrees",
+        points=[
+            ScanPoint(value=0.0, energy_hartree=-158.0, relative_kcal=0.0),
+            ScanPoint(value=60.0, energy_hartree=-157.99, relative_kcal=2.8),
+        ],
+        minimum_value=0.0,
+        maximum_relative_kcal=2.8,
+        minimum_structure=_structure(),
+    )
+
+
+def _rotation() -> RotationProfile:
+    """A rotational profile about one named torsion."""
+    return RotationProfile(
+        smiles="CCCC",
+        input_structure_id=_structure().structure_id,
+        method="GFN2-xTB",
+        solvent=None,
+        temperature_k=298.15,
+        level="quick",
+        torsion_id="tor_6b25409b2bd410a6",
+        atoms=[0, 1, 2, 3],
+        label="the C1-C2 bond",
+        symmetry_order=1,
+        period_degrees=360.0,
+        points=[
+            ScanPoint(value=60.0, energy_hartree=-158.0, relative_kcal=0.75),
+            ScanPoint(value=180.0, energy_hartree=-158.001, relative_kcal=0.0),
+        ],
+        rotamers=[
+            Rotamer(
+                dihedral_degrees=180.0,
+                structure_id=_structure().structure_id,
+                relative_kcal=0.0,
+                population=0.59,
+                degeneracy=1,
+            )
+        ],
+        barriers=[
+            RotationBarrier(
+                from_rotamer=0,
+                to_rotamer=0,
+                at_degrees=120.0,
+                forward_kcal=2.76,
+                reverse_kcal=2.76,
+                basis="E",
+                interconversion=half_life_from_barrier(2.76, 298.15),
+            )
+        ],
+        highest_barrier_kcal=2.76,
+        uncertainty_kcal=3.0,
+    )
+
+
+def _interaction() -> InteractionResult:
+    """A non-covalent complex and its interaction energy."""
+    return InteractionResult(
+        smiles_a="CCO",
+        smiles_b="O",
+        method="GFN2-xTB",
+        solvent="water",
+        interaction_energy_kcal=-5.2,
+        complex_energy_hartree=-30.0,
+        monomer_energies_hartree=[-20.0, -10.0],
+        binding_modes=3,
+        structure=_structure(),
+    )
+
+
+def _microstate_pka() -> MicrostatePka:
+    """A macrostate pKa from two sampled ensembles — the most expensive result in the tier."""
+    return MicrostatePka(
+        smiles="Oc1ccccc1",
+        branch="acid",
+        pka=9.9,
+        uncertainty=1.4,
+        delta_g_kcal=21.6,
+        site_smiles="[O-]c1ccccc1",
+        method="CREST/GFN2-xTB",
+        solvent="water",
+        temperature_k=298.15,
+        neutral=_ensemble_result("Oc1ccccc1"),
+        ionised=_ensemble_result("[O-]c1ccccc1", search="deprotomers"),
+        microstates_found=4,
+        microstates_within_rt=2,
+        warnings=["two microstates within RT"],
+    )
+
+
+# One minimal-valid instance per shape the envelope can carry, keyed by the model's own name — the
+# same key `payload_kind` carries and `_ENVELOPE_MEMBERS` derives.
+#
+# **This replaced a four-entry `_MULTI_STEP` tuple and the test over it**, which asserted the same
+# property — envelope in, record out — over the four shapes someone had listed. A list is exactly
+# what let the fifth shape ship broken, so the parametrisation is now driven by the envelope and
+# this mapping is only checked *against* it.
+#
+# **Keyed rather than listed, and checked against the envelope below**, because the test underneath
+# is the one this file was missing: every assertion here already proved that each shape *routes* to
+# a projector, and routing is what `MicrostatePka` did — straight into a projector that raised
+# `UnknownPropertyError` on every payload it could ever be given, because three of the five
+# properties it emits were never registered. Nine `_ENVELOPE_MEMBERS` assertions were green, 126
+# publish tests were green, and every microstate pKa this system computed — two CREST metadynamics
+# searches, minutes to hours — was dropped at the enqueue behind a generic failure counter.
+# Typed `Any` rather than `BaseModel` only because the envelope field it is splatted
+# into is a specific optional member type, which a `BaseModel` return would not satisfy.
+_SHAPES: dict[str, Callable[[], Any]] = {
+    "ReactionEnergyResult": _reaction,
+    "SolventComparisonResult": _solvent_screen,
+    "ScanResult": _scan,
+    "RotationProfile": _rotation,
+    "ConformerEnsemble": _ensemble_result,
+    "InteractionResult": _interaction,
+    "MicrostatePka": _microstate_pka,
+    "RefinedEnsemble": _refined,
+    "EnsembleProperty": _averaged,
+    "SpeciesDistribution": _distribution,
+    "SpeciesSolventComparison": _species_solvent_screen,
+    "BondDissociationSurvey": _bond_survey_result,
+}
+
+# Model name -> the envelope field carrying it, derived from `XtbJobResult` for the same reason
+# `_ENVELOPE_MEMBERS` is: a tenth result shape must reach these tests with no edit here.
+_MEMBER_FIELDS: dict[str, str] = {
+    annotation.__name__: name
+    for name, field in XtbJobResult.model_fields.items()
+    for annotation in get_args(field.annotation)
+    if isinstance(annotation, type) and issubclass(annotation, BaseModel)
+}
+
+
+def test_a_specimen_exists_for_every_shape_the_envelope_can_carry() -> None:
+    """The completeness half: a new shape cannot be added without a specimen to project.
+
+    Without this the parametrisation below would silently shrink to the shapes someone remembered,
+    which is the same failure one level up that `_ENVELOPE_MEMBERS` was derived to end.
     """
-    envelope = job_envelope(XtbJobResult(kind=field, summary="s", **{field: build()}))
+    assert set(_SHAPES) == set(_ENVELOPE_MEMBERS), (
+        "every shape `XtbJobResult` can carry needs a specimen in `_SHAPES`; missing "
+        f"{sorted(set(_ENVELOPE_MEMBERS) - set(_SHAPES))}, stale "
+        f"{sorted(set(_SHAPES) - set(_ENVELOPE_MEMBERS))}"
+    )
 
-    assert envelope.payload_kind == expected_kind
+
+@pytest.mark.parametrize("payload_kind", _ENVELOPE_MEMBERS)
+def test_every_shape_a_calc_job_can_return_actually_projects(payload_kind: str) -> None:
+    """Not "routes to a projector" — *projects*. That gap is what shipped the defect.
+
+    A projector can be registered, be reached, and still raise on every payload it will ever see:
+    `_fact` routes each numeric fact through `properties.to_canonical`, which refuses a name the
+    registry does not define, so one unregistered property in a *required* field makes the whole
+    projector unreachable in production while every registration assertion stays green.
+
+    Driven through `job_envelope` — what `CalcJobWorkflow.run` itself calls — so this asserts what
+    the hook produces rather than what a hand-built payload would.
+    """
+    field = _MEMBER_FIELDS[payload_kind]
+    envelope = job_envelope(
+        XtbJobResult(kind=field, summary="s", **{field: _SHAPES[payload_kind]()})
+    )
+    assert envelope.payload_kind == payload_kind
+
     records = records_for(
         calc_ref=f"calc-job-{field}",
         calc_type=f"calc.{field}",
         payload=envelope.data,
         payload_kind=envelope.payload_kind,
     )
-    assert records, f"{expected_kind} projected no record"
+
+    assert records, f"{payload_kind} projected no record"
     record = records[0]
     assert record.subject.members, "the projected record names nothing it is about"
-    # Something quantitative survived — a record with a subject and no facts is a row that says a
-    # calculation happened and nothing about what it found.
-    assert record.properties or record.sites or record.conformers or record.candidates
+    # Something quantitative survived: a record with a subject and no facts says a calculation
+    # happened and nothing about what it found.
+    assert (
+        record.properties
+        or record.sites
+        or record.points
+        or record.conformers
+        or (record.candidates)
+    ), f"{payload_kind} projected a record carrying no facts at all"
 
 
 def test_a_refined_ensemble_publishes_electronic_energies_and_free_energy_populations() -> None:

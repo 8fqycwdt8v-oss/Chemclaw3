@@ -126,5 +126,12 @@ class Warehouse(Protocol):
         for the process's life by design, and a `close()` nobody can reach would be an interface
         promise with no mechanism behind it. A driver that needs teardown does it in its own
         `__del__` or leaves it to the process exit its session timeout already assumes.
+
+        **"For the process's life" is about the seam, not about one session.** A driver whose
+        session can die under it — an expiring SQL-warehouse session, a warehouse scaled to zero —
+        drops that session on a transient failure and opens a new one on the next call, which is
+        its own business and needs nothing here. What it must not do is keep serving a handle it
+        already knows is dead: that is a permanent outage wearing a retry's clothes
+        (`DatabricksWarehouse._session_lost`).
         """
         ...

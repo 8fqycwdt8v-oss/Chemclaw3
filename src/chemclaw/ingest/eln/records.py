@@ -40,6 +40,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from chemclaw.core import db
 from chemclaw.core.config import settings
+from chemclaw.core.errors import ChemclawError
 from chemclaw.kg.note import ProcessConditions, require_note_slug
 
 logger = logging.getLogger(__name__)
@@ -48,13 +49,43 @@ logger = logging.getLogger(__name__)
 # nothing here, and that is decided without a query.
 RECORD_TYPE = "reaction"
 
+
+class AmbiguousReactionRecord(ChemclawError):
+    """A bare reaction id that more than one ingest source has transcribed."""
+
+
+def _one_of(reaction_id: str, found: Sequence[tuple[str, "ReactionRecord"]]) -> "ReactionRecord":
+    """The one record a `reaction-<id>` citation names, or a refusal saying why there is no one.
+
+    A citation carries no source (`kg.note.note_id_for_reaction` spells the bare id), so with two
+    sites' transcriptions behind one id there is genuinely no right answer — and returning either
+    is a coin flip that reads as a fact. That is what the bare-id primary key used to do silently,
+    except worse: the later sync had already destroyed the other site's row.
+
+    **A row with no `ingest_source` predates the key change and is superseded by one that has it.**
+    Migration `056` defaults the column to `''` on rows already stored, and the first sync after the
+    upgrade re-writes each of them under its real source — so during that window one id can hold a
+    legacy row and its own replacement, which is not an ambiguity and must not read as one.
+    """
+    stated = [pair for pair in found if pair[0]]
+    candidates = stated or list(found)
+    if len(candidates) > 1:
+        raise AmbiguousReactionRecord(
+            f"reaction id {reaction_id!r} is transcribed by more than one ingest source "
+            f"({', '.join(sorted(source for source, _ in candidates))}), so the citation "
+            "`reaction-<id>` does not name one run. Narrow CHEMCLAW_DATA_SOURCES, or have one of "
+            "the sources export a distinct entry id"
+        )
+    return candidates[0][1]
+
+
 _COLUMNS = "reaction_id, body, compound_smiles, project, performed_at, conditions, source"
 
 _UPSERT = f"""
-INSERT INTO reaction_records ({_COLUMNS})
-VALUES (%(reaction_id)s, %(body)s, %(compound_smiles)s, %(project)s, %(performed_at)s,
-        %(conditions)s, %(source)s)
-ON CONFLICT (reaction_id) DO UPDATE SET
+INSERT INTO reaction_records (ingest_source, {_COLUMNS})
+VALUES (%(ingest_source)s, %(reaction_id)s, %(body)s, %(compound_smiles)s, %(project)s,
+        %(performed_at)s, %(conditions)s, %(source)s)
+ON CONFLICT (ingest_source, reaction_id) DO UPDATE SET
     -- Every field is refreshed, because an ELN amends an entry *in place*: a yield corrected after
     -- assay, an impurity added, a retraction. The old note path compared bodies to notice that and
     -- needed a full corpus parse to do it; here the newer rendering simply wins.
@@ -67,11 +98,16 @@ ON CONFLICT (reaction_id) DO UPDATE SET
     last_seen = now()
 """
 
-_SELECT_ONE = f"SELECT {_COLUMNS} FROM reaction_records WHERE reaction_id = %s"
+# Every row that answers to the bare id, with the source that keys it — `_one_of` decides which is
+# the citation's, and refuses when nothing here can.
+_SELECT_ONE = f"SELECT ingest_source, {_COLUMNS} FROM reaction_records WHERE reaction_id = %s"
 
 _SELECT_KNOWN = "SELECT reaction_id FROM reaction_records WHERE reaction_id = ANY(%s)"
 
-_SELECT_BODIES = "SELECT reaction_id, body FROM reaction_records WHERE reaction_id = ANY(%s)"
+_SELECT_BODIES = (
+    "SELECT reaction_id, body FROM reaction_records "
+    "WHERE ingest_source = %s AND reaction_id = ANY(%s)"
+)
 
 
 class ReactionRecord(BaseModel):
@@ -149,8 +185,21 @@ class ReactionRecord(BaseModel):
 class ReactionRecordStore(Protocol):
     """Persistence + lookup contract for transcribed ELN entries. Backends implement this."""
 
-    async def record(self, records: Sequence[ReactionRecord]) -> int:
-        """Insert or replace records by reaction id; return how many were written."""
+    async def record(self, records: Sequence[ReactionRecord], source: str) -> int:
+        """Insert or replace `source`'s records by reaction id; return how many were written.
+
+        **`source` is the registry source name and it is half of the row's identity**, not a label
+        on it. Two ELNs may legitimately use one entry id — `ingest_reaction` said so and answered
+        it with a `source` *column* beside a bare-id key, which only ever recorded which one won:
+        the upsert refreshed every field, so the later sync replaced the earlier site's
+        transcription and every citation to it then resolved to a different run at a different
+        site, with `kg-validate` still passing. The label index put the pair in its key from the
+        start; this is the same rule here.
+
+        Not a field on `ReactionRecord`, because that model is what `record_from_ord_reaction`
+        renders out of one entry and the registry name is not in the entry. The store is where the
+        two meet.
+        """
         ...
 
     async def read(self, reaction_id: str) -> ReactionRecord | None:
@@ -159,10 +208,13 @@ class ReactionRecordStore(Protocol):
         Never the `reaction-` note id: that prefix is a citation spelling
         (`kg.note.note_id_for_reaction`), and accepting both is how a store ends up holding two
         names for one row.
+
+        Raises `AmbiguousReactionRecord` when two ingest sources have transcribed the id — see
+        `_one_of` for why that is a refusal rather than a pick.
         """
         ...
 
-    async def bodies(self, reaction_ids: Sequence[str]) -> dict[str, str]:
+    async def bodies(self, reaction_ids: Sequence[str], source: str) -> dict[str, str]:
         """The stored body of each of `reaction_ids` the corpus holds — the unchanged check.
 
         **Keyed on the ids the caller is about to write, never on the corpus.** The sync's overlap
@@ -173,6 +225,11 @@ class ReactionRecordStore(Protocol):
         The body, not merely the id: an ELN amends an entry *in place* — a yield corrected after
         assay, an impurity added, a retraction — while keeping its `created_at`, so treating "seen
         before" as "unchanged" drops every correction silently.
+
+        Scoped to `source` for the reason `record` is: comparing a page of one ELN's entries
+        against another ELN's rows of the same ids answers a question nobody asked, and it answers
+        it wrong in both directions — a false "unchanged" skips a real entry, and a false "changed"
+        re-ingests one forever.
         """
         ...
 
@@ -193,31 +250,36 @@ class ReactionRecordStore(Protocol):
 class InMemoryReactionRecordStore:
     """Process-local `ReactionRecordStore` for tests and single-run use.
 
-    Keyed by reaction id, so re-recording an id replaces it — the same idempotency the `ON CONFLICT`
-    clause gives the durable store, which is what lets an ingest test assert replay behaviour
-    without a database.
+    Keyed by `(source, reaction_id)`, so re-recording one source's id replaces it and two sources
+    sharing an id keep both rows — the same identity the durable store's primary key gives, which
+    is what lets an ingest test assert replay behaviour without a database.
     """
 
     def __init__(self) -> None:
         """Start with an empty corpus."""
-        self._records: dict[str, ReactionRecord] = {}
+        self._records: dict[tuple[str, str], ReactionRecord] = {}
 
-    async def record(self, records: Sequence[ReactionRecord]) -> int:
-        """Insert or replace each record by reaction id; return how many were written."""
+    async def record(self, records: Sequence[ReactionRecord], source: str) -> int:
+        """Insert or replace each of `source`'s records by reaction id; return how many."""
         for item in records:
-            self._records[item.reaction_id] = item
+            self._records[(source, item.reaction_id)] = item
         return len(records)
 
     async def read(self, reaction_id: str) -> ReactionRecord | None:
-        """One record by its bare ELN id, or `None`."""
-        return self._records.get(reaction_id)
+        """One record by its bare ELN id, or `None`; refuses an id two sources both hold."""
+        found = [
+            (source, record)
+            for (source, stored_id), record in sorted(self._records.items())
+            if stored_id == reaction_id
+        ]
+        return _one_of(reaction_id, found) if found else None
 
-    async def bodies(self, reaction_ids: Sequence[str]) -> dict[str, str]:
-        """The stored body of each of `reaction_ids` this store holds."""
+    async def bodies(self, reaction_ids: Sequence[str], source: str) -> dict[str, str]:
+        """The stored body of each of `source`'s `reaction_ids` this store holds."""
         return {
-            reaction_id: self._records[reaction_id].body
+            reaction_id: self._records[(source, reaction_id)].body
             for reaction_id in reaction_ids
-            if reaction_id in self._records
+            if (source, reaction_id) in self._records
         }
 
     async def eligible(self, reaction_ids: Sequence[str], filters: dict[str, Any]) -> set[str]:
@@ -226,15 +288,20 @@ class InMemoryReactionRecordStore:
         return {
             reaction_id
             for reaction_id in reaction_ids
-            if (item := self._records.get(reaction_id)) is not None and item.passes(filters, today)
+            if any(
+                record.passes(filters, today)
+                for (_, stored_id), record in self._records.items()
+                if stored_id == reaction_id
+            )
         }
 
     async def known(self, reaction_ids: Sequence[str]) -> set[str]:
-        """Which of `reaction_ids` this store holds at all."""
-        return {reaction_id for reaction_id in reaction_ids if reaction_id in self._records}
+        """Which of `reaction_ids` this store holds at all, under any source."""
+        held = {stored_id for _, stored_id in self._records}
+        return {reaction_id for reaction_id in reaction_ids if reaction_id in held}
 
     async def all_records(self) -> list[ReactionRecord]:
-        """Everything stored, in id order — a test affordance, not part of the Protocol."""
+        """Everything stored, in `(source, id)` order — a test affordance, not the Protocol."""
         return [self._records[key] for key in sorted(self._records)]
 
 
@@ -247,8 +314,8 @@ class PostgresReactionRecordStore:
         async with db.connection(settings.postgres_dsn) as conn:
             yield conn
 
-    async def record(self, records: Sequence[ReactionRecord]) -> int:
-        """Upsert transcribed reactions; return how many were written.
+    async def record(self, records: Sequence[ReactionRecord], source: str) -> int:
+        """Upsert `source`'s transcribed reactions; return how many were written.
 
         One round trip for the batch rather than one per record: the sync loop hands over a whole
         chunk, and the per-entry cost is the thing this tier exists to remove.
@@ -261,6 +328,7 @@ class PostgresReactionRecordStore:
                     _UPSERT,
                     [
                         {
+                            "ingest_source": source,
                             "reaction_id": item.reaction_id,
                             "body": item.body,
                             "compound_smiles": item.compound_smiles,
@@ -278,20 +346,30 @@ class PostgresReactionRecordStore:
         return len(records)
 
     async def read(self, reaction_id: str) -> ReactionRecord | None:
-        """One record by its bare ELN id, or `None` when the corpus does not hold it."""
+        """One record by its bare ELN id, or `None` when the corpus does not hold it.
+
+        Every row answering to the id comes back, not the first one the plan happened to return:
+        `_one_of` is what decides between them, and it refuses rather than picking when two ingest
+        sources have both transcribed the id.
+        """
         async with self._connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(_SELECT_ONE, (reaction_id,))
-                row = await cur.fetchone()
-        return _record(row) if row is not None else None
+                rows = await cur.fetchall()
+        if not rows:
+            return None
+        # Sorted by the source alone: it is unique per id (the primary key says so), and sorting
+        # whole rows would compare a `date` against a `None` on any tie that cannot happen.
+        ordered = sorted(rows, key=lambda row: str(row[0]))
+        return _one_of(reaction_id, [(row[0], _record(row[1:])) for row in ordered])
 
-    async def bodies(self, reaction_ids: Sequence[str]) -> dict[str, str]:
-        """The stored body of each of `reaction_ids` the corpus holds."""
+    async def bodies(self, reaction_ids: Sequence[str], source: str) -> dict[str, str]:
+        """The stored body of each of `source`'s `reaction_ids` the corpus holds."""
         if not reaction_ids:
             return {}
         async with self._connection() as conn:
             async with conn.cursor() as cur:
-                await cur.execute(_SELECT_BODIES, (list(reaction_ids),))
+                await cur.execute(_SELECT_BODIES, (source, list(reaction_ids)))
                 rows = await cur.fetchall()
         return {row[0]: row[1] for row in rows}
 

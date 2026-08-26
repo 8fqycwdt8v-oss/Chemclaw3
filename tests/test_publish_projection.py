@@ -18,6 +18,7 @@ import pytest
 from chemclaw.publish import project as projection
 from chemclaw.publish.project import project
 from chemclaw.publish.properties import REGISTRY
+from chemclaw.publish.record import Conditions
 from chemclaw.science.calc.models import (
     AtomCharge,
     BondOrder,
@@ -30,6 +31,7 @@ from chemclaw.science.calc.models import (
     FukuiSite,
     InteractionResult,
     LogdResult,
+    MicrostatePka,
     OptimizationSummary,
     PkaResult,
     RankedSpecies,
@@ -119,6 +121,44 @@ def _reaction() -> ReactionEnergyResult:
         is_strongly_exothermic=True,
         exotherm_threshold_kcal=-20.0,
         conformer_treatment="single",
+    )
+
+
+def _microstate() -> MicrostatePka:
+    """A macrostate pKa: two sampled ensembles reduced to one number.
+
+    Its solvent is spelled the long way deliberately — this is the one projector of fifteen that
+    stored the name as given, so the fixture has to carry an alias for that to be visible.
+    """
+    ensemble = ConformerEnsemble(
+        smiles="Oc1ccccc1",
+        method="GFN2-xTB",
+        search="conformers",
+        effort="quick",
+        solvent="thf",
+        temperature_k=298.15,
+        conformers=[
+            Conformer(relative_kcal=0.0, population=1.0, degeneracy=1, structure=_structure(1.0))
+        ],
+        total_found=1,
+        conformational_entropy_cal_per_mol_k=0.0,
+        ensemble_correction_kcal=0.0,
+    )
+    return MicrostatePka(
+        smiles="Oc1ccccc1",
+        branch="acid",
+        pka=9.9,
+        uncertainty=1.4,
+        delta_g_kcal=21.6,
+        site_smiles="[O-]c1ccccc1",
+        method="CREST/GFN2-xTB",
+        solvent="Tetrahydrofuran",
+        temperature_k=298.15,
+        neutral=ensemble,
+        ionised=ensemble,
+        microstates_found=4,
+        microstates_within_rt=2,
+        warnings=["two microstates carry population"],
     )
 
 
@@ -267,7 +307,6 @@ def _cases() -> list[tuple[str, str, Any, dict[str, Any]]]:
         sampled=True,
     )
     gas_phase = distribution.model_copy(update={"solvent": None})
-
     simple: list[tuple[str, str, Any]] = [
         ("ReactionEnergyResult", "reaction.energy", _reaction()),
         ("SpeciesDistribution", "calc.rank_species", distribution),
@@ -404,6 +443,7 @@ def _cases() -> list[tuple[str, str, Any, dict[str, Any]]]:
                 site="acid",
             ),
         ),
+        ("MicrostatePka", "calc.predict_microstate_pka", _microstate()),
         (
             "SolubilityResult",
             "solubility",
@@ -596,6 +636,74 @@ def test_a_solvent_name_is_canonicalized_at_projection() -> None:
     assert both == {"thf"}
 
 
+def test_a_microstate_pka_publishes_the_free_energy_the_number_is_a_map_of() -> None:
+    """The most expensive calculation in the tier, and the one that published nothing.
+
+    Three of the five properties this projector emits were absent from the registry, so `_fact`
+    raised `UnknownPropertyError` out of `to_canonical` on **every** payload — and because
+    `delta_g_kcal` is a required field of `MicrostatePka`, the raise was unconditional. Every
+    microstate pKa was dropped at the enqueue.
+
+    Two of those three are registered now. The third is not, and that is the finding underneath the
+    finding: `branch` is `PkaResult.site` under another name — both are `acid` / `base`, both say
+    which equilibrium was computed — so registering a second name for it would have split the one
+    property "which equilibrium is this pKa about" in two, which is exactly the failure
+    `property_definition` exists to prevent. The winning microstate's *constitution* is a different
+    fact and gets its own name.
+    """
+    record = project(
+        calc_ref="microstate@v1:a:b",
+        calc_type="calc.predict_microstate_pka",
+        payload=_microstate().model_dump(mode="json"),
+        payload_kind="MicrostatePka",
+    )
+
+    facts = {fact.property: fact for fact in record.properties}
+    assert facts["pka"].value == 9.9
+    assert facts["pka"].uncertainty == 1.4, "a semiempirical pKa without its error bar is a claim"
+    assert facts["deprotonation_free_energy"].value == 21.6, (
+        "the pKa is a linear map of this number, and a refit changes one without changing the other"
+    )
+    assert facts["microstates_within_rt"].value == 2, (
+        "more than one microstate within RT is why this is a macrostate pKa rather than a "
+        "site-resolved one — the caveat has to travel with the number"
+    )
+    assert facts["species_enumerated"].value == 4
+    assert facts["pka_site"].value_text == "acid", (
+        "which equilibrium was computed is the same fact `predict_pka` publishes under this name; "
+        "a second name for it would make 'every base pKa we computed' answer over one pipeline"
+    )
+    assert facts["ionised_microstate"].value_text == "[O-]c1ccccc1", (
+        "which proton came off is the half of a pKa a bare number does not carry"
+    )
+    assert [flag.message for flag in record.flags] == ["two microstates carry population"]
+
+    # F5: the one projector of fifteen that stored the solvent as given. `Tetrahydrofuran` and
+    # `thf` are one solvent, and the store's `solvent_id` is minted straight from this field.
+    assert record.conditions.solvent == "thf"
+    assert record.conditions.temperature_k == 298.15
+    assert record.subject.kind == "molecule", "the ensembles are how it was computed, not what "
+    "it is about"
+
+
+def test_a_condition_set_canonicalizes_its_own_solvent() -> None:
+    """Structural, because the fifteenth projector forgot and the sixteenth would too.
+
+    Canonicalization used to be a call every projector made by hand — fourteen of them did and one
+    did not, and the one that did not stored `Tetrahydrofuran` as a first-class `solvent_id` with
+    its own `condition_id`, so the same acid computed under two spellings landed under two
+    conditions and `WHERE solvent_id = 'thf'` returned half of it. `Conditions`' own docstring
+    already promised this happens at write time; now it does.
+    """
+    assert Conditions(solvent=" Tetrahydrofuran ").solvent == "thf"
+    assert Conditions(solvent="H2O").solvent == "water"
+    # Gas phase is a real state, not a missing value, and stays distinguishable from an empty name.
+    assert Conditions(solvent=None).solvent is None
+    assert Conditions(solvent="  ").solvent is None
+    # An unrecognised solvent is still a fact about the run: normalized, never rejected.
+    assert Conditions(solvent="Cyclopentyl methyl ether").solvent == "cyclopentyl methyl ether"
+
+
 def test_a_solvent_screen_publishes_its_parts_as_well_as_its_aggregate() -> None:
     """Never store an aggregate whose parts are not also stored.
 
@@ -768,6 +876,14 @@ _DELIBERATELY_UNREAD: dict[str, dict[str, str]] = {
         "sampled": "a Literal[True] marker; constant, so it carries no information",
     },
     "PkaResult": {},
+    "MicrostatePka": {
+        "neutral": (
+            "the sampled evidence on the protonated side: a full `ConformerEnsemble` that the "
+            "CREST search publishes under its own `xtb.conformers` key, so reading it here would "
+            "store one ensemble twice"
+        ),
+        "ionised": "the same, on the deprotonated side",
+    },
     "SolubilityResult": {},
     "LogdResult": {},
     "DescriptorProfile": {},

@@ -55,6 +55,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 from chemclaw.agent.framing import ENVELOPE_TAG, defang, frame_untrusted, safe_id
+from chemclaw.agent.turn_usage import off_stream_metering
 from chemclaw.core.config import settings
 from chemclaw.core.metrics_bridge import record_metric
 from chemclaw.kg.note import cited_ids
@@ -366,9 +367,22 @@ async def verify_answer(
             #
             # `tests/test_verifier.py` asserts the *schema*, not the call, because that is the part
             # that can be checked without a credential and is where the defect actually lived.
+            #
+            # **`off_stream_metering()` is what puts this call on the turn's bill.** Every other
+            # model call a turn makes happens inside the graph, so its usage rides the `messages`
+            # stream `api/graph_stream` meters — including the ones a *tool body* makes, which
+            # inherit the graph's callbacks through LangChain's ambient config. This one runs after
+            # the stream is exhausted (`api/runner_answer.build_answer_event`), so nothing was
+            # watching it: its tokens reached neither the budget guard, nor
+            # `chemclaw_tokens_total`, nor the `turn_costs` row. That is the same hole
+            # `agent/turn_usage.py` was moved to `agent/` to close for the template path.
+            #
+            # It belongs here and nowhere else in this repository: an explicit `callbacks` list
+            # replaces the inherited one, so the same call on an in-graph path would take that call
+            # *off* the stream that already meters it.
             response = await client.with_structured_output(
                 VerificationResult, method="json_schema"
-            ).ainvoke(_verifier_prompt(answer, evidence))
+            ).ainvoke(_verifier_prompt(answer, evidence), config=off_stream_metering())
     except Exception:
         # An unreachable/failing judge endpoint must not weaken verification below the offline
         # gate: degrade to the deterministic citation check (which needs no network) instead of

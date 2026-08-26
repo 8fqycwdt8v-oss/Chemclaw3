@@ -1,11 +1,17 @@
-"""The scratchpad's routing, its erasure key, and the property that keeps writes auditable.
+"""The scratchpad's routing, its erasure key, and the two properties that bound a turn's writes.
 
-Three things are worth a test here and the third matters most. Routing and tool narrowing are
-ordinary wiring. The third — that nothing writes to the store except through a *tool* — is what
-answers the audit objection `D-2026-08-10-basestore-is-not-where-this-systems-memory-lives` raised,
-rather than merely arguing it. A direct `store.aput` would bypass the audit row, the authorization
-gate, the dry-run refusal and the repeat guard, all at once and silently: nothing fails, the memory
-is simply written with no record that it was.
+Routing and tool narrowing are ordinary wiring. What is not is *where* a write may point and *how*
+it is recorded, and both are asserted against something that runs rather than against a declaration.
+
+- Nothing writes to the store except through a *tool*, which is what answers the audit objection
+  `D-2026-08-10-basestore-is-not-where-this-systems-memory-lives` raised rather than merely arguing
+  it. A direct `store.aput` would bypass the audit row, the authorization gate, the dry-run refusal
+  and the repeat guard, all at once and silently: nothing fails, the memory is simply written with
+  no record that it was.
+- The deny-rules reach the middleware that enforces them. They did not, for as long as the only
+  test read the rule list back — so a write to any path at all succeeded while three docstrings
+  said otherwise. That one is driven through a compiled graph, which is the only place the answer
+  lives.
 """
 
 import ast
@@ -116,6 +122,58 @@ def test_writes_are_denied_outside_the_two_roots_that_are_meant_to_be_written() 
     assert rules[-1].paths == ["/**"], "the closing rule must cover everything"
     allowed = {path for rule in rules[:-1] for path in rule.paths}
     assert allowed == {"/scratch/**", "/memories/**"}
+
+
+def test_a_write_out_of_bounds_is_refused_by_the_graph_that_really_compiles() -> None:
+    """The deny rule must reach the middleware that enforces it, not merely exist.
+
+    **The rule list was checked and its arrival was not, and the arrival is where it broke.**
+    `create_deep_agent(permissions=…)` reaches enforcement only through the `FilesystemMiddleware`
+    instance upstream constructs with `_permissions=`; this repository supplies its own instance
+    under the same `.name` to withhold `execute`/`delete`, and `_apply_custom_middleware` replaces
+    upstream's *in place* — so the rules were dropped on the floor and a scripted
+    `write_file("/outside/evil.md")` answered "Updated file /outside/evil.md". The test above
+    asserted `[allow, allow, deny]` throughout and stayed green, which is the shape
+    `agent/loop_cap.py` names: a decision that is correct and connected to nothing.
+
+    So this drives the compiled graph. Both directions are asserted from one run, because a refusal
+    that also refused `/scratch/` would be a worse bug than the one being fixed.
+    """
+    from chemclaw.agent.audit import NullAuditSink
+    from chemclaw.agent.langgraph_agent import build_langgraph_agent
+    from chemclaw.agent.state import turn_config, turn_input
+    from tests.fakes_langgraph import ScriptedChatModel
+
+    graph = build_langgraph_agent(
+        model=ScriptedChatModel(
+            [
+                {"name": "write_file", "args": {"file_path": "/scratch/ok.md", "content": "keep"}},
+                {"name": "write_file", "args": {"file_path": "/outside/evil.md", "content": "no"}},
+                "done",
+            ]
+        ),
+        audit_sink=NullAuditSink(),
+    )
+
+    final = asyncio.run(graph.ainvoke(turn_input("write two files"), config=turn_config()))
+    written = set(final.get("files") or {})
+
+    assert "/scratch/ok.md" in written, "the scratchpad's own root was refused"
+    assert "/outside/evil.md" not in written, (
+        "a write landed outside the two roots the deny rule exists to close — the permission list "
+        "is not reaching the FilesystemMiddleware this repository substitutes"
+    )
+    # Matched on the path rather than on `status`: `tool_authz.answered_failure` rewrites a
+    # returned failure's status to `"success"` before anything downstream sees it, deliberately, so
+    # a provider does not read `is_error` as "retry this".
+    refusal = next(
+        message
+        for message in final["messages"]
+        if getattr(message, "name", None) == "write_file" and "/outside/evil.md" in message.text
+    )
+    assert "permission denied" in refusal.text, (
+        f"the model was told something other than a refusal: {refusal.text!r}"
+    )
 
 
 def test_no_first_party_module_writes_to_a_store_directly() -> None:

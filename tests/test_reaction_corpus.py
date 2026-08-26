@@ -240,3 +240,79 @@ def test_a_reaction_corpus_never_becomes_an_ingest_source(
     monkeypatch.setattr(settings, "data_sources", "graph,pistachio")
     assert "pistachio" not in active_ingest_source_names()
     assert "pistachio" in {source.name for source in active_retrieve_sources()}
+
+
+# --- the pagination column, when the release leaves it NULL -------------------------------------
+
+_LOAD_SEQ_BINDING = {
+    **_BINDING,
+    # A release loaded in batches paginates on its load sequence, not on its reaction id — the
+    # shape `CorpusBinding.order_by` exists for, and the one where `key` and `cursor_column` are
+    # two different columns holding two different domains of value.
+    "order_by": "LOAD_SEQ",
+}
+
+
+def _load_seq_rows() -> list[dict[str, object]]:
+    """The four reactions, keyed for pagination by a load sequence the first row never got."""
+    rows = _rows()
+    for row, load_seq in zip(rows, [None, "A100", "B200", "P300"], strict=True):
+        row["LOAD_SEQ"] = load_seq
+    return rows
+
+
+def _load_seq_warehouse() -> KeysetWarehouse:
+    """A warehouse paginating on `LOAD_SEQ`, NULL first — the order Spark gives an ASC sort."""
+    return KeysetWarehouse({_RELATION: _load_seq_rows()}, _RELATION, "LOAD_SEQ")
+
+
+def test_a_null_in_the_pagination_column_never_becomes_the_string_none() -> None:
+    """`as_text` is `str()`, so a NULL cursor value resumed the next page at `> 'None'`.
+
+    The identical defect `_field` documents and fixes, on the line that decides where the next page
+    starts. `"None"` is truthy, so the `or key` fallback never fired either, and the following
+    statement asked the warehouse for every key sorting *above* those six characters — silently
+    dropping `A100` and `B200`, which on a release keyed by digits or early letters is most of it.
+    A cursor that cannot advance holds its position instead, which is what makes the workflow's
+    "no cursor advance" guard fire and name the mis-declared `order_by`.
+    """
+
+    async def _run() -> None:
+        index, warehouse = InMemoryLabelIndex(), _load_seq_warehouse()
+        binding = CorpusBinding.model_validate(_LOAD_SEQ_BINDING)
+
+        page = await drain_corpus(warehouse, binding, index, "pistachio", limit=1)
+
+        assert (page.read, page.recorded, page.has_more) == (1, 1, True)
+        assert page.cursor == "", "a NULL cursor value must not advance the keyset"
+        # And the *key* column's value is not substituted for it either: `p1` is an id, `LOAD_SEQ`
+        # holds load sequences, and comparing one against the other resumes the drain at an
+        # arbitrary point in the release.
+        await drain_corpus(warehouse, binding, index, "pistachio", after=page.cursor, limit=1)
+        assert [params for _, params in warehouse.executed] == [[1], [1]]
+
+    asyncio.run(_run())
+
+
+def test_the_cursor_advances_past_a_row_the_drain_skips() -> None:
+    """A row with no key is skipped as a precedent — the drain must still get past it.
+
+    The cursor was only written for rows that *had* a key, so a keyless row at the end of a page
+    left it where it was, and the next page returned that same row: a drain wedged permanently by a
+    row it was never going to record. Advancing is read from the pagination column alone, which is
+    the only column the resume predicate compares.
+    """
+
+    async def _run() -> None:
+        rows = _load_seq_rows()
+        rows[1]["REACTION_ID"] = None  # the row `_record` refuses for want of a key
+        index = InMemoryLabelIndex()
+        warehouse = KeysetWarehouse({_RELATION: rows}, _RELATION, "LOAD_SEQ")
+        binding = CorpusBinding.model_validate(_LOAD_SEQ_BINDING)
+
+        page = await drain_corpus(warehouse, binding, index, "pistachio", after="A099", limit=1)
+
+        assert (page.read, page.recorded, page.skipped) == (1, 0, 1)
+        assert page.cursor == "A100"
+
+    asyncio.run(_run())

@@ -39,7 +39,8 @@ async def _records(**projects: str | None) -> InMemoryReactionRecordStore:
                 source="eln:test",
             )
             for reaction_id, project in projects.items()
-        ]
+        ],
+        "eln-json",
     )
     return store
 

@@ -79,7 +79,8 @@ def _ingested(monkeypatch: pytest.MonkeyPatch, *reaction_ids: str) -> None:
             [
                 ReactionRecord(reaction_id=rid, body=f"body {rid}", source="eln:test")
                 for rid in reaction_ids
-            ]
+            ],
+            "eln-json",
         )
     )
     monkeypatch.setattr(

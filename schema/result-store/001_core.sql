@@ -137,8 +137,14 @@ CREATE TABLE IF NOT EXISTS structure (
     structure_id    VARCHAR(64) PRIMARY KEY,
     compound_id     VARCHAR(64) REFERENCES compound (compound_id),
     atom_count      INTEGER     NOT NULL DEFAULT 0,
-    charge          INTEGER     NOT NULL DEFAULT 0,
-    multiplicity    INTEGER     NOT NULL DEFAULT 1,
+    -- **Nullable, because 0 and 1 are answers.** A geometry reaches the writer either whole (its
+    -- charge and multiplicity stated) or as a bare content address (they are not), and a NOT NULL
+    -- default made the second case indistinguishable from a neutral closed-shell singlet -- so
+    -- "every anionic geometry we have optimised" answered over a column that said 0 for every ion
+    -- this system had ever published. NULL is "not recorded"; the writer preserves a stated value
+    -- against an unstated one rather than letting the later write win.
+    charge          INTEGER,
+    multiplicity    INTEGER,
     -- The calculation that produced this geometry, when it is an output rather than an embedding.
     origin_calc_ref VARCHAR(512) NOT NULL DEFAULT '',
     geometry        JSONB       NOT NULL,
@@ -420,20 +426,6 @@ CREATE TABLE IF NOT EXISTS calculation_flag (
     PRIMARY KEY (calc_ref, ordinal)
 );
 CREATE INDEX IF NOT EXISTS calculation_flag_idx ON calculation_flag (flag, severity);
-
--- A reference to a by-product, never its bytes.
---
--- A Hessian is megabytes, and the artifact store it lives in is deliberately evictable because the
--- answer can be regenerated from it. Copying those bytes outward would duplicate the one thing this
--- system decided not to keep forever, so what crosses is that the artifact existed and what it is.
-CREATE TABLE IF NOT EXISTS calculation_artifact (
-    calc_ref     VARCHAR(512) NOT NULL REFERENCES calculation (calc_ref),
-    name         VARCHAR(128) NOT NULL,
-    media_type   VARCHAR(128) NOT NULL DEFAULT 'application/octet-stream',
-    byte_size    BIGINT,
-    content_hash VARCHAR(128) NOT NULL DEFAULT '',
-    PRIMARY KEY (calc_ref, name)
-);
 
 -- ============================================================================================
 -- Schema metadata

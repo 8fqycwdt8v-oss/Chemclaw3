@@ -140,10 +140,10 @@ def test_a_sync_run_does_not_read_the_corpus_it_is_not_replaying() -> None:
     class _CountingStore(InMemoryReactionRecordStore):
         """Records how many ids each unchanged-entry lookup asked for."""
 
-        async def bodies(self, reaction_ids: Sequence[str]) -> dict[str, str]:
+        async def bodies(self, reaction_ids: Sequence[str], source: str) -> dict[str, str]:
             """Count the request, then answer it."""
             asked.append(len(reaction_ids))
-            return await super().bodies(reaction_ids)
+            return await super().bodies(reaction_ids, source)
 
     async def _run() -> None:
         cursor = datetime(2026, 1, 2, tzinfo=UTC)
@@ -154,7 +154,8 @@ def test_a_sync_run_does_not_read_the_corpus_it_is_not_replaying() -> None:
             [
                 ReactionRecord(reaction_id=f"old-{i}", body=f"body {i}", source="eln:test")
                 for i in range(500)
-            ]
+            ],
+            "test-eln",
         )
         replayed = _entry("replayed", cursor - datetime.resolution)
         await sync_entries(
@@ -203,7 +204,7 @@ def test_the_unchanged_check_keys_on_the_record_id_not_the_entry_id() -> None:
             InMemoryReactionRecordStore(),
         )
         # An earlier run's record, stored under the *reaction* id.
-        await rec.record([record_from_ord_reaction(adapter.map_to_ord(replayed))])
+        await rec.record([record_from_ord_reaction(adapter.map_to_ord(replayed))], "test-eln")
         summary = await sync_entries(
             adapter, rxn, mol, rec, cursor, label_index=InMemoryLabelIndex(), source="test-eln"
         )
@@ -282,7 +283,9 @@ def test_a_reaction_cited_by_a_campaign_still_expands(
     async def _run() -> str:
         store = InMemoryReactionRecordStore()
         adapter = _ListAdapter([_entry("rxn-cited", datetime(2026, 3, 1, tzinfo=UTC))])
-        await store.record([record_from_ord_reaction(adapter.map_to_ord(adapter._entries[0]))])
+        await store.record(
+            [record_from_ord_reaction(adapter.map_to_ord(adapter._entries[0]))], "eln-json"
+        )
         monkeypatch.setattr("chemclaw.agent.graph_tools.default_record_store", lambda: store)
         return (await expand_note(note_id_for_reaction("rxn-cited"))).body
 
@@ -327,7 +330,7 @@ def test_condense_protocols_resolves_a_reaction_reference(monkeypatch: pytest.Mo
         store = InMemoryReactionRecordStore()
         adapter = _ListAdapter([_entry("rxn-cond", datetime(2026, 3, 1, tzinfo=UTC))])
         record = record_from_ord_reaction(adapter.map_to_ord(adapter._entries[0]))
-        await store.record([record])
+        await store.record([record], "eln-json")
         monkeypatch.setattr("chemclaw.agent.protocol_tools.default_record_store", lambda: store)
         return await _from_record(note_id_for_reaction("rxn-cond"))
 
@@ -380,7 +383,7 @@ def test_a_citation_to_a_missing_record_is_still_caught() -> None:
     async def _run() -> tuple[list[str], list[str]]:
         store = InMemoryReactionRecordStore()
         await store.record(
-            [ReactionRecord(reaction_id="real", body="a real run", source="eln:test")]
+            [ReactionRecord(reaction_id="real", body="a real run", source="eln:test")], "test-eln"
         )
         citations = external_citations(
             [
@@ -426,7 +429,7 @@ def test_the_postgres_store_and_the_in_memory_one_answer_alike() -> None:
             ),
         ]
         for store in (durable, memory):
-            await store.record(records)
+            await store.record(records, "pg-eln")
 
         ids = ["pg-alpha", "pg-undated", "pg-absent"]
         cases: list[dict[str, object]] = [
@@ -445,12 +448,12 @@ def test_the_postgres_store_and_the_in_memory_one_answer_alike() -> None:
                 f"the SQL filter and `ReactionRecord.passes` disagree on {filters}"
             )
 
-        assert await durable.bodies(ids) == await memory.bodies(ids)
+        assert await durable.bodies(ids, "pg-eln") == await memory.bodies(ids, "pg-eln")
         assert await durable.known(ids) == {"pg-alpha", "pg-undated"}
 
         # An amendment overwrites in place — no second row, no versioning scheme.
         amended = records[0].model_copy(update={"body": "alpha body, yield corrected to 31%"})
-        await durable.record([amended])
+        await durable.record([amended], "pg-eln")
         stored = await durable.read("pg-alpha")
         assert stored is not None and stored.body == amended.body
         assert await durable.known(["pg-alpha"]) == {"pg-alpha"}
@@ -485,3 +488,71 @@ def test_the_citation_gate_fails_when_it_cannot_reach_the_store(
     printed = capsys.readouterr().out
     assert exit_code == 1, f"the gate passed without checking anything:\n{printed}"
     assert "NOT CHECKED" in printed and "did not pass" in printed
+
+
+# --- one entry id, two ELNs ----------------------------------------------------------------------
+
+
+def _sited(reaction_id: str, site: str, body: str) -> ReactionRecord:
+    """One site's transcription of an entry id both sites happen to use."""
+    return ReactionRecord(reaction_id=reaction_id, body=body, source=f"{site}:{reaction_id}")
+
+
+def test_two_sources_sharing_an_entry_id_do_not_overwrite_each_other() -> None:
+    """`EXP-1001` at two sites is two runs, and the row key has to be able to say so.
+
+    `ingest_reaction`'s own docstring names the collision — "two ELNs may legitimately use one entry
+    id" — and answered it with a `source` column beside a bare-id key. That column only records
+    *which one won*: the upsert refreshes every field including `source`, so with two ingest sources
+    enabled the later sync silently replaced the earlier site's transcription, and every
+    `reaction-EXP-1001` citation a playbook carried then resolved to a different run at a different
+    site. `kg-validate` still passed — the citation resolves, to the wrong record. The label index
+    put `(source, reaction_id)` in its key for exactly this reason; this tier did not.
+    """
+
+    async def _run() -> None:
+        store = InMemoryReactionRecordStore()
+        await store.record([_sited("EXP-1001", "site-a", "82% Suzuki")], source="eln-a")
+        await store.record([_sited("EXP-1001", "site-b", "nitration, failed")], source="eln-b")
+
+        assert len(await store.all_records()) == 2, "one site's transcription was destroyed"
+        assert await store.bodies(["EXP-1001"], source="eln-a") == {"EXP-1001": "82% Suzuki"}
+        assert await store.bodies(["EXP-1001"], source="eln-b") == {"EXP-1001": "nitration, failed"}
+
+    asyncio.run(_run())
+
+
+def test_a_citation_that_two_sources_could_answer_is_refused_rather_than_guessed() -> None:
+    """`reaction-EXP-1001` names no source, so with two rows behind it there is no right answer.
+
+    Returning either is a coin flip that reads as a fact — the failure mode this whole finding is
+    about — so the read refuses and names both sources. An operator can then scope the sources or
+    the site can re-key its export; what they cannot do is not find out.
+    """
+
+    async def _run() -> None:
+        store = InMemoryReactionRecordStore()
+        await store.record([_sited("EXP-1001", "site-a", "82% Suzuki")], source="eln-a")
+        await store.record([_sited("EXP-1001", "site-b", "nitration, failed")], source="eln-b")
+
+        with pytest.raises(ChemclawError, match="eln-a"):
+            await store.read("EXP-1001")
+
+    asyncio.run(_run())
+
+
+def test_the_postgres_store_keys_transcriptions_by_source_too() -> None:
+    """The `ON CONFLICT` clause and the primary key are the deployment's half of the same rule."""
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        durable = PostgresReactionRecordStore()
+        await durable.record([_sited("pg-shared", "site-a", "a body")], source="pg-eln-a")
+        await durable.record([_sited("pg-shared", "site-b", "b body")], source="pg-eln-b")
+
+        assert await durable.bodies(["pg-shared"], source="pg-eln-a") == {"pg-shared": "a body"}
+        assert await durable.bodies(["pg-shared"], source="pg-eln-b") == {"pg-shared": "b body"}
+        with pytest.raises(ChemclawError, match="pg-eln-a"):
+            await durable.read("pg-shared")
+
+    asyncio.run(_run())

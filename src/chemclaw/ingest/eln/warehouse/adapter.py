@@ -7,13 +7,13 @@ yet is writing YAML, and a column landing in it next quarter is a line of YAML.
 
 Everything downstream is untouched and inherited. `chemclaw.ingest.eln.sync` supplies the cursor,
 the overlap window, the future-timestamp guard, dedup against merged note bodies and reject-and-
-continue; `ingest_reaction` writes the fingerprints and proposes the note through the PR-gate;
+continue; `ingest_reaction` writes the fingerprints, the label row and the transcription record;
 `ElnSyncWorkflow` drains this source in chunks under its own `sync_cursors` watermark. This adapter
 is one of two methods and a mapping, exactly like the two file-drop adapters beside it.
 """
 
 import logging
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from pydantic import ValidationError
@@ -45,6 +45,15 @@ logger = logging.getLogger(__name__)
 # can never shadow it (`RelatedBinding` rejects the name).
 ROOT = "root"
 
+# How many pages one fetch may take to get *past* a single watermark value before it gives up and
+# says so. The rows of a block are held in memory until the block is crossed, so this is the bound
+# on that — ten pages of the binding's own `fetch_limit`, which at the default is 5,000 rows sharing
+# one timestamp. Past it the source is genuinely un-resumable on a timestamp cursor (nothing this
+# side can invent gets past a block it cannot hold), so the fetch reports itself truncated and the
+# sync workflow's "no cursor advance" guard stops the source with a warning. That is the whole
+# difference from what this used to do, which was to return the first page forever in silence.
+_MAX_TIE_PAGES = 10
+
 
 class WarehouseElnAdapter:
     """An `ElnAdapter` over a SQL warehouse, configured entirely by its binding.
@@ -66,6 +75,11 @@ class WarehouseElnAdapter:
         self._ingest: IngestBinding = self._binding.ingest
         self._name = name or "warehouse"
         self._warehouse: Warehouse | None = None
+        # Whether the last fetch stopped because the page filled up rather than because the source
+        # ran out. Read through `chemclaw.ingest.eln.adapter.fetch_was_truncated`, which is what
+        # lets the durable sync tell "come back for more" from "that was everything" — a
+        # distinction only the side that issued the `LIMIT` can make.
+        self._truncated = False
         if self._ingest.entry.fetch_limit < settings.eln_sync_batch_size:
             logger.warning(
                 "%s: entry.fetch_limit (%d) is below eln_sync_batch_size (%d); the durable sync "
@@ -89,15 +103,58 @@ class WarehouseElnAdapter:
         ingestion is idempotent, so replaying the boundary row is safe and skipping it is not.
         Amendments count as new — `sql.watermark_expression` is what makes that true, and it is the
         reason a binding should declare `modified_at` whenever the source has one.
+
+        **A page that cannot move the cursor is continued rather than returned.** The sync's cursor
+        is a timestamp, so a page whose newest watermark is the cursor itself leaves the next run
+        issuing the identical fetch — permanently, in silence, with the rest of that block never
+        seen again. `_page` therefore keeps reading *inside* the block, by the composite keyset
+        `entry_statement` now orders on, until a row with a later watermark comes into view or the
+        source runs out. See `_MAX_TIE_PAGES` for what happens when a block is too large to cross.
+
+        The residual, stated because it is real: the cursor is inclusive, so the block sitting *at*
+        the cursor is re-read on every run — one row where the watermark is a timestamp, a whole
+        day's entries where a binding pointed `created_at:` at a DATE column. They cost one indexed
+        `bodies` lookup each and are skipped as unchanged; what the block's size decides is how much
+        the source re-reads, not whether it makes progress. A site paying that noticeably should
+        bind a finer watermark column, which is what the warning above tells it.
         """
         warehouse = await self._connection()
         entry = self._ingest.entry
-        statement, params = sql.entry_statement(
-            entry, warehouse.placeholder, since, entry.fetch_limit
-        )
-        async with warehouse.cursor() as cursor:
-            await cursor.execute(statement, params)
-            rows = await cursor.fetchall()
+        rows: list[dict[str, Any]] = []
+        after_key = ""
+        for _ in range(_MAX_TIE_PAGES):
+            page = await self._page(warehouse, since, after_key)
+            rows.extend(page)
+            # Short of the limit means the source had nothing more to give, so there is nothing
+            # waiting and nothing to page past.
+            self._truncated = len(page) == entry.fetch_limit
+            if not self._truncated or self._watermark(rows[-1]) > since:
+                break
+            last_key = rows[-1].get(entry.key)
+            if last_key is None:
+                # The keyset cannot continue past a row with no key, and `as_text` would hand the
+                # predicate the six characters `str(None)` produces — a value from no column's
+                # domain, which is how the corpus drain skipped most of a release. The fetch stops
+                # here still reporting itself truncated, so the sync workflow's guard says so.
+                logger.warning(
+                    "%s: the last row of a page carries no %s, so this fetch cannot page past the "
+                    "watermark %s; the declared key must be present on every row",
+                    self._name,
+                    entry.key,
+                    since.isoformat(),
+                )
+                break
+            after_key = as_text(last_key)
+        else:
+            logger.warning(
+                "%s: more than %d pages of %s share the watermark %s, so this fetch cannot get "
+                "past it and the sync cursor cannot advance. Bind `created_at`/`modified_at` to a "
+                "column with sub-block resolution, or narrow `where:`",
+                self._name,
+                _MAX_TIE_PAGES,
+                entry.relation,
+                since.isoformat(),
+            )
         if not rows:
             return []
 
@@ -128,6 +185,38 @@ class WarehouseElnAdapter:
         await self._attach_related(warehouse, bundles)
         return [self._raw_entry(key, bundle) for key, bundle in bundles.items()]
 
+    def fetch_truncated(self) -> bool:
+        """Whether the last fetch was cut short by its own `LIMIT` (the `BoundedFetch` contract)."""
+        return self._truncated
+
+    async def _page(
+        self, warehouse: Warehouse, since: datetime, after_key: str
+    ) -> list[dict[str, Any]]:
+        """One bounded page of entry rows, starting at the cursor or inside a watermark block."""
+        entry = self._ingest.entry
+        statement, params = sql.entry_statement(
+            entry, warehouse.placeholder, since, entry.fetch_limit, after_key
+        )
+        async with warehouse.cursor() as cursor:
+            await cursor.execute(statement, params)
+            return await cursor.fetchall()
+
+    def _watermark(self, row: dict[str, Any]) -> datetime:
+        """The row's own value of the column the page is ordered on — `COALESCE(modified, created)`.
+
+        The Python reading of `sql.watermark_expression`, and it has to be exactly that rather than
+        `entry_window`'s `max`: what decides whether a page got past the cursor is what the
+        *warehouse* sorted on. A row with no usable timestamp at all reads as no later than the
+        cursor, so the fetch keeps paging rather than concluding it has moved on off a value it
+        could not read; `_raw_entry` rejects that row a moment later, naming the column.
+        """
+        entry = self._ingest.entry
+        if entry.modified_at and row.get(entry.modified_at) is not None:
+            return _optional_timestamp(row.get(entry.modified_at)) or datetime.min.replace(
+                tzinfo=UTC
+            )
+        return _optional_timestamp(row.get(entry.created_at)) or datetime.min.replace(tzinfo=UTC)
+
     async def _attach_related(
         self, warehouse: Warehouse, bundles: dict[str, dict[str, Any]]
     ) -> None:
@@ -137,19 +226,30 @@ class WarehouseElnAdapter:
         four round trips, not four hundred. Rows whose foreign key matches no entry in the batch are
         dropped silently — with `order_by` set the warehouse may return them in any order, and the
         `IN (...)` list is what scopes them.
+
+        **Per `fetch_limit` keys, not per batch**, because a batch is no longer bounded by one page:
+        crossing a block of tied watermarks accumulates several pages of entries, and every key in
+        the batch is a bind parameter in each of these `IN (...)` lists. `fetch_limit`'s own bound
+        is chosen to keep that list under a warehouse's bind limit (`EntryBinding` says so), so it
+        is the size to slice by — the alternative is a child query that fails on exactly the fetch
+        the tie-crossing exists to make possible.
         """
         keys = list(bundles)
+        page = self._ingest.entry.fetch_limit
         for block in self._ingest.related:
             for bundle in bundles.values():
                 bundle.setdefault(block.name, [])
-            statement, params = sql.related_statement(block, warehouse.placeholder, keys)
-            async with warehouse.cursor() as cursor:
-                await cursor.execute(statement, params)
-                rows = await cursor.fetchall()
-            for row in rows:
-                owner = bundles.get(str(row.get(block.foreign_key, "")))
-                if owner is not None:
-                    owner[block.name].append(row)
+            for start in range(0, len(keys), page):
+                statement, params = sql.related_statement(
+                    block, warehouse.placeholder, keys[start : start + page]
+                )
+                async with warehouse.cursor() as cursor:
+                    await cursor.execute(statement, params)
+                    rows = await cursor.fetchall()
+                for row in rows:
+                    owner = bundles.get(str(row.get(block.foreign_key, "")))
+                    if owner is not None:
+                        owner[block.name].append(row)
 
     def _raw_entry(self, key: str, bundle: dict[str, Any]) -> RawEntry:
         """Wrap one bundled reaction as the `RawEntry` the sync loop passes back to `map_to_ord`."""
