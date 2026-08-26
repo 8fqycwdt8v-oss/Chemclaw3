@@ -110,35 +110,7 @@ class ToolFailureSignal(BaseModel):
     call_id: str = ""
 
 
-class HandoffSignal(BaseModel):
-    """The turn entered a specialist, or came back out of one (M9's open row).
-
-    `HandoffEvent` shipped as a member of the event contract that nothing produced: the union
-    declared it, the dev page already switched on it, `graph_stream` already attributed events by
-    subgraph namespace — and no code path raised the handoff itself. Additive and defaulted, so
-    nothing broke; but a surface programming against the contract would wait for an event that
-    never came, which is a promise the shipped code did not keep.
-
-    A signal rather than something read off the delegation tool call, because the observation point
-    has to survive the routing question that is still open. Whether a supervisor delegates through
-    `SubAgentMiddleware`'s `task` tool or through a routing node issuing `Command(goto=…)` — the
-    choice D-2026-08-10 leaves to measurement — the compiled specialist is invoked either way, and
-    that invocation is the one thing both shapes share. Reading the `task` tool's arguments instead
-    would have bound the event contract to the delegation mechanism and made the routing decision
-    a contract change.
-
-    `to` is the specialist being entered; empty means control returned to the agent above it, which
-    is what `HandoffEvent.to` already declares. `reason` is the task description the supervisor
-    stated when it delegated — prose for a human, and nothing branches on it.
-    """
-
-    to: str
-    reason: str = ""
-
-
-Signal = (
-    JobSignal | ProposalSignal | QuestionSignal | ApprovalSignal | ToolFailureSignal | HandoffSignal
-)
+Signal = JobSignal | ProposalSignal | QuestionSignal | ApprovalSignal | ToolFailureSignal
 
 
 # The key a signal rides under in the graph's custom stream. Namespaced because the channel is
@@ -221,12 +193,3 @@ def record_approval_request(prompt: str, approval_id: str) -> None:
 def record_tool_failure(tool: str, message: str, call_id: str = "") -> None:
     """Note that `tool` failed, by raising or by answering. A no-op where nothing is streaming."""
     _emit(ToolFailureSignal(tool=tool, message=message, call_id=call_id))
-
-
-def record_handoff(to: str, reason: str = "") -> None:
-    """Note that the turn entered specialist `to`, or left one when `to` is empty.
-
-    A no-op where nothing is streaming — the same drop as every other signal, and it is what lets a
-    specialist run inside a Temporal activity without a handoff attempting to narrate to nobody.
-    """
-    _emit(HandoffSignal(to=to, reason=reason))

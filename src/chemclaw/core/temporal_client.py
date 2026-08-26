@@ -71,8 +71,8 @@ def connect_options() -> dict[str, Any]:
     tls = _tls_config()
     if tls is not None:
         options["tls"] = tls
-    if settings.temporal_api_key:
-        options["api_key"] = settings.temporal_api_key
+    if api_key := settings.temporal_api_key.get_secret_value():
+        options["api_key"] = api_key
     return options
 
 

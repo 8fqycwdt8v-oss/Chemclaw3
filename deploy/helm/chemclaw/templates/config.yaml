@@ -28,6 +28,10 @@ data:
          value block created. Only the enabled connectors appear, so a disabled bundle is simply
          unreachable rather than pointing at a Service with no pods. */}}
   CHEMCLAW_CONNECTOR_URLS: {{ include "chemclaw.connectorUrls" . | quote }}
+  {{- /* And which of them the agent loads at all, from the same block for the same reason — see
+         `chemclaw.connectorsEnabled`. Without it, `enabled: false` took a bundle's pods away and
+         left its tools advertised, so the switch this file documents did half of what it says. */}}
+  CHEMCLAW_CONNECTORS_ENABLED: {{ include "chemclaw.connectorsEnabled" . | quote }}
   {{- /* Derived from the autoscaling block rather than hand-written in `config`, and for the
          sharpest version of the same reason: the admission cap is per-process, so the load the
          shared LLM endpoint really sees is `this × uvicorn workers × the cap`. Written by hand it

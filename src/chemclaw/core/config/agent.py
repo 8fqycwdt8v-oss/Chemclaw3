@@ -9,7 +9,7 @@ sections shared a single module (D-072 mixins, split per D-156).
 import os
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings
 
 # The two postures the plan/execute harness can start in, named once so every model that accepts
@@ -44,7 +44,11 @@ class AgentSettings(BaseSettings):
     # by a previous process are read as ordinary content, and the injection mitigation silently
     # lapses for the oldest material. A deployment-wide value keeps one tag across every pod and
     # restart. Hashed before use, so the secret never appears in a prompt or a stored session row.
-    framing_envelope_secret: str = ""
+    # A `SecretStr`, for the reason the credentials carry one
+    # (`D-2026-08-26-a-credential-is-a-type-not-a-convention`). It is not a credential to any
+    # external system, which is how it was missed once already — it is the HMAC key the envelope
+    # tag is derived from, and anyone who learns it can close the envelope from inside.
+    framing_envelope_secret: SecretStr = SecretStr("")
 
     # The agent (plan step 1.5). `agent_model` is the orchestration model name
     # (ENV-overridable); the provider's API key is read by the chat model from its own env var

@@ -56,10 +56,18 @@ def _envelope_nonce() -> str:
     a prompt, a transcript or a stored session row.
 
     Unset falls back to the per-process random value, which is what dev and tests want and what
-    every existing deployment already has. `Settings` warns when durable sessions are configured
-    without it, because that is the exact combination where envelopes orphan.
+    every existing deployment already has.
+
+    **Nothing warns about the combination that matters**, and this docstring said `Settings` did
+    until 2026-08-26: `framing_envelope_secret` is named in exactly three files — this one, its own
+    config section, and `core/logging.py`'s redaction inventory — so no validator anywhere pairs it
+    with `session_store_dsn`. That pairing is where envelopes orphan: a durable session replays
+    material written under a previous process's random nonce, the tag no longer matches, and the
+    marking silently lapses for the oldest content. Queued in `BACKLOG.md` with that anchor rather
+    than added here, because a startup warning is `Settings`' to raise and it has no warning
+    mechanism yet — every guard there raises.
     """
-    secret = settings.framing_envelope_secret
+    secret = settings.framing_envelope_secret.get_secret_value()
     if secret:
         return hmac.new(secret.encode(), b"chemclaw-retrieved-note-envelope", sha256).hexdigest()[
             :16

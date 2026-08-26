@@ -13,6 +13,7 @@ import sys
 from collections.abc import Callable
 
 import pytest
+from pydantic import SecretStr
 
 from chemclaw.core.config import Settings, settings
 from chemclaw.core.logging import (
@@ -272,7 +273,7 @@ _KEY = "sk-live-0123456789abcdef"
 def _secrets(monkeypatch: pytest.MonkeyPatch) -> None:
     """Configure real secret values, as a deployment would hold them."""
     monkeypatch.setattr("chemclaw.core.config.settings.postgres_dsn", _DSN)
-    monkeypatch.setattr("chemclaw.core.config.settings.llm_api_key", _KEY)
+    monkeypatch.setattr("chemclaw.core.config.settings.llm_api_key", SecretStr(_KEY))
 
 
 def _record(message: str, *args: object) -> logging.LogRecord:
@@ -448,8 +449,8 @@ def test_a_short_or_empty_secret_is_not_matched(monkeypatch: pytest.MonkeyPatch)
     This is the failure that would make redaction worse than none: `llm_api_key` is `""` by default,
     and a substring search for the empty string matches everywhere.
     """
-    monkeypatch.setattr("chemclaw.core.config.settings.llm_api_key", "")
-    monkeypatch.setattr("chemclaw.core.config.settings.note_webhook_secret", "abc")
+    monkeypatch.setattr("chemclaw.core.config.settings.llm_api_key", SecretStr(""))
+    monkeypatch.setattr("chemclaw.core.config.settings.note_webhook_secret", SecretStr("abc"))
     assert _rendered(_record("abc is a fine thing to log")) == "abc is a fine thing to log"
 
 
@@ -619,16 +620,22 @@ def test_every_named_secret_is_a_real_settings_field() -> None:
     `Settings` field and never was one under that name.
 
     No credential was actually exposed by it, because the entry was dead rather than wrong. The
-    hazard is the next rename: three of the listed values (`hpc_api_token`,
-    `hpc_artifact_store_token`, `temporal_api_key`) are touched by no other test, so renaming one
-    in `config.py` would leave a real secret reaching the log with the suite still green.
+    hazard is the next rename: renaming a listed field in `config.py` would leave a real secret
+    reaching the log with the suite still green. (`hpc_api_token`, `hpc_artifact_store_token` and
+    `temporal_api_key` were the three that no other test touched at all; since 2026-08-26
+    `tests/test_credentials.py` drives two of them through their real consumers.)
 
-    Deliberately one-directional. It does not assert that every secret-looking field is listed,
-    because "secret-looking" is exactly the name-pattern heuristic the inventory's own comment
-    rejects — `calc_server_token_env` holds a variable *name*, `budget_max_tokens_per_user` is an
-    integer, and `temporal_tls_key` is a path to a PEM rather than key material. Whether a field
-    holds a credential stays a human judgement made in review; whether a listed one still exists
-    does not.
+    Deliberately one-directional *here*. It does not assert that every secret-looking field is
+    listed, because "secret-looking" is exactly the name-pattern heuristic the inventory's own
+    comment rejects — `calc_server_token_env` holds a variable *name*,
+    `budget_max_tokens_per_user` is an integer, and `temporal_tls_key` is a path to a PEM rather
+    than key material.
+
+    The other direction now exists and does not use a heuristic:
+    `tests/test_credentials.py::test_every_secret_str_on_the_settings_object_is_also_redacted`
+    asserts it over the *type*, since
+    `D-2026-08-26-a-credential-is-a-type-not-a-convention` made every non-DSN credential a
+    `SecretStr`. Declaring the type is the human judgement; both protections then follow from it.
     """
     unknown = sorted(set(_SECRET_SETTINGS) - set(Settings.model_fields))
     assert not unknown, (

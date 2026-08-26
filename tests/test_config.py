@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from pydantic import SecretStr
 
 from chemclaw.core.config import Settings
 
@@ -223,7 +224,8 @@ def _nextflow(**overrides: Any) -> Settings:
         hpc_pipeline_name="qm-dft",
         hpc_pipeline_version="1.0.0",
         hpc_artifact_store_url="https://artifacts.internal",
-        hpc_api_token="tower-token",
+        # A `SecretStr` since D-2026-08-26-a-credential-is-a-type-not-a-convention.
+        hpc_api_token=SecretStr("tower-token"),
         **overrides,
     )
 

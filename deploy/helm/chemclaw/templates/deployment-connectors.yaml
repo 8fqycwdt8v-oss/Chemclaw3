@@ -32,7 +32,17 @@ metadata:
     {{- include "chemclaw.labels" $ | nindent 4 }}
     app.kubernetes.io/component: connector-{{ $name }}
 spec:
-  replicas: {{ $cfg.replicas }}
+  {{- /* `serverReplicas` when the bundle sizes its two halves separately, else the shared
+         `replicas`. One knob drove both Deployments until 2026-08-26, so scaling `calc`'s MCP
+         server to 4 also scaled its Temporal worker to 4 — two differently-shaped processes (one
+         request-serving, one queue-polling) tied to one number, and each counted separately
+         against the connection ceiling.
+
+         `default` treats `0` as unset, so `serverReplicas: 0` falls back to `replicas` rather than
+         scaling this half to zero. That is the right reading here: turning a capability off is
+         `enabled: false`, which takes its tools off the agent's surface too — a bundle scaled to
+         zero pods while still advertised is the failure the enable list was just fixed for. */}}
+  replicas: {{ $cfg.serverReplicas | default $cfg.replicas | required (printf "connectors.%s: server pods need serverReplicas or replicas" $name) }}
   selector:
     matchLabels:
       {{- include "chemclaw.selectorLabels" $ | nindent 6 }}
@@ -95,7 +105,12 @@ metadata:
     {{- include "chemclaw.labels" $ | nindent 4 }}
     app.kubernetes.io/component: connector-worker-{{ $name }}
 spec:
-  replicas: {{ $cfg.replicas }}
+  {{- /* The other half of the same split — and the one that could render *empty*. The worker
+         block is deliberately not conditioned on `url`, while `replicas` was only ever required
+         of a bundle without one, so an externally hosted bundle that owns durable work rendered no
+         `replicas` at all: Kubernetes defaulted it to 1 and `chemclaw.pooledProcesses` counted it
+         as `nil | int` = 0. `required` is what turns that silence into a refused render. */}}
+  replicas: {{ $cfg.workerReplicas | default $cfg.replicas | required (printf "connectors.%s: worker pods need workerReplicas or replicas" $name) }}
   selector:
     matchLabels:
       {{- include "chemclaw.selectorLabels" $ | nindent 6 }}

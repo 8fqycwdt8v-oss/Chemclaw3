@@ -59,7 +59,7 @@ def _webhook_signature_ok(body: bytes, header: str) -> bool:
     the comparison: a byte-at-a-time `==` on a MAC leaks its prefix through timing, which is the
     one implementation detail of a signature check that matters.
     """
-    secret = settings.note_webhook_secret
+    secret = settings.note_webhook_secret.get_secret_value()
     if not secret or not header.startswith("sha256="):
         return False
     expected = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
@@ -167,7 +167,7 @@ async def knowledge_merged(
     """
     raw = await request.body()
     signed = _webhook_signature_ok(raw, request.headers.get(_WEBHOOK_SIGNATURE_HEADER, ""))
-    if settings.note_webhook_secret and not signed:
+    if settings.note_webhook_secret.get_secret_value() and not signed:
         raise HTTPException(status_code=401, detail="invalid or missing webhook signature")
     try:
         merged = KnowledgeMergedIn.model_validate_json(raw) if raw else KnowledgeMergedIn()
