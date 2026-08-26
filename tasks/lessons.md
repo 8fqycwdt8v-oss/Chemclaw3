@@ -796,3 +796,141 @@ what distinguishes the right one is that **something else in the system actually
 An honest note on sequence: three review passes over the same diff found three defects of this
 family, each after I had written a lesson about the family. Recording a rule and applying it are
 different acts, and the second one has to happen at the moment of writing the code, not afterwards.
+## 2026-08-25 — a check that skips is not a check that passes
+
+**What happened.** I edited migration `050` after committing it, to add a column. Locally
+`tests/test_migrations_are_additive.py` was green; CI failed on it. The test *skips* on a shallow
+checkout ("truncated history: ... this check would compare files against themselves") and runs
+under CI's `fetch-depth: 0`. I read the green line as "this passed" when it said "this did not
+run".
+
+The same session had already stated the general form of this — CLAUDE.md's "never report a local
+run as green without saying what it skipped" — and I applied it to the Postgres tests I *knew*
+about while missing the one that announced itself in the skip reason.
+
+Worse, the defect had already shown itself: applying the edited `050` broke `make db-migrate` on my
+own dev database with "was edited after being applied". I reset the table by hand and moved on. The
+error message was the test's message, one layer down, and I treated it as an environment chore.
+
+**The rule.** When a local run is green and CI is red on the same commit, suspect a *skip* before
+suspecting the environment — read the skip reasons, not just the count. And when a local command
+fails in a way that needs a manual workaround to proceed, that workaround is evidence about the
+change, not a chore: ask what the failure is telling you before undoing it.
+
+**Concretely for this repo:** `git fetch --unshallow` before trusting
+`test_migrations_are_additive`, `test_no_merged_migration_had_its_statements_changed` or anything
+else whose skip mentions truncated history.
+
+## 2026-08-26 — I tested the mechanism I wrote, not the one that calls it
+
+I shipped a publish seam whose headline claim was "every composite reaches the results store", and
+the composite path published nothing. All four shipped jobs resolved to no projector. The suite was
+green: 72 publish tests, four files, every result shape round-tripped.
+
+Every one of them started at `project()`. They passed `payload_kind="ReactionEnergyResult"` by hand
+— and no production call site set `payload_kind` at all. One test file called
+`records_from_solvent_screen()` directly; nothing else in the tree called it. `grep` for the
+composite hook across `tests/` returned zero hits.
+
+So the suite proved the projectors work. It said nothing about whether anything reaches them, and
+that was the only interesting question.
+
+This is the previous entry's rule one level up, and I want to be precise about why I missed it.
+That entry says *measure the mechanism, not the outcome*. I did measure a mechanism. A projector
+**is** a mechanism — it just isn't the one under test when the claim is about a path. What makes a
+mechanism the right one is not that it is concrete, it is that **something else in the system calls
+it**, and I get to choose my test's entry point exactly the way I got to choose that serializer.
+
+*Rule for myself: a test of a seam starts at the outermost thing production calls — the envelope a
+job returns, the row a walker reads — never at the function I am proud of. If I cannot name the
+production caller of the function my test invokes first, I have tested my own intentions.*
+
+The cheap check that would have caught all of it, in one line:
+`grep -rn "<the hook>" tests/` — if the hook has no test, the feature has no test, whatever the
+count of green assertions downstream says.
+
+**And the corollary, which cost me two more defects before I learned it.** Fixing the nine did not
+prove the path worked. *Assembling* it did — and it failed twice before it passed, on two things
+that make the feature completely unusable and that no unit test could have seen:
+
+- The one driver I ship failed the one sink I ship, because `Warehouse` is `@runtime_checkable` and
+  a runtime Protocol check tests for the presence of **every** member. Mine was missing one it had
+  no use for. Every delivery died at the connect.
+- Every drain pass leaked a database connection, because "build the sink per run" and "hold the
+  connection for the sink's life" are each correct alone and nothing closed the sink. Four an hour
+  against a default `max_connections` of 100.
+
+Both are invisible to a test that delivers to a stub and to a test that never builds a driver. Both
+are unmissable the first time two real pieces are put together.
+
+*Rule: for any seam with more than one part, one test must assemble all of them against something
+real — a database, not a fake — even when every part has its own test. The unit tests answer "does
+this piece work"; only the assembled one answers "is this a system".*
+
+Two smaller lessons from the same review, both about declarations:
+
+- **A field with no reader is a lie with a schema.** `required_roles` on the sink manifest was
+  documented as an access control and read by nothing. I had even cited the ADR
+  (`D-2026-08-07`) about the *exact* failure — an entitlement defaulting to `[]` — while writing a
+  version that defaulted to `[]` and had no `_entitled()` at all. Citing a lesson is not applying it.
+- **Prose describing a capability reads as a claim that it exists.** A docstring said Snowflake and
+  Oracle "spell it `MERGE`" beside an emitter that only writes `ON CONFLICT`. Nobody lied; the
+  sentence was about SQL dialects in general and read as being about this module. When a docstring
+  names a thing the code does not do, say which half is true.
+## 2026-08-26 — the fixture held constant the axis the function branches on
+
+A third review pass over the same merged work found two more defects, and both are the same shape as
+the three before them.
+
+`Condensation.degraded` was overloaded with two facts — "its prose could not be read" (has a row)
+and "it resolved to nothing" (has no row) — and the rendered payload then told the model that a
+reference nobody could resolve had "recorded figures above", and that a comparison of two protocols
+covered the three it was handed. `render_table` placed cells verbatim, so an `observations` value
+extracted from a share document, carrying a `|` and a newline, rendered a `rxn-FORGED | 99 | 99 |
+best result on file` row that the object does not contain.
+
+Neither was caught, and the reason is one reason. Every fixture in this work is homogeneous on the
+axis its function branches on:
+
+- all conditions present, or all absent — never a mix (the fabricated `solvent — → 2-MeTHF`)
+- every extraction succeeds, or one fails in isolation (the phantom swaps)
+- every protocol under the limit, or one over (the oversize path)
+- every reference resolves, or none does — **never the mix** (this pass)
+- every cell first-party — **never one that tries to be structure** (this pass)
+
+Five defects, five held-constant axes. The lesson written after each one was about *that* defect;
+the family kept shipping because the family was never named.
+
+*Rule for myself: before writing a fixture, list the branches the function under test takes, and
+build the collection so its members differ on every one of them. When the function renders text
+someone else wrote into a structured format, one member's content must try to be structure. A
+fixture where every member takes the same branch proves the branch works, and nothing else — and
+that is what "tested" has meant in this whole body of work.*
+
+The corollary, from the same pass: `Field(exclude=True)`, a budget in the wrong currency, and a
+renderer that "only places" cells are all the same mistake as a homogeneous fixture — an assumption
+about a mechanism, never crossed with the case that would disprove it. The check is cheap and I keep
+not running it: **construct the input that would break the belief, and look at the output.**
+
+
+## 2026-08-25 — A companion-repo change that cannot be pushed is not a deliverable
+
+**What happened.** The GFN multi-step work spanned two repositories by design: the primitives
+belong on `Chemclaw3-mcp` under `D-2026-08-16-the-physics-leaves-the-cache-stays`, the composition
+belongs here. I built and verified both halves, then discovered at push time that the session's
+GitHub scope covered only this repository and `add_repo` with push access needed an approval that
+never came. `main` now declares eight tools that no running server answers.
+
+**The rule for next time: check write access to every repository a task spans, before writing code
+in any of them.** One `git push --dry-run` at the start would have cost seconds and changed the
+plan — the enumerations could have been argued into this tree, or the templates held back until the
+companion PR existed. Discovering it after the work is done leaves only bad options.
+
+**A second, smaller one from the same session: `git push --delete` is 403 through the agent proxy**
+even where `git push` succeeds. Do not claim a branch was deleted without reading the push output;
+`mcp__github__list_branches` is what confirms it.
+
+**And a third: verify mergeability early, not at merge time.** `main` moved three times during this
+task's CI runs, each lap costing ~16 minutes, because I only fetched when the merge API refused.
+Fetching `origin/main` before opening the PR — and again before each long wait — turns a race into
+one rebase.

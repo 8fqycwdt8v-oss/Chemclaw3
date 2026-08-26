@@ -1,6 +1,10 @@
 ---
 artifact_refs: []
 calc_refs: []
+conditions:
+  temperature_c: 80.0
+  time_h: 12.0
+  yield_percent: 76.0
 confidence: 0.85
 created_by: human
 id: rxn-suzuki-biaryl

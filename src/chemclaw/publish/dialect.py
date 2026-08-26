@@ -8,7 +8,17 @@ reaches the statement text. Table and column names here are literals in this fil
 
 **Upserts, because a redelivery must converge.** The outbox retries, and every primary key in the
 shipped schema is a content hash, so writing the same record twice is a no-op rather than a
-duplicate. Postgres spells that `ON CONFLICT ... DO UPDATE`; Snowflake and Oracle spell it `MERGE`.
+duplicate.
+
+**This emits Postgres, and only Postgres.** `ON CONFLICT ... DO UPDATE` is a Postgres spelling;
+Snowflake and Oracle spell the same idea `MERGE`, and there is no `MERGE` emitter here. An earlier
+version of this paragraph named all three, which read as though the SQL driver already spoke them —
+it does not. What is portable today is the *schema*: `schema/result-store/` avoids arrays,
+sequences and expression indexes precisely so a site can create it on another engine, and adding
+that engine is then this module plus the driver's `information_schema` probe.
+Until someone asks for one, saying so plainly is better than a sentence that has to be tested to
+be disbelieved.
+
 The statements are built as text rather than through a query builder because there are a fixed
 number of them, shaped by the schema and not by the caller — a builder would add a dependency and
 an indirection to save nothing, and would make the exact string a test wants to assert harder to
@@ -325,6 +335,24 @@ CONFLICT_KEYS: dict[str, tuple[str, ...]] = {
     "calculation_artifact": ("calc_ref", "name"),
 }
 
+# Columns a *blank* incoming value must never overwrite.
+#
+# `structure` is content-addressed: `structure_id` is a hash of the geometry, so two rows with one
+# id agree about the science and can differ only in how much of the surrounding provenance the
+# writer happened to know. Two builders below emit these rows -- a subject member, which knows the
+# id and nothing else, and a conformer, which knows which calculation produced the geometry -- and
+# the plain `DO UPDATE SET col = EXCLUDED.col` let whichever arrived second win. A member row
+# landing after a conformer row therefore blanked a real `origin_calc_ref`.
+#
+# `DO NOTHING` would have been the wrong repair: it fixes that ordering and breaks the mirror one,
+# where the member row lands first and the real origin never gets written. What is actually wanted
+# is that a writer who does not know a fact cannot erase it from one who does, which is what this
+# says. A member row is not given `record.calc_ref` instead, because the geometry a calculation
+# *ran on* is its input -- claiming this calculation produced it would be a false provenance.
+PRESERVE_ON_BLANK: dict[str, tuple[str, ...]] = {
+    "structure": ("origin_calc_ref", "compound_id", "atom_count", "geometry"),
+}
+
 # Dependency order. A row is never written before what it references, which is what makes the write
 # correct against a site that actually created the foreign keys.
 TABLE_ORDER: tuple[str, ...] = (
@@ -349,6 +377,16 @@ TABLE_ORDER: tuple[str, ...] = (
 )
 
 
+# What "the writer did not know" looks like per column, for `PRESERVE_ON_BLANK`. Typed, because
+# `NULLIF` compares values: an empty string is not a blank integer and neither is an empty object.
+_BLANKS: dict[str, str] = {
+    "origin_calc_ref": "''",
+    "compound_id": "''",
+    "atom_count": "0",
+    "geometry": "'{}'::jsonb",
+}
+
+
 def upsert_statement(table: str, columns: Sequence[str], placeholder: str = "%s") -> str:
     """The Postgres-flavoured upsert for one table over `columns`.
 
@@ -363,5 +401,15 @@ def upsert_statement(table: str, columns: Sequence[str], placeholder: str = "%s"
         # Every column is part of the key, so there is nothing an update could change: seeing the
         # row again is confirmation, not new information.
         return f"{statement} ON CONFLICT ({', '.join(keys)}) DO NOTHING"
-    assignments = ", ".join(f"{column} = EXCLUDED.{column}" for column in updatable)
+    preserve = PRESERVE_ON_BLANK.get(table, ())
+    assignments = ", ".join(
+        # `NULLIF(…, '')` collapses the two ways "the writer did not know" arrives -- SQL NULL and
+        # the empty string/zero/`{}` the row builders use -- so either one leaves the stored value
+        # alone. Written per column rather than per table because only the content-addressed
+        # tables want it; everywhere else a later write is genuinely newer information.
+        f"{column} = COALESCE(NULLIF(EXCLUDED.{column}, {_BLANKS[column]}), {table}.{column})"
+        if column in preserve
+        else f"{column} = EXCLUDED.{column}"
+        for column in updatable
+    )
     return f"{statement} ON CONFLICT ({', '.join(keys)}) DO UPDATE SET {assignments}"

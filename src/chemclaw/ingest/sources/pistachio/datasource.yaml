@@ -28,6 +28,18 @@ description: >-
 
 retrieve: chemclaw.ingest.eln.warehouse.retriever:WarehouseVectorRetriever
 
+# What this corpus already carries, and what the background labeller must derive anyway.
+#
+# **`provides` is never a skip.** Pistachio ships a NameRxn classification for a large fraction of
+# its corpus and not for all of it, and every row it left empty is derived — which is the whole of
+# "the database will not have all these labels in the beginning". The claim is read for the coverage
+# sentence an answer carries and for the `override` subset check, nothing else.
+labels:
+  provides:
+    - named-reaction
+    - atom-mapping
+  override: []
+
 config:
   binding:
     connection:
@@ -74,3 +86,49 @@ config:
       # filesystem probe — and a Pistachio reaction id colliding with an ELN one would silently
       # hide a legitimate hit.
       suppress_ingested: false
+
+    # **The second seam onto the same table, and it answers a different question.** `vector:` above
+    # ranks by embedding similarity — "find me reactions that read like this one" — which is what a
+    # research sweep wants. It cannot answer *which ligand*, *as what*, *under what conditions* or
+    # *how it was worked up*, because those are properties of the recipe and an embedding of the
+    # reaction text is not a queryable decomposition of it.
+    #
+    # So this block is drained into the reaction-label index
+    # (`D-2026-08-25-a-label-is-derived-not-recorded`): one keyset pass writes each reaction's
+    # record phase — the record-form SMILES with its agents kept, the conditions, the workup text
+    # and one row per species — and the background labeller then fills in the atom map, the named
+    # reaction and the refined per-species roles. The two seams share the connection above and
+    # nothing else.
+    #
+    # Keyset, not a datetime cursor and not OFFSET: a release is a versioned load rather than a
+    # feed, and `OFFSET n` over ten million rows makes the drain quadratically slower the further
+    # in it gets. `order_by` must be unique and stable across the release.
+    #
+    # Like everything else in this file these column names are a plausible landing table, not the
+    # site's. Replace them, or better, mount your own copy of this folder first on
+    # `CHEMCLAW_DATA_SOURCES_DIR`.
+    corpus:
+      relation: v_reaction
+      key: reaction_id
+      order_by: reaction_id
+      # A row with no product is not a precedent. Inserted literally, so it is as trusted as this
+      # file — the same trade `EntryBinding.where` makes.
+      where: "product_smiles IS NOT NULL"
+      fetch_limit: 2000
+
+      smiles: {path: root.reaction_smiles}
+      citation: {path: root.patent_number, fallback: {path: root.document_id}}
+      published_on: {path: root.publication_date, transform: [{iso_date: {}}]}
+      temperature_c: {path: root.temperature_c, transform: [{number: {}}]}
+      time_h: {path: root.time_h, transform: [{number: {}}]}
+      yield_percent:
+        path: root.yield_pct
+        transform: [{number: {}}, {clamp: {min: 0, max: 100}}]
+      workup_text: {path: root.workup_text}
+
+      # The labels the corpus carries. `make datasource-validate` checks these against the
+      # `labels: provides:` block above, so a source cannot claim a name it has no column for.
+      named_reaction: {path: root.namerxn_name}
+      reaction_class: {path: root.namerxn_class}
+      rxno_id: {path: root.rxno_id}
+      mapped_smiles: {path: root.mapped_reaction_smiles}

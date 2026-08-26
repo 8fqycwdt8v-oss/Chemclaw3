@@ -250,9 +250,18 @@ Durability lives **only** in Temporal, never in the conversation layer's own ad-
 rule is D-002's and it got *stricter* when layer 1 gained a checkpointer, because the checkpointer
 holds turn state and every long or expensive job is still Temporal's (D-2026-08-10 §3). Skills hold
 judgment; **connectors** hold capability (deterministic tools) — MCP is the protocol a connector
-speaks, not the thing that holds the capability (D-110/D-118). Anything agent-generated enters the
+speaks, not the thing that holds the capability (D-110/D-118). Anything agent-*asserted* enters the
 graph via a **PR-gate** (human validates before merge) — the agent proposes, a human decides, reused
 everywhere (job results, reports, distilled playbooks). See `docs/reference/architektur.md` §4, §9, §12.
+
+**A deterministic transcription is not an assertion, and is not gated**
+(D-2026-08-25-an-eln-transcription-is-data-not-a-claim). An ELN entry becomes a row in
+`reaction_records` — readable the moment it is ingested, queryable by structure, expandable into its
+recipe — because `record_from_ord_reaction` infers nothing and so hands a reviewer nothing to
+decide. Measured, the gate cost 202 ms of serialized git per entry and a corpus scan that wedged the
+sync at ~700k entries, for 4 person-years of clicking per million. The same rule now runs the other
+way too: **no Temporal Schedule opens a pull request.** The campaign/playbook/optimization miners are
+unchanged and still run, on demand rather than hourly, so knowledge never arrives on a timer.
 
 ## Commands
 

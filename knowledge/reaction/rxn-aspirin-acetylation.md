@@ -2,6 +2,10 @@
 artifact_refs: []
 calc_refs: []
 compound_smiles: CC(=O)Oc1ccccc1C(=O)O
+conditions:
+  temperature_c: 60.0
+  time_h: 2.0
+  yield_percent: 88.0
 confidence: 0.9
 created_by: human
 id: rxn-aspirin-acetylation

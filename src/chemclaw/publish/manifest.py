@@ -66,15 +66,6 @@ class ResultSinkManifest(BaseModel):
             "it — so a wrong key is a validation failure without a second model to keep in step."
         ),
     )
-    required_roles: list[str] = Field(
-        default_factory=list,
-        description=(
-            "Entitlements a turn must hold for its results to reach this sink. Empty means every "
-            "authenticated actor. Expressed in the binding rather than in core config, following "
-            "the mounted share's precedent: which people a destination is for is a fact about that "
-            "destination."
-        ),
-    )
     tenant_id: str = Field(
         default="",
         description=(

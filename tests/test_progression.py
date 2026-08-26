@@ -8,9 +8,9 @@ run was testing surviving ingestion. In-memory throughout — no store, no git, 
 
 from datetime import date
 
-from chemclaw.ingest.eln.note import note_from_ord_reaction
 from chemclaw.ingest.eln.ord import Component, OrdReaction, Role, StepKind
 from chemclaw.ingest.eln.ord import ReactionStep as Step
+from chemclaw.ingest.eln.record import record_from_ord_reaction
 from chemclaw.memory.optimization import OptimizationCampaign, optimization_campaign_note
 from chemclaw.memory.progression import (
     changes_between,
@@ -223,10 +223,10 @@ def test_the_note_carries_what_each_run_was_testing() -> None:
 
 def test_the_hypothesis_survives_into_the_reaction_note() -> None:
     """Leading with it, because it is what makes the run legible to a later reader."""
-    body = note_from_ord_reaction(_run("a", day=1, hypothesis="is the impurity thermal?")).body
+    body = record_from_ord_reaction(_run("a", day=1, hypothesis="is the impurity thermal?")).body
     assert "Tested: is the impurity thermal?" in body
 
 
 def test_a_run_with_no_recorded_hypothesis_says_nothing_about_one() -> None:
     """Silence is "not recorded", never "there was no hypothesis"."""
-    assert "Tested:" not in note_from_ord_reaction(_run("a", day=1)).body
+    assert "Tested:" not in record_from_ord_reaction(_run("a", day=1)).body

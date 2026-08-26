@@ -58,12 +58,19 @@ _KEYED: dict[str, tuple[str, tuple[str, ...]]] = {
     # for its properties must reach the entry that conformer's own address names.
     "compute_properties_at": ("xtb.properties", ("solvent",)),
     "predict_site_reactivity": ("xtb.fukui", ()),
-    # The geometry-taking twin, under the same `calc_type` and — the property that matters —
-    # the same **empty** params tuple. A Fukui calculation does not depend on the mode: the
-    # server computes all three indices from three single points and sorts on the way out, so
-    # one row serves every mode. Keying on `mode` here would make a cache *hit* authoritative
-    # about an ordering it never chose, which is what `ranked_for` exists to prevent.
-    "compute_fukui_at": ("xtb.fukui", ()),
+    # The geometry-taking twin, under the same `calc_type` — one row serves a Fukui computed from
+    # a SMILES and one computed at the identical geometry. `mode` and `top_n` stay out of the key
+    # on both: the server computes all three indices from three single points and sorts on the way
+    # out, so keying on `mode` would make a cache *hit* authoritative about an ordering it never
+    # chose, which is what `ranked_for` exists to prevent.
+    #
+    # **`solvent` is in the key here and absent from the twin, and that is not an inconsistency.**
+    # `predict_site_reactivity(smiles, mode, top_n)` takes no solvent at all, while
+    # `compute_fukui_at(structure, mode, solvent, top_n)` does, and the server keys it —
+    # `identity._fukui_at` builds `XtbSpec(task="fukui", solvent=_solvent(arguments))`. The two
+    # tools shared one entry here and only one of them fitted it, so a Fukui set computed in water
+    # and one in the gas phase collided in tests while production correctly recomputed.
+    "compute_fukui_at": ("xtb.fukui", ("solvent",)),
     "predict_pka": ("pka", ()),
     "predict_solubility": ("solubility", ()),
     "predict_developability_profile": ("developability", ()),
@@ -390,22 +397,39 @@ class FakeCalcServer:
             "veber_pass": True,
         }
 
-    def _predict_site_reactivity(self, arguments: dict[str, Any]) -> dict[str, Any]:
+    def _predict_site_reactivity(
+        self, arguments: dict[str, Any], nudge: float = 0.0
+    ) -> dict[str, Any]:
         canonical = require_canonical_smiles(arguments["smiles"])
         molecule = Chem.AddHs(Chem.MolFromSmiles(canonical))
         atoms = list(molecule.GetAtoms())
         # f_minus descends with the index and f_plus ascends, so the two modes rank the atoms in
         # opposite orders — which makes a mis-served ranking visible rather than coincidental.
+        #
+        # **`f_zero` varies per atom and `nudge` moves it per geometry**, and both matter. It is
+        # the field an ensemble average actually reports (`compose._DEFAULT_FUKUI_MODE` is
+        # "radical"), and it used to be the constant 0.5 for every atom of every conformer — so
+        # `test_an_averaged_fukui_ranking_reaches_the_geometry_taking_tool` was comparing 0.5 to
+        # 0.5 and could not have failed. `nudge` is what makes two conformers rank their atoms
+        # differently, which is the whole premise of averaging over an ensemble.
         sites = [
             {
                 "index": atom.GetIdx(),
                 "element": atom.GetSymbol(),
                 "f_minus": round(1.0 - atom.GetIdx() / len(atoms), 4),
                 "f_plus": round(atom.GetIdx() / len(atoms), 4),
-                "f_zero": 0.5,
+                "f_zero": round(0.5 + nudge * (1 if atom.GetIdx() % 2 else -1), 4),
             }
             for atom in atoms
         ]
+        # **Ranked most-susceptible first and truncated, because that is the contract the real
+        # server keeps** (`SiteReactivityResult`: "ordered most-susceptible first by the index named
+        # in `ranked_by`, and truncated to the most susceptible `len(sites)` of `total_atoms`").
+        # The fake used to return them in atom-index order and whole, which is the shape in which
+        # pairing conformers by list position happens to be correct — so the fake could not express
+        # the defect that shipped.
+        sites.sort(key=lambda site: -float(site["f_minus"]))
+        sites = sites[: int(arguments.get("top_n") or len(sites))]
         return {
             "calc_version": FAKE_VERSION,
             "smiles": canonical,
@@ -420,10 +444,23 @@ class FakeCalcServer:
         }
 
     def _compute_fukui_at(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        """The geometry-taking twin of the Fukui ranking, answering about its own molecule."""
+        """The geometry-taking twin of the Fukui ranking, answering about *this* geometry.
+
+        **Geometry-dependent, which is the entire point of the tool.** This used to delegate on the
+        SMILES alone, so every conformer of one molecule came back byte-identical — and an ensemble
+        average over identical members cannot show a mispairing, a reordering or a truncation. The
+        `DEFERRED.md` row this tool closed was written to ask how often the top-ranked site *moves*
+        between geometries; a fake that holds it still answers "never" by construction.
+        """
         structure = arguments["structure"]
-        answer = self._predict_site_reactivity({"smiles": structure["smiles"]})
-        answer["structure_id"] = _structure_id(structure)
+        identifier = _structure_id(structure)
+        # Small, deterministic, and derived from the address — enough to reorder the ranking
+        # between conformers without pretending to be physics.
+        nudge = (int(identifier[-4:], 16) % 17) / 100.0
+        answer = self._predict_site_reactivity(
+            {"smiles": structure["smiles"], "top_n": arguments.get("top_n")}, nudge=nudge
+        )
+        answer["structure_id"] = identifier
         return answer
 
     def _compute_properties_at(self, arguments: dict[str, Any]) -> dict[str, Any]:

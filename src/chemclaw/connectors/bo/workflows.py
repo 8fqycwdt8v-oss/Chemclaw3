@@ -206,5 +206,6 @@ class BoCampaignWorkflow:
                 f"recorded as {campaign_id}"
             ),
             data=result.model_dump(mode="json"),
+            payload_kind=type(result).__name__,
             note=note,
         )

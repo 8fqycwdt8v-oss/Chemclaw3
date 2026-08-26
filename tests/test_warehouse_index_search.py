@@ -221,14 +221,21 @@ async def test_an_empty_eligibility_set_returns_nothing_without_asking_the_store
 
 
 @_sync
-async def test_a_binding_where_is_applied_even_with_no_query_filter() -> None:
+async def test_a_binding_where_is_enforced_with_no_query_filter_and_costs_no_scope() -> None:
     """`where:` says which rows are *ever* eligible; a query that filters nothing cannot waive it.
 
-    The regression this pins: `_eligible_keys` used to decide "is this search filtered" from the
-    query's keys, so a binding carrying both `index:` and `where:` restricted the corpus when the
-    model happened to pass a date and did not when it did not — the same binding, two answers, no
-    error. The scanned path has always applied `where` unconditionally; this makes the index path
-    agree.
+    Two regressions in one test, because the fix for the first caused the second.
+
+    *The original:* `_eligible_keys` decided "is this search filtered" from the query's keys, so a
+    binding carrying `index:` and `where:` restricted the corpus when the model happened to pass a
+    date and did not when it did not.
+
+    *The overcorrection:* making `where:` count as "filtered" ran a scope query on every search —
+    and a `where:` over a corpus large enough to need an index exceeds
+    `vector_store_max_scope_keys` by construction, so the source answered **nothing at all** for
+    every query. Strictly worse than the bug it fixed.
+
+    `where:` is enforced at the resolve, which is keyed to `top_k` rows and needs no enumeration.
     """
     retriever = _retriever(
         await _store_ranked("ester formation", "RX-1", "RX-2"), where="STATUS = 'GRANTED'"
@@ -236,8 +243,28 @@ async def test_a_binding_where_is_applied_even_with_no_query_filter() -> None:
     await retriever.retrieve("ester formation", {})
 
     statements = [sql for sql, _ in warehouse_fake.NEXT.executed]  # type: ignore[union-attr]
-    assert len(statements) == 2, "a scope query ran even though the query carried no filter"
-    assert "STATUS = 'GRANTED'" in statements[0]
+    assert len(statements) == 1, "no scope query: `where:` is not the query's filter"
+    assert "STATUS = 'GRANTED'" in statements[0], "and it still reaches the statement"
+    assert "IN (" in statements[0], "on the resolve, alongside the keys the index returned"
+
+
+@_sync
+async def test_a_broad_where_does_not_starve_an_unfiltered_query() -> None:
+    """The overcorrection, pinned from the outcome rather than from the statement text.
+
+    Measured before the fix: 2 chunks without `where:`, 0 with it, on the same corpus and query.
+    """
+    cap = settings.vector_store_max_scope_keys
+    try:
+        object.__setattr__(settings, "vector_store_max_scope_keys", 1)
+        retriever = _retriever(
+            await _store_ranked("ester formation", "RX-1", "RX-2"), where="STATUS = 'GRANTED'"
+        )
+        chunks = await retriever.retrieve("ester formation", {})
+    finally:
+        object.__setattr__(settings, "vector_store_max_scope_keys", cap)
+
+    assert len(chunks) == 2, "a `where:` bigger than the cap must not zero an unfiltered query"
 
 
 @_sync

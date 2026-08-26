@@ -148,7 +148,7 @@ def _all_templates() -> str:
 # find them. Each absence is invisible offline and silent in production: the agent simply advertises
 # no skills or fewer capabilities, the graph is empty, migrations have no SQL. `tests/` and
 # `examples/` are the two first-party trees deliberately not shipped.
-_RUNTIME_DATA = ("data", "skills", "knowledge", "infra")
+_RUNTIME_DATA = ("data", "skills", "knowledge", "infra", "schema")
 
 
 def _copied() -> set[str]:
@@ -189,8 +189,10 @@ def test_every_runtime_data_directory_actually_exists() -> None:
     moved, the image would have started fine and read an empty export directory forever.
 
     D-156 moved three more (`profiles`, `templates`, `evals`) under `data/`, so this list shrank
-    rather than grew. Four entries now: `data/` is every corpus the code reads, and `skills/`,
-    `knowledge/` and `infra/` are the three that are not configuration: layers 3 and 4, and the SQL.
+    rather than grew. Five entries now: `data/` is every corpus the code reads; `skills/`,
+    `knowledge/` and `infra/` are the three that are not configuration (layers 3 and 4, and this
+    system's own SQL); and `schema/` is the DDL for stores it does *not* own, which was missing from
+    the image while `publish/drivers/sql.py` told operators to generate it from inside one.
     """
     root = DEPLOY.parent
     for required in _RUNTIME_DATA:

@@ -4,8 +4,12 @@
 `ingest/eln/warehouse/driver.py`'s `Warehouse`/`WarehouseCursor` are already dialect-neutral —
 `execute(sql, params)` does not care whether the statement reads or writes, and `placeholder` is on
 the connection because parameter style is a dialect fact. The read-only-ness of that seam lives in
-its `sql.py`, not in the driver. So the same `SnowflakeWarehouse` that reads a site's ELN can write
-its results store.
+its `sql.py`, not in the driver. So a driver written for the inbound seam is already shaped to
+write, and this one connects through the same Protocol.
+
+**The statements it sends are Postgres, though** (`dialect.py`) — the upserts are `ON CONFLICT`,
+which Snowflake and Oracle do not accept. The seam is portable; the emitter is not yet. Reaching
+another engine is a `MERGE` emitter beside the current one, not a configuration change.
 
 **What is deliberately *not* reused is that seam's `ConnectionBinding`.** It is Snowflake-shaped —
 an account, a warehouse, a role, and **no host or port** — so pointing a Postgres store at it would
@@ -65,6 +69,23 @@ class SqlResultSink:
         self._warehouse: Warehouse | None = None
         self._columns: dict[str, set[str]] | None = None
 
+    async def aclose(self) -> None:
+        """Close the held connection and forget the probed schema.
+
+        The drain builds a sink per run, so without this each pass leaked one connection — see
+        `PostgresWarehouse.aclose`. The cached column set goes with it because the two are scoped
+        together: the probe is cached for the sink's lifetime precisely so a site that applies a
+        migration is picked up on the next pass rather than the next restart.
+        """
+        warehouse = self._warehouse
+        self._warehouse = None
+        self._columns = None
+        closer = getattr(warehouse, "aclose", None)
+        if closer is not None:
+            # Not every `Warehouse` holds something to close — the Protocol does not require it of
+            # a driver, only of a *sink*. A site's own driver that opens nothing needs no method.
+            await closer()
+
     def _connect(self) -> Warehouse:
         """The connection, opened once and held for this sink's life."""
         if self._warehouse is None:
@@ -88,8 +109,13 @@ class SqlResultSink:
             return self._columns
         async with warehouse.cursor() as cursor:
             await cursor.execute(
+                # `LOWER(table_name)`, because `information_schema` is not case-agnostic: Postgres
+                # stores unquoted identifiers folded down and Snowflake and Oracle fold them up, so
+                # binding this module's lowercase literals against the raw column matched nothing at
+                # all on two of the three engines — and a probe that finds no tables reports every
+                # table missing, which reads exactly like a site that never ran the DDL.
                 "SELECT table_name, column_name FROM information_schema.columns "
-                "WHERE table_name IN ("
+                "WHERE LOWER(table_name) IN ("
                 + ", ".join([warehouse.placeholder] * len(TABLE_ORDER))
                 + ")",
                 list(TABLE_ORDER),

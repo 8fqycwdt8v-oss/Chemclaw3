@@ -1,0 +1,186 @@
+"""A calculation reaches an external database and can be queried out of it again.
+
+**The only test in this suite that assembles the whole path** — projector, outbox, drain, driver
+and the shipped DDL — and it exists because assembling it is what found the last two defects.
+Everything upstream of here tests one piece against a fixture I chose:
+
+- `test_publish_projection.py` calls `project()` directly, so it was green while nothing called it.
+- `test_publish_outbox.py` uses a stub sink, so it was green while the shipped driver could not
+  satisfy the shipped sink's own runtime check and every real delivery failed at the connect.
+
+Neither is wrong. Both are blind in the same direction, and this is the file that is not: it builds
+`SqlResultSink` over `PostgresWarehouse`, applies `schema/result-store/` to a *second* schema
+standing in for a database this system does not own, and asks the questions in SQL.
+"""
+
+import asyncio
+from typing import Any
+
+import psycopg
+import pytest
+
+from chemclaw.core.config import settings
+from chemclaw.publish import outbox
+from chemclaw.science.calc.models import SolventComparisonResult, SolventEffect
+from tests.pg import migrated_db_or_skip
+
+# The stand-in for the site's own results database. A separate schema rather than a separate
+# database, because the point is that the writer holds no DDL rights on it and names no table this
+# repository does not ship — not that it is a separate server.
+_STORE = "test_publish_e2e"
+
+
+async def _create_store(dsn: str) -> None:
+    """Apply the shipped DDL and the generated registry seed to a fresh schema.
+
+    Exactly what a site does: `make sink-schema --all`, then apply. Loading them here rather than
+    hand-writing a fixture is deliberate — a fixture that drifted from the shipped files would test
+    a database nobody deploys.
+    """
+    from chemclaw.cli.sink_schema import ddl, seed
+
+    async with await psycopg.AsyncConnection.connect(dsn, autocommit=True) as conn:
+        await conn.execute(f"DROP SCHEMA IF EXISTS {_STORE} CASCADE")
+        await conn.execute(f"CREATE SCHEMA {_STORE}")
+    async with await psycopg.AsyncConnection.connect(dsn, autocommit=True) as conn:
+        await conn.execute(f"SET search_path={_STORE}")
+        await conn.execute(ddl())
+        await conn.execute(seed())
+
+
+def _screen() -> SolventComparisonResult:
+    """A solvent comparison — the composite shape, and the one that decomposes.
+
+    THF is named by its **alias** deliberately. `ALPB_SOLVENTS` accepts `thf` and
+    `tetrahydrofuran` and the name reaches the calculation key verbatim, so a store that kept the
+    given name answers "every reaction in THF" with a confident subset. The query below asks by the
+    canonical id, and it only returns this row because the alias table resolved it.
+    """
+    return SolventComparisonResult(
+        reactants=["C=C", "C=CC=C"],
+        products=["C1CCCCC1"],
+        method="GFN2-xTB",
+        temperature_k=298.15,
+        level="standard",
+        effects=[
+            SolventEffect(
+                solvent="tetrahydrofuran",
+                delta_e_kcal=-38.0,
+                delta_h_kcal=-36.0,
+                delta_g_kcal=-24.0,
+            ),
+            SolventEffect(
+                solvent="toluene", delta_e_kcal=-40.0, delta_h_kcal=-38.0, delta_g_kcal=-28.9
+            ),
+        ],
+        best_solvent="toluene",
+        spread_kcal=4.9,
+        uncertainty_kcal=3.0,
+    )
+
+
+def test_a_composite_reaches_an_external_database_and_answers_a_question(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Enqueue a composite the way a finished job does, drain it, then query it back out.
+
+    Three assertions, each about a claim the seam is built on:
+
+    1. **The composite arrives at all.** Its `calc_type` is `<connector>.<job>`, which matches no
+       projector prefix — only the `payload_kind` on the envelope routes it.
+    2. **The parts arrive with it**, edged back to the aggregate, so "what was ΔG in THF" is
+       answerable and not only "which solvent won".
+    3. **The alias resolves**, so the canonical-id query returns a run submitted under another name.
+    """
+    from chemclaw.durable import publish_results
+    from chemclaw.publish.drivers.sql import SqlResultSink
+    from chemclaw.publish.record import Publication
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        dsn = settings.postgres_dsn
+        await _create_store(dsn)
+
+        monkeypatch.setattr(outbox, "publishing_enabled", lambda: True)
+        monkeypatch.setattr(outbox, "enabled_names", lambda: ["e2e"])
+        async with outbox._connect() as conn:
+            await conn.execute("DELETE FROM result_publications")
+            await conn.commit()
+
+        queued = await outbox.enqueue_payload(
+            calc_ref="job-e2e-1",
+            calc_type="calc.compare_solvents",
+            payload_kind="SolventComparisonResult",
+            payload=_screen().model_dump(mode="json"),
+            publication=Publication(
+                actor="chemist@example.com", job_id="job-e2e-1", rationale="which solvent"
+            ),
+        )
+        assert queued == 3, "the comparison and both of its parts must be queued"
+
+        sink = SqlResultSink(
+            name="e2e",
+            tenant_id="site-a",
+            writer_version="test",
+            connection={
+                "driver": "chemclaw.publish.drivers.postgres:PostgresWarehouse",
+                "dsn": dsn,
+                "schema": _STORE,
+            },
+        )
+        outcome = await publish_results._drain_one("e2e", sink, 50)
+        assert outcome.failed == 0, f"delivery failed: {outcome.reason}"
+        assert outcome.delivered == 3
+
+        async with await psycopg.AsyncConnection.connect(dsn, autocommit=True) as conn:
+            await conn.execute(f"SET search_path={_STORE}")
+            rows = await _rows(
+                conn,
+                """
+                SELECT pv.solvent_id, pv.value_canonical
+                FROM property_value pv
+                WHERE pv.property = 'reaction_delta_g'
+                ORDER BY pv.value_canonical
+                """,
+            )
+            assert [(row[0], row[1]) for row in rows] == [("toluene", -28.9), ("thf", -24.0)], (
+                "both parts must be answerable on their own, and the THF row must have been "
+                "resolved from the alias it was submitted under"
+            )
+
+            edges = await _rows(
+                conn,
+                "SELECT calc_ref, depends_on_calc_ref FROM calculation_input ORDER BY calc_ref",
+            )
+            assert [row[1] for row in edges] == ["job-e2e-1", "job-e2e-1"], (
+                "each part must edge back to the aggregate, or the verdict is untraceable"
+            )
+
+            publication = await _rows(
+                conn, "SELECT actor, tenant_id FROM calculation_publication LIMIT 1"
+            )
+            assert publication[0] == ("chemist@example.com", "site-a"), (
+                "who ran it and under which deployment belongs on the publication row, not the "
+                "calculation — two chemists running one calculation share its calc_ref"
+            )
+
+        # Redelivery converges: every key is a content hash, so a second drain writes nothing new.
+        async with outbox._connect() as conn:
+            await conn.execute("UPDATE result_publications SET state='pending', attempts=0")
+            await conn.commit()
+        again = await publish_results._drain_one("e2e", sink, 50)
+        assert again.failed == 0
+        async with await psycopg.AsyncConnection.connect(dsn, autocommit=True) as conn:
+            await conn.execute(f"SET search_path={_STORE}")
+            counted = await _rows(conn, "SELECT count(*) FROM calculation")
+            assert counted[0][0] == 3, "a redelivery must be a no-op, not a duplicate"
+        # The drain closes its sinks; this test drives `_drain_one` directly, so it closes its own.
+        await sink.aclose()
+
+    asyncio.run(_run())
+
+
+async def _rows(conn: psycopg.AsyncConnection[Any], sql: str) -> list[Any]:
+    """Run one question and return its rows."""
+    cursor = await conn.execute(sql)
+    return list(await cursor.fetchall())

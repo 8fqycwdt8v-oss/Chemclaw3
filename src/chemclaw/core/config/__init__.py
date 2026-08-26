@@ -62,6 +62,7 @@ from chemclaw.core.config.evals import EvalSettings
 from chemclaw.core.config.fingerprints import FingerprintSettings
 from chemclaw.core.config.hpc import HpcSettings
 from chemclaw.core.config.kg import KgSettings
+from chemclaw.core.config.labels import LabelSettings
 from chemclaw.core.config.llm import LlmSettings
 from chemclaw.core.config.memory import MemorySettings
 from chemclaw.core.config.observability import ObservabilitySettings
@@ -95,6 +96,7 @@ __all__ = [
     "FingerprintSettings",
     "HpcSettings",
     "KgSettings",
+    "LabelSettings",
     "LlmSettings",
     "MemorySettings",
     "ObservabilitySettings",
@@ -124,6 +126,7 @@ class Settings(
     KgSettings,
     EvalSettings,
     FingerprintSettings,
+    LabelSettings,
     ElnSettings,
     SourcesSettings,
     ConnectorSettings,

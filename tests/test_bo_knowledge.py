@@ -152,7 +152,7 @@ def test_compound_smiles_is_set_only_when_one_molecule_is_recommended() -> None:
     `kg.conflicts` groups on `(type, compound_smiles)` and `find_notes` searches it, and a
     `bo-candidate` carried none at all — a recommendation to make a specific molecule was
     invisible to both. It is filled in only when the recommendation names exactly one molecule,
-    for the reason `ingest/eln/note.py::_principal_product` gives about the same field: a point
+    for the reason `ingest/eln/record.py::_principal_product` gives about the same field: a point
     naming a ligand *and* a substrate has no single subject, and picking one would file the note
     under a compound nobody chose.
     """

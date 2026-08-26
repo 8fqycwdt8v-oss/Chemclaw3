@@ -23,6 +23,7 @@ from typing import Any
 
 from chemclaw.ingest.eln.warehouse.binding import (
     BindingError,
+    CorpusBinding,
     EntryBinding,
     RelatedBinding,
     VectorBinding,
@@ -72,6 +73,36 @@ def entry_statement(
         f"LIMIT {placeholder}"
     )
     return sql, [since, limit]
+
+
+def corpus_statement(
+    corpus: CorpusBinding, placeholder: str, after: str, limit: int
+) -> tuple[str, list[Any]]:
+    """One bounded page of a bulk reaction corpus, resuming strictly after `after`.
+
+    **Keyset, not offset, and not a datetime.** `OFFSET n` on a multi-million-row table makes the
+    warehouse walk and discard n rows on every page, so a drain gets quadratically slower exactly
+    as it gets further in; and a datetime cursor is meaningless for a versioned release that was
+    loaded all at once. Resuming after the last key seen is O(index seek) per page and is what
+    makes a stopped drain resumable at no cost.
+
+    An empty `after` starts at the beginning, which is the first pass and also a full re-drain.
+    Re-drainng is safe: every write the corpus drain makes is an id-keyed upsert.
+
+    `SELECT *` for the same reason `entry_statement` uses it — the binding names the columns it
+    reads by path, and a projection would have to know a schema nobody can see yet.
+    """
+    cursor = corpus.cursor_column
+    predicate = f"{cursor} > {placeholder}" if after else "1 = 1"
+    if corpus.where:
+        predicate += f" AND ({corpus.where})"
+    sql = (
+        f"SELECT * FROM {corpus.relation} "  # identifier checked by `binding._check_identifier`
+        f"WHERE {predicate} "
+        f"ORDER BY {cursor} ASC "
+        f"LIMIT {placeholder}"
+    )
+    return sql, ([after, limit] if after else [limit])
 
 
 def related_statement(
@@ -196,15 +227,31 @@ def resolve_statement(
 
     No `ORDER BY`: the ranking is the store's and the caller re-imposes it. Ordering by the key here
     would look tidy and would silently discard the ranking.
+
+    **`where:` is enforced here, and this is the only place it can be.** It is a *corpus*
+    restriction — "these rows are eligible at all" — so it is typically broad, and on an
+    index-ranked source the corpus is the size that made an index necessary. Enumerating it as a
+    key set to pre-filter with is therefore exactly what `vector_store_max_scope_keys` refuses; a
+    first attempt did that and turned a binding's `where:` into "this source answers nothing".
+    Applying it to the resolve costs one predicate on a query already keyed to `top_k` rows.
+
+    The residual, stated because it is a real cost: a row the `where:` excludes can still occupy a
+    slot in the store's top-k, so a search may return fewer than `top_k` hits. That is the
+    post-filter trade this seam otherwise refuses — and it is right *here* and wrong for the query's
+    own `tag`/`since`/`until`, because those are narrow. Post-filtering a narrow predicate loses
+    everything; post-filtering a broad one loses a slot or two.
     """
     if not keys:
         raise BindingError("resolve_statement needs at least one key")
     markers = ", ".join(placeholder for _ in keys)
     columns = ", ".join([vector.key, *vector.content_columns])
+    predicate = f"{vector.key} IN ({markers})"
+    if vector.where:
+        predicate += f" AND ({vector.where})"
     sql = (
         f"SELECT {columns} "  # identifier checked by `binding._check_identifier`
         f"FROM {vector.relation} "
-        f"WHERE {vector.key} IN ({markers})"
+        f"WHERE {predicate}"
     )
     return sql, list(keys)
 
@@ -218,11 +265,10 @@ def vector_predicates(
     at — inventing a column name would either error on every query or, worse, match a column that
     means something else at this site.
 
-    **Public, because "would this search be filtered at all" is a question with one right answer.**
-    The index-ranked retriever has to know whether to run a scope query, and it used to answer that
-    by looking at the query's keys — which silently dropped the binding's own `where:`, since that
-    is a predicate no key implies. Asking for the predicate list is the same question asked of the
-    thing that actually builds it.
+    **The scope query uses this; the resolve query does not.** An index-ranked search pre-filters on
+    the *query's* narrow keys and enforces the binding's broad `where:` at the resolve instead —
+    `resolve_statement` says why. So `where:` appears in both statements when a scope is built, and
+    in the resolve alone when one is not, which is what makes it unconditional either way.
     """
     predicates: list[str] = []
     params: list[Any] = []

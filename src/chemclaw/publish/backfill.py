@@ -40,7 +40,7 @@ _CACHED = """
 # and therefore reaches a results store through no other path.
 _JOBS = """
     SELECT job_id, connector, job, result, calc_refs, requested_by, session_id, correlation_id,
-           rationale, completed_at
+           rationale, completed_at, payload_kind
     FROM job_records
     WHERE result <> '{}'::jsonb
     ORDER BY completed_at
@@ -108,8 +108,14 @@ async def backfill_jobs(*, dry_run: bool, batch: int) -> tuple[int, int, int]:
             seen += 1
             job_id, connector, job, result, calc_refs = row[0], row[1], row[2], row[3], row[4]
             requested_by, session_id, correlation_id, rationale, completed_at = row[5:10]
+            payload_kind = row[10] or ""
+            # `<connector>.<job>` is a *route*, and no projector prefix matches one — so before
+            # `payload_kind` existed this skipped every composite in the table. It is still passed
+            # as the `calc_type` because that is what the row is addressed by; `payload_kind` is
+            # what routes it, and an empty one (a row written before migration 055) falls back to
+            # the prefix inference exactly as it did before.
             calc_type = f"{connector}.{job}"
-            if projector_for(calc_type) is None:
+            if projector_for(calc_type, payload_kind) is None:
                 skipped += 1
                 continue
             if dry_run:
@@ -118,6 +124,7 @@ async def backfill_jobs(*, dry_run: bool, batch: int) -> tuple[int, int, int]:
             queued += await outbox.enqueue_payload(
                 calc_ref=job_id,
                 calc_type=calc_type,
+                payload_kind=payload_kind,
                 payload=result,
                 depends_on=list(calc_refs or []),
                 computed_at=completed_at,

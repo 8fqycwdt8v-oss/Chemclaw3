@@ -2,8 +2,8 @@
 
 A thin Temporal wrapper over `chemclaw.ingest.eln.sync.sync_entries`: the activity wires the
 production
-adapter, fingerprint stores, and note submitter and does all the I/O (ELN read, DB writes,
-git push); the workflow invokes it with the high-water cursor. It runs on the
+adapter and fingerprint stores and does all the I/O (ELN read, DB writes); the workflow invokes
+it with the high-water cursor. It runs on the
 `background-jobs` queue (light, periodic work), and a Temporal Schedule drives it
 (`durable/schedules.py`). The sync is **self-cursoring and per-source**: each active ingest
 source carries its own cursor in `sync_cursors` (keyed by the registry source name). A
@@ -15,7 +15,7 @@ drained in bounded, heartbeating chunks (`eln_sync_batch_size` new entries per a
 attempt, cursor persisted per chunk), so an arbitrarily large backlog makes durable forward
 progress instead of wedging one over-window attempt forever; only the first chunk reaches
 into the late-file overlap window, so a drain never replays it once per chunk. Factories are
-module-level so tests swap them for in-memory stores and a fake submitter.
+module-level so tests swap them for in-memory stores.
 """
 
 from datetime import UTC, datetime, timedelta
@@ -31,11 +31,12 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.ingest.eln.adapter import RawEntry
     from chemclaw.ingest.eln.cursor import load_cursor, store_cursor
     from chemclaw.ingest.eln.ord import OrdReaction
+    from chemclaw.ingest.eln.records import default_record_store
     from chemclaw.ingest.eln.sync import IngestSummary, RejectedEntry, sync_entries
     from chemclaw.ingest.sources.base import IngestHalf
     from chemclaw.ingest.sources.registry import active_ingest_source_names, make_data_source
-    from chemclaw.kg.git_submitter import default_submitter
     from chemclaw.science.fingerprints.store import default_molecule_store, default_reaction_store
+    from chemclaw.science.labels.store import default_label_index
 
 from chemclaw.durable.heartbeat import beating
 from chemclaw.durable.publish import BAD_DATA_RETRY
@@ -43,6 +44,8 @@ from chemclaw.durable.publish import BAD_DATA_RETRY
 # Module-level indirection so tests swap the production stores for in-memory ones.
 _reaction_store = default_reaction_store
 _molecule_store = default_molecule_store
+_label_index = default_label_index
+_record_store = default_record_store
 
 
 def _merge(summaries: list[IngestSummary], floor: datetime) -> IngestSummary:
@@ -55,19 +58,16 @@ def _merge(summaries: list[IngestSummary], floor: datetime) -> IngestSummary:
     """
     ingested: list[str] = []
     skipped_existing: list[str] = []
-    awaiting_merge: list[str] = []
     rejected: list[RejectedEntry] = []
     cursors: list[datetime] = []
     for summary in summaries:
         ingested.extend(summary.ingested)
         skipped_existing.extend(summary.skipped_existing)
-        awaiting_merge.extend(summary.awaiting_merge)
         rejected.extend(summary.rejected)
         cursors.append(summary.next_cursor)
     return IngestSummary(
         ingested=ingested,
         skipped_existing=skipped_existing,
-        awaiting_merge=awaiting_merge,
         rejected=rejected,
         next_cursor=max(cursors, default=floor),
     )
@@ -98,7 +98,7 @@ class _BoundedIngest:
     Entries at or before the run's cursor (`since`) — the overlap window's idempotent re-ingest —
     pass through uncapped: they are cheap re-writes and never advance the cursor. Entries after it
     are sorted oldest-first and truncated to `limit`, so one activity attempt does a bounded amount
-    of PR-gate work no matter how large the backlog, and `truncated` tells the workflow to come
+    of ingest work no matter how large the backlog, and `truncated` tells the workflow to come
     back for the rest with the advanced cursor. Because the cap applies only past `since`, every
     kept chunk that was truncated strictly advances the cursor — the loop always makes progress.
     """
@@ -162,8 +162,10 @@ async def sync_eln_entries(source: str, since: datetime, apply_overlap: bool = T
             bounded,
             _reaction_store(),
             _molecule_store(),
-            default_submitter(),
+            _record_store(),
             since,
+            label_index=_label_index(),
+            source=source,
             apply_overlap=apply_overlap,
         ),
         f"eln sync {source}",

@@ -139,6 +139,11 @@ def test_the_source_registry_offers_no_external_source() -> None:
         # retrieve-only with no ingest half at all, so a patent reaction is cited as precedent and
         # never becomes a knowledge-graph note. Argued in full in
         # `docs/decisions/D-2026-08-25-a-lakehouse-arrives-on-two-seams-not-one.md`.
+        #
+        # It carries two bindings onto one table and this row covers both: a `vector:` index for
+        # embedding search, and a `corpus:` block drained into the reaction-label index
+        # (`D-2026-08-25-a-corpus-is-evidence-not-an-eln`). Neither adds a destination — they share
+        # the connection above — so the sanction is unchanged by the second one.
         "pistachio",
         # A mounted SMB/CIFS file share, and *not* an escalation of D-089 at all: it reaches no
         # host. The share is a read-only volume the platform mounts, so the code sees a POSIX path

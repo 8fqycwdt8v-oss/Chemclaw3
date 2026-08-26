@@ -45,6 +45,9 @@ the pair applies in filename order and neither shadows the other.
 | `calculation_results` | 001 (+019 `compute_seconds`, 024 indexes, 048 `structure_id`) | `science/calc/postgres_store.py` | **refused**: evicting a cached result silently converts a hit into a recomputation, potentially an HPC run (D-011). Bounded by cost policy, not by a clock |
 | `molecule_fingerprints` | 002 (+004, 046 index) | `science/fingerprints/store.py` | — |
 | `reaction_fingerprints` | 003 (+004, 046 index) | `science/fingerprints/store.py` | — |
+| `reaction_labels` | 051 | `science/labels/store.py` | derived and rebuildable: drop it and re-run the corpus drain plus the label backfill |
+| `reaction_species` | 051 | `science/labels/store.py` | derived and rebuildable; a species the source amended away is deleted with its reaction's record phase |
+| `corpus_molecules` | 054 | `ingest/labels/corpus.py` | derived and rebuildable: refilled by re-draining the corpus |
 | `audit_events` | 006 (+010, 011, 026, 044, 045) | `agent/audit_store.py` | **refused**: the trail is the record of who ran what, and disposing of it is a policy decision for whoever owns that record rather than an age cutoff in a cleanup job. `prev_hash`/`row_hash`/`chain_version` are retired columns, unwritten, at their defaults |
 | `sync_cursors` | 007 | `ingest/eln/cursor.py` | — (one row per ingest source; bounded by the source count) |
 | `session_messages` | 008 (+022, 026, 043, 046 `message_shape` check) | `agent/session_store.py` | `durable/retention.py`, per session through the pairing closure (D-145). The in-line compaction on write this row used to name went with the engine that needed it |
@@ -58,7 +61,7 @@ the pair applies in filename order and neither shadows the other.
 | `artifact_blobs` | 019 | `science/calc/postgres_artifacts.py` | `durable/artifact_eviction.py`, by idle window and size budget (both off by default) |
 | `calculation_artifacts` | 019 | `science/calc/postgres_artifacts.py` | cascades from `artifact_blobs` |
 | `plan_approvals` | 020 (+034) | `agent/plan_approval_store.py` | — (consumed rows are marked, not removed) |
-| `job_records` | 023 (+033, 049) | `durable/job_record_store.py` | **refused**: the table exists because a durable run's result used to expire with Temporal's history and take a campaign's evaluation record with it (D-157) |
+| `job_records` | 023 (+033, 049, 055) | `durable/job_record_store.py` | **refused**: the table exists because a durable run's result used to expire with Temporal's history and take a campaign's evaluation record with it (D-157) |
 | `observations` | 025 | `memory/observations.py` | stale rows retired by status, not deleted |
 | `note_proposals` | 027 (+036) | `kg/proposal_store.py` | — |
 | `measurements` | 030 | `science/calc/calibration.py` | — |
@@ -70,6 +73,7 @@ the pair applies in filename order and neither shadows the other.
 | `document_chunks` | 037 (+038, 040, 041) | `ingest/documents/index.py` | cascades in effect from `document_files`: the same sweep deletes any *cutting* — `(doc_id, chunking_key)` — no remaining file row claims, and `upsert` applies the identical predicate to the documents it writes. Derived and rebuildable — dropping both tables and re-running the sync reconstructs them |
 | `tool_result_blobs` | 042 | `api/tool_results.py` | `durable/retention.py`, by `created_at` (`retention_tool_results_days`). 0 by default like every other window, so **an operator who has not stated one lets this grow** — and at up to a row per tool call it grows fastest of the three. It holds no record of anything (the answers are in `calculation_results` and `job_records`), so a plain age cutoff is the whole policy it needs |
 | `tool_result_links` | 042 | `api/tool_results.py` | cascades from `tool_result_blobs` |
+| `reaction_records` | 052 (+053) | `ingest/eln/records.py` | **nothing bounds it, deliberately** — one row per ELN entry (~1 kB), upserted by id, so the corpus tracks the source system and an amendment overwrites rather than appends. A row is the *only* readable form of a run (D-2026-08-25), so pruning one deletes a result; a deployment mirroring a 3M-entry ELN should expect a few GB and no growth beyond what the ELN itself holds |
 | `result_publications` | 050 | `publish/outbox.py` | `durable/retention.py`, by `delivered_at` (`retention_result_publications_days`, 0 by default). **`state = 'delivered'` only**, and the predicate is the policy rather than an optimization: a delivered row is a receipt for a result that now lives both here and in an external store, so pruning it loses nothing — while a `pending` or `failed` row is the only record that something has **not** been published, and sweeping that on a clock would turn a results-store outage into a silent gap |
 | `structures` | 047 | `science/calc/postgres_structures.py` | **refused**: a row is the geometry a `structure_id` names, and that address is handed to chemists, written into notes and taken as an argument by the next calculation (D-2026-08-21). Pruning it would break a handle rather than reclaim anything — the same coordinates are inside the `calculation_results` payload one table over, which D-011 already refuses to prune. Rows are a few kB and deduplicated by content |
 

@@ -655,7 +655,11 @@ class EnsembleMember(BaseModel):
     """
 
     energy_hartree: float
-    degeneracy: int = 1
+    # `ge=1`, because `boltzmann_populations` divides by the sum of the weights and a
+    # payload whose degeneracies were all zero would raise ZeroDivisionError from inside
+    # the arithmetic rather than at the boundary. `ThermoSettings.symmetry_number` next
+    # door already carries the same constraint for the same reason.
+    degeneracy: int = Field(default=1, ge=1)
     structure: Structure
 
 
@@ -784,9 +788,12 @@ class EnsembleProperty(BaseModel):
     This is the shape that lifts it: each member's property computed at that member's own geometry,
     then weighted by the population the ensemble gives it.
 
-    `refined` says which populations were used. Weighting by electronic energy is free once the
-    search exists; weighting by free energy costs one Hessian per member, so the caller chooses and
-    the result records the choice rather than letting a reader assume the better one.
+    **These populations are electronic-energy weighted, always.** A `refined` flag once sat here to
+    say which weighting ran, and nothing ever wrote it — a promise with no implementation, which is
+    worse than the absence it papered over, because a reader takes `refined=False` for a recorded
+    choice rather than a default nobody set. Free-energy weighting costs one Hessian per member and
+    is what `RefinedEnsemble` is for; when a property average over *those* populations is wanted,
+    that is a new field on this model and a writer for it, not a boolean.
     """
 
     smiles: str | None
@@ -796,7 +803,6 @@ class EnsembleProperty(BaseModel):
     temperature_k: float
     members_averaged: int
     total_found: int
-    refined: bool = False
     sampled: Literal[True] = True
     value: WeightedValue | None = None
     per_atom: list[WeightedAtom] = Field(default_factory=list)
@@ -804,6 +810,11 @@ class EnsembleProperty(BaseModel):
     # Below 1.0 the average is over a *truncation* of the ensemble, and saying so is what stops
     # "the Boltzmann-averaged dipole" meaning "the dipole of the five conformers we could afford".
     population_covered: float = 1.0
+    # **`population_covered` records the truncation; this is what *says* it.** The field above
+    # shipped without one, so the cheap composite disclosed its partial coverage only to a reader
+    # who thought to divide, while `RefinedEnsemble` — the expensive one — warned. Same rule, both
+    # of them now.
+    warnings: list[str] = Field(default_factory=list)
 
 
 class RefinedConformer(BaseModel):
@@ -812,7 +823,11 @@ class RefinedConformer(BaseModel):
     structure: Structure
     relative_kcal: float
     population: float
-    degeneracy: int = 1
+    # `ge=1`, because `boltzmann_populations` divides by the sum of the weights and a
+    # payload whose degeneracies were all zero would raise ZeroDivisionError from inside
+    # the arithmetic rather than at the boundary. `ThermoSettings.symmetry_number` next
+    # door already carries the same constraint for the same reason.
+    degeneracy: int = Field(default=1, ge=1)
     gibbs_free_energy_hartree: float
     electronic_energy_hartree: float
     is_minimum: bool
@@ -841,8 +856,16 @@ class RefinedEnsemble(BaseModel):
     total_found: int
     refined_count: int
     refined_population_covered: float
-    conformational_entropy_cal_per_mol_k: float
-    ensemble_correction_kcal: float
+    # **Named for the subset, because that is what they describe.** `ConformerEnsemble` carries
+    # fields with the first of these names and they mean something else: `ensemble_from_members`
+    # computes them over *all* members and deliberately refuses to truncate them, arguing that
+    # doing so "would turn 'here are the 10 that matter out of 47' into a quietly wrong claim that
+    # there were 10". Here the populations are renormalised over the refined top N, so the entropy
+    # is over N states and the correction is systematically too small. Shipping that under the
+    # ensemble-wide name put two meanings one model apart; `refined_` says which one this is, and
+    # `refined_population_covered` beside it says how much of the ensemble that N accounts for.
+    refined_conformational_entropy_cal_per_mol_k: float
+    refined_ensemble_correction_kcal: float
     sampled: Literal[True] = True
     treatment: Literal["free-energy-weighted-top-n"] = "free-energy-weighted-top-n"
     warnings: list[str] = Field(default_factory=list)
@@ -977,6 +1000,12 @@ class SpeciesEnergy(BaseModel):
     # The -T*S_conf term the ensemble contributed, present only at `thorough`. Positive flexibility
     # lowers a free energy, so this is negative when it is present at all.
     conformational_entropy_kcal: float | None = None
+    # The geometry this energy describes, so a caller can carry it into the next calculation
+    # (D-2026-08-21). Additive and defaulted, because histories written before it exist.
+    structure_id: str = ""
+    # How many conformers the search found, at `thorough`; 0 where no search ran. `species_ranking`
+    # reported a hardcoded 0 beside `sampled=True`, which reads as "sampled and found nothing".
+    conformers_found: int = 0
     was_cached: bool
     # The method the *server* reported for this species' optimisation, so a reaction can state the
     # level of theory it was actually run at. Additive and defaulted because this crosses the

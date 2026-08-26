@@ -143,6 +143,59 @@ def test_an_averaged_fukui_ranking_reaches_the_geometry_taking_tool(
     assert averaged.value is None, "a per-atom property has no single scalar"
     assert len(averaged.per_atom) > 1
     assert all(atom.value.minimum <= atom.value.mean for atom in averaged.per_atom)
+    # Every atom appears once, and the indices are the molecule's rather than a rank order.
+    indices = [atom.index for atom in averaged.per_atom]
+    assert indices == sorted(set(indices)), "atoms must be reported once each, by index"
+
+
+def test_an_averaged_fukui_pairs_atoms_by_index_not_by_rank() -> None:
+    """Conformers rank their atoms differently, and averaging by list position mixes them up.
+
+    `SiteReactivityResult.sites` is ordered *most-susceptible first* and truncated to `top_n`, so
+    position k is a different atom in different conformers — which is the normal case, not the
+    exotic one: if the ranking did not move with geometry there would be no reason to average over
+    an ensemble at all. The first version of `_averaged` did `member[position]` and labelled the
+    result with the first conformer's index, so it averaged one atom's index with another's and
+    reported it under a third name.
+
+    Asserted against a hand-built input rather than through the fake, because the arithmetic is
+    what is being pinned: atom 0 is 0.1 in every conformer and atom 1 is 0.9 in every conformer, so
+    *any* correct pairing gives 0.1 and 0.9 with zero spread. Position-pairing gives 0.5 and 0.5
+    with a spread of 0.8 — the reordering is the only difference between the two members.
+    """
+    ranked_high_first = {0: ("C", 0.1), 1: ("O", 0.9)}
+    ranked_low_first = {1: ("O", 0.9), 0: ("C", 0.1)}
+
+    per_atom, dropped = compose._per_atom([ranked_high_first, ranked_low_first], [0.5, 0.5])
+
+    assert dropped == 0, "both conformers carry both atoms"
+
+    by_index = {atom.index: atom for atom in per_atom}
+    assert by_index[0].value.mean == pytest.approx(0.1)
+    assert by_index[1].value.mean == pytest.approx(0.9)
+    assert by_index[0].element == "C" and by_index[1].element == "O"
+    assert by_index[0].value.spread == pytest.approx(0.0), (
+        "one atom's value is identical in both conformers; a spread here means two atoms were "
+        "averaged together"
+    )
+
+
+def test_an_atom_missing_from_one_conformer_is_dropped_rather_than_part_averaged() -> None:
+    """Truncation means conformers can carry different atom *sets*, not merely different orders.
+
+    A Fukui result is cut to `top_n`, so a marginal atom can be inside one conformer's list and
+    outside another's. Position-pairing raised `IndexError` on the short list; averaging over
+    whichever members happen to carry the atom would be worse, because the result would look like a
+    population-weighted mean over the ensemble and be a mean over a subset, with nothing saying so.
+    """
+    both = {0: ("C", 0.2), 1: ("O", 0.4)}
+    truncated = {0: ("C", 0.6)}
+
+    per_atom, dropped = compose._per_atom([both, truncated], [0.5, 0.5])
+
+    assert [atom.index for atom in per_atom] == [0], "an atom absent from a member must be dropped"
+    assert per_atom[0].value.mean == pytest.approx(0.4)
+    assert dropped == 1, "the dropped atom must be counted so the caller can say so"
 
 
 def test_a_property_no_conformer_defines_is_refused_rather_than_averaged() -> None:
@@ -243,7 +296,15 @@ def test_a_ranking_past_the_ceiling_reports_what_it_left_out(
 
     assert distribution.enumerated == 3
     assert len(distribution.species) == 2
-    assert any("were enumerated" in warning for warning in distribution.warnings)
+    # The *number*, not just the substring. Asserting `"were enumerated" in warning` is what let
+    # this ship reading "3 species were enumerated and the -1 lowest-priority were not computed":
+    # the branch runs only when the set exceeds the ceiling, so `ceiling - len(species)` was always
+    # negative. A chemist-facing count is worth pinning as a count.
+    truncation = next(w for w in distribution.warnings if "were enumerated" in w)
+    assert "1 that were dropped" in truncation, truncation
+    assert "-" not in truncation.replace("lowest-", ""), (
+        f"a negative count reached a chemist-facing warning: {truncation}"
+    )
 
 
 def test_an_empty_species_set_is_refused() -> None:
@@ -313,3 +374,69 @@ def test_a_fan_out_over_the_ceiling_refuses_before_it_computes_anything(
 
     assert server.count("relax_structure") == 0, "the refusal came after work had started"
     assert server.count("search_conformer_ensemble") == 0
+
+
+@pytest.mark.parametrize(
+    "composite",
+    [
+        pytest.param(lambda store: compose.refined_ensemble(store, "CCO"), id="refined_ensemble"),
+        pytest.param(
+            lambda store: compose.ensemble_property(store, "CCO", prop="dipole_debye"),
+            id="ensemble_property",
+        ),
+    ],
+)
+def test_the_ensemble_composites_also_refuse_before_the_search(
+    monkeypatch: pytest.MonkeyPatch, composite: Any
+) -> None:
+    """Both of these awaited the CREST search and *then* checked the budget.
+
+    That is the exact inversion `budget.py` exists to prevent — "a timeout that fires after three
+    hours has already spent three hours" — and it left the most expensive call in the bundle
+    outside the fence. Only `species_ranking` was covered by the test above, so the two that had
+    the defect were the two nobody asserted.
+
+    The count assertion is the whole test: a refusal that arrives after `search_conformer_ensemble`
+    ran is not a preflight, however correct its message.
+    """
+    server = install(monkeypatch, FakeCalcServer())
+    monkeypatch.setattr(calc_settings, "calc_max_primitive_calls", 1)
+
+    with pytest.raises(ValueError, match=r"would run \d+ calculations"):
+        _run(composite(InMemoryStore()))
+
+    assert server.count("search_conformer_ensemble") == 0, (
+        "the conformer search ran before the budget was checked"
+    )
+    assert server.count("relax_structure") == 0
+
+
+def test_a_published_survey_names_the_method_the_server_ran(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`BondDissociationSurvey.method` must come off the result, never off local config.
+
+    `settings.xtb_method` describes a calculation this process no longer runs — the physics is
+    `Chemclaw3-mcp`'s since `D-2026-08-16-the-physics-leaves-the-cache-stays`. A deployment whose
+    env says one method while the server runs another would publish a Temporal wire type, PR-gated
+    into the knowledge graph, asserting the wrong level of theory. `reaction_energy` carries the
+    argument in a comment and reads it off the result; this composite did not, alone among the
+    three added beside it.
+
+    The setting is moved rather than the server's answer, so the test fails for the right reason:
+    with the defect present the survey reports "WRONG-METHOD" because that is what the env said.
+    """
+    install(monkeypatch, FakeCalcServer())
+    monkeypatch.setattr(calc_settings, "xtb_method", "WRONG-METHOD")
+
+    survey = _run(
+        compose.bond_dissociation_survey(
+            InMemoryStore(),
+            "CCO",
+            [((0, 1), "C-C", ["[CH3]", "[CH2]O"])],
+        )
+    )
+
+    assert survey.method == "GFN2-xTB", (
+        f"the survey published {survey.method!r} rather than what the server ran"
+    )

@@ -161,6 +161,27 @@ topic).
       payloads be JSON, or should each tool render its own boundary as `condense_protocols` now does
       — deserves deciding rather than defaulting.
 
+- [ ] **Seven `chem` enumerations and `compute_fukui_at` are declared here and served nowhere** —
+      [S], and it is a live gap rather than a plan. `src/chemclaw/connectors/chem/connector.yaml`
+      names `enumerate_tautomers`, `enumerate_protonation_states`, `enumerate_stereoisomers`,
+      `enumerate_bond_cleavages`, `enumerate_degradants`, `transform_structure` and
+      `describe_topology`; six of the seven templates added by
+      `D-2026-08-25-the-loop-is-a-composite-not-a-template` call one of them, and
+      `connectors/calc/compose.py::ensemble_property` calls `compute_fukui_at` for its `fukui`
+      field. All eight are implemented in `Chemclaw3-mcp` (`servers/chem/.../engine/species.py`,
+      `servers/calc/.../tools.py`) on branch `claude/chemclaw-gfn-workflows-5eie2t` **which was
+      never pushed** — that repository was outside the session's GitHub scope and `add_repo` with
+      push access was never approved, so the work exists only in that session's container and is
+      lost with it.
+      **What this costs until it lands:** `make template-validate` passes, because `chem` is a
+      bundle this repository declares and does not run, so those tools are name-checked and
+      argument-unchecked — the count it reports rose from 1 to 6 for exactly this reason. `make
+      connector-validate` against a running server is what would catch it, and the live lane is
+      where it will surface. Re-implementing is the fallback and the ADR's "What was measured
+      rather than assumed" section is the specification: it records the per-search `xtb` binary
+      requirement, the `protonated.xyz`/`protomers.xyz` filename, and the element-list defect that
+      only appears once a search changes the atom count.
+
 - [ ] **`changes_between` diffs against *absent* and can report a change nobody made** — [S].
       `memory/progression.py::number_change` and `_species_change` treat a missing value as a value:
       a run recording no temperature beside one that does yields `temperature 90 °C → —`, which
@@ -236,6 +257,16 @@ topic).
       needs is a policy answer: which predictors are calibrated enough to override their published
       RMSE. `calibration_conformal_coverage` / `_min_samples` come back with the caller.
 
+**`reaction_fingerprints` keys on a bare reaction id, so two sources collide on one row.**
+`science/fingerprints/store.py` writes `reaction_fingerprints.id = reaction.reaction_id` with no
+source column, while `ingest/sources/eln-snowflake/datasource.yaml` puts the source name into
+`provenance` precisely "so two ELNs with colliding entry ids stay distinguishable in the graph".
+Two sources using one entry id therefore share a fingerprint row and a `reaction-<id>` note id:
+the second ingest overwrites the first, silently, and a similarity hit cites the wrong run. Found
+while designing the label index, which uses a composite `(source, reaction_id)` key and does not
+inherit it — so the fix is to give the fingerprint tables the same key, and it is a migration plus
+`note_id_for_reaction`. Not urgent while one ELN is enabled anywhere; not detectable at all when
+it happens.
 ## 3 — Work that is lost, dropped or invisible
 
 - [ ] **A decided approval hold can be reopened** — [M]. `agent/interaction_tools.py::start_approval`
@@ -344,7 +375,10 @@ topic).
       by default and `src/chemclaw/publish/sinks/postgres/sink.yaml` addresses a host nobody runs.
       Attaching one is configuration (`make sink-schema`, apply, set the variable), so this is a
       deployment action rather than code — but until it happens, no number below has been measured
-      against a real corpus.
+      against a real corpus. `D-2026-08-26-a-route-is-not-a-shape` is why that matters more than it
+      reads: the composite half of the path was inert for a release and no test noticed, because
+      every test started at a projector rather than at a hook. A live target is the only thing that
+      would have made it obvious.
 - [ ] **Nothing has measured how many rows a real corpus produces** — [M]. The volume risk named in
       `D-2026-08-25`: `cached_compute` publishes on every miss, and a conformer search projects one
       record with ~47 conformer rows plus their structures. Before publishing is enabled by default

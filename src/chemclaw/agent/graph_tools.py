@@ -22,10 +22,11 @@ from chemclaw.core.errors import ChemclawError
 from chemclaw.core.tool_registry import tool
 from chemclaw.core.turn_signals import record_proposal
 from chemclaw.ingest.eln.compound import compound_dependencies
+from chemclaw.ingest.eln.records import RECORD_TYPE, default_record_store
 from chemclaw.kg.analytics import GraphGaps, analyze
 from chemclaw.kg.git_submitter import default_submitter
-from chemclaw.kg.graph import build_graph, load_notes, neighborhood
-from chemclaw.kg.note import Note, Relation
+from chemclaw.kg.graph import build_graph, load_notes, neighborhood, note_in
+from chemclaw.kg.note import Note, Relation, resolves_outside_graph
 from chemclaw.kg.pr_gate import propose_note
 from chemclaw.kg.relations import DEFAULT_RELATION
 from chemclaw.kg.search import query_terms, term_coverage
@@ -188,18 +189,48 @@ def _neighbor_ref(graph: nx.DiGraph, anchor_id: str, note: Note) -> NeighborRef:
 def _require_note(graph: nx.DiGraph, note_id: str) -> Note:
     """The note `note_id` names, or a `ChemclawError` saying why it could not be found.
 
-    One message for both by-id lookups (`expand_note`, `record_failure`), because the cause a
-    chemist most needs to hear is the same for both and easy to get wrong: an id that resolves to
-    nothing is *usually* a citation to a note whose PR-gate submission has not been merged yet
-    (D-018), which reads identically to a typo unless the message says so.
+    One message for both by-id lookups (`expand_note`, `record_failure`). It used to name the
+    PR-gate as the likely cause, because a citation to an indexed reaction whose note nobody had
+    merged read identically to a typo (D-018). That cause is gone — a reaction record is readable
+    the moment it is ingested — so the message no longer offers an explanation that is now wrong.
     """
     if note_id not in graph or graph.nodes[note_id].get("note") is None:
-        raise ChemclawError(
-            f"no note with id {note_id!r} — it may not exist, or it may be a citation to a "
-            "reaction that has been indexed but whose note is still pending human review"
-        )
+        raise ChemclawError(f"no note with id {note_id!r}")
     note: Note = graph.nodes[note_id]["note"]
     return note
+
+
+async def _expand_record(note_id: str) -> NoteView:
+    """Expand a `reaction-<id>` citation from the transcription store (D-2026-08-25).
+
+    The ELN half of `expand_note`. A record is data rather than a claim, so what comes back is the
+    transcription and an empty neighbourhood — not "we found nothing linked", but "a transcription
+    links to nothing by construction". What *is* asserted about these runs lives in the campaigns
+    and playbooks that cite them, and those are ordinary graph notes reached the ordinary way.
+
+    `created_by` is reported as `agent` because a program rendered the file, which is what that
+    field has always meant; it no longer implies anything is waiting for review.
+    """
+    record = await default_record_store().read(note_id.removeprefix("reaction-"))
+    if record is None:
+        raise ChemclawError(f"no reaction record with id {note_id!r}")
+    return NoteView(
+        note=NoteRef(
+            id=note_id,
+            type=RECORD_TYPE,
+            compound_smiles=record.compound_smiles,
+            tags=[record.project] if record.project else [],
+            created_by="agent",
+            source=record.source,
+            confidence=None,
+            valid_from=record.performed_at,
+            valid_to=None,
+        ),
+        # Source text a chemist typed into an ELN, so it is framed as data for the same reason a
+        # note body is: it reaches the model verbatim and must not be read as instruction.
+        body=frame_untrusted(record.body, note_id=note_id),
+        neighbors=[],
+    )
 
 
 @tool
@@ -216,6 +247,14 @@ async def expand_note(note_id: str, hops: int = 1) -> NoteView:
     and neighbors reached in two hops carry no relations, which is what "nothing is asserted about
     how these are connected" looks like.
 
+    A `reaction-<id>` citation the graph does not hold resolves against the transcription store
+    instead (D-2026-08-25), so a structure-search hit expands into its recipe — conditions, the
+    charge sheet, the impurity profile, the procedure. It has no neighbourhood: it asserts
+    nothing and
+    therefore links to nothing. This is also what retires D-018's failure mode, where the same
+    citation raised "no note with that id" for as long as nobody merged its pull request, and a
+    chemist could not tell that from a typo.
+
     Args:
         note_id: The id of the entry note.
         hops: How many link steps to expand (1 or 2).
@@ -227,13 +266,18 @@ async def expand_note(note_id: str, hops: int = 1) -> NoteView:
     Raises:
         ChemclawError: When `note_id` names no current note. A `ChemclawError` is chemclaw's
             own always-safe "bad input" contract (`chemclaw.core.errors`), so
-            `chemclaw.agent.tool_authz`
-            surfaces this message to the model verbatim instead of an opaque generic
-            failure — the common real cause is a citation to a note still pending PR-gate
-            review (D-018: a fingerprint-indexed reaction whose note has not yet been merged),
-            which the chemist can otherwise not distinguish from a typo or a deleted note.
+            `chemclaw.agent.tool_authz` surfaces this message to the model verbatim instead of an
+            opaque generic failure.
     """
     graph = await asyncio.to_thread(build_graph, settings.knowledge_path)
+    # The graph first, the store second, and in that order deliberately: `reaction-` is a *prefix*,
+    # not a reservation, so a human-authored note under that name must still win. Store-first made
+    # every such note unreachable — silently, because the record lookup fails with its own message.
+    #
+    # **Whether the graph holds a *note*, not whether it holds the id** — `note_in` says why those
+    # differ, and this line testing membership instead was the defect it now prevents.
+    if note_in(graph, note_id) is None and resolves_outside_graph(note_id):
+        return await _expand_record(note_id)
     note = _require_note(graph, note_id)
     # `hops` comes from the model; clamp it to [0, graph_max_hops] so a large value is bounded
     # rather than traversing the whole graph (SEC-4).

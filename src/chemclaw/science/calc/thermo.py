@@ -535,6 +535,16 @@ def ensemble_from_members(
     degeneracies = [member.degeneracy for member in members]
     populations = boltzmann_populations(relative, degeneracies, temperature_k)
     entropy = ensemble_entropy(populations, degeneracies)
+    # **Sorted here, so "lowest-first" is a property of this function rather than of the server.**
+    # `ConformerEnsemble.lowest_structure_id` and `compose.refined_ensemble`'s "top N by electronic
+    # energy" both index `conformers[0:]` and both documented the order as given. Nothing in this
+    # repository established it: `EnsemblePayload` has no ordering validator, and the order held
+    # only because `Chemclaw3-mcp`'s `crest_cli` sorts on the way out. That is a real control in
+    # another repository, which is exactly the kind this tree declines to depend on silently — a
+    # backend that returned members unsorted would spend the Hessians on arbitrary conformers and
+    # report a lowest-energy geometry that was not one, with every number still internally
+    # consistent. One sort costs nothing and makes the claim local.
+    ordered = sorted(zip(relative, populations, members, strict=True), key=lambda entry: entry[0])
     conformers = [
         Conformer(
             relative_kcal=round(energy, 3),
@@ -542,7 +552,7 @@ def ensemble_from_members(
             degeneracy=member.degeneracy,
             structure=member.structure,
         )
-        for energy, population, member in zip(relative, populations, members, strict=True)
+        for energy, population, member in ordered
     ]
     return ConformerEnsemble(
         smiles=smiles,

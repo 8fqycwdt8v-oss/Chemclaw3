@@ -9,9 +9,10 @@ emit carries the id of the note it came from, so the harness can cite it (5b.2).
 
 import asyncio
 import logging
+from collections.abc import Sequence
 from datetime import date
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 from chemclaw.core.config import settings
 from chemclaw.core.embeddings import embed_texts
@@ -192,19 +193,40 @@ class GraphRetriever:
 _NOTE_FILTERS = ("type", "tag", "since", "until")
 
 
+@runtime_checkable
+class ReactionMetadata(Protocol):
+    """The one question this package asks of the ELN transcription tier.
+
+    Declared here rather than imported from `chemclaw.ingest.eln.records`, and that is a layering
+    fact rather than a style preference: `ingest` depends on `retrieval`, so importing back would
+    make a cycle out of what is really a one-method need. A Protocol is structural, so the concrete
+    `ReactionRecordStore` satisfies this without either package knowing about the other — and the
+    retriever ends up declaring what it needs instead of where it comes from.
+    """
+
+    async def eligible(self, reaction_ids: Sequence[str], filters: dict[str, Any]) -> set[str]:
+        """Which of `reaction_ids` pass `filters` and are current."""
+        ...
+
+
 class FingerprintReactionRetriever:
     """Retrieve reactions structurally similar to a reaction-SMILES query. A `SourceRetriever`."""
 
     name = "reaction-fingerprint"
 
-    def __init__(self, store: FingerprintStore, notes_dir: str | None = None) -> None:
-        """Search the given reaction fingerprint store, resolving notes from `notes_dir`.
+    def __init__(self, store: FingerprintStore, records: ReactionMetadata) -> None:
+        """Search `store`, resolving a metadata filter against `records`.
 
-        The store is injected for testability; the directory is the corpus a metadata filter is
-        resolved against, and is only read when a filter is actually given.
+        Both are injected, and `records` is **required** rather than defaulted: this package may not
+        import the transcription tier (see `ReactionMetadata`), and a default that reached for the
+        production store would be that import wearing a different hat. The caller — `agent` or
+        `durable`, both of which may depend on `ingest` — supplies it.
+
+        The metadata lookup only happens when a filter is actually given. This took a `notes_dir`
+        while reactions were markdown notes on disk; they are rows now (D-2026-08-25).
         """
         self._store = store
-        self._dir = Path(notes_dir) if notes_dir is not None else settings.knowledge_path
+        self._records = records
 
     async def retrieve(self, query: str, filters: dict[str, Any]) -> list[EvidenceChunk]:
         """Return chunks for reactions similar to `query` (a reaction SMILES), or none.
@@ -268,16 +290,19 @@ class FingerprintReactionRetriever:
     async def _eligible(
         self, matches: list[Match], wanted: dict[str, Any], page: int
     ) -> list[Match]:
-        """Keep the neighbours whose note passes `wanted`, most similar first, truncated to `page`.
+        """Keep the neighbours whose record passes `wanted`, most similar first, cut to `page`.
 
-        A match whose note is not on disk is dropped here, which is the one place the pending-note
-        citation above does *not* apply — and deliberately. A filter says "only notes that are X";
-        a note nobody can read cannot be shown to be X, so serving it would answer a narrowed
-        question with an unnarrowed hit. Same rule as `_in_window`'s undated note, for the same
-        reason. An unfiltered sweep never reaches this and still surfaces the pending note.
+        A match with no stored record is dropped here, and deliberately: a filter says "only
+        records that are X", and a record nobody can read cannot be shown to be X, so serving it
+        would answer a narrowed question with an unnarrowed hit. An unfiltered sweep never reaches
+        this and still surfaces every structural hit the index holds.
+
+        The gate itself is `records.eligible_reaction_ids`, which applies the same type/tag/window
+        rules every note-backed retriever applies — against columns rather than parsed frontmatter,
+        and over this page of candidates rather than the whole corpus.
         """
-        eligible = await _eligible_notes(self._dir, wanted)
-        kept = [match for match in matches if note_id_for_reaction(match.id) in eligible]
+        eligible = await self._records.eligible([match.id for match in matches], wanted)
+        kept = [match for match in matches if match.id in eligible]
         if len(matches) >= self._depth(page) and len(kept) < page:
             # The deeper search was itself exhausted and still did not fill a page, so there may be
             # matching reactions further down the ranking that were never looked at. Said out loud

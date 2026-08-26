@@ -107,7 +107,12 @@ RECORDED_SHAPES: dict[str, str] = {
     # New with the split: the wire shape a `compute_hessian` row holds, base64 `.npy` and all. It
     # replaces `HessianResult`, whose content addresses pointed into an artifact store this
     # repository no longer writes to.
-    "EnsemblePayload": "583226fa547b2412",
+    # Changed by `EnsembleMember.degeneracy` gaining `ge=1`. Recorded rather than epoch-bumped:
+    # the constraint tightens *validation* and rewrites no data, so no row already in
+    # `calculation_results` becomes wrong or incomplete — a stored degeneracy is a rotamer
+    # count and has always been >= 1. Bumping the epoch would discard every cached CREST
+    # search, the most expensive thing in the system, to no end.
+    "EnsemblePayload": "4afdce1baac44be8",
     "HessianPayload": "8495e40479a746f1",
     "OptimizationResult": "3d934a3b36e47f11",
     "PkaResult": "f4928a91c06fc746",
