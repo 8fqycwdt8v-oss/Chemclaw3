@@ -353,6 +353,22 @@ _ALLOWED_MODULE_EDGES: set[Edge] = {
     ("chemclaw.memory", "chemclaw.ingest"),
     ("chemclaw.memory", "chemclaw.kg"),
     ("chemclaw.memory", "chemclaw.science"),
+    # The result-publication seam (D-2026-08-25). It is a leaf that consumes what the system
+    # produced: it reads the kernel and, for its SQL driver, the warehouse connection Protocol that
+    # `ingest` already defines — reusing that rather than defining a second `module:callable`
+    # driver seam with the same shape and the same credential discipline. Nothing imports back:
+    # `publish` is imported *by* `durable` (the drain) and lazily by `science` (the enqueue hook),
+    # and imports neither.
+    ("chemclaw.publish", "chemclaw.core"),
+    ("chemclaw.publish", "chemclaw.ingest"),
+    ("chemclaw.durable", "chemclaw.publish"),
+    ("chemclaw.cli", "chemclaw.publish"),
+    # The `results` bundle's job re-queues stored calculations, and the walk it runs is
+    # `publish.backfill`. That module is in the publish layer rather than in `cli/` *because* of
+    # this edge: the walk began in the CLI, which made this a connector importing a terminal
+    # entrypoint, and the gate caught it. A connector reaching down into publish is ordinary; the
+    # inversion was not.
+    ("chemclaw.connectors", "chemclaw.publish"),
     ("chemclaw.retrieval", "chemclaw.core"),
     ("chemclaw.retrieval", "chemclaw.kg"),
     ("chemclaw.retrieval", "chemclaw.science"),
@@ -372,6 +388,13 @@ _ALLOWED_MODULE_EDGES: set[Edge] = {
 # What remains is the connector registry, which is a real capability layer rather than a primitive
 # that was merely filed one package too high, so it is not a move that would retire this entry.
 _ALLOWED_LAZY_EDGES: dict[Edge, str] = {
+    ("chemclaw.science", "chemclaw.publish"): (
+        "cached_compute offers a freshly computed primitive to the external results store. Lazy "
+        "for two reasons that both matter: `science` is the pure-computation layer and must not "
+        "depend on an outbound seam at import time, and with no sink configured the projection "
+        "machinery is never imported at all - so a deployment that does not publish pays nothing "
+        "for the hook (see `science.calc.store._publish_best_effort`)"
+    ),
     ("chemclaw.core", "chemclaw.connectors"): (
         "logging's redaction filter resolves connector bearer-token env names lazily so "
         "core.logging - imported by every entrypoint first - must not hard-depend on the connector "

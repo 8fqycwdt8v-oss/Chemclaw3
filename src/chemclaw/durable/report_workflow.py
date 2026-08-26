@@ -18,6 +18,7 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.core.identity_context import reset_current_identity, set_current_identity
     from chemclaw.durable.connector_job import ConnectorJobResult
     from chemclaw.durable.registry import durable_activity, durable_workflow
+    from chemclaw.ingest.eln.records import default_record_store
     from chemclaw.ingest.sources.registry import active_retrieve_sources
     from chemclaw.kg.git_submitter import default_submitter
     from chemclaw.kg.pr_gate import propose_note
@@ -50,7 +51,10 @@ def default_retrievers() -> list[SourceRetriever]:
     queries, `[]` otherwise) and needed when a section's query names a reaction to search by
     structure.
     """
-    return [*active_retrieve_sources(), FingerprintReactionRetriever(default_reaction_store())]
+    return [
+        *active_retrieve_sources(),
+        FingerprintReactionRetriever(default_reaction_store(), default_record_store()),
+    ]
 
 
 @durable_activity("background")

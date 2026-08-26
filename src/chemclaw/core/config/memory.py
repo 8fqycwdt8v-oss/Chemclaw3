@@ -45,15 +45,13 @@ class MemorySettings(BaseSettings):
     observation_promote_min_projects: int = Field(default=2, ge=1)
     observation_retire_after_days: int = Field(default=30, ge=0)
     observation_max_results: int = Field(default=10, ge=1)
-    # Cadence for the observation lifecycle job (mine, retire, promote). Daily, like the memory
-    # jobs it sits beside and for the same reason: it re-scans the whole corpus.
+    # Cadence for the observation lifecycle job (mine, then retire). Daily, because it re-scans
+    # the whole corpus. Promotion is not on this timer — it opens pull requests, so it is started
+    # on demand (D-2026-08-25).
     observation_schedule_minutes: float = Field(default=1440.0, gt=0)
-    # Temporal Schedule cadence for the memory-synthesis jobs (`durable/schedules.py`): they
-    # re-scan the whole corpus, so they run less often than the cursor-driven ELN sync.
-    memory_synthesis_schedule_minutes: float = Field(default=1440.0, gt=0)
     # Fraction of a Schedule's interval used as a deterministic per-job phase offset (gap
-    # SCH-3). The memory jobs share one cadence and each re-scans the whole corpus, so without
-    # an offset they fire together against one background worker. 0 disables the spread.
+    # SCH-3). Two schedules sharing a cadence would otherwise fire together against one background
+    # worker. 0 disables the spread.
     schedule_jitter_fraction: float = Field(default=0.2, ge=0.0, lt=1.0)
     # Retention windows in days (gap SCH-1). Nothing in the system deleted anything before this,
     # so every durable table grew for the deployment's lifetime. 0 disables pruning for that
@@ -81,6 +79,11 @@ class MemorySettings(BaseSettings):
     # The cost is stated rather than hidden: until an operator sets this, the table grows, and it
     # grows faster than the two above it. `infra/sql/README.md` says so in its Disposal column.
     retention_tool_results_days: int = Field(default=0, ge=0)
+    # How long a *delivered* result publication is kept. Only delivered rows are ever pruned: a
+    # pending or failed one is the only record that something has not reached its results store,
+    # and deleting that would turn an outage into a silent gap. 0 disables it, like every window
+    # here.
+    retention_result_publications_days: int = Field(default=0, ge=0)
     # The LangGraph checkpoint tables (`checkpoints`, `checkpoint_blobs`, `checkpoint_writes`).
     # They held the same standing as the fingerprint tables in this module's opening complaint —
     # nothing deleted from them, ever — with one difference that made it easy to miss: they are

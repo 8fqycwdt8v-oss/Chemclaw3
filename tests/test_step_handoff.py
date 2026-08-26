@@ -376,6 +376,9 @@ def test_the_shipped_refinement_template_carries_an_address_between_its_steps() 
         summary="conformers of CCO",
         data=without_geometry({"kind": "ensemble", "ensemble": ensemble.model_dump(mode="json")}),
     )
+    # Narrowed because `Template.steps` is a union and only the two capability steps carry
+    # arguments; without it mypy reads `refine` as possibly an `AgentStep`.
+    assert isinstance(refine, ToolStep | JobStep)
     resolved = resolve(
         refine.arguments,
         {"inputs.smiles": "CCO", "inputs.solvent": "", "steps.search.result": envelope},

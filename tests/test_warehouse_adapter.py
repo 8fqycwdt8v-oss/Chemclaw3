@@ -15,11 +15,12 @@ import pytest
 
 from chemclaw.ingest.eln.adapter import ElnMappingError
 from chemclaw.ingest.eln.ord import Role
+from chemclaw.ingest.eln.records import InMemoryReactionRecordStore
 from chemclaw.ingest.eln.sync import sync_entries
 from chemclaw.ingest.eln.warehouse.adapter import WarehouseElnAdapter
 from chemclaw.science.fingerprints.store import InMemoryFingerprintStore
+from chemclaw.science.labels.store import InMemoryLabelIndex
 from tests import warehouse_fake
-from tests.conftest import FakeSubmitter
 
 _DRIVER = "tests.warehouse_fake:open_fake"
 
@@ -495,11 +496,24 @@ def test_a_page_of_amended_rows_does_not_stall_the_sync_forever() -> None:
     adapter = WarehouseElnAdapter(binding=binding, name="eln-test")
 
     async def _run() -> set[str]:
-        rxn, mol, sub = InMemoryFingerprintStore(), InMemoryFingerprintStore(), FakeSubmitter()
+        rxn, mol, rec = (
+            InMemoryFingerprintStore(),
+            InMemoryFingerprintStore(),
+            InMemoryReactionRecordStore(),
+        )
         cursor = old
         seen: set[str] = set()
         for _ in range(4):  # four chunks is more than enough to drain four rows two at a time
-            summary = await sync_entries(adapter, rxn, mol, sub, cursor, apply_overlap=False)
+            summary = await sync_entries(
+                adapter,
+                rxn,
+                mol,
+                rec,
+                cursor,
+                label_index=InMemoryLabelIndex(),
+                source="eln-snowflake",
+                apply_overlap=False,
+            )
             seen.update(summary.ingested)
             cursor = summary.next_cursor
         return seen

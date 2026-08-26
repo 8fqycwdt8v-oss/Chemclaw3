@@ -1,46 +1,52 @@
-# The condenser's headline measurement was taken on a path production does not use
+# ELN records become queryable data, not knowledge-graph notes (D-2026-08-25)
 
-Plan: `/root/.claude/plans/as-if-you-ask-fuzzy-crab.md` (approved).
-Base: `85a3c51`. Branch: `claude/condenser-wire-payload`.
+## Task
+Remove the PR-gate from ELN ingestion. Keep the ELN queryable ("similar reaction", "same
+product") with full content. Nothing extracts knowledge automatically without a user asking.
 
-## Measured
-
-- [x] **`exclude=True` does nothing.** `_stringify` tries `json.dumps` (fails on a `BaseModel`) and
-      falls back to `str()` = pydantic repr, which ignores `exclude`. Wire evidence from a compiled
-      graph: `table='' rows=[] complete=True oversized=[] degraded=[]`.
-- [x] **The ratio is 2.7x, not 9.1x** — 39,890 vs 14,611 tokens at N=80, against 6,352 claimed.
-- [x] **Repo-wide**: `EvidenceSweep` reaches the model as repr too. Pre-existing.
-- [x] **§4 confirmed** (was unverified): `EXPLAIN (ANALYZE)` shows `loops=400` on both
-      `CITATION_SQL` and `_MODIFIED_SQL` to return **2** rows — the window forces per-row
-      evaluation, and both subqueries are row-invariant.
-
-## Steps
-
-- [x] 1. The tool renders a string; drop `exclude=True`; re-measure on the wire.
-- [x] 2. Hoist the two row-invariant subqueries out of the windowed subquery.
-- [x] 3. Pin the stringification shape in `tests/test_upstream_surface.py` (absence form).
-- [x] 4. Superseding ADR with the corrected table; ledger row.
-- [x] 5. BACKLOG row for the repo-wide repr payload; `tasks/lessons.md`.
+## Done
+- [x] Measure the gate before changing it (202 ms/note serialized git; 425 µs/note corpus scan;
+      zero LLM calls in ingest; refs *not* the bottleneck — disconfirmed)
+- [x] Migration `052_reaction_records.sql` + grants + `infra/sql/README.md` inventory row
+- [x] `ingest/eln/records.py` — Protocol + InMemory + Postgres, shaped like `fingerprints/store.py`
+- [x] `ingest/eln/note.py` → `record.py`; `note_from_ord_reaction` → `record_from_ord_reaction`
+- [x] `ingest.py` drops `propose_note`; fingerprint indexing untouched
+- [x] `sync.py` drops `_merged_note_bodies` (the O(corpus) scan) and `awaiting_merge`
+- [x] `dangling_links` external-id namespace + `cli/validate_kg.py` citation-existence check
+- [x] `expand_note` falls back to the store (graph still wins — `reaction-` is a prefix, not a
+      reservation); D-018's dangling-citation failure class removed
+- [x] Retriever filter resolves against the store
+- [x] No Schedule opens a PR: 3 memory schedules removed, observation promotion split out
+- [x] Layering: removed both new edges by injecting one-method Protocols, not by declaring them
+- [x] Slug validation kept (`require_note_slug` extracted, not copied) — caught by a test, not review
+- [x] `tests/test_reaction_records.py` — the 4 claims the change would be wrong without
+- [x] ADR + ledger + CLAUDE.md + ARCHITECTURE.md + DEFERRED row
 
 ## Review
+The elegant version was not the first one. Two things forced it:
 
-| what | before | after |
-|---|---|---|
-| wire payload at N=80 | 14,611 tokens (2.7x) | **6,368 (6.3x)** |
-| `CITATION_SQL`/`_MODIFIED_SQL` | `loops=400`, 854 buffers, 3.257 ms | **0 per-row subplans, 56 buffers, 1.530 ms** |
-| both backends' `modified_at` | 2026-03-04 vs 2026-01-01 | **agree** |
+1. **The layering test.** Putting the store in `ingest` inverted `ingest → kg` and
+   `ingest → retrieval`. The file's own rule ("move the code rather than excuse the edge") gave
+   the answer: each consumer declares a one-method Protocol, the caller injects the store, and the
+   edge disappears instead of being allowlisted. `FingerprintReactionRetriever`'s `records` is
+   required rather than defaulted for the same reason.
+2. **A dropped guard.** `ReactionRecord` initially had no slug validation, because a Postgres PK
+   does not need one. An existing test failed and was right: the id still becomes the
+   `reaction-<id>` citation a campaign note carries into git.
 
-Two findings arrived *while fixing*, not from the plan:
+One hazard I introduced and then removed: routing on the `reaction-` prefix *before* the graph made
+any human-authored note under that name silently unreachable. Graph first, store second.
 
-- The `EXPLAIN` that confirmed the per-row subqueries also exposed a **backend disagreement** on
-  `modified_at` that had been there since the reader landed — Postgres took `max` across copies as
-  the rule states, the reference backend took the cited path's own time. The cross-backend test
-  could not see it: one file row, no mtime.
-- My first strengthened fixture for that gave the same row both the smallest path *and* the newest
-  time, so it passed against either rule. The cited copy is now deliberately not the newest one.
+## Merge with main (main moved mid-flight)
+- [x] Base was `bed7d69`, whose own CI run **failed**; `50cb06f` on main fixed the two mypy errors
+      that had kept main red since 2026-08-22. Merged main in rather than waiting.
+- [x] Main added `ProcessConditions` frontmatter, read by `condense.py` and `protocol_tools.py`.
+      Both sides changed the same mapping, so it is carried rather than picked: the record gains a
+      `conditions` JSONB column, and `condense_protocols` gains a record fallback — without it
+      every reaction reference would read as `missing`, silently breaking a feature main had just
+      shipped.
+- [x] Verified the exact CI command: `mypy src examples tests` → clean.
 
-That is the third and fourth time this session a fixture held constant the axis that broke. The
-`lessons.md` entry says so plainly rather than filing it as a one-off.
-
-Suite: 4,303 passed, 3 skipped (shallow git history; no Postgres skips). `make lint type` clean.
-Six validators green.
+## Not done, deliberately
+The chemist's actual insight is still not captured — see the `DEFERRED.md` row. This change makes
+the ELN queryable; it does not make it teach.

@@ -180,6 +180,65 @@ wait_for() {
   die "$name did not become ready at $url — see $LIVE_DIR/$name.log"
 }
 
+# ------------------------------------------------------------------ the fleet's two bundles
+#
+# `chem` and `safety` are enabled bundles whose capability is `Chemclaw3-mcp`'s: they carry a
+# manifest here and no `server/`, which is `D-2026-08-09-a-connector-we-do-not-run` working as
+# designed. `cli/connectors_dev.py` therefore emits no URL for either — deliberately, since minting
+# a token for a server we do not run would replace a clear `MissingConnectorCredential` with a 401
+# from a server that never heard of it.
+#
+# The consequence was that this lane could not start at all. `CHEMCLAW_CONNECTORS_REQUIRED=true` is
+# pinned below, both bundles keep their loopback defaults, and `check_connectors_at_startup` raises
+# before the front door binds. **The pin is not the bug and must not be relaxed to fix this** —
+# LIVE-8's lesson is that a configuration only production sets is a configuration nothing tests, and
+# turning it off here would delete the test rather than pass it. So the lane starts the two servers
+# it needs from the fleet checkout, which is what the four-repo lane already does.
+readonly MCP_REPO="${CHEMCLAW_MCP_REPO:-$REPO_ROOT/../chemclaw3-mcp}"
+
+# Ports and package names come from the fleet's own manifests, which is the same "one reader for one
+# shape" rule `connector_env` follows: a server that moves port there moves here without an edit.
+fleet_python_bin() { ( cd "$MCP_REPO" && uv sync --quiet && uv run python -c 'import sys; print(sys.executable)' ); }
+
+fleet_port() {
+  "$1" - "$MCP_REPO/manifests/$2/connector.yaml" <<'PY'
+import re, sys
+url = re.search(r"url:\s*(\S+)", open(sys.argv[1]).read()).group(1)
+print(re.search(r":(\d+)/mcp", url).group(1))
+PY
+}
+
+start_fleet_bundles() {
+  local python="$1"
+  [ -d "$MCP_REPO" ] || die "chem and safety are served by Chemclaw3-mcp, which is not at $MCP_REPO.
+Clone it beside this checkout, or set CHEMCLAW_MCP_REPO. Relaxing CHEMCLAW_CONNECTORS_REQUIRED is
+not the fix: it is the posture the chart ships and the one this lane exists to exercise."
+
+  local fleet_python
+  fleet_python="$(fleet_python_bin)" || die "could not resolve an interpreter in $MCP_REPO"
+
+  local name port
+  for name in chem safety; do
+    port="$(fleet_port "$python" "$name")" || die "no port in $MCP_REPO/manifests/$name/connector.yaml"
+    # The same variable name on both sides, which is the manifest's `token_env` and the whole
+    # reason a dev token works here: core reads it to send, the server reads it to verify.
+    local var="CHEMCLAW_$(printf '%s' "$name" | tr '[:lower:]' '[:upper:]')_TOKEN"
+    export "$var=${!var:-dev-token}"
+    ( cd "$MCP_REPO" && start "$name" "$fleet_python" -m "uvicorn" "chemclaw_mcp_$name.app:app" \
+        --host 127.0.0.1 --port "$port" )
+    wait_for "$name" "http://127.0.0.1:$port/healthz"
+    CHEMCLAW_CONNECTOR_URLS="$("$python" - "$CHEMCLAW_CONNECTOR_URLS" "$name" "$port" <<'PY'
+import json, sys
+urls = json.loads(sys.argv[1] or "{}")
+urls[sys.argv[2]] = f"http://127.0.0.1:{sys.argv[3]}/mcp"
+print(json.dumps(urls))
+PY
+)"
+  done
+  export CHEMCLAW_CONNECTOR_URLS
+}
+
+
 up() {
   mkdir -p "$RUN_DIR"
   command -v uv >/dev/null 2>&1 || die "uv not found"
@@ -225,6 +284,12 @@ up() {
       >> "$RUN_DIR/connector-env.sh" )
     log "identity enforced: issuer $CHEMCLAW_ENTRA_ISSUER, probe identity ${CHEMCLAW_LIVE_PROBE_OID:-live-probe-runner}"
   fi
+
+  # `chem` and `safety` come from the fleet checkout, and they come up *before* the front door for
+  # the reason `connectors_required=true` exists: an unreachable enabled bundle is a boot failure,
+  # not a degraded turn.
+  start_fleet_bundles "$python"
+  log "connector urls (with the fleet): $CHEMCLAW_CONNECTOR_URLS"
 
   # The connectors themselves: the front door refuses to report ready without them under
   # `connectors_required=true`, and the workers call them through the same URLs.

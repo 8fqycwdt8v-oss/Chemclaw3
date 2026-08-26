@@ -43,19 +43,18 @@ from chemclaw.core.config import settings
 from chemclaw.core.ids import stable_hash
 from chemclaw.core.temporal_client import connect
 from chemclaw.durable.artifact_eviction import ArtifactEvictionWorkflow
+from chemclaw.durable.corpus_sync import ReactionCorpusWorkflow, corpus_sources
 from chemclaw.durable.digest import DigestWorkflow
 from chemclaw.durable.document_sync import DocumentShareSyncWorkflow, share_sources
 from chemclaw.durable.eln_sync import ElnSyncWorkflow
 from chemclaw.durable.eval_drift import EvalDriftWorkflow
-from chemclaw.durable.memory_jobs import (
-    CampaignSynthesisWorkflow,
-    OptimizationCampaignWorkflow,
-    PlaybookDistillationWorkflow,
-)
+from chemclaw.durable.label_sync import ReactionLabelWorkflow, label_policies
 from chemclaw.durable.note_index import NoteReindexWorkflow
 from chemclaw.durable.observation_jobs import ObservationSynthesisWorkflow
+from chemclaw.durable.publish_results import PublishResultsWorkflow
 from chemclaw.durable.retention import RetentionWorkflow
 from chemclaw.ingest.sources.registry import active_ingest_source_names
+from chemclaw.publish.registry import publishing_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +91,8 @@ OWNED_SCHEDULE_IDS = frozenset(
         "artifact-eviction",
         "observations",
         "document-sync",
+        "reaction-labels",
+        "reaction-corpus",
     }
 )
 
@@ -114,18 +115,21 @@ def _retention_windows_are_set() -> bool:
 
 
 def planned_schedules() -> list[PlannedSchedule]:
-    """The Schedules this script maintains — the ELN sync plus the three memory jobs.
+    """The Schedules this script maintains.
 
     Pure and side-effect-free (no client), so a test can assert the set of jobs and their
     configured cadences without a live Temporal server.
+
+    **No Schedule here opens a pull request** (D-2026-08-25). Campaign synthesis, playbook
+    distillation and optimization-campaign detection used to fire hourly and propose PR-gated notes
+    with nobody having asked, which is knowledge arriving on a timer. The miners are unchanged and
+    still run — `CampaignSynthesisWorkflow`, `PlaybookDistillationWorkflow` and
+    `OptimizationCampaignWorkflow` are started on demand, by a chemist or by an agent workflow that
+    has a reason to look. What is left on a timer is ingestion, indexing, eviction and retention:
+    jobs that make the corpus queryable and none that decide what it means.
     """
     eln_every = timedelta(minutes=settings.eln_sync_schedule_minutes)
-    memory_every = timedelta(minutes=settings.memory_synthesis_schedule_minutes)
-    schedules = [
-        PlannedSchedule("campaign-synthesis", CampaignSynthesisWorkflow, memory_every),
-        PlannedSchedule("playbook-distillation", PlaybookDistillationWorkflow, memory_every),
-        PlannedSchedule("optimization-campaign", OptimizationCampaignWorkflow, memory_every),
-    ]
+    schedules: list[PlannedSchedule] = []
     # The ELN sync earns a Schedule only where there is an ELN to sync — the same question
     # `document-sync` asks seventeen lines below, asked of the same registry. It was the one
     # periodic job planned unconditionally, and with no source configured (the default) that is an
@@ -134,7 +138,7 @@ def planned_schedules() -> list[PlannedSchedule]:
     # reason `document-sync` records: `CHEMCLAW_DATA_SOURCES` is already the enable switch (D-018),
     # and a second flag could only restate it or contradict it.
     if active_ingest_source_names():
-        schedules.insert(0, PlannedSchedule("eln-sync", ElnSyncWorkflow, eln_every))
+        schedules.append(PlannedSchedule("eln-sync", ElnSyncWorkflow, eln_every))
     # The drift check is opt-in (plan F10-F2): it only earns a Schedule where a committed baseline
     # is maintained, so an unconfigured deployment does not fire an eval it has no baseline for.
     if settings.eval_drift_enabled:
@@ -152,6 +156,20 @@ def planned_schedules() -> list[PlannedSchedule]:
     if share_sources():
         share_every = timedelta(minutes=settings.document_sync_schedule_minutes)
         schedules.append(PlannedSchedule("document-sync", DocumentShareSyncWorkflow, share_every))
+    # The labelling drain earns a Schedule only where some enabled source declares a `labels:`
+    # block — the third time this file asks the manifests instead of adding a flag, and for the
+    # third time because `CHEMCLAW_DATA_SOURCES` plus a declaration already answers it. A
+    # deployment with no reaction corpus would otherwise ask the labelling server for its version
+    # every hour and then label nothing.
+    if label_policies():
+        label_every = timedelta(minutes=settings.label_sync_schedule_minutes)
+        schedules.append(PlannedSchedule("reaction-labels", ReactionLabelWorkflow, label_every))
+    # And the corpus drain earns one only where a source declares a `corpus:` binding. Daily
+    # rather than hourly: a release changes when a vendor ships one, so an hourly re-walk would
+    # read a warehouse to learn nothing.
+    if corpus_sources():
+        corpus_every = timedelta(minutes=settings.corpus_sync_schedule_minutes)
+        schedules.append(PlannedSchedule("reaction-corpus", ReactionCorpusWorkflow, corpus_every))
     # Digests only earn a Schedule where someone has subscribed (gap IDEA-1); otherwise the job
     # would sweep the corpus daily to deliver nothing.
     if settings.digest_enabled:
@@ -180,6 +198,15 @@ def planned_schedules() -> list[PlannedSchedule]:
         schedules.append(
             PlannedSchedule("artifact-eviction", ArtifactEvictionWorkflow, eviction_every)
         )
+    # Draining the result outbox earns a Schedule only where a sink is actually enabled - the same
+    # question `document-sync` and `eln-sync` ask of their own registries, and asked of the sink
+    # registry rather than of a second `result_publish_enabled` flag, because
+    # `CHEMCLAW_RESULT_SINKS` is already the enable switch (D-018) and a second flag could only
+    # restate it or contradict it. With no sink configured the queue is empty by construction, so
+    # this would be a job sweeping a table nothing writes.
+    if publishing_enabled():
+        publish_every = timedelta(minutes=settings.result_publish_schedule_minutes)
+        schedules.append(PlannedSchedule("result-publish", PublishResultsWorkflow, publish_every))
     # The observations tier is the one knowledge surface no human reviews before the agent reads
     # it, so it fires only where a deployment has consciously turned it on (D-161). Without this
     # guard the table would fill on a default nobody chose.
@@ -194,9 +221,11 @@ def planned_schedules() -> list[PlannedSchedule]:
 def _jitter(job: PlannedSchedule) -> timedelta:
     """A deterministic per-job offset inside its interval, so co-scheduled jobs do not collide.
 
-    The three memory-synthesis jobs share one configured cadence and each re-scans the whole
-    corpus, so without an offset they fire simultaneously against a single background worker
-    (`replicas: 1`) and contend for the same reads (gap SCH-3). Temporal jitter is a *random*
+    Jobs sharing one configured cadence would otherwise fire simultaneously against a single
+    background worker (`replicas: 1`) and contend for the same reads (gap SCH-3). That was written
+    for the three memory-synthesis jobs, which no longer have Schedules (D-2026-08-25); the
+    collision it prevents is a property of any two schedules sharing a cadence, so the offset
+    stays. Temporal jitter is a *random*
     delay drawn per fire; this is instead a fixed per-schedule phase offset derived from the
     schedule id, which is stable across re-applies (so `apply_schedules` stays a reconcile, not a
     reshuffle) and spreads the jobs deterministically.

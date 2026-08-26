@@ -23,6 +23,7 @@ from typing import Any
 
 from chemclaw.ingest.eln.warehouse.binding import (
     BindingError,
+    CorpusBinding,
     EntryBinding,
     RelatedBinding,
     VectorBinding,
@@ -72,6 +73,36 @@ def entry_statement(
         f"LIMIT {placeholder}"
     )
     return sql, [since, limit]
+
+
+def corpus_statement(
+    corpus: CorpusBinding, placeholder: str, after: str, limit: int
+) -> tuple[str, list[Any]]:
+    """One bounded page of a bulk reaction corpus, resuming strictly after `after`.
+
+    **Keyset, not offset, and not a datetime.** `OFFSET n` on a multi-million-row table makes the
+    warehouse walk and discard n rows on every page, so a drain gets quadratically slower exactly
+    as it gets further in; and a datetime cursor is meaningless for a versioned release that was
+    loaded all at once. Resuming after the last key seen is O(index seek) per page and is what
+    makes a stopped drain resumable at no cost.
+
+    An empty `after` starts at the beginning, which is the first pass and also a full re-drain.
+    Re-drainng is safe: every write the corpus drain makes is an id-keyed upsert.
+
+    `SELECT *` for the same reason `entry_statement` uses it — the binding names the columns it
+    reads by path, and a projection would have to know a schema nobody can see yet.
+    """
+    cursor = corpus.cursor_column
+    predicate = f"{cursor} > {placeholder}" if after else "1 = 1"
+    if corpus.where:
+        predicate += f" AND ({corpus.where})"
+    sql = (
+        f"SELECT * FROM {corpus.relation} "  # identifier checked by `binding._check_identifier`
+        f"WHERE {predicate} "
+        f"ORDER BY {cursor} ASC "
+        f"LIMIT {placeholder}"
+    )
+    return sql, ([after, limit] if after else [limit])
 
 
 def related_statement(
@@ -145,7 +176,7 @@ def vector_statement(
         params.append(bound)
 
     columns = ", ".join([vector.key, *vector.content_columns])
-    predicates, filter_params = _vector_predicates(vector, placeholder, filters)
+    predicates, filter_params = vector_predicates(vector, placeholder, filters)
     params.extend(filter_params)
     where = f" WHERE {' AND '.join(predicates)}" if predicates else ""
     sql = (
@@ -174,7 +205,7 @@ def scope_statement(
     thin corpus. The residual this bounds is the one `retrieval/vectors/README.md` states — a scope
     is a set, and a broad filter over a very large corpus builds a big one.
     """
-    predicates, params = _vector_predicates(vector, placeholder, filters)
+    predicates, params = vector_predicates(vector, placeholder, filters)
     where = f" WHERE {' AND '.join(predicates)}" if predicates else ""
     sql = (
         f"SELECT {vector.key} "  # identifier checked by `binding._check_identifier`
@@ -209,7 +240,7 @@ def resolve_statement(
     return sql, list(keys)
 
 
-def _vector_predicates(
+def vector_predicates(
     vector: VectorBinding, placeholder: str, filters: dict[str, Any]
 ) -> tuple[list[str], list[Any]]:
     """Translate the honoured evidence filters onto the site's own columns.
@@ -217,6 +248,12 @@ def _vector_predicates(
     Only the keys the binding mapped are applied. An unmapped filter is ignored rather than guessed
     at — inventing a column name would either error on every query or, worse, match a column that
     means something else at this site.
+
+    **Public, because "would this search be filtered at all" is a question with one right answer.**
+    The index-ranked retriever has to know whether to run a scope query, and it used to answer that
+    by looking at the query's keys — which silently dropped the binding's own `where:`, since that
+    is a predicate no key implies. Asking for the predicate list is the same question asked of the
+    thing that actually builds it.
     """
     predicates: list[str] = []
     params: list[Any] = []

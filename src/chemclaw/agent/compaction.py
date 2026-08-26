@@ -280,7 +280,14 @@ def context_compaction_middleware() -> list[Any]:
                 # renaming an ENV-visible knob to fix a name would cost every deployment that sets
                 # it, so the name stays and `core/config/agent.py` says what it now means.
                 ClearToolUsesEdit(
-                    trigger=settings.agent_context_token_budget,
+                    # Its own trigger, well below the budget the window uses. The two edits are
+                    # different instruments: this one is lossless — the `tool_use` record survives
+                    # and the model can re-fetch — so it is cheap enough to run early, and every
+                    # token it reclaims early is a conversation group the window below never has to
+                    # delete. Sharing one threshold meant nothing reduced until 100k and then both
+                    # fired together, which is the expensive edit doing work the free one could
+                    # have done.
+                    trigger=settings.agent_tool_result_clear_trigger,
                     keep=settings.agent_keep_last_tool_groups,
                     placeholder=TOOL_RESULT_PLACEHOLDER,
                 ),

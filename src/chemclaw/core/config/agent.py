@@ -99,6 +99,24 @@ class AgentSettings(BaseSettings):
     agent_context_token_budget: int = Field(default=100_000, ge=1)
     agent_keep_last_tool_groups: int = Field(default=2, ge=0)
     agent_keep_last_conversation_groups: int = Field(default=12, ge=1)
+    # `agent_tool_result_clear_trigger` is the *lossless* edit's own threshold, and splitting it
+    # off is the whole point of this field. `context_compaction_middleware` composes two edits:
+    # upstream's `ClearToolUsesEdit`, which replaces a re-fetchable tool result with a placeholder
+    # and leaves the `tool_use` record so the model can fetch it again, and the first-party
+    # conversation window, which *deletes* older groups. Both used to read
+    # `agent_context_token_budget`, so nothing reduced until 100k and then the cheap edit and the
+    # destructive one fired in the same breath.
+    #
+    # They are different instruments and want different thresholds. Clearing costs nothing and
+    # loses nothing, so it should run early and often; every token it reclaims early is a
+    # conversation group the window never has to reach for. Anthropic's own composition separates
+    # them by an order of magnitude for this reason (30k against 180k in the cookbook's research
+    # agent), and the default here is the same shape against this repository's 100k budget.
+    #
+    # Above the budget it would be pointless — the window would already have fired — so the
+    # validator in `Settings` refuses that rather than letting a deployment set a number that
+    # silently means "unchanged".
+    agent_tool_result_clear_trigger: int = Field(default=30_000, ge=1)
     # Durable working memory for the agent's scratchpad (`agent/scratchpad.py`). Off by default,
     # and the default is about *data* rather than about the code being unproven: enabling it
     # creates the `store`/`store_vectors` tables and starts writing files a turn authored to a

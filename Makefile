@@ -11,7 +11,10 @@ KUBE_VERSION ?= 1.29.0
 # aggregates over two different case-sets are different quantities, and a delta between them looks
 # like a result while meaning nothing. Bump this together with a `make eval-baseline` refresh
 # whenever the case-set itself changes — the mismatch is the tripwire that says you forgot.
-EVAL_CASE_SET_VERSION ?= autonomy-2026-08-01
+# Bumped when the case set itself changes, because a baseline is only comparable to the set it was
+# recorded on — `eval-baseline-check` refuses to compare two versions rather than reporting a drift
+# between different quantities. 2026-08-25 added `autonomy-turn-cost`.
+EVAL_CASE_SET_VERSION ?= autonomy-2026-08-25
 
 # The two patterns that classify `deps-audit`'s output. Named here rather than inlined in the
 # recipe so `tests/test_deploy_chart.py` can assert the classification against the same strings
@@ -36,7 +39,7 @@ SHELL := bash
 
 .DEFAULT_GOAL := help
 
-.PHONY: help install lint type test cov check ci chat db-migrate db-grants schedules-apply kg-validate eval eval-strict eval-baseline eval-baseline-check eln-validate skill-validate connector-validate datasource-validate template-validate connectors prose-validate helm-validate explain user-erase reindex reindex-full up down phoenix-up phoenix-down phoenix-publish deps-audit live-infra live-infra-down live-up live-down live-status live-jobs live-probes live-plan-gate live-degradation live-storm live-soak live-soak-report leak-probe mutants mutant-results
+.PHONY: help install lint type test cov check ci chat db-migrate db-grants schedules-apply kg-validate eval eval-strict eval-baseline eval-baseline-check eln-validate skill-validate connector-validate datasource-validate sink-validate sink-schema template-validate connectors prose-validate helm-validate explain user-erase reindex reindex-full up down phoenix-up phoenix-down phoenix-publish deps-audit live-infra live-infra-down live-up live-down live-status live-jobs live-probes live-plan-gate live-degradation live-storm live-soak live-soak-report leak-probe mutants mutant-results
 
 help:  ## List every target with its one-line description (the default).
 	@# Reads the `## ` comments beside each target, so a new target documents itself the day it is
@@ -79,7 +82,7 @@ check: lint type test  ## The fast inner-loop gate: lint + type + test (no cover
 # alone. Last in the list rather than first: a dependency finding is a real failure but not one
 # that should mask a broken test, and it is the one gate whose fix lives in `uv.lock` rather than
 # in the diff under review.
-ci: lint type cov kg-validate eval-strict eln-validate skill-validate connector-validate datasource-validate template-validate prose-validate helm-validate deps-audit  ## The full pre-push gate: lint + type + coverage + all validators + the dependency audit (what CI runs).
+ci: lint type cov kg-validate eval-strict eln-validate skill-validate connector-validate datasource-validate sink-validate template-validate prose-validate helm-validate deps-audit  ## The full pre-push gate: lint + type + coverage + all validators + the dependency audit (what CI runs).
 
 chat:  ## Chat with the agent from the terminal (admin/testing mode; needs ANTHROPIC_API_KEY).
 	uv run chemclaw --admin
@@ -99,8 +102,8 @@ db-grants:  ## Reconcile the runtime role's privileges (run after db-migrate, on
 schedules-apply:  ## Create/update the Temporal Schedules for the periodic background jobs.
 	uv run python -m chemclaw.cli.schedules
 
-kg-validate:  ## Validate the knowledge graph (schema, duplicate ids, broken links).
-	uv run python -m chemclaw.kg.validate
+kg-validate:  ## Validate the knowledge graph (schema, duplicate ids, broken links, citations).
+	uv run python -m chemclaw.cli.validate_kg
 
 eval:  ## Score the versioned eval case-set and print the citable report (Phase 2b).
 	uv run python -m chemclaw.evals.harness
@@ -112,7 +115,11 @@ eval-baseline-check:  ## Score the case-set against data/evals/baseline.json and
 	uv run python -m chemclaw.evals.harness --case-set-version $(EVAL_CASE_SET_VERSION) --baseline
 
 eval-baseline:  ## Regenerate data/evals/baseline.json from a scoring run (after a reviewed change).
-	uv run python -m chemclaw.cli.refresh_baseline
+# The version is passed, and it has to be: `refresh_baseline` defaults to "unversioned" while
+# `eval-baseline-check` asks for $(EVAL_CASE_SET_VERSION), so the two targets used to disagree and a
+# regenerated baseline failed the very check it was regenerated for. Found by running them in
+# sequence, which is what adding a case makes you do.
+	uv run python -m chemclaw.cli.refresh_baseline --case-set-version $(EVAL_CASE_SET_VERSION)
 
 eln-validate:  ## Validate the ELN export's reactions (RDKit structure + mass balance).
 	uv run python -m chemclaw.ingest.eln.validate
@@ -125,6 +132,12 @@ connector-validate:  ## Validate the connector bundles (manifests, declarations,
 
 datasource-validate:  ## Validate the data-source manifests (halves resolve, config binds, names exist).
 	uv run python -m chemclaw.cli.validate_datasources
+
+sink-validate:  ## Validate the result-sink manifests (drivers resolve, config binds, names exist).
+	uv run python -m chemclaw.cli.validate_sinks
+
+sink-schema:  ## Print the DDL + registry seed a results database needs (apply it yourself).
+	uv run python -m chemclaw.cli.sink_schema --all
 
 template-validate:  ## Validate the step templates (steps, references, tools/jobs/profiles named).
 	uv run python -m chemclaw.cli.validate_templates

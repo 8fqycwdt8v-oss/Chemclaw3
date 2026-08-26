@@ -1,0 +1,71 @@
+{
+  "probe": {
+    "id": "ws-01",
+    "section": 17,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "I have four Suzuki runs to compare and I keep losing track. Work through them one at a time and keep a running table as you go, then give me the summary at the end: 2 mol% Pd(PPh3)4 in dioxane/water 80 C gave 71%, 1.5 mol% Pd(OAc)2/SPhos same solvent gave 88%, 1.5 mol% Pd(OAc)2/SPhos in 2-MeTHF/water gave 84%, and 0.5 mol% Pd(OAc)2/SPhos in 2-MeTHF/water gave 52%.",
+    "expects_tools": [
+      "write_file",
+      "read_file",
+      "edit_file"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a yield, loading or solvent that was not in the question",
+      "that the table was saved anywhere the asker can open later"
+    ],
+    "direction": "The four runs are given, so nothing has to be looked up; what is being tested is whether the model uses the scratchpad it has instead of holding four rows in prose and dropping one. A good answer builds the table as it goes and then reports it whole, with all four rows and their numbers intact. The chemistry conclusion is the easy part and should be there too — SPhos is worth more than the extra palladium, 2-MeTHF costs about four points against dioxane, and 0.5 mol% is below whatever this substrate needs. What it must not do is imply the table persists: the scratchpad is this turn's, and an answer promising the asker can \"open it later\" has invented a filing cabinet.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "ws-01",
+    "section": 17,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "I have four Suzuki runs to compare and I keep losing track. Work through them one at a time and keep a running table as you go, then give me the summary at the end: 2 mol% Pd(PPh3)4 in dioxane/water 80 C gave 71%, 1.5 mol% Pd(OAc)2/SPhos same solvent gave 88%, 1.5 mol% Pd(OAc)2/SPhos in 2-MeTHF/water gave 84%, and 0.5 mol% Pd(OAc)2/SPhos in 2-MeTHF/water gave 52%.",
+    "answer": "Two notes cover this coupling; both are cited above.Two notes cover this coupling; both are cited above.",
+    "answered": true,
+    "tools_called": [
+      "find_notes"
+    ],
+    "tool_results": [
+      {
+        "tool": "find_notes",
+        "preview": "[NoteRef(id='bo-suzuki-next', type='bo-candidate', compound_smiles=None, tags=['bo', 'suggestion'], created_by='human', source='seed-corpus', confidence=0.5, valid_from=None, valid_to=None), NoteRef(i"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [
+      "bo",
+      "calc",
+      "molfp",
+      "rxnfp"
+    ],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 4.36,
+    "event_counts": {
+      "capability_degraded": 1,
+      "token": 4,
+      "tool_call": 1,
+      "tool_result": 1,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "edaf3a8397b349e198944a8416f9fb6b",
+    "first_degraded_index": 1,
+    "first_output_index": 2,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

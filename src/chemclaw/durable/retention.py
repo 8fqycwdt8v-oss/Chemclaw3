@@ -141,6 +141,15 @@ _PRUNABLE: dict[str, tuple[str, str]] = {
     "session_events": ("created_at", "consumed_at IS NOT NULL"),
     "session_messages": ("created_at", "TRUE"),
     "tool_result_blobs": ("created_at", "TRUE"),
+    # **Delivered rows only**, and the predicate is the whole point rather than an optimization. A
+    # delivered publication is a receipt for something that now lives in two places, so keeping
+    # every one forever would be a third copy of every result this deployment has computed. A
+    # `pending` or `failed` row is the only record that something has *not* been published, and
+    # sweeping it on a clock would turn a results-store outage into a silent gap — which is the
+    # exact failure the outbox exists to prevent. Dated by `delivered_at`, not `enqueued_at`: a row
+    # that waited three weeks for a destination to come back should be kept for its full window
+    # after it finally arrived, not deleted on arrival.
+    "result_publications": ("delivered_at", "state = 'delivered'"),
     "checkpoints": ("(checkpoint->>'ts')::timestamptz", "TRUE"),
 }
 
@@ -279,6 +288,7 @@ def _window_days(table: str) -> int:
         "session_events": settings.retention_session_events_days,
         "session_messages": settings.retention_session_messages_days,
         "tool_result_blobs": settings.retention_tool_results_days,
+        "result_publications": settings.retention_result_publications_days,
         "checkpoints": settings.retention_checkpoints_days,
     }[table]
 

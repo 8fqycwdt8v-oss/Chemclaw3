@@ -421,10 +421,13 @@ def _connector_token_envs() -> set[str]:
         for endpoint in (manifest.endpoint,)
         if isinstance(endpoint, HttpEndpoint) and isinstance(endpoint.auth, BearerAuth)
     }
-    # The calculation server's bearer, whose name is a *setting's value* rather than a manifest
-    # field. Read the same way — off the declaration, never hard-coded — so renaming the variable
-    # in config keeps this gate correct with no edit here.
+    # The two out-of-release servers' bearers, whose names are *settings' values* rather than
+    # manifest fields — neither server's manifest is mounted here, deliberately, because these are
+    # internal primitives and mounting them would put them in the agent's prompt. Read off the
+    # declarations, never hard-coded, so renaming either variable in config keeps this gate correct
+    # with no edit here.
     declared.add(settings.calc_server_token_env.removeprefix("CHEMCLAW_").lower())
+    declared.add(settings.rxnlabel_server_token_env.removeprefix("CHEMCLAW_").lower())
     return declared
 
 

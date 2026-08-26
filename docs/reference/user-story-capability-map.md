@@ -114,7 +114,7 @@ stories turn on it.
 
 **`project` is the one to be careful about.** It looks like a field and is a migration: `Note` has
 no project field at all. When this audit was written `OrdReaction.project` never reached the graph
-either, because `ingest/eln/note.py` wrote no tags — measured on the committed corpus, 6 of 993
+either, because `ingest/eln/record.py` wrote no tags — measured on the committed corpus, 6 of 993
 reaction notes carried any tag — and `kg/analytics.py` reported a set difference over free-text
 tags (`playbook`, `solvent`, `suzuki`) under the name `projects_without_distillation`, which is how
 a correctly-computed field produced a fabricated portfolio status report in the live run.

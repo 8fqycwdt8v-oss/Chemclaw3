@@ -62,9 +62,11 @@ from chemclaw.core.config.evals import EvalSettings
 from chemclaw.core.config.fingerprints import FingerprintSettings
 from chemclaw.core.config.hpc import HpcSettings
 from chemclaw.core.config.kg import KgSettings
+from chemclaw.core.config.labels import LabelSettings
 from chemclaw.core.config.llm import LlmSettings
 from chemclaw.core.config.memory import MemorySettings
 from chemclaw.core.config.observability import ObservabilitySettings
+from chemclaw.core.config.publish import PublishSettings
 from chemclaw.core.config.reports import ReportSettings
 from chemclaw.core.config.retrieval import (
     NOTE_INDEX_SOURCES,
@@ -94,9 +96,11 @@ __all__ = [
     "FingerprintSettings",
     "HpcSettings",
     "KgSettings",
+    "LabelSettings",
     "LlmSettings",
     "MemorySettings",
     "ObservabilitySettings",
+    "PublishSettings",
     "ReportSettings",
     "RetrievalSettings",
     "ServiceSettings",
@@ -122,12 +126,14 @@ class Settings(
     KgSettings,
     EvalSettings,
     FingerprintSettings,
+    LabelSettings,
     ElnSettings,
     SourcesSettings,
     ConnectorSettings,
     MemorySettings,
     RetrievalSettings,
     ReportSettings,
+    PublishSettings,
 ):
     """Environment configuration, loaded from process env then a local `.env`.
 
@@ -156,6 +162,11 @@ class Settings(
         worth writing down is worth failing on. (Counted in the list below, not in this sentence —
         a number in prose beside a list is a number that goes stale.)
 
+        - **A tool-result clear trigger above the conversation budget.** The lossless edit was
+          split off from the budget precisely so it could fire first; setting it higher means it
+          never fires before the window does, which is the behaviour the split removed. The
+          inverted setting is the worse of the two possible misconfigurations because it looks
+          like it took effect.
         - **`service_uvicorn_workers > 1` silently breaks five per-process guarantees.** Until
           those have a shared story (shared rate limiter, shared budget tracker, shared attachment
           store, shared session LRU, shared metrics scrape), the knob is a foot-gun that offers no
@@ -189,6 +200,14 @@ class Settings(
           "does anything in this deployment write `note_index`", and `note_reindex_enabled` is the
           third way that happens — the scheduled rebuild, which needs no retrieve source at all.
         """
+        if self.agent_tool_result_clear_trigger > self.agent_context_token_budget:
+            raise ValueError(
+                "agent_tool_result_clear_trigger must not exceed agent_context_token_budget: the "
+                "lossless tool-result edit exists to run *before* the destructive conversation "
+                "window, and setting it above the budget silently restores the single-threshold "
+                "behaviour it was split off from — a misconfiguration that looks like it took "
+                "effect (agent/compaction.py::context_compaction_middleware)."
+            )
         if self.service_uvicorn_workers > 1:
             raise ValueError(
                 "service_uvicorn_workers>1 silently breaks five per-process guarantees until they "

@@ -10,6 +10,7 @@ import asyncio
 from pathlib import Path
 from typing import Any
 
+from chemclaw.ingest.eln.records import InMemoryReactionRecordStore
 from chemclaw.retrieval.evidence import EvidenceChunk, SourceRetriever
 from chemclaw.retrieval.harness import (
     Claim,
@@ -310,16 +311,16 @@ def test_graph_retriever_excerpt_strips_wikilinks(tmp_path: Path) -> None:
     asyncio.run(_run())
 
 
-def test_fingerprint_retriever_cites_reaction_notes() -> None:
-    """The fingerprint retriever cites reaction notes for structurally similar reactions."""
+def test_fingerprint_retriever_cites_reaction_records() -> None:
+    """The fingerprint retriever cites reaction records for structurally similar reactions."""
 
     async def _run() -> None:
         store = InMemoryFingerprintStore()
         await store.add(record_for_reaction("eln-1", _ESTER))
-        retriever = FingerprintReactionRetriever(store)
+        retriever = FingerprintReactionRetriever(store, InMemoryReactionRecordStore())
 
         hits = await retriever.retrieve(_ESTER, {})
-        assert hits[0].source_note_id == "reaction-eln-1"  # cites the reaction note
+        assert hits[0].source_note_id == "reaction-eln-1"  # cites the reaction record
         # A prose (non-reaction-SMILES) query yields no evidence, not an error.
         assert await retriever.retrieve("what was the yield?", {}) == []
 

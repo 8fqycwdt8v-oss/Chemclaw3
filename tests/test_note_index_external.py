@@ -237,3 +237,44 @@ async def test_retiring_a_note_removes_its_point_too(tmp_path: Path) -> None:
     assert [match.id for match in await store.search(COLLECTION, [0.0, 1.0], 5)] == [], (
         "the retired note's vector is gone from the store, not just from the catalogue"
     )
+
+
+@_sync
+async def test_switching_provider_re_embeds_rather_than_returning_nothing(tmp_path: Path) -> None:
+    """A deployment whose notes were in Postgres must not silently lose its dense leg on the move.
+
+    The defect this pins is the one `infra/sql/039` was written about, one backend over. A cluster
+    already running an external store for its *documents* gets its notes moved here too, because
+    `vector_store_provider` is one switch. Every `note_index` row is still present with a matching
+    `embedding_key`, so a fingerprint diff keyed only on the model sees nothing to do — while the
+    store holds no note vector at all. `reindex_notes` returns 0, and `search_dense` answers from an
+    empty collection: no hits, no error, until somebody runs `--full` by hand.
+
+    Namespacing the stored key by the collection is what makes the move self-healing.
+    """
+    _write_note(tmp_path, "reaction-a", "Ester A")
+    store = InMemoryVectorStore()
+    postgres = await _fresh_index(store)  # empties note_index, then hands back the external index
+
+    # Stage the "before" state: rows written by the *Postgres* index, i.e. the bare embedding key.
+    plain = PostgresNoteIndex()
+    assert await reindex_notes(plain, notes_dir=str(tmp_path)) == 1
+    assert set(await plain.fingerprints(await _key())) == {"reaction-a"}
+
+    # Now the same corpus through the external index, as an upgrade would.
+    assert await postgres.fingerprints(await _key()) == {}, (
+        "the catalogue's rows must not claim a vector this store has never held"
+    )
+    assert await reindex_notes(postgres, notes_dir=str(tmp_path)) == 1, "the note is re-embedded"
+
+    # And the vector landed where the search will look for it, which is the whole point: before the
+    # fix this returned nothing at all, from an empty collection, with no error anywhere.
+    hits = await postgres.search_dense(await _embed("Ester A"), 5)
+    assert [hit.note_id for hit in hits] == ["reaction-a"]
+    assert set(await postgres.fingerprints(await _key())) == {"reaction-a"}
+
+
+async def _embed(text: str) -> list[float]:
+    from chemclaw.core.embeddings import embed_texts
+
+    return embed_texts([text])[0]

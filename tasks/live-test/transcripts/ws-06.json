@@ -1,0 +1,69 @@
+{
+  "probe": {
+    "id": "ws-06",
+    "section": 17,
+    "persona": "manager",
+    "bucket": "A",
+    "question": "What am I currently signed up to hear about? I set a few of these up weeks ago and I have stopped trusting that they are still live.",
+    "expects_tools": [
+      "list_watches"
+    ],
+    "expects_job": false,
+    "forbids_claims": [
+      "a watch that does not exist",
+      "a delivery history, read receipt or notification that was sent"
+    ],
+    "direction": "A plain read of this asker's subscriptions. The distrust in the question is the thing to answer: say what is registered and what each one is watching, and if the answer is nothing, say nothing — a manager who believes three watches are live and has none is exactly the person this probe exists for. It must not claim anything about whether notifications were *delivered*; the register records subscriptions, not deliveries, and conflating the two is how the answer becomes reassuring and wrong.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "ws-06",
+    "section": 17,
+    "persona": "manager",
+    "bucket": "A",
+    "question": "What am I currently signed up to hear about? I set a few of these up weeks ago and I have stopped trusting that they are still live.",
+    "answer": "Two notes cover this coupling; both are cited above.Two notes cover this coupling; both are cited above.",
+    "answered": true,
+    "tools_called": [
+      "find_notes"
+    ],
+    "tool_results": [
+      {
+        "tool": "find_notes",
+        "preview": "[NoteRef(id='bo-suzuki-next', type='bo-candidate', compound_smiles=None, tags=['bo', 'suggestion'], created_by='human', source='seed-corpus', confidence=0.5, valid_from=None, valid_to=None), NoteRef(i"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [
+      "bo",
+      "calc",
+      "molfp",
+      "rxnfp"
+    ],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 4.35,
+    "event_counts": {
+      "capability_degraded": 1,
+      "token": 4,
+      "tool_call": 1,
+      "tool_result": 1,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "49a0e42e54334d70be0ed39dc4268e7e",
+    "first_degraded_index": 1,
+    "first_output_index": 2,
+    "specialists": [],
+    "plan_refusals": [],
+    "tokens": null
+  }
+}

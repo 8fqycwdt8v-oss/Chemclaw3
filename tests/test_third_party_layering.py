@@ -172,6 +172,20 @@ _ALLOWED_MODULE_STACKS: dict[Edge, str] = {
     ("chemclaw.core", "temporal"): "core/temporal_client.py is the one client-per-process",
     ("chemclaw.core", "http"): "core/asgi.py + core/worker_http.py are the shared ASGI primitives",
     ("chemclaw.core", "rdkit"): "core/chem.py canonicalises SMILES for every layer",
+    # `core/mcp_session.py` is the one *outbound* MCP client session, beside `core/db.py`'s pool and
+    # `core/http.py`'s client factory. It is here rather than in `connectors/` because the second
+    # caller is `ingest/labels/labeller.py`, and `ingest -> connectors` is not an edge this tree
+    # has: putting it there would have meant either a new layering edge or a second copy of four
+    # separately-measured hazards (the connect bound behind a long read bound, the timeout ordering
+    # that decides whether a lost answer raises, the credential-rejection walk through the task
+    # group's ExceptionGroup, and the internal-error string that decides retry-or-die).
+    #
+    # Note the direction: this is a *client*. `connectors -> mcp` below is the server half, and the
+    # two allowances are independent — the kernel serves nothing.
+    ("chemclaw.core", "mcp"): (
+        "core/mcp_session.py is the one outbound MCP client session; its second caller is in "
+        "ingest/, which may not import connectors/"
+    ),
     # `core/turn_signals.py` publishes a turn's out-of-band signals through `get_stream_writer()`.
     #
     # This is a real coupling the contextvar it replaced did not have, and it is declared rather
@@ -228,6 +242,14 @@ _ALLOWED_MODULE_STACKS: dict[Edge, str] = {
     ("chemclaw.science", "ml"): "science/bo is BoFire on BoTorch on torch",
     ("chemclaw.science", "postgres"): "the calculation cache is a table (D-011)",
     # the leaf packages: each owns its own tables and nothing else.
+    # publish: the outbound result seam (D-2026-08-25). It reaches an external results store, so
+    # a database client and an HTTP client are its two shipped drivers rather than an exception to
+    # anything — the seam exists precisely to hold them. `postgres` is also the *local* outbox,
+    # which is a table like every other durable queue in this tree.
+    ("chemclaw.publish", "postgres"): (
+        "the outbox is a table, and the shipped SQL driver reaches a Postgres results store"
+    ),
+    ("chemclaw.publish", "httpx"): "the shipped HTTP driver POSTs records to a results service",
     ("chemclaw.kg", "postgres"): "the note-proposal store",
     ("chemclaw.ingest", "postgres"): "the document chunk index",
     ("chemclaw.ingest", "rdkit"): "an ELN row's structure is canonicalised on the way in",
