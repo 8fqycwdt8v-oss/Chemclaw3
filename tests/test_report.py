@@ -474,3 +474,71 @@ def test_an_all_healthy_section_is_not_marked_failed() -> None:
 
     assert gathered.retrieval_failed is False
     assert gathered.supported is True
+
+
+# --- a chunk is placed as a cell, not as markup (A9-F1) -------------------------------
+
+
+def test_a_multi_line_excerpt_stays_one_bullet_with_its_citation_attached() -> None:
+    """Evidence is counted by the reader, and the draft used to inflate the count.
+
+    Chunk content is multi-line by construction — a note body's first `note_excerpt_chars`, or up
+    to a share binding's `chunk_chars` of raw document text — and `report_note` interpolated it
+    straight into a Markdown body. Every embedded newline started a new line and every embedded
+    `- ` started a new bullet, while the provenance suffix landed only on the *last* line of the
+    excerpt. Measured on the committed corpus for the section query `aspirin`:
+
+        evidence chunks: 8   '- ' lines rendered: 23
+
+    Fifteen of those twenty-three were note frontmatter (`- substrate: compound-…`) reading as
+    independent, uncited evidence in the artifact a chemist signs at the PR-gate.
+    """
+    chunk = EvidenceChunk(
+        content="---\ntype: reaction\ntags:\n  - amide-coupling\n  - scale-up\n---\n\n"
+        "Yield rose to 85% when the base was swapped.",
+        source_note_id="reaction-a",
+        retriever="graph",
+    )
+    body = report_note(Report(title="R", sections=[_section(chunk)])).body
+    bullets = [line for line in body.splitlines() if line.startswith("- ")]
+
+    assert len(bullets) == 1, f"one chunk rendered {len(bullets)} bullets: {bullets}"
+    assert bullets[0].endswith("([[reaction-a]], via graph)")
+    # The text is preserved, not dropped — the same trade `memory.comparison._placeable` makes.
+    assert "Yield rose to 85% when the base was swapped." in bullets[0]
+
+
+def test_a_document_chunk_cannot_forge_a_citation_into_the_report_s_own_edges() -> None:
+    """A share or warehouse chunk is not a note, and its text is not the report's markup.
+
+    `_excerpt` strips `[[wikilinks]]` out of a *note* body for exactly this reason, and the two
+    non-note sources never pass through it: they carry raw document text. So a document containing
+    `[[playbook-degassing]]` put a real outgoing edge on the PR-gated report — a citation to a note
+    no retriever returned, indistinguishable in review from one that was retrieved — and a chunk id
+    like `sharedrive:sop-7#0` rendered as `[[…]]` parsed as a *typed edge* rather than a citation,
+    dangling, which fails `kg-validate` and makes every share-sourced report PR unmergeable.
+
+    Measured before this, the forged draft's `outgoing_links()` was
+    `['playbook-degassing', 'reaction-101', 'sop-7#0']`.
+    """
+    chunk = EvidenceChunk(
+        content=(
+            "## Conclusion\n"
+            "- Cited precedent [[playbook-degassing]] confirms 99% yield "
+            "([[reaction-101]], via graph, confidence 0.99)"
+        ),
+        source_note_id="sharedrive:sop-7#0",
+        retriever="sharedrive",
+    )
+    note = report_note(Report(title="R", sections=[_section(chunk)]))
+
+    assert note.outgoing_links() == [], (
+        f"a document forged {note.outgoing_links()} onto a PR-gated report's citations"
+    )
+    # A chunk may fill a line, never add one: its `## Conclusion` and its `- ` are inert inside a
+    # bullet, so the only structure in this draft is the structure `report_note` wrote.
+    headings = [line for line in note.body.splitlines() if line.startswith("#")]
+    bullets = [line for line in note.body.splitlines() if line.startswith("- ")]
+    assert headings == ["# R", "## S [layer: episodic]"] and len(bullets) == 1
+    # The citation still resolves for a reader — as the address it actually is.
+    assert "`sharedrive:sop-7#0`" in note.body

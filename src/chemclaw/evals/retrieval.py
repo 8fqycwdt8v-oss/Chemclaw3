@@ -182,7 +182,7 @@ def _retrieved_ids(case: EvalCase) -> list[str]:
     return list(ids)
 
 
-@metric("retrieval_recall", Direction.HIGHER_IS_BETTER)
+@metric("retrieval_recall", Direction.HIGHER_IS_BETTER, live=True)
 def retrieval_recall(case: EvalCase) -> MetricResult:
     """Fraction of the gold expected sources that retrieval actually surfaced (KM-13).
 
@@ -204,7 +204,7 @@ def retrieval_recall(case: EvalCase) -> MetricResult:
     )
 
 
-@metric("retrieval_precision", Direction.HIGHER_IS_BETTER)
+@metric("retrieval_precision", Direction.HIGHER_IS_BETTER, live=True)
 def retrieval_precision(case: EvalCase) -> MetricResult:
     """Fraction of retrieved notes that are gold-relevant — a diagnostic, not gated (KM-13).
 

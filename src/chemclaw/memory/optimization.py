@@ -15,9 +15,8 @@ skeleton is deterministic; the analysis (which change was the lever, what to try
 from pydantic import BaseModel
 
 from chemclaw.core.config import settings
-from chemclaw.core.reagents import resolve_compound_name
 from chemclaw.ingest.eln.ord import Impurity, OrdReaction
-from chemclaw.kg.note import Note
+from chemclaw.kg.note import Note, strip_links
 from chemclaw.memory.comparison import (
     MISSING,
     cell,
@@ -53,25 +52,6 @@ def find_optimization_campaigns(
         for cluster in cluster_by_similarity(fingerprints, floor)
         if len(cluster) >= 2
     ]
-
-
-def canonical_condition(species: str) -> str:
-    """Fold a condition species to one canonical token (gap KNW-4).
-
-    `DMF`, `N,N-dimethylformamide` and `CN(C)C=O` are the same solvent and were three unrelated
-    tokens to every lexical and grouping path, so an optimization campaign could be split in two by
-    spelling alone. Resolution reuses the one identity table (`chemclaw.core.reagents`), so the
-    vocabulary here cannot drift from the one every other in-process caller uses. That guarantee is
-    now bounded by the process: after `D-2026-08-16-the-physics-leaves-the-cache-stays` the
-    calculators and the hazard screen answer from `Chemclaw3-mcp`, each carrying its own reagent
-    table, and a shared import no longer holds them together.
-
-    An unrecognised species folds to its own trimmed, lowercased form rather than being dropped:
-    an unknown reagent is still a real condition, and losing it would silently merge campaigns that
-    genuinely differ.
-    """
-    match = resolve_compound_name(species)
-    return match.smiles if match is not None else species.strip().lower()
 
 
 def optimization_campaign_note(
@@ -141,10 +121,18 @@ def optimization_campaign_note(
 
 
 def _run_detail(reaction: OrdReaction) -> str:
-    """The per-run block: the hypothesis it tested, then its procedure excerpt (each if any)."""
+    """The per-run block: the hypothesis it tested, then its procedure excerpt (each if any).
+
+    Both are ELN free text — what a technician typed, or a warehouse column a binding mapped — and
+    this block lands in a PR-gated note that a chemist merges and that the graph reads citations
+    out of. So a `[[wikilink]]` in either is stripped to its target: unstripped it was a real
+    outgoing edge to a note the campaign never referenced, forged by whoever wrote the procedure
+    and indistinguishable in review from one this system derived. Same rule and same reason as
+    `retrieval.harness.report_note`, which carried the identical defect over retrieved chunks.
+    """
     lines = []
     if reaction.hypothesis:
-        lines.append(f"  - tested: {' '.join(reaction.hypothesis.split())}")
+        lines.append(f"  - tested: {strip_links(' '.join(reaction.hypothesis.split()))}")
     if excerpt := _excerpt(reaction):
         lines.append(f"  - procedure: {excerpt}")
     if not lines:
@@ -187,5 +175,5 @@ def _excerpt(reaction: OrdReaction) -> str:
     """A short, single-line procedure excerpt for a run (empty when no procedure was recorded)."""
     if not reaction.procedure_text:
         return ""
-    text = " ".join(reaction.procedure_text.split())
+    text = strip_links(" ".join(reaction.procedure_text.split()))
     return text[: settings.note_excerpt_chars]

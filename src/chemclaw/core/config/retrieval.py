@@ -8,7 +8,7 @@ sections shared a single module (D-072 mixins, split per D-156).
 
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings
 
 
@@ -39,8 +39,11 @@ class RetrievalSettings(BaseSettings):
     # *evidence classes*: a validated internal ELN entry and a transferred analogy otherwise
     # fuse identically. Keys are retriever names as they appear on `EvidenceChunk.retriever`; an
     # absent retriever weighs 1.0, and an empty map (the default) is exactly today's uniform
-    # behavior. ENV override is JSON, e.g. CHEMCLAW_RETRIEVAL_SOURCE_WEIGHTS='{"graph": 1.5,
-    # "vector": 0.8}'.
+    # behavior. A weight is applied in *rank* space (`k + rank / weight`) rather than as a
+    # multiplier on the fused score — `retrieval.hybrid.reciprocal_rank_fusion` carries the
+    # measurement of why, and it is the difference between "graph rank 3 fuses like rank 2" and
+    # "the dense leg contributes nothing". ENV override is JSON, e.g.
+    # CHEMCLAW_RETRIEVAL_SOURCE_WEIGHTS='{"graph": 1.5, "vector": 0.8}'.
     retrieval_source_weights: dict[str, float] = Field(default_factory=dict)
     # How much of a source note's body an excerpt carries — shared by the report harness's
     # evidence excerpts and the memory layer's procedure excerpts (one note-excerpt budget,
@@ -206,6 +209,25 @@ class RetrievalSettings(BaseSettings):
     # *which* rows come back, and a recall knob that also perturbs the ranking makes the next
     # measurement ambiguous.
     hnsw_iterative_scan: Literal["off", "strict_order", "relaxed_order"] = "off"
+
+    @field_validator("retrieval_source_weights")
+    @classmethod
+    def _weights_are_positive(cls, value: dict[str, float]) -> dict[str, float]:
+        """Refuse a zero or negative tier factor, which the fusion cannot express.
+
+        A weight divides the rank, so `0` is a division by zero and a negative one inverts the
+        source's own ordering — a deployment would be asking for its worst hit first. Both were
+        also meaningless under the multiplier this replaced (`0` silently deleted a source from
+        every sweep, which is precisely the starvation the knob is meant to prevent), so this is
+        the config saying out loud what the arithmetic always required.
+        """
+        bad = sorted(name for name, weight in value.items() if weight <= 0)
+        if bad:
+            raise ValueError(
+                f"retrieval_source_weights must be positive; {bad} are not. A weight is a tier "
+                "factor applied in rank space, so zero or less names no ordering at all"
+            )
+        return value
 
     @property
     def retrieval_source_weights_map(self) -> dict[str, float] | None:

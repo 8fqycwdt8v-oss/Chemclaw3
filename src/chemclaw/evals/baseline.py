@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING
 from pydantic import BaseModel, Field
 
 from chemclaw.core.errors import ChemclawError
-from chemclaw.evals.metric import Direction, direction_of
+from chemclaw.evals.metric import Direction, direction_of, is_live
 
 if TYPE_CHECKING:  # pragma: no cover - `EvalReport` is needed only as an annotation here.
     # Deferred on purpose: `harness` imports this module for its `--baseline` mode, and importing
@@ -150,6 +150,11 @@ class MetricComparison(BaseModel):
     """
 
     metric: str
+    # Whether scoring this metric ran product code (`live`) or read literals a case file commits
+    # (pinned). Carried on the row because the summary line's "0 of 13 worsened" is otherwise read
+    # as thirteen guarded quantities — eleven of them cannot move for any reason a release can
+    # cause, so a change that halved dense-leg recall passed a CI step that looked comprehensive.
+    live: bool = False
     # None when this build no longer registers the metric at all — it cannot be scored, so it has
     # no direction to report. Never a stand-in value: a guessed direction next to a real delta is
     # exactly the confidently-mis-signed verdict `direction_of` refuses to produce.
@@ -174,6 +179,16 @@ class BaselineComparison(BaseModel):
     def worsened(self) -> list[MetricComparison]:
         """The rows that must fail the command — drift in the bad direction, or a lost metric."""
         return [row for row in self.rows if row.worsening]
+
+    def live_rows(self) -> list[MetricComparison]:
+        """The rows whose score came from running product code — what this gate actually watches.
+
+        The other rows are not worthless: a pinned metric still catches an edited case file or a
+        changed formula, which is a real review signal. They are simply not what a reader assumes
+        when a CI step reports a count of guarded metrics, and the difference is not visible in the
+        numbers.
+        """
+        return [row for row in self.rows if row.live]
 
 
 def is_worsening(alert: DriftAlert) -> bool:
@@ -233,6 +248,7 @@ def compare_to_baseline(
         rows.append(
             MetricComparison(
                 metric=name,
+                live=is_live(name),
                 direction=_known_direction(name),
                 baseline_value=baseline_value,
                 current_value=current_value,
@@ -262,22 +278,36 @@ def render_comparison(comparison: BaselineComparison) -> str:
         f"# Baseline comparison (case-set {comparison.case_set_version}, "
         f"epsilon {comparison.epsilon:g})",
         "",
-        "| Metric | Better | Baseline | Current | Delta | Band | Verdict |",
-        "| --- | --- | --- | --- | --- | --- | --- |",
+        "| Metric | Kind | Better | Baseline | Current | Delta | Band | Verdict |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     for row in comparison.rows:
         current = "—" if row.current_value is None else f"{row.current_value:.6g}"
         delta = "—" if row.current_value is None else f"{row.delta:+.4g}"
         better = "—" if row.direction is None else row.direction.value
         lines.append(
-            f"| {row.metric} | {better} | {row.baseline_value:.6g} | {current} "
+            f"| {row.metric} | {'live' if row.live else 'pinned'} | {better} "
+            f"| {row.baseline_value:.6g} | {current} "
             f"| {delta} | {row.band:.4g} | {_verdict(row)} |"
         )
     worsened = comparison.worsened()
+    live = len(comparison.live_rows())
+    pinned = len(comparison.rows) - live
     lines += [
         "",
         f"**{len(worsened)} of {len(comparison.rows)} baseline metric(s) worsened** beyond the "
         f"noise band.",
+        "",
+        # **The count a reader takes from this line is what the gate covers, so it has to say
+        # what it covers.** A pinned metric is arithmetic over literals a case file commits, so
+        # nothing a release changes can move it — only editing a case or a formula can. Eleven of
+        # the thirteen shipped baseline metrics are that, and the line above read as thirteen
+        # guarded quantities: a change that halved dense-leg recall or broke the fusion left every
+        # pinned row unchanged by construction and the two live rows untouched (they score
+        # `GraphRetriever` only), and CI was green with nothing able to see it. Individual case
+        # files said so; the gate did not.
+        f"{live} live (scored by running product code), {pinned} pinned (arithmetic over "
+        "literals committed in the case files, so only a case or formula edit can move them).",
     ]
     if worsened:
         # Named again below the table: the table is long enough that a single **WORSE** cell in the

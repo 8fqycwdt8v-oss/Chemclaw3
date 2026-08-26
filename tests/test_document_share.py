@@ -56,6 +56,8 @@ from chemclaw.ingest.documents.sync import (
     reembed_stale,
     sync_share,
 )
+from chemclaw.retrieval.evidence import EvidenceChunk
+from chemclaw.retrieval.fanout import sweep_sources
 from chemclaw.retrieval.vectors.base import stored_embedding_key
 from chemclaw.retrieval.vectors.memory import InMemoryVectorStore
 from tests.document_fixtures import (
@@ -847,10 +849,17 @@ def test_an_ungated_share_needs_no_identity(share: dict[str, Any]) -> None:
     assert asyncio.run(retriever.retrieve("palladium catalyst", {})) != []
 
 
-def test_a_backend_failure_yields_no_evidence_instead_of_raising(
+def test_a_backend_failure_raises_so_the_sweep_can_report_it(
     share: dict[str, Any], as_user: Callable[[str, set[str]], None]
 ) -> None:
-    """`gather_evidence` fans out with a bare gather, so one raising leg fails the question."""
+    """An unreachable index is a fact about the deployment, not an answer about the share.
+
+    This used to assert `== []`, on the argument that `gather_evidence` fanned its retrievers out
+    with a bare `asyncio.gather` and one raising leg would lose the whole question. That stopped
+    being true when the sweep became per-source graph branches (`retrieval.fanout`), and what was
+    left was a retriever telling a chemist that a share holds no precedent while its database was
+    down. `_sweep` is the catcher now: it degrades this branch and names the source in `failed`.
+    """
 
     class Broken(InMemoryDocumentIndex):
         async def search_dense(self, *args: Any, **kwargs: Any) -> Any:
@@ -858,7 +867,13 @@ def test_a_backend_failure_yields_no_evidence_instead_of_raising(
 
     retriever = ShareDocumentRetriever(binding=share, name=SOURCE, index=Broken())
     as_user("user-1", {"sharedrive.reader"})
-    assert asyncio.run(retriever.retrieve("anything", {})) == []
+    with pytest.raises(ConnectionError):
+        asyncio.run(retriever.retrieve("anything", {}))
+
+    ranked, failed = asyncio.run(sweep_sources([(SOURCE, retriever)], "anything", {}))
+    assert ranked == [[]] and failed == [SOURCE], (
+        "the branch must report a failure, not the zero-chunk answer of a healthy quiet source"
+    )
 
 
 def test_an_embedding_provider_failure_costs_this_leg_and_no_other(
@@ -866,17 +881,15 @@ def test_an_embedding_provider_failure_costs_this_leg_and_no_other(
 ) -> None:
     """The query is embedded *inside* this leg, so the provider's own errors are this leg's too.
 
-    They are not `DocumentIndexError`, `ConnectionError`, `OSError` or `DocumentShareError`, so an
-    `openai.APIError` from a rate-limited endpoint escaped into `gather_evidence`'s `gather` —
-    which has no `return_exceptions` — and failed the whole turn, including the answer the
-    knowledge graph had already produced. The `except Exception` backstop is what makes the
-    "**Never raises**" docstring true; deleting the whole block left all 52 of this file's tests
-    passing, which is why this one exists. Its sibling in `ingest/eln/warehouse/retriever.py` got
-    the identical test in the same change.
+    A rate-limited endpoint's own exception type is none of the ones this retriever used to
+    enumerate, so it once escaped into `gather_evidence`'s bare `gather` and failed the whole turn.
+    The enumeration and its `except Exception` backstop are both gone: the sweep's branch catches
+    everything, and what this test now pins is that the leg is *reported* rather than silently
+    emptied — the failure this source suffered may not read as the corpus having nothing to say.
     """
 
     class _ProviderError(Exception):
-        """Stands in for a vendor client's own error type, which is in none of the lists above."""
+        """Stands in for a vendor client's own error type, which no handler here enumerates."""
 
     def _refusing(texts: list[str]) -> list[list[float]]:
         raise _ProviderError("429 rate limited")
@@ -886,7 +899,12 @@ def test_an_embedding_provider_failure_costs_this_leg_and_no_other(
     monkeypatch.setattr(retriever_module, "embed_texts", _refusing)
     as_user("user-1", {"sharedrive.reader"})
 
-    assert asyncio.run(_entitled_retriever(share, index).retrieve("yield", {})) == []
+    retriever = _entitled_retriever(share, index)
+    with pytest.raises(_ProviderError):
+        asyncio.run(retriever.retrieve("yield", {}))
+
+    ranked, failed = asyncio.run(sweep_sources([(SOURCE, retriever)], "yield", {}))
+    assert ranked == [[]] and failed == [SOURCE]
 
 
 def test_a_note_type_filter_returns_nothing_rather_than_ignoring_it(
@@ -1187,14 +1205,15 @@ def test_a_wedged_drain_leaves_has_more_set_for_the_guard() -> None:
 # --- one bad thing must not stop everything -----------------------------------------------------
 
 
-def test_a_backend_failure_returns_no_evidence_rather_than_failing_the_turn(
+def test_a_statement_timeout_degrades_this_leg_and_leaves_the_others_answering(
     share: dict[str, Any],
 ) -> None:
-    """`gather_evidence` fans retrievers out with a bare `asyncio.gather`, no return_exceptions.
+    """A statement timeout costs this source and not the turn — as a *reported* failure.
 
-    So a raising leg does not degrade a question — it fails the whole thing, knowledge graph and
-    all. `psycopg.Error` descends from `Exception`, not `OSError`, so it used to sail straight
-    through the handler whose docstring promises this never happens.
+    `psycopg.Error` descends from `Exception` and not from `OSError`, which is why the retriever's
+    enumerated handlers never caught it; wrapping it in `DocumentIndexError` at the raiser is what
+    gave it a type this layer can name. Reaching the sweep is what makes it visible: the graph leg
+    beside it still answers, and `failed` says the share did not.
     """
     import psycopg
 
@@ -1202,10 +1221,27 @@ def test_a_backend_failure_returns_no_evidence_rather_than_failing_the_turn(
         async def search_dense(self, *args: Any, **kwargs: Any) -> Any:
             raise DocumentIndexError("search failed: statement timeout") from psycopg.Error()
 
+    class _Graph:
+        """The healthy leg beside it, which must keep its hits."""
+
+        name = "graph"
+
+        async def retrieve(self, _q: str, _f: dict[str, Any]) -> list[EvidenceChunk]:
+            return [
+                EvidenceChunk(
+                    content="Pd/C 5% in ethanol", source_note_id="rxn-1", retriever="graph"
+                )
+            ]
+
     retriever = ShareDocumentRetriever(
         {**share, "required_roles": [], "public": True}, name=SOURCE, index=Exploding()
     )
-    assert asyncio.run(retriever.retrieve("catalyst", {})) == []
+    ranked, failed = asyncio.run(
+        sweep_sources([("graph", _Graph()), (SOURCE, retriever)], "catalyst", {})
+    )
+
+    assert [len(chunks) for chunks in ranked] == [1, 0]
+    assert failed == [SOURCE]
 
 
 def test_a_backend_failure_is_reported_without_the_driver_s_connection_details(
@@ -2031,3 +2067,59 @@ def test_moving_the_document_corpus_to_another_store_re_embeds_it() -> None:
         )
 
     asyncio.run(_run())
+
+
+def test_neither_backend_ranks_a_chunk_from_a_superseded_embedding_configuration() -> None:
+    """`document_chunks.embedding_key` decided what got re-embedded and nothing about the search.
+
+    A share's chunks are the evidence a report cites, and an operator repointing `embedding_model`
+    or `llm_base_url` at another model of the same width raises nothing at insert. Every stored
+    vector then belongs to model A while every query is embedded by model B: the cosines stay
+    positive, so the `> 0` floor keeps them, and the chunks that come back are arbitrary text with
+    a real file path attached. The re-embed that heals it is a scheduled drain, so the window is at
+    least one pass over the share.
+
+    Asserted on both backends together, because the reference is only worth anything while it
+    answers the way the statement production runs does.
+    """
+
+    async def _run(monkeypatch: pytest.MonkeyPatch) -> None:
+        await migrated_db_or_skip()
+        async with await connect(settings.postgres_dsn) as conn:
+            await conn.execute("TRUNCATE document_files, document_chunks")
+            await conn.commit()
+
+        (vector,) = await asyncio.to_thread(embed_texts, ["palladium catalyst deactivation"])
+        stale = embedding_config_key()
+        file_row = FileRecord(
+            path="SOPs/protocol.txt",
+            source=SOURCE,
+            doc_id="doc-1",
+            fingerprint="1:2",
+            chunking_key="400:40",
+        )
+        chunk = ChunkRecord(
+            doc_id="doc-1",
+            chunking_key="400:40",
+            ordinal=0,
+            content="The palladium catalyst deactivated above 80 degrees.",
+            coordinate="page 1",
+            embedding=vector,
+        )
+
+        for index in (PostgresDocumentIndex(), InMemoryDocumentIndex()):
+            await index.upsert([file_row], [chunk], stale)
+            found = await index.search_dense(SOURCE, vector, 5, DocumentFilter())
+            assert found, f"{type(index).__name__}: sanity, findable under its own key"
+
+        with monkeypatch.context() as swapped:
+            swapped.setattr(settings, "embedding_model", "another-model-of-the-same-width")
+            assert embedding_config_key() != stale
+            for index in (PostgresDocumentIndex(), InMemoryDocumentIndex()):
+                hits = await index.search_dense(SOURCE, vector, 5, DocumentFilter())
+                assert hits == [], (
+                    f"{type(index).__name__} cited a model-A chunk against a model-B query: {hits}"
+                )
+
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        asyncio.run(_run(monkeypatch))

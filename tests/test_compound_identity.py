@@ -27,7 +27,7 @@ from chemclaw.core.reagents import display_name, known_names, resolve_compound_n
 from chemclaw.ingest.eln.compound import compound_note
 from chemclaw.kg.note import KNOWN_NOTE_TYPES
 from chemclaw.kg.render import render_note
-from chemclaw.memory.optimization import canonical_condition
+from chemclaw.memory.progression import canonical_condition
 from chemclaw.science.fingerprints.molfp.fingerprint import ecfp_bitstring, molecule_definition
 from chemclaw.science.fingerprints.molfp.search import (
     find_similar_molecules,

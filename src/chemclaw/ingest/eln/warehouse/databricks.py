@@ -253,9 +253,12 @@ class DatabricksWarehouse:
         **The one thing this driver was missing.** `_connect` memoizes and nothing ever cleared it,
         while a Databricks SQL session is emphatically not permanent: it expires, and the warehouse
         behind it can be stopped or scaled to zero overnight. Every statement afterwards failed
-        against the same dead handle for the life of the pod — in the retriever, swallowed by the
-        `except Exception` backstop so the ELN simply stopped answering while the pod read healthy;
-        in a sync activity, on every attempt and every Temporal retry.
+        against the same dead handle for the life of the pod — in the retriever, where an
+        `except Exception` backstop turned it into an empty result, so the ELN simply stopped
+        answering while the pod read healthy; in a sync activity, on every attempt and every
+        Temporal retry. That backstop is gone and the failure reaches `fanout._sweep`, which is
+        what makes a dead session visible rather than merely survivable — but the reconnect below
+        is still what stops it recurring.
 
         The seam has no lifecycle hook to close a connection from (`driver.Warehouse` says why it
         has no `close`), and it does not need one: what has to be dropped is the *session*, not the

@@ -280,10 +280,12 @@ async def test_a_binding_with_no_where_and_no_filter_still_costs_no_scope_query(
 async def test_the_scope_cap_message_reaches_a_default_level_log(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """The message names the operator's lever, and `retrieve` logs only a generic line at WARNING.
+    """The message names the operator's lever, at WARNING, on the way out.
 
     Without this the one actionable sentence sat at DEBUG while a broad filter read to the agent as
-    an empty corpus.
+    an empty corpus. The refusal itself now leaves this leg rather than becoming `[]`, so the
+    "reads as an empty corpus" half is closed at both ends: the sweep reports the source as failed,
+    and the log says which knob turns it back on.
     """
     import logging
 
@@ -291,7 +293,7 @@ async def test_the_scope_cap_message_reaches_a_default_level_log(
     cap = settings.vector_store_max_scope_keys
     try:
         object.__setattr__(settings, "vector_store_max_scope_keys", 1)
-        with caplog.at_level(logging.WARNING):
+        with caplog.at_level(logging.WARNING), pytest.raises(WarehouseQueryError):
             await retriever.retrieve("ester formation", {"since": "2020-01-01"})
     finally:
         object.__setattr__(settings, "vector_store_max_scope_keys", cap)

@@ -13,6 +13,7 @@ about *itself*:
 - **IDEA-5** RRF fused a validated ELN entry and a transferred analogy identically.
 """
 
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -229,6 +230,46 @@ def test_an_unlisted_retriever_keeps_neutral_weight() -> None:
     assert {c.source_note_id for c in ordered} == {"a", "b"}
 
 
+def test_a_weighted_source_cannot_starve_another_source_out_of_the_cap() -> None:
+    """The documented example weight starved a whole retrieval leg to zero surviving chunks.
+
+    RRF's rank term is nearly flat at `k=60` — rank 1 scores 0.01639 and rank 30 scores 0.01111, a
+    ratio of 1.48 across thirty positions — so a *multiplicative* weight does not nudge a tier, it
+    replaces rank with source: at `w = 1.5` a graph hit outranks every other source's best hit for
+    all its own ranks below 31 (`graph rank30 * 1.5 = 0.01667` vs `lexical rank1 = 0.01639`).
+
+    Measured on a 40-chunk sweep of four sources, with the weights the ENV comment in
+    `core/config/retrieval.py` gives as its example:
+
+        weights=None                            -> graph 15 / lexical 8 / share 10 / vector 7
+        weights={'graph': 1.5, 'vector': 0.8}   -> graph 34 / lexical  3 / share  3 / vector 0
+
+    That is literally the "one retrieval leg contributed *zero* chunks" outcome
+    `D-2026-08-01-a-cap-that-starves-a-source` records as the merge design's reason to exist, and
+    nothing reports it: the per-source counters show the vector branch returning its seven chunks,
+    and they all die in the fusion. The invariant pinned here is the general one, not the example —
+    for any weights, every source's rank-1 hit survives a cap of 40 over four sources.
+    """
+    depths = {"graph": 45, "lexical": 8, "vector": 7, "share": 10}
+    lists = [
+        [_chunk(f"{source}-{rank}", source) for rank in range(depth)]
+        for source, depth in depths.items()
+    ]
+    weights = {"graph": 1.5, "vector": 0.8}
+
+    fused = reciprocal_rank_fusion(lists, k=60, weights=weights)[:40]
+    surviving = Counter(chunk.retriever for chunk in fused)
+
+    assert surviving["vector"] > 0, (
+        f"the dense leg contributed nothing to the fused sweep: {dict(surviving)}"
+    )
+    best = {chunk.source_note_id for chunk in fused}
+    assert {f"{source}-0" for source in depths} <= best, (
+        "a weight may reorder tiers; it may not push a source's own best hit below another "
+        f"source's tail — survivors: {dict(surviving)}"
+    )
+
+
 def test_the_distilled_types_are_all_real_note_types() -> None:
     """A typo in `_DISTILLED_TYPES` disables the gap query silently, in the direction of "clean".
 
@@ -267,3 +308,17 @@ def test_hubs_never_name_a_note_that_does_not_exist(tmp_path: Path) -> None:
     # Not dropped — reported as what it is, by the same call, from the same graph.
     assert len(gaps.dangling_links) == 4
     assert "reaction-0 -> compound-pending" in gaps.dangling_links
+
+
+def test_a_non_positive_source_weight_is_refused_by_the_config() -> None:
+    """A weight divides the rank, so zero is a division by zero and a negative one inverts a source.
+
+    Both were meaningless under the multiplier this replaced too — `0` deleted a source from every
+    sweep silently, which is the starvation the knob exists to prevent — so refusing them is the
+    config stating what the arithmetic always required.
+    """
+    from chemclaw.core.config.retrieval import RetrievalSettings
+
+    with pytest.raises(ValidationError, match="must be positive"):
+        RetrievalSettings(retrieval_source_weights={"graph": 0.0})
+    assert RetrievalSettings(retrieval_source_weights={"graph": 1.5}).retrieval_source_weights

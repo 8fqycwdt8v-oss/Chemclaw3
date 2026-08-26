@@ -110,12 +110,26 @@ async def _sweep(state: BranchState, config: RunnableConfig) -> dict[str, Any]:
     name, retriever = sources[index]
     try:
         chunks = await retriever.retrieve(configurable[_QUERY], configurable[_FILTERS])
-    except Exception:
+    except Exception as exc:
         # Through `degraded()` rather than a bare `logger.exception` plus a private counter: this is
         # the repository's chokepoint for "we continued with less", and a swallow that does not go
         # through it is invisible to `chemclaw_degraded_total` and to `tests/test_degraded.py`,
         # which reads the subsystem names out of the source and pins the set.
-        degraded(logger, "evidence_source", "evidence source %r failed; the sweep continues", name)
+        #
+        # **The exception's type is in the line**, because it is what the retrievers used to log
+        # before they were made to raise. Their argument for catching was that a retriever knows
+        # the difference between a transient outage and a missing driver — which is true, and was
+        # a property of the *log* rather than of the answer they returned. Naming the type here
+        # keeps that classification while the fact of the failure travels on to the caller in
+        # `failed`, which is the channel the retrievers' own handlers used to empty.
+        degraded(
+            logger,
+            "evidence_source",
+            "evidence source %r failed with %s; the sweep continues",
+            name,
+            type(exc).__name__,
+        )
+        logger.debug("evidence source %r failure detail", name, exc_info=True)
         record_metric(
             lambda m: m.increment("chemclaw_evidence_source_failures_total", 1, {"source": name})
         )

@@ -19,6 +19,8 @@ from chemclaw.ingest.eln.records import InMemoryReactionRecordStore, ReactionRec
 from chemclaw.ingest.eln.warehouse.binding import BindingError
 from chemclaw.ingest.eln.warehouse.databricks import DatabricksVectorDialect
 from chemclaw.ingest.eln.warehouse.retriever import WarehouseVectorRetriever
+from chemclaw.retrieval.evidence import EvidenceChunk
+from chemclaw.retrieval.fanout import sweep_sources
 from tests import warehouse_fake
 
 _DRIVER = "tests.warehouse_fake:open_fake"
@@ -86,6 +88,18 @@ def _ingested(monkeypatch: pytest.MonkeyPatch, *reaction_ids: str) -> None:
     monkeypatch.setattr(
         "chemclaw.ingest.eln.warehouse.retriever.default_record_store", lambda: store
     )
+
+
+class _Graph:
+    """A healthy source beside the warehouse — what a degraded sweep must still return."""
+
+    name = "graph"
+
+    async def retrieve(self, _query: str, _filters: Any) -> list[EvidenceChunk]:
+        """One chunk, so a leg that keeps answering is distinguishable from one that stops."""
+        return [
+            EvidenceChunk(content="ester formation, 84%", source_note_id="rxn-1", retriever="graph")
+        ]
 
 
 def _primed() -> warehouse_fake.FakeWarehouse:
@@ -208,12 +222,26 @@ def test_declared_filters_reach_the_statement_and_undeclared_ones_are_ignored() 
 
 
 def test_an_unreachable_warehouse_costs_this_leg_and_no_other() -> None:
-    """One failed retriever must not take down a question the other sources could still answer."""
+    """A failed retriever costs its own leg — and must not answer the question *for* the others.
+
+    This asserted `== []` while `gather_evidence` fanned out with a bare `asyncio.gather`, where a
+    raise lost the whole question. The sweep is per-source branches now, so the empty list is no
+    longer protecting anything and is actively lying: `sources_failed` stayed empty and the model
+    was handed the corpus's own "nothing on file". Both halves are pinned here — the healthy leg
+    keeps its hits, and the dead one is named.
+    """
     warehouse_fake.prime(**_hits())
     _primed().fail_with = ConnectionError("warehouse down")
     retriever = WarehouseVectorRetriever(binding=_binding(), name="eln-warehouse")
 
-    assert asyncio.run(retriever.retrieve("ester formation", {})) == []
+    with pytest.raises(ConnectionError):
+        asyncio.run(retriever.retrieve("ester formation", {}))
+
+    ranked, failed = asyncio.run(
+        sweep_sources([("graph", _Graph()), ("eln-warehouse", retriever)], "ester formation", {})
+    )
+    assert [len(chunks) for chunks in ranked] == [1, 0]
+    assert failed == ["eln-warehouse"]
 
 
 def test_an_empty_query_asks_the_warehouse_nothing() -> None:
@@ -248,15 +276,20 @@ def test_a_misconfigured_source_costs_this_leg_and_no_other(
 ) -> None:
     """A driver the image does not carry must not fail every question in the process.
 
-    `gather_evidence` fans the retrievers out with a plain `asyncio.gather`, so a raising leg does
-    not degrade an answer — it loses it. The deployment error still has to be loud, but in the log,
-    not in every chemist's next question.
+    A driver package the image does not carry fails identically on every query until someone
+    changes the deployment, which is exactly why it may not read as a quiet corpus: an empty answer
+    from a source nobody can reach is a permanent, silent lie rather than a transient one. The
+    sweep's branch is what keeps it out of the chemist's next question while `failed` records it.
     """
     binding = _binding()
     binding["connection"] = {"driver": "chemclaw.ingest.eln.warehouse.no_such_driver:Nope"}
     retriever = WarehouseVectorRetriever(binding=binding, name="eln-warehouse")
 
-    assert asyncio.run(retriever.retrieve("ester formation", {})) == []
+    with pytest.raises(BindingError):
+        asyncio.run(retriever.retrieve("ester formation", {}))
+
+    _, failed = asyncio.run(sweep_sources([("eln-warehouse", retriever)], "ester formation", {}))
+    assert failed == ["eln-warehouse"]
 
 
 class _ProviderError(Exception):
@@ -268,10 +301,10 @@ def test_an_embedding_provider_failure_costs_this_leg_and_no_other(
 ) -> None:
     """The query is embedded *inside* this leg, so the provider's own errors are this leg's too.
 
-    They are not `WarehouseQueryError`, `ConnectionError` or `OSError`, so before this they escaped
-    into `gather_evidence`'s `gather` — which has no `return_exceptions` — and a rate-limited
-    embedding endpoint failed the whole turn, including the answer the knowledge graph had already
-    produced.
+    A vendor client's own exception type is in none of the lists this retriever used to enumerate,
+    which is why the enumeration is gone: the sweep's branch catches everything, so the type no
+    longer decides whether a failure is reported. What this pins is that it *is* reported, rather
+    than converted into the empty list a corpus with no matching reaction would return.
     """
     monkeypatch.setattr(
         retriever_module, "embed_texts", lambda texts: (_ for _ in ()).throw(_ProviderError("429"))
@@ -279,7 +312,11 @@ def test_an_embedding_provider_failure_costs_this_leg_and_no_other(
     warehouse_fake.prime(**_hits())
     retriever = WarehouseVectorRetriever(binding=_binding(), name="eln-warehouse")
 
-    assert asyncio.run(retriever.retrieve("ester formation", {})) == []
+    with pytest.raises(_ProviderError):
+        asyncio.run(retriever.retrieve("ester formation", {}))
+
+    _, failed = asyncio.run(sweep_sources([("eln-warehouse", retriever)], "ester formation", {}))
+    assert failed == ["eln-warehouse"]
 
 
 def test_the_query_is_embedded_off_the_event_loop(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -356,3 +393,66 @@ def test_a_driver_with_no_similarity_dialect_refuses_the_vector_block() -> None:
 
     with pytest.raises(BindingError, match="similarity-search dialect"):
         asyncio.run(retriever._search("ester formation", {}))
+
+
+def test_a_warehouse_session_is_opened_once_per_process_not_once_per_tool_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The premise the missing `close()` rests on, made true by measurement rather than by comment.
+
+    `Warehouse` deliberately has no `close`, on the written ground that "a connection lives for the
+    process's life by design". `active_retrieve_sources()` has no memoisation, so it builds a fresh
+    retrieve half inside every `gather_evidence` body — measured, 100 constructions for 100 sweeps
+    — and each one opened its own Databricks SQL session that nothing could ever close. Server-side
+    that state survives until an idle timeout measured in tens of minutes, so a busy chat pod
+    exhausts the workspace's sessions in an hour and the symptom is missing evidence.
+
+    Construction stays free (it opens nothing); what may not repeat is the *connection*. This
+    counts driver opens across 50 freshly-built halves sharing one binding.
+    """
+    opens: list[dict[str, Any]] = []
+    real = warehouse_fake.open_fake
+
+    def counting(**options: Any) -> Any:
+        opens.append(options)
+        return real(**options)
+
+    monkeypatch.setattr(warehouse_fake, "open_fake", counting)
+    warehouse_fake.prime(**_hits())
+
+    for _ in range(50):
+        # Exactly what `_build_retrieve_half` does on every `gather_evidence` call.
+        half = WarehouseVectorRetriever(binding=_binding(), name="eln-warehouse")
+        assert asyncio.run(half.retrieve("ester formation", {}))
+
+    assert len(opens) == 1, (
+        f"50 tool calls opened {len(opens)} warehouse session(s); the driver protocol has no "
+        "close(), so every one of them leaks until the server times it out"
+    )
+
+
+def test_two_bindings_do_not_share_one_warehouse_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The control on the cache's key: a second corpus is a second connection, not a collision.
+
+    `pistachio` and `eln-databricks` are two data sources over two catalogues, each with its own
+    credential — the reason a per-corpus token is worth having in the first place. Keying the reuse
+    on anything coarser than the connection block would serve one corpus's rows to the other.
+    """
+    opens: list[dict[str, Any]] = []
+    real = warehouse_fake.open_fake
+
+    def counting(**options: Any) -> Any:
+        opens.append(options)
+        return real(**options)
+
+    monkeypatch.setattr(warehouse_fake, "open_fake", counting)
+    warehouse_fake.prime(**_hits())
+
+    first = _binding()
+    first["connection"] = {"driver": _DRIVER, "catalog": "eln_prod"}
+    second = _binding()
+    second["connection"] = {"driver": _DRIVER, "catalog": "pistachio"}
+    for binding in (first, second, first, second):
+        asyncio.run(WarehouseVectorRetriever(binding=binding, name="corpus").retrieve("ester", {}))
+
+    assert [options.get("catalog") for options in opens] == ["eln_prod", "pistachio"]

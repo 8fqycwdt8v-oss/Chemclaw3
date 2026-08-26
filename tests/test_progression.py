@@ -16,6 +16,7 @@ from chemclaw.memory.progression import (
     changes_between,
     order_chronologically,
     progression,
+    text_change,
 )
 
 
@@ -256,3 +257,35 @@ def test_the_hypothesis_survives_into_the_reaction_note() -> None:
 def test_a_run_with_no_recorded_hypothesis_says_nothing_about_one() -> None:
     """Silence is "not recorded", never "there was no hypothesis"."""
     assert "Tested:" not in record_from_ord_reaction(_run("a", day=1)).body
+
+
+def test_two_spellings_of_one_solvent_are_not_reported_as_a_change() -> None:
+    """The one comparison that works on solvent *names* could not tell two names apart.
+
+    `canonical_condition` folds `DMF`, `N,N-dimethylformamide` and `CN(C)C=O` to one token through
+    `core.reagents`, and its docstring says why: without it "an optimization campaign could be
+    split in two by spelling alone". It had no caller in `src/` at all — kept alive by a test that
+    called it directly, which is the `reject_widening` / `map_to_hpc_identity` shape `CLAUDE.md`
+    names. Meanwhile `text_change`, the comparison a chemist actually reads in the turn-time
+    "Changed vs previous" column, compared casefolded prose:
+
+        'DMF' vs 'N,N-dimethylformamide':
+            canonical_condition folds -> True
+            text_change reports       -> solvent DMF → N,N-dimethylformamide
+
+    A fabricated lever, in the artifact built for reading levers off. What is *displayed* is still
+    what was written; only the decision about whether anything moved is folded.
+    """
+    for before, after in (
+        ("DMF", "N,N-dimethylformamide"),
+        ("DIPEA", "N,N-diisopropylethylamine"),
+        ("DMF", "CN(C)C=O"),
+    ):
+        assert text_change("solvent", before, after) is None, (
+            f"{before!r} → {after!r} is one species written twice, not a swap"
+        )
+
+    real = text_change("solvent", "DMF", "2-MeTHF")
+    assert real is not None and real.describe() == "solvent DMF → 2-MeTHF"
+    # An unrecognised species is still a real condition, and two of them still differ.
+    assert text_change("solvent", "Mystery-A", "Mystery-B") is not None

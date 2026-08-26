@@ -38,6 +38,7 @@ from pydantic import BaseModel, Field
 
 from chemclaw.core import db
 from chemclaw.core.config import SCHEMA_VECTOR_DIM, settings
+from chemclaw.core.embeddings import embedding_config_key
 from chemclaw.core.errors import SubsystemUnavailableError
 from chemclaw.core.fulltext import TSQUERY_TERMS, reference_terms, reference_tokens
 from chemclaw.ingest.documents.binding import DocumentShareError
@@ -641,11 +642,17 @@ class InMemoryDocumentIndex:
         The query's norm is computed once here rather than inside `_cosine` per chunk — that is a
         1,536-element pure-Python pass repeated for every chunk in the index, for a value that
         cannot change during the scan.
+
+        Scoped to the live embedding configuration, as `PostgresDocumentIndex` is: a reference that
+        ranked a superseded generation while the backend did not would be a reference for the wrong
+        backend.
         """
         query_norm = math.sqrt(sum(x * x for x in query_embedding))
+        current = embedding_config_key()
         scored = [
             (c, _cosine(query_embedding, c.embedding, a_norm=query_norm))
             for c in self._chunks.values()
+            if self._keys.get(self._row(c)) == current
         ]
         return self._rank(source, filters, scored, top_k)
 
@@ -856,11 +863,18 @@ class PostgresDocumentIndex:
         # corpus. "The same ids" is a measurement, not a guarantee: HNSW is approximate, so what the
         # tie-break pins is that the two backends agree on the order of the hits they *do* return,
         # never which rows win a tie at the k-th place — and the inner form did not pin that either.
+        # **`embedding_key` is a predicate on the read, too.** The column decides what
+        # `reembed_stale` picks up and it decided nothing else, so repointing `embedding_model` at
+        # another model of the same width left this statement ranking model-A vectors against a
+        # model-B query — positive cosines, so the `> 0` floor does not drop them, and the chunks
+        # that come back are arbitrary while reading as cited evidence from the share. The note
+        # index carries the same predicate for the same reason; see its `_dense`.
         self._dense = (
             "SELECT doc_id, ordinal, content, coordinate, score, path FROM ("
             "SELECT c.doc_id, c.ordinal, c.content, c.coordinate, "
             f"1 - (c.embedding <=> %(q)s::vector({width})) AS score, {CITATION_SQL}"
-            "FROM document_chunks c WHERE c.embedding IS NOT NULL "
+            "FROM document_chunks c "
+            "WHERE c.embedding IS NOT NULL AND c.embedding_key = %(key)s "
             f"AND 1 - (c.embedding <=> %(q)s::vector({width})) > 0 AND {_ELIGIBLE}"
             f"ORDER BY c.embedding <=> %(q)s::vector({width}) LIMIT %(k)s"
             ") AS hits ORDER BY score DESC, doc_id, ordinal"
@@ -1071,6 +1085,15 @@ class PostgresDocumentIndex:
             await conn.commit()
         return removed
 
+    def _read_key(self) -> str:
+        """The `embedding_key` a *read* must match — the live configuration, as stored.
+
+        A hook for `_stored_key`'s reason: `ExternalVectorDocumentIndex` namespaces every key it
+        writes by store and collection, so a shared spelling is the only thing that keeps a read
+        and a write agreeing about which generation a vector belongs to.
+        """
+        return embedding_config_key()
+
     def _params(self, source: str, top_k: int, filters: DocumentFilter) -> dict[str, object]:
         """The filter parameters both statements bind (NULL meaning unrestricted)."""
         return {
@@ -1104,24 +1127,26 @@ class PostgresDocumentIndex:
         Raises:
             DocumentIndexError: The backend could not answer. Wrapped rather than left as
                 `psycopg.Error`, which descends from `Exception` and not from `OSError`, so the
-                retriever's "never raises" handler did not catch it: a statement timeout on a large
+                retriever's enumerated handlers did not catch it: a statement timeout on a large
                 share propagated out through `gather_evidence`'s `asyncio.gather` and failed the
                 whole turn, taking the knowledge graph's answer with it. `db.connection` converts
                 only *connect-time* failures to `ConnectionError`; anything `execute` raises came
-                straight through. This is the wrapper type `WarehouseQueryError` gives the retriever
-                that copied this pattern.
+                straight through. Those handlers are gone — `retrieval.fanout._sweep` degrades the
+                one branch now, and a retriever that answered `[]` here was telling a chemist the
+                share holds no precedent while its database was down. What the wrapper still buys
+                is a type that names the subsystem rather than the driver. This is the type
+                `WarehouseQueryError` mirrors for the retriever that copied this pattern.
 
                 **The message carries none of the driver's text**, which is the contract
                 `SubsystemUnavailableError` states and this raiser did not keep: it was
                 `f"document search failed: {exc}"` around a `psycopg.Error`, whose string is
                 "connection to server at "…", port 5432 failed: …". `api/middleware`'s handler
                 relays a `SubsystemUnavailableError`'s message to the HTTP client verbatim,
-                precisely *because* the contract says there is nothing in it to leak. Nothing
-                reaches that handler from here today — both retrievers swallow this type — so this
-                was a contract one raiser did not keep rather than a live leak, and the fix is the
-                one line that makes the promise true wherever the type travels next. The detail is
-                not lost: it is the `__cause__`, which both handlers that see this type log with
-                `exc_info` — the retriever at DEBUG, `api/middleware` at WARNING.
+                precisely *because* the contract says there is nothing in it to leak. It was a
+                contract this raiser did not keep rather than a live leak while both retrievers
+                caught this type; they no longer do, so the promise now has to hold. The detail is
+                not lost: it is the `__cause__`, which every handler that sees this type logs with
+                `exc_info` — `fanout._sweep` at DEBUG, `api/middleware` at WARNING.
         """
         try:
             async with self._connection() as conn:
@@ -1195,6 +1220,7 @@ class PostgresDocumentIndex:
             return []
         params = self._params(source, top_k, filters)
         params["q"] = _vector_literal(query_embedding)
+        params["key"] = self._read_key()
         return await self._run(self._dense, params, vector_recall=True)
 
     async def search_lexical(
