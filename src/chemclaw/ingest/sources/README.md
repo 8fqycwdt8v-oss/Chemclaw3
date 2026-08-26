@@ -18,22 +18,32 @@ Three steps. None of them is an edit to core Python.
 `retrieve`). Both protocols are re-exported from `sources/base.py`. Put it wherever it belongs —
 a warehouse client belongs beside its peers, not in this folder.
 
-**For a SQL warehouse, skip this step.** `chemclaw.ingest.eln.warehouse` is a generic ELN adapter
+**For a SQL database, skip this step.** `chemclaw.ingest.eln.warehouse` is a generic ELN adapter
 whose knowledge of the source is a *binding* in the manifest rather than code, so attaching one is
 steps 2 and 3 only. See its README for the binding's shape, and
-`sources/eln-snowflake/datasource.yaml` for a complete worked example.
+`sources/eln-databricks/datasource.yaml` for a complete worked example. A database this repository
+ships no driver for adds one module — a callable satisfying
+`chemclaw.ingest.eln.warehouse.driver.Warehouse` — and nothing else: the `connection:` block below
+is that callable's own keyword arguments
+(`D-2026-08-26-the-driver-s-signature-is-the-schema`).
 
 **2. Declare it** as `sources/<name>/datasource.yaml`:
 
 ```yaml
-name: eln-snowflake            # must equal the folder name — it is the enable token
+name: eln-databricks           # must equal the folder name — it is the enable token
 description: >-
-  The corporate ELN, read from the Snowflake reactions view.
+  The corporate ELN, read from the lakehouse's reactions view.
 ingest: chemclaw.ingest.eln.warehouse.adapter:WarehouseElnAdapter    # module:callable
 config:                        # keyword arguments for that callable
   binding:                     # ... which for this adapter is the site's whole schema
-    connection: {driver: chemclaw.ingest.eln.warehouse.snowflake:SnowflakeWarehouse, ...}
-    ingest: {entry: {relation: V_REACTION, key: REACTION_ID, ...}, ...}
+    connection:                # ... and this block is the *driver's* keyword arguments
+      driver: chemclaw.ingest.eln.warehouse.databricks:DatabricksWarehouse
+      server_hostname_env: DATABRICKS_HOST    # `*_env` names the variable, never the value
+      access_token_env: DATABRICKS_TOKEN
+      warehouse_id: 0123456789abcdef
+      catalog: eln_prod
+      schema: reactions
+    ingest: {entry: {relation: v_reaction, key: reaction_id, ...}, ...}
 ```
 
 Declare `ingest:`, `retrieve:`, or both. A source with neither is rejected.

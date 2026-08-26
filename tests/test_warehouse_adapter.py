@@ -7,7 +7,6 @@ schema change is a change to YAML and to nothing else.
 """
 
 import asyncio
-import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -366,25 +365,36 @@ def test_a_fallback_column_keeps_the_older_half_of_the_history() -> None:
     assert reaction.inputs[0].smiles == "CC(=O)O"
 
 
-def test_credentials_are_read_from_the_named_environment_variables(
+def test_a_connection_block_is_whatever_its_driver_takes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The binding names variables; the values come from the environment, at connect time."""
-    monkeypatch.setenv("TEST_WH_ACCOUNT", "acct-123")
-    monkeypatch.setenv("TEST_WH_USER", "svc_chemclaw")
+    """Any modern database, in its own words: the block is the driver's keyword arguments.
+
+    The vocabulary below belongs to no shipped driver on purpose — `dsn`, `api_key`, `collection`
+    is roughly what a vector database wants and nothing like what a lakehouse wants. Nothing in this
+    engine knows any of those words, and that is the property under test: attaching a database this
+    repository has never heard of is a driver module plus a manifest, with no field added to a
+    shared model (`D-2026-08-26-the-driver-s-signature-is-the-schema`).
+
+    The `*_env` suffix is the one convention that survives, and it is a *rule about secrets* rather
+    than about a vendor: the binding names the variable, the value is read here, at connect time.
+    """
+    monkeypatch.setenv("TEST_STORE_KEY", "sk-live-1")
     binding = _binding()
     binding["connection"] = {
         "driver": _DRIVER,
-        "account_env": "TEST_WH_ACCOUNT",
-        "user_env": "TEST_WH_USER",
-        "warehouse": "RND_WH",
+        "dsn": "acme://vectors.internal:9000",
+        "api_key_env": "TEST_STORE_KEY",
+        "collection": "reactions",
     }
     _fetch(binding, _rows())
     fake = _primed()
 
-    assert fake.connect_options["account"] == "acct-123"
-    assert fake.connect_options["user"] == "svc_chemclaw"
-    assert fake.connect_options["warehouse"] == "RND_WH"
+    assert fake.connect_options == {
+        "dsn": "acme://vectors.internal:9000",
+        "api_key": "sk-live-1",
+        "collection": "reactions",
+    }, "the block reached the driver verbatim, with only the named secret resolved"
 
 
 def test_a_missing_credential_fails_naming_the_variable(
@@ -393,7 +403,7 @@ def test_a_missing_credential_fails_naming_the_variable(
     """An operator gets the variable name, not an authentication error from a vendor client."""
     monkeypatch.delenv("TEST_WH_ABSENT", raising=False)
     binding = _binding()
-    binding["connection"] = {"driver": _DRIVER, "account_env": "TEST_WH_ABSENT"}
+    binding["connection"] = {"driver": _DRIVER, "token_env": "TEST_WH_ABSENT"}
     warehouse_fake.prime(**_rows())
     adapter = WarehouseElnAdapter(binding=binding, name="eln-test")
 
@@ -511,7 +521,7 @@ def test_a_page_of_amended_rows_does_not_stall_the_sync_forever() -> None:
                 rec,
                 cursor,
                 label_index=InMemoryLabelIndex(),
-                source="eln-snowflake",
+                source="eln-databricks",
                 apply_overlap=False,
             )
             seen.update(summary.ingested)
@@ -519,72 +529,3 @@ def test_a_page_of_amended_rows_does_not_stall_the_sync_forever() -> None:
         return seen
 
     assert "NEW-1" in asyncio.run(_run()), "the reaction created after the amendments is reachable"
-
-
-def test_a_rejected_statement_reaches_the_caller_without_the_query_in_it(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """The driver's text says where to look; it must not say what we asked.
-
-    Snowflake's `ProgrammingError` quotes the failing statement, and a `WarehouseQueryError` raised
-    inside a durable job is marked non-retryable by class name (`durable/publish.py`) so its
-    *message* reaches the session — which means the site's table names, its column names and the
-    shape of the query the binding built would land in a chemist's transcript and in the model's
-    context. That is a schema disclosure through an error path, and it is the sort that reads as
-    ordinary diagnostics right up until someone asks where the transcript went.
-
-    What replaces it is not "less information" — it is the information an operator can act on. The
-    error number and the query id locate the statement in the warehouse's own query history, where
-    the person debugging it already has the access to read it. The full text is one
-    `logger.exception` away, on the pod.
-
-    Driven through the real `_SnowflakeCursor` against a stand-in client module, because the whole
-    behaviour under test is which of the client's two error classes maps to which of ours, and a
-    fake that raised our types instead would be asserting its own arrangement.
-    """
-    from chemclaw.ingest.eln.warehouse.driver import WarehouseQueryError
-    from chemclaw.ingest.eln.warehouse.snowflake import _SnowflakeCursor
-
-    class _ProgrammingError(Exception):
-        """Stands in for the client's, with the two attributes the message now reads."""
-
-        errno = 2003
-        sfqid = "01b2-0000-abcd"
-
-    class _OperationalError(Exception):
-        """The transient half, kept so the split is exercised rather than assumed."""
-
-    secret = "SELECT NOTEBOOK_ID, RXN_SMILES FROM RND.LEGACY_ELN.EXPERIMENTS WHERE ..."
-
-    class _FailingCursor:
-        def execute(self, sql: str, params: tuple[Any, ...]) -> None:
-            raise _ProgrammingError(f"002003 (42S02): SQL compilation error in: {secret}")
-
-    client = type(
-        "_Client",
-        (),
-        {
-            "errors": type(
-                "_Errors",
-                (),
-                {"ProgrammingError": _ProgrammingError, "OperationalError": _OperationalError},
-            )
-        },
-    )()
-
-    with caplog.at_level(logging.ERROR):
-        with pytest.raises(WarehouseQueryError) as raised:
-            asyncio.run(_SnowflakeCursor(_FailingCursor(), client).execute("SELECT 1", ()))
-
-    message = str(raised.value)
-    assert "LEGACY_ELN" not in message and "RXN_SMILES" not in message and secret not in message, (
-        f"the warehouse's own text reached the caller: {message}"
-    )
-    assert "2003" in message and "01b2-0000-abcd" in message, (
-        "an operator still has to be able to find the statement in the query history"
-    )
-    # Nothing is lost, only moved: the pod's log has the whole thing, including the chained cause.
-    assert any(secret in record.getMessage() + str(record.exc_info) for record in caplog.records), (
-        "the detail has to survive somewhere, or this is redaction by deletion"
-    )
-    assert isinstance(raised.value.__cause__, _ProgrammingError)

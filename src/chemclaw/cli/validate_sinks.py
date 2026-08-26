@@ -26,8 +26,9 @@ import sys
 from typing import Any
 
 from chemclaw.core.config import settings
+from chemclaw.core.connect import signature_mismatch
 from chemclaw.core.logging import configure_logging
-from chemclaw.publish.connect import _resolve as _resolve_connection_driver
+from chemclaw.publish.connect import resolve_driver as _resolve_connection_driver
 from chemclaw.publish.manifest import ResultSinkManifest
 from chemclaw.publish.properties import REGISTRY
 from chemclaw.publish.registry import ResultSinkError, _resolve, discovered
@@ -73,16 +74,8 @@ def _driver_problems(manifest: ResultSinkManifest) -> list[str]:
             nested = _resolve_connection_driver(reference)
         except Exception as exc:
             return [*problems, f"{manifest.name}: connection driver {reference!r}: {exc}"]
-        options = {
-            key[:-4] if key.endswith("_env") else key: "" for key in connection if key != "driver"
-        }
-        try:
-            inspect.signature(nested).bind(**options)
-        except TypeError as exc:
-            problems.append(
-                f"{manifest.name}: connection driver {reference!r} does not accept its block "
-                f"({sorted(options)}): {exc}"
-            )
+        if mismatch := signature_mismatch(nested, connection):
+            problems.append(f"{manifest.name}: connection driver {reference!r} {mismatch}")
     return problems
 
 

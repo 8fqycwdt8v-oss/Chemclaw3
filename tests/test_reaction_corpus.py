@@ -1,6 +1,6 @@
 """Draining a bulk reaction corpus out of a warehouse and into the label index.
 
-The whole path is exercised offline against a fake driver — the same way `eln-snowflake` shipped
+The whole path is exercised offline against a fake driver — the same way the warehouse ELN shipped
 and was proved before any tenant existed. What that buys is that when the real Pistachio table
 arrives, the only thing that has to be right is the column names in one YAML file.
 

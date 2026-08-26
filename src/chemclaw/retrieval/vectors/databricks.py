@@ -24,7 +24,7 @@ cosine ranking in the first place; without it this store would disagree with pgv
 document is nearest, and nothing would fail.
 
 **The client blocks.** `databricks-vectorsearch` is synchronous, so every call crosses
-`asyncio.to_thread` — the reason `ingest/eln/warehouse/snowflake.py` gives for the same treatment:
+`asyncio.to_thread` — the reason `ingest/eln/warehouse/databricks.py` gives for the same treatment:
 a retriever runs inside a `gather`, and a blocking call on the event loop stalls every other leg of
 the fan-out for the length of a network round trip. `tests/test_event_loop_offload.py` is the guard.
 

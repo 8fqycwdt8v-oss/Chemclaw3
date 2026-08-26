@@ -20,8 +20,8 @@ class SourcesSettings(BaseSettings):
     """The generic `DataSource` seam (plan F7): where sources are discovered, and which are active.
 
     Its own section because the seam is deliberately source-agnostic — adding a source (first live
-    one: a custom Snowflake ELN connector) is one `datasource.yaml` folder and one name here, zero
-    core edits — so it belongs to neither the ELN section nor the retrieval section alone.
+    one: a warehouse ELN connector) is one `datasource.yaml` folder and one name here, zero core
+    edits — so it belongs to neither the ELN section nor the retrieval section alone.
 
     Two tokens, exactly mirroring the connector seam: a *discovery* path and an *enablement* list.
     Discovery is not enablement (D-018) — the repo ships every source, a deployment runs the subset

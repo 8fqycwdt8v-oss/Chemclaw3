@@ -1,15 +1,24 @@
-"""The Databricks SQL driver — the second module in this package that knows a vendor exists.
+"""The Databricks SQL driver — one of the modules in this package that knows a vendor exists.
 
-Alone in a file and imported by nothing, exactly as `snowflake.py` is: `connection.driver` in a
-binding names it, `warehouse.connect` resolves that string when a connection is first opened, and a
-repository with no Databricks client installed runs the whole test suite against a fake.
+Alone in a file and imported by nothing: `connection.driver` in a binding names it,
+`chemclaw.core.connect` resolves that string when a connection is first opened, and a repository
+with no Databricks client installed runs the whole test suite against a fake.
+
+**Its constructor signature is the connection block's schema** — `server_hostname`,
+`access_token_env`, `warehouse_id`, `catalog`, `schema` — in Databricks' own words rather than in a
+seam vocabulary translated per vendor. That is the rule
+`D-2026-08-26-the-driver-s-signature-is-the-schema` settled: the model this driver used to be built
+through named an `account`, a `warehouse` and a `role`, so this file had to redefine three of those
+to mean something else and *refuse* two more that have no analogue here. Attaching the next
+database — a Postgres, a DuckDB file, a ClickHouse, a vector database — is now a module beside this
+one with its own keywords, and nothing shared to widen.
 
 **What this driver serves, and what it does not.** The ingest half needs nothing special — the
 statements `sql.py` builds for it are `SELECT *`, `COALESCE`, `>= ?`, `ORDER BY … ASC`, `LIMIT ?`
-and `IN (…)`, which Databricks SQL runs unchanged. The similarity search is where the dialects
-differ, and this one differs in *two* places rather than one:
+and `IN (…)`, which Databricks SQL runs unchanged. The similarity search is where dialects differ,
+and this one differs in *two* places rather than one:
 
-* the function is `vector_cosine_similarity`, not Snowflake's `VECTOR_COSINE_SIMILARITY`; and
+* the function is `vector_cosine_similarity`, lower case and taking `ARRAY<FLOAT>`; and
 * there is no `VECTOR` type and no array *parameter*. Native parameters are scalars, so a 1536-float
   query vector cannot be bound as a list at all. It is bound as one JSON string and parsed
   server-side with `from_json(?, 'ARRAY<FLOAT>')` — which keeps the vector a bound *value* rather
@@ -25,9 +34,9 @@ and goes straight to the client, which builds its own URL — `tests/test_no_egr
 external host in first-party code on purpose, because the address of a data source belongs in
 configuration where attaching one is a reviewable decision.
 
-**Sync client, async seam.** The vendor client blocks, so every call crosses `asyncio.to_thread`,
-for the reason `snowflake.py` gives: a retriever runs inside a `gather`, and a blocking driver call
-on the event loop stalls every other leg of the fan-out for the length of a warehouse query.
+**Sync client, async seam.** The vendor client blocks, so every call crosses `asyncio.to_thread`: a
+retriever runs inside a `gather`, and a blocking driver call on the event loop stalls every other
+leg of the fan-out for the length of a warehouse query.
 """
 
 import asyncio
@@ -124,8 +133,8 @@ class _DatabricksCursor:
         """Every row of the last statement, each keyed by column name.
 
         `Row.asDict()` rather than `dict(row)`: the connector returns a tuple-like `Row`, so `dict`
-        over one raises rather than keying by column — the one line that differs from the Snowflake
-        cursor, and the kind of difference that would otherwise surface as an empty result.
+        over one raises rather than keying by column — the kind of difference that would otherwise
+        surface as an empty result rather than as an error.
         """
         rows = await asyncio.to_thread(self._cursor.fetchall)
         return [row.asDict() for row in rows]
@@ -134,78 +143,54 @@ class _DatabricksCursor:
 class DatabricksWarehouse:
     """A `Warehouse` backed by the Databricks SQL connector.
 
-    Built by `warehouse.connect.open_warehouse` from the binding's `connection:` block, so its
-    keyword arguments are that block's fields. Three of them mean something different here than
-    they do for Snowflake, and the binding's comments should say so:
-
-    | binding field | Databricks |
-    | --- | --- |
-    | `account_env` | the workspace hostname (`adb-….azuredatabricks.net`) |
-    | `password_env` | a personal access token |
-    | `warehouse` | the SQL warehouse id, or its full `/sql/1.0/warehouses/…` path |
-    | `database` | the Unity Catalog *catalog* |
-    | `schema` | the schema within it |
-
-    The alternative was a driver-specific pass-through on `ConnectionBinding`, which would add a
-    field to the shared model that exactly one driver reads. These five already mean "which tenant,
-    which credential, which compute, which namespace"; the vendor's word for each is what differs.
+    Built by `chemclaw.core.connect.open_connection` from the binding's `connection:` block, whose
+    keys are the parameters below — `*_env` for the ones that name an environment variable holding a
+    secret, the rest written directly. Nothing translates between a seam vocabulary and this one,
+    which is the point: the words here are the words the Databricks documentation uses.
     """
 
     def __init__(
         self,
         *,
-        account: str = "",
-        user: str = "",
-        password: str = "",
-        private_key: str = "",
-        warehouse: str = "",
-        database: str = "",
+        server_hostname: str = "",
+        access_token: str = "",
+        warehouse_id: str = "",
+        http_path: str = "",
+        catalog: str = "",
         schema: str = "",
-        role: str = "",
+        user_agent_entry: str = "",
         query_timeout_seconds: int = 60,
     ) -> None:
         """Record what to connect with. The connection itself is opened lazily, on first use."""
-        if not account:
+        if not server_hostname:
             raise BindingError(
-                "the Databricks driver needs `account_env` naming the variable that holds the "
-                "workspace hostname"
+                "the Databricks driver needs `server_hostname_env` naming the variable that holds "
+                "the workspace hostname (adb-....azuredatabricks.net)"
             )
-        if not password:
+        if not access_token:
             raise BindingError(
                 "the Databricks driver authenticates with a personal access token; name the "
-                "variable holding it in `password_env`"
+                "variable holding it in `access_token_env`"
             )
-        if not warehouse:
+        if bool(warehouse_id) == bool(http_path):
             raise BindingError(
-                "the Databricks driver needs `warehouse` set to the SQL warehouse id (or its full "
-                "/sql/1.0/warehouses/... path) — there is no default compute to fall back on"
+                "the Databricks driver needs exactly one of `warehouse_id` (the id the SQL "
+                "warehouse page shows) or `http_path` (its full /sql/1.0/warehouses/... path); "
+                "there is no default compute to fall back on, and naming both leaves which one is "
+                "in force to the reader"
             )
-        # Refused rather than dropped. Both are meaningful on Snowflake and have no analogue here,
-        # so silently ignoring one would leave a deployment believing a credential or an access
-        # restriction was in force when it was not.
-        for field, value in (("private_key_env", private_key), ("role", role)):
-            if value:
-                raise BindingError(
-                    f"the Databricks driver has no use for `{field}`: it authenticates with a "
-                    "personal access token, and access is governed by Unity Catalog grants on the "
-                    "token's principal rather than by a role named in the connection"
-                )
         self._options: dict[str, Any] = {
-            "server_hostname": account,
-            "access_token": password,
-            "http_path": (
-                warehouse
-                if warehouse.startswith("/")
-                else _WAREHOUSE_PATH.format(warehouse=warehouse)
-            ),
+            "server_hostname": server_hostname,
+            "access_token": access_token,
+            "http_path": http_path or _WAREHOUSE_PATH.format(warehouse=warehouse_id),
         }
-        if user:
-            # Not a credential here — the token carries the identity — but the connector forwards it
-            # to the server as the session's user agent entry, which is what an operator greps for
-            # in the query history when asking who ran a statement.
-            self._options["_user_agent_entry"] = user
-        if database:
-            self._options["catalog"] = database
+        if user_agent_entry:
+            # Not a credential — the token carries the identity — but the connector forwards it to
+            # the server as the session's user agent entry, which is what an operator greps for in
+            # the query history when asking who ran a statement.
+            self._options["_user_agent_entry"] = user_agent_entry
+        if catalog:
+            self._options["catalog"] = catalog
         if schema:
             self._options["schema"] = schema
         # Bound on the session rather than re-applied per cursor: a runaway scan on a shared

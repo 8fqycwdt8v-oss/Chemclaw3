@@ -1,19 +1,22 @@
 """The Databricks SQL driver and its vector dialect, against a fake client module.
 
-The driver is the only module in `chemclaw.ingest.eln.warehouse` that knows this vendor exists, and
-what is worth pinning here is the handful of places it differs from the Snowflake one in a way that
-would otherwise surface as an empty result rather than an error:
+The driver is the module in `chemclaw.ingest.eln.warehouse` that knows this vendor exists, and what
+is worth pinning here is what only it can be wrong about — the places where a mistake surfaces as an
+empty result rather than as an error:
 
 * rows come back as tuple-like `Row` objects, so `dict(row)` keys by *position*, not by column;
 * the query vector cannot be bound as a list — there is no array parameter type — so it goes as one
   JSON scalar parsed server-side; and
-* three `connection:` fields mean something different here than they do for Snowflake, and two
-  others mean nothing at all and are refused rather than dropped.
+* its constructor signature *is* the `connection:` block's schema
+  (`D-2026-08-26-the-driver-s-signature-is-the-schema`), so what a binding may say is exactly what
+  these parameters are called, and a compute target that is neither given nor derivable is refused
+  here rather than by the server.
 """
 
 import asyncio
 import functools
 import json
+import logging
 from typing import Any
 
 import pytest
@@ -121,10 +124,10 @@ def _bind(monkeypatch: pytest.MonkeyPatch, client: _FakeClientModule) -> None:
 
 def _warehouse(**overrides: Any) -> DatabricksWarehouse:
     options: dict[str, Any] = {
-        "account": "adb-1234.11.azuredatabricks.net",
-        "password": "dapi-token",
-        "warehouse": "abc123",
-        "database": "eln_prod",
+        "server_hostname": "adb-1234.11.azuredatabricks.net",
+        "access_token": "dapi-token",
+        "warehouse_id": "abc123",
+        "catalog": "eln_prod",
         "schema": "reactions",
         "query_timeout_seconds": 45,
     }
@@ -132,7 +135,7 @@ def _warehouse(**overrides: Any) -> DatabricksWarehouse:
     return DatabricksWarehouse(**options)
 
 
-# --- the connection binding maps onto Databricks' own vocabulary --------------------------------
+# --- the connection block is this driver's own signature ----------------------------------------
 
 
 def test_the_driver_satisfies_the_warehouse_protocol() -> None:
@@ -141,8 +144,14 @@ def test_the_driver_satisfies_the_warehouse_protocol() -> None:
     assert isinstance(DatabricksVectorDialect(), VectorDialect)
 
 
-def test_binding_fields_map_onto_the_clients_own_names(monkeypatch: pytest.MonkeyPatch) -> None:
-    """`account`/`password`/`warehouse`/`database` are this seam's words for vendor concepts."""
+def test_binding_fields_reach_the_client_under_its_own_names(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A binding writes Databricks' words, and they arrive as Databricks' words.
+
+    Nothing translates in between, which is the whole of the generality claim: the next database is
+    a driver with *its* vocabulary, not a field added to a model shared with this one.
+    """
     client = _FakeClientModule()
     _bind(monkeypatch, client)
     asyncio.run(_warehouse()._connect())
@@ -158,28 +167,43 @@ def test_a_full_http_path_is_taken_as_given(monkeypatch: pytest.MonkeyPatch) -> 
     """The UI shows an id; an admin often has the path. Both are legitimate, so both work."""
     client = _FakeClientModule()
     _bind(monkeypatch, client)
-    asyncio.run(_warehouse(warehouse="/sql/1.0/warehouses/deadbeef")._connect())
+    asyncio.run(_warehouse(warehouse_id="", http_path="/sql/1.0/warehouses/deadbeef")._connect())
     assert client.connect_options["http_path"] == "/sql/1.0/warehouses/deadbeef"
 
 
-@pytest.mark.parametrize("missing", ["account", "password", "warehouse"])
-def test_the_three_fields_with_no_default_are_refused_when_absent(missing: str) -> None:
+@pytest.mark.parametrize("missing", ["server_hostname", "access_token"])
+def test_the_fields_with_no_default_are_refused_when_absent(missing: str) -> None:
     """Refused where the binding is read, not by an authentication error from a vendor client."""
-    with pytest.raises(BindingError, match=missing.replace("account", "account_env")):
+    with pytest.raises(BindingError, match=missing):
         _warehouse(**{missing: ""})
 
 
-@pytest.mark.parametrize(
-    ("field", "value"), [("private_key", "-----BEGIN"), ("role", "CHEMCLAW_READER")]
-)
-def test_a_field_with_no_analogue_is_refused_rather_than_dropped(field: str, value: str) -> None:
-    """Silently ignoring `role` would leave a deployment believing an access restriction applies.
+@pytest.mark.parametrize("compute", [{"warehouse_id": ""}, {"http_path": "/sql/1.0/warehouses/x"}])
+def test_exactly_one_compute_target_is_required(compute: dict[str, str]) -> None:
+    """Neither is a warehouse that does not exist; both is a question the reader cannot answer.
 
-    Both fields are meaningful on Snowflake, so a binding copied from `eln-snowflake` will carry
-    them. Dropping them would be the quiet failure; refusing them is the message.
+    There is no default compute to fall back on, so an absent one has to fail here rather than as a
+    connection error minutes into a sync. Naming *both* is refused for the opposite reason: it would
+    resolve silently to whichever the driver happened to prefer, and a binding whose meaning depends
+    on that is a binding nobody can review.
     """
-    with pytest.raises(BindingError, match="no use for"):
-        _warehouse(**{field: value})
+    with pytest.raises(BindingError, match="exactly one"):
+        _warehouse(**compute)
+
+
+def test_a_key_this_driver_does_not_take_is_a_typeerror_naming_it() -> None:
+    """The offline check for "the driver's signature is the schema", at the driver's own door.
+
+    A binding copied from another vendor's — `role:`, `private_key_env:`, `account_env:` — used to
+    be refused by a hand-written list inside this driver, because the shared connection model
+    accepted those keys from anyone. There is no such model now, so the refusal is Python's, it
+    names the offending keyword, and it cannot fall out of step with the signature.
+    `make datasource-validate` runs exactly this bind offline, before anything connects.
+    """
+    with pytest.raises(TypeError, match="role"):
+        DatabricksWarehouse(  # type: ignore[call-arg]
+            server_hostname="h", access_token="t", warehouse_id="w", role="CHEMCLAW_READER"
+        )
 
 
 # --- rows: the difference that would otherwise be an empty result -------------------------------
@@ -256,20 +280,36 @@ def test_an_operational_error_is_transient(monkeypatch: pytest.MonkeyPatch) -> N
 
 
 def test_a_rejected_statement_is_not_retryable_and_quotes_nothing(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """The site's table and column names must not reach a chemist's transcript or the model."""
+    """The site's table and column names must not reach a chemist's transcript or the model.
+
+    A `WarehouseQueryError` raised inside a durable job is marked non-retryable by class name
+    (`durable/publish.py`), so its *message* reaches the session — and a driver's own text quotes
+    the failing statement. That is a schema disclosure through an error path, and it reads as
+    ordinary diagnostics right up until someone asks where the transcript went.
+
+    What replaces it is not "less information" but information an operator can act on: a pointer to
+    this pod's log, where the whole thing is. The last two assertions are what make that true rather
+    than claimed — nothing is lost, only moved.
+    """
     client = _FakeClientModule()
-    client.raise_on_execute = client.Error("[TABLE_OR_VIEW_NOT_FOUND] eln_prod.reactions.V_SECRET")
+    secret = "[TABLE_OR_VIEW_NOT_FOUND] eln_prod.reactions.V_SECRET"
+    client.raise_on_execute = client.Error(secret)
     _bind(monkeypatch, client)
 
     @_sync
     async def run() -> None:
         async with _warehouse().cursor() as cursor:
-            with pytest.raises(WarehouseQueryError) as caught:
-                await cursor.execute("SELECT * FROM V_SECRET", [])
+            with caplog.at_level(logging.ERROR):
+                with pytest.raises(WarehouseQueryError) as caught:
+                    await cursor.execute("SELECT * FROM V_SECRET", [])
             assert "V_SECRET" not in str(caught.value)
             assert "log" in str(caught.value)
+            assert isinstance(caught.value.__cause__, client.Error)
+            assert any(
+                secret in record.getMessage() + str(record.exc_info) for record in caplog.records
+            ), "the detail has to survive somewhere, or this is redaction by deletion"
 
     run()
 

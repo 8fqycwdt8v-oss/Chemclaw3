@@ -1,119 +1,92 @@
-# Rotational energies and rotamer barriers — implemented — 2026-08-26
+# Pistachio on Databricks: remove the Snowflake integration, generalise the database seam
 
-## Task
-"Get rotational energies and the barrier energy between rotamers for individual compounds —
-especially, how the user tells the agent **which bond to rotate**." Concept first, then build it.
+## The ask
 
-`D-2026-08-26-a-torsion-is-named-not-indexed` is the record; this is the working log.
+> The first database integrated will be pistachio using databricks. Remove the specific snowflake
+> integration but leave the generic database connector for easy connection of pistachio and
+> additional databases later on. Keep this connector that general that any modern database can be
+> easily integrated. Make sure to not only focus on classical databases like Postgres, snowflake or
+> databricks but as well vector databases.
+
+## What is already true (checked, not assumed)
+
+- `chemclaw.ingest.eln.warehouse` is already a schema-in-a-file engine naming no table, no column.
+- `servers`: two drivers exist — `snowflake.py` and `databricks.py`; `pistachio/datasource.yaml`
+  and `eln-databricks/datasource.yaml` already bind the Databricks one.
+- `chemclaw.retrieval.vectors` already has a `VectorStore` Protocol with three adapters
+  (`pgvector` = absence of one, `qdrant`, `databricks`).
+
+## What is *not* general, and is the actual work
+
+1. `ConnectionBinding` is **Snowflake-shaped**: `account_env`, `user_env`, `private_key_env`,
+   `warehouse`, `role`. `publish/connect.py` says so in its own docstring and refuses to reuse it.
+   The Databricks driver is contorted by it (`account` means hostname, `password` means token) and
+   has to *refuse* two fields that have no analogue.
+2. `vector_store_provider` is a closed `Literal` with an `if`-chain — a new vector database is a
+   core edit, which is exactly what the warehouse seam refuses to be.
+3. Two copies of "resolve `module:callable`, read `*_env` from the environment" exist
+   (`ingest/eln/warehouse/connect.py`, `publish/connect.py`).
 
 ## Plan
-- [x] **1 · Read what exists** — `scan_coordinate`, `compose.scan_profile`, `thermo`, and the two
-      skills that already hold the judgment.
-- [x] **2 · Measure the premise** rather than assert it (RDKit 2026.3.5, the pinned build).
-- [x] **3 · Decide** — three pieces, each on the side of a boundary already drawn.
-- [x] **4 · `Chemclaw3-mcp`** — `enumerate_torsions` on `servers/chem`, plus `render_structure`'s
-      `highlight_atoms`, plus the automorphism check and the contract table.
-- [x] **5 · Here** — `torsion_handle`, `Torsion`/`Rotamer`/`RotationBarrier`/`RotationProfile`,
-      Eyring in `thermo.py`, `rotation_units` in `budget.py`, `RotationJobSpec`,
-      `compose.rotation_profile`, the activity dispatch, the manifest job, the projector and its
-      properties, `rotational-barrier.yaml`, both skills.
-- [x] **6 · Tests** — 41 new, driven through the real composite against a fake with a real
-      torsional potential.
-- [x] **7 · Verify** — `make lint type test`, `connector-validate`, `template-validate`,
-      `skill-validate`, `prose-validate`; both repos.
 
-## What building it found
+- [x] P0 — read the seam, the two drivers, both connect modules, the vector registry, the manifests
+- [x] P1 — **The driver's signature is the schema.** `ConnectionBinding` keeps `driver:` and becomes
+      `extra="allow"`; every other key is the driver's own keyword, `*_env` naming an env var.
+      One shared implementation in `core/connect.py`, used by ingest, publish and the vector seam.
+- [x] P2 — `DatabricksWarehouse` takes its **own** vocabulary (`server_hostname`, `access_token`,
+      `http_path`/`warehouse_id`, `catalog`, `schema`); the three fields that "mean something
+      different here" stop meaning anything different.
+- [x] P3 — delete `warehouse/snowflake.py` and `ingest/sources/eln-snowflake/`; move the fixture
+      role onto `eln-databricks`; drop the mypy override and the key-material sanction.
+- [x] P4 — **A vector database is a driver too.** `vector_store_provider` accepts a shipped name or
+      a `module:callable`, late-bound through the same resolver. No core edit for a fourth store.
+- [x] P5 — manifests updated (`eln-databricks`, `pistachio`), READMEs, `.env.example`, CLAUDE.md,
+      the concept guide, DEFERRED rows that named the Snowflake tenant.
+- [x] P6 — ADR, `make lint type test` green with Postgres up (say what skipped otherwise).
 
-1. **A stale atom index is not an error.** `(4, 5)` is the amide C–N of `c1ccc(NC(C)=O)cc1` and an
-   aromatic *ring* bond of `CC(=O)Nc1ccccc1`. `scan_profile` bounds-checks and nothing else.
-2. **The rotatable-bond descriptor is not a torsion list.** 0 for toluene, p-xylene and
-   *tert*-butylbenzene; 1 for acetanilide, and that one is not the amide.
-3. **Symmetry classes match automorphism orbits** on 21 molecules — 0 false merges. Shipped as a
-   test, not as a claim.
-4. **`skills/atropisomer-assessment`'s half-life anchors were wrong by two orders of magnitude.**
-   Its prose said "27 → about a day"; 27 kcal/mol is 80 days, and 30 is 35 years, not "a few".
-   The error was largest exactly at the ICH class boundary the skill exists to decide.
-5. **Every `calc` durable job was publishing nothing.** `CalcJobWorkflow` sends
-   `payload_kind=type(result).__name__` and its result is the `XtbJobResult` *envelope*, so
-   `projector_for("calc.compute_reaction_energy", "XtbJobResult")` was `None` — while
-   `tests/test_publish_reaches_the_hooks.py` was green asserting a `payload_kind` production has
-   never sent. Fixed at the projection boundary (`unwrap_envelope`), not by re-shaping what the
-   chat sees.
+## Verification plan
+
+- `make lint type test` with `dockerd` + `make up` + `make db-migrate` running, so the ~157
+  Postgres tests actually run rather than skip.
+- `make datasource-validate --construct` — builds the halves, so it validates the *binding*.
+- New tests: a binding against a stub driver with an invented vocabulary proves "any modern
+  database"; a `module:callable` vector store proves the same for the vector half.
 
 ## Review
 
-The three pieces, and why each is where it is:
+**What shipped.**
 
-- **`enumerate_torsions` on `chem`** (so, `Chemclaw3-mcp`): a pure graph operation, the sixth in a
-  family of five, under the house rule *enumerate, then compute — and never the reverse*. It mints
-  a handle from the canonical symmetry classes plus the RDKit build, so a rewritten SMILES keeps the
-  name and a toolchain bump breaks it loudly.
-- **`profile_rotation` here**: its key would name the wells it settles on, so `D-2026-08-16` says
-  it is not shippable as a tool; it loops, so `D-2026-08-25-the-loop-is-a-composite-not-a-template`
-  says it is not a template. Every point it computes is a separately-keyed primitive.
-- **Eyring beside RRHO**: arithmetic over a result, not a calculation — the same rule that kept the
-  RRHO half here when the physics left.
+1. **Snowflake is gone**: `warehouse/snowflake.py`, `ingest/sources/eln-snowflake/`, the
+   `snowflake.*` mypy override, and the `("chemclaw.ingest", "crypto")` layering row whose only site
+   was that driver's key-pair auth. `eln-databricks` is now the manifest the binding tests resolve
+   every path of, and `pistachio` beside it is the first integration.
+2. **`ConnectionBinding` declares `driver:` and nothing else** (`extra="allow"`). Every other key is
+   a keyword argument of the callable it names. `DatabricksWarehouse` consequently took its own
+   vocabulary (`server_hostname`, `access_token`, `warehouse_id`/`http_path`, `catalog`, `schema`)
+   and lost both the translation table in its docstring and the hand-written refusal of two fields
+   that had no analogue.
+3. **One implementation of "attach a database"** in `core/connect.py`, used by ingest, publish and
+   the vector registry. The ~90 duplicated lines in `publish/connect.py` are gone; its own docstring
+   had said the duplication existed only because the model was one vendor's shape.
+4. **The offline check moved to where it can be right**: `make datasource-validate` resolves the
+   driver and binds the block against its signature, sharing `signature_mismatch` with
+   `make sink-validate` so the two cannot drift on the `_env` stripping rule.
+5. **A vector database is a driver too**: `vector_store_provider` takes a shipped name or a
+   `module:callable`. The `Literal`'s typo check survives as a field validator.
 
-What is deliberately not done: 2D surfaces, transition-state claims, ring torsions, enumeration
-inside the compute job. And the two open ends, both needing the live lane rather than more code —
-no barrier has been computed against real xTB, and the conformer-dependence warning threshold is
-unset. Both are in the ADR.
+**Measured, not argued.**
 
----
+- `make lint type test` green with `dockerd` + `make up` + `make db-migrate` running:
+  **4805 passed, 3 skipped**. The three skips are the shallow-clone migration-history checks, not
+  Postgres skips — the ~157 Postgres tests ran (a bare run before starting the daemon showed 3515).
+- Every validator green: `datasource-validate` (and `--construct`), `sink-validate`,
+  `connector-validate`, `skill-validate`, `prose-validate`, `eln-validate`, `template-validate`.
+- The new gate demonstrated rather than asserted: a `role: ANALYST` added to `pistachio`'s
+  connection block failed `make datasource-validate` naming the keyword; a `hostt:` typo in the
+  sink manifest failed `make sink-validate` the same way. Both reverted.
 
-**What is deliberately not fixed**, each with a BACKLOG row rather than a silent omission: the
-four multi-step GFN shapes (PR 2 — declared in `_NOT_YET_PUBLISHED`, so a tenth member field still
-fails), `xtb.hess` and `ThermochemistryResult` (needs a third hook, not a projector), and the BO
-campaign question (write the projector or say it deliberately does not publish).
-
-## Result, measured the same way as before
-
-| | before | after |
-| --- | --- | --- |
-| primitive calculators publishing | 8 of 10 | 9 of 10 (`xtb.hess` declared) |
-| durable jobs publishing | 1 of 11 | 6 of 11 (4 declared, 1 undecided) |
-
-`make lint type test`: 4699 passed, 3 skipped (the migration-history checks needing
-`fetch-depth: 0`), lint and `mypy --strict` clean. Five validators re-run green. End to end against
-Postgres, a reaction-energy job and a descriptor panel each queue 1 row where both queued 0.
-
-
----
-
-# PR 2 — a projector for every shape the GFN loop produces
-
-## Task
-Empty `_NOT_YET_PUBLISHED`: the four multi-step results the seven new jobs return had no
-projector, so those jobs reached the publish path (after PR 1) and were dropped.
-
-## Done
-- [x] `_refined_ensemble`, `_ensemble_property`, `_species_distribution`, `_bond_survey`
-- [x] 13 registry rows; an unmappable average raises rather than storing an unregistered name
-- [x] `_NOT_YET_PUBLISHED` emptied and **kept** — an empty exclusion is what makes the next
-      unroutable shape fail loudly
-- [x] 7 tests driving each shape through `job_envelope`, not through `project()`
-- [x] ADR + ledger (inserted in sorted position — the ledger is ascending, not append-order)
-- [x] BACKLOG row deleted in this commit, per the register's rule
-
-## Review
-Four choices worth recording, each of which could have gone the other way:
-
-1. **A refined ensemble's `energy_hartree` is the electronic energy**, though the ranking is by G.
-   One absolute-energy column, and the electronic one means the same thing in both ensemble
-   shapes — so E-weighted and G-weighted stay comparable. `treatment` disambiguates the relatives.
-2. **`refined_*` property names are kept apart** from the ensemble-wide ones, carrying the model's
-   own argument across the boundary instead of undoing it there.
-3. **An averaged property lands on the plain registered name** (`dipole`, not `dipole_averaged`) —
-   the alternative is the registry split a test already exists to catch.
-4. **A ranked species set is `candidates`, not members.** `CandidateFact` shipped with the schema
-   and had no producer at all; this is its first.
-
-The spread of an averaged property is deliberately not published: min/max/spread are each in the
-averaged property's own unit, so one `property_spread` has no canonical unit and a name per
-property is registry bloat.
-
-Verified by deleting one projector: three assertions turn red — routing, envelope, and that
-shape's own. `make lint type test`: 4744 passed, 3 skipped. Three validators green.
-
-Publishing now: 9/10 primitives, **10 of 11 jobs**. The eleventh is `bo`, which is a question
-rather than a gap and keeps its row.
+**One thing deliberately not done.** The engine tests no longer pin a vendor's SQL — the fake brings
+its own dialect — because with the connection vocabulary now the driver's, borrowing a shipped
+dialect would pin one vendor's spelling into every test of a module whose whole claim is that it has
+none. The shipped spelling is pinned twice instead: against the real dialect, and end to end through
+the retriever. That is more Databricks coverage than existed before, not less.
