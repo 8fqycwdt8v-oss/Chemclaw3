@@ -17,7 +17,6 @@ tools:
   - compute_xtb_energy
   - predict_pka
   - predict_solubility
-  - compute_dft_energy
   - suggest_next_experiment
   - propose_knowledge_note
 ---
@@ -83,7 +82,8 @@ chemistry when that is what answers the question.
    notes do not state (weighing an untried solvent against the tested ones, a pKa, a relative
    stability), run it yourself with `predict_solubility` / `predict_pka` / `compute_xtb_energy`
    and fold the result — with its uncertainty — into the answer; do not stop at "the ELN does
-   not say". Heavy QM goes through `compute_dft_energy`.
+   not say". Everything available is semiempirical: where the question needs more accuracy than
+   that, say so rather than quoting a number the method cannot support.
 6. **Design the next experiment when that is the question** — by one of two paths, chosen
    deliberately and named in the answer.
    - *Reason it from the series* when the chemist is working a step day by day and the question

@@ -80,7 +80,8 @@ def _resolvable_signatures() -> dict[str, inspect.Signature]:
 
     Two sources, both local: the in-process `@tool` registry, and each discovered bundle's own
     `chemclaw.connectors.<name>.server.tools` module, whose function names *are* the tool names the
-    manifest declares. A bundle with no server module (`qm` is jobs-only) and a declared name the
+    manifest declares. A bundle with no server module (`results` is jobs-only) and a declared
+    name the
     module does not define are both skipped — whether a bundle serves what it declares is
     `make connector-validate`'s question, and answering it twice, differently, here would be worse
     than not answering it.

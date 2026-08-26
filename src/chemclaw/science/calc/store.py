@@ -30,17 +30,19 @@ ResultPayload = dict[str, Any]
 # The version of **ChemClaw's own** contribution to a stored result — the half no `calc_version`
 # covers.
 #
-# **Two places fold it in, and it has to be both.** `CalculationKey.build` is the original and now
-# serves only the DFT path (`connectors/qm/cache.py`); every `calc` key comes back from the
+# **It is folded in wherever a key is assembled, and getting that wrong is silent.**
+# `CalculationKey.build` is the original and folds it in; every `calc` key comes back from the
 # calculation server as four parts and is assembled by `connectors.calc.remote.remote_key`, which
-# folds the epoch into the params hash there. For one release after the physics moved it was folded
-# in *neither* place for `calc`, so a bump invalidated DFT rows and nothing else while this comment,
-# `science/calc/__init__.py` and a test's own failure message all prescribed bumping it as the
-# remedy for a stored payload changing meaning.
+# folds the epoch into the params hash there instead. For one release after the physics moved it
+# was folded in at *neither* place for `calc`, so a bump invalidated the DFT bundle's rows and
+# nothing else while this comment, `science/calc/__init__.py` and a test's own failure message all
+# prescribed bumping it as the remedy for a stored payload changing meaning. That bundle is gone
+# (`D-2026-08-26-semiempirical-is-the-whole-tier`) and `remote_key` is the live path; the rule the
+# episode leaves behind is that a new way of assembling a key is a new place to fold the epoch.
 #
 # Every calculator's `calc_version` answers one question: *would the program we shell out to
 # produce a different number now?* It is built from a tblite build, an xtb/crest binary version, an
-# RDKit version, an HPC pipeline tag. Two things change what a stored row *means* that no such
+# RDKit version. Two things change what a stored row *means* that no such
 # version can see, and they turned out to be the same defect reached from two directions:
 #
 # - **Our own arithmetic was wrong and then fixed.** `xtb_thermo._rotational` divided a linear
@@ -377,12 +379,13 @@ async def publish_stored_result(
     """Offer a just-persisted primitive to the external results store, if one is configured.
 
     **Public, and paired with `put` rather than with `cached_compute`.** Every writer to the
-    calculation store is a producer of publishable science, and there are two: `cached_compute`
-    below, and `connectors/qm/activities.py::persist_qm_result`, which cannot use `cached_compute`
-    because its computation happened on a cluster rather than behind a callable. The QM writer was
-    missed when this was private to this module, so DFT — the one calculator the `dft` projector
-    and the `basis_set`-carrying `theory_level` row exist for — published on backfill and never
-    live. One helper beside the write is what makes "persisted implies offered" checkable.
+    calculation store is a producer of publishable science, and this used to be private to the one
+    writer that goes through `cached_compute` below. The second writer — the removed DFT bundle's
+    `persist_qm_result`, which could not use `cached_compute` because its computation happened on a
+    cluster rather than behind a callable — was therefore missed, and DFT published on backfill and
+    never live. It stays public and stays paired with the write rather than with `cached_compute`,
+    because that is what makes "persisted implies offered" checkable for the *next* writer that
+    does not come through the cache.
 
     **Imported inside the function, and that is load-bearing rather than stylistic.** `science` may
     not import a capability layer at module scope (`tests/test_layering.py`), and the publish path

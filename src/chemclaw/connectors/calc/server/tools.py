@@ -722,7 +722,8 @@ async def _starting_geometry(smiles: str, structure_id: str) -> Structure:
 async def compute_xtb_energy(smiles: str, charge: int = 0) -> XtbResult:
     """Compute the GFN2-xTB total energy of a molecule (fast, semiempirical).
 
-    Runs a quick semiempirical single point (no HPC). Results are cached, so
+    Runs a quick GFN2-xTB single point — semiempirical is the ceiling, with no heavier
+    method behind this tool. Results are cached, so
     repeating the same molecule and charge is free and returns instantly.
 
     Args:

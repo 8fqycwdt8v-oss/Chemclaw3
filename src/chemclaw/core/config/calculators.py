@@ -122,6 +122,18 @@ class CalculatorSettings(BaseSettings):
     # real separation between torsional minima (60 degrees for a three-fold rotor) and well above
     # the spread of an optimizer settling into one basin from two neighbouring start points.
     xtb_rotation_merge_degrees: float = Field(default=15.0, gt=0.0, lt=60.0)
+    # How far out of line one step of a torsion profile has to be, as a multiple of that profile's
+    # own typical step, before it is reported as a point that relaxed into a different basin.
+    #
+    # **A ratio and not a kcal/mol threshold, because measurement said so.** This was
+    # `xtb_reaction_uncertainty_kcal` (3.0), which fires on any barrier steep enough to matter: on
+    # the live GFN2 server N,N-dimethylacetamide steps 8.8 kcal/mol between two 30-degree points
+    # while climbing an ordinary 18 kcal/mol amide barrier, and was warned about — so the check
+    # fired on precisely the hindered rotations the capability exists for and stayed quiet on the
+    # freely-rotating ones. A discontinuity is a step *out of line with its neighbours*, not a
+    # large step. Calibrated against three measured smooth profiles, whose largest step was 3.5x,
+    # 2.7x and 2.5x their own median; 4.0 clears all three.
+    xtb_rotation_discontinuity_ratio: float = Field(default=4.0, gt=1.0)
     # How many times a geometry that lands on a saddle point may be displaced along its
     # imaginary mode and re-optimized, and how far (Angstrom, the largest atom's motion).
     # One attempt clears the ordinary case — a force field's eclipsed methyl held by

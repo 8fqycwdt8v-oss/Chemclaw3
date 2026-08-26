@@ -268,10 +268,10 @@ def costly_bundle(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[s
 def test_an_expensive_job_step_is_refused_for_an_unentitled_requester(
     monkeypatch: pytest.MonkeyPatch, costly_bundle: str
 ) -> None:
-    """The finding: a template was a way to start HPC work you could not start yourself.
+    """The finding: a template was a way to start expensive work you could not start yourself.
 
     `ResolvedJob` dropped `expensive`, so `authorize_trigger` never ran on this path and a template
-    naming `compute_dft_energy` started it for anyone entitled to run the *template*. The check now
+    naming `sample_conformers` started it for anyone entitled to run the *template*. The check now
     happens against the step's own requester, before any child workflow is started.
     """
     monkeypatch.setattr(settings, "entra_required", True)

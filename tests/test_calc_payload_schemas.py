@@ -42,7 +42,6 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from chemclaw.connectors.qm.specs import QMJobResult
 from chemclaw.core.ids import stable_hash
 from chemclaw.science.calc.models import (
     DescriptorProfile,
@@ -92,7 +91,6 @@ PAYLOAD_MODELS: tuple[type[BaseModel], ...] = (
     HessianPayload,
     OptimizationResult,
     PkaResult,
-    QMJobResult,
     SiteReactivityResult,
     SolubilityResult,
     XtbResult,
@@ -116,7 +114,6 @@ RECORDED_SHAPES: dict[str, str] = {
     "HessianPayload": "8495e40479a746f1",
     "OptimizationResult": "3d934a3b36e47f11",
     "PkaResult": "f4928a91c06fc746",
-    "QMJobResult": "fce36419000e7f0d",
     "SiteReactivityResult": "0378ea844edafd37",
     # Changed when `Estimate.method` dropped its unreachable `"conformal"` member: nothing ever
     # produced that value (the function behind it had no caller and was deleted), so every row on
@@ -148,7 +145,7 @@ def test_persisted_payload_shapes_have_not_changed() -> None:
         f"persisted payload shape(s) changed: {sorted(changed)}.\n"
         "If rows already in `calculation_results` are now wrong or incomplete, bump "
         "`chemclaw.science.calc.store.CALCULATION_EPOCH` (and log the reason beside it). It "
-        "reaches every key: `CalculationKey.build` folds it in for the DFT path, and "
+        "reaches every key: `CalculationKey.build` folds it in, and "
         "`connectors.calc.remote.remote_key` folds it into the params hash of every key the "
         "calculation server derives.\n"
         "Then record the new digest(s) in RECORDED_SHAPES: "

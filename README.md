@@ -46,7 +46,6 @@ uvicorn chemclaw.api.app:create_app --factory --host 127.0.0.1 --port 8000
 
 # Durable workers (separate processes; need Temporal + Postgres from `make up`).
 python -m chemclaw.durable.background_worker    # background-jobs (ELN sync, reports, memory)
-python -m chemclaw.connectors.qm.worker         # connector-qm (the durable QM/DFT job via Nextflow)
 python -m chemclaw.connectors.calc.worker       # connector-calc (the expensive xTB calculations)
 python -m chemclaw.connectors.bo.worker         # connector-bo (optimization campaigns)
 ```

@@ -19,7 +19,7 @@ call with no heartbeat is an activity Temporal declares dead: against
 times, each restarting from whatever the cache already holds — and before the split that cost
 roughly fifty minutes of saturated CPU to fail a CREST search that would have succeeded. That
 wrapper was extracted for exactly this shape ("one opaque call with nothing finer to report than
-*still running*") from the CREST subprocess, the HPC poll and the BoFire fit; a remote computation
+*still running*") from the CREST subprocess and the BoFire fit; a remote computation
 is the fourth instance. Its guarantee — **no exit from the wrapper leaves the wrapped work
 running** — is what makes a dropped connection safe rather than a detached write.
 

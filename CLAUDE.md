@@ -11,7 +11,7 @@ the ledger stayed), BoFire BO campaigns, the knowledge graph + PR-gate, the eval
 layer, ECFP4/DRFP fingerprint search, ELN ingestion, the memory layers, and the report
 harness.
 
-The **foundation build F0–F7** (the real target stack: OpenShift + HPC/Nextflow + an internal
+The **foundation build F0–F7** (the real target stack: OpenShift + an internal
 OpenAI-compatible LLM, Entra identity system-wide) is **implemented for everything verifiable
 offline**, each phase ADR'd (D-039…D-050) and green under `make lint type test`:
 
@@ -21,7 +21,8 @@ offline**, each phase ADR'd (D-039…D-050) and green under `make lint type test
   core rule, Temporal-mTLS. (Workload-identity federation, OBO and the HPC identity bridge were
   built and never wired to anything; D-2026-08-15 deleted all three — 254 LOC whose only callers
   were their own tests. Re-adding one is a new decision, and the ADRs that designed them stand.)
-- **F5** real Nextflow (Seqera/Tower) launcher behind the QM activities (mock kept for CI).
+- **F5** was the real Nextflow (Seqera/Tower) launcher behind the QM activities. **It is gone**
+  along with the whole HPC/DFT tier — see the section below.
 - **F6** OpenShift delivery: one rootless image, Helm chart, CI, the plain-secret set `values.yaml`
   declares and `tests/test_helm_chart.py` pins, Temporal self-hosted.
 - **F7** the generic `DataSource` seam (`chemclaw.ingest.sources`) — ELN re-hosted unchanged; a new source is one
@@ -146,6 +147,19 @@ independently and carried out, removing the audit hash chain while keeping the t
 the INSERT-only grant. What that leaves open in `docs/planning/BACKLOG.md` is the durable approval
 store, the `session_messages` read-model and `HumanInTheLoopMiddleware`. `RubricMiddleware` is **declined** (`D-2026-08-16-a-second-judge-is-a-second-answer-about-the-same-answer`) — it cannot reuse `score_answer`, and a failed grading returns the ungraded answer.
 
+**There is no HPC tier, and there is no DFT** (`D-2026-08-26-semiempirical-is-the-whole-tier`).
+Every calculation this system runs is semiempirical — GFN2-xTB through tblite, and CREST — and it
+runs in its own pod (`Chemclaw3-mcp`'s `servers/calc`, addressed by `CHEMCLAW_CALC_SERVER_URL`) on
+OpenShift or Databricks, never on a cluster. The `qm` connector bundle, the `hpc` config section and
+its fourteen `hpc_*` settings, the Seqera/Tower launcher, the mock launcher in `Chemclaw3_mock`, the chart's
+`connectors.qm` entry and `hpcApiToken` secret, and `compute_dft_energy` itself are all deleted —
+not deferred. Three things were deliberately kept and each says why in the ADR: the `dft` *backfill*
+projector (`calculation_results` is never pruned, so a deployment still holds rows the removed
+bundle stamped), the parent-ceiling invariant rewritten against `xtb_job_timeout_seconds` (the CREST
+search is the longest activity now), and `job-result` back in core's `KNOWN_NOTE_TYPES` because no
+bundle mints it any more. **When a decision turns on a difference inside GFN2-xTB's error bar, say
+so and propose an experiment — there is no tier to escalate to.**
+
 **Live edges remain open** (need a real Temporal broker / OpenShift cluster): live cluster durability
 + `helm`/`kubeconform` render. See `docs/planning/BACKLOG.md` for the exact list. Note that the
 render edge now has one more thing to catch: `D-2026-08-26-a-knob-that-renders-nothing-is-not-a-knob`
@@ -168,8 +182,9 @@ every tool, job and skill (D-118) — so it describes a system that no longer ex
 while remaining right about the four layers. Read it for intent; read `docs/decisions/`, the package
 READMEs and `docs/guides/runbook.md` for what is true today.
 
-- `docs/reference/architektur.md` — the four-layer architecture (§6 = the real OpenShift/Nextflow/internal-LLM
-  deployment; §7/§8 = Entra durchgängig).
+- `docs/reference/architektur.md` — the four-layer architecture (§6 = the real OpenShift/internal-LLM
+  deployment; §7/§8 = Entra durchgängig). Its HPC/SLURM/Nextflow and DFT-escalation prose describes a
+  design that was retracted in full; §6 carries the note saying so.
 - `docs/archive/plans/implementation-plan.md` — the original build order; `docs/archive/plans/implementation-tickets.md` — the
   F0–F9 ticket backlog with per-phase status.
 
@@ -186,8 +201,8 @@ generations and are not in scope for any task here.
 - [`8fqycwdt8v-oss/Chemclaw3_ui`](https://github.com/8fqycwdt8v-oss/Chemclaw3_ui) — the ChemClaw3
   frontend.
 - [`8fqycwdt8v-oss/Chemclaw3_mock`](https://github.com/8fqycwdt8v-oss/Chemclaw3_mock) — a mock
-  server that stands in for external MCP tools and data sources, plus a mock HOC, so the system
-  can be live-tested end-to-end without real integrations.
+  server that stands in for external MCP tools and data sources, so the system can be live-tested
+  end-to-end without real integrations.
 
 **Where a capability belongs.** This repo holds *infrastructure*: conversation orchestration, the
 knowledge graph, retrieval, memory, ingestion, identity, **publication** and durable execution. Scientific capability
@@ -196,7 +211,9 @@ as a server. **The boundary within science is by *composability*, not by speed o
 (`D-2026-08-16-the-physics-leaves-the-cache-stays`): a *primitive* — one calculation whose identity
 is derivable from its inputs — is a stateless MCP server there, while *orchestration* and the D-011
 cache stay here. A **composite**, whose key would name an output, is not shipped at all: it is
-decomposed, and this repo composes the parts so every step is cached.
+decomposed, and this repo composes the parts so every step is cached. Scientific capability here
+means **semiempirical** capability: there is no DFT and no cluster
+(`D-2026-08-26-semiempirical-is-the-whole-tier`).
 
 That replaced an earlier fast/slow rule, and measurement is what replaced it. Leaving the durable
 jobs' physics here would have *copied* the engine rather than moved it — the four modules behind
@@ -252,13 +269,11 @@ Four layers, each with a single responsibility. **Never merge their concerns.**
 
 1. **LangGraph** — conversation orchestration + short reasoning steps, as one compiled graph per
    turn with a Postgres checkpointer under it.
-2. **Temporal** — durable execution of long/expensive jobs. Fast local compute (xTB/GFN2, ML
-   predictors) + BoFire BO, and **HPC/DFT execution is built** (F5, D-048: the real Nextflow
-   launcher behind the QM activities) — what it waits on is a cluster, not code
-   (`docs/planning/DEFERRED.md`). Queues: `background-jobs` for core's light work (sync, re-index,
-   reports, the connector-job wrapper) plus one derived `connector-<name>` queue per bundle that
-   owns durable work. The heavy `hpc-jobs` queue went with the QM job into `connectors/qm/`
-   (D-118/D-150), so there is no second *core* queue.
+2. **Temporal** — durable execution of long/expensive jobs: the semiempirical calculations
+   (xTB/GFN2 single points, CREST conformer and complex searches, scans, rotational profiles) and
+   BoFire BO. Queues: `background-jobs` for core's light work (sync, re-index, reports, the
+   connector-job wrapper) plus one derived `connector-<name>` queue per bundle that owns durable
+   work (D-118/D-150), so there is no second *core* queue.
    Every result is persisted once via the calculation store, and a *persisted* result is never
    recomputed (D-011) — `cached_compute` is a check-then-act, so concurrent misses on one key each
    compute (measured: 8 together → 8 computes; 4 after the write → 0). Per-key in-flight dedup is a

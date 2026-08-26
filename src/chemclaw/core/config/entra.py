@@ -36,9 +36,9 @@ class EntraSettings(BaseSettings):
     entra_jwks_url: str = ""
     entra_issuer: str = ""
     # Authorization for expensive triggers (plan F4-T5): the single fachliche gate. An action
-    # named in `entra_expensive_actions` (comma list, e.g. "compute_dft_energy,start_bo_campaign")
+    # named in `entra_expensive_actions` (comma list, e.g. "sample_conformers,start_bo_campaign")
     # may run only for a user holding at least one role in `entra_privileged_roles` — so an
-    # autonomously-planned todo cannot launch a costly HPC/BO job outside the requesting user's
+    # autonomously-planned todo cannot launch a costly calculation or BO job outside the user's
     # entitlements. Enforced only when `entra_required` (a real deployment with real roles); in
     # dev the gate is open. Both empty by default: nothing is privileged until a deployment
     # declares it.
@@ -53,7 +53,7 @@ class EntraSettings(BaseSettings):
     # an `entra_privileged_roles` role out of the box — an explicit entry here overrides that).
     # The built-in write gate only narrows `"allow"`; it never widens `"deny"`. Enforced only
     # when `entra_required` (dev gate is open). ENV override for the gates is JSON, e.g.
-    # CHEMCLAW_TOOL_ROLE_GATES='{"compute_dft_energy": ["process-chemist"]}'. Note: `deny` with an
+    # CHEMCLAW_TOOL_ROLE_GATES='{"sample_conformers": ["process-chemist"]}'. Note: `deny` with an
     # empty `tool_role_gates` blocks *all* tools — a deliberate lockdown, not a footgun to
     # stumble into.
     tool_role_gates: dict[str, list[str]] = Field(default_factory=dict)

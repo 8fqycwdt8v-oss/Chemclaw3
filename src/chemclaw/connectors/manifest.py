@@ -265,7 +265,8 @@ class JobSpec(BaseModel):
     declared queue could therefore hold exactly one correct value and any number of wrong ones,
     each of which starts a job successfully and then leaves it in a queue nobody polls.
 
-    `expensive` puts the job in the coarse `authorize_trigger` gate's set (a costly HPC/BO run must
+    `expensive` puts the job in the coarse `authorize_trigger` gate's set (a costly search or BO
+    run must
     be entitled, not merely authenticated) — the declaration *is* the gate's source, read by
     `chemclaw.agent.authz.expensive_actions`, so it needs no matching operator entry and gains
     nothing from one. It was for a while a marker that authorized nothing, because the gate
@@ -384,10 +385,10 @@ class ConnectorManifest(BaseModel):
     # **Why a bundle may extend a closed vocabulary.** Those two frozensets are closed on purpose:
     # a typo makes a note or an edge unfindable by every filter keyed on it, so the vocabulary is
     # checked at the PR-gate rather than left open. But the vocabulary is not core's alone —
-    # `job-result` and `bo-candidate` are both minted by bundles (`connectors/qm/knowledge.py`,
-    # `connectors/bo/knowledge.py`) and were written into core's frozenset by hand. That made a
-    # bundle contributing a note type the one connector contribution needing a core edit, in the
-    # seam whose whole claim is that a capability is a folder (D-118).
+    # `bo-candidate` is minted by a bundle (`connectors/bo/knowledge.py`) and was written into
+    # core's frozenset by hand. That made a bundle contributing a note type the one connector
+    # contribution needing a core edit, in the seam whose whole claim is that a capability is a
+    # folder (D-118).
     #
     # Declaring it here keeps both properties: the set is still closed (an undeclared name still
     # fails `make kg-validate`), a human still sees a genuinely new type at the gate that reviews

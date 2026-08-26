@@ -86,7 +86,7 @@ async def notify_session(session_id: str, kind: str, payload: dict[str, Any]) ->
             dedupe_key=_dedupe_key(info.workflow_id, info.run_id, kind, payload),
         ),
         task_queue=settings.background_task_queue,
-        start_to_close_timeout=timedelta(seconds=settings.qm_activity_timeout_seconds),
+        start_to_close_timeout=timedelta(seconds=settings.activity_timeout_seconds),
         # **`start_to_close` alone is not a bound on this call, and that is what made "best effort"
         # able to block a finished job forever.** It runs only once a worker has *picked the task
         # up*; a task nobody polls — the background fleet scaled to zero, a rolling update, a queue
@@ -98,7 +98,7 @@ async def notify_session(session_id: str, kind: str, payload: dict[str, Any]) ->
         #
         # Doubled rather than a new setting: the wait is one small insert plus whatever queue delay
         # a healthy fleet has, and a second knob would be one more pair to keep in step.
-        schedule_to_close_timeout=timedelta(seconds=settings.qm_activity_timeout_seconds * 2),
+        schedule_to_close_timeout=timedelta(seconds=settings.activity_timeout_seconds * 2),
         retry_policy=BAD_DATA_RETRY,
     )
 
@@ -108,7 +108,8 @@ async def notify_session_best_effort(session_id: str, kind: str, payload: dict[s
 
     For a workflow whose real result is the calculation (QM, BO): the science is done and cached, so
     a failed notification must not fail the job — the same discipline as `publish_note_best_effort`
-    for the note write. It runs on the light background queue (a small DB insert, not HPC).
+    for the note write. It runs on the light background queue (a small DB insert, not a
+    calculation).
 
     Returns whether the event was recorded. Most callers ignore it, exactly because the science is
     the result and the notification is not. A caller that advances a *watermark* past what it just

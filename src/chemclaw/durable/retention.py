@@ -87,7 +87,8 @@ is a policy a deployment has to be able to state and act on.
 
 - `calculation_results` is **refused** for a different reason: D-011 ("never compute twice") is a
   correctness *and* cost guarantee, and evicting a cached result silently converts a cache hit into
-  a recomputation — potentially an HPC run. A cache is bounded by cost policy, not by a retention
+  a recomputation — potentially an hours-long search. A cache is bounded by cost policy, not by a
+  retention
   clock, so it needs its own eviction design (LRU by access, or by compute cost) rather than an age
   cutoff. Deliberately not lumped in here.
 
@@ -122,7 +123,8 @@ logger = logging.getLogger(__name__)
 # `session_events` carries `consumed_at IS NOT NULL` because the module docstring's justification
 # for pruning it is that "a **consumed** push-back mailbox row is spent". Age alone was the whole
 # predicate, so an undelivered `job_completed` older than the window was destroyed: a durable job
-# that outran the retention window — a QM/HPC run, exactly what this channel exists for — lost its
+# that outran the retention window — a long conformer search, exactly what this channel exists
+# for — lost its
 # completion, the session waited on it forever, and the harness "awaiting job" todo never flipped.
 # It also destroyed the `system-audit-integrity` and `system-eval-drift` alerts, which by
 # construction are never consumed, so retention silently deleted the evidence. (The first channel

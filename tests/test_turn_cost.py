@@ -1,7 +1,7 @@
 """Cost attribution: who spent what, on tokens and on compute.
 
 The readiness row read *"token metrics carry `profile` only, so 'what did team X cost' is
-unanswerable, and HPC/compute spend is entirely unmetered — no counter for jobs launched or
+unanswerable, and compute spend is entirely unmetered — no counter for jobs launched or
 node-hours"*. Half of that is a real gap and half is not, and the tests below separate them:
 
 - **Real.** Nothing durable recorded what a turn cost, against whom. The `profile` label answers a
@@ -195,10 +195,10 @@ def test_a_job_record_carries_what_the_run_consumed() -> None:
     )
 
     job = ConnectorJobInput(
-        connector="qm",
-        job="compute_dft_energy",
-        workflow="QmJobWorkflow",
-        task_queue="hpc-jobs",
+        connector="calc",
+        job="sample_conformers",
+        workflow="CalcJobWorkflow",
+        task_queue="connector-calc",
         rationale="check the barrier",
         requested_by="oid-abc",
         payload={"smiles": "CCO"},

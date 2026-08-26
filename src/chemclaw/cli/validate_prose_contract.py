@@ -356,7 +356,7 @@ def _sub_decision_labels() -> set[str]:
     label some decision document defines and still rejects an invented one.
 
     **Only the title line counts, and that is not a shortcut.** An ADR that *defines* a label names
-    it in its heading — `D-048 — F5: real HPC execution … (D-A5, D-A5a)`. Scanning the whole body
+    it in its heading — `D-048 — F5: … (D-A5, D-A5a)`. Scanning the whole body
     would make every mention definitional, so an ADR discussing a label (this rule's own ADR names
     an invented `D-A77b` as an example of what must fail) would silently license it. That is not
     hypothetical: it is how this function's first version was caught.
@@ -515,8 +515,8 @@ def check_prose_contract() -> list[str]:
             problems.append(f"{origin}: names {name} but no such agent tool is registered")
         # The *effective* vocabulary — core's set plus what the enabled bundles declare — because
         # that is what `kg-validate` will accept, and this check exists to predict its verdict.
-        # Against core's half alone, prose naming `job-result` (minted by the `qm` bundle) would be
-        # reported as unknown while the note it produces validates perfectly.
+        # Against core's half alone, prose naming `bo-candidate` (declared by the `bo` bundle)
+        # would be reported as unknown while the note it produces validates perfectly.
         for note_type in sorted(referenced_note_types(text) - known_note_types()):
             problems.append(
                 f"{origin}: tells the agent to write a `{note_type}` note, which is not a known "
