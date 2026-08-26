@@ -394,14 +394,14 @@ def _warehouse_shaped(procedure: str) -> OrdReaction:
     """A reaction as a warehouse binding produces one: prose recorded, `steps` never mapped.
 
     `chemclaw.ingest.eln.warehouse.binding` excludes `steps` from `_MAPPABLE_FIELDS`
-    deliberately, so this is the real shape of every Snowflake-ingested reaction rather than a
+    deliberately, so this is the real shape of every warehouse-ingested reaction rather than a
     contrived one.
     """
     return OrdReaction(
         reaction_id="WH-1",
         inputs=[Component(smiles="c1ccccc1Br", role=Role.REACTANT)],
         outcomes=[Component(smiles="c1ccccc1-c1ccccc1", role=Role.PRODUCT)],
-        provenance="snowflake:eln",
+        provenance="warehouse:eln",
         procedure_text=procedure,
     )
 
@@ -410,7 +410,7 @@ def test_a_recorded_procedure_reaches_the_note_when_the_source_maps_no_steps() -
     """The warehouse path's protocol must survive to the graph, not stop at the schema.
 
     Before this, `_procedure_block` returned `""` whenever `steps` was empty and nothing else read
-    `procedure_text`, so a Snowflake-ingested reaction reached `expand_note` with no recipe at all —
+    `procedure_text`, so a warehouse-ingested reaction reached `expand_note` with no recipe at all —
     measured at the time: 251 characters of procedure in, a 63-character body out.
     """
     procedure = (
@@ -470,7 +470,7 @@ def test_the_numbers_a_chemist_compares_reach_the_note_as_numbers() -> None:
         reaction_id="R1",
         inputs=[Component(smiles="c1ccccc1Br", role=Role.REACTANT)],
         outcomes=[Component(smiles="c1ccccc1-c1ccccc1", role=Role.PRODUCT)],
-        provenance="snowflake:eln",
+        provenance="warehouse:eln",
         temperature_c=90.0,
         time_h=12.0,
         yield_percent=78.0,

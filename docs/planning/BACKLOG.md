@@ -227,7 +227,7 @@ topic).
 
 **`reaction_fingerprints` keys on a bare reaction id, so two sources collide on one row.**
 `science/fingerprints/store.py` writes `reaction_fingerprints.id = reaction.reaction_id` with no
-source column, while `ingest/sources/eln-snowflake/datasource.yaml` puts the source name into
+source column, while `ingest/sources/eln-databricks/datasource.yaml` puts the source name into
 `provenance` precisely "so two ELNs with colliding entry ids stay distinguishable in the graph".
 Two sources using one entry id therefore share a fingerprint row and a `reaction-<id>` note id:
 the second ingest overwrites the first, silently, and a similarity hit cites the wrong run. Found
@@ -366,7 +366,7 @@ it happens.
       each of the three memory jobs (`build_campaign_notes_activity`,
       `build_playbook_notes_activity`, `build_optimization_notes_activity`) walks the whole record
       from the beginning of time, and `all_reactions()` is called once per activity. On the two
-      file-drop exports this costs nothing; against a real Snowflake ELN it is a full table scan
+      file-drop exports this costs nothing; against a real warehouse ELN it is a full table scan
       per activity per scheduled run. `ElnAdapter` (`ingest/eln/adapter.py:128`) has exactly two
       methods and neither is a fetch-by-id, so there is no cheaper read to reach for — closing this
       means either a fetch-by-id on the adapter protocol (every source pays) or a derived store of
@@ -730,7 +730,7 @@ above when it becomes the next thing worth doing, and delete it from here when i
 The large multi-item programmes that used to be tracked here as sections are records now, not
 plans: the F0–F9 foundation build, the F10 parity pass, the F11 gap closure, the BO capability
 roadmap and the xTB/QM (X-series) roadmap. Their remaining live edges — real Temporal broker, real
-cluster, real Snowflake — are in
+cluster, a real Databricks workspace — are in
 [`DEFERRED.md`](DEFERRED.md), each with the trigger that would revisit it, which is the register
 those belong in.
 

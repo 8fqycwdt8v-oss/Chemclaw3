@@ -8,15 +8,15 @@ its `sql.py`, not in the driver. So a driver written for the inbound seam is alr
 write, and this one connects through the same Protocol.
 
 **The statements it sends are Postgres, though** (`dialect.py`) — the upserts are `ON CONFLICT`,
-which Snowflake and Oracle do not accept. The seam is portable; the emitter is not yet. Reaching
-another engine is a `MERGE` emitter beside the current one, not a configuration change.
+which several warehouses spell `MERGE` instead. The seam is portable; the emitter is not yet.
+Reaching another engine is a `MERGE` emitter beside the current one, not a configuration change.
 
-**What is deliberately *not* reused is that seam's `ConnectionBinding`.** It is Snowflake-shaped —
-an account, a warehouse, a role, and **no host or port** — so pointing a Postgres store at it would
-mean either abusing `account` as a hostname or teaching one model to describe two products. The
-connection block here is validated by the driver's own signature instead, which is the same rule
-the data-source seam applies to its `config:`. `publish/connect.py` keeps the credential discipline
-that mattered: variables are *named*, read at connect time, and registered for log redaction first.
+**The `connection:` block is the driver's own signature**, here and on the inbound side alike
+(`D-2026-08-26-the-driver-s-signature-is-the-schema`). This module used to argue for the opposite —
+that the inbound seam's `ConnectionBinding` could not be reused because it enumerated one vendor's
+connection fields and had no host or port. It enumerates nothing now, and both seams resolve their
+driver through `chemclaw.core.connect`, which keeps the discipline that mattered: variables are
+*named*, read at connect time, and registered for log redaction first.
 """
 
 import logging

@@ -125,13 +125,12 @@ _STACKS: dict[str, str] = {
     "httpx": "httpx",
     "openai": "llm",
     "anthropic": "llm",
-    "snowflake": "warehouse",
-    # The second warehouse driver, on the same terms. Tracked here so its lazy import is a
-    # *declared* exception rather than one this file simply cannot see — an untracked root is
-    # invisible to the walk, which would make "no undeclared third-party import" a weaker
-    # claim than it reads as. `databricks-vectorsearch` is a different matter: the vector
-    # adapter reaches it through `importlib.import_module`, a string no AST walk resolves,
-    # and `retrieval/vectors/databricks.py` says so in its own docstring.
+    # The warehouse driver's client. Tracked here so its lazy import is a *declared* exception
+    # rather than one this file simply cannot see — an untracked root is invisible to the walk,
+    # which would make "no undeclared third-party import" a weaker claim than it reads as.
+    # `databricks-vectorsearch` is a different matter: the vector adapter reaches it through
+    # `importlib.import_module`, a string no AST walk resolves, and
+    # `retrieval/vectors/databricks.py` says so in its own docstring.
     "databricks": "warehouse",
     # Added after a review measured what `_STACKS` was leaving unpoliced. Three roots present in
     # `src/` carry a layering meaning the first version missed; the rest of what it flagged
@@ -143,10 +142,12 @@ _STACKS: dict[str, str] = {
     # layering violation this system can have, and `import jwt` in `science/`, `connectors/` or
     # `kg/` is exactly what that looks like in source.
     "jwt": "token",
-    # Key material. One site, `ingest/eln/warehouse/snowflake.py`, deserialising a private key for
-    # the warehouse's key-pair auth. (The review that asked for this row placed it in
-    # `api/auth.py` alongside `jwt`; measured, it is not there and never was — `api/auth.py`
-    # imports `jwt` only. The two are separate concerns and get separate stacks.)
+    # Key material. **No package imports it today**, which is why the row is kept rather than
+    # deleted: the one site was a warehouse driver's key-pair auth, and a `cryptography` import
+    # reappearing outside the identity path is a thing to notice in review rather than to discover
+    # afterwards. There is no allowed `(package, "crypto")` row below, so any such import fails this
+    # file. (The review that asked for the original row placed it in `api/auth.py` alongside `jwt`;
+    # measured, it is not there and never was — `api/auth.py` imports `jwt` only.)
     "cryptography": "crypto",
     # The xTB engine itself. **No package may import it any more**, which is the point of keeping
     # the row: `D-2026-08-16-the-physics-leaves-the-cache-stays` moved the engines to
@@ -253,10 +254,6 @@ _ALLOWED_MODULE_STACKS: dict[Edge, str] = {
     ("chemclaw.kg", "postgres"): "the note-proposal store",
     ("chemclaw.ingest", "postgres"): "the document chunk index",
     ("chemclaw.ingest", "rdkit"): "an ELN row's structure is canonicalised on the way in",
-    ("chemclaw.ingest", "crypto"): (
-        "the Snowflake binding's key-pair auth deserialises a PEM private key; the only place in "
-        "the tree that handles key material outside the identity path"
-    ),
     ("chemclaw.memory", "postgres"): "the memory layers are tables",
     ("chemclaw.retrieval", "postgres"): "the vector index is pgvector",
     ("chemclaw.evals", "httpx"): "the live probe drives the real front door over HTTP",

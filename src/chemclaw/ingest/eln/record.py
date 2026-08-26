@@ -348,8 +348,8 @@ def _procedure_block(reaction: OrdReaction) -> str:
     statements were true and nothing rendered that prose: measured, a warehouse-shaped reaction
     carrying 251 characters of procedure produced a 63-character note body containing none of it,
     and `procedure_text` had three writers and exactly one reader in the tree — a 240-character
-    excerpt in `memory/optimization`. For the first live connector, a Snowflake ELN, `expand_note`
-    answered with a reaction that had no recipe.
+    excerpt in `memory/optimization`. For the warehouse ELN — the first live connector —
+    `expand_note` answered with a reaction that had no recipe.
 
     **Why both are sometimes rendered, decided by containment rather than by a threshold.** The two
     file-drop adapters populate `steps` *and* `procedure_text`, and they do it differently.

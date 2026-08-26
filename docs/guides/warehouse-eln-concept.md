@@ -1,7 +1,8 @@
 # Concept: attaching a warehouse ELN whose schema nobody knows yet
 
-**Status:** implemented offline; the live connection waits on a tenant. The decision is
-`docs/decisions/D-2026-08-04-the-schema-is-a-file.md`.
+**Status:** implemented offline; the live connection waits on a tenant. The decisions are
+`docs/decisions/D-2026-08-04-the-schema-is-a-file.md` and, for the connection block itself,
+`docs/decisions/D-2026-08-26-the-driver-s-signature-is-the-schema.md`.
 **Scope:** how ChemClaw connects to a corporate ELN held in a SQL warehouse — reaction records,
 their child tables, and the per-reaction embedding beside them — when the tables and columns are not
 knowable in advance.
@@ -12,7 +13,8 @@ three need infrastructure this environment does not have (`docs/planning/DEFERRE
 
 ## 0. The problem, and the answer in one line
 
-The final ELN integration will be a Snowflake database. It will carry reaction SMILES, protocol
+The final ELN integration is a lakehouse — Databricks, for the first site. It will carry reaction
+SMILES, protocol
 text, project ids, several child tables of charged amounts for starting materials, solvents and
 reagents, yield, purity, more tables than anyone has enumerated, and a vector representation of each
 reaction in a warehouse vector table.
@@ -27,12 +29,12 @@ the site invents next quarter is adding a block to it.
 
 D-120 made *attaching* a source free: a folder holding a `datasource.yaml`, plus the folder's name
 in `CHEMCLAW_DATA_SOURCES`, and no core Python changes. `docs/planning/DEFERRED.md` recorded the
-Snowflake connector as blocked on "the tenant, not the seam", and for attachment that was true.
+warehouse connector as blocked on "the tenant, not the seam", and for attachment that was true.
 
 It was not true for *mapping*. Both existing adapters —
 `src/chemclaw/ingest/eln/json_adapter.py` and `src/chemclaw/ingest/eln/ord_adapter.py` — name their
 source's fields in code, which is correct for them: both formats were fixed before the adapter was
-written. Under that pattern, a Snowflake ELN means writing an adapter on the day access arrives, and
+written. Under that pattern, a warehouse ELN means writing an adapter on the day access arrives, and
 editing it whenever a column lands. The seam was ready; the mapping was still a code change waiting
 to happen.
 
@@ -40,8 +42,13 @@ to happen.
 
 One document, inside the manifest's `config:` block, in five parts.
 
-- **`connection:`** — where the warehouse is, and the *names* of the environment variables holding
-  its credentials. Also the driver, as a `module:callable`.
+- **`connection:`** — the driver, as a `module:callable`, and **that driver's own keyword
+  arguments**: its vocabulary, not a shared one, with every key ending `_env` naming the environment
+  variable holding a credential rather than carrying it
+  (`D-2026-08-26-the-driver-s-signature-is-the-schema`). This is what makes the seam general over
+  databases rather than over one vendor's idea of a connection — a lakehouse, a Postgres, a DuckDB
+  export and a vector database share no connection vocabulary, and the block does not try to be
+  their union. `make datasource-validate` binds it against the callable's signature, offline.
 - **`entry:`** — the root query. Which relation holds reactions, which column is the id, and which
   columns the sync cursor reads.
 - **`related:`** — one block per child table. This is the answer to "and many more data tables": the
@@ -56,7 +63,7 @@ Two grammars, both deliberately small. A **path** names a value (`root.YIELD_PCT
 `analytics[0].PURITY_PCT`, or a bare column inside a child-row block). A **transform chain** reshapes
 it — minutes to hours, grams to milligrams, the site's `SM` to this schema's `reactant`.
 
-`src/chemclaw/ingest/sources/eln-snowflake/datasource.yaml` is the worked example, and
+`src/chemclaw/ingest/sources/eln-databricks/datasource.yaml` is the worked example, and
 `tests/test_warehouse_binding.py` resolves every path in it against a fixture row, so it cannot decay
 into a file that only looks correct.
 
@@ -147,15 +154,18 @@ child tables are fetched once per batch rather than once per reaction; that the 
 units map; that unmapped columns survive and are bounded; that a bad row is rejected and the batch
 continues; and that the similarity search is ranked and truncated by the warehouse.
 
-`snowflake.py` imports its client inside a function rather than at module scope — the one departure
+`databricks.py` imports its client inside a function rather than at module scope — the one departure
 from the seam's "import whatever you need at the top" corollary. That corollary is about which
 *process* pays for an import; this is about a package that is not installed in any of them, because
 the client is not a dependency of this repository and should not become one before a tenant exists.
 
 ## 7. Attaching the real one
 
-1. Copy `src/chemclaw/ingest/sources/eln-snowflake/datasource.yaml` into a directory the deployment
-   mounts, and replace every name in it with the site's own.
+1. Copy `src/chemclaw/ingest/sources/eln-databricks/datasource.yaml` into a directory the deployment
+   mounts, and replace every name in it with the site's own. A warehouse this repository ships no
+   driver for is one more step and no different in kind: write a module exposing a callable that
+   satisfies `chemclaw.ingest.eln.warehouse.driver.Warehouse`, name it in `connection.driver:`, and
+   write that callable's own keyword arguments underneath it.
 2. Put that directory first in `CHEMCLAW_DATA_SOURCES_DIR` — it is an OS-pathsep search path where
    the earlier entry wins, so the site's schema is never a change to this repository.
 3. Set the environment variables the `connection:` block names.

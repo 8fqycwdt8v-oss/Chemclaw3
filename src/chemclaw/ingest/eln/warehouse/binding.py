@@ -32,6 +32,7 @@ from typing import Annotated, Any, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from chemclaw.core.connect import ENV_SUFFIX, check_env_name
 from chemclaw.ingest.eln.ord import OrdReaction, Role
 from chemclaw.ingest.eln.warehouse.expr import (
     PathSyntaxError,
@@ -41,9 +42,9 @@ from chemclaw.ingest.eln.warehouse.expr import (
 )
 from chemclaw.science.labels.vocabulary import LabelGroup
 
-# A relation or column name, optionally qualified (`ELN_PROD.REACTIONS.V_REACTION`). Interpolated
+# A relation or column name, optionally qualified (`eln_prod.reactions.v_reaction`). Interpolated
 # into SQL, so it is checked rather than trusted: everything a binding contributes to a statement
-# is either an identifier matching this or a bound parameter. `$` is legal inside a Snowflake
+# is either an identifier matching this or a bound parameter. `$` is legal inside a warehouse
 # identifier and appears in generated views; it is not legal as the first character.
 _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_$]*(?:\.[A-Za-z_][A-Za-z0-9_$]*)*$")
 
@@ -347,7 +348,7 @@ class IngestBinding(BaseModel):
         min_length=1,
         description=(
             "The citation each reaction carries, as a template over the entry row — "
-            "'eln-snowflake:${root.REACTION_ID}:${root.OPERATOR}'. Name the source in it: with "
+            "'eln-databricks:${root.reaction_id}:${root.operator}'. Name the source in it: with "
             "two ELNs live, colliding entry ids collapse onto the same note, and the source name "
             "is what makes that visible."
         ),
@@ -458,17 +459,36 @@ def _chain(field: FieldBinding) -> list[FieldBinding]:
 
 
 class ConnectionBinding(BaseModel):
-    """Where the warehouse is and how to reach it — addresses here, secrets never.
+    """Where the database is and how to reach it — addresses here, secrets named, never carried.
 
-    Credentials are named, not carried: `*_env` fields hold the *name* of an environment variable,
-    read at connect time. That is the connector seam's `token_env` idiom (`connectors/manifest.py`),
-    and it is what lets this document be a file in a repository. The names are deliberately not
-    `CHEMCLAW_`-prefixed — they are the warehouse client's own credentials, not settings of this
-    application, and a `CHEMCLAW_*` name would have to become a field of `Settings` to satisfy the
-    checks that keep `.env.example` honest.
+    **This model deliberately declares one field.** Everything else in the block is passed to
+    whatever `driver:` names, as keyword arguments: *the driver's signature is the schema*. That is
+    the one thing that makes this seam general over databases rather than over one vendor's idea of
+    a connection, and it was learned by getting it wrong. The first version of this model enumerated
+    `account_env`, `user_env`, `private_key_env`, `warehouse` and `role` — Snowflake's words — so
+    the second driver had to redefine three of them to mean something else (`account` a hostname,
+    `password` a token, `warehouse` an HTTP path) and *refuse* the two with no analogue, while
+    `publish/connect.py` declined to reuse the model at all rather than make one model mean two
+    things. A Postgres, a lakehouse, a DuckDB file and a vector database do not share a vocabulary,
+    and a shared model can only be their union.
+
+    So this is `extra="allow"`, and the strictness that `extra="forbid"` bought elsewhere comes back
+    at the point it actually applies: the driver is built with these keywords on the first
+    connection, so a key it does not accept is a `TypeError` naming the keyword, from the callable
+    that owns the vocabulary. Waiting for a connection to learn that would be too late, so
+    `make datasource-validate` runs the same check offline — it resolves the driver and binds the
+    block against its signature without connecting (`cli/validate_datasources._check_connection`),
+    which is the rule the result-sink seam already applied to its own `connection:` block.
+
+    Credentials are named, not carried: a key ending `_env` holds the *name* of an environment
+    variable, read at connect time. That is the connector seam's `token_env` idiom
+    (`connectors/manifest.py`), and it is what lets this document be a file in a repository. The
+    names are deliberately not `CHEMCLAW_`-prefixed — they are the database client's own
+    credentials, not settings of this application, and a `CHEMCLAW_*` name would have to become a
+    field of `Settings` to satisfy the checks that keep `.env.example` honest.
     """
 
-    model_config = ConfigDict(extra="forbid", frozen=True, populate_by_name=True)
+    model_config = ConfigDict(extra="allow", frozen=True)
 
     driver: str = Field(
         min_length=1,
@@ -477,15 +497,6 @@ class ConnectionBinding(BaseModel):
             "seam's own halves, so the vendor client is imported only in a process that connects."
         ),
     )
-    account_env: str = Field(default="", description="Env var holding the account identifier.")
-    user_env: str = Field(default="", description="Env var holding the user name.")
-    password_env: str = Field(default="", description="Env var holding the password, if used.")
-    private_key_env: str = Field(default="", description="Env var holding the PEM private key.")
-    warehouse: str = ""
-    database: str = ""
-    db_schema: str = Field(default="", alias="schema")
-    role: str = ""
-    query_timeout_seconds: int = Field(default=60, ge=1, le=3600)
 
     @model_validator(mode="after")
     def _names_no_secrets(self) -> Self:
@@ -493,18 +504,25 @@ class ConnectionBinding(BaseModel):
 
         Not a security boundary — a determined author can still paste anything — but it catches the
         realistic mistake, which is someone filling in `password_env: hunter2` because the field
-        sits where a password would go in every other tool they have used.
+        sits where a password would go in every other tool they have used. Applied to every key
+        ending in `_env` rather than to a list of known credential names: the whole point of this
+        block is that the credential names are the driver's, and this repository does not know them.
         """
-        for name in ("account_env", "user_env", "password_env", "private_key_env"):
-            value: str = getattr(self, name)
-            if value and not re.match(r"^[A-Z][A-Z0-9_]*$", value):
-                raise BindingError(
-                    f"{name} holds the NAME of an environment variable (like SNOWFLAKE_ACCOUNT), "
-                    f"never its value; got {value!r}"
-                )
+        for key, value in self.options.items():
+            if key.endswith(ENV_SUFFIX):
+                check_env_name(key, str(value or ""), error=BindingError)
         if ":" not in self.driver:
             raise BindingError(f"connection.driver must be 'module:callable'; got {self.driver!r}")
         return self
+
+    @property
+    def options(self) -> dict[str, Any]:
+        """The driver's keyword arguments as written, secrets still named rather than read.
+
+        `model_extra` rather than `model_dump()` minus a key, because the two differ on a field this
+        model *declares*: `driver` is the seam's, everything else is the driver's.
+        """
+        return dict(self.model_extra or {})
 
 
 class VectorBinding(BaseModel):
@@ -621,8 +639,8 @@ class VectorBinding(BaseModel):
             # so an unchecked value closes the call and continues the query. It was the single
             # field this validator skipped, which made `sql.py`'s "only checked identifiers are
             # written here" false for exactly one field — and it is also the one field a site
-            # author edits rather than a reviewer. A dotted name passes, so the real
-            # `SNOWFLAKE.CORTEX.EMBED_TEXT_768` is unaffected.
+            # author edits rather than a reviewer. A dotted name passes, so a real qualified
+            # embedder (`main.ml.embed_text`, a vendor's built-in) is unaffected.
             _check_identifier(self.server_embed_function, "server embed function")
         if self.embedding == "local" and (self.server_embed_function or self.server_embed_model):
             raise BindingError(

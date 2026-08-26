@@ -97,7 +97,7 @@ def test_registry_selects_active_halves(monkeypatch: pytest.MonkeyPatch) -> None
 def test_unknown_source_is_rejected() -> None:
     """A source no manifest declares raises, naming the valid keys."""
     with pytest.raises(ValueError, match="unknown data source"):
-        registry.make_data_source("snowflake")  # not yet declared (deferred)
+        registry.make_data_source("teradata")  # no manifest declares one
 
 
 def test_enabling_an_undeclared_source_fails_loudly(monkeypatch: pytest.MonkeyPatch) -> None:

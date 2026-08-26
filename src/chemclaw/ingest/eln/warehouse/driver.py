@@ -3,7 +3,7 @@
 This module imports no driver and no third-party package, on purpose. It is what lets the rest of
 the engine — SQL generation, mapping, unit conversion, similarity search — be exercised in CI
 against a fake, on a machine with no warehouse and no vendor client installed. The real client
-lives alone in `chemclaw.ingest.eln.warehouse.snowflake`, imported only when a binding names it.
+lives alone in `chemclaw.ingest.eln.warehouse.databricks`, imported only when a binding names it.
 
 **Why a Protocol rather than reusing `chemclaw.core.db`.** That module is the *application's*
 Postgres: one DSN from settings, one pool, one statement timeout. A warehouse is a different thing
@@ -11,18 +11,18 @@ attached differently — its credentials come from a manifest's environment name
 per-source rather than per-process, and its dialect is not Postgres. Sharing the helper would have
 meant teaching it about both, which is how a connection helper becomes a configuration union.
 
-**`placeholder` is on the connection because parameter style is a dialect fact.** Snowflake binds
+**`placeholder` is on the connection because parameter style is a dialect fact.** Databricks binds
 `?`, psycopg binds `%s`, and the alternative to asking is a module-level `paramstyle` mutation in
 the vendor client — a global that every other user of that client in the process inherits. Asking
 keeps `sql.py` dialect-neutral and lets a test assert the exact string that would be sent.
 
 **`vector_dialect` is here for exactly the same reason, and it arrived late.** How a warehouse
 spells a similarity search is as much a dialect fact as how it spells a parameter, and `sql.py` was
-neutral about the second while hardcoding the first: `VECTOR_COSINE_SIMILARITY` and
-`?::VECTOR(FLOAT, n)` are Snowflake's names, in a module whose docstring claims to contribute only
-structure. The second driver is what exposed it. A dialect owns two things a vendor genuinely
-differs on — what the similarity function is called and how a query vector is *bound*, which is the
-sharper half: Snowflake binds a Python list against a `VECTOR` cast, while a warehouse with no array
+neutral about the second while hardcoding the first: one vendor's function names and its
+`?::VECTOR(FLOAT, n)` cast sat in a module whose docstring claims to contribute only structure. A
+second driver is what exposed it. A dialect owns the two things vendors genuinely differ on — what
+the similarity function is called and how a query vector is *bound*, which is the sharper half: a
+warehouse with a native vector type binds a Python list against a cast, while one with no array
 parameter type has to take the vector as a scalar and parse it server-side. A driver that offers no
 dialect cannot serve a `vector:` block at all, and says so rather than emitting SQL its server will
 reject.
@@ -103,7 +103,7 @@ class Warehouse(Protocol):
 
     @property
     def placeholder(self) -> str:
-        """The parameter marker this connection binds with (`?` for Snowflake, `%s` for psycopg)."""
+        """The parameter marker this connection binds with (`?` for Databricks, `%s` psycopg)."""
         ...
 
     @property

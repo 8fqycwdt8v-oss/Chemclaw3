@@ -1,6 +1,6 @@
 """The background service that keeps the reaction-label index complete.
 
-Every reaction corpus in this tree — the ELN drops, the Snowflake ELN, the patent corpus — lands a
+Every reaction corpus in this tree — the ELN drops, the warehouse ELN, the patent corpus — lands a
 *record* phase in `reaction_labels` when it is ingested, and nothing else. This job fills in the
 rest: the atom map, the named reaction, the per-species roles and structure features. It finds the
 work by asking, never by being told: a row whose `labeller_version` differs from the current one is
