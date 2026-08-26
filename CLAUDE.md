@@ -170,7 +170,7 @@ generations and are not in scope for any task here.
   can be live-tested end-to-end without real integrations.
 
 **Where a capability belongs.** This repo holds *infrastructure*: conversation orchestration, the
-knowledge graph, retrieval, memory, ingestion, **publication** and durable execution. Scientific capability
+knowledge graph, retrieval, memory, ingestion, identity, **publication** and durable execution. Scientific capability
 — quantum chemistry, reaction prediction, property lookup, optimization — belongs in `Chemclaw3-mcp`
 as a server. **The boundary within science is by *composability*, not by speed or by subject**
 (`D-2026-08-16-the-physics-leaves-the-cache-stays`): a *primitive* — one calculation whose identity
