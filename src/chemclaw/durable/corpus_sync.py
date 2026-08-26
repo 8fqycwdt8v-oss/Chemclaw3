@@ -2,8 +2,9 @@
 
 The counterpart of `eln_sync.py` for the other kind of reaction source, and the differences are all
 consequences of one thing: a corpus is *literature*, not this organisation's own record. So it
-never reaches the PR-gate, it carries a patent citation rather than a note id, and it is drained by
-keyset rather than by a datetime watermark — a release is a versioned load, not a live feed. The
+writes no transcription of its own, it carries a patent citation rather than a note id, and it is
+drained by keyset rather than by a datetime watermark — a release is a versioned load, not a live
+feed. The
 reasoning is in `ingest/labels/corpus.py` and in
 `D-2026-08-25-a-corpus-is-evidence-not-an-eln`.
 

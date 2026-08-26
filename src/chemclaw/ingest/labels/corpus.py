@@ -1,13 +1,13 @@
 """Walk a bulk reaction corpus into the label index, as cited evidence rather than as knowledge.
 
-A patent corpus is not an ELN, and the difference is not size. An ELN entry is a claim this
-organisation makes about an experiment it ran, so it goes through the PR-gate and becomes a note a
-human signed off. A patent reaction is *literature*: it is evidence, it cites a document anyone can
-read, and nobody here is going to review 13 million of them.
+A patent corpus is not an ELN, and the difference is not size. An ELN entry is this organisation's
+own record of an experiment it ran: it is transcribed into `reaction_records`, and what anyone
+asserts *about* those runs is still a playbook or a campaign a human signs off. A patent reaction is
+*literature*: it is evidence, it cites a document anyone can read, and it belongs to nobody here.
 `D-2026-08-06-a-share-is-mounted-not-called` drew that line for documents; this applies it to
 reactions.
 
-**So a corpus declares no `ingest:` half, and that is a design choice with five separate reasons.**
+**So a corpus declares no `ingest:` half, and that is a design choice with three separate reasons.**
 Each is a real path in this tree, not a hypothetical:
 
 * `durable/memory_jobs.py::read_corpus` calls `fetch_new_entries(datetime.min)` on **every** active
@@ -15,14 +15,18 @@ Each is a real path in this tree, not a hypothetical:
   do it per cycle.
 * `memory/similarity.cluster_by_similarity` is then O(n²) pairwise over that list — the
   `DEFERRED.md` row whose stated trigger is ~10⁴ reactions.
-* `ingest_reaction` ends in `propose_note` unconditionally: one git branch per reaction, through a
-  gate a human is supposed to read.
-* `sync_entries` calls `_merged_note_bodies()`, loading every merged note body once per run.
 * A corpus release is a versioned load addressed by key, not a live feed addressed by datetime. The
   `ElnAdapter` cursor contract does not fit it.
 
-Declaring no ingest half sidesteps all five with **no edits** to any of them, which is why there is
-no "publish mode" on `ingest_reaction`: there is no ingest path to gate.
+Declaring no ingest half sidesteps all three with **no edits** to any of them.
+
+This argument was written with five reasons, and
+`D-2026-08-25-an-eln-transcription-is-data-not-a-claim` retired two of them a day later by fixing
+the ingest path itself: `ingest_reaction` no longer ends in `propose_note`, and the per-run parse of
+every merged note body that used to wedge `sync_entries` at ~700k entries is now one indexed lookup
+bounded by the page. Recorded rather than quietly deleted, because the two that went were the
+*review* reasons — so what carries this decision now is scale and cursor shape alone, and a reader
+who assumed the gate was still the reason would be reading a case that no longer exists.
 
 What a corpus source *does* declare is `retrieve:` — so its rows are reachable as evidence — and a
 `corpus:` block in its warehouse binding, which this module drains.

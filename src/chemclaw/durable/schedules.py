@@ -48,7 +48,7 @@ from chemclaw.durable.digest import DigestWorkflow
 from chemclaw.durable.document_sync import DocumentShareSyncWorkflow, share_sources
 from chemclaw.durable.eln_sync import ElnSyncWorkflow
 from chemclaw.durable.eval_drift import EvalDriftWorkflow
-from chemclaw.durable.label_sync import ReactionLabelWorkflow, label_policies
+from chemclaw.durable.label_sync import ReactionLabelWorkflow
 from chemclaw.durable.note_index import NoteReindexWorkflow
 from chemclaw.durable.observation_jobs import ObservationSynthesisWorkflow
 from chemclaw.durable.publish_results import PublishResultsWorkflow
@@ -156,12 +156,20 @@ def planned_schedules() -> list[PlannedSchedule]:
     if share_sources():
         share_every = timedelta(minutes=settings.document_sync_schedule_minutes)
         schedules.append(PlannedSchedule("document-sync", DocumentShareSyncWorkflow, share_every))
-    # The labelling drain earns a Schedule only where some enabled source declares a `labels:`
-    # block — the third time this file asks the manifests instead of adding a flag, and for the
-    # third time because `CHEMCLAW_DATA_SOURCES` plus a declaration already answers it. A
-    # deployment with no reaction corpus would otherwise ask the labelling server for its version
+    # The labelling drain earns a Schedule wherever there is a reaction corpus to label — an
+    # ingest half that writes record rows, or a bulk corpus binding. Still the manifests rather
+    # than a flag, for the third time in this file, because `CHEMCLAW_DATA_SOURCES` plus a
+    # declaration already answers it; and a deployment with neither still gets no Schedule, which
+    # is the concern that mattered — it would otherwise ask the labelling server for its version
     # every hour and then label nothing.
-    if label_policies():
+    #
+    # **Not `label_policies()`.** That was the gate until it was measured, and it is the wrong
+    # question: exactly one source in this tree declares a `labels:` block and it ships disabled,
+    # so on a stock deployment this Schedule was never created and the ELN corpus was never
+    # labelled by anything. A block says what a source already *carries*, not whether its rows may
+    # be labelled — `D-2026-08-25-a-label-is-derived-not-recorded` reads `provides` for the
+    # coverage report and the `override` subset check, and for nothing else.
+    if active_ingest_source_names() or corpus_sources():
         label_every = timedelta(minutes=settings.label_sync_schedule_minutes)
         schedules.append(PlannedSchedule("reaction-labels", ReactionLabelWorkflow, label_every))
     # And the corpus drain earns one only where a source declares a `corpus:` binding. Daily
