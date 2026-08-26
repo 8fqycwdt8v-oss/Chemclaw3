@@ -417,9 +417,22 @@ def _mcp_connection(manifest: ConnectorManifest, endpoint: Endpoint) -> Connecto
                 httpx_client_factory=_connector_client_factory(manifest.name, endpoint),
                 session_kwargs=_session_kwargs(endpoint),
             ),
-            allowed_tools=tuple(endpoint.tools) if endpoint.tools else None,
+            allowed_tools=tuple(endpoint.tools),
         )
     if isinstance(endpoint, StdioEndpoint):
+        # **Refused unless the deployment asked for it**, because this is the one endpoint field
+        # that executes: `command` is run in the chat process, before the handshake, so a manifest
+        # dropped on `connectors_dir` by anything that can write there (a CI job syncing a sibling
+        # repo, a ConfigMap edit) used to be arbitrary code execution under the identity holding
+        # every connector token. Refusing here rather than at parse time keeps `StdioEndpoint`
+        # constructible — the transport's own tests build one directly — while making a *file* an
+        # inert declaration until an operator turns the transport on.
+        if not settings.connector_stdio_enabled:
+            raise ConnectorError(
+                f"connector {manifest.name!r} declares `transport: stdio`, which launches "
+                f"{endpoint.command!r} in this process; it is disabled by default because a "
+                "manifest is data. Set CHEMCLAW_CONNECTOR_STDIO_ENABLED=true to allow it."
+            )
         # No identity headers, for the same reason as `_mcp_tool`: a subprocess of our own process,
         # under our own identity, with no request to attach them to (`connectors.identity`).
         return ConnectorSpec(
@@ -430,7 +443,7 @@ def _mcp_connection(manifest: ConnectorManifest, endpoint: Endpoint) -> Connecto
                 args=list(endpoint.args),
                 session_kwargs=_session_kwargs(endpoint),
             ),
-            allowed_tools=tuple(endpoint.tools) if endpoint.tools else None,
+            allowed_tools=tuple(endpoint.tools),
         )
     assert_never(endpoint)  # exhaustive over the union — a new transport without a branch is a bug
 

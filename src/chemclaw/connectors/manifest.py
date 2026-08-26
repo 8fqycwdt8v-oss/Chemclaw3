@@ -199,9 +199,23 @@ def _check_classification(
     quietly, and it costs a bundle author one line per tool, once.
 
     Core still cannot infer the answer — that is exactly why the bundle has to state it.
+
+    **An empty `tools` list is refused for the same reason, and it is not the same check.** A
+    partition of nothing is trivially satisfied, so an endpoint that simply omits `tools:` passed
+    this function while turning both of its guarantees off at once: `registry` read the empty list
+    as "no allow-list" and bound the server's entire advertised surface, and none of what arrived
+    appeared in `state_changing_tool_names()`, so `agent.authz.side_effecting_call` answered `False`
+    for every one of them — including a write. That is the plan gate's input (D-167) and the
+    dry-run gate's, so the manifest that declared the least got the most.
     """
-    classified = set(state_changing) | set(read_only)
     served = set(tools)
+    if not served:
+        raise ValueError(
+            "endpoint declares no tools; an endpoint that serves nothing cannot be reached, and "
+            "an empty list makes this partition vacuous — every tool the server advertises would "
+            "arrive unclassified and be treated as a read"
+        )
+    classified = set(state_changing) | set(read_only)
     unknown = sorted(classified - served)
     if unknown:
         raise ValueError(
@@ -230,9 +244,9 @@ def _check_classification(
 # It is declared **here, by the bundle**, and not as a list in core, for the same reason the queue
 # and the params model are: whether `predict_pka` is a lookup or a calculation is the capability's
 # own fact, and a copy of it in core is a second source of truth that goes stale the first time a
-# bundle changes what a tool does. An undeclared tool is treated as a read: core cannot infer a
-# bundle's semantics, and guessing "write" would gate every connector's whole surface the day this
-# shipped.
+# bundle changes what a tool does. There is no such thing as an undeclared tool: `tools` may not be
+# empty and every entry must be classified, because both ways of leaving it blank end at the same
+# place — a write the plan gate reads as a read.
 Endpoint = HttpEndpoint | StdioEndpoint
 
 

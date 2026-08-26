@@ -58,6 +58,21 @@ from chemclaw.core.mcp_session import cancel_on_timeout
 from chemclaw.core.session_context import reset_current_session_id, set_current_session_id
 from tests.conftest import _free_port
 
+
+def _endpoint(url: str, *tools: str, request_timeout: int | None = None) -> HttpEndpoint:
+    """An `HttpEndpoint` serving `tools`, all classified read-only.
+
+    A manifest may not declare an empty `tools` list — that omission used to make the
+    classification partition vacuous *and* turn the allow-list off, so a server's whole advertised
+    surface arrived unclassified and `side_effecting_call` reported every tool of it as a read.
+    Each test here stands up a server serving one tool, so naming it is what its manifest would
+    say; `read_only` is right for all of them (they echo, they raise, they sleep).
+    """
+    return HttpEndpoint(
+        url=url, tools=list(tools), read_only=list(tools), request_timeout=request_timeout
+    )
+
+
 # Every discovered bundle that ships a local HTTP server, as `(name, manifest)`. Parametrizing
 # over discovery rather than a hardcoded list means a new bundle is covered on the day it is added.
 #
@@ -198,7 +213,7 @@ def test_the_turn_identity_actually_arrives_at_the_connector() -> None:
     port = _free_port()
 
     async def _call() -> None:
-        endpoint = HttpEndpoint(url=f"http://127.0.0.1:{port}/mcp")
+        endpoint = _endpoint(f"http://127.0.0.1:{port}/mcp", "echo")
         # Built by `_mcp_connection`, which is the one function a deployment builds a connector
         # with — so this proves the identity hook lands on the client the agent actually uses.
         spec = _mcp_connection(
@@ -254,10 +269,10 @@ def test_a_tool_body_can_read_the_caller_core_stamped() -> None:
     port = _free_port()
 
     async def _call() -> None:
-        endpoint = HttpEndpoint(url=f"http://127.0.0.1:{port}/mcp")
+        endpoint = _endpoint(f"http://127.0.0.1:{port}/mcp", "whoami")
         spec = _mcp_connection(
             cast(ConnectorManifest, SimpleNamespace(name="caller-probe")),
-            HttpEndpoint(url=endpoint.url),
+            _endpoint(endpoint.url, "whoami"),
         )
         async with AsyncExitStack() as stack:
             tools, _unreachable = await open_connector_specs(stack, [spec])
@@ -323,7 +338,7 @@ def test_a_redirecting_connector_cannot_harvest_the_turn_identity() -> None:
         delivered.append(_chemclaw_headers(request))
         return RedirectResponse(f"http://127.0.0.1:{harvester_port}/mcp", status_code=307)
 
-    endpoint = HttpEndpoint(url=f"http://127.0.0.1:{connector_port}/mcp")
+    endpoint = _endpoint(f"http://127.0.0.1:{connector_port}/mcp", "ping")
 
     async def _post() -> int:
         async with connector_http_client("redirect-probe", endpoint) as client:
@@ -397,7 +412,7 @@ def test_an_unexpected_tool_exception_reaches_the_caller_sanitized() -> None:
     async def _call() -> str:
         spec = _mcp_connection(
             cast(ConnectorManifest, SimpleNamespace(name="leak-probe")),
-            HttpEndpoint(url=f"http://127.0.0.1:{port}/mcp"),
+            _endpoint(f"http://127.0.0.1:{port}/mcp", "blow_up"),
         )
         async with AsyncExitStack() as stack:
             tools, unreachable = await open_connector_specs(stack, [spec])
@@ -483,7 +498,7 @@ def test_a_deliberate_domain_error_still_reaches_the_caller_unchanged() -> None:
     async def _call() -> str:
         spec = _mcp_connection(
             cast(ConnectorManifest, SimpleNamespace(name="domain-error-probe")),
-            HttpEndpoint(url=f"http://127.0.0.1:{port}/mcp"),
+            _endpoint(f"http://127.0.0.1:{port}/mcp", "bad_smiles"),
         )
         async with AsyncExitStack() as stack:
             tools, unreachable = await open_connector_specs(stack, [spec])
@@ -573,7 +588,7 @@ def test_a_slow_tool_call_is_abandoned_at_the_declared_request_timeout() -> None
     async def _call() -> float:
         spec = _mcp_connection(
             cast(ConnectorManifest, SimpleNamespace(name="slow-probe")),
-            HttpEndpoint(url=f"http://127.0.0.1:{port}/mcp", request_timeout=2),
+            _endpoint(f"http://127.0.0.1:{port}/mcp", "crawl", request_timeout=2),
         )
         async with AsyncExitStack() as stack:
             tools, unreachable = await open_connector_specs(stack, [spec])
@@ -634,7 +649,7 @@ def test_a_timed_out_call_tells_the_connector_to_stop_working() -> None:
     async def _call() -> None:
         spec = _mcp_connection(
             cast(ConnectorManifest, SimpleNamespace(name="cancel-probe")),
-            HttpEndpoint(url=f"http://127.0.0.1:{port}/mcp", request_timeout=2),
+            _endpoint(f"http://127.0.0.1:{port}/mcp", "crawl", request_timeout=2),
         )
         async with AsyncExitStack() as stack:
             tools, unreachable = await open_connector_specs(stack, [spec])
@@ -685,7 +700,7 @@ def test_the_http_read_bound_is_looser_than_the_session_bound() -> None:
     answer with no error anywhere — which is exactly the failure measured before the fix. The grace
     is what keeps the httpx timeout a backstop for a stream that stops producing bytes at all.
     """
-    endpoint = HttpEndpoint(url="http://127.0.0.1:8899/mcp", request_timeout=2)
+    endpoint = _endpoint("http://127.0.0.1:8899/mcp", "unreached", request_timeout=2)
     spec = _mcp_connection(
         cast(ConnectorManifest, SimpleNamespace(name="ordering-probe")), endpoint
     )
@@ -701,17 +716,25 @@ def test_the_http_read_bound_is_looser_than_the_session_bound() -> None:
     assert read_bound is not None and read_bound > session_bound
 
 
-def test_an_endpoint_declaring_no_timeout_is_still_bounded() -> None:
+def test_an_endpoint_declaring_no_timeout_is_still_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """`request_timeout` is optional, and its absence must not mean "wait forever".
 
     The case a third-party bundle ships: `HttpEndpoint.request_timeout` defaults to `None`, and
     `StdioEndpoint` has no such field at all. Both used to reach `anyio.fail_after(None)`. Both
     branches of `_mcp_connection` are checked, because the one that was forgotten is the one that
     hangs a turn.
+
+    The stdio half needs the transport switched on: `command:` executes, so a manifest alone may
+    not turn it on, and a test that wants the branch says so.
     """
-    http = HttpEndpoint(url="http://127.0.0.1:8899/mcp")
+    monkeypatch.setattr("chemclaw.core.config.settings.connector_stdio_enabled", True)
+    http = _endpoint("http://127.0.0.1:8899/mcp", "unreached")
     assert http.request_timeout is None, "this test is only meaningful for an undeclared timeout"
-    stdio = StdioEndpoint(command="python", args=["-c", "pass"])
+    stdio = StdioEndpoint(
+        command="python", args=["-c", "pass"], tools=["unreached"], read_only=["unreached"]
+    )
 
     for endpoint in (http, stdio):
         spec = _mcp_connection(
@@ -751,7 +774,7 @@ def test_a_tool_carries_the_build_of_the_server_that_answers_it() -> None:
     port = _free_port()
 
     async def _discover() -> list[BaseTool]:
-        endpoint = HttpEndpoint(url=f"http://127.0.0.1:{port}/mcp")
+        endpoint = _endpoint(f"http://127.0.0.1:{port}/mcp", "echo")
         spec = _mcp_connection(
             cast(ConnectorManifest, SimpleNamespace(name="revision-probe")), endpoint
         )

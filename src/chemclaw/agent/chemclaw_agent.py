@@ -476,14 +476,14 @@ def _narrow_allowed_specs(specs: list[ConnectorSpec], keep: frozenset[str]) -> l
     `ConnectorSpec` is frozen, and the mutation was only ever safe because those objects are
     per-turn. Rebuilding is the same policy without needing that argument to hold.
 
-    A spec whose manifest declared *no* allow-list (`allowed_tools is None`, meaning "everything
-    this server offers") becomes bounded by `keep` here — a profile narrowing by tool name must
-    reach a connector that declined to enumerate its own surface, or the narrowing would be a
-    no-op on exactly the bundles with the widest surface.
+    Every spec arrives with a declared allow-list — a manifest may not leave `tools` empty — so
+    this is an intersection and never a substitution. The `allowed_tools is None` case it used to
+    carry ("everything this server offers", narrowed to `keep`) was the profile half of a hole that
+    let an endpoint declaring no tools bind a server's whole surface unclassified; it went with it.
     """
     narrowed = []
     for spec in specs:
-        allowed = sorted(set(spec.allowed_tools) & keep) if spec.allowed_tools else sorted(keep)
+        allowed = sorted(set(spec.allowed_tools) & keep)
         if not allowed:
             continue
         narrowed.append(replace(spec, allowed_tools=tuple(allowed)))

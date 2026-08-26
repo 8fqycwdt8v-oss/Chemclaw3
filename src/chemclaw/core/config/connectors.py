@@ -96,6 +96,17 @@ class ConnectorSettings(BaseSettings):
     # the model's context: enough to recognise the campaign being looked for, not a table dump.
     job_record_search_limit: int = Field(default=20, ge=1)
 
+    # Whether a discovered manifest may launch a subprocess (`endpoint: transport: stdio`).
+    # **Default off, because a manifest is data and this field is the one that executes.** A
+    # bundle directory is discovered by existing — any subdirectory of `connectors_dir` holding a
+    # `connector.yaml` — and discovery is enablement unless `connectors_enabled` narrows it, so a
+    # YAML file appearing on that path used to run its `command:` in the chat process, before the
+    # MCP handshake, under the identity holding every connector token and the database pool. The
+    # spawn happened even when the connector was then reported unreachable, which is what made it
+    # quiet. No shipped bundle declares stdio; it is the zero-infrastructure path for local
+    # development and for the transport's own tests, and those set this explicitly.
+    connector_stdio_enabled: bool = False
+
     @property
     def connectors_dirs(self) -> list[str]:
         """The connector bundle directories, split on the OS path separator (like `PATH`)."""

@@ -161,6 +161,7 @@ def test_each_transport_builds_its_matching_maf_tool(
         "  tools:\n    - compute\n  read_only:\n    - compute\n",
     )
     _use(monkeypatch, tmp_path)
+    monkeypatch.setattr("chemclaw.core.config.settings.connector_stdio_enabled", True)
     # Both transports as specs, which is the one shape now. It used to be two classes — a
     # `DegradingHttpConnector` and a `DegradingStdioConnector`, distinguished by `isinstance` —
     # because MAF took a live tool object per transport. `open_connector_specs` opens a session
@@ -438,3 +439,35 @@ def test_a_broken_dependency_underneath_a_server_still_raises(
     monkeypatch.setattr(importlib, "import_module", _missing_dep)
     with pytest.raises(ModuleNotFoundError, match="absent_dep"):
         server_tools_module("calc")
+
+
+def test_a_stdio_manifest_does_not_launch_its_command_unless_the_deployment_allows_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`command:` is the one endpoint field that executes, so a *file* may not turn it on.
+
+    A bundle is discovered by existing — any subdirectory of `connectors_dir` holding a
+    `connector.yaml` — and discovery is enablement unless `connectors_enabled` narrows it. So a
+    manifest written by anything that can reach that path (a CI job syncing a sibling repo, a
+    ConfigMap edit, a reviewer treating YAML as configuration rather than as code) used to run its
+    command in the chat process, before the MCP handshake, under the identity that holds every
+    connector bearer token and the database pool. The spawn happened even when the handshake then
+    failed and the connector was reported "unreachable", which is what made it quiet.
+
+    No shipped bundle declares stdio. The transport stays reachable for local development and for
+    its own tests, which say so explicitly — the default refuses.
+    """
+    _bundle(
+        tmp_path,
+        "local",
+        "name: local\ndescription: a local capability\n"
+        "endpoint:\n  transport: stdio\n  command: /bin/sh\n  args: ['-c', 'true']\n"
+        "  tools:\n    - compute\n  read_only:\n    - compute\n",
+    )
+    _use(monkeypatch, tmp_path)
+
+    with pytest.raises(ConnectorError, match="disabled by default"):
+        connector_specs()
+
+    monkeypatch.setattr("chemclaw.core.config.settings.connector_stdio_enabled", True)
+    assert [spec.name for spec in connector_specs()] == ["local"]
