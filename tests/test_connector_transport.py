@@ -53,6 +53,7 @@ from chemclaw.connectors.registry import (
 )
 from chemclaw.connectors.server import connector_app
 from chemclaw.connectors.transport import SERVED_BY, ConnectorSpec, _stamped
+from chemclaw.core.mcp_session import cancel_on_timeout
 from chemclaw.core.identity_context import reset_current_identity, set_current_identity
 from chemclaw.core.session_context import reset_current_session_id, set_current_session_id
 from tests.conftest import _free_port
@@ -651,6 +652,28 @@ def test_a_timed_out_call_tells_the_connector_to_stop_working() -> None:
 
     with _Server(app, port):
         asyncio.run(asyncio.wait_for(_call(), timeout=20))
+
+
+def test_a_session_that_cannot_be_wrapped_is_left_alone_rather_than_refused() -> None:
+    """Installing the cancellation must never be able to fail a working session.
+
+    `cancel_on_timeout` reads two upstream privates, and `open_session` calls it *before* it marks
+    the connection established — so anything raised there is classified as `McpConnectFailed`, "the
+    calculation service is not answering". An SDK rename would therefore have turned a lost
+    *cancellation* into a total *outage*: every calc job failing, for a courtesy.
+
+    The right failure mode for an enhancement to an otherwise working session is to degrade to the
+    behaviour it improves on. This pins that, against a session exposing neither attribute — which
+    is both the upstream-rename case and the shape of the minimal fake in `tests/test_calc_remote.py`
+    that found it.
+    """
+
+    class _Bare:
+        """A session object with none of what the wrapper wants."""
+
+    bare = _Bare()
+    cancel_on_timeout(cast(Any, bare))  # must not raise
+    assert not hasattr(bare, "send_request"), "an unwrappable session was wrapped anyway"
 
 
 def test_the_http_read_bound_is_looser_than_the_session_bound() -> None:

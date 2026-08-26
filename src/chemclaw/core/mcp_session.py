@@ -163,15 +163,34 @@ def cancel_on_timeout(session: ClientSession) -> None:
     synchronously to its first `await` and `send_request`'s first is the stream write, so no other
     task can interleave between this read and that increment. The second is `_READ_TIMEOUT_CODE`.
 
-    Best-effort by construction: a transport that is already gone cannot carry a cancellation, and
-    failing the call for that would replace a wasted computation with a lost error. The original
-    `McpError` is what the caller sees either way.
+    Best-effort by construction, in **both** halves. A transport that is already gone cannot carry
+    a cancellation, and failing the call for that would replace a wasted computation with a lost
+    error; and a session that does not expose what this needs is left alone rather than refused.
+
+    That second half is the one worth stating, because getting it wrong is much worse than the
+    defect this fixes. `open_session` calls this *before* it marks the connection established, so
+    anything raised here is classified as `McpConnectFailed` — "the calculation service is not
+    answering". This function reaches into two upstream privates, so an SDK bump that renames either
+    would have turned a lost *cancellation* into a total *outage*, with `tests/test_upstream_surface.py`
+    going red beside it and every calc job failing regardless. Degrading to today's behaviour — no
+    cancellation, the call abandoned locally — is the only acceptable failure mode for an
+    enhancement to an otherwise working session. Found by the fake `ClientSession` in
+    `tests/test_calc_remote.py`, which implements exactly what `open_session` uses and no more; the
+    test fake was right and this function was not.
 
     Args:
         session: A live `ClientSession`, wrapped in place. Called once per session, right after
-            `initialize()`.
+            `initialize()`. A session not exposing `send_request`/`_request_id` is returned
+            unwrapped.
     """
-    send_request = session.send_request
+    send_request = getattr(session, "send_request", None)
+    if send_request is None or not hasattr(session, "_request_id"):
+        logger.warning(
+            "this MCP client session exposes no %s, so a call that outlives its read bound will be "
+            "abandoned without telling the server to stop; see core/mcp_session.cancel_on_timeout",
+            "send_request" if send_request is None else "_request_id",
+        )
+        return
 
     async def send_request_cancelling(*args: Any, **kwargs: Any) -> Any:
         """Delegate, and on a read-bound timeout ask the server to abandon that request."""
