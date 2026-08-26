@@ -10,7 +10,6 @@ import asyncio
 import pytest
 
 from chemclaw.connectors.calc.remote import cached_remote
-from chemclaw.connectors.qm.specs import QmJobSpec, qm_job_key
 from chemclaw.core.chem import (
     InvalidSmilesError,
     canonical_smiles,
@@ -114,19 +113,6 @@ def test_require_molecule_returns_the_molecule_the_canonical_form_is_taken_from(
     from rdkit import Chem
 
     assert str(Chem.MolToSmiles(require_molecule(" OCC\n"))) == require_canonical_smiles("CCO")
-
-
-def test_qm_job_key_ignores_smiles_spelling() -> None:
-    """Same molecule, different SMILES spelling → one QM workflow id (D-011)."""
-    a = QmJobSpec(molecule_smiles="CCO", method="B3LYP", basis_set="def2-SVP")
-    b = QmJobSpec(molecule_smiles="OCC", method="B3LYP", basis_set="def2-SVP")
-    assert qm_job_key(a) == qm_job_key(b)
-
-
-def test_qm_job_key_rejects_invalid_smiles() -> None:
-    """An unparseable molecule is rejected at key construction (durable boundary)."""
-    with pytest.raises(InvalidSmilesError):
-        qm_job_key(QmJobSpec(molecule_smiles="???", method="B3LYP", basis_set="def2-SVP"))
 
 
 def test_calc_cache_key_collapses_equivalent_smiles() -> None:

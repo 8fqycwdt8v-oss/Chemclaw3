@@ -445,22 +445,21 @@ it happens.
       needs a warning mechanism that section does not have — and a decision about whether the
       combination is an error at all.
 
-- [ ] **Three credentials cannot be set through the chart at all** — [S], and the half of the
+- [ ] **Two credentials cannot be set through the chart at all** — [S], and the half of the
       settings-secret row that did **not** close with
-      `D-2026-08-26-a-credential-is-a-type-not-a-convention`. `hpc_artifact_store_token`,
-      `llm_fallback_api_key` and `temporal_api_key` are `SecretStr` fields with readers
-      (`connectors/qm/hpc/nextflow.py:73`, `agent/llm_provider.py:251`, `core/temporal_client.py:74`)
-      and no entry under `secrets.keys` or `secrets.optionalKeys` in
-      `deploy/helm/chemclaw/values.yaml:519`, so `chemclaw.env` renders no `secretKeyRef` and a
-      deployment has no supported way to provide them. The consequence differs per credential and
-      that is what makes it a judgement rather than three identical additions:
-      `hpc_artifact_store_token` unset means a *cross-origin* artifact store is fetched
-      unauthenticated (`_artifact_headers` falls through to `{}`), which is the one with a live
-      security shape; `llm_fallback_api_key` unset silently reuses the primary's key, which is
-      correct for the common case (a second replica of one deployment) and wrong for a second
-      vendor; `temporal_api_key` is Temporal Cloud only and the chart ships self-hosted with mTLS,
-      so it may be right that it has no key — but nothing says so. All three go under
+      `D-2026-08-26-a-credential-is-a-type-not-a-convention`. `llm_fallback_api_key` and
+      `temporal_api_key` are `SecretStr` fields with readers
+      (`agent/llm_provider.py:251`, `core/temporal_client.py:74`) and no entry under
+      `secrets.keys` or `secrets.optionalKeys` in `deploy/helm/chemclaw/values.yaml`, so
+      `chemclaw.env` renders no `secretKeyRef` and a deployment has no supported way to provide
+      them. The consequence differs per credential and that is what makes it a judgement rather
+      than two identical additions: `llm_fallback_api_key` unset silently reuses the primary's
+      key, which is correct for the common case (a second replica of one deployment) and wrong for
+      a second vendor; `temporal_api_key` is Temporal Cloud only and the chart ships self-hosted
+      with mTLS, so it may be right that it has no key — but nothing says so. Both go under
       `optionalKeys`, for the upgrade reason `framingEnvelopeSecret` already records.
+      (`hpc_artifact_store_token` was the third and is gone with the tier that read it,
+      `D-2026-08-26-semiempirical-is-the-whole-tier`.)
 
 - [ ] **No session pagination and no per-session delete** — [M], **corrected**. This row claimed a
       data-subject erasure request "has no route across the seven tables". It does:
@@ -496,7 +495,7 @@ it happens.
 
 - [ ] **A jobs-only bundle has no reachability signal at all** — [M]. `connectors/health.py:81-99`
       derives its target from `health_url(manifest)`, which is `None` for a bundle with no
-      `endpoint:` — so `qm` reports `unprobed` whether its worker fleet is at two replicas or zero,
+      `endpoint:` — so `results` reports `unprobed` whether its worker fleet is at two replicas or zero,
       `chemclaw_connectors_unhealthy` counts only `unreachable`, and `check_connectors_at_startup`
       raises only on `unreachable`. The fail-fast posture an operator opts into is structurally
       blind to the failure with the largest blast radius. `describe_task_queue(bundle_queue(name))`
@@ -709,7 +708,7 @@ above when it becomes the next thing worth doing, and delete it from here when i
 The large multi-item programmes that used to be tracked here as sections are records now, not
 plans: the F0–F9 foundation build, the F10 parity pass, the F11 gap closure, the BO capability
 roadmap and the xTB/QM (X-series) roadmap. Their remaining live edges — real Temporal broker, real
-cluster, real HPC, real Snowflake — are in
+cluster, real Snowflake — are in
 [`DEFERRED.md`](DEFERRED.md), each with the trigger that would revisit it, which is the register
 those belong in.
 

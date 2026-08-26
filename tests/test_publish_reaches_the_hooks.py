@@ -70,10 +70,10 @@ from tests.calc_server_fake import _KEYED
 # real hook" asserted a pairing no hook produced, and all nine calc jobs published nothing while
 # it stayed green.
 #
-# So the list is now read off the two things that decide it: the member fields of `XtbJobResult`
-# (a tenth result shape is one field there and appears here with no edit) and `qm`'s own return
-# type. A route is not asserted alongside them because a route never identifies a shape — that
-# was the original error — and `test_a_route_never_routes_on_its_own` keeps that honest.
+# So the list is now read off the thing that decides it: the member fields of `XtbJobResult` (a
+# tenth result shape is one field there and appears here with no edit). A route is not asserted
+# alongside them because a route never identifies a shape — that was the original error — and
+# `test_a_route_never_routes_on_its_own` keeps that honest.
 _ENVELOPE_MEMBERS: tuple[str, ...] = tuple(
     sorted(
         annotation.__name__
@@ -90,11 +90,6 @@ _ENVELOPE_MEMBERS: tuple[str, ...] = tuple(
 # route, so a tenth member field on `XtbJobResult` fails immediately rather than joining a silent
 # set — which is the whole reason this is a declared exclusion rather than an omission.
 _NOT_YET_PUBLISHED: frozenset[str] = frozenset()
-
-# What the `qm` bundle returns. Listed rather than derived because it has no envelope to derive
-# from — the workflow returns its domain model directly, which is precisely why `qm` was the one
-# bundle publishing before this change.
-_QM_RESULT = "QMJobResult"
 
 # Every `calc_type` the calculation server stamps on a cache row, read off the fake that states
 # its key contract rather than re-listed here. A calculator that gains a cache type appears in this
@@ -260,14 +255,17 @@ def test_every_calc_type_the_server_stamps_routes_to_a_projector(calc_type: str)
     )
 
 
-def test_the_qm_bundle_returns_its_domain_model_and_routes() -> None:
-    """`qm` has no envelope: its workflow returns `QMJobResult`, which is why it always published.
+def test_a_retired_calculators_rows_still_project() -> None:
+    """`calculation_results` is never pruned, so a stored row outlives the code that wrote it.
 
-    Kept as its own test rather than folded into the parametrisation above, because the thing
-    worth asserting is the *difference* — one bundle wraps its result and one does not, and the
-    publish path has to work for both.
+    The `dft` rows the removed QM bundle stamped are the live case
+    (`D-2026-08-26-semiempirical-is-the-whole-tier`); `xtb.scan` is the same shape from an earlier
+    move. Both resolve by `calc_type` prefix alone, which is all the backfill path has — a row
+    carries no model name. Deleting the projector with the calculator would leave a deployment's
+    existing rows silently unpublishable.
     """
-    assert projector_for("qm.compute_dft_energy", _QM_RESULT) is not None
+    assert projector_for("dft@nextflow-1.0.0:abc:def") is not None
+    assert projector_for("xtb.scan@GFN2:abc:def") is not None
 
 
 def test_what_the_calc_workflow_returns_projects_into_records() -> None:

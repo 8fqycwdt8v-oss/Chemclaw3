@@ -19,7 +19,8 @@ name: calc
 description: >-
   Fast cached property calculators: xTB single-point energy, predicted pKa and solubility, plus the
   calibration ledger that scores those predictions against measured values. Sub-second and cached,
-  so a repeat call is free — heavy QM goes through the durable compute_dft_energy instead.
+  so a repeat call is free; the searches and profiles that are not sub-second run as durable jobs
+  below. Every method here is semiempirical (GFN2-xTB via tblite, CREST) — there is no DFT tier.
 
 endpoint:
   transport: http

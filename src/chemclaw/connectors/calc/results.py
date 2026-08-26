@@ -76,7 +76,8 @@ class XtbJobResult(BaseModel):
         science wants the member. `type(envelope).__name__` is therefore never the answer to "what
         shape is this" — it is always `XtbJobResult` — and answering it that way is what left the
         whole composite half of `chemclaw.publish` dropping its input with a debug line while every
-        test passed (`D-2026-08-25-a-cache-is-not-a-record`'s headline claim). `qm` has no wrapper
+        test passed (`D-2026-08-25-a-cache-is-not-a-record`'s headline claim). The DFT bundle had
+        no wrapper
         and is the one bundle that published; this is how `calc` stops being the exception.
 
         **Members are recognised by type, not by a name list.** A member is a `BaseModel`; the

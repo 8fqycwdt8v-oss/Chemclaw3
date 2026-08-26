@@ -42,10 +42,21 @@ class TemporalSettings(BaseSettings):
 
     # Core's own task queue: the light background jobs (sync, re-index, reports, and the
     # connector-job wrapper). A name is config so a deployment can shard or rename it without
-    # touching worker code (D-006). There is no second core queue any more — the heavy `hpc-jobs`
-    # queue went with the QM job into `connectors/qm/`, whose worker derives its queue from the
-    # bundle name (`connectors.queues.bundle_queue`, D-118).
+    # touching worker code (D-006). It is the only core queue: every capability's durable work
+    # runs on the queue its own bundle derives from its name (`connectors.queues.bundle_queue`,
+    # D-118).
     background_task_queue: str = "background-jobs"
+
+    # Start-to-close budget for a *short* core activity — one that computes or writes a row and
+    # returns, rather than waiting on something. Read by the memory-distillation job, the
+    # orchestrator's step activities and the session push-back
+    # (`durable/memory_jobs.py`, `durable/orchestrator.py`, `durable/notify.py`).
+    #
+    # It used to be spelled `qm_activity_timeout_seconds` and live in an HPC section, which was
+    # never what it meant: none of its three readers is a QM path, and the one bundle whose name it
+    # carried is gone (`D-2026-08-26-semiempirical-is-the-whole-tier`). A capability whose
+    # activities are longer than this states its own budget in its own workflow, as `calc` does.
+    activity_timeout_seconds: float = Field(default=30.0, gt=0)
 
     # Bound on retries for ordinary activities under the shared bad-data retry policy
     # (`workflows.publish.BAD_DATA_RETRY`). Bad data is non-retryable by type; this caps the
@@ -94,10 +105,9 @@ class TemporalSettings(BaseSettings):
     # not the constraint. Equal is the point at which no activity can ever be the one that has to
     # wait.
     #
-    # A bundle whose activities are long waits rather than database work overrides this — `qm`
-    # holds one slot per in-flight HPC job for up to `hpc_run_timeout_seconds` (24 h) and touches
-    # the database twice in that span, so its ceiling is about memory, not connections, and its
-    # chart entry says so.
+    # A bundle whose activities are long waits rather than database work overrides this — `calc`
+    # holds a slot for the whole of a CREST conformer search and touches the database only at its
+    # ends, so its ceiling is about memory, not connections, and its chart entry says so.
     worker_max_concurrent_activities: int = Field(default=8, ge=1)
 
     @model_validator(mode="after")

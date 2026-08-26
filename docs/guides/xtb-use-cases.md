@@ -176,9 +176,10 @@ it. None is a new calculator; each is a connection between layers.
 3. **Enriching ELN-ingested structures.** Compute descriptors once per ingested substrate
    so the knowledge graph becomes searchable by electronic character, not just by
    substructure. Cheap (cached forever), and it makes retrieval smarter. **Available now.**
-4. **The escalation ladder.** xTB is the cheap tier under the deferred DFT/HPC path: try
-   it first, escalate only when the answer sits inside the error bar of the decision.
-   `qm-job-submission` and `calculation-selection` now state this boundary.
+4. **The accuracy ceiling is the answer, not a rung.** There is no DFT tier to escalate to
+   (`D-2026-08-26-semiempirical-is-the-whole-tier`), so when a decision turns on a difference
+   inside GFN2-xTB's error bar the honest move is to say so and propose an experiment, not to
+   quote a number the method cannot support. `calculation-selection` states this boundary.
 5. **Computation inside the autonomous harness.** Fast calculators run inline with no
    durable job, so a plan step can compute without the harness waiting on Temporal — the
    reason §2.2's triage is practical at all.

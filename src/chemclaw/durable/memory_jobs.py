@@ -260,7 +260,7 @@ async def _synthesize(build_activity: Any, id_prefix: str) -> list[str]:
     cap = await workflow.execute_local_activity(
         resolve_notes_per_run,
         # The generic short-activity budget, as `resolve_fan_out_limit` uses beside it.
-        start_to_close_timeout=timedelta(seconds=settings.qm_activity_timeout_seconds),
+        start_to_close_timeout=timedelta(seconds=settings.activity_timeout_seconds),
         retry_policy=BAD_DATA_RETRY,
     )
     return await fan_out(

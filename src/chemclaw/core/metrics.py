@@ -175,7 +175,8 @@ _COUNTERS: dict[str, str] = {
     # identically. This is the consumption counterpart — accumulated seconds, so `rate()` reads as
     # "compute-seconds per second", the same shape as the token counters and the standard way spend
     # is expressed. A histogram would be the wrong instrument twice over: the shared bucket set tops
-    # out at 300 s, which is noise for HPC work, and the question is how much was consumed rather
+    # out at 300 s, which is noise for an hours-long search, and the question is how much was
+    # consumed rather
     # than how the durations were distributed. Not node-hours — parallelism belongs to the launcher
     # and none reports it back yet — but runtime is the factor node-hours multiplies.
     "chemclaw_job_runtime_seconds_total": (

@@ -49,7 +49,7 @@ _EXPECTED_INPROCESS_TOOLS = {
     "recall_observations",
     # The durable launchers core still owns, and the one status tool every durable job is
     # collected with, connector-owned or not. The QM launcher and its bespoke status tool were the
-    # last pair to go; the HPC job is a declared `qm` connector job now (D-118).
+    # last pair to go; every expensive job is a declared connector job now (D-118).
     #
     # The report's workflow has not moved into a bundle (D-115: its closure *is* core's).
     # `synthesize_memory` is core's for the same reason and one more: D-2026-08-25 took the corpus

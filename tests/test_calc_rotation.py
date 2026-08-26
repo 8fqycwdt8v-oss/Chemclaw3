@@ -61,13 +61,20 @@ def _torsion(smiles: str = _BUTANE, bond: tuple[int, int] = (1, 2), **overrides:
     return Torsion.model_validate({**fields, **overrides})
 
 
-def _profile(server: FakeCalcServer, **kwargs: object) -> RotationProfile:
-    """Run the composite against the fake, from a fresh cache."""
+def _profile(
+    server: FakeCalcServer, *, bond: Torsion | None = None, **kwargs: object
+) -> RotationProfile:
+    """Run the composite against the fake, from a fresh cache.
+
+    `server` is taken and unused: it is the fixture that installs the fake, and naming it at each
+    call site is what makes the dependency visible.
+    """
+    del server
     return asyncio.run(
         compose.rotation_profile(
             InMemoryStore(),
             _BUTANE,
-            _torsion(),
+            bond or _torsion(),
             **kwargs,  # type: ignore[arg-type]
         )
     )
@@ -232,6 +239,29 @@ class TestTheBarrier:
             barrier.at_degrees < 60 or barrier.at_degrees > 300 for barrier in profile.barriers
         )
 
+    def test_a_single_well_per_period_still_has_a_barrier(self, server: FakeCalcServer) -> None:
+        """The case the whole capability exists for, and the one that reported nothing.
+
+        A hindered rotation with one populated form per period — an amide, a biaryl with a single
+        minimum — rotates into its *own symmetry image* over the pass between them. That is the
+        barrier variable-temperature NMR measures. Measured against the live GFN2 server before
+        this was fixed: N,N-dimethylacetamide's profile rises to 18.1 kcal/mol at 96 degrees, one
+        planar well per 180 degrees, and `barriers` came back **empty** — the number was computed
+        and then dropped, because pairing adjacent wells around a ring silently produces a
+        zero-length arc when there is only one of them.
+
+        Driven here over a third of the fake's three-fold potential, which holds exactly one well.
+        """
+        profile = _profile(server, bond=_torsion(symmetry_order=3, period_degrees=120.0))
+        assert len(profile.rotamers) == 1
+        assert len(profile.barriers) == 1
+        barrier = profile.barriers[0]
+        assert barrier.from_rotamer == barrier.to_rotamer == 0
+        # Symmetry, not coincidence: it is the same well on both sides of the pass.
+        assert barrier.forward_kcal == barrier.reverse_kcal
+        assert barrier.forward_kcal > 0.0
+        assert profile.highest_barrier_kcal == barrier.forward_kcal
+
     def test_every_barrier_carries_a_half_life_with_its_band(self, server: FakeCalcServer) -> None:
         """A single lifetime from a semiempirical barrier reads exactly like a measurement."""
         for barrier in _profile(server).barriers:
@@ -243,6 +273,47 @@ class TestTheBarrier:
                 < lifetime.half_life_seconds_slowest
             )
             assert lifetime.uncertainty_kcal == settings.xtb_reaction_uncertainty_kcal
+
+
+class TestTheWarnings:
+    """A check that fires on the molecules the feature is for is worse than no check."""
+
+    def test_a_steep_real_barrier_is_not_reported_as_a_discontinuity(
+        self, server: FakeCalcServer
+    ) -> None:
+        """The false positive measured against live GFN2, and the reason the rule is a ratio.
+
+        N,N-dimethylacetamide climbs an ordinary 18 kcal/mol amide barrier and therefore steps
+        8.8 kcal/mol between two 30-degree points. Against the old absolute bound — the method's
+        3 kcal/mol reaction uncertainty — that was warned about as "a point relaxed into a
+        different basin", so the check fired on precisely the hindered rotations this capability
+        exists for and stayed silent on the freely-rotating ones.
+
+        A discontinuity is a step *out of line with its neighbours*, not a large step. Here the
+        fake's own smooth three-fold profile stands in: it must produce no such warning.
+        """
+        warnings = _profile(server).warnings
+        assert not [warning for warning in warnings if "different basin" in warning], warnings
+
+    def test_a_step_far_out_of_line_is_still_reported(self, server: FakeCalcServer) -> None:
+        """The check still has to catch what it is for, so the ratio is a threshold, not a mute.
+
+        One point is pushed far off the smooth profile — which is what a relaxation into another
+        basin looks like — and the warning must name it.
+        """
+        smooth = server._optimization
+        original = server.overrides.get("scan_point")
+
+        def _one_point_adrift(arguments: dict[str, object]) -> dict[str, object]:
+            result = server._scan_point(arguments)
+            if float(arguments["value"]) == 90.0:  # type: ignore[arg-type]
+                result["energy_hartree"] -= 0.2
+            return result
+
+        del smooth, original
+        server.overrides["scan_point"] = _one_point_adrift
+        warnings = _profile(server).warnings
+        assert [warning for warning in warnings if "different basin" in warning], warnings
 
 
 class TestTheCache:
