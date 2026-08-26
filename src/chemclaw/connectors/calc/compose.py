@@ -614,18 +614,26 @@ def _aryl_protonation(site_smiles: str | None) -> bool | None:
     )
 
 
-def _anionic_carbon(site_smiles: str) -> bool:
-    """Whether the deprotonation landed on carbon — parsed, not pattern-matched.
+def _off_domain_anion(site_smiles: str) -> str | None:
+    """The element a deprotonation landed on when it is one the calibration was not fitted on.
 
-    A C-H acid is a real answer to "which proton is most acidic" and a wrong one to "what is its
-    pKa in water": the calibration is fitted on heteroatom acids, and DMSO-scale carbon acidity is
-    not what it maps. Read off the atom carrying the charge, because a substring test cannot tell
-    `[CH2-]` from `[Cl-]` or from a bracketed carbon that is not the anion.
+    The acid reference set is **O-H and S-H only**, so a winning deprotomer at carbon or nitrogen is
+    an extrapolation and says so. Both are real answers to "which proton is most acidic" and wrong
+    answers to "what is its pKa in water" if quoted unqualified: CREST ranks every site including
+    C-H, and an N-H acid (an imide, a sulfonamide) is a class the linear map has never seen.
+
+    Read off the atom carrying the charge rather than matched against the string, because a
+    substring test cannot tell `[CH2-]` from `[Cl-]` or from a bracketed carbon that is not the
+    anion. Returns `None` for the fitted case and for a site that cannot be read.
     """
     mol = Chem.MolFromSmiles(site_smiles)
     if mol is None:
-        return False
-    return any(atom.GetAtomicNum() == 6 and atom.GetFormalCharge() < 0 for atom in mol.GetAtoms())
+        return None
+    charged = [atom for atom in mol.GetAtoms() if atom.GetFormalCharge() < 0]
+    off = [atom for atom in charged if atom.GetAtomicNum() in (6, 7)]
+    if not off or any(atom.GetAtomicNum() in (8, 16) for atom in charged):
+        return None
+    return "carbon" if off[0].GetAtomicNum() == 6 else "nitrogen"
 
 
 async def microstate_pka(
@@ -774,10 +782,12 @@ def _pka_warnings(
             "the ionised microstate's constitution could not be perceived from its geometry, so "
             "which proton this pKa is about is not reported"
         )
-    elif branch == "acid" and _anionic_carbon(site):
+    elif branch == "acid" and (element := _off_domain_anion(site)) is not None:
         warnings.append(
-            f"the most stable deprotomer is a carbanion ({site}): CREST ranks every site including "
-            "C-H, and this calibration was fitted on heteroatom acids only"
+            f"the proton came off {element} ({site}), and this calibration was fitted on O-H and "
+            "S-H acids only. The ranking of sites stands — it is what the search measured — but "
+            "the mapping of this free energy to a pKa is an extrapolation to a class the fit has "
+            "never seen"
         )
     if not calibration.fitted_from < pka < calibration.fitted_to:
         warnings.append(

@@ -611,3 +611,20 @@ def test_a_solvent_the_calibration_was_not_fitted_in_says_so(
     result = _run(compose.microstate_pka(store, "Oc1ccccc1", solvent="acetonitrile"))
 
     assert any("fitted in water" in warning for warning in result.warnings)
+
+
+def test_a_deprotonation_off_the_fitted_domain_says_so(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An N-H acid is a real winner and an extrapolation, and the result has to say which.
+
+    The reference set is O-H and S-H only. CREST ranks every site, so an imide or a sulfonamide can
+    legitimately come back with the proton off nitrogen — a correct answer to "which proton" and an
+    unfitted one to "what is the pKa". Quoting the number without the warning is how a calibration
+    silently acquires a domain nobody measured.
+    """
+    install(monkeypatch, FakeCalcServer())
+    store = InMemoryStore()
+
+    result = _run(compose.microstate_pka(store, "O=C(N)c1ccccc1", branch="acid"))
+
+    assert result.site_smiles is not None
+    assert any("came off nitrogen" in warning for warning in result.warnings)

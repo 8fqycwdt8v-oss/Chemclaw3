@@ -55,6 +55,19 @@ final stage copies and puts on `PATH`. Verified by building it: both run in the 
 Pinned, because `crest --version` and `xtb --version` are both interpolated into `calc_version`: an
 unpinned rebuild would silently re-key every cached calculation.
 
+**`CHEMCLAW_XTB_ENGINE=tblite` is pinned in the image, and that is the second half of the
+decision.** `auto` resolves to the `xtb` binary the moment one is on `PATH`, and the backend is
+interpolated into `calc_version` — measured, `opt-GFN2-xTB+tblite-0.7.0/…` against
+`opt-GFN2-xTB+xtb-6.7.1/tblite-0.7.0/…`. Shipping the binary as the default would therefore have
+done three things on the day the image deployed, none of which announces itself: every row in
+`calculation_results` misses forever; every reconciled residual in the calibration ledger becomes
+unreachable, because `predictions` is keyed on `calc_version` and read with an exact predicate, so
+`calculator_trust("pka")` reports a confident `UNCALIBRATED` at n=0; and `predict_pka`'s base branch
+relaxes through the new backend while its slope and intercept were fitted through the old one. The
+binary is therefore *available*, not *active* — one environment variable for a deployment that wants
+ANCopt and has decided to recompute. CREST needs none of this: it carries its own GFN
+implementation, which is why the capability half of this ADR is unaffected by the pin.
+
 `CHEMCLAW_CREST_THREADS=4` is set in the image. The three `*_NUM_THREADS=1` variables bind the
 in-process stack and do **not** reach the sampler — `crest_cli` scrubs the environment to four
 allow-listed variables — so without this CREST's OpenMP sizes itself from `/proc/cpuinfo`, which is
@@ -89,8 +102,9 @@ delocalised anion comes back in a quinoid form. It names the site; it is not a d
   recorded here so it is not discovered in an audit as an accident of a base image.
 - Removing them stays supported and stays loud: `is_available()` goes False, the searches refuse by
   name, and `resolve_backend()` falls back to `tblite` with the version string saying so.
-- The suite is green both with the binaries present and without them, which is now two different
-  code paths rather than one.
+- The suite runs in two configurations now rather than one, and the gated tests
+  (`tests/test_crest_ensembles.py`) invert on `is_available()` so neither configuration asserts a
+  refusal as permanent.
 
 ## The rule
 
