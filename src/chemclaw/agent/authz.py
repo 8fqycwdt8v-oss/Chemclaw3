@@ -65,7 +65,13 @@ class AuthorizationError(Exception):
 #
 # Declared here rather than added to the chart's `entra_expensive_actions`, so that a deployment
 # gets it without configuring anything — the same property the manifest derivation gives bundles.
-CORE_EXPENSIVE_ACTIONS: frozenset[str] = frozenset({"request_development_report"})
+#
+# `synthesize_memory` joins it for the same reason and one more: it re-reads every reaction from
+# every ingest source and opens pull requests in the knowledge repository, so it is both unbounded
+# in the corpus and outward-facing in its effect.
+CORE_EXPENSIVE_ACTIONS: frozenset[str] = frozenset(
+    {"request_development_report", "synthesize_memory"}
+)
 
 # The write/side-effect tools gated to `entra_privileged_role_set` when the operator has NOT
 # configured an explicit `tool_role_gates` entry for them. Under `tool_authz_default="allow"`
@@ -110,6 +116,7 @@ STATE_CHANGING_TOOLS: frozenset[str] = (
             "watch_for",  # writes subscriptions
             "stop_watching",  # deletes from subscriptions
             "request_development_report",  # starts a durable report workflow
+            "synthesize_memory",  # starts a corpus scan that opens knowledge PRs
         }
     )
     | DEFAULT_WRITE_TOOL_GATES

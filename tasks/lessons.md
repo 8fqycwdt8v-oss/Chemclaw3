@@ -877,3 +877,37 @@ Two smaller lessons from the same review, both about declarations:
   Oracle "spell it `MERGE`" beside an emitter that only writes `ON CONFLICT`. Nobody lied; the
   sentence was about SQL dialects in general and read as being about this module. When a docstring
   names a thing the code does not do, say which half is true.
+## 2026-08-26 — the fixture held constant the axis the function branches on
+
+A third review pass over the same merged work found two more defects, and both are the same shape as
+the three before them.
+
+`Condensation.degraded` was overloaded with two facts — "its prose could not be read" (has a row)
+and "it resolved to nothing" (has no row) — and the rendered payload then told the model that a
+reference nobody could resolve had "recorded figures above", and that a comparison of two protocols
+covered the three it was handed. `render_table` placed cells verbatim, so an `observations` value
+extracted from a share document, carrying a `|` and a newline, rendered a `rxn-FORGED | 99 | 99 |
+best result on file` row that the object does not contain.
+
+Neither was caught, and the reason is one reason. Every fixture in this work is homogeneous on the
+axis its function branches on:
+
+- all conditions present, or all absent — never a mix (the fabricated `solvent — → 2-MeTHF`)
+- every extraction succeeds, or one fails in isolation (the phantom swaps)
+- every protocol under the limit, or one over (the oversize path)
+- every reference resolves, or none does — **never the mix** (this pass)
+- every cell first-party — **never one that tries to be structure** (this pass)
+
+Five defects, five held-constant axes. The lesson written after each one was about *that* defect;
+the family kept shipping because the family was never named.
+
+*Rule for myself: before writing a fixture, list the branches the function under test takes, and
+build the collection so its members differ on every one of them. When the function renders text
+someone else wrote into a structured format, one member's content must try to be structure. A
+fixture where every member takes the same branch proves the branch works, and nothing else — and
+that is what "tested" has meant in this whole body of work.*
+
+The corollary, from the same pass: `Field(exclude=True)`, a budget in the wrong currency, and a
+renderer that "only places" cells are all the same mistake as a homogeneous fixture — an assumption
+about a mechanism, never crossed with the case that would disprove it. The check is cheap and I keep
+not running it: **construct the input that would break the belief, and look at the output.**

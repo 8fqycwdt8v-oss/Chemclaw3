@@ -8,7 +8,6 @@ fan-out and nothing else.
 
 import asyncio
 import time
-from pathlib import Path
 from typing import Any
 
 import pytest
@@ -16,6 +15,7 @@ import pytest
 import chemclaw.ingest.eln.warehouse.retriever as retriever_module
 from chemclaw.core.config import settings
 from chemclaw.core.embeddings import embed_texts
+from chemclaw.ingest.eln.records import InMemoryReactionRecordStore, ReactionRecord
 from chemclaw.ingest.eln.warehouse.binding import BindingError
 from chemclaw.ingest.eln.warehouse.retriever import WarehouseVectorRetriever
 from tests import warehouse_fake
@@ -65,6 +65,27 @@ def _retrieve(
     return asyncio.run(retriever.retrieve("ester formation", filters or {}))
 
 
+def _ingested(monkeypatch: pytest.MonkeyPatch, *reaction_ids: str) -> None:
+    """Point the retriever's suppression check at a corpus holding exactly `reaction_ids`.
+
+    The check asks the transcription store since D-2026-08-25, not the filesystem, so seeding a
+    `knowledge/reaction/*.md` file — what these tests used to do — now proves nothing at all: that
+    is precisely how `suppress_ingested` became a silent no-op.
+    """
+    store = InMemoryReactionRecordStore()
+    asyncio.run(
+        store.record(
+            [
+                ReactionRecord(reaction_id=rid, body=f"body {rid}", source="eln:test")
+                for rid in reaction_ids
+            ]
+        )
+    )
+    monkeypatch.setattr(
+        "chemclaw.ingest.eln.warehouse.retriever.default_record_store", lambda: store
+    )
+
+
 def _primed() -> warehouse_fake.FakeWarehouse:
     """The warehouse the last retrieval actually used."""
     assert warehouse_fake.NEXT is not None
@@ -107,56 +128,42 @@ def test_chunks_cite_the_row_because_there_is_no_note_to_cite() -> None:
     assert "PROTOCOL_TEXT: Charge the acid" in chunks[0].content
 
 
-def test_a_reaction_already_merged_as_a_note_is_not_surfaced_twice(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_a_reaction_already_ingested_is_not_surfaced_twice(monkeypatch: pytest.MonkeyPatch) -> None:
     """The rule that lets one ELN carry both halves without double-counting.
 
-    A curated reaction reaching the agent once as reviewed, merged knowledge and again as a raw
-    warehouse row would look like two independent sources agreeing.
-    """
-    reactions = tmp_path / "reaction"
-    reactions.mkdir()
-    (reactions / "reaction-RX-1.md").write_text("merged", encoding="utf-8")
-    monkeypatch.setattr(type(settings), "knowledge_path", property(lambda _: tmp_path))
+    A curated reaction reaching the agent once as an ingested record and again as a raw warehouse
+    row would look like two independent sources agreeing.
 
+    This asked the *filesystem* until D-2026-08-25 made a transcription a row: it stat'd
+    `knowledge/reaction/reaction-<key>.md`, which ingestion stopped writing, so the check answered
+    `False` forever and the suppression silently stopped happening. Asserted against the store now,
+    which is where the answer lives.
+    """
+    _ingested(monkeypatch, "RX-1")
     chunks = _retrieve(_binding(), _hits())
     assert [c.source_note_id for c in chunks] == ["eln-warehouse:RX-2"]
 
 
-def test_a_row_key_cannot_reach_a_file_outside_the_graph(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """The suppression check is confined to `knowledge_path`, whatever the warehouse's key says.
+def test_a_traversal_shaped_row_key_suppresses_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A warehouse-controlled key must never decide a suppression it has no record for.
 
-    The key is warehouse-controlled and lands in a path by string join, so `../../` used to walk
-    out of the graph. Nothing is read and only a `stat` runs, but the answer decides whether a hit
-    is *suppressed* — so a key escaping onto any file that happens to exist hides evidence, which is
-    the failure that matters here rather than disclosure.
+    The key used to land in a path by string join, so `../../` walked out of the graph and could
+    stat any file that happened to exist — hiding evidence, which is the failure that matters here
+    rather than disclosure. There is no path any more, and the property is asserted against the
+    shape rather than the mechanism so it survives the next storage change too: a key the slug rule
+    rejects cannot be a record id, so it is filtered out before the query and suppresses nothing.
     """
-    graph = tmp_path / "graph"
-    (graph / "reaction").mkdir(parents=True)
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    # The file the traversal is aiming at: real, and nothing to do with the knowledge graph.
-    (outside / "reaction-escaped.md").write_text("not a note", encoding="utf-8")
-    monkeypatch.setattr(type(settings), "knowledge_path", property(lambda _: graph))
-
+    _ingested(monkeypatch)
     hits = _hits()
-    # Four, not two: the `reaction-` prefix makes the first component a name rather than a `..`,
-    # so the shallower spellings land back inside the graph and prove nothing.
     hits["V_EMBEDDING"][0]["REACTION_ID"] = "../../../../outside/reaction-escaped"
     chunks = _retrieve(_binding(), hits)
 
-    assert len(chunks) == 2, "a key that escapes the graph has no note, so nothing is suppressed"
+    assert len(chunks) == 2, "a key that cannot be a record id has no record, so nothing is dropped"
 
 
-def test_suppression_can_be_switched_off(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_suppression_can_be_switched_off(monkeypatch: pytest.MonkeyPatch) -> None:
     """A deployment that ingests nothing has no duplicates to suppress and pays nothing for it."""
-    reactions = tmp_path / "reaction"
-    reactions.mkdir()
-    (reactions / "reaction-RX-1.md").write_text("merged", encoding="utf-8")
-    monkeypatch.setattr(type(settings), "knowledge_path", property(lambda _: tmp_path))
+    _ingested(monkeypatch, "RX-1")
 
     chunks = _retrieve(_binding(suppress_ingested=False), _hits())
     assert len(chunks) == 2
@@ -280,20 +287,21 @@ def test_the_query_is_embedded_off_the_event_loop(monkeypatch: pytest.MonkeyPatc
     assert asyncio.run(_run()) > 5, "the loop kept running while the provider was blocking"
 
 
-def test_a_key_the_filesystem_cannot_resolve_costs_its_own_row_and_no_other(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+def test_a_key_the_store_cannot_hold_costs_its_own_row_and_no_other(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The confinement must not be stricter than the question it answers.
+    """The filter must not be stricter than the question it answers.
 
-    `is_file()` returns False for a path with an embedded NUL; `resolve()` raises `ValueError` on
-    one. Confining the path without guarding that turned a single unusable row into a raise that
-    propagated to `retrieve()`'s backstop and returned `[]` for the **whole leg** — discarding
-    every other legitimate hit. That is the same "hide evidence" outcome the confinement exists to
-    prevent, so it is asserted here from the other side.
+    Under the old path form, `resolve()` raised `ValueError` on an embedded NUL where `is_file()`
+    merely answered `False`, so one unusable row raised into `retrieve()`'s backstop and returned
+    `[]` for the **whole leg** — discarding every other legitimate hit. That is the same "hide
+    evidence" outcome the check exists to prevent, reached from the other side.
+
+    The failure mode survived the move to a store rather than being retired by it: Postgres text
+    cannot hold a NUL, so *asking* about such a key raises out of the driver in exactly the same
+    way. Pre-filtering by the slug rule is what keeps one bad row costing one row.
     """
-    (tmp_path / "reaction").mkdir()
-    monkeypatch.setattr(type(settings), "knowledge_path", property(lambda _: tmp_path))
-
+    _ingested(monkeypatch)
     hits = _hits()
     hits["V_EMBEDDING"][0]["REACTION_ID"] = "RX-\x00-nul"
     chunks = _retrieve(_binding(), hits)

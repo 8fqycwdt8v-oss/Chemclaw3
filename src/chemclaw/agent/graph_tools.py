@@ -25,7 +25,7 @@ from chemclaw.ingest.eln.compound import compound_dependencies
 from chemclaw.ingest.eln.records import RECORD_TYPE, default_record_store
 from chemclaw.kg.analytics import GraphGaps, analyze
 from chemclaw.kg.git_submitter import default_submitter
-from chemclaw.kg.graph import build_graph, load_notes, neighborhood
+from chemclaw.kg.graph import build_graph, load_notes, neighborhood, note_in
 from chemclaw.kg.note import Note, Relation, resolves_outside_graph
 from chemclaw.kg.pr_gate import propose_note
 from chemclaw.kg.relations import DEFAULT_RELATION
@@ -273,7 +273,10 @@ async def expand_note(note_id: str, hops: int = 1) -> NoteView:
     # The graph first, the store second, and in that order deliberately: `reaction-` is a *prefix*,
     # not a reservation, so a human-authored note under that name must still win. Store-first made
     # every such note unreachable — silently, because the record lookup fails with its own message.
-    if note_id not in graph and resolves_outside_graph(note_id):
+    #
+    # **Whether the graph holds a *note*, not whether it holds the id** — `note_in` says why those
+    # differ, and this line testing membership instead was the defect it now prevents.
+    if note_in(graph, note_id) is None and resolves_outside_graph(note_id):
         return await _expand_record(note_id)
     note = _require_note(graph, note_id)
     # `hops` comes from the model; clamp it to [0, graph_max_hops] so a large value is bounded
