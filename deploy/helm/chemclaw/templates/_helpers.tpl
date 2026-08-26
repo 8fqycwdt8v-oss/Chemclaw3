@@ -474,6 +474,34 @@ readOnlyRootFilesystem: {{ .Values.securityContext.readOnlyRootFilesystem }}
 {{- toJson $urls -}}
 {{- end -}}
 
+{{- /* Which bundles the agent loads at all — `CHEMCLAW_CONNECTORS_ENABLED`, derived from the same
+       block that renders the pods.
+
+       **`enabled: false` used to remove a bundle's pods and leave its tools on the agent's
+       surface.** `values.yaml` said this key was "in `config` below"; it was in none of the 33
+       entries there, and `connectors_enabled` empty means *every discovered bundle* — "discovery is
+       enablement until you say otherwise". So a disabled `qm` still advertised its jobs, the
+       launcher still started the wrapper on the polled queue and its child on `connector-qm`, which
+       nobody polls, and the chemist was told "running" until the 25 h ceiling.
+
+       Pathsep-joined (`:`), which is what `Settings.connectors_enabled_list` splits on, and in the
+       map's key order — Helm ranges a map sorted by key and `registry.discovered()` sorts by name,
+       so the derived order is the discovery order and the advertised tool order does not move.
+
+       A release that enables no connector at all is refused rather than rendered: the empty string
+       means "load everything" to the reader, so it is the one intent this variable cannot express,
+       and rendering it would silently invert the operator's choice. */ -}}
+{{- define "chemclaw.connectorsEnabled" -}}
+{{- $names := list -}}
+{{- range $name, $cfg := .Values.connectors -}}
+{{- if $cfg.enabled -}}{{- $names = append $names $name -}}{{- end -}}
+{{- end -}}
+{{- if and .Values.connectors (not $names) -}}
+{{- fail "connectors: every bundle is disabled. CHEMCLAW_CONNECTORS_ENABLED cannot say \"none\" — empty means every bundle the image ships — so enable at least one, or remove the connectors block entirely if this release is meant to run without them." -}}
+{{- end -}}
+{{- join ":" $names -}}
+{{- end -}}
+
 {{- /* How many processes in this release may open a Postgres pool — the multiplicand in
        `pg_pool_max_size × processes` that `core/config/store.py` has always stated in prose and
        nothing computed (D-2026-08-05-the-connection-budget-is-a-fleet-number).
@@ -506,8 +534,12 @@ readOnlyRootFilesystem: {{ .Values.securityContext.readOnlyRootFilesystem }}
        connector pods nothing in this release and so opens no pool here. Counting it would spend
        the fleet's connection budget on processes that do not exist, which is the ceiling being
        wrong in the direction that silently throttles the pods that do. */ -}}
-{{- if and $cfg.server (not $cfg.url) -}}{{- $total = add $total ($cfg.replicas | int) -}}{{- end -}}
-{{- if $cfg.worker -}}{{- $total = add $total ($cfg.replicas | int) -}}{{- end -}}
+{{- /* Each half at its own count, because they are separate Deployments and (since 2026-08-26)
+       separately scalable. Reading `replicas` for both was right only while one knob drove both;
+       it is also what made a `url:` bundle with a worker contribute `nil | int` = 0 to the
+       budget, since `replicas` was never required of one. */ -}}
+{{- if and $cfg.server (not $cfg.url) -}}{{- $total = add $total ($cfg.serverReplicas | default $cfg.replicas | int) -}}{{- end -}}
+{{- if $cfg.worker -}}{{- $total = add $total ($cfg.workerReplicas | default $cfg.replicas | int) -}}{{- end -}}
 {{- end -}}
 {{- end -}}
 {{- $total -}}

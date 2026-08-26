@@ -248,13 +248,17 @@ def _openai_compatible_model(model: str | None = None, *, fallback: bool = False
     # the common case is a second replica of one internal deployment, not a different vendor.
     base_url = settings.llm_fallback_base_url if fallback else settings.llm_base_url
     chosen = model or (settings.llm_fallback_model if fallback else "") or settings.llm_model
-    key = (settings.llm_fallback_api_key if fallback else "") or settings.llm_api_key
+    # Unwrapped here and nowhere earlier: both settings are `SecretStr`, so `or` on them would
+    # compare wrappers (always truthy) rather than the keys inside.
+    fallback_key = settings.llm_fallback_api_key.get_secret_value() if fallback else ""
+    key = fallback_key or settings.llm_api_key.get_secret_value()
 
     return ChatOpenAI(
         model=chosen,
         base_url=base_url,
         # `ChatOpenAI` takes the credential as a `SecretStr`, which keeps the key out of a repr
-        # and out of any log line that prints the model object.
+        # and out of any log line that prints the model object — the same guarantee `Settings` now
+        # makes, so the value is a `SecretStr` on both sides of this call and plain only between.
         api_key=SecretStr(key or _KEYLESS_PLACEHOLDER),
         timeout=settings.llm_timeout_seconds,
         max_retries=settings.llm_max_retries,

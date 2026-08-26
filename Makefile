@@ -160,7 +160,12 @@ helm-validate:  ## Render the Helm chart and validate it against the Kubernetes 
 	@# not something that slips through as "skipped".
 	@command -v helm >/dev/null || { echo "helm not installed - see docs/guides/runbook.md"; exit 1; }
 	@command -v kubeconform >/dev/null || { echo "kubeconform not installed - see docs/guides/runbook.md"; exit 1; }
+	@# `--set networkPolicy.allowAnyDestination=true` because the chart refuses to render until a
+	@# release states where its pods may talk (`templates/networkpolicy.yaml`). A validation render
+	@# has no destinations to enumerate, so it takes the escape hatch explicitly — which is the
+	@# same one sentence an operator has to write, and is why this flag is visible here.
 	helm template chemclaw deploy/helm/chemclaw \
+	  --set networkPolicy.allowAnyDestination=true \
 	  | kubeconform -strict -summary -ignore-missing-schemas -kubernetes-version $(KUBE_VERSION) \
 	      -schema-location default -schema-location \
 	      'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'
@@ -177,6 +182,7 @@ helm-validate:  ## Render the Helm chart and validate it against the Kubernetes 
 	@# `case` reads the variable in-process: no subprocess, no pipe, nothing to race.
 	@set -e; \
 	  render=$$(helm template chemclaw deploy/helm/chemclaw \
+	    --set networkPolicy.allowAnyDestination=true \
 	    --set connectors.molfp.url=https://model.invalid/mcp); \
 	  case "$$render" in *chemclaw-connector-molfp*) \
 	    echo "FAIL: an externally hosted connector still gets a Deployment/Service"; exit 1;; esac; \

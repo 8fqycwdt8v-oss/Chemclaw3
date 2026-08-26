@@ -55,7 +55,12 @@ from chemclaw.core.config import settings
 from chemclaw.core.metrics_bridge import degraded, record_metric
 from chemclaw.kg.note import ProcessConditions
 from chemclaw.memory.comparison import MISSING, cell, date_cell, drop_empty_columns, render_table
-from chemclaw.memory.progression import ConditionChange, number_change, text_change
+from chemclaw.memory.progression import (
+    ConditionChange,
+    both_recorded,
+    number_change,
+    text_change,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -422,18 +427,17 @@ def _changes(
     did not, which is the noise `changes_between` excludes amounts to avoid.
 
     **A field is compared only when both sides recorded it**, and getting that wrong is what this
-    function shipped doing. `number_change` and `text_change` treat *absent* as a value, which is
-    safe in `optimization.py` — every member there is an `OrdReaction` from one DRFP campaign, so
-    the set is homogeneous by construction — and is a fabrication engine here, where the set is
-    arbitrary by design. Measured before the guard: three runs with *identical* conditions and one
-    failed extraction rendered `solvent 2-MeTHF → —` then `solvent — → 2-MeTHF`, two swaps that
+    function shipped doing. Measured before the guard: three runs with *identical* conditions and
+    one failed extraction rendered `solvent 2-MeTHF → —` then `solvent — → 2-MeTHF`, two swaps that
     never happened, invented by a transient endpoint failure; a share document between two reaction
     notes rendered `temperature 90 °C → —; time 12 h → —` and back, for fields the document does
-    not have. This is exactly the hazard the paragraph above cites `changes_between` for — stated
-    correctly about reagents, and then not applied to the three columns that *are* compared.
+    not have.
 
-    Absent-to-present is a difference in what was **recorded**, never a change in the process, and
-    the two are not distinguishable to a reader once they are in the same column.
+    The rule is `progression.both_recorded` and it is enforced *inside* `number_change` and
+    `text_change` — one rule rather than a guard here and an unguarded copy in the campaign note,
+    which is how the bounded half of the same defect stayed open after this one was closed. What
+    stays here is the *counting*: a comparison can only report "unchanged" about fields it could
+    actually compare.
 
     Three outcomes, because "unchanged" is itself a claim: nothing comparable at all renders
     `MISSING`, everything comparable and equal renders "unchanged", and the rest is the list. A run
@@ -452,15 +456,15 @@ def _changes(
     for change, both in (
         (
             number_change("temperature", before_c.temperature_c, after_c.temperature_c, "°C"),
-            before_c.temperature_c is not None and after_c.temperature_c is not None,
+            both_recorded(before_c.temperature_c, after_c.temperature_c),
         ),
         (
             number_change("time", before_c.time_h, after_c.time_h, "h"),
-            before_c.time_h is not None and after_c.time_h is not None,
+            both_recorded(before_c.time_h, after_c.time_h),
         ),
         (
             text_change("solvent", before_r.solvent, after_r.solvent),
-            bool(before_r.solvent) and bool(after_r.solvent),
+            both_recorded(before_r.solvent, after_r.solvent),
         ),
     ):
         if not both:

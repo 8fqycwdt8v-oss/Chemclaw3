@@ -17,7 +17,7 @@ import pytest
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
-from pydantic import ValidationError
+from pydantic import SecretStr, ValidationError
 
 from chemclaw.agent.framing import ENVELOPE_TAG
 from chemclaw.agent.verifier import (
@@ -885,7 +885,7 @@ def _openai_compatible_client(monkeypatch: pytest.MonkeyPatch, base_url: str) ->
     monkeypatch.setattr(settings, "llm_provider", "openai_compatible")
     monkeypatch.setattr(settings, "llm_base_url", base_url)
     monkeypatch.setattr(settings, "llm_model", "internal-test-model")
-    monkeypatch.setattr(settings, "llm_api_key", "test-key")
+    monkeypatch.setattr(settings, "llm_api_key", SecretStr("test-key"))
     return build_chat_model("verifier")
 
 

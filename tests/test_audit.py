@@ -10,7 +10,9 @@ enough — no live agent run or model call is needed.
 
 import asyncio
 import logging
+import re
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -143,54 +145,18 @@ def test_ambient_identity_overrides_the_static_actor() -> None:
     assert sink.events[0].actor == "u-entra-oid"  # ambient user, not the "unknown" fallback
 
 
-def test_a_specialist_is_recorded_beside_the_human_actor() -> None:
-    """The trail names both: which person authorized the turn, and which agent made the call.
+def test_the_audit_row_records_an_empty_agent_and_nothing_else_changes() -> None:
+    """`agent` is empty on every row, and every other audited field is untouched.
 
-    Invariant 3 of D-2026-08-10-a-subagent-is-an-attenuation-not-a-new-actor. A subagent is an
-    attenuation of its caller's authority, not a new actor, so recording only the specialist would
-    make the trail worthless and recording it *as* the actor would repeat the D-040
-    failure — an agent's act attributed to a chemist's Entra oid. Both fields, or neither is true.
+    Empty is the whole truth rather than the main agent's half of it: the contextvar the field used
+    to be read from had no setter in `src/` for as long as it existed, so *every* row this trail has
+    ever written carried `agent=""` while three docstrings said the trail named the agent beside the
+    human (`D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution`). The field and its
+    column stay for when subagents return; what went is the plumbing that claimed to fill them.
+
+    The second half is the one that matters for the trail already in the database: the row a call
+    produces is field-for-field what it was, so the deletion perturbs no stored shape.
     """
-    from chemclaw.core.identity_context import (
-        reset_current_identity,
-        reset_current_specialist,
-        set_current_identity,
-        set_current_specialist,
-    )
-
-    sink = _RecordingSink()
-    mw = make_audit_middleware(correlation_id="conv-sub", actor="unknown", sink=sink)
-
-    async def _ok_call() -> None:
-        return None
-
-    identity = set_current_identity("u-entra-oid", frozenset({"compute"}))
-    specialist = set_current_specialist("computation")
-    try:
-        _drive_mw(mw, _ctx("predict_pka", {"smiles": "CCO"}), _ok_call)
-    finally:
-        reset_current_specialist(specialist)
-        reset_current_identity(identity)
-
-    event = sink.events[0]
-    assert event.actor == "u-entra-oid", "the human authorization was lost"
-    assert event.agent == "computation", "the specialist that ran the call was lost"
-
-
-def test_the_main_agent_records_an_empty_specialist_and_nothing_else_changes() -> None:
-    """Outside a subgraph the field is empty — and every other audited field is untouched.
-
-    Empty is the honest record for the turn's own agent, not a gap. The second half is the one that
-    matters for the trail already in the database: widening the event must not perturb what a call
-    with no specialist records, so the row a main-agent call produces is field-for-field what it was
-    before `agent` existed.
-    """
-    from chemclaw.core.identity_context import (
-        get_current_specialist,
-        reset_current_specialist,
-        set_current_specialist,
-    )
-
     sink = _RecordingSink()
     mw = make_audit_middleware(correlation_id="conv-main", actor="alice@corp", sink=sink)
 
@@ -200,50 +166,49 @@ def test_the_main_agent_records_an_empty_specialist_and_nothing_else_changes() -
     _drive_mw(mw, _ctx("find_notes", {"q": "x"}), _ok_call)
 
     event = sink.events[0]
-    assert event.agent == ""
-    assert event.model_dump(exclude={"agent"}) == {
+    assert event.model_dump() == {
         "correlation_id": "conv-main",
         "session_id": "",
         "purpose": "",
         "actor": "alice@corp",
+        # Written in rather than excluded, for the same reason `tool_revision` is: an exclude set
+        # that grows with each new field is a guard that checks less every time it is updated.
+        "agent": "",
         "tool": "find_notes",
         "arguments": "{'q': 'x'}",
         "outcome": "ok",
         "detail": "",
         "latency_ms": event.latency_ms,
         "revision": settings.deployment_revision,
-        # The second widening this guards, and it is written in rather than excluded: an exclude
-        # set that grows with each new field is a guard that checks less every time it is updated.
         # Empty because `find_notes` ran in this process — see the two tests at the end of the file
         # for why that is a complete answer and not a gap.
         "tool_revision": "",
     }
-    # And the binding is scoped to the subgraph, not leaked into the turn that followed it.
-    token = set_current_specialist("safety")
-    reset_current_specialist(token)
-    assert get_current_specialist() == ""
 
 
-def test_a_nested_specialist_restores_its_caller_rather_than_clearing_it() -> None:
-    """A specialist that delegates further leaves its own name behind, not an empty string.
+def test_nothing_in_the_tree_writes_the_agent_column() -> None:
+    """An absence pinned, so re-adding the claim without a producer turns this red.
 
-    `reset_current_specialist` restores the previous value precisely so a two-level delegation
-    attributes the outer specialist's own later calls to it — clearing instead would silently
-    re-attribute them to the main agent, which is a false record rather than a missing one.
+    The failure this closes was not that the field was empty — it was that a control *looked* like
+    it existed: a contextvar with a setter, a getter, a nesting-aware reset and three tests driving
+    them directly, none of which any production path called. That is the `map_to_hpc_identity` shape
+    `D-2026-08-15-a-capability-that-ships-off-is-not-a-capability` deleted three other controls for.
+
+    So this asserts the honest state rather than the plumbing: no module under `src/` sets `agent`
+    on an `AuditEvent`. Whoever re-adds subagents will fail this test, which is the point — the
+    producer and the claim have to arrive together.
     """
-    from chemclaw.core.identity_context import (
-        get_current_specialist,
-        reset_current_specialist,
-        set_current_specialist,
+    src = Path(__file__).resolve().parents[1] / "src" / "chemclaw"
+    writers = [
+        path.relative_to(src).as_posix()
+        for path in src.rglob("*.py")
+        if re.search(r"^\s*agent=", path.read_text(), flags=re.MULTILINE)
+        and "AuditEvent" in path.read_text()
+    ]
+    assert writers == [], (
+        f"{writers} constructs an AuditEvent with an `agent`; the field's comment and "
+        "tests/test_audit.py say nothing does. Update both in the same change."
     )
-
-    outer = set_current_specialist("design")
-    inner = set_current_specialist("safety")
-    assert get_current_specialist() == "safety"
-    reset_current_specialist(inner)
-    assert get_current_specialist() == "design"
-    reset_current_specialist(outer)
-    assert get_current_specialist() == ""
 
 
 def test_audit_stamps_the_deployment_revision(monkeypatch: pytest.MonkeyPatch) -> None:

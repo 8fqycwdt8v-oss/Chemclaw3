@@ -247,7 +247,7 @@ def _openai_compatible_embeddings(texts: list[str]) -> list[list[float]]:
     """Embed via the internal OpenAI-compatible endpoint (reuses the chat transport config)."""
     client = _openai_client(
         settings.llm_base_url,
-        settings.llm_api_key,
+        settings.llm_api_key.get_secret_value(),
         settings.llm_timeout_seconds,
         settings.llm_max_retries,
         settings.llm_tls_ca_bundle,

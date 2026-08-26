@@ -10,7 +10,7 @@ import os
 from pathlib import Path
 from typing import Self
 
-from pydantic import Field, model_validator
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings
 
 
@@ -70,7 +70,9 @@ class KgSettings(BaseSettings):
     # `/events/knowledge-merged` accepted from any authenticated principal before it could close a
     # proposal — tolerable while it only kicked an idempotent reindex, not once it records a
     # decision. Set it in any deployment where the webhook may move a proposal to `merged`.
-    note_webhook_secret: str = ""
+    # A `SecretStr`, for the reason `D-2026-08-26-a-credential-is-a-type-not-a-convention`
+    # states: read it with `.get_secret_value()`, and never through an f-string.
+    note_webhook_secret: SecretStr = SecretStr("")
     # Page size for `GET /proposals`. Bounded like every other listing: the review queue is
     # unbounded in principle, and a surface that asks for "all of it" should page rather than ask
     # the database for an unbounded scan.

@@ -1,59 +1,80 @@
-**Failed approach, recorded so it is not retried.** Driving `build_langgraph_agent()` in-process
-against the live API to measure real turn economics: this environment's credential is rejected, and
-clearing the session's `ANTHROPIC_BASE_URL` gives the same 401. `cli.mock_llm` makes the *harness*
-runnable end to end but cannot stand in for judgement — it emits scripted tool calls without
-choosing them, measured at expected-tool-reached 0/3. W2.3 and W2.4 need a real credential and
-nothing else.
+# Backlog / DEFERRED sweep — 2026-08-26
 
+## Task
+Work the queue rather than add to it: pick the rows in `docs/planning/BACKLOG.md` that are
+closable **offline and in full**, re-measure each against `HEAD` first (the file's own rule),
+implement, prove, and delete the row in the commit that closes it.
 
----
+`DEFERRED.md` was read end to end: **no row's trigger has fired.** Every one is gated on a
+cluster, a tenant, a licence, an upstream release or a corpus none of which this environment
+has. Nothing to close there — which is itself the answer to "what should be done" for that file.
 
-# Review of the merged #215, and the six defects it found
+## Selected rows (7)
 
-`/code-review` against `410f494` returned eight findings; all eight were verified by running the
-code rather than by reading it, which changed the ranking twice.
+Rejected as not-now, with the reason, so the next session does not re-derive it:
+`CalculationKey` escaping (needs an ADR + a full-cache-invalidation migration plan),
+`fetch_artifact` (waits on the fleet's `vibspectrum`), tool-result framing (ADR-sized, needs a
+content-field convention), the pydantic-repr row (blast radius is every tool at once),
+`observations_status_idx` and `session_owners` disposal (both need a product call, not a diff),
+the whole of §5 (blocked on a working model credential or on deployment history).
 
-## Fixed here
+- [x] **1 · §1 The audit trail's `agent` column can never be non-empty.** `set_current_specialist`
+      has zero callers in `src/`; `record_handoff` has none anywhere. Delete the contextvar trio,
+      `record_handoff`, `HandoffSignal` and the audit write. Keep `HandoffEvent` (a union member is
+      a three-repo change) and the SQL column (a merged migration is never edited). ADR.
+- [x] **2 · §2 `changes_between` diffs against *absent*.** Move `_changes`'s "both sides recorded
+      it" rule out of `agent/condense.py` and into `memory/progression.py`, one rule instead of two.
+- [x] **3 · §3 A rejoined durable run never reaches the second chemist.** `handle.describe()` on
+      the `WorkflowAlreadyStartedError` path; announce when the status is RUNNING.
+- [x] **4 · §4 `connectors.<name>.enabled` never reaches the agent.** A `chemclaw.connectorsEnabled`
+      helper mirroring `connectorUrls`; delete the sentence pointing at the absent key.
+- [x] **5 · §4 One `replicas` knob drives two differently-shaped Deployments.** Split into
+      `serverReplicas`/`workerReplicas` defaulting to `replicas`; fix the `nil | int` = 0 hole a
+      `url:` bundle with a worker leaves in the connection ceiling.
+- [x] **6 · §4 Egress is still port-scoped by default.** Empty `egressDestinations` under an
+      enabled policy must `fail`, with an explicit `allowAnyDestination: true` escape hatch.
+- [x] **7 · §4 Three credentials are plain `str`.** `SecretStr` on `llm_api_key`, `hpc_api_token`,
+      `temporal_api_key` — defence in depth beside the redacting filter, which stays.
 
-- [x] **The credential probe aborted the entire suite at collection.** `skipif` evaluates at
-      collection time, so an unreachable provider raised there and pytest reported `Interrupted`.
-      Measured: 0 tests ran from two files, one of them the static-prefix ratchet. Now a fixture;
-      measured after: 19 passed, 2 errors scoped to the two live tests. An AST test pins the
-      absence, because there are several ways back in.
-- [x] **A 30,000 default became a hard minimum for `agent_context_token_budget`.** A deployment
-      setting only the budget to 20,000 could not construct `Settings()`, citing a variable it never
-      set. The default is clamped; the refusal is kept for an *explicit* over-budget value.
-- [x] **`forget_calls()` was global.** Clearing preserves the newest tool results, so the blanket
-      reset forgave repeats the model can still read — once per reduction. Now it names the calls
-      whose results were actually replaced, read off upstream's `context_editing.cleared` stamp.
-      Neither module had a test for the coupling; both do now, plus the marker in the upstream
-      register.
-- [x] **`len(GRANDFATHERED) <= 18` could not say "only shrinks".** The first fix — a frozen copy —
-      was worse: derived from the same literal, it can never differ, and it **passed against a
-      deliberately planted addition**. The literal is now a dated baseline and the live set is
-      computed from it.
-- [x] **Two deepagents privates were unregistered**, one of them the arity dependency D-2026-08-14
-      removed from production. Both now in `tests/test_upstream_surface.py`.
-- [x] **`processes.sh` persisted its env before minting the fleet's tokens**, reintroducing the
-      exact failure the comment above the write warns about.
+## Verification
+`make lint type test` with the Postgres/Temporal stack **up** (`dockerd` + `make up` +
+`make db-migrate`) — a green run that skipped ~157 Postgres tests proves nothing about the
+durable layer. Report what was skipped.
 
-## Corrected rather than fixed
+## Review
 
-- [x] **`turn_cost_ratio` scores a fixture.** Its case is all literals, so the metric is a constant
-      of committed data — the claim that it "moves only when the system does" was false of this
-      case. Both the case and the docstring now say so; the rewiring is a backlog row, blocked on a
-      deployment that has turns in it.
+**Three ADRs**, one per decision rather than one per commit:
+`an-attribution-nothing-can-write-is-not-an-attribution` (row 1),
+`a-knob-that-renders-nothing-is-not-a-knob` (rows 4–6, one failure with three faces),
+`a-credential-is-a-type-not-a-convention` (row 7). Rows 2 and 3 are defect fixes with tests and
+need no decision recorded.
 
-## Deferred with a reason (backlog rows)
+**Two rows were wrong as written, and correcting them was part of the work** — which is what the
+file's own header asks for.
 
-- [ ] The run-directory collision between `processes.sh` and `e2e-full-stack/up.sh` — a decision
-      about which lane owns the fleet, not an edit.
+1. **Row 2 asked for too much.** `BACKLOG.md` said the "both sides recorded it" rule should cover
+   the two setpoints *and* the species sets. Applied to species, `test_a_reagent_added_mid_procedure_is_diffed_too`
+   went red — correctly. A setpoint is an optional scalar, so `None` means nobody wrote it down; a
+   role's species set is derived from a components list that is *present either way*, so an empty
+   `reagent` set is the record saying the run used no reagent. That is a real change and the most
+   common one a series carries. The rule now covers optional scalars and stops there, with the
+   asymmetry pinned by a test so nobody "unifies" it later.
+2. **Row 7 was three fields and is seven.** A settings object where some secrets hide in a `repr`
+   and others do not teaches the wrong rule. Two things surfaced on the way: `llm_fallback_api_key`
+   was in no redaction list at all — the one credential nothing covered — and both readers in
+   `core/logging.py` test `isinstance(value, str)`, which a `SecretStr` is not, so the "hardening"
+   would have silently switched the redaction off for exactly the fields it hardened.
 
-## What the review overturned
+**One new row queued**, from the same measurement: `hpc_artifact_store_token`,
+`llm_fallback_api_key` and `temporal_api_key` are typed and read and have no chart Secret key, so a
+deployment cannot set them at all. Typing them did not fix that and the row says so.
 
-One finding was ranked most severe and measured as overstated: the compaction trigger counts
-*messages* only (`token_count_method="approximate"` passes no system prompt and no tools), so 30k is
-a long conversation rather than the "mid-sized thread" claimed, and the 24,838-token static prefix
-does not count toward it. The underlying imprecision was real and is fixed above; the severity was
-not. Worth recording because it is the second time this session that the articulate explanation and
-the true one came apart — and running it is what separated them.
+**Nothing was closable in `DEFERRED.md`.** Every row is gated on a cluster, a tenant, a licence, an
+upstream release or a corpus this environment does not have. That is the answer to "what should be
+done" there, not an omission.
+
+**What the fail-closed chart costs.** `helm template` on the shipped defaults now needs
+`--set networkPolicy.allowAnyDestination=true`. Three call sites pay it and a test asserts every
+shipped-defaults render carries it, so the next one added without it fails offline. `helm` is not
+installed here, so the render itself is unproven until `make helm-validate` runs on a machine that
+has it — every assertion added is over template *text*, like the rest of that suite.

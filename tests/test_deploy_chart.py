@@ -314,14 +314,55 @@ def test_every_shipped_connector_has_a_chart_entry() -> None:
     for name in discovered():
         assert name in entries, f"connector bundle {name!r} has no entry in values.yaml connectors"
         assert "enabled" in entries[name]
-        # `replicas` only for a bundle this release actually runs. A `url:` entry renders no
-        # Deployment and no Service by design (`deployment-connectors.yaml` gates on
-        # `and $cfg.server (not $cfg.url)`), so a replica count on one would declare a number of
-        # pods that never exist — the kind of value a reader would later try to tune. The half of
-        # this test that still applies to it is the half above: it must have an entry, because an
-        # entry is how the address reaches `chemclaw.connectorUrls`.
-        if not entries[name].get("url"):
-            assert "replicas" in entries[name]
+        # A count for every half this release actually pods, and none for a half it does not. A
+        # `url:` entry renders no Deployment and no Service by design
+        # (`deployment-connectors.yaml` gates on `and $cfg.server (not $cfg.url)`), so a server
+        # count on one would declare a number of pods that never exist — the kind of value a
+        # reader would later try to tune.
+        #
+        # **The worker half is asked for separately, and that is the hole this used to leave.**
+        # The worker block is deliberately *not* conditioned on `url` — durable jobs run on our own
+        # Temporal queue whoever hosts the tools — while the only count this test demanded was
+        # skipped entirely for a `url:` bundle. One such bundle owning durable work would have
+        # rendered an empty `replicas` (Kubernetes reads that as 1) and contributed `nil | int` = 0
+        # to `chemclaw.pooledProcesses`, so the connection budget would have been short by exactly
+        # the pods that were running. No shipped bundle is that shape today, which is why it was
+        # latent; the shape is legal, which is why it is checked.
+        entry = entries[name]
+        if entry.get("server") and not entry.get("url"):
+            assert "serverReplicas" in entry or "replicas" in entry, (
+                f"{name}: server pods with no count to render"
+            )
+        if entry.get("worker"):
+            assert "workerReplicas" in entry or "replicas" in entry, (
+                f"{name}: worker pods with no count to render"
+            )
+
+
+def test_a_connectors_two_deployments_are_sized_separately() -> None:
+    """One knob drove two differently-shaped Deployments, and each cost connections.
+
+    `calc` serves MCP requests from one Deployment and polls a Temporal queue from another. Both
+    read `$cfg.replicas`, so scaling the server to 4 for request load also ran four queue pollers
+    and spent four more of `postgres.maxConnections` — a change nobody asked for, made by the
+    knob's shape rather than by anyone's intent.
+
+    Asserted on the template text because rendering needs `helm`, which this offline suite does
+    not have. Both halves must fall back to `replicas`: every bundle shipped here sizes its two
+    halves the same, and the split must not turn that into two values to keep in step.
+    """
+    template = (CHART / "templates" / "deployment-connectors.yaml").read_text()
+    app, worker = (
+        template.split("app.kubernetes.io/component: connector-worker-")[0],
+        (template.split("kind: Deployment")[-1]),
+    )
+    assert "$cfg.serverReplicas | default $cfg.replicas" in app
+    assert "$cfg.workerReplicas | default $cfg.replicas" in worker
+    assert "$cfg.serverReplicas" not in worker, "the worker Deployment reads the server's knob"
+    assert "$cfg.workerReplicas" not in app, "the app Deployment reads the worker's knob"
+    # And neither may render empty: `replicas:` with no value is 1 to Kubernetes and 0 to the
+    # connection budget, which is the pair of wrong answers this is here to prevent.
+    assert template.count("| required (printf ") == 2
 
 
 def test_an_externally_hosted_connector_gets_no_pods_and_no_service() -> None:
@@ -461,6 +502,65 @@ def test_connector_urls_are_computed_from_the_deployed_set() -> None:
     assert 'define "chemclaw.connectorUrls"' in helper
     assert "range $name, $cfg := .Values.connectors" in helper
     assert "$.Values.connectorPort" in helper
+
+
+def test_disabling_a_connector_takes_its_tools_off_the_agent_too() -> None:
+    """`enabled: false` removed the pods and left the tool advertised, for as long as it existed.
+
+    `values.yaml` said `CHEMCLAW_CONNECTORS_ENABLED` lived "in `config` below" and it was in none
+    of the entries there — so the agent ran the setting's default, which is the empty string, which
+    `registry.enabled()` reads as *every discovered bundle* ("discovery is enablement until you say
+    otherwise"). A disabled `qm` therefore still advertised its jobs: the launcher started the
+    wrapper on the polled queue and its child on `connector-qm`, which nobody polls, and the
+    chemist was told "running" until the 25 h ceiling. Latent only because all seven shipped
+    entries are `enabled: true`; it fires the first time anyone uses the switch the file documents.
+
+    Derived rather than hand-written, for the same reason `CHEMCLAW_CONNECTOR_URLS` is: a second
+    list of the same topology goes stale the first time a bundle is toggled, and this is the copy
+    whose staleness is invisible.
+    """
+    config = (CHART / "templates" / "config.yaml").read_text()
+    assert (
+        'CHEMCLAW_CONNECTORS_ENABLED: {{ include "chemclaw.connectorsEnabled" . | quote }}'
+        in config
+    )
+    assert "CHEMCLAW_CONNECTORS_ENABLED" not in _values()["config"], (
+        "the enable list must be derived from .Values.connectors, not hand-written beside it"
+    )
+    helper = (CHART / "templates" / "_helpers.tpl").read_text()
+    _, _, definition = helper.partition('define "chemclaw.connectorsEnabled"')
+    definition = definition.split('define "chemclaw.connectorUrls"')[0]
+    assert "range $name, $cfg := .Values.connectors" in definition
+    assert "$cfg.enabled" in definition
+
+    # The separator is the one `Settings.connectors_enabled_list` splits on, and it is read from
+    # the code rather than retyped: a chart that joined on the wrong character would render a
+    # single unknown bundle name, which `registry.enabled()` raises on at startup.
+    from chemclaw.core.config import settings
+
+    with_two = settings.model_copy(update={"connectors_enabled": "alpha:beta"})
+    assert with_two.connectors_enabled_list == ["alpha", "beta"]
+    assert 'join ":" $names' in definition
+
+
+def test_a_release_that_enables_no_connector_is_refused_rather_than_inverted() -> None:
+    """The one intent this variable cannot express, so it must not be rendered by accident.
+
+    An empty `CHEMCLAW_CONNECTORS_ENABLED` means "every bundle the image ships". So deriving it
+    from a connectors block where an operator has disabled *everything* would render the empty
+    string and load all of them — the exact opposite of what was asked for, and a worse failure
+    than the one this derivation fixes, because it would arrive by way of the fix.
+    """
+    helper = (CHART / "templates" / "_helpers.tpl").read_text()
+    _, _, definition = helper.partition('define "chemclaw.connectorsEnabled"')
+    definition = definition.split('define "chemclaw.connectorUrls"')[0]
+    assert "{{- fail " in definition, "an all-disabled release would render as all-enabled"
+
+    from chemclaw.core.config import settings
+
+    assert settings.model_copy(update={"connectors_enabled": ""}).connectors_enabled_list == [], (
+        "the premise of the guard — that empty is not 'none' — no longer holds"
+    )
 
 
 def test_connectors_are_reachable_only_from_chemclaw_pods() -> None:
@@ -972,9 +1072,11 @@ def _pooled_processes(values: dict[str, Any]) -> int:
             continue
         # An externally hosted bundle (`url`) pods no server here, so it pools nothing here.
         if bundle.get("server") and not bundle.get("url"):
-            total += bundle["replicas"]
+            total += bundle.get("serverReplicas", bundle.get("replicas"))
+        # Each half at its own count: two Deployments, two knobs, and a `url:` bundle's worker
+        # still pods here even though its server does not.
         if bundle.get("worker"):
-            total += bundle["replicas"]
+            total += bundle.get("workerReplicas", bundle.get("replicas"))
     return int(total)
 
 
@@ -1021,6 +1123,10 @@ def test_the_shipped_connection_ceiling_matches_the_fleet_the_chart_renders() ->
     # And every other pooled process comes from the same blocks the Deployments do.
     assert ".Values.workers.background.replicas" in definition
     assert "range $name, $cfg := .Values.connectors" in definition
+    # Each connector half at its own count, or the budget is wrong for any bundle that sizes them
+    # differently — which is the whole reason the two knobs exist.
+    assert "$cfg.serverReplicas | default $cfg.replicas" in definition
+    assert "$cfg.workerReplicas | default $cfg.replicas" in definition
 
 
 def test_the_connection_ceiling_has_a_runtime_check_config_validation_cannot_do() -> None:
@@ -1441,6 +1547,47 @@ def test_egress_destinations_are_declarable() -> None:
     policy = (CHART / "templates" / "networkpolicy.yaml").read_text()
     assert ".Values.networkPolicy.egressDestinations" in policy
     assert _values()["networkPolicy"]["egressDestinations"] == []
+
+
+def test_an_unstated_egress_posture_refuses_to_render() -> None:
+    """Available and visible was not enough: the chart must not render a posture nobody chose.
+
+    A declarable knob left empty is still `to: []` in the cluster — every destination on five
+    ports — behind an object an operator reads as "egress is restricted". The comment saying so
+    lived in `values.yaml`, which nobody re-reads after the first install. So the render now fails
+    unless exactly one of the two is stated: a destination list, or `allowAnyDestination: true`.
+
+    Asserted on the template text and the shipped values rather than by rendering, because `helm`
+    is a live-edge dependency this suite does not have — the same reason every other check here
+    parses. What that cannot see is the *logic* of the condition, so it is written to be readable
+    as one line: `empty` on both sides, failing when the two agree.
+
+    The escape hatch defaults to `false`, which means `helm template` on these defaults needs one
+    `--set`. That is the cost of the guard and it is paid in the three places that render.
+    """
+    policy = (CHART / "templates" / "networkpolicy.yaml").read_text()
+    guard = (
+        "eq (empty .Values.networkPolicy.egressDestinations)"
+        " (empty .Values.networkPolicy.allowAnyDestination)"
+    )
+    assert guard in policy, "the egress posture can be left unstated"
+    assert "{{- fail " in policy, "the guard warns rather than refusing"
+    assert _values()["networkPolicy"]["allowAnyDestination"] is False, (
+        "the shipped default grants a permission the release never wrote down"
+    )
+    # Every render of the shipped defaults must carry the escape hatch, or it cannot render at all.
+    makefile = (DEPLOY.parent / "Makefile").read_text()
+    renders = [line for line in makefile.splitlines() if "helm template chemclaw" in line]
+    assert len(renders) == 2, f"{len(renders)} renders in the Makefile; each needs the flag"
+    flagged = [
+        line
+        for line in makefile.splitlines()
+        if "--set networkPolicy.allowAnyDestination=true" in line
+        and not line.lstrip().startswith("@#")
+    ]
+    assert len(flagged) == 2, (
+        "a shipped-defaults render is missing the flag it cannot render without"
+    )
 
 
 def test_dns_egress_survives_narrowing_the_destinations() -> None:

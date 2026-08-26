@@ -16,11 +16,12 @@ row this queue has ever carried. 223 of its rows are open
 (`grep -c '^- \[ \]' docs/archive/findings-2026-08.md`; the header here said "~185" until
 2026-08-17). That is not "223 *further*" and the two counts do not subtract: promoting a row
 **restates** it, so a queued row is still open there under its original wording, and matching the
-two sets by title matched only 7 of the 30 rows this queue held when that was measured (it holds 41
-now; §5 is the first thing here that is not a defect this repository found in itself, and none of
-its rows is in the archive at all). The overlap is real and
-unmeasurable by `grep`, which is why the number here is the archive's own and not a difference. When
-a queued row needs its full measurement history, that file has it under the review that found it.
+two sets by title matched only 7 of the 30 rows this queue held when that was measured; it holds 41
+now, after the 2026-08-26 sweep closed seven, deleted an eighth that `#221` had already closed
+without removing it, and queued two. §5 is the first thing here that is not a defect this repository
+found in itself, and none of its rows is in the archive at all. The overlap is real and unmeasurable
+by `grep`, which is why the number here is the archive's own and not a difference. When a queued row
+needs its full measurement history, that file has it under the review that found it.
 
 **A row must name an anchor in the tree** — a module, a line, a manifest key — so any row can be
 checked with one `grep` instead of an argument. A row that cannot name one is not ready to be
@@ -117,17 +118,6 @@ topic).
       guarantee nothing in the lane states. Either the manifest stops forbidding it or the lane
       stops relying on the order.
 
-- [ ] **The audit trail's `agent` column can never be non-empty** — [S]. `agent/audit.py:350` reads
-      `get_current_specialist()`; `set_current_specialist` has **zero callers in `src/`** and
-      `core/turn_signals.record_handoff` has none anywhere, tests included. `tests/test_audit.py`
-      keeps the contextvar alive by setting it directly — the `map_to_hpc_identity` shape
-      `D-2026-08-15-a-capability-that-ships-off-is-not-a-capability` names, which that ADR deleted
-      three other controls for. **The answer is deletion, not wiring**: there is no specialist to
-      name, and re-adding subagents is a new decision. Keep `HandoffEvent` (removing a union member
-      is a coordinated three-repo change) and the SQL column (a merged migration is never edited);
-      delete the contextvar trio, `record_handoff`, `HandoffSignal` and the audit write. ~120 lines
-      out. That ADR simply did not sweep these.
-
 - [ ] **`CalculationKey`'s primary key is an unescaped concatenation of caller-shaped strings** —
       [M]. `science/calc/store.py:122` (`CalculationKey.as_str`) builds the literal
       `calculation_results` primary key as `f"{calc_type}@{calc_version}:{input_hash}:{params_hash}"`
@@ -181,20 +171,6 @@ topic).
       rather than assumed" section is the specification: it records the per-search `xtb` binary
       requirement, the `protonated.xyz`/`protomers.xyz` filename, and the element-list defect that
       only appears once a search changes the atom count.
-
-- [ ] **`changes_between` diffs against *absent* and can report a change nobody made** — [S].
-      `memory/progression.py::number_change` and `_species_change` treat a missing value as a value:
-      a run recording no temperature beside one that does yields `temperature 90 °C → —`, which
-      renders in `optimization_campaign_note`'s "Changed vs previous" column as a change. That
-      function's own docstring identifies the hazard and excludes equivalents and loadings for it —
-      it just does not apply the same rule to the two setpoints and the species sets it *does* diff.
-      Bounded in practice, which is why this is [S] and not larger: a campaign's members are all
-      `OrdReaction`s from one DRFP cluster, so both sides usually record the same fields.
-      **The turn-time condenser hit the unbounded version of this** and fixed it in `_changes`
-      (`agent/condense.py`) rather than in the shared helper, because changing the helper alters
-      merged campaign-note output and `tests/test_optimization.py`. Closing this means moving the
-      "both sides recorded it" rule into `progression` and accepting that diff — one rule instead of
-      two, which is the right end state.
 
 - [ ] **A solvate collapses onto whichever fragment is larger** — [M], and worse than filed: it is
       not only the cache key, it is the **knowledge-graph note id**. Measured,
@@ -322,16 +298,6 @@ it happens.
       one exists, `digest_enabled` should plan no Schedule, since shipping the ack without the
       reader loses matches permanently rather than merely not delivering them.
 
-- [ ] **A rejoined durable run never reaches the second chemist** — [M].
-      `connectors/jobs.py:386-403`: on `WorkflowAlreadyStartedError` the launcher returns the id and
-      deliberately emits no `record_job_started`, and the running workflow's `session_id` belongs to
-      the *first* launcher. So chemist B gets no turn-stream `job_started`, no `job_completed`, and
-      `agent/job_results.py` cannot wait on it either — they are told "in progress" and must poll by
-      hand forever. The comment justifies the silence with "it may already be finished";
-      `handle.describe()` answers exactly that question, so the ~3-line fix is to describe once on
-      the rejoin path and announce it when the status is RUNNING. Full push-back to a second session
-      is the larger change behind it.
-
 - [ ] **The sixteen periodic workflows can still hang instead of failing** — [M]. The job path now
       declares `failure_exception_types` and `tests/test_workflow_registry.py` holds it
       (`D-2026-08-16-a-job-that-cannot-fail-is-a-job-that-hangs`), scoped deliberately: for a run
@@ -420,25 +386,36 @@ it happens.
       never was, and the cross-reference defeated the rule that a row must name a real anchor. The
       lock is buildable here: a Postgres advisory lock on the pool that already exists, ~60 lines.
 
-- [ ] **Egress is still port-scoped by default** — [S]. `networkPolicy.egressDestinations` is
-      declarable and empty, which renders `to: []` — any destination on the allowed ports, as the
-      template's own comment says. The chart cannot invent a site's CIDR, so the sound fix is to
-      make empty **fail** when the policy is enabled, with an explicit `allowAnyDestination: true`
-      escape hatch. ~15 lines plus tests, fully offline (the chart tests parse YAML).
+- [ ] **A durable deployment with no `framing_envelope_secret` silently loses the injection
+      marking on its oldest content, and nothing says so** — [S]. `agent/framing.py::_envelope_nonce`
+      falls back to `secrets.token_hex(8)` per process when the setting is empty, and the agent
+      instructions say only an envelope carrying *exactly* the current tag marks retrieved content
+      as data. With `session_store_dsn` set, a replayed thread carries envelopes written under a
+      previous process's nonce: they no longer match, and that content is read as ordinary prose.
+      `framing.py` claimed `Settings` warned about the pairing until 2026-08-26; it does not —
+      `grep -rl framing_envelope src/` returns three files and none of them is a validator. The
+      guard belongs in `core/config/__init__.py::_guards_that_the_comments_already_demand`, which
+      is the right place and the reason this is not a two-line fix: every guard there *raises*, and
+      raising would take down every existing durable deployment that has not set the value. So it
+      needs a warning mechanism that section does not have — and a decision about whether the
+      combination is an error at all.
 
-- [ ] **Three credentials are plain `str` on the settings object** — [S], **corrected**. The hazard
-      this row stated is already closed: `core/logging.py:972` (`SecretRedactingFilter._redact`)
-      redacts all nine `_SECRET_SETTINGS` values by exact match across `msg`, `args`, `exc_text` and
-      `stack_info`, and the module docstring (`core/logging.py:23`) names "a `repr` of a config
-      object" as a covered route — so `logger.debug("%s", settings)` is safe today, and as of
-      2026-08-17 so is logging's own `handleError` path. What is left is defence in depth on
-      `llm_api_key`, `hpc_api_token` and `temporal_api_key` — **5 read sites in 4 modules**
-      (`agent/llm_provider.py:251`, `core/embeddings.py:232`, `connectors/qm/hpc/nextflow.py:53`,
-      `core/temporal_client.py:74` and `:75`), ~20 lines. The three DSNs are explicitly *not* in scope:
-      **34 lines** read one (`grep -rno "settings\.\(postgres_dsn\|postgres_migration_dsn\|session_store_dsn\)" src/ --include=*.py | sed 's/:settings.*//' | sort -u | wc -l`
-      — 41 occurrences over 27 modules; the row said 43 and never said what it was counting), all
-      feeding psycopg conninfo, which needs the plain string straight back. Rotation is a separate
-      concern with no anchor and is dropped.
+- [ ] **Three credentials cannot be set through the chart at all** — [S], and the half of the
+      settings-secret row that did **not** close with
+      `D-2026-08-26-a-credential-is-a-type-not-a-convention`. `hpc_artifact_store_token`,
+      `llm_fallback_api_key` and `temporal_api_key` are `SecretStr` fields with readers
+      (`connectors/qm/hpc/nextflow.py:73`, `agent/llm_provider.py:251`, `core/temporal_client.py:74`)
+      and no entry under `secrets.keys` or `secrets.optionalKeys` in
+      `deploy/helm/chemclaw/values.yaml:519`, so `chemclaw.env` renders no `secretKeyRef` and a
+      deployment has no supported way to provide them. The consequence differs per credential and
+      that is what makes it a judgement rather than three identical additions:
+      `hpc_artifact_store_token` unset means a *cross-origin* artifact store is fetched
+      unauthenticated (`_artifact_headers` falls through to `{}`), which is the one with a live
+      security shape; `llm_fallback_api_key` unset silently reuses the primary's key, which is
+      correct for the common case (a second replica of one deployment) and wrong for a second
+      vendor; `temporal_api_key` is Temporal Cloud only and the chart ships self-hosted with mTLS,
+      so it may be right that it has no key — but nothing says so. All three go under
+      `optionalKeys`, for the upgrade reason `framingEnvelopeSecret` already records.
 
 - [ ] **No session pagination and no per-session delete** — [M], **corrected**. This row claimed a
       data-subject erasure request "has no route across the seven tables". It does:
@@ -472,17 +449,6 @@ it happens.
       product call — the migration's stated rationale and the code that ships disagree about what the
       "newest and most-evidenced first" bucket actually orders by.
 
-- [ ] **`connectors.<name>.enabled` in the chart never reaches the agent** — [M].
-      `values.yaml:135` says "CHEMCLAW_CONNECTORS_ENABLED in `config` below decides which bundles
-      the agent loads at all" — and that key is in none of the 33 `config` entries. The chart derives
-      `CHEMCLAW_CONNECTOR_URLS`, `SERVICE_FLEET_REPLICAS` and `PG_FLEET_POOLED_PROCESSES` from
-      `.Values.connectors` and not the enable list, so `enabled: false` removes the pods and leaves
-      the tool on the agent's surface: the launcher starts the wrapper on the polled queue and its
-      child on `connector-qm`, which nobody polls, and the chemist is told "running" until the 25 h
-      ceiling. Latent today (all seven shipped entries are `enabled: true`); it fires the first time
-      someone uses the switch the file documents. Fix is a `chemclaw.connectorsEnabled` helper
-      mirroring `connectorUrls`, plus deleting the sentence that points at the absent key.
-
 - [ ] **A jobs-only bundle has no reachability signal at all** — [M]. `connectors/health.py:81-99`
       derives its target from `health_url(manifest)`, which is `None` for a bundle with no
       `endpoint:` — so `qm` reports `unprobed` whether its worker fleet is at two replicas or zero,
@@ -491,35 +457,6 @@ it happens.
       blind to the failure with the largest blast radius. `describe_task_queue(bundle_queue(name))`
       in the same sweep, reported as `unpolled` and counted like `unreachable`, is the runtime twin
       of the manifest check `connector-validate` now does — and it catches the row above too.
-
-- [ ] **One `replicas` knob drives two differently-shaped Deployments** — [S].
-      `templates/deployment-connectors.yaml:35` and `:98` both read `$cfg.replicas`, so scaling
-      `calc`'s MCP server to 4 also scales its Temporal worker to 4, and `pooledProcesses` counts it
-      twice against the `pg_fleet_max_connections` startup ceiling. Worse, the guard requires
-      `replicas` only when there is no `url`, while the worker block is deliberately not conditioned
-      on `url` — so a `url:` bundle that owns durable work renders an empty `replicas` (Kubernetes
-      defaults to 1) and contributes `nil | int` = 0 to the declared fleet. Split into
-      `serverReplicas`/`workerReplicas` defaulting to `replicas`, and extend the chart test to
-      require it whenever `worker` is set.
-
-
-- [ ] **Two tests guard on a credential being *present*, not on it working, and a stale one turns a
-      skip into a red suite** — [S]. `tests/test_prompt_caching.py:304` is
-      `@pytest.mark.skipif("API-KEY" not in os.environ, ...)` and
-      `test_which_shipped_profiles_clear_the_cache_floor` reads `os.environ["API-KEY"]` directly.
-      Measured on a Claude Code Remote box for this repo on 2026-08-25: the variable is set, the
-      value is rejected — `anthropic.AuthenticationError: 401 ... 'API key is invalid.'` — so both
-      tests **ran and failed** where the intent was plainly to skip, and `make test` came back
-      `3 failed, 4251 passed, 3 skipped` on an unmodified tree. `CLAUDE.md` already warns that the
-      credential "may not exist in every environment"; what it does not cover is the worse case,
-      present-and-stale, which reads as a defect in prompt caching rather than as an absent
-      credential. Guard on reachability (a `count_tokens` probe, which is unbilled and is what the
-      second test already uses) and skip with the reason, rather than on the key being non-empty.
-
-      Beside it, and *not* a defect worth a row of its own: `tests/test_reizman.py::test_bo_campaign_finds_high_yield`
-      also failed in that run, on the 180 s `pytest-timeout`, and **passes in 49 s in isolation** —
-      it was competing with four other pytest processes. Recorded here so the next person to see it
-      red under load does not go looking for a BoFire regression.
 
 ---
 

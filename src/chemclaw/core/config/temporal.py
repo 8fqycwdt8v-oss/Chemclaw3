@@ -8,7 +8,7 @@ sections shared a single module (D-072 mixins, split per D-156).
 
 from typing import Self
 
-from pydantic import Field, model_validator
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings
 
 
@@ -31,7 +31,14 @@ class TemporalSettings(BaseSettings):
     temporal_tls_cert: str = ""
     temporal_tls_key: str = ""
     temporal_tls_ca: str = ""
-    temporal_api_key: str = ""
+    # A `SecretStr`, like every other credential on this object
+    # (`D-2026-08-26-a-credential-is-a-type-not-a-convention`): its `repr` is `**********`, so the
+    # value cannot reach a log line, a `model_dump()` or a pydantic error message through a route
+    # `core/logging.py`'s exact-match redaction has not been taught about. That filter stays and is
+    # still the control; this is the type making the same guarantee where the filter is not looking.
+    # Read it with `.get_secret_value()` — and note that an f-string does *not*, so a formatted
+    # credential renders as asterisks and fails as a 401 rather than leaking.
+    temporal_api_key: SecretStr = SecretStr("")
 
     # Core's own task queue: the light background jobs (sync, re-index, reports, and the
     # connector-job wrapper). A name is config so a deployment can shard or rename it without

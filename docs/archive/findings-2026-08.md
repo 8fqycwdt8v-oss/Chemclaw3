@@ -2338,19 +2338,25 @@ QM path. The rows below are what survives that merge, narrowed to say so.
       trusted, the `bo` synchronous path records `unverified:<claim>` in its attribution columns
       ([`D-2026-08-13-an-unverifiable-actor-is-recorded-as-a-claim`](../decisions/D-2026-08-13-an-unverifiable-actor-is-recorded-as-a-claim.md)),
       which is what this row's closure would let a writer stop doing.
-- [ ] **Egress is still port-scoped by default** — [S]. D-158 made destinations declarable
-      (`networkPolicy.egressDestinations`) but left the default empty, which renders `to: []` — any
-      destination on those ports. Closing it needs the operator's real CIDRs; until a deployment
-      sets them, `tests/test_no_egress.py` remains a source-scan rather than a control.
+- [x] **Egress is still port-scoped by default** — closed by
+      D-2026-08-26-a-knob-that-renders-nothing-is-not-a-knob. The chart still cannot invent a site's
+      CIDRs, so what changed is that it refuses to render until the operator states which of the two
+      they mean: `egressDestinations`, or an explicit `allowAnyDestination: true`. Neither, or both,
+      and `helm install` fails naming both ways out — the choice moved from a comment nobody re-reads
+      into the operator's own values file.
 - [ ] **Workload identity federation is dead code the docs lean on** — [M]. `identity/workload.py`
       has no production caller (only its test and the dormant `obo.py`), while `values.yaml` enables
       it and `deploy/README.md` presents it as *the reason* only three plain secrets are needed.
       Either wire it or correct the documents; also `deployment-connectors.yaml` is the one pod spec
       missing the `azure.workload.identity/use` label, on the `qm` worker that talks to HPC.
-- [ ] **Secrets are plain `str`, never rotated** — [M]. No `SecretStr` anywhere; `llm_api_key`,
-      `hpc_api_token`, `temporal_api_key` and the DSN are one `logger.debug("%s", settings)` from a
-      log. The "three-secret model" is four in `values.yaml`, and `hpc_artifact_store_token` has no
-      chart key at all — so a cross-origin artifact store is fetched unauthenticated.
+- [x] **Secrets are plain `str`, never rotated** — the type half is closed by
+      D-2026-08-26-a-credential-is-a-type-not-a-convention: all seven non-DSN credentials are
+      `SecretStr`, the three DSNs are deliberately out (34 lines feed psycopg conninfo, which needs
+      the plain string back), and the `logger.debug("%s", settings)` route this row names was
+      already closed by `core/logging.py`'s redacting filter before it. Rotation is dropped: it has
+      no anchor and no deployment to rotate against. **The chart-key half is not closed** and is now
+      its own queued row — `hpc_artifact_store_token`, `llm_fallback_api_key` and `temporal_api_key`
+      still have no entry under `secrets.keys`/`optionalKeys`.
 - [x] **One database credential can rewrite the audit chain** — closed by
       D-2026-08-05-append-only-by-grant-not-by-contract. `postgres_migration_dsn` splits the schema
       owner from the runtime role; `infra/sql/grants/` grants the runtime role exactly the verbs

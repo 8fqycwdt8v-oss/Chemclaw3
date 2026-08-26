@@ -10,6 +10,7 @@ import sys
 from typing import Any
 
 import pytest
+from pydantic import SecretStr
 
 import chemclaw.agent.llm_provider as provider
 from chemclaw.core.config import Settings, settings
@@ -60,7 +61,7 @@ def test_openai_compatible_model_carries_endpoint_and_route(
         llm_provider="openai_compatible",
         llm_base_url="https://llm.internal/v1",
         llm_model="internal-large",
-        llm_api_key="generic-key",
+        llm_api_key=SecretStr("generic-key"),
         llm_timeout_seconds=12.0,
         llm_max_retries=5,
         model_routes={"verifier": "internal-small"},
@@ -86,7 +87,7 @@ def test_keyless_endpoint_gets_placeholder_for_the_model_half(
         llm_provider="openai_compatible",
         llm_base_url="https://llm.internal/v1",
         llm_model="internal-model",
-        llm_api_key="",
+        llm_api_key=SecretStr(""),
     )
     assert provider.build_chat_model().openai_api_key.get_secret_value()
 
@@ -188,7 +189,7 @@ def _openai_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "llm_provider", "openai_compatible")
     monkeypatch.setattr(settings, "llm_base_url", "https://primary.internal/v1")
     monkeypatch.setattr(settings, "llm_model", "internal-large")
-    monkeypatch.setattr(settings, "llm_api_key", "primary-key")
+    monkeypatch.setattr(settings, "llm_api_key", SecretStr("primary-key"))
 
 
 def test_no_fallback_configured_returns_the_model_itself(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -216,7 +217,7 @@ def test_a_configured_fallback_wraps_the_model_and_reuses_the_primarys_model_and
     _openai_endpoint(monkeypatch)
     monkeypatch.setattr(settings, "llm_fallback_base_url", "https://standby.internal/v1")
     monkeypatch.setattr(settings, "llm_fallback_model", "")
-    monkeypatch.setattr(settings, "llm_fallback_api_key", "")
+    monkeypatch.setattr(settings, "llm_fallback_api_key", SecretStr(""))
 
     model = provider.build_chat_model()
     assert type(model).__name__ == "RunnableWithFallbacks"
@@ -233,7 +234,7 @@ def test_the_fallback_may_name_its_own_model_and_credential(
     _openai_endpoint(monkeypatch)
     monkeypatch.setattr(settings, "llm_fallback_base_url", "https://other.example/v1")
     monkeypatch.setattr(settings, "llm_fallback_model", "other-model")
-    monkeypatch.setattr(settings, "llm_fallback_api_key", "other-key")
+    monkeypatch.setattr(settings, "llm_fallback_api_key", SecretStr("other-key"))
 
     standby = provider.build_chat_model().fallbacks[0]
     assert standby.model_name == "other-model"
