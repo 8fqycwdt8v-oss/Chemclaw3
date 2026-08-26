@@ -46,6 +46,31 @@ enqueue is best-effort by construction and a destination being unreachable is co
 never raised. `SinkUnavailableError` is a `ConnectionError` (retryable) while `SinkRejectedError` is
 a `ChemclawError` (not) — that split is the retry contract, not a taxonomy preference.
 
+## What deliberately does not publish
+
+Two things reach a publish hook and are dropped on purpose. Both are written down here because the
+alternative — a hook that stays silent — is indistinguishable from the defect this package spent two
+changes fixing.
+
+**A BO campaign.** `connectors/bo/workflows.py` stamps `payload_kind="CampaignResult"`, and no
+projector reads it. That is the decision, not an omission: a `CampaignResult` is a `best` and a
+`history` of `Observation`s — a parameter set and an objective value — and it has no molecular
+subject at all. Every `subject.kind` this schema accepts is structural (`molecule`, `geometry`,
+`ensemble`, `reaction`, `complex`, `system`), and the parameters a campaign optimizes are as often
+a temperature or a catalyst loading as a compound. A campaign's record is `bo_campaigns` and
+`bo_suggestions`, which is where its history already lives and where a sequence *is* the record.
+The `payload_kind` stays because it is a true statement about the payload and the backfill reads
+it; if a campaign ever earns a projector, the routing is already correct.
+
+**A Hessian.** `xtb.hess` is a `calc_type` the calculation server stamps and this package has no
+prefix for. The scientific value of a Hessian is realised in `ThermochemistryResult` — frequencies,
+ZPE, the RRHO corrections — and *that* has a projector with no hook: it is a tool composite, so it
+is neither written to the calculation cache (composites are not cached, D-011) nor returned by a
+job envelope. Publishing frequencies therefore needs a third hook rather than a projector, which is
+a decision to take rather than a line to add. Tracked in `docs/planning/BACKLOG.md`;
+`tests/test_publish_reaches_the_hooks.py::_PRIMITIVES_NOT_PUBLISHED` names it so the gap is
+declared rather than merely absent.
+
 ## Attaching a store
 
 The schema is **shipped here and created by the site**; nothing in this system holds DDL privileges

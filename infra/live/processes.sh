@@ -318,6 +318,13 @@ up() {
   start_worker worker-calc 9001 "$python" -m chemclaw.connectors.calc.worker
   start_worker worker-bo 9002 "$python" -m chemclaw.connectors.bo.worker
   start_worker worker-qm 9003 "$python" -m chemclaw.connectors.qm.worker
+  # The `results` bundle owns a job (`republish_calculations`) and therefore a queue, and the
+  # chart renders it a worker Deployment like the other three. It was missing here, so the one
+  # thing this lane exists for — running the deployed shape — did not include it and a job
+  # launched against that queue would have sat unpolled. Inert in practice until
+  # `CHEMCLAW_RESULT_SINKS` names a sink, which is a reason it went unnoticed rather than a
+  # reason to leave it out.
+  start_worker worker-results 9004 "$python" -m chemclaw.connectors.results.worker
 
   # The mock model, when the lane is pointed at it. Started before the front door because the front
   # door builds a chat client at startup and would come up pointed at nothing.
@@ -347,7 +354,7 @@ up() {
     log "  'make live-jobs' (Temporal + Postgres) runs without it; 'make live-probes' needs it."
   fi
 
-  for worker in worker-background worker-calc worker-bo worker-qm; do
+  for worker in worker-background worker-calc worker-bo worker-qm worker-results; do
     wait_for "$worker" "http://127.0.0.1:$(cat "$RUN_DIR/$worker.port")/readyz"
   done
   if llm_configured; then
