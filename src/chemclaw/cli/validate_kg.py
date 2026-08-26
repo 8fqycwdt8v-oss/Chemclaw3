@@ -58,6 +58,18 @@ def main() -> int:
     if problems:
         print(f"\n{len(problems)} problem(s) found in {notes_dir}")
         return 1
+    if unchecked:
+        # **Non-zero, not zero.** This module's own docstring promised the gate "does not pass
+        # silently" when the store is unreachable, and then returned success anyway — the printed
+        # line was the whole of the control. It matters more here than it would elsewhere: since
+        # D-2026-08-25 `dangling_links` ignores every `reaction-` target on purpose, so this half is
+        # the *only* thing standing between a typo'd run id and a merge. A gate that cannot run its
+        # one remaining check has not passed; it has not looked.
+        print(
+            f"\n{unchecked} reaction citation(s) could not be checked, so this gate did not pass. "
+            "Point CHEMCLAW_POSTGRES_DSN at a migrated database and run it again."
+        )
+        return 1
     checked = len(citations) - unchecked
     print(f"OK: {notes_dir} is a valid knowledge graph ({checked} reaction citation(s) verified)")
     return 0

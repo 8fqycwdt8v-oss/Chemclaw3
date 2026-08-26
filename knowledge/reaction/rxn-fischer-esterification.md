@@ -1,6 +1,8 @@
 ---
 artifact_refs: []
 calc_refs: []
+conditions:
+  time_h: 6.0
 confidence: 0.9
 created_by: human
 id: rxn-fischer-esterification

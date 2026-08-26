@@ -47,11 +47,17 @@ _EXPECTED_INPROCESS_TOOLS = {
     "record_confirmed_answer",
     "record_failure",
     "recall_observations",
-    # The one durable launcher core still owns — the report's workflow has not moved into a bundle
-    # (D-115: its closure *is* core's) — and the one status tool every durable job is collected
-    # with, connector-owned or not. The QM launcher and its bespoke status tool were the last pair
-    # to go; the HPC job is a declared `qm` connector job now (D-118).
+    # The durable launchers core still owns, and the one status tool every durable job is
+    # collected with, connector-owned or not. The QM launcher and its bespoke status tool were the
+    # last pair to go; the HPC job is a declared `qm` connector job now (D-118).
+    #
+    # The report's workflow has not moved into a bundle (D-115: its closure *is* core's).
+    # `synthesize_memory` is core's for the same reason and one more: D-2026-08-25 took the corpus
+    # miners' Schedules away so that no timer opens a pull request, which left four registered
+    # workflows with no caller at all — this is the trigger that replaced the clock, and a person
+    # asking is now the only thing that starts one.
     "request_development_report",
+    "synthesize_memory",
     "get_durable_job_status",
     # The retrospective half of that pair (D-157): the durable record of every finished run, which
     # is core's for the same reason the status tool is — it is generic over every job, and a

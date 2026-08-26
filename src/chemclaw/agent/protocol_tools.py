@@ -29,7 +29,7 @@ from chemclaw.core.errors import ChemclawError
 from chemclaw.core.tool_registry import tool
 from chemclaw.ingest.eln.records import RECORD_TYPE, default_record_store
 from chemclaw.ingest.sources.registry import active_retrieve_sources
-from chemclaw.kg.graph import build_graph
+from chemclaw.kg.graph import build_graph, note_in
 from chemclaw.kg.note import Note, resolves_outside_graph
 
 logger = logging.getLogger(__name__)
@@ -166,7 +166,7 @@ async def condense_protocols(protocol_refs: list[str]) -> str:
     protocols: list[Protocol] = []
     missing: list[str] = []
     for ref in refs:
-        note = graph.nodes[ref].get("note") if ref in graph else None
+        note = note_in(graph, ref)
         if isinstance(note, Note):
             protocols.append(
                 Protocol(
@@ -207,12 +207,13 @@ async def condense_protocols(protocol_refs: list[str]) -> str:
     if missing:
         # Said out loud rather than dropped: a comparison silently missing a protocol the caller
         # asked for reads as a complete answer about a smaller set.
-        result = result.model_copy(
-            update={
-                "complete": False,
-                "degraded": [*result.degraded, *missing],
-            }
-        )
+        #
+        # **On `unresolved` rather than appended to `degraded`.** These refs have no row: they were
+        # never resolved, so nothing about them is in the table. `degraded` means the opposite —
+        # the protocol is a row and only its prose is missing — and merging the two made the
+        # rendered payload tell the model that a reference nobody could resolve had "recorded
+        # figures above", and that a two-row comparison covered all three references it was given.
+        result = result.model_copy(update={"complete": False, "unresolved": missing})
     # **Rendered here, not handed over as a model.** A pydantic return is stringified by
     # `langchain_core.tools.base._stringify`, which falls back to `str()` — pydantic's repr — for
     # anything `json.dumps` cannot take. Returning the string means the payload measured and the
