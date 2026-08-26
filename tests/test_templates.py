@@ -14,6 +14,7 @@ here; everything above it is sandbox-safe and always runs.
 """
 
 import asyncio
+import json
 import subprocess
 import sys
 from datetime import timedelta
@@ -362,17 +363,31 @@ def test_a_shipped_template_whose_arguments_cannot_be_checked_says_so() -> None:
     A bundle this release declares but does not run has no `connectors/<name>/server/tools.py`
     here, so its signatures are unresolvable and `_step_problems` skips them — silently, by
     design, because an unresolvable tool must not produce invented failures. `hazard-briefing`
-    calls `screen_hazards`, which makes it the first shipped template that is name-checked and
+    calls `screen_hazards`, which made it the first shipped template that is name-checked and
     *not* argument-checked.
 
-    The assertion is deliberately on the real shipped template rather than a fixture: what would
+    The assertion is deliberately on the real shipped templates rather than a fixture: what would
     go wrong is not the reporting mechanism, it is somebody moving another bundle out and not
     noticing that a pinned procedure lost its argument check. This fails the moment that happens
     and the note stops matching what ships.
+
+    **The blind spot grew from one template to five**, and pinning the whole set rather than a
+    count is what makes that legible. Every addition is a `chem` enumeration — the bundle whose
+    capability is `Chemclaw3-mcp`'s — so the multi-step protocols of
+    `D-2026-08-25-the-loop-is-a-composite-not-a-template` are name-checked here and
+    argument-checked only by `make connector-validate` against a running server. That is the known
+    cost of enumerating on a bundle we declare and do not run, stated rather than discovered.
     """
     from chemclaw.cli.validate_templates import unchecked_arguments
 
-    assert unchecked_arguments() == {"hazard-briefing": ["screen_hazards"]}
+    assert unchecked_arguments() == {
+        "bond-strength-survey": ["enumerate_bond_cleavages"],
+        "degradant-triage": ["enumerate_degradants", "screen_hazards"],
+        "hazard-briefing": ["screen_hazards"],
+        "microspecies-profile": ["enumerate_protonation_states"],
+        "stereoisomer-ranking": ["enumerate_stereoisomers"],
+        "tautomer-resolution": ["enumerate_tautomers"],
+    }
 
 
 def test_the_validator_accepts_a_correct_tool_step(
@@ -741,3 +756,55 @@ def test_a_structured_tool_result_is_not_mistaken_for_mcp_content() -> None:
 
     notes = [NoteRef(id="reaction-1", type="reaction", source="eln", confidence=0.9)]
     assert _mcp_text(notes) is notes, "a structured result was flattened into a string"
+
+
+def test_a_tool_steps_structured_content_reaches_the_next_step_as_a_model() -> None:
+    """The defect that made four shipped templates die on their second step, pinned end to end.
+
+    `run_tautomer-resolution` and three siblings hand one tool's field to the next step
+    (`species: "${steps.forms.result.smiles}"`). That reference raised `UnresolvedReference` at
+    *run* time — after the launch, inside the workflow — because `_mcp_text` had already joined the
+    content blocks into a string, so `smiles` was being asked of a `str`. CI was green throughout:
+    `make template-validate` checks that the step ids resolve backwards and that the tool exists,
+    never that the result has the shape the reference walks.
+
+    This asserts the whole path rather than `_structured` alone, because the bug lived in the seam
+    between two correct functions: `_mcp_text` flattens content, which is right for text, and
+    `ainvoke(args)` returns content only, which is right for a chat turn. Only the composition was
+    wrong, so only a test over the composition can hold it.
+    """
+    from langchain_core.tools import StructuredTool
+
+    from chemclaw.durable.template_activities import (
+        StepIdentity,
+        ToolStepInput,
+        _call_governed,
+    )
+    from chemclaw.templates.resolve import resolve
+
+    payload = {"smiles": ["CC(=O)CC(C)=O", "CC(O)=CC(C)=O"], "count": 2}
+
+    def _enumerate(smiles: str) -> tuple[list[dict[str, str]], dict[str, object]]:
+        # The shape `langchain_mcp_adapters` produces: content blocks, plus the server's
+        # `structuredContent` under the artifact's own key.
+        return [{"type": "text", "text": json.dumps(payload)}], {"structured_content": payload}
+
+    tool = StructuredTool.from_function(
+        func=_enumerate,
+        name="enumerate_tautomers",
+        description="enumerate tautomers",
+        response_format="content_and_artifact",
+    )
+    step = ToolStepInput(
+        arguments={"smiles": "CC(=O)CC(C)=O"},
+        identity=StepIdentity(actor="chemist@example.com", roles=[], correlation_id="c-1"),
+        tool="enumerate_tautomers",
+    )
+
+    result = asyncio.run(_call_governed(tool, step))
+
+    assert result == payload, "the structured content the server sent was discarded"
+    # The reference the templates actually carry, against the value the step actually leaves.
+    assert (
+        resolve("${steps.forms.result.smiles}", {"steps.forms.result": result}) == payload["smiles"]
+    )

@@ -114,8 +114,18 @@ def test_the_model_cannot_author_the_actor() -> None:
     """
     assert "requested_by" not in QmJobSpec.model_fields
     assert "requested_by" in QMJobInput.model_fields
-    # And nothing ambient to the turn leaked in with it.
-    assert set(QmJobSpec.model_fields) == {"molecule_smiles", "method", "basis_set"}
+    # And nothing ambient to the turn leaked in with it. `structure_id` *is* model-authored — it is
+    # a chemist's choice of conformer — while the geometry it resolves to is not: a model that
+    # could send coordinates could send coordinates that are not the ones its id names, which is
+    # the whole property an address has (D-2026-08-21).
+    assert set(QmJobSpec.model_fields) == {
+        "molecule_smiles",
+        "method",
+        "basis_set",
+        "structure_id",
+    }
+    assert {"geometry_xyz", "charge", "multiplicity"} <= set(QMJobInput.model_fields)
+    assert not {"geometry_xyz", "charge", "multiplicity"} & set(QmJobSpec.model_fields)
 
 
 def test_workflow_history_replays_deterministically() -> None:

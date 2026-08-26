@@ -21,11 +21,14 @@ mistake. Every assertion below compares against the CSV, never against the stage
 
 One ledger, per dataset, following the published rows down the pipeline:
 
-    published (CSV) -> seeded (ORD JSON) -> mapped (OrdReaction) -> note -> proposal
+    published (CSV) -> seeded (ORD JSON) -> mapped (OrdReaction) -> reaction_records
 
-It stops at the proposal, and that is the right place rather than a shortcut: the derived
-`note_index` holds *merged* notes, and a merge is a human's decision at the PR-gate (D-004). A lane
-that indexed its own proposals to check them would be asserting that a reviewer had approved them.
+It stops at the stored record, which is now the whole of the transcription path.
+`D-2026-08-25-an-eln-transcription-is-data-not-a-claim` took the PR-gate off this hop, because
+`record_from_ord_reaction` infers nothing and so hands a reviewer nothing to decide. A record is
+readable the moment it is ingested, so the lane asks Postgres for the record itself rather than
+stopping short of a human's merge — which is a stronger check than the proposal count it replaces,
+not a weaker one.
 
 A stage that drops rows is not automatically a failure — one dataset is refused *deliberately*,
 and the refusal is correct (see `_DATASETS`). It is a failure when reality disagrees with the
@@ -64,10 +67,9 @@ from chemclaw.core.db import _redact
 from chemclaw.core.db import connection as db_connection
 from chemclaw.core.logging import configure_logging
 from chemclaw.ingest.eln.json_adapter import JsonExportAdapter
-from chemclaw.ingest.eln.note import note_from_ord_reaction
 from chemclaw.ingest.eln.ord import OrdReaction
 from chemclaw.ingest.eln.ord_adapter import OrdJsonAdapter
-from chemclaw.kg.note import note_id_for_reaction
+from chemclaw.ingest.eln.record import record_from_ord_reaction
 
 logger = logging.getLogger(__name__)
 
@@ -503,7 +505,7 @@ def check_note_carries_the_number(mapped: dict[str, list[OrdReaction]]) -> Check
                 f"{zero is not None}/{nonzero is not None}"
             ),
         )
-    bodies = {r.reaction_id: note_from_ord_reaction(r).body for r in (zero, nonzero)}
+    bodies = {r.reaction_id: record_from_ord_reaction(r).body for r in (zero, nonzero)}
     states_zero = "yield: 0.0%" in bodies[zero.reaction_id]
     states_nonzero = f"yield: {nonzero.yield_percent}%" in bodies[nonzero.reaction_id]
     return Check(
@@ -570,23 +572,23 @@ async def check_prose_yields_its_numbers(eln_export_dir: Path) -> Check:
 
 
 async def check_corpus_is_reachable(mapped: dict[str, list[OrdReaction]]) -> Check:
-    """The mapped records actually reached the PR-gate — asked of Postgres, not of a log line.
+    """The mapped records actually landed in `reaction_records` — asked of Postgres, not of a log.
 
     This is the check the 2026-08-17 run had no way to fail: it counted 638 proposals without ever
     asking *which* records they were, and the answer was none of the ~4,200 ORD ones.
+
+    Since `D-2026-08-25-an-eln-transcription-is-data-not-a-claim` the hop being checked is the
+    stored record rather than a PR-gate proposal, and the id is the ELN's own `reaction_id` — the
+    `reaction-` citation prefix is not stored, so a lookup never has to strip it.
     """
-    expected = [
-        note_id_for_reaction(reaction.reaction_id)
-        for reactions in mapped.values()
-        for reaction in reactions
-    ]
+    expected = [reaction.reaction_id for reactions in mapped.values() for reaction in reactions]
     if not expected:
         return Check(
             name="corpus is reachable", passed=False, observed="nothing mapped to look for"
         )
     async with db_connection(settings.postgres_dsn) as connection:
         cursor = await connection.execute(
-            "SELECT count(DISTINCT note_id) FROM note_proposals WHERE note_id = ANY(%s)",
+            "SELECT count(*) FROM reaction_records WHERE reaction_id = ANY(%s)",
             (expected,),
         )
         row = await cursor.fetchone()
@@ -594,7 +596,7 @@ async def check_corpus_is_reachable(mapped: dict[str, list[OrdReaction]]) -> Che
     return Check(
         name="corpus is reachable",
         passed=found == len(expected),
-        observed=f"{found}/{len(expected)} mapped ORD records have a note proposal",
+        observed=f"{found}/{len(expected)} mapped ORD records are stored as reaction records",
     )
 
 

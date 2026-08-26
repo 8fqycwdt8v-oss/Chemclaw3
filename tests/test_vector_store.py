@@ -389,6 +389,50 @@ def test_an_external_provider_needs_an_address(monkeypatch: pytest.MonkeyPatch) 
         StoreSettings(vector_store_provider="qdrant", vector_store_url="")
 
 
+def test_the_databricks_provider_builds_the_databricks_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The second name on the token, resolved in the same one place."""
+    from chemclaw.retrieval.vectors.databricks import DatabricksVectorStore
+
+    monkeypatch.setattr(settings, "vector_store_provider", "databricks")
+    assert isinstance(default_vector_store(), DatabricksVectorStore)
+
+
+def test_databricks_will_not_accept_the_shipped_qdrant_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The emptiness check above cannot catch this: the field has a non-empty default.
+
+    `vector_store_url` ships as Qdrant's `http://localhost:6333`, so a deployment that selected
+    `databricks` and forgot the workspace URL passed startup and failed inside a worker — the exact
+    outcome that validator exists to prevent.
+    """
+    from chemclaw.core.config.store import StoreSettings
+
+    with pytest.raises(ValueError, match="shipped default"):
+        StoreSettings(vector_store_provider="databricks", vector_store_endpoint_name="ep")
+
+
+def test_databricks_needs_the_endpoint_that_serves_its_index(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An index is addressed by a pair, and the client cannot derive one half from the other.
+
+    The same stance the URL check above takes: a provider selected without the address it needs is
+    a misconfiguration that can be caught at deploy time, and the alternative is a client library's
+    "index not found" surfacing from inside a worker hours later.
+    """
+    from chemclaw.core.config.store import StoreSettings
+
+    with pytest.raises(ValueError, match="vector_store_endpoint_name"):
+        StoreSettings(
+            vector_store_provider="databricks",
+            vector_store_url="https://example.cloud.databricks.com",
+            vector_store_endpoint_name="",
+        )
+
+
 def test_the_pgvector_width_check_is_inert_for_an_external_store(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

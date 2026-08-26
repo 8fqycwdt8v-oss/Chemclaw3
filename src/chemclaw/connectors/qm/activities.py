@@ -37,7 +37,9 @@ from chemclaw.core.chem import require_canonical_smiles
 from chemclaw.core.config import settings
 from chemclaw.durable.registry import durable_activity
 from chemclaw.science.calc.postgres_store import default_store
-from chemclaw.science.calc.store import StoredResult
+from chemclaw.science.calc.postgres_structures import default_structure_store
+from chemclaw.science.calc.store import StoredResult, publish_stored_result
+from chemclaw.science.calc.structures import require_structure
 
 # Format the mock scheduler emits; parsed by `parse_qm_output`. Kept next to the
 # only two functions that produce/consume it so the contract stays local.
@@ -57,9 +59,27 @@ async def prepare_input(job: QMJobInput) -> QMJobInput:
     equivalent spellings to one form — so a malformed request fails fast here rather
     than flowing through the mock into a stored result, and the same molecule always
     yields the same downstream workflow id / cache key (D-011).
+
+    **It is also where a named geometry becomes one** (D-2026-08-21): resolving a `structure_id`
+    is I/O, so it cannot happen in the workflow, and it belongs at the same boundary that already
+    turns a request into the form the pipeline receives. An id that does not resolve, or that
+    names a geometry of a different molecule, fails here — before an HPC run is submitted, which
+    is the only point at which failing is free.
     """
     smiles = require_canonical_smiles(job.molecule_smiles)
-    return job.model_copy(update={"molecule_smiles": smiles})
+    update: dict[str, object] = {"molecule_smiles": smiles}
+    if job.structure_id:
+        structure = await require_structure(default_structure_store(), job.structure_id)
+        if structure.smiles is not None and require_canonical_smiles(structure.smiles) != smiles:
+            raise ValueError(
+                f"{job.structure_id!r} is a geometry of {structure.smiles!r}, not of "
+                f"{job.molecule_smiles!r}. A structure id addresses one 3D geometry; use one "
+                "reported by a calculation on the molecule you are asking about."
+            )
+        update["geometry_xyz"] = structure.as_xyz(smiles)
+        update["charge"] = structure.charge
+        update["multiplicity"] = structure.multiplicity
+    return job.model_copy(update=update)
 
 
 @durable_activity(bundle_queue("qm"))
@@ -255,7 +275,10 @@ async def persist_qm_result(result: QMJobResult) -> str:
             basis_set=result.basis_set,
         )
     )
-    await default_store().put(
-        StoredResult(key=key, result=result.model_dump(mode="json")),
-    )
+    payload = result.model_dump(mode="json")
+    await default_store().put(StoredResult(key=key, result=payload))
+    # Paired with the write, not with `cached_compute`: this result came off a cluster rather than
+    # from a callable, so it never passes through the cache's compute-once path and its publish
+    # hook. Without this line DFT reached an external results store only via the backfill.
+    await publish_stored_result(key, payload, payload_kind=type(result).__name__)
     return key.as_str()

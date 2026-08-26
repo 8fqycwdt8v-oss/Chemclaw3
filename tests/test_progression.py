@@ -8,9 +8,9 @@ run was testing surviving ingestion. In-memory throughout — no store, no git, 
 
 from datetime import date
 
-from chemclaw.ingest.eln.note import note_from_ord_reaction
 from chemclaw.ingest.eln.ord import Component, OrdReaction, Role, StepKind
 from chemclaw.ingest.eln.ord import ReactionStep as Step
+from chemclaw.ingest.eln.record import record_from_ord_reaction
 from chemclaw.memory.optimization import OptimizationCampaign, optimization_campaign_note
 from chemclaw.memory.progression import (
     changes_between,
@@ -86,10 +86,36 @@ def test_a_setpoint_change_is_named_with_its_units() -> None:
     assert [c.describe() for c in changes] == ["temperature 80 °C → 60 °C"]
 
 
-def test_an_unrecorded_setpoint_reads_as_absent_rather_than_zero() -> None:
-    """A missing number is a gap in the record, and must not be rendered as a value."""
-    changes = changes_between(_run("a", time_h=4), _run("b", time_h=None))
-    assert [c.describe() for c in changes] == ["time 4 h → —"]
+def test_a_setpoint_one_run_did_not_record_is_not_a_change() -> None:
+    """A missing number is a gap in the *record*, so diffing against it invents a change.
+
+    This test asserted the opposite until 2026-08-26 — `time 4 h → —` — which is the defect
+    `agent/condense._changes` had already been fixed for and `progression` had not
+    (`BACKLOG.md` §2). Absent-to-present is a difference in what someone wrote down, never in what
+    they did, and the two are indistinguishable to a reader once they are in the same column of
+    `optimization_campaign_note`. One rule now, `both_recorded`, applied inside `number_change` and
+    `text_change` rather than guarded separately at each call site.
+
+    A *recorded* zero still compares: it is a setpoint, not a gap.
+    """
+    assert changes_between(_run("a", time_h=4), _run("b", time_h=None)) == []
+    assert changes_between(_run("a", time_h=None), _run("b", time_h=4)) == []
+    assert [
+        c.describe() for c in changes_between(_run("a", temperature=0), _run("b", temperature=25))
+    ] == ["temperature 0 °C → 25 °C"]
+
+
+def test_a_species_set_is_diffed_even_when_one_side_is_empty() -> None:
+    """The asymmetry `both_recorded` is drawn around, pinned so it cannot be "unified" by mistake.
+
+    A setpoint is an optional scalar and `None` means nobody wrote it down. A role's species set is
+    derived from a components list that is present either way, so an empty `reagent` set beside a
+    full one is the record stating the run used no reagent — a real change, and the most common one
+    a series carries. Applying the absence rule to both would have traded a rare fabrication (a
+    partially transcribed source) for a routine erasure.
+    """
+    changes = changes_between(_run("a", solvent=None), _run("b"))
+    assert [c.describe() for c in changes] == ["solvent — → N,N-dimethylformamide"]
 
 
 def test_a_solvent_swap_names_only_what_went_out_and_what_came_in() -> None:
@@ -223,10 +249,10 @@ def test_the_note_carries_what_each_run_was_testing() -> None:
 
 def test_the_hypothesis_survives_into_the_reaction_note() -> None:
     """Leading with it, because it is what makes the run legible to a later reader."""
-    body = note_from_ord_reaction(_run("a", day=1, hypothesis="is the impurity thermal?")).body
+    body = record_from_ord_reaction(_run("a", day=1, hypothesis="is the impurity thermal?")).body
     assert "Tested: is the impurity thermal?" in body
 
 
 def test_a_run_with_no_recorded_hypothesis_says_nothing_about_one() -> None:
     """Silence is "not recorded", never "there was no hypothesis"."""
-    assert "Tested:" not in note_from_ord_reaction(_run("a", day=1)).body
+    assert "Tested:" not in record_from_ord_reaction(_run("a", day=1)).body

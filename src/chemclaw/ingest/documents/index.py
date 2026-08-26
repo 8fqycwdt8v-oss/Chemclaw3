@@ -30,7 +30,7 @@ import math
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 import psycopg
 from psycopg.rows import TupleRow
@@ -41,6 +41,7 @@ from chemclaw.core.config import SCHEMA_VECTOR_DIM, settings
 from chemclaw.core.errors import SubsystemUnavailableError
 from chemclaw.core.fulltext import TSQUERY_TERMS, reference_terms, reference_tokens
 from chemclaw.ingest.documents.binding import DocumentShareError
+from chemclaw.ingest.documents.chunk import Chunk
 
 
 class DocumentIndexError(SubsystemUnavailableError):
@@ -107,6 +108,74 @@ class StaleChunk(BaseModel):
     chunking_key: str
     ordinal: int
     content: str
+
+
+class StoredDocument(BaseModel):
+    """One document as the tables hold it: the path it is cited as, and its pieces in order.
+
+    The read-model `upsert` writes and nothing read until now. Separate from `DocumentText`
+    because they are different things — this is rows, that is reassembled text — and because only
+    the caller knows the cutting's overlap, so the join cannot happen down here.
+    """
+
+    doc_id: str = Field(min_length=1)
+    # `CITATION_SQL`'s rule, the smallest matching path, so a whole-document read cites the same
+    # file a chunk hit from that document cites rather than a different copy of it.
+    path: str = Field(min_length=1)
+    pieces: list[Chunk] = Field(default_factory=list)
+    modified_at: datetime | None = None
+    # Whether the backend stopped before the document ended. The honest source for
+    # `DocumentText.truncated`, which used to be inferred from a fully-assembled string — that is,
+    # from having already built the thing the ceiling exists to avoid building.
+    truncated: bool = False
+
+    model_config = {"arbitrary_types_allowed": True}
+
+
+def _within_chars(pieces: list[Chunk], max_chars: int) -> tuple[list[Chunk], bool]:
+    """Keep pieces until their cumulative length reaches `max_chars`, plus the one that crosses it.
+
+    The in-memory mirror of the Postgres window below, written once so the two backends cut at the
+    same piece — `tests/test_document_share.py` asserts they agree about a stored document, and a
+    bound applied differently on each side would quietly make that assertion about two things.
+
+    The crossing piece is kept rather than dropped, so a document whose text ends exactly at the
+    ceiling is not reported as truncated; `truncated` is decided by what is left *after* it.
+    """
+    kept: list[Chunk] = []
+    spent = 0
+    for index, piece in enumerate(pieces):
+        kept.append(piece)
+        spent += len(piece.content)
+        if spent >= max_chars:
+            return kept, index + 1 < len(pieces)
+    return kept, False
+
+
+class DocumentText(BaseModel):
+    """A whole document, reassembled from its stored chunks, saying what that is and is not.
+
+    **Not the file's bytes.** `chunk_document` strips each piece, drops empty ones, joins blocks
+    with a blank line and hoists `[page 3]` out of the body into a coordinate — none of it
+    recoverable — so this is the text *as the crawl parsed and indexed it*. That is also the text
+    every citation a turn is holding points into, which is the property that matters: a reader
+    checking a quotation checks it against what was actually retrieved.
+
+    `truncated` is carried rather than implied. A document over the read ceiling comes back short,
+    and a shortened document that does not say so reads as a complete one — the rule
+    `FingerprintSearch.verdict` and `EvidenceChunk.conflicts_total` already follow.
+    """
+
+    doc_id: str = Field(min_length=1)
+    source: str = Field(min_length=1)
+    # The smallest path holding this document, by `CITATION_SQL`'s rule — so a whole-document read
+    # cites the same file a chunk hit from it cites, rather than picking a different copy.
+    path: str = Field(min_length=1)
+    text: str
+    chunks: int = Field(ge=0)
+    truncated: bool = False
+    coordinates: list[str] = Field(default_factory=list)
+    modified_at: datetime | None = None
 
 
 class DocumentFilter(BaseModel):
@@ -212,6 +281,29 @@ class DocumentIndex(Protocol):
 
     async def store_embeddings(self, chunks: list[ChunkRecord], key: str) -> None:
         """Replace the vector and key of existing chunks, leaving content and coordinate alone."""
+        ...
+
+    async def stored_document(
+        self, source: str, doc_id: str, chunking_key: str, max_chars: int
+    ) -> StoredDocument | None:
+        """This document as stored under one cutting, or `None` when this share does not hold it.
+
+        `max_chars` bounds the read **here**, at the fetch, rather than after assembly. A binding
+        allows a 52 MB file, so a caller that trimmed afterwards would already have pulled every
+        row over the wire and built the whole string — which is precisely what
+        `document_read_max_chars` exists to prevent and, before this parameter, did not. Pieces are
+        returned until their cumulative length reaches `max_chars`, plus the one that crosses it,
+        and `truncated` says whether more existed.
+
+        The read half of what `upsert` writes, and the only way back to a whole protocol: the
+        parsed text is discarded once `doc_id` is taken from it, so these rows *are* the document.
+        Scoped by `source` and gated on the same file-row eligibility a search uses, so a caller
+        cannot read a document out of a share it was never entitled to search.
+
+        Pieces are `chunk.Chunk` rather than `ChunkRecord` — the same shape the cutter produced,
+        and deliberately without the vector. A whole-document read wants text; carrying 1,536
+        floats a piece for it would be the largest part of the payload and none of the answer.
+        """
         ...
 
     async def touch(self, source: str, paths: list[str]) -> None:
@@ -384,6 +476,53 @@ class InMemoryDocumentIndex:
         for row in [k for k in self._chunks if k[0] in touched and (k[0], k[1]) not in claimed]:
             del self._chunks[row]
             self._keys.pop(row, None)
+
+    async def stored_document(
+        self, source: str, doc_id: str, chunking_key: str, max_chars: int
+    ) -> StoredDocument | None:
+        """This document as stored, when some path on `source` still holds it under this cutting."""
+        paths = sorted(
+            f.path
+            for f in self._files.values()
+            if f.doc_id == doc_id and f.chunking_key == chunking_key and f.source == source
+        )
+        if not paths:
+            return None
+        rows = sorted(
+            (
+                chunk
+                for (cdoc, ckey, _), chunk in self._chunks.items()
+                if cdoc == doc_id and ckey == chunking_key
+            ),
+            key=lambda c: c.ordinal,
+        )
+        kept, truncated = _within_chars(
+            [Chunk(ordinal=r.ordinal, content=r.content, coordinate=r.coordinate) for r in rows],
+            max_chars,
+        )
+        return StoredDocument(
+            doc_id=doc_id,
+            # `min` mirrors `CITATION_SQL`, so the reference backend cites what Postgres cites.
+            path=paths[0],
+            pieces=kept,
+            # `max` across every matching file row, mirroring `_MODIFIED_BY_DOC` — a document
+            # copied into several folders is as recent as the most recently touched copy of it.
+            # This read the cited path's own mtime instead, so the two backends disagreed whenever
+            # a document had more than one copy with different times; the cross-backend test could
+            # not see it, because its fixture had one file row and no mtime at all.
+            modified_at=max(
+                (
+                    f.modified_at
+                    for f in self._files.values()
+                    if f.doc_id == doc_id
+                    and f.chunking_key == chunking_key
+                    and f.source == source
+                    and f.modified_at is not None
+                ),
+                default=None,
+            ),
+            truncated=truncated,
+        )
 
     async def stale_chunks(self, key: str, limit: int, chunkings: set[str]) -> list[StaleChunk]:
         """Chunks of a live cutting whose vector was made by a different configuration."""
@@ -592,6 +731,19 @@ _ELIGIBLE = f"EXISTS (SELECT 1 {_FILE_MATCH}) "
 # external store. Two spellings of "which path does this content get cited as" would be two
 # citation policies, and they would diverge the first time either was tuned.
 CITATION_SQL = f"(SELECT min(f.path) {_FILE_MATCH}) AS path "
+# The same two facts for a *whole-document* read, keyed on the bound parameters rather than on a
+# chunk row. `CITATION_SQL` and `_MODIFIED_SQL` above correlate on `c.doc_id`/`c.chunking_key` so a
+# reader must evaluate them per row; here the document is already named, so one evaluation answers
+# for the whole result and the expression can sit outside a window that would otherwise force it to
+# run once per eligible chunk. Same rule, same rows, addressed differently — see `_document`.
+_FILE_MATCH_BY_DOC = _FILE_MATCH.replace("f.doc_id = c.doc_id", "f.doc_id = %(doc)s").replace(
+    "f.chunking_key = c.chunking_key", "f.chunking_key = %(chunking)s"
+)
+_CITATION_BY_DOC = f"SELECT min(f.path) {_FILE_MATCH_BY_DOC}"
+_MODIFIED_BY_DOC = f"SELECT max(f.modified_at) {_FILE_MATCH_BY_DOC}"
+# The same file rows' modification time, for a whole-document read: `max`, because a document
+# copied into several folders is as recent as the most recently touched copy of it.
+_MODIFIED_SQL = f"SELECT max(f.modified_at) {_FILE_MATCH}"
 
 
 class PostgresDocumentIndex:
@@ -646,6 +798,39 @@ class PostgresDocumentIndex:
             f"UPDATE document_chunks SET embedding = %(emb)s::vector({width}), "
             "embedding_key = %(key)s "
             "WHERE doc_id = %(doc)s AND chunking_key = %(chunking)s AND ordinal = %(ord)s"
+        )
+        # The whole document, in document order, gated on the same file-row eligibility a search
+        # uses — `%(tag)s`/`%(since)s`/`%(until)s` are bound NULL here because a whole-document read
+        # is addressed by id rather than filtered, but the *source* and *chunking* clauses of
+        # `_ELIGIBLE` still apply: a document is readable from the share that indexed it, under the
+        # cutting that share uses, and from nowhere else.
+        # **Bounded in SQL, not after assembly.** A binding allows a 52 MB file, so fetching every
+        # row and trimming afterwards would pull the whole document over the wire and into the chat
+        # pod — the thing `document_read_max_chars` exists to prevent. The window sums content
+        # length in `ordinal` order and keeps every piece whose *preceding* total is under the cap,
+        # which is the piece set `_within_chars` keeps: everything up to the cap, plus the one that
+        # crosses it. `remaining` is how the caller learns more existed without reading it.
+        # **The citation and the modification time are resolved once, outside the window.** Both
+        # are correlated on `c.doc_id` and `c.chunking_key`, which the `WHERE` pins to a single
+        # value — so they are invariant across every row of this result and were being computed per
+        # row anyway. Inside the windowed subquery that is worse than merely redundant: a window
+        # must see every eligible row before the outer filter can drop any, so the planner cannot
+        # push the cut down. Measured with `EXPLAIN (ANALYZE, BUFFERS)` on 400 chunks with a cap
+        # that keeps two: `loops=400` on both subplans and 854 buffer hits, against 54 for the scan
+        # itself — 800 of them spent resolving one path and one timestamp four hundred times.
+        #
+        # Hoisted into the outer `SELECT`, they run once each. The window still visits every row,
+        # which is inherent to a running total and is what bounds the *transfer*; what this removes
+        # is the per-row work that had nothing to do with the bound.
+        self._document = (
+            f"SELECT ordinal, content, coordinate, remaining, ({_CITATION_BY_DOC}) AS path, "
+            f"({_MODIFIED_BY_DOC}) AS modified_at FROM ("
+            "SELECT c.ordinal, c.content, c.coordinate, "
+            "sum(length(c.content)) OVER (ORDER BY c.ordinal) - length(c.content) AS before, "
+            "count(*) OVER () AS remaining "
+            f"FROM document_chunks c "
+            f"WHERE c.doc_id = %(doc)s AND c.chunking_key = %(chunking)s AND {_ELIGIBLE}"
+            ") AS windowed WHERE before < %(cap)s ORDER BY ordinal"
         )
         # `IS DISTINCT FROM`, not `<>`: NULL is every row written before the key column existed,
         # and `<>` would silently pass over exactly those.
@@ -964,6 +1149,41 @@ class PostgresDocumentIndex:
             for row in rows
             if row[5]
         ]
+
+    async def stored_document(
+        self, source: str, doc_id: str, chunking_key: str, max_chars: int
+    ) -> StoredDocument | None:
+        """This document as stored, when some path on `source` still holds it under this cutting."""
+        params: dict[str, Any] = {
+            "doc": doc_id,
+            "chunking": chunking_key,
+            "src": source,
+            "cap": max_chars,
+            "tag": None,
+            "since": None,
+            "until": None,
+        }
+        try:
+            async with self._connection() as conn, conn.cursor() as cur:
+                await cur.execute(self._document, params)
+                rows = await cur.fetchall()
+        except psycopg.Error as exc:
+            raise DocumentIndexError(
+                "the document index did not answer, so the document was not read"
+            ) from exc
+        # Every row carries the same resolved citation; a document no live file row claims returns
+        # none at all, which is the `None` this method promises rather than an empty document.
+        if not rows or not rows[0][4]:
+            return None
+        return StoredDocument(
+            doc_id=doc_id,
+            path=rows[0][4],
+            pieces=[Chunk(ordinal=r[0], content=r[1], coordinate=r[2]) for r in rows],
+            modified_at=rows[0][5],
+            # `remaining` counts every eligible piece; fewer rows came back than that means the
+            # window stopped early.
+            truncated=len(rows) < rows[0][3],
+        )
 
     async def search_dense(
         self, source: str, query_embedding: list[float], top_k: int, filters: DocumentFilter

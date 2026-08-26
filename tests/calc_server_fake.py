@@ -35,6 +35,7 @@ from rdkit.Chem import AllChem
 
 from chemclaw.core.chem import require_canonical_smiles
 from chemclaw.core.ids import stable_hash
+from chemclaw.science.calc.structures import InMemoryStructureStore
 
 # A version string carrying **both** key delimiters, because a real one does: `esol-delaney@2004`
 # carries the `@` and `cal-0.28733:-29.3116` carries the `:`. A client that split the flat
@@ -50,7 +51,26 @@ FAKE_VERSION = "GFN2-xTB+fake@1/cal-0.28733:-29.3116"
 _KEYED: dict[str, tuple[str, tuple[str, ...]]] = {
     "compute_xtb_energy": ("xtb.sp", ("charge",)),
     "compute_electronic_properties": ("xtb.properties", ("solvent",)),
+    # The same calculation asked at a *named* geometry rather than at one embedded from a SMILES,
+    # so it answers under the same `calc_type` with the same params — the subject is what differs,
+    # and the subject is `input_hash`. Reproduced here because it is the property the
+    # cheap-search-then-careful-optimization chain rests on: relaxing a conformer and then asking
+    # for its properties must reach the entry that conformer's own address names.
+    "compute_properties_at": ("xtb.properties", ("solvent",)),
     "predict_site_reactivity": ("xtb.fukui", ()),
+    # The geometry-taking twin, under the same `calc_type` — one row serves a Fukui computed from
+    # a SMILES and one computed at the identical geometry. `mode` and `top_n` stay out of the key
+    # on both: the server computes all three indices from three single points and sorts on the way
+    # out, so keying on `mode` would make a cache *hit* authoritative about an ordering it never
+    # chose, which is what `ranked_for` exists to prevent.
+    #
+    # **`solvent` is in the key here and absent from the twin, and that is not an inconsistency.**
+    # `predict_site_reactivity(smiles, mode, top_n)` takes no solvent at all, while
+    # `compute_fukui_at(structure, mode, solvent, top_n)` does, and the server keys it —
+    # `identity._fukui_at` builds `XtbSpec(task="fukui", solvent=_solvent(arguments))`. The two
+    # tools shared one entry here and only one of them fitted it, so a Fukui set computed in water
+    # and one in the gas phase collided in tests while production correctly recomputed.
+    "compute_fukui_at": ("xtb.fukui", ("solvent",)),
     "predict_pka": ("pka", ()),
     "predict_solubility": ("solubility", ()),
     "predict_developability_profile": ("developability", ()),
@@ -124,6 +144,23 @@ def harmonic_hessian(structure: dict[str, Any], *, imaginary: bool = False) -> d
     }
 
 
+def _nudged(structure: dict[str, Any], index: int) -> dict[str, Any]:
+    """The same molecule at a slightly different geometry — one ensemble member.
+
+    Displaces every atom along x by `index/100` Angstrom, which is two orders of magnitude above the
+    rounding `Structure` applies, so each member has its own `structure_id` and therefore its own
+    cache entry. Index 0 is returned unchanged, so the lowest member is still the input geometry and
+    the existing tests that follow it through a composite are unaffected.
+    """
+    if index == 0:
+        return structure
+    offset = index / 100.0
+    return {
+        **structure,
+        "positions": [[x + offset, y, z] for x, y, z in structure["positions"]],
+    }
+
+
 def _structure_id(structure: dict[str, Any]) -> str:
     """The content address of a structure dict, by the same rule `Structure.structure_id` uses."""
     return "st_" + stable_hash(
@@ -148,6 +185,11 @@ class FakeCalcServer:
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self._saddle_first = saddle_first
         self.overrides: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {}
+        # Where the composites' geometries land once `install` has wired it in. On the fake rather
+        # than built by `install`, so a test can read it back — resolving an id a result reported
+        # is how "the handle the agent is shown is the handle it can pass back" gets checked
+        # against the real code path instead of against a stub.
+        self.structures = InMemoryStructureStore()
 
     def count(self, tool: str) -> int:
         """How many times `tool` was called."""
@@ -198,7 +240,18 @@ class FakeCalcServer:
             "input_hash": stable_hash(inputs),
             "params_hash": stable_hash(params),
         }
-        return {"tool": tool, "calc_version": FAKE_VERSION, "key": key, "calc_key": None}
+        # `structure_id` for the calculations that run on a geometry, exactly as the real server
+        # reports it — it is the server's authoritative answer to "which geometry is this about",
+        # and it is what `calculation_results.structure_id` records so a stored row can be found by
+        # the conformer a chemist picked (D-2026-08-21). Absent for a molecule-keyed calculator,
+        # which is about a compound and not about any particular geometry of it.
+        return {
+            "tool": tool,
+            "calc_version": FAKE_VERSION,
+            "key": key,
+            "calc_key": None,
+            "structure_id": _structure_id(subject) if subject is not None else None,
+        }
 
     # --- the tools themselves ---------------------------------------------------------------
 
@@ -272,13 +325,21 @@ class FakeCalcServer:
             "effort": arguments.get("effort", "quick"),
             # Three members, degeneracies 1/2/1: enough for a degeneracy-weighted population to
             # differ visibly from an unweighted one, which is the arithmetic that stayed here.
+            #
+            # **Each member is a distinct geometry**, nudged along x by a hundredth of an Angstrom.
+            # They shared one structure until a refinement composite needed them not to: refining
+            # an ensemble is one optimization and one Hessian *per member*, and three members at one
+            # address collapse to a single cache entry — so a fake with identical members reports
+            # three refinements as one call and every fan-out test passes on work that never
+            # happened. The displacement is above `_GEOMETRY_DECIMALS`, so the three addresses
+            # genuinely differ.
             "members": [
                 {
                     "energy_hartree": -1.0 * len(structure["elements"]) - shift,
                     "degeneracy": degeneracy,
-                    "structure": structure,
+                    "structure": _nudged(structure, index),
                 }
-                for shift, degeneracy in ((0.0, 1), (-0.001, 2), (-0.002, 1))
+                for index, (shift, degeneracy) in enumerate(((0.0, 1), (-0.001, 2), (-0.002, 1)))
             ],
             "total_found": 3,
         }
@@ -336,22 +397,39 @@ class FakeCalcServer:
             "veber_pass": True,
         }
 
-    def _predict_site_reactivity(self, arguments: dict[str, Any]) -> dict[str, Any]:
+    def _predict_site_reactivity(
+        self, arguments: dict[str, Any], nudge: float = 0.0
+    ) -> dict[str, Any]:
         canonical = require_canonical_smiles(arguments["smiles"])
         molecule = Chem.AddHs(Chem.MolFromSmiles(canonical))
         atoms = list(molecule.GetAtoms())
         # f_minus descends with the index and f_plus ascends, so the two modes rank the atoms in
         # opposite orders — which makes a mis-served ranking visible rather than coincidental.
+        #
+        # **`f_zero` varies per atom and `nudge` moves it per geometry**, and both matter. It is
+        # the field an ensemble average actually reports (`compose._DEFAULT_FUKUI_MODE` is
+        # "radical"), and it used to be the constant 0.5 for every atom of every conformer — so
+        # `test_an_averaged_fukui_ranking_reaches_the_geometry_taking_tool` was comparing 0.5 to
+        # 0.5 and could not have failed. `nudge` is what makes two conformers rank their atoms
+        # differently, which is the whole premise of averaging over an ensemble.
         sites = [
             {
                 "index": atom.GetIdx(),
                 "element": atom.GetSymbol(),
                 "f_minus": round(1.0 - atom.GetIdx() / len(atoms), 4),
                 "f_plus": round(atom.GetIdx() / len(atoms), 4),
-                "f_zero": 0.5,
+                "f_zero": round(0.5 + nudge * (1 if atom.GetIdx() % 2 else -1), 4),
             }
             for atom in atoms
         ]
+        # **Ranked most-susceptible first and truncated, because that is the contract the real
+        # server keeps** (`SiteReactivityResult`: "ordered most-susceptible first by the index named
+        # in `ranked_by`, and truncated to the most susceptible `len(sites)` of `total_atoms`").
+        # The fake used to return them in atom-index order and whole, which is the shape in which
+        # pairing conformers by list position happens to be correct — so the fake could not express
+        # the defect that shipped.
+        sites.sort(key=lambda site: -float(site["f_minus"]))
+        sites = sites[: int(arguments.get("top_n") or len(sites))]
         return {
             "calc_version": FAKE_VERSION,
             "smiles": canonical,
@@ -364,6 +442,41 @@ class FakeCalcServer:
             "total_atoms": len(atoms),
             "sites": sites,
         }
+
+    def _compute_fukui_at(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        """The geometry-taking twin of the Fukui ranking, answering about *this* geometry.
+
+        **Geometry-dependent, which is the entire point of the tool.** This used to delegate on the
+        SMILES alone, so every conformer of one molecule came back byte-identical — and an ensemble
+        average over identical members cannot show a mispairing, a reordering or a truncation. The
+        `DEFERRED.md` row this tool closed was written to ask how often the top-ranked site *moves*
+        between geometries; a fake that holds it still answers "never" by construction.
+        """
+        structure = arguments["structure"]
+        identifier = _structure_id(structure)
+        # Small, deterministic, and derived from the address — enough to reorder the ranking
+        # between conformers without pretending to be physics.
+        nudge = (int(identifier[-4:], 16) % 17) / 100.0
+        answer = self._predict_site_reactivity(
+            {"smiles": structure["smiles"], "top_n": arguments.get("top_n")}, nudge=nudge
+        )
+        answer["structure_id"] = identifier
+        return answer
+
+    def _compute_properties_at(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        """The geometry-taking twin, answering about the structure's own molecule.
+
+        **The dipole depends on the geometry**, which the SMILES-in twin cannot express and which a
+        Boltzmann average is entirely about. A fake whose property is the same at every conformer
+        makes an ensemble average equal to its own mean by construction, so the spread is zero and a
+        test over it passes whatever the weighting does. The dependence is the crudest thing that
+        works — the first atom's x coordinate — because the number is never asserted as chemistry.
+        """
+        structure = arguments["structure"]
+        answer = self._compute_electronic_properties({"smiles": structure["smiles"], **arguments})
+        answer["structure_id"] = _structure_id(structure)
+        answer["dipole_debye"] = round(answer["dipole_debye"] + structure["positions"][0][0], 4)
+        return answer
 
     def _compute_electronic_properties(self, arguments: dict[str, Any]) -> dict[str, Any]:
         canonical = require_canonical_smiles(arguments["smiles"])
@@ -416,12 +529,29 @@ class _Text:
         self.text = text
 
 
+# The modules that bound `default_structure_store` at import time, so a patch has to reach each of
+# them rather than the definition site. Three, and the list is short because the geometry store has
+# exactly three callers: the composites that write to it and the two paths that resolve a handle.
+_STRUCTURE_STORE_CALLERS = (
+    "chemclaw.connectors.calc.compose",
+    "chemclaw.connectors.calc.activities",
+    "chemclaw.connectors.calc.server.tools",
+)
+
+
 def install(monkeypatch: pytest.MonkeyPatch, server: FakeCalcServer) -> FakeCalcServer:
-    """Make every `calc_session()` yield `server`, so no socket is opened anywhere.
+    """Make every `calc_session()` yield `server` and every geometry go to `server.structures`.
 
     Patched at `connectors.calc.remote`, the one module that opens a session — so the tool path,
     the composites, the durable activities and the BO calculator bindings all reach this fake
     through their real call chains rather than through a stub of their own.
+
+    **The geometry store is part of "no socket is opened anywhere".** Every composite persists the
+    geometries it receives (D-2026-08-21-a-geometry-is-an-address-not-a-payload), so without this
+    an offline composite test reaches Postgres — which is exactly the shape of dependency this
+    fake exists to remove, and the failure a sandbox with no database would see. Installing one
+    in-memory store shared by all three callers also makes the round trip testable: a test can
+    relax a molecule and then resolve the id the result reported, through the real code path.
     """
 
     @asynccontextmanager
@@ -429,4 +559,6 @@ def install(monkeypatch: pytest.MonkeyPatch, server: FakeCalcServer) -> FakeCalc
         yield server
 
     monkeypatch.setattr("chemclaw.connectors.calc.remote.calc_session", _session)
+    for module in _STRUCTURE_STORE_CALLERS:
+        monkeypatch.setattr(f"{module}.default_structure_store", lambda: server.structures)
     return server

@@ -105,6 +105,21 @@ _COUNTERS: dict[str, str] = {
     # invisible in every other signal — a live turn made 29 tool calls and emitted an empty answer
     # with no error, and only a count makes that a trend anyone can watch rather than an anecdote.
     "chemclaw_turn_empty_answers_total": "Turns that ended without producing any answer text.",
+    # The result-publication path (D-2026-08-25). Three counters and a gauge, because the three
+    # failure modes are genuinely different and one series carrying all of them would be
+    # unactionable: a record that could not be *queued* is a local database problem, a record that
+    # could not be *delivered* is the external store's, and a queue that is growing is neither
+    # failing nor working. `chemclaw_results_queued_total` against
+    # `chemclaw_results_published_total` is what says whether the drain is keeping up.
+    "chemclaw_results_queued_total": (
+        "Computed results projected and queued for an external results store."
+    ),
+    "chemclaw_results_published_total": (
+        "Computed results confirmed durable at an external results store."
+    ),
+    "chemclaw_result_publish_failures_total": (
+        "Result publications that could not be queued or delivered."
+    ),
     "chemclaw_audit_sink_failures_total": (
         "Audit records that could not be persisted (the trail is incomplete)."
     ),
@@ -144,6 +159,15 @@ _COUNTERS: dict[str, str] = {
     # deployment on every dashboard.
     "chemclaw_verifier_degraded_total": (
         "Answers scored by the deterministic citation gate because the LLM judge was unavailable."
+    ),
+    # One row per protocol the condenser was handed, labelled by what happened to it:
+    # `extracted` (its prose was read), `degraded` (the extraction failed or timed out, and the
+    # row kept its recorded figures), `oversized` (too large for one call, refused by name and
+    # never split). Labelled rather than three series because the three are one question — how
+    # much of what a turn asked to condense actually got condensed — and a reader who cannot
+    # divide them cannot answer it.
+    "chemclaw_protocol_digests_total": (
+        "Protocols handed to the condenser, by outcome (extracted / degraded / oversized)."
     ),
     "chemclaw_jobs_started_total": "Durable jobs launched by an agent tool.",
     # The counter above counts *launches*, which on the most expensive thing this system does is the
@@ -229,6 +253,20 @@ _COUNTERS: dict[str, str] = {
     # from was not even exhausted: it never grew past 13 of 64 connections and opened zero new
     # ones. Counted separately from the admission shed so "the loop could not schedule a handoff"
     # is not read as "the LLM endpoint is full".
+    # A token whose group memberships did not fit in it. Entra replaces `groups` with
+    # `_claim_names` past roughly 150 memberships, and there is no fix at request time — resolving
+    # the overage needs a Graph call, which D-089 does not permit. So the user with the *most*
+    # access silently arrives with the *fewest* group-derived entitlements, and until this counter
+    # existed the only trace was a WARNING line: a chemist quietly loses a gated document share and
+    # nothing an operator watches moves. Counting it is what makes the condition alertable rather
+    # than greppable, which is this repository's own standing rule about measurement.
+    #
+    # Unlabelled, deliberately: the interesting series is "is this happening at all", and a label
+    # carrying the `oid` would key an unauthenticated exposition on user identity.
+    "chemclaw_group_claim_overage_total": (
+        "Validated tokens that carried a group-claim overage (`_claim_names`) instead of `groups`, "
+        "so no group-derived entitlement could be read for that user."
+    ),
     "chemclaw_db_unavailable_total": (
         "Requests shed with 503 because a pooled Postgres connection could not be obtained."
     ),
@@ -373,6 +411,10 @@ _COUNTER_LABELS: dict[str, tuple[str, ...]] = {
     # Four values, fixed by a CHECK constraint in `infra/sql/027_note_proposals.sql` — the only
     # label in this registry whose cardinality is bounded by the database rather than by trust.
     "chemclaw_note_proposals_total": ("state",),
+    # Three values, fixed in `agent/condense.py`'s own `DigestSource` literal rather than by a
+    # caller: `extracted`, `degraded`, `oversized`. Bounded by the code that emits it, which is the
+    # same guarantee `state` above gets from a CHECK constraint.
+    "chemclaw_protocol_digests_total": ("outcome",),
     # Bounded by configuration exactly as `profile` is: a connector is a bundle the chart enables,
     # never a name a caller supplies, and the whole shipped fleet is six.
     "chemclaw_job_runtime_seconds_total": ("connector",),

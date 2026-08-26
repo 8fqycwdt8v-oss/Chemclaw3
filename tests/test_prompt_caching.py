@@ -21,8 +21,11 @@ that proves the provider *honoured* any of the above. It skips without a credent
 stays offline.
 """
 
+import ast
+import functools
 import os
 import warnings
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -297,12 +300,87 @@ def test_no_cache_activity_still_meters_zero() -> None:
 
 
 # --------------------------------------------------------------------------------------------
+# The credential, and the difference between not having one and having one that is refused.
+# --------------------------------------------------------------------------------------------
+
+_CREDENTIAL_ENV = "API-KEY"
+
+
+@functools.cache
+def _live_credential() -> str | None:
+    """The credential, but only if it actually works. `None` — with a reason — otherwise.
+
+    **The guard this replaced tested for the variable rather than for the credential**, and the two
+    come apart in the environment this repository is developed in. A Claude Code Remote box for
+    this repo carries `API-KEY` set to a value `api.anthropic.com` rejects; measured 2026-08-25,
+    both tests below therefore *ran* where the intent was plainly to skip, and `make test` returned
+    `3 failed, 4251 passed` on an unmodified tree. A red suite that means "your credential is
+    stale" is a red suite nobody can read.
+
+    `count_tokens` is the probe because it is **not billed**, which is also why the second test
+    uses it for its real work. One round trip, cached for the session by `functools.cache`, so a
+    suite with thirty guarded tests still costs one call.
+
+    **Only an authentication failure becomes a skip.** A 429 or a 529 is the provider being busy,
+    not the operator being unconfigured, and folding those into "skipped" is how a suite quietly
+    stops testing. They propagate, and the test fails as it should.
+
+    **Called from a fixture, never from `skipif`.** `skipif` evaluates its condition at
+    *collection*, and an exception there is not a failing test — it is `Interrupted: N errors
+    during collection`, which abandons the entire session. Measured: with `API-KEY` set and the
+    provider unreachable, `pytest tests/test_prompt_caching.py tests/test_context_floor.py`
+    collected neither file and ran 0 tests. That turned the paragraph above inside out — "the test
+    fails as it should" was the intent, and what actually happened was that every *other* test
+    stopped running too. The probe now runs inside `live_credential`, where a propagating 429 fails
+    these two tests and nothing else, which is what was meant in the first place.
+    """
+    key = os.environ.get(_CREDENTIAL_ENV)
+    if not key:
+        return None
+    import anthropic
+
+    try:
+        anthropic.Anthropic(api_key=key).messages.count_tokens(
+            model="claude-haiku-4-5-20251001",
+            messages=[{"role": "user", "content": "probe"}],
+        )
+    except anthropic.AuthenticationError:
+        return None
+    return key
+
+
+@pytest.fixture
+def live_credential() -> str:
+    """The working credential, or skip *this test* — the guard that used to be a `skipif`.
+
+    A fixture rather than a mark because it runs at call time. Collection then cannot fail, so a
+    provider that is down costs these two tests and leaves the other 4,500 alone.
+    """
+    key = _live_credential()
+    if key is None:
+        pytest.skip(_no_credential_reason())
+    return key
+
+
+def _no_credential_reason() -> str:
+    """Why the guarded tests are skipping, in the words an operator needs.
+
+    Absent and rejected are different problems with different remedies, and the skip line is the
+    only place anybody reads which one they have.
+    """
+    if not os.environ.get(_CREDENTIAL_ENV):
+        return f"no {_CREDENTIAL_ENV} in the environment"
+    return f"{_CREDENTIAL_ENV} is set but the provider rejects it — the credential is stale"
+
+
+# --------------------------------------------------------------------------------------------
 # The only test that proves the provider honoured any of it.
 # --------------------------------------------------------------------------------------------
 
 
-@pytest.mark.skipif("API-KEY" not in os.environ, reason="needs a live Anthropic credential")
-def test_live_second_call_reads_from_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_live_second_call_reads_from_cache(
+    monkeypatch: pytest.MonkeyPatch, live_credential: str
+) -> None:
     """Two back-to-back calls with our own payload: the second is served from cache.
 
     A payload-shape assertion proves the marker was sent, never that it was honoured — the
@@ -318,7 +396,7 @@ def test_live_second_call_reads_from_cache(monkeypatch: pytest.MonkeyPatch) -> N
 
     payload = _captured_payload(monkeypatch)
     # After the capture, which deliberately installs a dummy key so it can never reach the network.
-    monkeypatch.setenv("ANTHROPIC_API_KEY", os.environ["API-KEY"])
+    monkeypatch.setenv("ANTHROPIC_API_KEY", live_credential)
     payload["max_tokens"] = 16
     # A unique tail, so this run writes its own entry instead of reading a previous run's.
     payload["messages"] = [{"role": "user", "content": f"Reply with: OK {uuid.uuid4().hex}"}]
@@ -376,8 +454,7 @@ _MEASURED_FLOORS = {"claude-sonnet-5": 1024, "claude-haiku-4-5-20251001": 4096}
 _BELOW_HAIKU_FLOOR: set[str] = set()
 
 
-@pytest.mark.skipif("API-KEY" not in os.environ, reason="needs a live Anthropic credential")
-def test_which_shipped_profiles_clear_the_cache_floor() -> None:
+def test_which_shipped_profiles_clear_the_cache_floor(live_credential: str) -> None:
     """Every profile's real prefix, against the floor of the model it runs on.
 
     **This is the check the original reasoning could not make, because its number was wrong.** The
@@ -395,7 +472,7 @@ def test_which_shipped_profiles_clear_the_cache_floor() -> None:
     from chemclaw.agent.profiles import get_profile, registered_profile_names
 
     load_profiles()
-    client = anthropic.Anthropic(api_key=os.environ["API-KEY"])
+    client = anthropic.Anthropic(api_key=live_credential)
     model = "claude-haiku-4-5-20251001"
     floor = _MEASURED_FLOORS[model]
 
@@ -421,4 +498,48 @@ def test_which_shipped_profiles_clear_the_cache_floor() -> None:
         f"the set of profiles that cannot cache on {model} changed: {sorted(below)} "
         f"(recorded: {sorted(_BELOW_HAIKU_FLOOR)}). A profile that dropped under {floor} tokens "
         "now pays full price on every model call, and the only symptom is the bill."
+    )
+
+
+# --------------------------------------------------------------------------------------------
+# The guard on the guard.
+# --------------------------------------------------------------------------------------------
+# The guard on the guard.
+# --------------------------------------------------------------------------------------------
+
+
+def test_no_module_level_call_dials_the_provider_at_collection() -> None:
+    """Collecting this module must never dial anything, whatever the environment holds.
+
+    The defect this pins cost the whole suite, not this file: `_live_credential()` was evaluated
+    inside `@pytest.mark.skipif(...)`, so an unreachable provider raised during *collection*, and a
+    collection error is `Interrupted` — sibling files are never collected and never run. Measured
+    with the provider pointed at a closed port: 0 tests ran from two files, one of which was
+    `test_context_floor.py`.
+
+    Asserting the absence rather than the fix, because there are several ways to reintroduce it
+    (a `skipif`, a module-level constant, a decorator argument) and only one property that matters:
+    nothing evaluated at import time asks the network a question.
+    """
+    tree = ast.parse(Path(__file__).read_text())
+    nested = {
+        id(inner)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+        for stmt in node.body
+        for inner in ast.walk(stmt)
+    }
+    offenders = sorted(
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "_live_credential"
+        and id(node) not in nested
+    )
+    assert not offenders, (
+        f"_live_credential() is called outside a function body at line(s) {offenders}. It performs "
+        "a network round trip, so at module scope — including inside a `skipif` condition — it "
+        "runs at collection, where an exception aborts the entire pytest session rather than "
+        "failing one test. Request the `live_credential` fixture instead."
     )

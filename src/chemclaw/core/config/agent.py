@@ -9,7 +9,7 @@ sections shared a single module (D-072 mixins, split per D-156).
 import os
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings
 
 # The two postures the plan/execute harness can start in, named once so every model that accepts
@@ -44,7 +44,11 @@ class AgentSettings(BaseSettings):
     # by a previous process are read as ordinary content, and the injection mitigation silently
     # lapses for the oldest material. A deployment-wide value keeps one tag across every pod and
     # restart. Hashed before use, so the secret never appears in a prompt or a stored session row.
-    framing_envelope_secret: str = ""
+    # A `SecretStr`, for the reason the credentials carry one
+    # (`D-2026-08-26-a-credential-is-a-type-not-a-convention`). It is not a credential to any
+    # external system, which is how it was missed once already — it is the HMAC key the envelope
+    # tag is derived from, and anyone who learns it can close the envelope from inside.
+    framing_envelope_secret: SecretStr = SecretStr("")
 
     # The agent (plan step 1.5). `agent_model` is the orchestration model name
     # (ENV-overridable); the provider's API key is read by the chat model from its own env var
@@ -99,6 +103,24 @@ class AgentSettings(BaseSettings):
     agent_context_token_budget: int = Field(default=100_000, ge=1)
     agent_keep_last_tool_groups: int = Field(default=2, ge=0)
     agent_keep_last_conversation_groups: int = Field(default=12, ge=1)
+    # `agent_tool_result_clear_trigger` is the *lossless* edit's own threshold, and splitting it
+    # off is the whole point of this field. `context_compaction_middleware` composes two edits:
+    # upstream's `ClearToolUsesEdit`, which replaces a re-fetchable tool result with a placeholder
+    # and leaves the `tool_use` record so the model can fetch it again, and the first-party
+    # conversation window, which *deletes* older groups. Both used to read
+    # `agent_context_token_budget`, so nothing reduced until 100k and then the cheap edit and the
+    # destructive one fired in the same breath.
+    #
+    # They are different instruments and want different thresholds. Clearing costs nothing and
+    # loses nothing, so it should run early and often; every token it reclaims early is a
+    # conversation group the window never has to reach for. Anthropic's own composition separates
+    # them by an order of magnitude for this reason (30k against 180k in the cookbook's research
+    # agent), and the default here is the same shape against this repository's 100k budget.
+    #
+    # Above the budget it would be pointless — the window would already have fired — so the
+    # validator in `Settings` refuses that rather than letting a deployment set a number that
+    # silently means "unchanged".
+    agent_tool_result_clear_trigger: int = Field(default=30_000, ge=1)
     # Durable working memory for the agent's scratchpad (`agent/scratchpad.py`). Off by default,
     # and the default is about *data* rather than about the code being unproven: enabling it
     # creates the `store`/`store_vectors` tables and starts writing files a turn authored to a

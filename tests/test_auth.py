@@ -21,6 +21,7 @@ from chemclaw.agent.session import TurnSession
 from chemclaw.api.app import create_app
 from chemclaw.api.auth import AuthError, validate_token
 from chemclaw.core.config import settings
+from chemclaw.core.metrics import METRICS
 
 _AUDIENCE = "api://chemclaw"
 _ISSUER = "https://issuer.test/v2.0"
@@ -118,9 +119,15 @@ def test_a_group_claim_overage_is_reported_rather_than_read_as_no_groups(
     """
     monkeypatch.setattr(settings, "entra_group_claims_as_roles", True)
     token = _sign(rsa_key, {"oid": "u-10", "roles": [], "_claim_names": {"groups": "src1"}})
+    before = METRICS.value("chemclaw_group_claim_overage_total")
     with caplog.at_level("WARNING"):
         assert validate_token(token).roles == frozenset()
     assert "overage" in caplog.text
+    # **And counted.** The log line names who; the counter is what makes anyone look. This failure
+    # is silent from both sides — the chemist sees a gated share return nothing, the operator sees
+    # a WARNING on a pod's stdout — so the only thing that turns it into an event is a series an
+    # alert can read (`ChemclawGroupClaimOverage`).
+    assert METRICS.value("chemclaw_group_claim_overage_total") == before + 1
 
 
 def test_wrong_audience_is_rejected(rsa_key: Any) -> None:

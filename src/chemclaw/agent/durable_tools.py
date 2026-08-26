@@ -38,21 +38,23 @@ tool. What is genuinely single is the *decode*:
 an error, and all three go through it.
 """
 
+import logging
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 from temporalio.client import WorkflowExecutionStatus
 from temporalio.common import WorkflowIDReusePolicy
 from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.service import RPCError, RPCStatusCode
+from temporalio.types import MethodAsyncNoParam
 
 from chemclaw.agent.authz import authorize_trigger, require_actor
 from chemclaw.agent.framing import frame_untrusted
 from chemclaw.core.config import settings
 from chemclaw.core.errors import SubsystemUnavailableError
 from chemclaw.core.identity_context import get_current_roles
-from chemclaw.core.ids import stable_hash
+from chemclaw.core.ids import canonical_text, stable_hash
 from chemclaw.core.temporal_client import connect
 from chemclaw.core.tool_registry import tool
 from chemclaw.core.turn_signals import record_job_started
@@ -67,9 +69,18 @@ from chemclaw.durable.job_record import JobRecordSummary, lookup_job_record, sea
 # is reached by name across its own queue instead, and
 # `tests/test_layering.py::test_the_agent_layer_imports_no_bundle_workflow` is what keeps the two
 # cases apart.
+from chemclaw.durable.memory_jobs import (
+    CampaignSynthesisWorkflow,
+    OptimizationCampaignWorkflow,
+    PlaybookDistillationWorkflow,
+)
 from chemclaw.durable.note_index import NoteReindexWorkflow
+from chemclaw.durable.observation_jobs import ObservationPromotionWorkflow
 from chemclaw.durable.report_workflow import DevelopmentReportWorkflow
 from chemclaw.retrieval.harness import ReportRequest, ReportSection
+from chemclaw.science.calc.geometry import without_geometry
+
+logger = logging.getLogger(__name__)
 
 
 class DurableJobStatus(BaseModel):
@@ -87,6 +98,12 @@ class DurableJobStatus(BaseModel):
     status: str
     summary: str | None = None
     result: dict[str, Any] = Field(default_factory=dict)
+    # The calculations this run rested on, as `propose_knowledge_note` takes them (D-2026-08-21).
+    # That tool's docstring has said "get them from a job's result envelope" since D-133 against an
+    # envelope that carried none, so a note drafted from a calculation the agent had just run could
+    # not cite it. Empty for a job that recorded none — a report, or a run from before the refs
+    # were captured — which is the honest reading either way.
+    calc_refs: list[str] = Field(default_factory=list)
     # Why the run was asked for, when the answer came from the durable record (D-157). Empty on the
     # live-Temporal path, which reads the workflow's result rather than the record — the launching
     # turn is right there in the conversation, so restating its own reason back to the model would
@@ -103,15 +120,6 @@ _TERMINAL = {
     WorkflowExecutionStatus.TERMINATED: "terminated",
     WorkflowExecutionStatus.TIMED_OUT: "timed_out",
 }
-
-
-def _canonical(text: str) -> str:
-    """Model-written free text, reduced to what it means: whitespace collapsed, case folded.
-
-    Only for building a durable id. The request itself keeps the words the chemist chose, because
-    they are what the draft renders.
-    """
-    return " ".join(text.split()).casefold()
 
 
 def _report_id(request: ReportRequest) -> str:
@@ -156,9 +164,9 @@ def _report_id(request: ReportRequest) -> str:
     cross-actor merge this key exists to prevent, and `memory_layer` is a closed set.
     """
     payload = [
-        _canonical(request.title),
+        canonical_text(request.title),
         *sorted(
-            f"{_canonical(s.heading)}|{_canonical(s.query)}|{s.memory_layer}"
+            f"{canonical_text(s.heading)}|{canonical_text(s.query)}|{s.memory_layer}"
             for s in request.sections
         ),
         request.requested_by,
@@ -219,6 +227,104 @@ async def request_development_report(title: str, sections: list[ReportSection]) 
     return handle.id
 
 
+# The four corpus-scanning jobs this tool can start, by the word a chemist would use.
+#
+# **They exist here because D-2026-08-25 took their Schedules away and left nothing behind.** That
+# decision was right — each of these opens pull requests, and knowledge arriving on a timer is
+# knowledge nobody asked for — but the change removed the trigger without adding one, so all four
+# became unreachable code whose docstrings claimed they were "started on demand". That is the
+# defect this module's own header was written about: a durable workflow registered on the worker
+# with no caller anywhere. This is the adapter, in the same thin shape.
+MemoryJobKind = Literal["campaign", "playbook", "optimization", "observation-promotion"]
+
+# Typed as the no-argument workflow method Temporal's own overload takes, rather than as the four
+# classes: a bare dict of heterogeneous workflow types degrades to `type[object]` and `.run` stops
+# type-checking, which is how the launcher would silently accept something that is not a workflow.
+_MEMORY_JOBS: dict[MemoryJobKind, MethodAsyncNoParam[Any, list[str]]] = {
+    "campaign": CampaignSynthesisWorkflow.run,
+    "playbook": PlaybookDistillationWorkflow.run,
+    "optimization": OptimizationCampaignWorkflow.run,
+    "observation-promotion": ObservationPromotionWorkflow.run,
+}
+
+
+@tool
+async def synthesize_memory(kind: MemoryJobKind) -> str:
+    """Mine the reaction corpus for a class of knowledge and propose what it finds for review.
+
+    Use this when someone asks what the corpus now supports — "have we accumulated enough on this
+    route to write it up", "what campaigns are in the record", "is anything worth distilling" —
+    or after a large ELN ingest. Each kind re-reads **every** reaction from the configured ingest
+    sources and proposes notes through the PR-gate, so a human still decides what becomes
+    knowledge; this only decides *when to look*.
+
+    Nothing runs these on a timer (D-2026-08-25). A pull request nobody asked for is knowledge
+    arriving unbidden, which is the thing that decision removed — so the corpus is mined when a
+    person has a reason, and this tool is that reason arriving.
+
+    The kinds:
+
+    - `campaign` — narrate chains of experiments where one run's product is the next one's
+      reactant, citing every member.
+    - `playbook` — distil a transformation that recurs *across projects* into reusable judgment.
+    - `optimization` — group same-transformation runs into a screen and read it as a series.
+    - `observation-promotion` — propose playbook notes for the ungated observations that have
+      crossed both support thresholds. The mining that feeds it still runs on a timer, because it
+      writes rows nobody reviews; only this half opens pull requests.
+
+    Args:
+        kind: Which synthesis to run.
+
+    Returns:
+        The job id. Poll it with `get_durable_job_status`; the result is the list of pull requests
+        opened, which may be empty when the corpus supports nothing new.
+    """
+    authorize_trigger("synthesize_memory")
+    # `require_actor` before anything durable starts, the core rule (F4-T3): these open pull
+    # requests in the knowledge repository, and a PR with no author behind it is exactly what the
+    # gate exists to prevent.
+    actor = require_actor()
+    client = await connect()
+    workflow_id = _memory_job_id(kind)
+    try:
+        handle = await client.start_workflow(
+            _MEMORY_JOBS[kind],
+            id=workflow_id,
+            task_queue=settings.background_task_queue,
+            id_reuse_policy=WorkflowIDReusePolicy.ALLOW_DUPLICATE_FAILED_ONLY,
+        )
+    except WorkflowAlreadyStartedError:
+        # Today's run of this kind already exists — see `_memory_job_id` for why a day is the unit.
+        # Hand back its id rather than starting a second full-corpus scan, and deliberately no
+        # `job_started` signal: this run already existed and may already have finished, so
+        # announcing a start would be false. Same contract as the report launcher above.
+        return workflow_id
+    logger.info("memory synthesis %s started by %s as %s", kind, actor, handle.id)
+    record_job_started(handle.id, "memory-synthesis")
+    return handle.id
+
+
+def _memory_job_id(kind: MemoryJobKind) -> str:
+    """A deterministic id for one kind's synthesis, keyed on the **UTC date**.
+
+    There is no request to key on: the input is the whole corpus as it stands, so two chemists
+    asking the same morning want the same answer and must not each pay a full re-scan — nor open
+    two pull requests for one finding, which is what `memory.ids.with_id`'s anchor can produce when
+    a cluster grows between two runs.
+
+    A day is the unit because a day is what the retired Schedule used
+    (`memory_synthesis_schedule_minutes` defaulted to 1440), so the cadence a deployment already
+    reasoned about is preserved and only the *trigger* moved from a clock to a person.
+
+    The cost is stated rather than hidden: a second ask on the same day rejoins the first run
+    instead of re-mining, so an ingest landing between the two is not picked up until tomorrow. The
+    tool returns that run's id either way, so the caller sees a job rather than silence — but it is
+    the same job, and a chemist who needs the newer corpus reflected today needs a different unit
+    here, not a retry.
+    """
+    return f"memory-{kind}-{datetime.now(UTC).date().isoformat()}"
+
+
 @tool
 async def get_durable_job_status(job_id: str) -> DurableJobStatus:
     """Collect a durable job: its status, and its result once it has completed.
@@ -239,8 +345,15 @@ async def get_durable_job_status(job_id: str) -> DurableJobStatus:
 
     Returns:
         The status (running, completed, failed, cancelled, terminated, timed_out) and, once
-        completed, the one-line `summary` plus the structured `result`. A job still running reports
-        the status alone.
+        completed, the one-line `summary`, the structured `result`, and `calc_refs` — the
+        calculation keys the run rested on, which `propose_knowledge_note` takes so a conclusion
+        drawn from this job stays traceable to what computed it. A job still running reports the
+        status alone.
+
+        A geometry in the result is reported by its `structure_id` rather than by its coordinates.
+        That address is what the next calculation takes: pass it to `optimize_geometry`,
+        `compute_thermochemistry`, `scan_coordinate` or `compute_dft_energy` to carry one chosen
+        conformer forward instead of starting again from the molecule.
 
     Raises:
         ValueError: When the id is unknown to both Temporal and the durable record, or names a
@@ -303,7 +416,12 @@ async def _recorded_status(job_id: str) -> DurableJobStatus | None:
         job_id=job_id,
         status="completed",
         summary=record.summary,
-        result=record.result,
+        calc_refs=record.calc_refs,
+        # Projected on the way out as well as on the way in, and the difference is *old rows*: a
+        # record written before D-2026-08-21 holds the whole geometry, so a months-old conformer
+        # search collected here would still spend a context window on coordinates. The projection
+        # is idempotent, so applying it to a record already written without them costs a walk.
+        result=without_geometry(record.result),
         rationale=record.rationale,
     )
 
@@ -404,7 +522,13 @@ def completed_job_status(job_id: str, raw: Any) -> DurableJobStatus:
     """
     envelope = envelope_from_result(job_id, raw)
     return DurableJobStatus(
-        job_id=job_id, status="completed", summary=envelope.summary, result=envelope.data
+        job_id=job_id,
+        status="completed",
+        summary=envelope.summary,
+        calc_refs=envelope.calc_refs,
+        # A `calc` envelope arrives already projected (`CalcJobWorkflow`); this covers every other
+        # bundle's, and an in-flight run started by the previous release. Idempotent either way.
+        result=without_geometry(envelope.data),
     )
 
 

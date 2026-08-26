@@ -210,10 +210,22 @@ def _write_outputs(transcript_dir: Path, report: str, grades: list[Judgement]) -
 
 
 def _client(base_url: str | None) -> httpx.AsyncClient:
-    """A front-door client on the configured timeout — one construction, so three suites agree."""
+    """A front-door client on the configured timeout — one construction, so three suites agree.
+
+    Carries `live_probe_token` as a bearer when one is configured, and no Authorization header at
+    all when it is not. Both are correct postures rather than a fallback: a dev-posture front door
+    (`entra_required=false`) never reads the header, and an enforced one 401s every probe without
+    it — so an empty token is "this lane is not enforcing identity", not "we forgot".
+    """
+    headers = (
+        {"Authorization": f"Bearer {settings.live_probe_token}"}
+        if settings.live_probe_token
+        else {}
+    )
     return httpx.AsyncClient(
         base_url=base_url if base_url is not None else settings.live_probe_base_url,
         timeout=httpx.Timeout(settings.live_probe_timeout_seconds),
+        headers=headers,
     )
 
 

@@ -51,6 +51,22 @@ is now one import away: a summarizer reads retrieved evidence and writes text th
 as conversation, so it is an indirect-prompt-injection surface pointed straight at the thread. The
 char/4 estimator and two deterministic edits need no credential, no extra model call, and no trust.
 
+**This prohibition is about the thread, and `agent/condense.py` is not a counter-example to it**
+(`D-2026-08-25-a-summarizer-in-the-thread-and-a-condenser-behind-a-tool`). That module does make a
+model call over retrieved evidence, and it is named here because a reader arriving at this
+paragraph as *the* prohibition would otherwise read it as a contradiction. The two reasons above
+are the replay and the envelope, and a tool result is neither: it arrives as a `ToolMessage`, framed
+on the way out, crossing every `wrap_tool_call` gate, carrying its citations, and cleared by
+`ClearToolUsesEdit` like any other result rather than becoming history. Nothing below changes for
+it, and `disabled_summarizer` stays switched off.
+
+**It tells the repeat guard, and that coupling is deliberate.** `agent/repeat_guard.py` refuses a
+third identical call on the stated grounds that the model already holds the first answer. Clearing a
+tool result is exactly what makes that false, and both modules said so and neither acted: this
+module's placeholder lost a "re-run the tool if you still need it" line *because* the guard would
+deny it. One call to `forget_calls` at the moment a reduction is known closes it, and it is here
+rather than in the guard because this is the only place that can see one happen.
+
 **The metric exists because prose about compaction is what caused this defect.**
 `RecordContextCompaction` is the reader that can say the mechanism fired — it compares the full
 thread on the request's state against the list the edits actually produced, so the number is
@@ -58,7 +74,7 @@ measured downstream of the policy rather than asserted beside it.
 """
 
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -69,9 +85,10 @@ from langchain.agents.middleware import (
     ModelRequest,
 )
 from langchain.agents.middleware.context_editing import ContextEdit, TokenCounter
-from langchain_core.messages import AnyMessage, HumanMessage
+from langchain_core.messages import AnyMessage, HumanMessage, ToolMessage
 from langchain_core.messages.utils import count_tokens_approximately, trim_messages
 
+from chemclaw.agent.repeat_guard import forget_calls
 from chemclaw.core.config import settings
 from chemclaw.core.metrics_bridge import record_metric
 
@@ -82,15 +99,16 @@ logger = logging.getLogger(__name__)
 # tool that returned nothing — a different fact, and one the model would reasonably act on by
 # calling the tool again.
 #
-# **It states the fact and gives no instruction, and both halves of that are deliberate.** An
-# earlier version ended "Re-run the tool if you still need it", which was wrong twice over. It
-# contradicted `agent/repeat_guard.py`: inside one long harness turn a cleared result can be
-# re-fetched, cleared again and re-fetched, and the third identical call in a turn is *refused* —
-# so the placeholder was telling the model to do the thing a guard three middlewares away would
-# then deny. And it charged for the advice in the worst place: this string is repeated once per
-# cleared result, tens of times, in exactly the situation where the budget is already spent. The
-# guidance is paid for once instead, in the system prompt (`chemclaw_agent`), which is where the
-# marker is explained and where a sentence costs one copy rather than twenty.
+# **It states the fact and gives no instruction, and that is now for one reason where it used to be
+# two.** An earlier version ended "Re-run the tool if you still need it". That contradicted
+# `agent/repeat_guard.py` — a cleared result could be re-fetched, cleared and re-fetched, and the
+# third identical call in a turn was *refused*, so the placeholder told the model to do what a guard
+# three middlewares away would then deny. **That half is fixed**: a reduction now clears the repeat
+# counters (`_record_reduction` calls `forget_calls`), because after a clearing an identical call is
+# a re-read rather than a repeat. What stands is the cost: this string is repeated once per cleared
+# result, tens of times, in exactly the situation where the budget is already spent. The guidance is
+# paid for once instead, in the system prompt (`chemclaw_agent`), where a sentence costs one copy
+# rather than twenty.
 TOOL_RESULT_PLACEHOLDER = (
     "[Earlier tool result dropped to stay inside this session's context budget.]"
 )
@@ -262,7 +280,14 @@ def context_compaction_middleware() -> list[Any]:
                 # renaming an ENV-visible knob to fix a name would cost every deployment that sets
                 # it, so the name stays and `core/config/agent.py` says what it now means.
                 ClearToolUsesEdit(
-                    trigger=settings.agent_context_token_budget,
+                    # Its own trigger, well below the budget the window uses. The two edits are
+                    # different instruments: this one is lossless — the `tool_use` record survives
+                    # and the model can re-fetch — so it is cheap enough to run early, and every
+                    # token it reclaims early is a conversation group the window below never has to
+                    # delete. Sharing one threshold meant nothing reduced until 100k and then both
+                    # fired together, which is the expensive edit doing work the free one could
+                    # have done.
+                    trigger=settings.agent_tool_result_clear_trigger,
                     keep=settings.agent_keep_last_tool_groups,
                     placeholder=TOOL_RESULT_PLACEHOLDER,
                 ),
@@ -302,6 +327,41 @@ def _record_reduction(request: ModelRequest[Any]) -> None:
     record_metric(
         lambda m: m.increment("chemclaw_context_reclaimed_tokens_total", float(reclaimed))
     )
+    # The one place the reduction is *known*, so the one place that can tell the repeat guard its
+    # premise has expired. A cleared tool result leaves the model without the answer the guard
+    # assumes it is holding, and the third identical call was then refused with advice — "answer
+    # from what you already have" — about something it no longer had. See `repeat_guard`.
+    #
+    # The calls are named rather than the counters wiped: clearing keeps the newest results, so a
+    # blanket reset forgave repeats the model can still read.
+    forget_calls(_cleared_calls(request.messages))
+
+
+def _cleared_calls(messages: Sequence[AnyMessage]) -> list[tuple[str, Any]]:
+    """The `(tool name, arguments)` of every result this reduction replaced with a placeholder.
+
+    Upstream stamps `response_metadata["context_editing"]["cleared"]` on a `ToolMessage` it clears,
+    which is the only reliable marker — the placeholder text is first-party and a content match
+    would break the moment it is reworded. The arguments come from the originating `AIMessage`'s
+    `tool_calls`, because the guard's identity is the call, not the tool.
+
+    The metadata key is pinned in `tests/test_upstream_surface.py`.
+    """
+    by_id: dict[str, tuple[str, Any]] = {}
+    for message in messages:
+        for call in getattr(message, "tool_calls", None) or ():
+            if call.get("id"):
+                by_id[str(call["id"])] = (str(call.get("name", "")), call.get("args"))
+    cleared: list[tuple[str, Any]] = []
+    for message in messages:
+        if not isinstance(message, ToolMessage):
+            continue
+        if not message.response_metadata.get("context_editing", {}).get("cleared"):
+            continue
+        identity = by_id.get(str(message.tool_call_id))
+        if identity is not None:
+            cleared.append(identity)
+    return cleared
 
 
 class RecordContextCompaction(AgentMiddleware[Any, Any, Any]):

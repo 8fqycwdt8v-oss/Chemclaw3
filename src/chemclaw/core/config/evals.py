@@ -38,6 +38,16 @@ class EvalSettings(BaseSettings):
     # non-exact-tie helped/hurt, defeating the band); raise it to the actual measurement noise
     # of the metric a given case-set exercises.
     eval_ab_epsilon: float = Field(default=1e-6, ge=0.0)
+    # What a cached token costs relative to an input token, for `turn_cost_ratio`. These are a
+    # provider's price list rather than a property of this system, which is exactly why they are
+    # settings: a re-pricing must not require a code change, and a deployment on a different
+    # provider must not inherit Anthropic's ratios. The defaults are Anthropic's published
+    # multipliers — a cache read is a tenth of an input token, a cache write a quarter more than
+    # one — and they are the reason the metric scores *billed* tokens rather than tokens sent.
+    # Scoring what was sent would book a new cache breakpoint as a regression, since it moves the
+    # two counts in opposite directions.
+    eval_cache_read_weight: float = Field(default=0.1, ge=0.0)
+    eval_cache_write_weight: float = Field(default=1.25, ge=0.0)
     # Eval drift detection (plan F10-F2). A `background-jobs` workflow re-runs the committed
     # case-set on a cadence and alerts when an aggregate metric moves further than a *relative*
     # band (`eval_drift_epsilon` × the baseline value) from the Git-committed baseline
@@ -61,6 +71,15 @@ class EvalSettings(BaseSettings):
     # (which bind a server) because the runner is a *client* and is routinely pointed at a
     # deployment it did not start.
     live_probe_base_url: str = "http://127.0.0.1:8000"
+    # The bearer the probe runner presents. Empty against a dev-posture front door, which reads no
+    # Authorization header at all; set when the lane runs with `entra_required=true`, where every
+    # probe is otherwise a 401 before a single turn starts.
+    #
+    # A token rather than a tenant/client/secret triple, because the runner is not an OAuth client
+    # and should not become one: whoever starts the lane already has to mint an identity with the
+    # roles the probes need (the expensive-job probes need a privileged one), so the only thing
+    # this needs to know is the result. `infra/live/processes.sh` mints it and exports this.
+    live_probe_token: str = ""
     # One turn's ceiling. Generous: a probe that triggers an inline calculation legitimately
     # waits, and cutting it short would record a system timeout as a model failure.
     live_probe_timeout_seconds: float = Field(default=300.0, gt=0)

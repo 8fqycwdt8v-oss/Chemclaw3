@@ -19,6 +19,7 @@ made MAF's own `header_provider` look usable (see `chemclaw.connectors.identity`
 """
 
 import asyncio
+import shlex
 from pathlib import Path
 
 import httpx
@@ -39,7 +40,7 @@ from chemclaw.connectors.identity import (
     turn_headers,
     turn_identity_hook,
 )
-from chemclaw.connectors.manifest import BearerAuth, NoAuth
+from chemclaw.connectors.manifest import BearerAuth, HttpEndpoint, NoAuth
 from chemclaw.core.config import settings
 from chemclaw.core.identity_context import (
     reset_current_correlation_id,
@@ -379,15 +380,26 @@ def test_an_unreadable_manifest_makes_the_connector_refuse_everything(
     )
 
 
-def test_a_mode_none_bundle_resolves_to_no_auth(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The other real-resolution case: every shipped bundle declares `mode: none`.
+def test_a_shipped_bundle_resolves_to_the_variable_its_manifest_names() -> None:
+    """The other real-resolution case: a discovered bundle resolves to a *name*, not a sentinel.
 
     Without this, "fail closed on an unreadable manifest" could be satisfied by failing closed
-    always, which would break `make connectors`, the dev composite and the transport tests.
+    always — which would refuse every MCP call in the dev composite and the transport tests, and
+    look exactly like a working credential gate while gating nothing that could ever open.
+
+    This used to assert `is None` for `molfp`, on the premise that every shipped bundle declared
+    `auth: mode: none`. That premise was the finding rather than the fixture: the four bundles this
+    repository hosts served their whole tool surface to anything that could reach the pod. The
+    assertion is now the positive one, and `test_an_app_no_bundle_backs_is_not_refused` carries the
+    `None` case it used to stand in for.
     """
+    from chemclaw.connectors.registry import enabled
     from chemclaw.connectors.server import _declared_bearer_env
 
-    assert _declared_bearer_env("molfp") is None
+    manifest = next(m for m in enabled() if m.name == "molfp")
+    endpoint = manifest.endpoint
+    assert isinstance(endpoint, HttpEndpoint) and isinstance(endpoint.auth, BearerAuth)
+    assert _declared_bearer_env("molfp") == endpoint.auth.token_env
 
 
 def test_a_shipped_bundle_that_discovery_missed_is_unresolved_not_unguarded(
@@ -579,3 +591,183 @@ def test_a_tool_reads_the_caller_of_the_call_it_serves_not_of_the_handshake() ->
         "a tool called by bob on a session alice opened must be attributed to bob; "
         f"got {seen} — the caller is frozen at the MCP handshake again"
     )
+
+
+def test_every_bundle_this_repository_hosts_authenticates_its_own_mcp() -> None:
+    """A bundle we serve declares a credential — asserted over the manifests, not remembered.
+
+    Four of the six endpoint-serving bundles shipped `auth: mode: none` (`bo`, `calc`, `molfp`,
+    `rxnfp`). The NetworkPolicy was the only thing between any pod in the namespace and a tool that
+    starts durable HPC work, and a NetworkPolicy selects peers rather than paths — so a compromised
+    or merely curious neighbour in the same namespace could launch one.
+
+    Written as a sweep over the enabled set rather than a list of four names, because the failure
+    this guards against is the *fifth* bundle: a list would still pass the day someone adds one
+    with `mode: none`, which is exactly how the first four came to be that way.
+
+    `chem` and `safety` are covered by the same sweep and were already correct — their credential
+    belongs to `Chemclaw3-mcp`, which enforces it on its own `/mcp`.
+    """
+    from chemclaw.connectors.registry import enabled
+
+    open_endpoints = [
+        manifest.name
+        for manifest in enabled()
+        if isinstance(manifest.endpoint, HttpEndpoint)
+        and not isinstance(manifest.endpoint.auth, BearerAuth)
+    ]
+    assert not open_endpoints, (
+        f"connector(s) {open_endpoints} serve an MCP endpoint with no credential. A NetworkPolicy "
+        "selects peers, not paths, so nothing else stands between a pod in the namespace and these "
+        "tools. Declare `auth: mode: bearer` with a `token_env`, add the key to "
+        "`deploy/helm/chemclaw/values.yaml`'s `secrets.optionalKeys`, and let "
+        "`chemclaw.cli.connectors_dev` mint it for local work."
+    )
+
+
+def test_a_shipped_manifests_declaration_is_what_the_gate_actually_reads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The declaration reaches the middleware: no token is a 401, the declared value is not.
+
+    The other bearer tests here patch `_declared_bearer_env`, which proves the *gate* and says
+    nothing about whether a real `connector.yaml` reaches it. This one names a shipped bundle and
+    lets resolution run for real, so a manifest that stopped declaring a credential — or declared
+    one under a variable nothing sets — fails here rather than in a cluster.
+    """
+    from starlette.requests import Request
+
+    from chemclaw.connectors.registry import enabled
+    from chemclaw.connectors.server import BearerAuthMiddleware
+
+    manifest = next(m for m in enabled() if m.name == "molfp")
+    endpoint = manifest.endpoint
+    assert isinstance(endpoint, HttpEndpoint) and isinstance(endpoint.auth, BearerAuth)
+    token_env = endpoint.auth.token_env
+    monkeypatch.setenv(token_env, "a-real-looking-token")
+    middleware = BearerAuthMiddleware(app=None, connector="molfp")
+
+    reached: list[bool] = []
+
+    async def _application(_request: Request) -> Response:
+        reached.append(True)
+        return Response(status_code=200)
+
+    async def _status(headers: list[tuple[bytes, bytes]]) -> int:
+        request = Request(
+            {
+                "type": "http",
+                "method": "POST",
+                "path": "/mcp",
+                "headers": headers,
+                "query_string": b"",
+            }
+        )
+        response = await middleware.dispatch(request, _application)
+        return int(response.status_code)
+
+    assert asyncio.run(_status([])) == 401
+    assert asyncio.run(_status([(b"authorization", b"Bearer wrong")])) == 401
+    assert reached == [], "an unauthenticated request reached the MCP application"
+    assert asyncio.run(_status([(b"authorization", b"Bearer a-real-looking-token")])) == 200
+    assert reached == [True]
+
+
+def test_the_probe_allowlist_survives_being_mounted_under_a_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`/healthz` stays open when the app is mounted at `/<name>`, which is how dev serves it.
+
+    Starlette does not strip a mount prefix from `scope["path"]` — it records it in `root_path` and
+    leaves the path whole — so an allowlist written against `/healthz` matches at the root and
+    silently stops matching under a mount. Each connector is its own Deployment in the cluster, so
+    the bug was invisible there; `chemclaw.cli.connectors_dev` mounts every bundle under its name,
+    which is what `make connectors`, the live lane and `tests/test_connector_transport.py` run.
+
+    It was invisible everywhere until the four bundles we host declared a credential, because
+    nothing was refused. With one declared, the readiness probe `connectors.health` makes against
+    `health_url` would have come back 401 and reported the whole fleet unreachable.
+
+    Driven at the scope level, mount prefix and all, because the shape is the whole point.
+    """
+    from starlette.requests import Request
+
+    from chemclaw.connectors.server import BearerAuthMiddleware
+
+    monkeypatch.setattr(
+        "chemclaw.connectors.server._declared_bearer_env", lambda name: "CHEMCLAW_PROBE_TOKEN"
+    )
+    monkeypatch.setenv("CHEMCLAW_PROBE_TOKEN", "s3cret")
+    middleware = BearerAuthMiddleware(app=None, connector="probe")
+
+    async def _application(_request: Request) -> Response:
+        return Response(status_code=200)
+
+    async def _status(path: str, root: str) -> int:
+        request = Request(
+            {
+                "type": "http",
+                "method": "GET",
+                "path": path,
+                "root_path": root,
+                "headers": [],
+                "query_string": b"",
+            }
+        )
+        response = await middleware.dispatch(request, _application)
+        return int(response.status_code)
+
+    assert asyncio.run(_status("/healthz", "")) == 200, "unmounted probe"
+    assert asyncio.run(_status("/molfp/healthz", "/molfp")) == 200, "mounted probe"
+    assert asyncio.run(_status("/molfp/metrics", "/molfp")) == 200, "mounted scrape"
+    # The exemption is the probe routes, not the prefix: everything else still needs the token.
+    assert asyncio.run(_status("/molfp/mcp", "/molfp")) == 401, "mounted MCP surface"
+
+
+def test_the_dev_runner_mints_a_credential_only_where_both_ends_are_ours(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A token is invented for the bundles we serve, and never for someone else's server.
+
+    `chem` and `safety` declare a bearer too, and that credential belongs to `Chemclaw3-mcp`.
+    Minting a random value for one would replace a clear `MissingConnectorCredential` naming the
+    unset variable with a 401 from a server that has never heard of the token — a worse failure,
+    and a slower one to diagnose. A secret is only ours to invent when both ends of the call are.
+    """
+    from chemclaw.cli.connectors_dev import bearer_token_envs, ensure_dev_tokens
+
+    monkeypatch.delenv("CHEMCLAW_CHEM_TOKEN", raising=False)
+    monkeypatch.delenv("CHEMCLAW_SAFETY_TOKEN", raising=False)
+    for env_var in bearer_token_envs().values():
+        monkeypatch.delenv(env_var, raising=False)
+
+    minted = ensure_dev_tokens()
+
+    assert set(minted) == set(bearer_token_envs().values())
+    assert "CHEMCLAW_CHEM_TOKEN" not in minted
+    assert "CHEMCLAW_SAFETY_TOKEN" not in minted
+    assert all(len(token) >= 24 for token in minted.values()), "a short token is not a credential"
+
+
+def test_an_operator_supplied_credential_is_kept_and_shell_quoted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An existing value survives untouched, and the printed export cannot break out of its quotes.
+
+    Both halves matter. Keeping the value is what lets a caller decide the secret and have both
+    processes agree on it. Quoting it is what stops a value carrying a `'` from ending the
+    assignment early and turning the rest of a *credential* into shell words — the output of
+    `--export-env` is `eval`ed by `infra/live/processes.sh`.
+    """
+    from chemclaw.cli.connectors_dev import _export_lines, bearer_token_envs, ensure_dev_tokens
+
+    env_var = bearer_token_envs()["molfp"]
+    monkeypatch.setenv(env_var, "it's a token; echo pwned")
+
+    minted = ensure_dev_tokens()
+    assert minted[env_var] == "it's a token; echo pwned"
+
+    line = next(line for line in _export_lines({}, minted) if line.startswith(f"export {env_var}="))
+    # Round-trip through the shell's own parser rather than asserting on the escaping: what matters
+    # is the value a caller ends up with, not which of the several correct spellings we emit.
+    assert shlex.split(line) == ["export", f"{env_var}=it's a token; echo pwned"]

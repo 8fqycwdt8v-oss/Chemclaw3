@@ -53,9 +53,14 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.durable.job_record import JobRecord, note_with_run_provenance, record_job
     from chemclaw.durable.memory_jobs import publish_memory_note_activity
     from chemclaw.durable.notify import notify_session_best_effort
+    from chemclaw.durable.publish_results import JobPublishInput, publish_job_result
     from chemclaw.kg.note import Note
 
-from chemclaw.durable.publish import BAD_DATA_RETRY, publish_note_best_effort
+from chemclaw.durable.publish import (
+    BAD_DATA_RETRY,
+    publish_note_best_effort,
+    publish_result_best_effort,
+)
 from chemclaw.durable.registry import durable_workflow
 
 
@@ -151,6 +156,33 @@ class ConnectorJobResult(BaseModel):
     summary: str = Field(min_length=1)
     data: dict[str, Any] = Field(default_factory=dict)
     note: Note | None = None
+    # The calculation keys this run rested on, so a conclusion drawn from it can cite them
+    # (D-2026-08-21). `propose_knowledge_note`'s `calc_refs` argument has told the model to "get
+    # them from a job's result envelope" since D-133 and no envelope carried any: the only
+    # producers in `src/` were the BO featurizer and the QM workflow's own note, neither of which
+    # an agent drafting a note from a calculation it just ran can reach. Without them a stale
+    # calculation cannot be traced to the conclusions drawn from it, which is the whole property
+    # `calc_refs` exists for.
+    #
+    # Additive and defaulted, because this crosses the Temporal wire and histories are in flight —
+    # the same rule `SpeciesEnergy.method` follows. Empty means "this job recorded none", never
+    # "it used none".
+    calc_refs: list[str] = Field(default_factory=list)
+    # The name of the pydantic model `data` was dumped from — the one thing `data: dict[str, Any]`
+    # destroys and nothing downstream can recover. `chemclaw.publish` dispatches on it exactly
+    # (`PAYLOAD_PROJECTORS`), falling back to inferring a projector from a `calc_type` prefix; a
+    # composite has no cache key and therefore no `calc_type` to infer from, so without this field
+    # **every composite is silently dropped** — measured: all four shipped jobs resolved to no
+    # projector, which is the case the publish seam was built for.
+    #
+    # Set from `type(result).__name__` at the site that still holds the typed result, never guessed
+    # downstream from the connector and job names: those are a *route*, and two routes may return
+    # one shape while one route's return type may change without its name changing.
+    #
+    # Additive and defaulted for the same reason `calc_refs` above is: it crosses the Temporal wire
+    # and histories are in flight. Empty means "this job did not say", which is what every history
+    # written before this field existed will decode to, and which the projector treats as "infer".
+    payload_kind: str = ""
 
 
 def envelope_from_result(job_id: str, raw: Any) -> ConnectorJobResult:
@@ -241,7 +273,9 @@ def job_record_for(
         # is the part Temporal's expiring history was the only copy of.
         result=result.data,
         note_id=result.note.id if result.note is not None else "",
+        calc_refs=result.calc_refs,
         runtime_seconds=runtime_seconds,
+        payload_kind=result.payload_kind,
     )
 
 
@@ -358,6 +392,43 @@ class ConnectorJobWorkflow:
         )
         return result
 
+    async def _publish_result(self, job: ConnectorJobInput, result: ConnectorJobResult) -> None:
+        """Offer this run's own result to the external results store, if one is configured.
+
+        The envelope's `data` is the composite the job produced - a reaction energy, a solvent
+        screen, an ensemble - which is precisely the shape that has no `calculation_results` row
+        and therefore reaches a results store through no other path.
+
+        `calc_ref` is the workflow id rather than a cache key, because a composite has no cache
+        key: its identity is the run. That is also what makes it idempotent, since the workflow id
+        is itself derived deterministically from the job and its arguments.
+
+        Runs through an activity rather than inline: a workflow may not touch a database, and
+        `publish_result_activity` carries the same bounded retry every other best-effort step here
+        uses.
+        """
+        if not result.data:
+            return
+        job_id = workflow.info().workflow_id
+        await publish_result_best_effort(
+            publish_job_result,
+            [
+                JobPublishInput(
+                    calc_ref=job_id,
+                    calc_type=f"{job.connector}.{job.job}",
+                    payload_kind=result.payload_kind,
+                    payload=result.data,
+                    depends_on=list(result.calc_refs),
+                    actor=job.requested_by,
+                    session_id=job.session_id,
+                    correlation_id=job.correlation_id,
+                    job_id=job_id,
+                    rationale=job.rationale,
+                )
+            ],
+            label=f"{job.connector}:{job.job}",
+        )
+
     async def _notify_failure(self, job: ConnectorJobInput, exc: BaseException) -> None:
         """Tell the session its job failed, before the failure propagates and closes this run.
 
@@ -396,6 +467,15 @@ class ConnectorJobWorkflow:
         # expensive campaign round the retry loop — but logged at error level, because unlike a
         # failed note this loses data nothing else holds.
         await self._record_run(record)
+        # The external results store, if a deployment has one. Beside the durable record and before
+        # the note, because it is the same kind of obligation the other two are: cross-cutting, and
+        # "each connector remembers" is the discipline that fails silently. Best-effort for the
+        # same reason as its neighbours — the science is already durable by the time this runs.
+        #
+        # This is the hook that reaches the *composites*. The primitives a job consumed were each
+        # published by `cached_compute` as they were computed; what only exists here is the
+        # composite the job assembled from them, which has no cache row of its own by design.
+        await self._publish_result(job, result)
         if job.publish_to_graph and result.note is not None:
             # The same PR-gate activity the memory-synthesis jobs use — one write path into the
             # graph, on the light background queue, bounded retries, never failing the job. The

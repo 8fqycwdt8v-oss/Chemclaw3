@@ -171,7 +171,7 @@ def _recommended_molecule(by_name: dict[str, Parameter], best: Observation) -> s
     `(type, compound_smiles)` and `find_notes` searches it — and a `bo-candidate` carried none, so
     a recommendation to *make a specific molecule* was invisible to both.
 
-    Only when there is exactly one, for the reason `ingest/eln/note.py::_principal_product` gives
+    Only when there is exactly one, for the reason `ingest/eln/record.py::_principal_product` gives
     about the same field: "the molecule this note is about" has no honest answer for a
     recommendation naming a ligand *and* a substrate, and picking one would file the note under a
     compound nobody chose. A wrong `compound_smiles` is worse than none — it is what a by-compound

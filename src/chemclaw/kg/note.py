@@ -71,6 +71,31 @@ def note_id_for_reaction(record_id: str) -> str:
     return f"reaction-{record_id}"
 
 
+# Id namespaces that resolve *outside* the markdown graph (D-2026-08-25).
+#
+# An ELN transcription is data, not a knowledge claim, so it lives in `reaction_records` rather
+# than as a file in `knowledge/` — but `memory.campaign` and `memory.optimization` still cite each
+# run as `[[reaction-<id>]]`, which is what makes a campaign narrative traversable. Without this,
+# every campaign, playbook and optimization note would fail `kg-validate` the moment reactions
+# stopped being files, for links that resolve perfectly well.
+#
+# The cost is stated rather than hidden: offline validation can check the *shape* of these ids and
+# not their existence, because `kg-validate` runs in CI with no database. Existence is checked
+# against the store by `kg.validate`, which CI runs with a database (`ReactionRecordStore.known`).
+EXTERNAL_ID_PREFIXES = ("reaction-",)
+
+
+def resolves_outside_graph(note_id: str) -> bool:
+    """Whether `note_id` names a record in a store rather than a note in the graph.
+
+    One predicate, because two callers ask it — `kg.graph.dangling_links` (is this link broken?)
+    and `agent.graph_tools.expand_note` (where do I look this up?) — and a link the first calls
+    fine that the second cannot find is exactly the two-spellings failure `note_id_for_reaction`
+    exists to prevent.
+    """
+    return note_id.startswith(EXTERNAL_ID_PREFIXES)
+
+
 def note_relative_path(note_type: str, note_id: str) -> str:
     """Where a note lives inside the knowledge directory: `<type>/<id>.md`.
 
@@ -161,6 +186,30 @@ def mentioned_ids(text: str) -> list[str]:
 # `_` is included because BO note ids embed registry objective names (e.g.
 # `bo-reizman_suzuki-<sha>`).
 _SLUG = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+
+
+def require_note_slug(value: str) -> str:
+    """Return `value` if it is a safe note slug, else raise `ValueError` naming the rule.
+
+    Extracted from `Note`'s validator because `ingest.eln.records.ReactionRecord` needs the same
+    rule and must not restate it. An ELN entry id no longer becomes a filename directly — a
+    transcription is a database row (D-2026-08-25) — but it still becomes the `reaction-<id>`
+    citation that campaign and playbook notes carry into git, so it reaches a file and a diff one
+    indirection later. Dropping the constraint when the storage changed would have been a silent
+    widening of what external JSON can put into a committed note body.
+
+    A few git ref rules the character class alone does not cover are refused explicitly (defense in
+    depth): `..` (an invalid ref component, e.g. `a..b`), a trailing `.`, and a `.lock` suffix —
+    git rejects all three, so an id that passed the schema would otherwise fail later at branch
+    creation.
+    """
+    if ".." in value or value.endswith((".", ".lock")) or not _SLUG.fullmatch(value):
+        raise ValueError(
+            f"{value!r} is not a safe note slug (allowed: {_SLUG.pattern}; "
+            "no '..', trailing '.', or '.lock' suffix)"
+        )
+    return value
+
 
 # `CalculationKey.as_str()`: `calc_type@calc_version:input_hash:params_hash`. The version segment
 # is the loose one on purpose — it carries a method name and a build string
@@ -334,6 +383,48 @@ class Relation(TemporalWindow):
         return f"relation {self.rel} -> {self.to}"
 
 
+class ProcessConditions(BaseModel):
+    """The setpoints and outcomes a run recorded, as numbers rather than as prose.
+
+    **Why this is frontmatter and not left in the body.** `note_from_ord_reaction` renders these
+    into readable bullets and the structure is then gone: `OrdReaction` is never persisted — it
+    exists only transiently inside `durable.memory_jobs.read_corpus`, which re-reads and re-maps the
+    entire ELN from the beginning of time on every call, on the background worker, behind an ingest
+    half the chat pod deliberately does not import. So at turn time the numbers a chemist compares
+    exist only as sentences, and anything wanting to compare runs had to re-derive them from prose
+    it had just finished rendering.
+
+    Putting them here rather than in a second table keeps one source of truth: the git-markdown
+    graph stays authoritative (D-004), `expand_note` already returns frontmatter, `kg-validate`
+    already checks it, and there is no migration and no store to keep in step.
+
+    **Exactly the columns the comparative table renders, and no more.** This is not a serialization
+    of `OrdReaction` — that would be the second, untyped schema `attributes` argues against. The
+    species sets behind "solvent DMF → 2-MeTHF" are deliberately absent: they need the full input
+    list, and a turn that wants them reads the prose, which is where the free-text half of a digest
+    is looking anyway.
+
+    Every field is optional because every one of them is optional on the record. Absent means "not
+    recorded", never "zero" — the distinction `comparison.MISSING` renders and `drop_empty_columns`
+    reads.
+    """
+
+    temperature_c: float | None = None
+    time_h: float | None = Field(default=None, ge=0.0)
+    yield_percent: float | None = Field(default=None, ge=0.0, le=100.0)
+    purity_percent: float | None = Field(default=None, ge=0.0, le=100.0)
+    # `OrdReaction.outcome_class`'s value. Carried because a failure that reads as an ordinary run
+    # is the one row in a comparison a chemist must not misread — and because `outcome_class`
+    # defaults to success, so silence here means "the source did not say", not "it worked".
+    outcome: Literal["success", "failure", "inconclusive"] | None = None
+    # `OrdReaction.major_impurity()`'s answer, by whatever identity the record carries. A process
+    # campaign is rarely optimizing yield; it is optimizing the impurity the yield hides.
+    major_impurity: str | None = None
+    impurity_area_percent: float | None = Field(default=None, ge=0.0, le=100.0)
+
+    model_config = ConfigDict(frozen=True)
+
+
 class Note(TemporalWindow):
     """One knowledge-graph note: its frontmatter metadata plus its Markdown body.
 
@@ -352,20 +443,8 @@ class Note(TemporalWindow):
     @field_validator("id", "type")
     @classmethod
     def _slug_only(cls, value: str) -> str:
-        """Reject path/ref metacharacters — see the `_SLUG` rationale above.
-
-        A few git ref rules the character class alone does not cover are refused
-        explicitly (defense in depth), because the slug becomes the `note/<id>`
-        branch in the PR-gate: `..` (an invalid ref component, e.g. `a..b`), a
-        trailing `.`, and a `.lock` suffix — git rejects all three, so an id that
-        passed the schema would otherwise only fail later at branch creation.
-        """
-        if ".." in value or value.endswith((".", ".lock")) or not _SLUG.fullmatch(value):
-            raise ValueError(
-                f"{value!r} is not a safe note slug (allowed: {_SLUG.pattern}; "
-                "no '..', trailing '.', or '.lock' suffix)"
-            )
-        return value
+        """Reject path/ref metacharacters — see `require_note_slug`."""
+        return require_note_slug(value)
 
     compound_smiles: str | None = None
     tags: list[str] = Field(default_factory=list)
@@ -378,6 +457,12 @@ class Note(TemporalWindow):
     # `[[wikilinks]]`: an edge to something the graph does not contain is a dangling link, and
     # `kg-validate` would fail the very PR that added the note. Shape-validated here; whether the
     # target exists is a question only a database can answer, and `kg-validate` runs without one.
+    # The run's recorded setpoints and outcomes, when this note is about one (`ProcessConditions`
+    # says why they are frontmatter). Note-type-specific on a shared model exactly as
+    # `compound_smiles` above is, and for the same reason: the alternative is a second note class.
+    # `valid_from` already carries the date the run was performed (D-162), so it is not repeated
+    # here — one fact, one field.
+    conditions: ProcessConditions | None = None
     calc_refs: list[str] = Field(default_factory=list)
     artifact_refs: list[str] = Field(default_factory=list)
     # Typed edges in structured form, for the metadata a body wikilink cannot carry (STO-8/9).

@@ -4,6 +4,14 @@ description: >-
   Judgment for choosing which fast calculator to run for a given question
   (semiempirical energy vs. predicted property) and reading the result honestly.
 tools:
+  - refine_ensemble
+  - compute_ensemble_property
+  - rank_species
+  - survey_bond_strengths
+  - enumerate_tautomers
+  - enumerate_protonation_states
+  - enumerate_bond_cleavages
+  - describe_topology
   - compute_xtb_energy
   - compute_electronic_properties
   - predict_site_reactivity
@@ -58,7 +66,10 @@ calculation; this skill assumes that decision is already made.
   silently over a basic one, and individual predictions miss by up to two units.
 - **Which atom reacts (regioselectivity)** → `predict_site_reactivity` (condensed
   Fukui indices; three fast single points). Load the `reactivity-descriptors` skill
-  before interpreting the ranking — it ranks sites *within* one molecule only.
+  before interpreting the ranking — it ranks sites *within* one molecule only. It now
+  takes a `structure_id`, so the question a chemist actually asks after a conformer
+  search — *which site is reactive in **this** conformer* — is answerable rather than
+  answered on a fresh embedding. A second mode at the same geometry is free.
 - **Frontier orbitals, dipole, partial charges, bond orders** →
   `compute_electronic_properties` (one single point). Best used to *compare* related
   molecules; also covered by `reactivity-descriptors`.
@@ -88,6 +99,31 @@ a species left out of the map gets sigma=1 and the result reports **no ΔG**, na
 while ΔE and ΔH — which sigma does not touch — stand as reported. Stating 1 explicitly is a real
 statement and does yield a ΔG, so state it for the unsymmetric species too rather than omitting
 them.
+
+## When the question is about a *set*, not a structure
+
+Everything above answers about one structure. Four jobs answer about a set, and the judgment for
+all of them is in **`ensemble-workflows`** — load it before using any of them, and before deciding
+that a single-structure answer is good enough.
+
+- **Which form is this molecule actually in?** → `rank_species` over `enumerate_tautomers`, or the
+  fixed sequence `run_tautomer_resolution`. Ask this *first* on anything with a mobile proton
+  between heteroatoms: every other number here describes whichever tautomer was drawn.
+- **What is charged, at which pH?** → `enumerate_protonation_states` then `rank_species`, or
+  `run_microspecies_profile`. This is the amphoteric and polyprotic case `predict_pka` and
+  `predict_logd` refuse; it is not a substitute for them on a single site, where they are calibrated
+  and this is not.
+- **Is this property a real number for a floppy molecule?** → `compute_ensemble_property`. Returns
+  a mean *and a spread*, and the spread is the finding as often as the mean is.
+- **Which bond breaks first?** → `enumerate_bond_cleavages` then `survey_bond_strengths`, or
+  `run_bond_strength_survey`.
+- **How much of the folded form is there?** → `refine_ensemble`, which re-weights by free energy
+  instead of electronic energy. A different treatment, not a better one, and it costs a Hessian per
+  member — reach for it when a *population* is the answer, not when a geometry is.
+
+The enumeration tools are free and structural; only the ranking costs anything. So enumerate first,
+look at the set, and then decide what to spend. `describe_topology` is free too and answers whether
+the molecule is flexible enough for a search to find anything.
 
 ## The cost ladder, and when a tool hands back a job id
 

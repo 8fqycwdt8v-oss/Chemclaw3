@@ -38,6 +38,8 @@ from collections.abc import Mapping
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any
 
+from pydantic import SecretStr
+
 from chemclaw.core.config import settings
 from chemclaw.core.identity_context import get_current_actor, get_current_correlation_id
 from chemclaw.core.metrics_bridge import degraded
@@ -555,11 +557,16 @@ def _trace_config(trace_config: Any) -> Any:
 # `repr` of a settings object — and cannot false-positive on anything else.
 #
 # Listed rather than derived from a name pattern (`*_token`, `*_secret`), because deriving would
-# silently include `entra_token_endpoint` and `budget_max_tokens_per_user` — a URL and an integer —
-# and silently *exclude* the next secret whose name does not match. A list is one line per addition
-# and is visible in review, which is what a credential inventory should be.
+# silently include `calc_server_token_env` and `budget_max_tokens_per_user` — a variable *name* and
+# an integer — and silently *exclude* the next secret whose name does not match. A list is one line
+# per addition and is visible in review, which is what a credential inventory should be.
 _SECRET_SETTINGS = (
     "llm_api_key",
+    # The fallback endpoint's own credential, absent from this list until 2026-08-26 — the one
+    # credential in `Settings` that no redaction covered. It is a separate field precisely so a
+    # second endpoint can hold a *different* key, so matching the primary's value would not have
+    # caught it.
+    "llm_fallback_api_key",
     "hpc_api_token",
     "hpc_artifact_store_token",
     "temporal_api_key",
@@ -785,12 +792,32 @@ def _published_values() -> frozenset[str]:
     published: set[str] = set()
     for name in _SECRET_SETTINGS:
         field = type(settings).model_fields.get(name)
-        default = getattr(field, "default", None)
-        if isinstance(default, str) and default:
+        default = _secret_text(getattr(field, "default", None))
+        if default:
             published.add(default)
             if password := _dsn_password(default):
                 published.add(password)
     return frozenset(published)
+
+
+def _secret_text(value: object) -> str:
+    """The string inside a settings value, whether it is a `str` or a `SecretStr`, else `""`.
+
+    **The type change that would have silently disabled this module.** Nine `Settings` fields are
+    redacted by exact value match, and both readers here tested `isinstance(value, str)` — which a
+    `SecretStr` is not. Converting the credentials to `SecretStr`
+    (`D-2026-08-26-a-credential-is-a-type-not-a-convention`) would therefore have skipped every one
+    of them: `str(SecretStr("k"))` is `"**********"`, so the filter would have gone on matching
+    asterisks against log lines and reporting success. Two guarantees that look like one, where the
+    stronger-looking one turns the other off.
+
+    `str` is still accepted, and not only for the DSNs: a test that monkeypatches a plain string
+    onto the settings object must still be redacted, because a filter that only covers correctly
+    typed values covers less than the one it replaced.
+    """
+    if isinstance(value, SecretStr):
+        return value.get_secret_value()
+    return value if isinstance(value, str) else ""
 
 
 def redact_secrets(text: str, extra_secrets: tuple[str, ...] = ()) -> str:
@@ -841,9 +868,7 @@ def _secret_values(connector_token_envs: tuple[str, ...] = ()) -> tuple[str, ...
             values.add(candidate)
 
     for name in _SECRET_SETTINGS:
-        value = getattr(settings, name, "")
-        if not isinstance(value, str):
-            continue
+        value = _secret_text(getattr(settings, name, ""))
         _consider(value)
         # A DSN's password is also worth matching on its own: libpq accepts several spellings and a
         # connection error may quote only the credential rather than the whole string. Considered

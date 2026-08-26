@@ -32,7 +32,7 @@ the calculation actually ran under and now takes it off the payload instead of d
 from typing import Literal
 
 import numpy as np
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, computed_field, model_validator
 from rdkit import Chem
 
 from chemclaw.core.ids import stable_hash
@@ -167,6 +167,33 @@ class Structure(BaseModel):
     def arrays(self) -> tuple[np.ndarray, np.ndarray]:
         """Return (atomic numbers, positions in Angstrom) — what the RRHO arithmetic reads."""
         return np.array(self.elements), np.array(self.positions)
+
+    def as_xyz(self, comment: str = "") -> str:
+        """This geometry as an XYZ block — the one interchange format every QM program reads.
+
+        For crossing a boundary that is not this system's: the HPC pipeline consumes a starting
+        geometry as a file, not as a pydantic model (D-2026-08-21). Everything inside this
+        repository passes the `Structure` itself, so this has exactly one caller and is deliberately
+        not a general serialization — `model_dump` is that.
+
+        Coordinates are written at the precision they are hashed at, so the block a pipeline
+        receives is the geometry `structure_id` names rather than a rounded neighbour of it.
+
+        Args:
+            comment: The second line, which XYZ reserves for free text; conventionally the
+                molecule's identity.
+
+        Returns:
+            The atom count, the comment, then one `<symbol> <x> <y> <z>` line per atom,
+            newline-terminated.
+        """
+        lines = [str(len(self.elements)), comment]
+        lines.extend(
+            f"{symbol} {x:.{_GEOMETRY_DECIMALS}f} {y:.{_GEOMETRY_DECIMALS}f} "
+            f"{z:.{_GEOMETRY_DECIMALS}f}"
+            for symbol, (x, y, z) in zip(self.symbols, self.positions, strict=True)
+        )
+        return "\n".join(lines) + "\n"
 
 
 class XtbInput(BaseModel):
@@ -628,7 +655,11 @@ class EnsembleMember(BaseModel):
     """
 
     energy_hartree: float
-    degeneracy: int = 1
+    # `ge=1`, because `boltzmann_populations` divides by the sum of the weights and a
+    # payload whose degeneracies were all zero would raise ZeroDivisionError from inside
+    # the arithmetic rather than at the boundary. `ThermoSettings.symmetry_number` next
+    # door already carries the same constraint for the same reason.
+    degeneracy: int = Field(default=1, ge=1)
     structure: Structure
 
 
@@ -694,12 +725,234 @@ class ConformerEnsemble(BaseModel):
     # Free energy of the ensemble relative to its lowest member, in kcal/mol: the -T*S_conf
     # correction to add to a single-conformer free energy.
     ensemble_correction_kcal: float
-    treatment: Literal["lowest-plus-conformational-entropy"] = "lowest-plus-conformational-entropy"
+    # Which approximation produced the populations above. **Additive and defaulted**, because this
+    # model crosses the Temporal wire and histories are in flight: a result decoded from an older
+    # one carries the value it always had. `free-energy-weighted-top-n` is what a refined ensemble
+    # reports — a different treatment rather than a better one, and a reader must not have to infer
+    # which ran (D-101).
+    treatment: Literal["lowest-plus-conformational-entropy", "free-energy-weighted-top-n"] = (
+        "lowest-plus-conformational-entropy"
+    )
 
     @property
     def lowest(self) -> Structure:
         """The lowest-energy member — what a downstream single-structure task should use."""
         return self.conformers[0].structure
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def lowest_structure_id(self) -> str:
+        """The address of the lowest-energy member, hoisted so nobody has to index into a list.
+
+        **A `computed_field`, so it survives `model_dump` and reaches the model and the template
+        resolver** (D-2026-08-21). The lowest conformer is what every downstream single-structure
+        question wants — relax it, take its Hessian, run DFT on it — and reaching it through
+        `conformers[0].structure.structure_id` would need list indexing in the one place this
+        system deliberately refuses to grow an expression language (`templates/resolve.py`).
+
+        Derived rather than stored: `conformers` is built lowest-first by `ensemble_from_members`,
+        and a second copy of that fact is a second thing that can disagree with it.
+        """
+        return self.conformers[0].structure.structure_id
+
+
+class WeightedValue(BaseModel):
+    """A Boltzmann-averaged property, with the spread of what was averaged.
+
+    **The spread travels with the mean, and that is the whole design of this model.** A property
+    whose values scatter across the ensemble by more than the difference it is being used to argue
+    is not a number to report as a single figure: a mean dipole of 2.1 D over conformers ranging
+    0.4 to 4.8 D says the molecule does not have *a* dipole at this temperature. Reporting the mean
+    alone turns that into a false precision reading exactly like a measurement, so a caller has to
+    look away from the spread deliberately rather than by omission.
+    """
+
+    mean: float
+    minimum: float
+    maximum: float
+    spread: float = Field(description="maximum minus minimum, in the property's own unit")
+
+
+class WeightedAtom(BaseModel):
+    """One atom's Boltzmann-averaged per-atom property across an ensemble."""
+
+    index: int
+    element: str
+    value: WeightedValue
+
+
+class EnsembleProperty(BaseModel):
+    """A property averaged over a conformer ensemble rather than read off one geometry.
+
+    The standing caveat on every other number in this system is that it describes **one** conformer.
+    This is the shape that lifts it: each member's property computed at that member's own geometry,
+    then weighted by the population the ensemble gives it.
+
+    **These populations are electronic-energy weighted, always.** A `refined` flag once sat here to
+    say which weighting ran, and nothing ever wrote it — a promise with no implementation, which is
+    worse than the absence it papered over, because a reader takes `refined=False` for a recorded
+    choice rather than a default nobody set. Free-energy weighting costs one Hessian per member and
+    is what `RefinedEnsemble` is for; when a property average over *those* populations is wanted,
+    that is a new field on this model and a writer for it, not a boolean.
+    """
+
+    smiles: str | None
+    property_name: str
+    method: str
+    solvent: str | None
+    temperature_k: float
+    members_averaged: int
+    total_found: int
+    sampled: Literal[True] = True
+    value: WeightedValue | None = None
+    per_atom: list[WeightedAtom] = Field(default_factory=list)
+    # The population fraction the averaged members account for, from the ensemble's own weighting.
+    # Below 1.0 the average is over a *truncation* of the ensemble, and saying so is what stops
+    # "the Boltzmann-averaged dipole" meaning "the dipole of the five conformers we could afford".
+    population_covered: float = 1.0
+    # **`population_covered` records the truncation; this is what *says* it.** The field above
+    # shipped without one, so the cheap composite disclosed its partial coverage only to a reader
+    # who thought to divide, while `RefinedEnsemble` — the expensive one — warned. Same rule, both
+    # of them now.
+    warnings: list[str] = Field(default_factory=list)
+
+
+class RefinedConformer(BaseModel):
+    """One ensemble member after its own optimization and Hessian."""
+
+    structure: Structure
+    relative_kcal: float
+    population: float
+    # `ge=1`, because `boltzmann_populations` divides by the sum of the weights and a
+    # payload whose degeneracies were all zero would raise ZeroDivisionError from inside
+    # the arithmetic rather than at the boundary. `ThermoSettings.symmetry_number` next
+    # door already carries the same constraint for the same reason.
+    degeneracy: int = Field(default=1, ge=1)
+    gibbs_free_energy_hartree: float
+    electronic_energy_hartree: float
+    is_minimum: bool
+
+
+class RefinedEnsemble(BaseModel):
+    """A conformer ensemble re-weighted by free energy instead of by electronic energy.
+
+    **A different approximation, not a better one**, and two fields say so rather than leaving a
+    reader to infer it. `refined_population_covered` is the E-weighted population fraction the
+    refined members account for: refining the top five of forty-seven and reporting the result as
+    "the ensemble" is the same error `ensemble_from_members` already refuses for `max_members`, and
+    it is worse here because the number looks more careful. `treatment` on the underlying
+    `ConformerEnsemble` names the weighting.
+
+    D-101 recorded that the system does not free-energy-weight an ensemble because it is one Hessian
+    per member. That is still true; this is the shape for when a caller decides to pay it, bounded
+    to the top `ensemble_refine_top_n`.
+    """
+
+    smiles: str | None
+    method: str
+    solvent: str | None
+    temperature_k: float
+    conformers: list[RefinedConformer]
+    total_found: int
+    refined_count: int
+    refined_population_covered: float
+    # **Named for the subset, because that is what they describe.** `ConformerEnsemble` carries
+    # fields with the first of these names and they mean something else: `ensemble_from_members`
+    # computes them over *all* members and deliberately refuses to truncate them, arguing that
+    # doing so "would turn 'here are the 10 that matter out of 47' into a quietly wrong claim that
+    # there were 10". Here the populations are renormalised over the refined top N, so the entropy
+    # is over N states and the correction is systematically too small. Shipping that under the
+    # ensemble-wide name put two meanings one model apart; `refined_` says which one this is, and
+    # `refined_population_covered` beside it says how much of the ensemble that N accounts for.
+    refined_conformational_entropy_cal_per_mol_k: float
+    refined_ensemble_correction_kcal: float
+    sampled: Literal[True] = True
+    treatment: Literal["free-energy-weighted-top-n"] = "free-energy-weighted-top-n"
+    warnings: list[str] = Field(default_factory=list)
+
+    @property
+    def lowest(self) -> Structure:
+        """The lowest free-energy member — the geometry a downstream single-structure task wants."""
+        return self.conformers[0].structure
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def lowest_structure_id(self) -> str:
+        """The address of the lowest free-energy member, hoisted for the template resolver."""
+        return self.conformers[0].structure.structure_id
+
+
+class RankedSpecies(BaseModel):
+    """One species of a distribution, with the free energy it was ranked by."""
+
+    smiles: str
+    label: str = ""
+    relative_kcal: float
+    population: float
+    gibbs_free_energy_hartree: float | None = None
+    electronic_energy_hartree: float
+    structure_id: str = ""
+    conformers_found: int = 0
+
+
+class SpeciesDistribution(BaseModel):
+    """How a molecule distributes over a set of *distinct species* at equilibrium.
+
+    One shape for three questions that are the same arithmetic over different species sets: which
+    tautomer dominates, which protonation microstate is present at a pH, and which diastereomer is
+    favoured. `kind` says which was asked, because the number means something different in each and
+    a reader must not have to guess from the SMILES.
+
+    The caveat that has to travel with it: a species not in the set was not ranked, and a
+    distribution over an incomplete enumeration is confident about the wrong universe. `enumerated`
+    records how many the enumeration produced against how many survived to be computed.
+    """
+
+    kind: Literal["tautomers", "microstates", "stereoisomers", "custom"]
+    method: str
+    solvent: str | None
+    temperature_k: float
+    level: ReactionLevel
+    species: list[RankedSpecies]
+    enumerated: int
+    uncertainty_kcal: float
+    sampled: bool = False
+    warnings: list[str] = Field(default_factory=list)
+
+    @property
+    def dominant(self) -> RankedSpecies:
+        """The most populated species — the form every other number should be about."""
+        return max(self.species, key=lambda candidate: candidate.population)
+
+
+class DissociatedBond(BaseModel):
+    """One bond's dissociation energy, and the fragments it was computed from."""
+
+    atoms: list[int]
+    bond: str
+    fragments: list[str]
+    dissociation_energy_kcal: float
+    is_weakest: bool = False
+
+
+class BondDissociationSurvey(BaseModel):
+    """Every breakable bond of a molecule, ranked by how much it costs to break.
+
+    Semiempirical and therefore a *ranking* — GFN2 bond dissociation energies carry several
+    kcal/mol of error, so the ordering is the answer and the magnitudes are not. What the ordering
+    supports: which C-H a radical abstracts, which bond an autoxidation attacks first, which
+    linkage a forced-degradation study should look for.
+    """
+
+    smiles: str
+    method: str
+    solvent: str | None
+    temperature_k: float
+    mode: Literal["homolytic", "heterolytic"]
+    bonds: list[DissociatedBond]
+    considered: int
+    uncertainty_kcal: float
+    warnings: list[str] = Field(default_factory=list)
 
 
 class InteractionResult(BaseModel):
@@ -747,6 +1000,12 @@ class SpeciesEnergy(BaseModel):
     # The -T*S_conf term the ensemble contributed, present only at `thorough`. Positive flexibility
     # lowers a free energy, so this is negative when it is present at all.
     conformational_entropy_kcal: float | None = None
+    # The geometry this energy describes, so a caller can carry it into the next calculation
+    # (D-2026-08-21). Additive and defaulted, because histories written before it exist.
+    structure_id: str = ""
+    # How many conformers the search found, at `thorough`; 0 where no search ran. `species_ranking`
+    # reported a hardcoded 0 beside `sampled=True`, which reads as "sampled and found nothing".
+    conformers_found: int = 0
     was_cached: bool
     # The method the *server* reported for this species' optimisation, so a reaction can state the
     # level of theory it was actually run at. Additive and defaulted because this crosses the

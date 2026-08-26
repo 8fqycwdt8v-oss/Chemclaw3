@@ -14,6 +14,8 @@ from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from typing import Any
 
+from chemclaw.ingest.eln.warehouse.snowflake import SnowflakeVectorDialect
+
 
 class FakeCursor:
     """One statement, answered from whatever the fake was primed with."""
@@ -52,11 +54,23 @@ class FakeWarehouse:
         self.fail_with: Exception | None = None
         self.connect_options: dict[str, Any] = {}
         self._placeholder = placeholder
+        self._vector_dialect: Any = SnowflakeVectorDialect()
 
     @property
     def placeholder(self) -> str:
         """The parameter marker the engine should emit for this connection."""
         return self._placeholder
+
+    @property
+    def vector_dialect(self) -> Any:
+        """Snowflake's dialect, so the exact statements the engine has always emitted are asserted.
+
+        The fake stands in for a driver, and the driver is where a dialect lives (D-2026-08-25).
+        Reusing Snowflake's here rather than inventing a fake one is deliberate: these tests exist
+        to pin the *statement text*, and a made-up dialect would pin a string nothing ever sends.
+        A test that wants the no-dialect case sets this to `None` on the instance.
+        """
+        return self._vector_dialect
 
     def respond(self, sql: str, params: list[Any]) -> list[dict[str, Any]]:
         """The rows of whichever primed relation this statement reads from.
@@ -151,3 +165,39 @@ def prime_warehouse(warehouse: FakeWarehouse) -> FakeWarehouse:
     global NEXT
     NEXT = warehouse
     return warehouse
+
+
+class KeysetWarehouse(FakeWarehouse):
+    """A `FakeWarehouse` whose corpus relation honours the statement's keyset WHERE and LIMIT.
+
+    The counterpart of `WatermarkWarehouse` for the other paging contract. The plain fake answers
+    every statement with the whole primed table, which makes the one failure a keyset drain exists
+    to prevent — a cursor that does not advance past the page the warehouse keeps returning —
+    impossible to reproduce: a wedged drain and a finished one look identical from outside.
+
+    Applies the *semantics* of `WHERE cursor > ? ORDER BY cursor ASC LIMIT ?` rather than parsing
+    the clause, for the reason its sibling gives: the exact text is pinned by the statement test, so
+    a parser here would only be a second place for the two to disagree. `params` is `[after, limit]`
+    on a resumed page and `[limit]` on the first one — which is itself the contract
+    `corpus_statement` documents.
+    """
+
+    def __init__(
+        self, tables: dict[str, list[dict[str, Any]]], corpus_relation: str, cursor_column: str
+    ) -> None:
+        """Serve `corpus_relation` under its keyset column; other tables as canned."""
+        super().__init__(tables)
+        self._corpus_relation = corpus_relation
+        self._cursor = cursor_column
+
+    def respond(self, sql: str, params: list[Any]) -> list[dict[str, Any]]:
+        """The next page of the corpus relation, or a canned table for anything else."""
+        if f" {self._corpus_relation} " not in sql:
+            return super().respond(sql, params)
+        rows = sorted(self.tables[self._corpus_relation], key=lambda r: str(r[self._cursor]))
+        if len(params) == 2:
+            after, limit = str(params[0]), int(params[1])
+            rows = [r for r in rows if str(r[self._cursor]) > after]
+        else:
+            limit = int(params[0])
+        return [dict(row) for row in rows[:limit]]

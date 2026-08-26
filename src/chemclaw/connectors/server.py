@@ -143,6 +143,28 @@ def _ships_a_manifest(name: str) -> bool:
     return (Path(__file__).parent / name / MANIFEST_FILENAME).is_file()
 
 
+def _app_relative_path(request: Request) -> str:
+    """This request's path *within this app*, with any mount prefix removed.
+
+    **Not `request.url.path`, and the difference is a security boundary rather than a nicety.**
+    Starlette leaves `scope["path"]` whole when it dispatches into a mounted sub-app and records
+    the prefix in `root_path` — measured: a `GET /molfp/healthz` reaches a middleware inside the
+    mounted app as `url.path == scope["path"] == "/molfp/healthz"`, `root_path == "/molfp"`. So a
+    probe allowlist written against `/healthz` matches at the root and silently *stops* matching
+    the moment the same app is mounted under a name.
+
+    In the cluster each connector is its own Deployment serving at the root, so the allowlist held
+    there. `chemclaw.cli.connectors_dev` — `make connectors`, the live lane, and the transport
+    tests — mounts every bundle under `/<name>`, and there it did not: with a credential declared,
+    the readiness probe `connectors.health` makes against `health_url` would have come back 401 and
+    reported the whole fleet unreachable. That was invisible while every bundle we host declared
+    `auth: mode: none`, because nothing was ever refused.
+    """
+    root = request.scope.get("root_path", "")
+    path = request.url.path
+    return path[len(root) :] if root and path.startswith(root) else path
+
+
 class BearerAuthMiddleware(BaseHTTPMiddleware):
     """Verify the bearer token a `mode: bearer` manifest says this connector requires.
 
@@ -198,7 +220,7 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
         """Refuse anything but `/healthz` and `/metrics` without the configured bearer token."""
-        if request.url.path in ("/healthz", "/metrics"):
+        if _app_relative_path(request) in ("/healthz", "/metrics"):
             return await call_next(request)
         token_env = self._declared()
         if token_env is None:

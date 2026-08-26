@@ -33,6 +33,8 @@ from typing import Any, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from chemclaw.science.labels.policy import LabelPolicy
+
 
 class DataSourceManifest(BaseModel):
     """Everything one data source declares: its name, its halves, and their construction config.
@@ -70,6 +72,17 @@ class DataSourceManifest(BaseModel):
         description=(
             "`module:callable` building the retrieve half (a `SourceRetriever`), or absent if "
             "this source cannot be retrieved from."
+        ),
+    )
+    labels: LabelPolicy | None = Field(
+        default=None,
+        description=(
+            "What derived reaction labels this source already carries, and which to re-derive "
+            "anyway. Absent means this source contributes no reaction rows to the label index — "
+            "so a `retrieve`-only document share leaves it out, and `make datasource-validate` "
+            "reports a block on a source nothing would ever label. Declaring it is also what "
+            "gives the labelling Schedule something to exist for: `durable/schedules.py` asks the "
+            "manifests, not a `*_enabled` setting, for the same reason `share_sources()` does."
         ),
     )
     config: dict[str, Any] = Field(

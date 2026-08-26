@@ -32,13 +32,13 @@ from mcp.shared.exceptions import McpError
 from mcp.types import INTERNAL_ERROR, INVALID_PARAMS, METHOD_NOT_FOUND, ErrorData
 
 from chemclaw.connectors import registry
-from chemclaw.connectors.calc import remote
 from chemclaw.connectors.calc.remote import (
     CalcServerError,
     CalcToolError,
     cached_remote,
     remote_key,
 )
+from chemclaw.core import mcp_session
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError, SubsystemUnavailableError
 from chemclaw.core.ids import stable_hash
@@ -147,8 +147,14 @@ def test_a_version_carrying_both_delimiters_round_trips(monkeypatch: pytest.Monk
         from chemclaw.connectors.calc.remote import calc_session
 
         async with calc_session() as session:
-            key = await remote_key(session, "predict_solubility", {"smiles": "c1ccccc1"})
-        assert key is not None
+            identity = await remote_key(session, "predict_solubility", {"smiles": "c1ccccc1"})
+        assert identity is not None
+        # `remote_key` answers with the key *and* the geometry the calculation runs on
+        # (D-2026-08-21) — the server reports both from one round trip and this client used to
+        # read only the first. A molecule-keyed calculator is about a compound and not about any
+        # particular geometry of it, so this one reports none, which is the honest value.
+        assert identity.structure_id == ""
+        key = identity.key
         assert key.calc_version == _AWKWARD_VERSION
         assert key.calc_type == "solubility"
         # Three of the four parts are the server's verbatim; `params_hash` is deliberately not.
@@ -282,7 +288,8 @@ def test_a_black_holed_server_fails_to_connect_in_seconds_not_quarter_hours() ->
     `calc_session` documents, where the client swallows a read timeout and the caller waits forever.
     """
     composed = httpx.Timeout(settings.calc_server_timeout_seconds, read=905.0)
-    client = remote._short_connect_client(headers=None, timeout=composed, auth=None)
+    factory = mcp_session.short_connect_client(settings.calc_server_timeout_seconds)
+    client = factory(headers=None, timeout=composed, auth=None)
 
     assert client.timeout.connect == registry._CONNECT_TIMEOUT_SECONDS
     assert client.timeout.read == 905.0
@@ -347,8 +354,8 @@ class _RaisingStore:
 
 def _real_session(monkeypatch: pytest.MonkeyPatch, transport: _Transport) -> None:
     """Run the genuine `calc_session`, with only its two transport objects faked."""
-    monkeypatch.setattr("chemclaw.connectors.calc.remote.streamablehttp_client", _Wire())
-    monkeypatch.setattr("chemclaw.connectors.calc.remote.ClientSession", transport)
+    monkeypatch.setattr("chemclaw.core.mcp_session.streamablehttp_client", _Wire())
+    monkeypatch.setattr("chemclaw.core.mcp_session.ClientSession", transport)
 
 
 @pytest.mark.parametrize(
@@ -491,6 +498,7 @@ def test_the_session_bounds_the_call_with_the_timeout_that_raises() -> None:
     from datetime import timedelta
 
     from chemclaw.connectors.calc import remote as remote_module
+    from chemclaw.core import mcp_session
     from chemclaw.core.config import settings
 
     seen: dict[str, Any] = {}
@@ -517,8 +525,8 @@ def test_the_session_bounds_the_call_with_the_timeout_that_raises() -> None:
 
     monkeypatch = pytest.MonkeyPatch()
     try:
-        monkeypatch.setattr(remote_module, "streamablehttp_client", _transport)
-        monkeypatch.setattr(remote_module, "ClientSession", _NullSession)
+        monkeypatch.setattr(mcp_session, "streamablehttp_client", _transport)
+        monkeypatch.setattr(mcp_session, "ClientSession", _NullSession)
 
         async def _run() -> None:
             async with remote_module.calc_session():
@@ -699,8 +707,8 @@ def test_a_refused_credential_is_not_an_outage() -> None:
     inversion `CalcToolError` exists to prevent, surviving at the one boundary that still collapsed
     it.
     """
-    assert remote._auth_rejection(_status_error(401)) == 401
-    assert remote._auth_rejection(_status_error(403)) == 403
+    assert mcp_session.auth_rejection(_status_error(401)) == 401
+    assert mcp_session.auth_rejection(_status_error(403)) == 403
 
 
 def test_the_rejection_is_found_inside_the_task_groups_exception_group() -> None:
@@ -715,7 +723,7 @@ def test_the_rejection_is_found_inside_the_task_groups_exception_group() -> None
     wrapper = RuntimeError("connect failed")
     wrapper.__cause__ = nested
 
-    assert remote._auth_rejection(wrapper) == 401
+    assert mcp_session.auth_rejection(wrapper) == 401
 
 
 def test_a_server_that_is_genuinely_down_stays_an_outage() -> None:
@@ -725,9 +733,9 @@ def test_a_server_that_is_genuinely_down_stays_an_outage() -> None:
     classification. A fix that turned every HTTP status into bad data would trade one wrong answer
     for another.
     """
-    assert remote._auth_rejection(_status_error(500)) is None
-    assert remote._auth_rejection(_status_error(502)) is None
-    assert remote._auth_rejection(ConnectionRefusedError("no listener")) is None
+    assert mcp_session.auth_rejection(_status_error(500)) is None
+    assert mcp_session.auth_rejection(_status_error(502)) is None
+    assert mcp_session.auth_rejection(ConnectionRefusedError("no listener")) is None
 
 
 def test_the_refusal_lands_in_the_non_retryable_hierarchy() -> None:

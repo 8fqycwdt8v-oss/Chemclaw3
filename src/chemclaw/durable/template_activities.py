@@ -372,14 +372,42 @@ async def _call_governed(tool: Any, step: ToolStepInput) -> Any:
     unwrapped that envelope. What survives is `_mcp_text`, for the case that was never a framework
     artifact: an MCP tool answers as content blocks on the wire whatever calls it.
     """
-    result = await invoke_governed(
+    message = await invoke_governed(
         tool,
         step.arguments,
         correlation_id=step.identity.correlation_id,
         actor=step.identity.actor,
         profile=get_profile(None),
+        want_message=True,
     )
-    return _mcp_text(result)
+    structured = _structured(message)
+    return structured if structured is not None else _mcp_text(getattr(message, "content", message))
+
+
+def _structured(message: Any) -> Any:
+    """The MCP tool's `structuredContent`, if it sent one — the shape a later step can walk.
+
+    **A tool result was reaching the resolver as a string, and that is what made half the shipped
+    templates dead on their second step.** `_mcp_text` joins content blocks into text, so
+    `${steps.forms.result.smiles}` asked for a field of a `str` and raised `UnresolvedReference` —
+    after the launch, inside the workflow, with CI green. The templates that field-walk a **`job`**
+    step never hit it, because a `ConnectorJobResult` is a real model; these were the first to
+    field-walk a **tool** result.
+
+    Hoisting a container field on the tool's return model was necessary and not sufficient: it
+    fixes the *indexing* limit `templates/resolve.py` has, and cannot fix a value that is not a
+    model by the time the resolver sees it. The structure was on the wire the whole time —
+    `langchain_mcp_adapters` builds every tool with `response_format="content_and_artifact"` and
+    puts the server's `structuredContent` in the artifact — and `ainvoke(args)` simply discards it.
+
+    Read defensively rather than by type: the artifact is upstream's `MCPToolArtifact` TypedDict,
+    an in-process tool has no artifact at all, and neither shape is promised to us.
+    """
+    artifact = getattr(message, "artifact", None)
+    if isinstance(artifact, dict):
+        structured = artifact.get("structured_content")
+        return structured if isinstance(structured, dict) else None
+    return None
 
 
 def _mcp_text(result: Any) -> Any:

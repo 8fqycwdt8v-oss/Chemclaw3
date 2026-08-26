@@ -82,10 +82,17 @@ COPY src ./src
 # 3 and 4 rather than configuration — `skills/` IS the agent's judgment layer (an image without it
 # advertises no skills at all) and `knowledge/` seeds the note tree so the mount point exists before
 # the first sync. `infra/` holds the SQL migrations the migrate Job runs.
+#
+# `schema/` holds the DDL for stores this system does *not* own — today the result store. It is
+# needed in the image rather than only in a checkout because the SQL sink's own error tells an
+# operator to run `python -m chemclaw.cli.sink_schema` when the target has no tables, and the
+# moment they need that is the moment they are in this container. Without this line that command
+# resolved a path outside the image and failed exactly where it was being recommended.
 COPY data ./data
 COPY skills ./skills
 COPY knowledge ./knowledge
 COPY infra ./infra
+COPY schema ./schema
 COPY deploy/entrypoint.sh /usr/local/bin/chemclaw-entrypoint
 COPY deploy/knowledge-sync.sh /usr/local/bin/chemclaw-knowledge-sync
 

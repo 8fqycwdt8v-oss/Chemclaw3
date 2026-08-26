@@ -19,8 +19,10 @@ import asyncio
 import shutil
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 
@@ -54,6 +56,7 @@ from chemclaw.ingest.documents.sync import (
     reembed_stale,
     sync_share,
 )
+from chemclaw.retrieval.vectors.base import stored_embedding_key
 from chemclaw.retrieval.vectors.memory import InMemoryVectorStore
 from tests.document_fixtures import (
     _blank_pdf_bytes,
@@ -1629,10 +1632,20 @@ def test_the_external_store_backend_carries_the_chunking_through_every_write() -
         assert coarse_hit.score == pytest.approx(1.0)
 
         # (2) Re-embedding one cutting marks that row and no other.
+        #
+        # The stored key is the caller's key namespaced by the store it went to
+        # (`retrieval/vectors/base.stored_embedding_key`), so that moving a corpus between backends
+        # cannot leave every row claiming a vector the new one has never held. What this step
+        # asserts is unchanged by that: *which* row got the new key, not how the key is spelled.
+        stored = partial(
+            stored_embedding_key,
+            provider=settings.vector_store_provider,
+            collection=index._collection,
+        )
         await index.store_embeddings(fine, "key-of-the-next-model")
         assert await _stored_keys("doc-1") == [
-            ("4000:400", 0, key),
-            ("400:40", 0, "key-of-the-next-model"),
+            ("4000:400", 0, stored(key)),
+            ("400:40", 0, stored("key-of-the-next-model")),
         ]
 
         # (4) The fine share is re-chunked coarsely. The base's per-write cleanup deletes the row
@@ -1654,5 +1667,309 @@ def test_the_external_store_backend_carries_the_chunking_through_every_write() -
         assert await index.prune_stale("sharedrive-2", await index.clock()) == 1
         assert await _stored_cuttings() == [], "the unclaimed cutting was swept here, not later"
         assert await store.search("chunks", coarse_vector, 10) == [], "and its point went with it"
+
+    asyncio.run(_run())
+
+
+def test_a_chunked_document_can_be_read_back_whole(tmp_path: Path) -> None:
+    """The address the retriever has always emitted finally has a reader.
+
+    A chunk hit cites `sharedrive:doc-…#3`; until now there was no way to ask for the other pieces,
+    because `sync._read_and_parse` discards the parsed text once `doc_id` is taken from it. A
+    protocol is atomic, so a turn that can only see one cut of it cannot reason about the procedure.
+    """
+    index = InMemoryDocumentIndex()
+    share = _long_share(tmp_path, chunk_chars=400, chunk_overlap_chars=40)
+    asyncio.run(sync_share(SOURCE, load_binding(share), index))
+    retriever = ShareDocumentRetriever(binding=share, name=SOURCE, index=index)
+
+    hits = asyncio.run(retriever.retrieve("charge the vessel", {}))
+    assert hits, "sanity: the share answers at all"
+    doc_id = hits[0].source_note_id.split(":", 1)[1].split("#", 1)[0]
+
+    whole = asyncio.run(retriever.read_document(doc_id))
+    assert whole is not None
+    assert whole.chunks > 1, "the fixture must actually be cut into several pieces"
+    # The document is *whole*: the first and last step both present, from one read.
+    assert "Step 0:" in whole.text and "Step 119:" in whole.text
+    assert whole.path == "SOPs/protocol.txt"
+    assert not whole.truncated
+
+
+def test_reading_a_document_this_share_does_not_hold_is_none_not_empty(tmp_path: Path) -> None:
+    """`None` means "could not be read". An empty document would be a different, false claim."""
+    index = InMemoryDocumentIndex()
+    share = _long_share(tmp_path, chunk_chars=400, chunk_overlap_chars=40)
+    asyncio.run(sync_share(SOURCE, load_binding(share), index))
+    retriever = ShareDocumentRetriever(binding=share, name=SOURCE, index=index)
+    assert asyncio.run(retriever.read_document("doc-nothing-here")) is None
+    assert asyncio.run(retriever.read_document("")) is None
+
+
+def test_a_whole_document_read_is_refused_without_the_shares_group(
+    tmp_path: Path, as_user: Callable[[str, set[str]], None]
+) -> None:
+    """A whole read is a strictly larger disclosure than a ranked excerpt, so it asks the same gate.
+
+    Including the reject-if-absent half: a gated share with no actor on the turn returns nothing,
+    which is `require_actor` applied to a corpus rather than to a tool.
+    """
+    index = InMemoryDocumentIndex()
+    public = _long_share(tmp_path, chunk_chars=400, chunk_overlap_chars=40)
+    asyncio.run(sync_share(SOURCE, load_binding(public), index))
+    doc_id = next(iter(index._files.values())).doc_id
+
+    gated = {**public, "required_roles": ["chemclaw.sharedrive.reader"]}
+    del gated["public"]
+    retriever = ShareDocumentRetriever(binding=gated, name=SOURCE, index=index)
+
+    # No actor at all on the turn.
+    assert asyncio.run(retriever.read_document(doc_id)) is None
+
+    as_user("someone", {"chemclaw.other"})
+    assert asyncio.run(retriever.read_document(doc_id)) is None
+
+    as_user("someone", {"chemclaw.sharedrive.reader"})
+    assert asyncio.run(retriever.read_document(doc_id)) is not None, (
+        "and the entitled caller still gets it"
+    )
+
+
+def test_an_oversized_document_comes_back_short_and_says_so(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A shortened document that does not say so reads as a complete one."""
+    index = InMemoryDocumentIndex()
+    share = _long_share(tmp_path, chunk_chars=400, chunk_overlap_chars=40)
+    asyncio.run(sync_share(SOURCE, load_binding(share), index))
+    retriever = ShareDocumentRetriever(binding=share, name=SOURCE, index=index)
+    doc_id = next(iter(index._files.values())).doc_id
+
+    monkeypatch.setattr(settings, "document_read_max_chars", 100)
+    whole = asyncio.run(retriever.read_document(doc_id))
+    assert whole is not None
+    assert whole.truncated is True
+    assert len(whole.text) == 100
+
+
+def test_both_backends_read_the_same_whole_document() -> None:
+    """The reference backend and Postgres must agree, or a test proves nothing about production."""
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        async with await connect(settings.postgres_dsn) as conn:
+            await conn.execute("TRUNCATE document_files, document_chunks")
+            await conn.commit()
+
+        (vector,) = await asyncio.to_thread(embed_texts, ["a chunk of a protocol"])
+        key = embedding_config_key()
+        file_row = FileRecord(
+            path="SOPs/protocol.txt",
+            source=SOURCE,
+            doc_id="doc-1",
+            fingerprint="1:2",
+            chunking_key="400:40",
+        )
+        chunks = [
+            ChunkRecord(
+                doc_id="doc-1",
+                chunking_key="400:40",
+                ordinal=n,
+                content=f"Step {n}: charge and hold.",
+                coordinate=f"page {n + 1}",
+                embedding=vector,
+            )
+            for n in range(4)
+        ]
+        # **Two copies with different modification times**, because a single file row with none
+        # holds constant the axis the two backends actually disagreed on: Postgres takes `max`
+        # across copies, and the reference backend used to take the cited path's own time.
+        # The cited copy is deliberately **not** the most recently touched one: `Archive/…` sorts
+        # first so it wins the citation, while `SOPs/…` carries the newer time. A fixture where the
+        # same row won both would pass against either rule and prove nothing about which is running.
+        cited_but_older = file_row.model_copy(
+            update={
+                "path": "Archive/protocol.txt",
+                "modified_at": datetime(2026, 1, 1, tzinfo=UTC),
+            }
+        )
+        newer_copy = file_row.model_copy(
+            update={"modified_at": datetime(2026, 3, 4, 12, tzinfo=UTC)}
+        )
+
+        results = []
+        for index in (PostgresDocumentIndex(), InMemoryDocumentIndex()):
+            await index.upsert([cited_but_older, newer_copy], chunks, key)
+            stored = await index.stored_document(SOURCE, "doc-1", "400:40", 1_000_000)
+            assert stored is not None, f"{type(index).__name__} did not read the document back"
+            results.append(
+                (
+                    stored.path,
+                    stored.modified_at,
+                    [(p.ordinal, p.content, p.coordinate) for p in stored.pieces],
+                )
+            )
+            # The smallest path is the citation; the most recent copy is the time.
+            assert stored.path == "Archive/protocol.txt"
+            assert stored.modified_at == datetime(2026, 3, 4, 12, tzinfo=UTC), (
+                f"{type(index).__name__} reported {stored.modified_at}, not the newest copy"
+            )
+            # A share that does not hold it reads as absent on both.
+            assert await index.stored_document("other-share", "doc-1", "400:40", 1_000_000) is None
+
+        assert results[0] == results[1], "the two backends disagree about the stored document"
+
+    asyncio.run(_run())
+
+
+def test_an_oversized_document_is_bounded_at_the_fetch_not_after_assembly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The point is what was never materialised, so this asserts on pieces rather than on text.
+
+    `document_read_max_chars`' own comment says it exists "so a 400-page report cannot be pulled
+    into the chat pod at all". The first version fetched every row and assembled the whole document
+    before trimming, so it prevented nothing — a binding allows a 52 MB file.
+    """
+    index = InMemoryDocumentIndex()
+    share = _long_share(tmp_path, chunk_chars=400, chunk_overlap_chars=40)
+    asyncio.run(sync_share(SOURCE, load_binding(share), index))
+    retriever = ShareDocumentRetriever(binding=share, name=SOURCE, index=index)
+    doc_id = next(iter(index._files.values())).doc_id
+
+    whole = asyncio.run(retriever.read_document(doc_id))
+    assert whole is not None and whole.chunks > 4, "the fixture must be worth bounding"
+
+    monkeypatch.setattr(settings, "document_read_max_chars", 500)
+    bounded = asyncio.run(retriever.read_document(doc_id))
+
+    assert bounded is not None
+    assert bounded.truncated is True
+    assert bounded.chunks < whole.chunks, (
+        f"every piece was still fetched ({bounded.chunks} of {whole.chunks}), so the ceiling is "
+        "being applied after assembly rather than at the fetch"
+    )
+    # Enough pieces to reach the ceiling, and not many more.
+    assert bounded.chunks <= 3
+
+
+def test_a_document_that_fits_is_never_reported_truncated(tmp_path: Path) -> None:
+    """The false-positive direction: a bound that cuts too eagerly lies the other way."""
+    index = InMemoryDocumentIndex()
+    share = _long_share(tmp_path, chunk_chars=400, chunk_overlap_chars=40)
+    asyncio.run(sync_share(SOURCE, load_binding(share), index))
+    retriever = ShareDocumentRetriever(binding=share, name=SOURCE, index=index)
+    doc_id = next(iter(index._files.values())).doc_id
+
+    whole = asyncio.run(retriever.read_document(doc_id))
+    assert whole is not None
+    assert whole.truncated is False
+    assert "Step 0:" in whole.text and "Step 119:" in whole.text
+
+
+def test_both_backends_stop_at_the_same_piece() -> None:
+    """A bound applied differently on each side would make the agreement test assert two things."""
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        async with await connect(settings.postgres_dsn) as conn:
+            await conn.execute("TRUNCATE document_files, document_chunks")
+            await conn.commit()
+
+        (vector,) = await asyncio.to_thread(embed_texts, ["a chunk of a protocol"])
+        key = embedding_config_key()
+        file_row = FileRecord(
+            path="SOPs/protocol.txt",
+            source=SOURCE,
+            doc_id="doc-cap",
+            fingerprint="1:2",
+            chunking_key="400:40",
+        )
+        chunks = [
+            ChunkRecord(
+                doc_id="doc-cap",
+                chunking_key="400:40",
+                ordinal=n,
+                content="x" * 100,
+                coordinate=f"page {n + 1}",
+                embedding=vector,
+            )
+            for n in range(10)
+        ]
+        seen = []
+        for index in (PostgresDocumentIndex(), InMemoryDocumentIndex()):
+            await index.upsert([file_row], chunks, key)
+            # 250 characters spans two 100-character pieces and crosses into the third.
+            stored = await index.stored_document(SOURCE, "doc-cap", "400:40", 250)
+            assert stored is not None
+            seen.append((len(stored.pieces), stored.truncated))
+            full = await index.stored_document(SOURCE, "doc-cap", "400:40", 10_000)
+            assert full is not None and full.truncated is False, (
+                f"{type(index).__name__} reported a complete document as truncated"
+            )
+
+        assert seen[0] == seen[1], f"the backends cut differently: {seen}"
+        assert seen[0] == (3, True)
+
+    asyncio.run(_run())
+
+
+def test_moving_the_document_corpus_to_another_store_re_embeds_it() -> None:
+    """A provider switch must not leave every chunk claiming a vector the new store never held.
+
+    The note index got this in D-2026-08-25; the document corpus did not, and it is the larger of
+    the two. `stale_chunks` selects on `embedding_key IS DISTINCT FROM`, and that key answered only
+    *which model made this vector* — so repointing `vector_store_provider` left every row matching,
+    the re-embedding drain finding nothing, and dense document search answering from an empty
+    collection with no error anywhere.
+
+    The catalogue is shared between backends by design, so the switch has to be visible in the row.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        async with await connect(settings.postgres_dsn) as conn:
+            await conn.execute("TRUNCATE document_files, document_chunks")
+            await conn.commit()
+
+        key = embedding_config_key()
+        (vector,) = await asyncio.to_thread(embed_texts, ["a protocol worth finding"])
+        file_row = FileRecord(
+            doc_id="doc-1",
+            source="sharedrive",
+            path="a.md",
+            fingerprint="1:1",
+            chunking_key="400:40",
+            tags=[],
+            modified_at=None,
+        )
+        chunks = [
+            ChunkRecord(
+                doc_id="doc-1",
+                chunking_key="400:40",
+                ordinal=0,
+                content="a protocol worth finding",
+                embedding=vector,
+            )
+        ]
+
+        first = ExternalVectorDocumentIndex(InMemoryVectorStore(), collection="chunks")
+        await first.upsert([file_row], chunks, key)
+        assert await first.stale_chunks(key, 10, {"400:40"}) == [], "settled in its own store"
+
+        # The move: same catalogue, same model, a store that has never seen this corpus.
+        moved_to = InMemoryVectorStore()
+        with patch.object(settings, "vector_store_provider", "databricks"):
+            moved = ExternalVectorDocumentIndex(moved_to, collection="chunks")
+            stale = await moved.stale_chunks(key, 10, {"400:40"})
+            assert [(c.doc_id, c.ordinal) for c in stale] == [("doc-1", 0)], (
+                "every chunk must read as stale: its vector is in the store we just left"
+            )
+            await moved.store_embeddings(chunks, key)
+            assert await moved.stale_chunks(key, 10, {"400:40"}) == []
+
+        assert [m.id for m in await moved_to.search("chunks", vector, 5)], (
+            "and the vector landed in the new store, which is what search will ask"
+        )
 
     asyncio.run(_run())

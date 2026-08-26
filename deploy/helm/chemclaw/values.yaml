@@ -129,12 +129,26 @@ knowledge:
 # they must match the bundle's own `connector.yaml` (an `endpoint:` and a `jobs:` block
 # respectively), which `tests/test_deploy_chart.py` checks in both directions.
 #
+# **`replicas` sizes both halves; `serverReplicas`/`workerReplicas` size one.** A bundle with both
+# halves runs two differently-shaped processes — one serving requests, one polling a queue — and
+# one knob drove both until 2026-08-26, so scaling `calc`'s MCP server to 4 also scaled its
+# Temporal worker to 4 and spent four extra connections from `postgres.maxConnections` doing it.
+# The shared value stays because for every bundle shipped here the two halves *are* the same size;
+# what changed is that they no longer have to be. Whichever pair a bundle uses, each rendered half
+# must resolve to a number — `required` in `deployment-connectors.yaml` refuses the render
+# otherwise, which is what closes the hole a `url:` bundle owning durable work used to fall into
+# (no `replicas` was ever required of one, so its worker rendered an empty count and contributed
+# zero to the declared connection budget while Kubernetes ran it at 1).
+#
 # The front door's CHEMCLAW_CONNECTOR_URLS is *computed* from this same block
 # (`chemclaw.connectorUrls`), so the addresses it dials and the Services that exist cannot disagree.
 #
-# Enabling a connector here is only half the switch: CHEMCLAW_CONNECTORS_ENABLED in `config` below
-# decides which bundles the agent loads at all. Leave it empty (the default) to load every bundle the
-# image ships, which is what matches "enable the pods and it works".
+# `enabled` is the whole switch: CHEMCLAW_CONNECTORS_ENABLED — which bundles the agent loads at all
+# — is *derived* from this block (`chemclaw.connectorsEnabled`), so a bundle turned off here loses
+# its pods and its tools together. It used to be only half: this file said that key lived "in
+# `config` below", it was in none of the entries there, and an empty value means "every bundle the
+# image ships" — so `enabled: false` removed the pods and left the tool advertised, and a chemist
+# calling it was told "running" until the 25 h job ceiling.
 #
 # **`url:` — a connector this release does not run.** Setting it says the bundle's MCP server is
 # hosted somewhere else (a platform team's model server, a vendor's FastAPI/MCP endpoint) and gives
@@ -221,6 +235,22 @@ connectors:
     replicas: 1
     # This bundle owns durable work, so it also gets a Temporal worker Deployment polling the queue
     # its manifest declares. Bundles without a `jobs:` entry leave this unset and get only the app.
+    worker: true
+  results:
+    # Republishing computed results to an external results store (D-2026-08-25). A jobs-only
+    # bundle, so `server: false` and no app pod or Service renders.
+    #
+    # **Enabled here, and still inert unless a sink is configured.** This bundle only *re-queues*
+    # what the automatic path publishes; with `CHEMCLAW_RESULT_SINKS` empty — the default — the
+    # enqueue is a no-op and the job reports zero. Turning publishing on is that variable plus a
+    # `sink.yaml`, never this flag.
+    #
+    # One replica: a corpus walk is a rare operator action, and two pods walking the same two
+    # tables would duplicate the read for no benefit — the outbox's identity index makes the
+    # *writes* idempotent, but the scan is still paid twice.
+    enabled: true
+    server: false
+    replicas: 1
     worker: true
   qm:
     enabled: true
@@ -382,7 +412,6 @@ config:
   CHEMCLAW_ENTRA_REQUIRED: "true"
   CHEMCLAW_ENTRA_TENANT_ID: "00000000-0000-0000-0000-000000000000"
   CHEMCLAW_ENTRA_AUDIENCE: "api://chemclaw"
-  CHEMCLAW_ENTRA_TOKEN_ENDPOINT: "https://login.microsoftonline.com/TENANT/oauth2/v2.0/token"
   # ⚠ EMPTY ON PURPOSE, AND EMPTY MEANS CLOSED. Until an operator sets this to their own Entra app
   # role(s), **every job a connector manifest declares `expensive: true` is refused for everyone**:
   # `compute_dft_energy`, `compute_interaction_energy`, `sample_conformers` and
@@ -530,6 +559,27 @@ secrets:
     chemToken: "CHEMCLAW_CHEM_TOKEN"
     safetyToken: "CHEMCLAW_SAFETY_TOKEN"
     calcToken: "CHEMCLAW_CALC_TOKEN"
+    # The four bundles **we** host, each authenticating its own `/mcp` (D-2026-08-20). Until they
+    # declared a credential the NetworkPolicy was the only thing between any pod in the namespace
+    # and a tool that starts durable HPC work — and a NetworkPolicy selects peers, not paths.
+    #
+    # Both ends read the same variable: `connectors/server.py`'s `BearerAuthMiddleware` on the
+    # serving pod, `connectors/identity.py`'s `_EnvBearerAuth` on core and the workers. Because
+    # `chemclaw.env` mounts these onto every Deployment, one value per bundle covers both sides
+    # with nothing to keep in step.
+    #
+    # `_MCP_TOKEN`, not `_TOKEN`: `CHEMCLAW_CALC_TOKEN` above is a *different hop* — the credential
+    # core presents to the remote calc server — and two hops sharing a name is how one of them ends
+    # up pointed at the wrong secret.
+    #
+    # `optional: true` for the upgrade reason the three above carry, and with the same caveat: it
+    # says nothing about whether the capability tolerates being unset. It does not. Unset, the
+    # serving pod refuses every MCP request and core raises `MissingConnectorCredential` on the
+    # first call — which is the fail-closed direction, and still an operator's job to fill in.
+    boMcpToken: "CHEMCLAW_BO_MCP_TOKEN"
+    calcMcpToken: "CHEMCLAW_CALC_MCP_TOKEN"
+    molfpMcpToken: "CHEMCLAW_MOLFP_MCP_TOKEN"
+    rxnfpMcpToken: "CHEMCLAW_RXNFP_MCP_TOKEN"
   # Secrets for the **migration hook Job only**, and the separation from `keys` above is the whole
   # point rather than tidiness: `chemclaw.env` mounts every key in that map onto every pod, so a
   # migration credential listed there would be present on the front door and every worker for the
@@ -578,7 +628,10 @@ serviceAccount:
   annotations:
     azure.workload.identity/client-id: "00000000-0000-0000-0000-000000000000"
 
-# NetworkPolicy egress allow-list (F6-T2): the app talks only to these, nothing else leaves the pod.
+# NetworkPolicy egress **port** allow-list (F6-T2). It bounds the ports, never the destinations —
+# `egressDestinations` below is what bounds those, and the chart refuses to render until a release
+# states one posture or the other. This line said "the app talks only to these, nothing else leaves
+# the pod", which was the same claim `deploy/README.md` made and the object did not keep.
 # Includes the internal LLM (8000) and OTLP collector (4317) — both plain HTTP on non-443 ports, so
 # they must be listed explicitly or the agent cannot reach its model / ship traces.
 # Metrics collection (REV-2). The `/metrics` route has existed since DEP-4 and nothing scraped it,
@@ -653,8 +706,14 @@ networkPolicy:
     calc: 8860
   # WHERE those ports may be dialled. Empty renders `to: []`, which in a NetworkPolicy means
   # **any destination** — so with this unset, TCP/443 from every pod to the whole internet is
-  # permitted. That is the shipped default only because the addresses are deployment-specific and
-  # a chart cannot invent your Postgres CIDR; it is not a safe end state.
+  # permitted. The addresses are deployment-specific and a chart cannot invent your Postgres CIDR,
+  # so this file cannot ship them; what it *can* do is refuse to render until you have said which
+  # of the two you mean.
+  #
+  # **Set exactly one of this list or `allowAnyDestination` below.** Neither, or both, and
+  # `helm install` fails naming both ways out. That is deliberate friction: the previous shipped
+  # state was an empty list, a comment saying it was not a safe end state, and a cluster object
+  # that read as "egress is restricted" while permitting the whole internet on five ports.
   #
   # `tests/test_no_egress.py` enforces "this system takes no external sources" (D-089) by scanning
   # source code for third-party host literals. That catches a developer adding a data source and
@@ -665,6 +724,16 @@ networkPolicy:
   #   - namespaceSelector: {matchLabels: {name: temporal}}
   #   - namespaceSelector: {matchLabels: {name: llm-serving}}
   egressDestinations: []
+  # The escape hatch, and the reason the guard above is a `fail` rather than a broken default: a
+  # deployment that genuinely cannot enumerate its destinations yet says so here, in its own values
+  # file, where the next person greps for it. `to: []` then renders exactly as it always did — the
+  # posture is unchanged, the silence is not.
+  #
+  # It is `false` here so that a release inherits no permission it did not write down. `helm
+  # template` on these defaults therefore needs `--set networkPolicy.allowAnyDestination=true` —
+  # which `make helm-validate`'s two renders and the runbook's deploy example both pass, and
+  # `deploy/README.md` documents.
+  allowAnyDestination: false
   # Namespaces allowed to reach the front door, beyond Chemclaw's own pods. The router needs it for
   # the Route to work and the monitoring stack needs it to scrape `/metrics`. This rule bounds which
   # *peers* may open a connection to the port — it does not, and cannot, bound paths, so it is not

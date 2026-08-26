@@ -1,0 +1,27 @@
+-- The name of the model a finished job's `result` was dumped from
+-- (D-2026-08-26-a-route-is-not-a-shape).
+--
+-- `ConnectorJobResult.data` is `dict[str, Any]`, which destroys the one fact `chemclaw.publish`
+-- needs to project a composite: which result model it is. The live hook now reads it off the
+-- envelope, but the backfill reads this table, and it had nothing to read — so it inferred the
+-- projector from `<connector>.<job>`, which matches no projector prefix, and skipped **every**
+-- composite row it saw. Measured before this column existed: all four shipped jobs resolved to no
+-- projector, so a backfill reported them `skipped` and published none of them.
+--
+-- Its own column rather than a key inside `result`, following `note_id` and `calc_refs`: `result`
+-- is the job's *domain* payload, opaque to core by design, and how core routes that payload is a
+-- cross-cutting fact about the run rather than part of it.
+--
+-- **A shape, never a route.** What is stored is `type(result).__name__` at the site that still
+-- holds the typed value — not the connector and job names, which are already two columns here. Two
+-- jobs may return one shape, and a job's return type may change without its name changing; the
+-- name of the model is the only thing that answers "what is this payload" correctly in both cases.
+--
+-- Empty for every row written before this migration, which reads correctly as "this run did not
+-- say" — and which `projector_for` already treats as "fall back to inferring from `calc_type`",
+-- so an old row behaves exactly as it did yesterday rather than failing.
+--
+-- Additive with a default, so the previous image keeps writing this table unchanged
+-- (`tests/test_migrations_are_additive.py`). Applied by `make db-migrate` (idempotent).
+ALTER TABLE job_records
+    ADD COLUMN IF NOT EXISTS payload_kind TEXT NOT NULL DEFAULT '';

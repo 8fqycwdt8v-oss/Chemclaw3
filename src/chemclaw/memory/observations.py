@@ -210,13 +210,20 @@ class Observation(BaseModel):
         reader of `recall_observations` sees a weaker restatement ranked below the current finding.
         Redundancy, bounded and self-healing, never a contradiction.
 
-        Two further costs are **not** among them, which is what makes this acceptable where
-        hashing the statement is not. `first_seen` resets on the new row, and nothing reads that
-        column — no ranking, promotion or retirement query touches it. And no duplicate PR is
-        reachable: `durable.observation_jobs.ObservationSynthesisWorkflow` promotes on every pass,
-        so a row that had crossed both thresholds was already `promoted` — and so out of
-        `_SELECT_OPEN` and `_SELECT_PROMOTABLE` — before any later run could move the anchor, while
-        a row still below them gains no further evidence after the move and never crosses them.
+        One further cost is **not** among them, which is part of what makes this acceptable where
+        hashing the statement is not: `first_seen` resets on the new row, and nothing reads that
+        column — no ranking, promotion or retirement query touches it.
+
+        **The duplicate-PR argument that used to sit here has been withdrawn, and replaced by an
+        actual check.** It read: promotion runs on every mining pass, so a row over both thresholds
+        is already `promoted` — and out of `_SELECT_PROMOTABLE` — before any later run can move the
+        anchor. That was true while one workflow did both. D-2026-08-25 split promotion out so that
+        no timer opens a pull request, and the precondition went with it: mining now runs daily
+        with no promotion, so a subset row can sit `open` and over-threshold while an anchor move
+        mints a superset row that is over-threshold too, and one later promotion opens two PRs for
+        one finding. `durable.observation_jobs.promote_observations_activity` now supersedes the
+        subset instead of relying on the ordering — a guarantee the code makes rather than one the
+        schedule happened to provide.
 
         **Kept rather than replaced, deliberately.** A merge-stable key would have to survive two
         clusters becoming one, and a single-linkage cluster's identity *is* its membership — the

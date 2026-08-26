@@ -12,9 +12,17 @@ put a null into a calculation and produce a confident wrong answer, which is the
 system can have.
 
 Deliberately *not* a template language. There are no conditionals, no loops and no expressions —
-only `${inputs.x}` and `${steps.id.result}`. Adding them is how a config format becomes a
-programming language with no debugger, and the moment a procedure needs branching it wants an agent
-(a profile) or real code (a connector workflow), neither of which is more YAML.
+only `${inputs.x}`, `${steps.id.result}` and a dotted field path into that result. Adding more is
+how a config format becomes a programming language with no debugger, and the moment a procedure
+needs branching it wants an agent (a profile) or real code (a connector workflow), neither of which
+is more YAML.
+
+The field path is the one addition, and it is addressing rather than computation: without it a
+`job` step's result could only be passed on *whole* — a `ConnectorJobResult` envelope, which
+satisfies no next step's argument schema — so every template carrying a computed value from one
+step to the next had to launder it through an `agent` step that re-typed it. That put a language
+model in the middle of the one execution mode whose purpose is to keep it out
+(`D-2026-08-21-a-geometry-is-an-address-not-a-payload`).
 """
 
 import re
@@ -22,9 +30,19 @@ from typing import Annotated, Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-# A reference to an input or to an earlier step's result. Anchored and closed: exactly two forms,
-# so a typo like `${step.x.result}` fails validation rather than being passed through as a literal.
-_REFERENCE = re.compile(r"\$\{(inputs\.[a-z][a-z0-9_]*|steps\.[a-z][a-z0-9_-]*\.result)\}")
+# A reference to an input, to an earlier step's result, or to a field inside that result. Anchored
+# and closed: a typo like `${step.x.result}` fails validation rather than being passed through as a
+# literal. The field path is a dotted attribute walk and nothing else — no indexing, no wildcards,
+# no expressions — which keeps the "deliberately not a template language" line exactly where the
+# module docstring draws it while letting a step chain a value the run already holds
+# (D-2026-08-21-a-geometry-is-an-address-not-a-payload).
+_REFERENCE = re.compile(
+    r"\$\{(inputs\.[a-z][a-z0-9_]*|steps\.[a-z][a-z0-9_-]*\.result(?:\.[a-z][a-z0-9_]*)*)\}"
+)
+# The step whose result a reference names, dropping any field path after it. The *step* is what
+# validation can check; whether the field exists depends on what the tool returns at run time, and
+# a manifest check that pretended otherwise would be guessing.
+_STEP_RESULT = re.compile(r"^(steps\.[a-z][a-z0-9_-]*\.result)")
 
 # The declared type of a template input, reusing the closed set a connector job's params use — the
 # same reasoning applies (a schema the model can always fill correctly beats an open type language),
@@ -173,7 +191,8 @@ class Template(BaseModel):
                         f"template {self.name!r} step {step.id!r} references unknown "
                         f"{reference!r}; declared inputs: {sorted(known_inputs)}"
                     )
-                if reference.startswith("steps.") and reference not in available:
+                named = _STEP_RESULT.match(reference)
+                if named is not None and named.group(1) not in available:
                     raise ValueError(
                         f"template {self.name!r} step {step.id!r} references {reference!r}, "
                         "which is not the result of an earlier step"

@@ -20,7 +20,7 @@ import networkx as nx
 
 from chemclaw.core.config import settings
 from chemclaw.core.metrics_bridge import record_metric
-from chemclaw.kg.note import Note, NoteError, Relation, read_note
+from chemclaw.kg.note import Note, NoteError, Relation, read_note, resolves_outside_graph
 
 log = logging.getLogger(__name__)
 
@@ -163,6 +163,23 @@ def note_file_fingerprints(notes_dir: Path) -> dict[str, str]:
     return fingerprints
 
 
+def note_in(graph: "nx.DiGraph[str]", note_id: str) -> Note | None:
+    """The note `note_id` names in `graph`, or `None` when the graph does not define one.
+
+    **`note_id in graph` is not that question, and the difference is a shipped defect.**
+    `_assemble_graph` mints a bare node for every cited-but-undefined link target — that is what
+    lets `dangling_links` find them — so an id cited by any note is a member of the graph whether
+    or not anything defines it. A caller testing membership therefore gets `True` for exactly the
+    ids that resolve to nothing.
+
+    Two callers asked this and spelled it differently: `agent.protocol_tools.condense_protocols`
+    read the `note` attribute and was right, `agent.graph_tools.expand_note` tested membership and
+    was wrong — so every `reaction-<id>` cited by a campaign or playbook skipped its store fallback
+    and raised "no note with id". One definition, so the two cannot disagree again.
+    """
+    return graph.nodes[note_id].get("note") if note_id in graph else None
+
+
 def dangling_links(notes: list[Note]) -> list[tuple[str, str]]:
     """Every `(source id, target id)` link in `notes` pointing at an id no note in `notes` defines.
 
@@ -174,13 +191,20 @@ def dangling_links(notes: list[Note]) -> list[tuple[str, str]]:
     Deliberately over a note list rather than over the assembled graph: a dangling target is a node
     with no `note` attribute there, which is the same fact expressed in a form that only one of the
     two callers has.
+
+    A target in an **external id namespace** is not dangling (`kg.note.resolves_outside_graph`): it
+    names a row in a store rather than a note in this tree. Since D-2026-08-25 an ELN transcription
+    is data in `reaction_records`, while `memory.campaign` and `memory.optimization` still cite each
+    run as `[[reaction-<id>]]` — so without this every campaign and optimization note would be
+    reported broken for links that resolve. What is genuinely lost is stated at the constant: this
+    function can no longer tell a real record from a typo'd one, and the live lane checks that.
     """
     defined = {note.id for note in notes}
     return sorted(
         (note.id, target)
         for note in notes
         for target in note.outgoing_links()
-        if target not in defined
+        if target not in defined and not resolves_outside_graph(target)
     )
 
 

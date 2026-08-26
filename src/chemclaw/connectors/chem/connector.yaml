@@ -22,8 +22,10 @@
 name: chem
 description: >-
   Bench chemistry over RDKit: resolve a compound name to a structure, build a stoichiometry/charge
-  table, compute E-factor and PMI for a route, and render a structure as an image. Pure and
-  synchronous — no store, no network, no durable state.
+  table, compute E-factor and PMI for a route, render a structure as an image, and enumerate the
+  species set a multi-step calculation runs over — tautomers, protonation microstates,
+  stereoisomers, breakable bonds and degradation hypotheses. Pure and synchronous — no store, no
+  network, no durable state.
 
 endpoint:
   transport: http
@@ -50,10 +52,32 @@ endpoint:
     - stoichiometry_table
     - green_metrics
     - render_structure
+    - enumerate_tautomers
+    - enumerate_protonation_states
+    - enumerate_stereoisomers
+    - enumerate_bond_cleavages
+    - enumerate_degradants
+    - transform_structure
+    - describe_topology
   # Pure functions of their input plus a vendored-dataset lookup: nothing here spends real compute
-  # or writes, so an agent can use all four to build the plan a human is asked to approve.
+  # or writes, so an agent can use every one of them to build the plan a human is asked to
+  # approve. A count is not written here: it said "four" while the list held eleven.
+  #
+  # The seven enumerations are reads for the same reason, and the classification matters more for
+  # them. Each is a map from one SMILES to a set of SMILES — no SCF, no `calc_version`, nothing
+  # cached — and what it produces is the *species set* an expensive protocol then runs over, once
+  # per member. Gating an enumeration would put the human in front of the question rather than in
+  # front of the cost; the CREST search that follows is `expensive` and `state_changing` on the
+  # `calc` bundle, and that is where approval belongs.
   read_only:
     - resolve_compound
     - stoichiometry_table
     - green_metrics
     - render_structure
+    - enumerate_tautomers
+    - enumerate_protonation_states
+    - enumerate_stereoisomers
+    - enumerate_bond_cleavages
+    - enumerate_degradants
+    - transform_structure
+    - describe_topology

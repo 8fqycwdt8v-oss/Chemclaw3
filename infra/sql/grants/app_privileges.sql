@@ -66,16 +66,26 @@ BEGIN
         'GRANT INSERT, UPDATE ON '
         'calculation_results, calculation_artifacts, job_records, '
         'bo_campaigns, measurements, predictions, note_proposals, observations, '
-        'plan_approvals, note_index, sync_cursors, turn_costs, '
-        'molecule_fingerprints, reaction_fingerprints, tool_result_links TO %I', app_role);
+        'reaction_records, '
+        'plan_approvals, sync_cursors, turn_costs, '
+        'molecule_fingerprints, reaction_fingerprints, reaction_labels, corpus_molecules, '
+        'tool_result_links TO %I', app_role);
     -- `tool_result_links` joins that list and `tool_result_blobs` the full-DML one below, even
     -- though retention deletes only the blob: a cascading delete is performed with the referencing
     -- table's owner privileges, not the deleting role's, so the link rows go without DELETE ever
     -- being granted on them. Withholding it is not a formality — it is what keeps "the sweep
     -- deletes blobs and links follow" the only way a link row can disappear.
     -- Insert only: written once and never revised. `bo_suggestions` is a campaign's history, and
-    -- the sequence *is* the history (031), so an UPDATE would rewrite it.
-    EXECUTE format('GRANT INSERT ON bo_suggestions TO %I', app_role);
+    -- the sequence *is* the history (031), so an UPDATE would rewrite it. A geometry is the same
+    -- shape one table over: `structures` is content-addressed, so the key *is* the content and a
+    -- row has nothing an update could correct (D-2026-08-21).
+    --
+    -- `chemclaw.cli.rekey_campaigns` does UPDATE `bo_suggestions` and DELETE from `bo_campaigns`,
+    -- and is deliberately absent from this matrix: it is an operator's one-off re-key run beside
+    -- `make db-migrate` under the owning principal, and granting a chat turn those verbs for the
+    -- life of the deployment is exactly what the withholding above is for.
+    -- `tests/test_database_privileges.py` names the module and this reason.
+    EXECUTE format('GRANT INSERT ON bo_suggestions, structures TO %I', app_role);
 
     -- Insert, delete, and now a narrow update. The row is still written once by its creator
     -- (`ON CONFLICT DO NOTHING`, first writer wins), and offboarding removes a departed person's
@@ -87,16 +97,36 @@ BEGIN
     -- group is still spelled out on its own line rather than folded into the full-DML list below.
     EXECUTE format('GRANT INSERT, UPDATE, DELETE ON session_owners TO %I', app_role);
 
+    -- The result outbox joins this group and exercises all three verbs: INSERT on enqueue, UPDATE
+    -- to mark a row delivered or to count a failed attempt, and DELETE because retention prunes
+    -- *delivered* rows. That last one is the difference between this table and the two next to it
+    -- that refuse pruning: a delivered row is a receipt for something that now lives in two
+    -- places, so keeping every one forever would be a third copy of every result this deployment
+    -- has ever computed. A pending or failed row is never pruned - it is the only record that
+    -- something has *not* been published.
+    --
     -- Full DML, because the application genuinely deletes from these: the retention sweep prunes
     -- conversation history and spent mailbox rows, artifact eviction reclaims cold blobs, a turn
     -- claim is released, a subscription is removed, a preference is unset. The two document tables
     -- join them because the share index is derived from a filesystem it does not own: a file
     -- deleted from the share has to leave the index, or a chemist keeps being cited a document
     -- nobody can open.
+    --
+    -- `note_index` joins them on that same argument, and moved here from the insert/update list
+    -- above when `reindex_notes` gained a prune (D-2026-08-25). It is derived from the Git note
+    -- tree exactly as the document tables are derived from the share, and until then a note deleted
+    -- from the tree left its row — and, once the dense half can live in an external store, its
+    -- vector — behind forever.
+    --
+    -- `reaction_species` joins them one level down: an amended entry that removed a charge leaves a
+    -- higher ordinal behind, and without the DELETE the label index keeps answering "this reaction
+    -- used TEA" from a species the current record no longer has. `reaction_labels` itself stays in
+    -- the insert/update group above — a reaction is never unrecorded, only re-recorded.
     EXECUTE format(
         'GRANT INSERT, UPDATE, DELETE ON '
         'session_messages, session_events, session_turns, subscriptions, user_preferences, '
-        'artifact_blobs, document_files, document_chunks, tool_result_blobs TO %I', app_role);
+        'artifact_blobs, document_files, document_chunks, note_index, tool_result_blobs, '
+        'reaction_species, result_publications TO %I', app_role);
 
     -- The tables LangGraph creates for itself, which no migration in `infra/sql` declares and which
     -- therefore fell through every enumeration above until they were named here.

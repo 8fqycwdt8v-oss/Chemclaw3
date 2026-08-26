@@ -62,9 +62,11 @@ from chemclaw.core.config.evals import EvalSettings
 from chemclaw.core.config.fingerprints import FingerprintSettings
 from chemclaw.core.config.hpc import HpcSettings
 from chemclaw.core.config.kg import KgSettings
+from chemclaw.core.config.labels import LabelSettings
 from chemclaw.core.config.llm import LlmSettings
 from chemclaw.core.config.memory import MemorySettings
 from chemclaw.core.config.observability import ObservabilitySettings
+from chemclaw.core.config.publish import PublishSettings
 from chemclaw.core.config.reports import ReportSettings
 from chemclaw.core.config.retrieval import (
     NOTE_INDEX_SOURCES,
@@ -94,9 +96,11 @@ __all__ = [
     "FingerprintSettings",
     "HpcSettings",
     "KgSettings",
+    "LabelSettings",
     "LlmSettings",
     "MemorySettings",
     "ObservabilitySettings",
+    "PublishSettings",
     "ReportSettings",
     "RetrievalSettings",
     "ServiceSettings",
@@ -122,12 +126,14 @@ class Settings(
     KgSettings,
     EvalSettings,
     FingerprintSettings,
+    LabelSettings,
     ElnSettings,
     SourcesSettings,
     ConnectorSettings,
     MemorySettings,
     RetrievalSettings,
     ReportSettings,
+    PublishSettings,
 ):
     """Environment configuration, loaded from process env then a local `.env`.
 
@@ -156,6 +162,11 @@ class Settings(
         worth writing down is worth failing on. (Counted in the list below, not in this sentence —
         a number in prose beside a list is a number that goes stale.)
 
+        - **A tool-result clear trigger above the conversation budget.** The lossless edit was
+          split off from the budget precisely so it could fire first; setting it higher means it
+          never fires before the window does, which is the behaviour the split removed. The
+          inverted setting is the worse of the two possible misconfigurations because it looks
+          like it took effect.
         - **`service_uvicorn_workers > 1` silently breaks five per-process guarantees.** Until
           those have a shared story (shared rate limiter, shared budget tracker, shared attachment
           store, shared session LRU, shared metrics scrape), the knob is a foot-gun that offers no
@@ -189,6 +200,23 @@ class Settings(
           "does anything in this deployment write `note_index`", and `note_reindex_enabled` is the
           third way that happens — the scheduled rebuild, which needs no retrieve source at all.
         """
+        # Only when the operator *set* it. At its default the trigger is clamped instead, because a
+        # default is this repository's opinion and a budget is the deployment's: a small-context
+        # site setting `CHEMCLAW_AGENT_CONTEXT_TOKEN_BUDGET=20000` and nothing else would otherwise
+        # fail to construct `Settings()` at all, citing a variable it never heard of. That made a
+        # 30,000-token floor out of a field whose entire purpose is to sit *below* the budget.
+        if "agent_tool_result_clear_trigger" not in self.model_fields_set:
+            self.agent_tool_result_clear_trigger = min(
+                self.agent_tool_result_clear_trigger, self.agent_context_token_budget
+            )
+        elif self.agent_tool_result_clear_trigger > self.agent_context_token_budget:
+            raise ValueError(
+                "agent_tool_result_clear_trigger must not exceed agent_context_token_budget: the "
+                "lossless tool-result edit exists to run *before* the destructive conversation "
+                "window, and setting it above the budget silently restores the single-threshold "
+                "behaviour it was split off from — a misconfiguration that looks like it took "
+                "effect (agent/compaction.py::context_compaction_middleware)."
+            )
         if self.service_uvicorn_workers > 1:
             raise ValueError(
                 "service_uvicorn_workers>1 silently breaks five per-process guarantees until they "
@@ -246,11 +274,17 @@ class Settings(
         writes_note_index = self.note_reindex_enabled or bool(
             NOTE_INDEX_SOURCES & set(self.data_source_list)
         )
-        if writes_note_index and self.embedding_dim != SCHEMA_VECTOR_DIM:
+        # Inert wherever the note vectors do not live in that column, exactly as
+        # `require_schema_vector_width()` is for the document one: an external store's deployment
+        # may legitimately run a 768-wide model, and refusing it over a column nothing writes would
+        # be this check inventing a constraint instead of reporting one.
+        pgvector_notes = self.vector_store_provider == "pgvector"
+        if writes_note_index and pgvector_notes and self.embedding_dim != SCHEMA_VECTOR_DIM:
             raise ValueError(
                 f"embedding_dim={self.embedding_dim} disagrees with the note_index vector column "
                 f"({SCHEMA_VECTOR_DIM}, infra/sql/012_note_index.sql); pgvector would reject "
-                "every write. Change both together, or drop 'vector' from data_sources."
+                "every write. Change both together, drop 'vector' from data_sources, or move the "
+                "vectors out of Postgres with vector_store_provider."
             )
         return self
 

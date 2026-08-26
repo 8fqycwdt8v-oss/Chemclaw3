@@ -110,7 +110,7 @@ def test_gather_evidence_frames_chunk_content(
         encoding="utf-8",
     )
     monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
-    chunks = asyncio.run(research_tools.gather_evidence("yield"))
+    chunks = asyncio.run(research_tools.gather_evidence("yield")).chunks
     assert chunks  # the note matched
     assert all(c.content.startswith(f'<{ENVELOPE_TAG} id="reaction-inj">') for c in chunks)
 
@@ -297,7 +297,7 @@ def test_gather_evidence_neutralizes_the_chunks_source_label_too(
         )
 
     monkeypatch.setattr(research_tools, "sweep_sources", _one_forged_chunk)
-    chunks = asyncio.run(research_tools.gather_evidence("yield"))
+    chunks = asyncio.run(research_tools.gather_evidence("yield")).chunks
 
     assert chunks, "the forged chunk reached the caller"
     assert all(f"</{ENVELOPE_TAG}>" not in c.source for c in chunks)
@@ -335,7 +335,7 @@ def test_gather_evidence_neutralizes_the_citation_id_as_well(
         )
 
     monkeypatch.setattr(research_tools, "sweep_sources", _one_forged_chunk)
-    chunks = asyncio.run(research_tools.gather_evidence("yield"))
+    chunks = asyncio.run(research_tools.gather_evidence("yield")).chunks
 
     assert chunks, "the forged chunk reached the caller"
     assert f"</{ENVELOPE_TAG}>" not in chunks[0].source_note_id

@@ -1,0 +1,71 @@
+# Search a molecule's conformers cheaply, then spend the expensive method on the one that matters.
+#
+# **This is the template that could not be written before D-2026-08-21.** A `job` step's result is
+# a `ConnectorJobResult` envelope, and until a step reference could name a field inside one, the
+# only thing this file could pass to step 2 was the whole envelope — which satisfies no job spec's
+# schema. The sequence had to be laundered through an `agent` step that read the coordinates and
+# re-typed them, which is a language model in the middle of the one execution mode that exists to
+# keep one out. And there was nothing to re-type *to*: no calculation on the agent's surface
+# accepted a geometry, so the second step could only be handed the SMILES the first step already
+# had — which is the search thrown away.
+#
+# Why a template and not a profile: the value is that the search happens *first*. An agent asked to
+# "get me a good free energy for this molecule" might reasonably compute one on a fresh embedding,
+# and a single-conformer free energy for a flexible molecule is the most common silent error in
+# semiempirical work. The judgment left to the model is the last step — what the numbers mean.
+summary: Search a molecule's conformers, then compute thermochemistry on the lowest one.
+description: >-
+  A fixed three-step refinement. Runs a CREST conformer search, takes the lowest-energy member by
+  its structure id, and computes vibrational frequencies and free energy at *that* geometry rather
+  than at a fresh embedding — then writes the two up together with the ensemble correction the
+  single-conformer number is missing. Use it when a free energy has to be trustworthy for a
+  flexible molecule; for one rigid structure `compute_thermochemistry` alone is enough.
+
+inputs:
+  - name: smiles
+    type: string
+    description: The molecule to refine, as SMILES.
+  - name: solvent
+    type: string
+    description: Implicit solvent name (e.g. "water", "thf"). Omit it for gas phase.
+    required: false
+
+steps:
+  - id: search
+    kind: job
+    purpose: Sample conformational space — always first, so nothing downstream describes one arbitrary shape.
+    job: sample_conformers
+    arguments:
+      smiles: "${inputs.smiles}"
+      solvent: "${inputs.solvent}"
+
+  - id: refine
+    kind: tool
+    purpose: >-
+      Frequencies and free energy at the lowest member. The dotted reference is the whole point:
+      it names the address the search reported, so this runs on the conformer the search chose
+      rather than on a fresh embedding of the same SMILES.
+    tool: compute_thermochemistry
+    arguments:
+      smiles: "${inputs.smiles}"
+      solvent: "${inputs.solvent}"
+      # `lowest_structure_id` is hoisted onto the ensemble for exactly this reference: reaching it
+      # through `conformers[0]` would need list indexing, which the resolver deliberately does not
+      # have (`templates/resolve.py` — a dotted attribute path is addressing, an index is the first
+      # step toward an expression language).
+      structure_id: "${steps.search.result.data.ensemble.lowest_structure_id}"
+
+  - id: report
+    kind: agent
+    purpose: Say what the ensemble adds to the single-conformer number, and what it does not.
+    prompt: >-
+      Report the conformational analysis of ${inputs.smiles}.
+
+      Conformer search: ${steps.search.result.summary}
+      Ensemble: ${steps.search.result.data}
+      Refinement at the lowest conformer: ${steps.refine.result}
+
+      State the populations and the conformational entropy, and say plainly that the search is a
+      *sample* of conformational space rather than an enumeration of it — a conformer that was not
+      sampled cannot be reported. Quote the uncertainty with every energy. Close by naming what a
+      chemist would still have to check.

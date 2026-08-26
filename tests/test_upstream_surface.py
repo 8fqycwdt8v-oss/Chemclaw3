@@ -584,3 +584,150 @@ def test_the_pinned_versions_are_the_ones_these_assertions_were_measured_against
             f"{package} {'.'.join(map(str, found))} is below the {'.'.join(map(str, floor))} "
             "these assertions were measured against"
         )
+
+
+def test_a_pydantic_tool_return_still_reaches_the_model_as_repr() -> None:
+    """`_stringify` prefers JSON and falls back to `str()`, so a `BaseModel` arrives as its repr.
+
+    Every structured tool in this repository returns a pydantic model — `EvidenceSweep`,
+    `NoteView`, `FingerprintSearch` — and none of them reaches the model as JSON, because
+    `json.dumps` cannot take a `BaseModel` and `_stringify` falls through to `str(content)`.
+
+    **This is asserted because a fix upstream would silently change every tool's payload**, and
+    because one design decision in this tree was already made against the wrong belief about it:
+    `Condensation.rows` carried `Field(exclude=True)` and a measurement taken with
+    `model_dump_json()`, neither of which described the wire. `agent/protocol_tools` now renders a
+    string at the tool boundary rather than depending on this behaviour — the assertion is here so
+    that if upstream starts serializing models properly, whoever reads this knows the repr
+    assumption is gone and can drop the workarounds it justified rather than leave them
+    unexplained.
+    """
+    from langchain_core.tools.base import _stringify
+    from pydantic import BaseModel, Field
+
+    class _Probe(BaseModel):
+        kept: str = "x"
+        hidden: str = Field(default="y", exclude=True)
+
+    rendered = _stringify(_Probe())
+
+    assert not rendered.startswith("{"), (
+        "`_stringify` now serializes a pydantic model as JSON. Every tool's payload just changed "
+        "shape, and `Field(exclude=True)` now takes effect where it previously did not — re-check "
+        "agent/condense.Condensation and agent/protocol_tools' string rendering."
+    )
+    assert "hidden=" in rendered, (
+        "`exclude=True` now survives tool-result stringification; the comment on "
+        "`Condensation.rows` saying it does not is stale"
+    )
+
+
+def test_the_mcp_adapter_still_puts_structured_content_under_that_artifact_key() -> None:
+    """A tool step reads `structuredContent` out of upstream's artifact, by key, and by shape.
+
+    `template_activities._structured` is what makes `${steps.<id>.result.<field>}` work on a `tool`
+    step at all: the content blocks are joined into a string by the time `_mcp_text` is done, so the
+    only route to a walkable value is the artifact `langchain_mcp_adapters` attaches. Three things
+    it depends on and upstream promises none of: that tools are built with
+    `response_format="content_and_artifact"`, that the artifact is a `dict` (an `MCPToolArtifact`
+    `TypedDict`, so `.get` works), and that the server's structured payload sits under
+    `structured_content`.
+
+    Pinned here rather than trusted because the failure is silent and expensive: if any of the three
+    changes, `_structured` returns `None`, the step falls back to the joined string, and four
+    shipped templates go back to raising `UnresolvedReference` *after* the launch — which is exactly
+    how they shipped in the first place.
+    """
+    import inspect
+
+    import langchain_mcp_adapters.tools as adapter
+
+    source = inspect.getsource(adapter)
+    assert 'response_format="content_and_artifact"' in source, (
+        "the adapter no longer builds tools with an artifact; "
+        "chemclaw.durable.template_activities._structured has nothing to read"
+    )
+    assert "structured_content" in adapter.MCPToolArtifact.__annotations__, (
+        "MCPToolArtifact no longer carries `structured_content`; "
+        "chemclaw.durable.template_activities._structured reads that key by name"
+    )
+    assert issubclass(adapter.MCPToolArtifact, dict), (
+        "MCPToolArtifact is no longer a TypedDict; "
+        "_structured's `isinstance(artifact, dict)` guard would reject every real artifact"
+    )
+
+
+def test_the_skills_middleware_still_formats_its_listing_under_a_private_name() -> None:
+    """`tests/test_context_floor.py` renders the skills block through upstream's own formatter.
+
+    The alternative was re-deriving the block from `SKILL.md` frontmatter, which would be a second
+    implementation of upstream's formatting to keep in step — and the floor has to be the number
+    the model is actually sent. So the coupling is deliberate; what was missing is it being
+    *recorded*, which is this file's whole job.
+
+    `_format_skills_list` is private, so a rename is a patch-release away and the symptom would be
+    an `AttributeError` inside a token-counting helper, several layers from the cause.
+    """
+    from deepagents.middleware.skills import SkillsMiddleware
+
+    assert hasattr(SkillsMiddleware, "_format_skills_list"), (
+        "deepagents' SkillsMiddleware no longer exposes `_format_skills_list`. "
+        "tests/test_context_floor.py::_skills_listing calls it to render the skills block the "
+        "static-prefix ratchet measures."
+    )
+
+
+def test_before_agent_still_accepts_the_three_argument_call_the_floor_uses() -> None:
+    """The arity `test_context_floor.py` invokes `before_agent` with, pinned because arity moved.
+
+    This is the one dependency in this file with previous form. `ReloadingSkillsMiddleware` was
+    rewritten onto a single `UntrackedValue` channel specifically to *stop* depending on the number
+    of arguments LangChain invokes a hook with
+    (`D-2026-08-14-the-coupling-is-the-cost-not-the-line-count`), and production no longer does.
+    The floor helper calls the hook directly, so it depends on the signature again — narrowly, in a
+    test, and now visibly rather than silently.
+
+    Asserted against the signature rather than by calling it, so this stays a shape assertion and
+    does not need a loaded skills backend.
+    """
+    import inspect
+
+    from deepagents.middleware.skills import SkillsMiddleware
+
+    params = list(inspect.signature(SkillsMiddleware.before_agent).parameters)
+    assert len(params) >= 4, (
+        f"deepagents' SkillsMiddleware.before_agent now takes {params}; "
+        "tests/test_context_floor.py::_skills_listing calls it as "
+        "`before_agent({}, None, None)` (three arguments after self) to load the skills the "
+        "static-prefix ratchet measures. Adjust that call, or move the helper onto whatever "
+        "load path upstream now publishes."
+    )
+
+
+def test_a_cleared_tool_result_is_still_marked_in_response_metadata() -> None:
+    """`agent/compaction.py::_cleared_calls` identifies cleared results by upstream's stamp.
+
+    The alternative — matching the placeholder text — is first-party and would break silently the
+    moment the string is reworded, so the metadata key is the dependency worth pinning. If it
+    changes, the repeat guard is told nothing was cleared and goes on refusing calls whose answers
+    the model no longer holds.
+    """
+    from langchain.agents.middleware import ClearToolUsesEdit
+    from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, ToolMessage
+    from langchain_core.messages.utils import count_tokens_approximately
+
+    messages: list[AnyMessage] = [
+        HumanMessage("go"),
+        AIMessage("", tool_calls=[{"name": "t", "args": {}, "id": "c0"}]),
+        ToolMessage("x " * 6000, tool_call_id="c0"),
+        AIMessage("", tool_calls=[{"name": "t", "args": {"n": 1}, "id": "c1"}]),
+        ToolMessage("x " * 6000, tool_call_id="c1"),
+    ]
+    ClearToolUsesEdit(trigger=1, keep=1, placeholder="[cleared]").apply(
+        messages, count_tokens=count_tokens_approximately
+    )
+    assert messages[2].response_metadata.get("context_editing", {}).get("cleared") is True, (
+        "ClearToolUsesEdit no longer stamps response_metadata['context_editing']['cleared']. "
+        "agent/compaction.py::_cleared_calls reads it to tell agent/repeat_guard.py which calls "
+        "lost their answers."
+    )

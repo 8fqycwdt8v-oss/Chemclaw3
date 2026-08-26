@@ -71,6 +71,14 @@ outlives all of this: deepagents builds a bare `SubAgent` dict with *only* `spec
 anything not compiled by `build_langgraph_agent` runs with no audit trail, no authz and no plan
 gate — silently.
 
+**That sweep missed one, and 2026-08-26 finished it**
+(`D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution`): `audit_events.agent` was
+empty on **every row that trail has ever written**, because `set_current_specialist` had no caller
+in `src/` and `record_handoff` had none anywhere — while three docstrings said in the present tense
+that the trail names the agent beside the human. The contextvar trio, `record_handoff` and
+`HandoffSignal` are gone; the column, `HandoffEvent` and the D-2026-08-10 rule stay, and an
+*absence* test now fails whoever re-adds the claim without a producer.
+
 An audit against LangChain's own **deep-agents** pillars (D-2026-08-11-a-policy-nobody-can-see…)
 then found five of six sound and each narrowing already argued for — and the sixth, *context
 management*, gone. D-025's compaction lived in the removed framework, and what survived it was the
@@ -132,9 +140,21 @@ independently and carried out, removing the audit hash chain while keeping the t
 the INSERT-only grant. What that leaves open in `docs/planning/BACKLOG.md` is the durable approval
 store, the `session_messages` read-model and `HumanInTheLoopMiddleware`. `RubricMiddleware` is **declined** (`D-2026-08-16-a-second-judge-is-a-second-answer-about-the-same-answer`) — it cannot reuse `score_answer`, and a failed grading returns the ungraded answer.
 
-**Live edges remain open** (need a real Entra tenant / Temporal broker / OpenShift cluster): real token
-validation, live cluster durability + `helm`/`kubeconform` render. See
-`docs/planning/BACKLOG.md` for the exact list.
+**Live edges remain open** (need a real Temporal broker / OpenShift cluster): live cluster durability
++ `helm`/`kubeconform` render. See `docs/planning/BACKLOG.md` for the exact list. Note that the
+render edge now has one more thing to catch: `D-2026-08-26-a-knob-that-renders-nothing-is-not-a-knob`
+makes the chart **refuse to render** until a release states its egress posture, so `helm template` on
+the shipped defaults takes `--set networkPolicy.allowAnyDestination=true` — as the Makefile's two
+renders, the runbook and `deploy/README.md` all now do. The same ADR derives
+`CHEMCLAW_CONNECTORS_ENABLED` from the `connectors` block (`enabled: false` used to take a bundle's
+pods and leave its tools advertised) and splits `replicas` into `serverReplicas`/`workerReplicas`.
+
+**Identity is no longer one of them** (D-2026-08-20-a-tenant-is-a-jwks-document-and-an-issuer-string).
+A tenant, to a resource server, is a JWKS document and an issuer string, so `Chemclaw3_mock`'s
+`app/entra/` is one: `tests/test_entra_end_to_end.py` runs the production app with
+`entra_required=True` against a real HTTP JWKS with nothing patched, and `make live-up` runs the
+enforced posture end to end. The one hop still unproven is browser → tenant, because MSAL talks to
+`login.microsoftonline.com` and mocking that is mocking a login UI rather than a key set.
 
 **On the design documents below: they are historical, not current.** `docs/reference/architektur.md` is
 pre-implementation design and contains **zero** references to connectors — the seam that now carries
@@ -164,7 +184,7 @@ generations and are not in scope for any task here.
   can be live-tested end-to-end without real integrations.
 
 **Where a capability belongs.** This repo holds *infrastructure*: conversation orchestration, the
-knowledge graph, retrieval, memory, ingestion, identity and durable execution. Scientific capability
+knowledge graph, retrieval, memory, ingestion, **publication** and durable execution. Scientific capability
 — quantum chemistry, reaction prediction, property lookup, optimization — belongs in `Chemclaw3-mcp`
 as a server. **The boundary within science is by *composability*, not by speed or by subject**
 (`D-2026-08-16-the-physics-leaves-the-cache-stays`): a *primitive* — one calculation whose identity
@@ -178,6 +198,17 @@ them transitively needed almost all of it — and shipping `compute_thermochemis
 turned a 0.007 s repeat into a full recompute, because its key names the geometry its refinement
 loop settles on. Duration was never the property that mattered; a server there may be slow, it may
 not be stateful.
+
+**Computed values leave, too** (`D-2026-08-25-a-cache-is-not-a-record`). `calculation_results` is a
+*cache* — `key` onto an opaque `result JSONB`, and its own query model refuses any predicate on the
+payload, because "a `total_energy_hartree > x` predicate would put one calculator's schema inside
+the thing that persists all of them". That is right for exact-key lookup and is exactly why it
+cannot also be the scientific record. So `src/chemclaw/publish/` projects every result — primitive
+or composite, single compound, multi-compound, reaction or ensemble — into a typed record and
+delivers it to a database this system does **not** own: a third manifest seam beside
+`connector.yaml` and `datasource.yaml`, because a connector *produces*, a source *supplies*, and a
+sink *consumes what the system produced*. The schema ships in `schema/result-store/` and a site
+creates it; publishing is off until `CHEMCLAW_RESULT_SINKS` names a sink.
 
 `science/fingerprints` stays here despite the name — retrieval, memory and ELN ingest import it
 in-process, which makes it infrastructure by this rule rather than an exception to it. `science/safety` used to be listed beside it on the same grounds; that argument
@@ -233,9 +264,18 @@ Durability lives **only** in Temporal, never in the conversation layer's own ad-
 rule is D-002's and it got *stricter* when layer 1 gained a checkpointer, because the checkpointer
 holds turn state and every long or expensive job is still Temporal's (D-2026-08-10 §3). Skills hold
 judgment; **connectors** hold capability (deterministic tools) — MCP is the protocol a connector
-speaks, not the thing that holds the capability (D-110/D-118). Anything agent-generated enters the
+speaks, not the thing that holds the capability (D-110/D-118). Anything agent-*asserted* enters the
 graph via a **PR-gate** (human validates before merge) — the agent proposes, a human decides, reused
 everywhere (job results, reports, distilled playbooks). See `docs/reference/architektur.md` §4, §9, §12.
+
+**A deterministic transcription is not an assertion, and is not gated**
+(D-2026-08-25-an-eln-transcription-is-data-not-a-claim). An ELN entry becomes a row in
+`reaction_records` — readable the moment it is ingested, queryable by structure, expandable into its
+recipe — because `record_from_ord_reaction` infers nothing and so hands a reviewer nothing to
+decide. Measured, the gate cost 202 ms of serialized git per entry and a corpus scan that wedged the
+sync at ~700k entries, for 4 person-years of clicking per million. The same rule now runs the other
+way too: **no Temporal Schedule opens a pull request.** The campaign/playbook/optimization miners are
+unchanged and still run, on demand rather than hourly, so knowledge never arrives on a timer.
 
 ## Commands
 

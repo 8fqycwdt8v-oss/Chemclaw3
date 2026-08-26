@@ -1,0 +1,65 @@
+# Which bond breaks first — the question behind autoxidation, HAT selectivity and forced degradation.
+#
+# Why a template: the enumeration and the calculation are different kinds of question, and doing
+# them in the wrong order is the common failure. An agent asked "is this prone to oxidation" can
+# reasonably answer from functional groups alone; the ranked survey is what turns that from a
+# pattern match into a comparison, and it only exists if the bonds are enumerated first.
+summary: Break every bond of a molecule in turn and rank them by dissociation energy.
+description: >-
+  A fixed three-step bond-strength survey. Enumerates every acyclic single bond as a radical pair,
+  computes each dissociation energy, and reports them ranked weakest first. Answers which C-H a
+  radical abstracts, which bond an autoxidation attacks, and which linkage a forced-degradation
+  study should look for. Ring bonds are excluded because breaking one gives a single fragment,
+  making its energy a ring-opening rather than a dissociation.
+
+  The ordering is the answer and the magnitudes are not: semiempirical bond dissociation energies
+  carry several kcal/mol of error, which is enough that a number should never be quoted as a BDE
+  and little enough that the ranking within one molecule is informative.
+
+inputs:
+  - name: smiles
+    type: string
+    description: The molecule to survey, as SMILES.
+  - name: solvent
+    type: string
+    description: Implicit solvent name. Omit it for gas phase, which is the usual choice for a BDE.
+    required: false
+
+steps:
+  - id: bonds
+    kind: tool
+    purpose: >-
+      The breakable bonds, written as radical pairs with explicit radical electrons — which is what
+      makes the open shell computable without a hand-declared spin state.
+    tool: enumerate_bond_cleavages
+    arguments:
+      smiles: "${inputs.smiles}"
+      mode: homolytic
+
+  - id: survey
+    kind: job
+    purpose: One balanced reaction per bond, ranked.
+    job: survey_bond_strengths
+    arguments:
+      smiles: "${inputs.smiles}"
+      # The field names on each cleavage match the job's own spec exactly, so this list passes
+      # through unchanged — a template cannot rename a field, and a near-miss here would need a
+      # model in the middle to re-type it.
+      cleavages: "${steps.bonds.result.cleavages}"
+      solvent: "${inputs.solvent}"
+
+  - id: report
+    kind: agent
+    purpose: Turn the ranking into the study a chemist would actually run.
+    prompt: >-
+      Report the bond-strength survey of ${inputs.smiles}.
+
+      Bonds considered: ${steps.bonds.result.count}
+      Ranked dissociation energies: ${steps.survey.result}
+
+      Name the weakest bonds and what each implies — a weak benzylic or alpha-to-heteroatom C-H is
+      an autoxidation and HAT liability, a weak C-N or C-O is a thermal or hydrolytic one. Report
+      the ordering as the finding and say explicitly that the magnitudes are not quotable as bond
+      dissociation energies. Ring bonds were not surveyed, so say so rather than letting their
+      absence read as strength. Close with the forced-degradation conditions this ranking argues
+      for, framed as a study to run rather than a prediction of what it will find.

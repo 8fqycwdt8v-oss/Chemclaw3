@@ -16,8 +16,11 @@ row this queue has ever carried. 223 of its rows are open
 (`grep -c '^- \[ \]' docs/archive/findings-2026-08.md`; the header here said "~185" until
 2026-08-17). That is not "223 *further*" and the two counts do not subtract: promoting a row
 **restates** it, so a queued row is still open there under its original wording, and matching the
-two sets by title matches only 7 of this queue's 30 rows — the overlap is real and unmeasurable by
-`grep`, which is why the number here is the archive's own and not a difference. When a queued row
+two sets by title matched only 7 of the 30 rows this queue held when that was measured; it holds 41
+now, after the 2026-08-26 sweep closed seven, deleted an eighth that `#221` had already closed
+without removing it, and queued two. §5 is the first thing here that is not a defect this repository
+found in itself, and none of its rows is in the archive at all. The overlap is real and unmeasurable
+by `grep`, which is why the number here is the archive's own and not a difference. When a queued row
 needs its full measurement history, that file has it under the review that found it.
 
 **A row must name an anchor in the tree** — a module, a line, a manifest key — so any row can be
@@ -57,21 +60,6 @@ topic).
 
 ## 1 — Untrusted input reaching a privileged surface
 
-- [ ] **Four of the six endpoint-serving connectors are unauthenticated** — [M]. `bo`, `calc`,
-      `molfp` and `rxnfp` ship `auth: mode: none`. The NetworkPolicy is the only thing between a pod
-      in the namespace and a tool that starts durable work. The mode is not theoretical: `chem` and
-      `safety` are served by `Chemclaw3-mcp`, whose `connector_app` enforces a bearer on `/mcp`
-      itself, so their manifests set `mode: bearer` and `CHEMCLAW_CHEM_TOKEN` /
-      `CHEMCLAW_SAFETY_TOKEN` are read per request today. The four remaining are the ones we host,
-      and `connectors/server.py`'s `BearerAuthMiddleware` already enforces the mode from each
-      bundle's own manifest, failing closed on an unresolved one.
-      *Measured shape of the change:* four manifests, four `values.yaml` `optionalKeys`, the
-      `tests/test_helm_chart.py` set that pins them, `.env.example`, and the dev/live runners —
-      which need the vars or every call 401s. **Watch the name collision**: `CHEMCLAW_CALC_TOKEN` is
-      already taken by a different hop (`core/config/calculators.py:165`, the token core presents to
-      the *remote* calc server), so the calc connector's own `/mcp` needs a distinct variable.
-      *Design direction:* MCP's OAuth 2.1 / ID-JAG token exchange for the federated case.
-
 - [ ] **The unauthenticated `X-Chemclaw-Actor` header becomes durable attribution** — [M], and
       **narrower than this row used to claim**. It does not reach `job_records` or the audit trail:
       the durable path takes the actor as an argument sourced from core's validated front-door
@@ -82,6 +70,22 @@ topic).
       so what is open is that a caller still chooses the string. A bearer on the row above proves
       *core called*, not *which chemist*, so full closure needs an actor assertion bound to the call
       (OBO or a signed memo) — which is the `DEFERRED.md` warehouse row's blocker too.
+
+- [ ] **`fetch_artifact` is a tool that can only refuse** — [S]. `list_artifacts` and
+      `fetch_artifact` promise "the relaxed coordinates, the second derivatives, the raw vibrational
+      spectrum" and "a conformer search seeded from a known structure", and two agent profiles
+      (`computation`, `evidence`) instruct the agent to reach for them before proposing a rerun. In
+      this repository the **only** artifact writer left is `ArrayOffloadingStore`, which writes
+      `hessian.npy` and `dipole_derivatives.npy` — and `fetch_artifact` refuses binary by design.
+      Measured: `list_artifacts` returns one `application/x-npy` entry and `fetch_artifact` on it
+      raises "is binary … not text". `xtbopt.xyz`, `crest_conformers.xyz` and `vibspectrum` appear
+      only in `science/calc/artifacts._MEDIA_TYPES` and in comments; their writers left with the
+      engines in `D-2026-08-16-the-physics-leaves-the-cache-stays`. **The geometry half is now
+      answered elsewhere** — D-2026-08-21's `structures` store is the addressable geometry the
+      profiles were really asking for — so what is left is the *spectrum*: either the server returns
+      `vibspectrum` as an artifact, or these two tools stop advertising one. Note the row below
+      assumes `fetch_artifact` hands the model externally-produced text; today it cannot hand it
+      anything.
 
 - [ ] **No connector or MCP tool result is framed** — [M], wide half only. The two narrow channels
       are closed (`EvidenceChunk.source` is defanged, `recall_observations` frames its statements),
@@ -103,31 +107,16 @@ topic).
       conversion out of the `pre-upgrade` Job into a `post-upgrade` one while the schema DDL stays
       where it is (~25 lines). Needs an ADR.
 
-- [ ] **No live lane in this repo can start** — [M]. `infra/live/processes.sh:47` pins
-      `CHEMCLAW_CONNECTORS_REQUIRED=true` while **chem and safety** are enabled and never started —
-      measured, `build_composite()` serves `bo, calc, molfp, rxnfp` and `check_connectors_at_startup`
-      raises. (This row used to name `calc` as a third; `calc` kept a local app after the physics
-      move and *is* served.) `cli/connectors_dev.py:78` emits URLs only for bundles with a local
-      app, so chem and safety keep their loopback defaults and the front door never boots. Also
-      `infra/live/e2e-full-stack/up.sh:185` puts `$MCP_REPO/manifests` on `CHEMCLAW_CONNECTORS_DIR`,
-      which `connectors/calc/connector.yaml:13` explicitly forbids — it survives on
-      `connectors/registry.py:124` (`found.setdefault`) being first-dir-wins, and **that behaviour
-      is pinned**: `tests/test_connector_registry.py:293` builds two dirs holding a bundle both
-      named `alpha`, on ports 7777 and 8888, and asserts the *first* dir's endpoint is the one
-      `enabled()` returns. (This row said "no test pins" it until 2026-08-17, which invented a
-      second hazard on top of a real one — the ordering is a load-bearing dependency of the live
-      lane whether or not it is pinned, and it is.)
-
-- [ ] **The audit trail's `agent` column can never be non-empty** — [S]. `agent/audit.py:350` reads
-      `get_current_specialist()`; `set_current_specialist` has **zero callers in `src/`** and
-      `core/turn_signals.record_handoff` has none anywhere, tests included. `tests/test_audit.py`
-      keeps the contextvar alive by setting it directly — the `map_to_hpc_identity` shape
-      `D-2026-08-15-a-capability-that-ships-off-is-not-a-capability` names, which that ADR deleted
-      three other controls for. **The answer is deletion, not wiring**: there is no specialist to
-      name, and re-adding subagents is a new decision. Keep `HandoffEvent` (removing a union member
-      is a coordinated three-repo change) and the SQL column (a merged migration is never edited);
-      delete the contextvar trio, `record_handoff`, `HandoffSignal` and the audit write. ~120 lines
-      out. That ADR simply did not sweep these.
+- [ ] **The four-repo lane puts the fleet's manifests on `CHEMCLAW_CONNECTORS_DIR`, which one
+      manifest forbids** — [S], and it is the half of the now-closed live-lane row that did not
+      close with it. `infra/live/e2e-full-stack/up.sh:185` adds `$MCP_REPO/manifests` to that path
+      while `connectors/calc/connector.yaml:13` explicitly forbids it. It works only because
+      `connectors/registry.py:124` is first-dir-wins (`found.setdefault`), and **that behaviour is
+      pinned**: `tests/test_connector_registry.py:293` builds two directories each holding a bundle
+      named `alpha`, on ports 7777 and 8888, and asserts the first directory's endpoint is what
+      `enabled()` returns. So this is latent rather than broken — the lane depends on an ordering
+      guarantee nothing in the lane states. Either the manifest stops forbidding it or the lane
+      stops relying on the order.
 
 - [ ] **`CalculationKey`'s primary key is an unescaped concatenation of caller-shaped strings** —
       [M]. `science/calc/store.py:122` (`CalculationKey.as_str`) builds the literal
@@ -145,6 +134,43 @@ topic).
       change to `as_str`.
 
 ## 2 — Answers that are wrong without saying so
+
+- [ ] **Every structured tool result reaches the model as pydantic repr, not JSON** — [M].
+      `langchain_core.tools.base._stringify` prefers `json.dumps(content)` and falls back to
+      `str(content)`, which is what happens for every `BaseModel` this repo returns —
+      `EvidenceSweep`, `NoteView`, `FingerprintSearch`, every connector model. Measured: an
+      `EvidenceSweep` arrives as `chunks=[EvidenceChunk(content='…', source_note_id='…', …)]`.
+      Two consequences worth separating. **`Field(exclude=True)` silently does nothing** anywhere in
+      this tree — one design decision was already taken against the wrong belief about it
+      (`D-2026-08-25-the-number-was-measured-on-a-path-production-does-not-use`), and the next one
+      will be too unless the shape is known. And repr is a *guess* at a payload rather than a
+      contract: nothing upstream promises it, which is why
+      `tests/test_upstream_surface.py::test_a_pydantic_tool_return_still_reaches_the_model_as_repr`
+      now pins it in that file's absence form.
+      Not fixed in passing, because the blast radius is every tool at once and the question — should
+      payloads be JSON, or should each tool render its own boundary as `condense_protocols` now does
+      — deserves deciding rather than defaulting.
+
+- [ ] **Seven `chem` enumerations and `compute_fukui_at` are declared here and served nowhere** —
+      [S], and it is a live gap rather than a plan. `src/chemclaw/connectors/chem/connector.yaml`
+      names `enumerate_tautomers`, `enumerate_protonation_states`, `enumerate_stereoisomers`,
+      `enumerate_bond_cleavages`, `enumerate_degradants`, `transform_structure` and
+      `describe_topology`; six of the seven templates added by
+      `D-2026-08-25-the-loop-is-a-composite-not-a-template` call one of them, and
+      `connectors/calc/compose.py::ensemble_property` calls `compute_fukui_at` for its `fukui`
+      field. All eight are implemented in `Chemclaw3-mcp` (`servers/chem/.../engine/species.py`,
+      `servers/calc/.../tools.py`) on branch `claude/chemclaw-gfn-workflows-5eie2t` **which was
+      never pushed** — that repository was outside the session's GitHub scope and `add_repo` with
+      push access was never approved, so the work exists only in that session's container and is
+      lost with it.
+      **What this costs until it lands:** `make template-validate` passes, because `chem` is a
+      bundle this repository declares and does not run, so those tools are name-checked and
+      argument-unchecked — the count it reports rose from 1 to 6 for exactly this reason. `make
+      connector-validate` against a running server is what would catch it, and the live lane is
+      where it will surface. Re-implementing is the fallback and the ADR's "What was measured
+      rather than assumed" section is the specification: it records the per-search `xtb` binary
+      requirement, the `protonated.xyz`/`protomers.xyz` filename, and the element-list defect that
+      only appears once a search changes the atom count.
 
 - [ ] **A solvate collapses onto whichever fragment is larger** — [M], and worse than filed: it is
       not only the cache key, it is the **knowledge-graph note id**. Measured,
@@ -207,6 +233,16 @@ topic).
       needs is a policy answer: which predictors are calibrated enough to override their published
       RMSE. `calibration_conformal_coverage` / `_min_samples` come back with the caller.
 
+**`reaction_fingerprints` keys on a bare reaction id, so two sources collide on one row.**
+`science/fingerprints/store.py` writes `reaction_fingerprints.id = reaction.reaction_id` with no
+source column, while `ingest/sources/eln-snowflake/datasource.yaml` puts the source name into
+`provenance` precisely "so two ELNs with colliding entry ids stay distinguishable in the graph".
+Two sources using one entry id therefore share a fingerprint row and a `reaction-<id>` note id:
+the second ingest overwrites the first, silently, and a similarity hit cites the wrong run. Found
+while designing the label index, which uses a composite `(source, reaction_id)` key and does not
+inherit it — so the fix is to give the fingerprint tables the same key, and it is a migration plus
+`note_id_for_reaction`. Not urgent while one ELN is enabled anywhere; not detectable at all when
+it happens.
 ## 3 — Work that is lost, dropped or invisible
 
 - [ ] **A decided approval hold can be reopened** — [M]. `agent/interaction_tools.py::start_approval`
@@ -262,16 +298,6 @@ topic).
       one exists, `digest_enabled` should plan no Schedule, since shipping the ack without the
       reader loses matches permanently rather than merely not delivering them.
 
-- [ ] **A rejoined durable run never reaches the second chemist** — [M].
-      `connectors/jobs.py:386-403`: on `WorkflowAlreadyStartedError` the launcher returns the id and
-      deliberately emits no `record_job_started`, and the running workflow's `session_id` belongs to
-      the *first* launcher. So chemist B gets no turn-stream `job_started`, no `job_completed`, and
-      `agent/job_results.py` cannot wait on it either — they are told "in progress" and must poll by
-      hand forever. The comment justifies the silence with "it may already be finished";
-      `handle.describe()` answers exactly that question, so the ~3-line fix is to describe once on
-      the rejoin path and announce it when the status is RUNNING. Full push-back to a second session
-      is the larger change behind it.
-
 - [ ] **The sixteen periodic workflows can still hang instead of failing** — [M]. The job path now
       declares `failure_exception_types` and `tests/test_workflow_registry.py` holds it
       (`D-2026-08-16-a-job-that-cannot-fail-is-a-job-that-hangs`), scoped deliberately: for a run
@@ -290,6 +316,42 @@ topic).
 
 ## 4 — Operating it
 
+- [ ] **`read_corpus` re-reads the entire ELN from `datetime.min` on every call** — [M].
+      `durable/memory_jobs.py:63` calls `fetch_new_entries(datetime.min)` on every ingest half, so
+      each of the three memory jobs (`build_campaign_notes_activity`,
+      `build_playbook_notes_activity`, `build_optimization_notes_activity`) walks the whole record
+      from the beginning of time, and `all_reactions()` is called once per activity. On the two
+      file-drop exports this costs nothing; against a real Snowflake ELN it is a full table scan
+      per activity per scheduled run. `ElnAdapter` (`ingest/eln/adapter.py:128`) has exactly two
+      methods and neither is a fetch-by-id, so there is no cheaper read to reach for — closing this
+      means either a fetch-by-id on the adapter protocol (every source pays) or a derived store of
+      mapped `OrdReaction`s.
+      **Found while building the protocol condenser and deliberately not fixed there**
+      (`D-2026-08-25-the-structure-is-discarded-at-the-note-boundary` records the reasoning): a
+      derived store would have answered it as a side effect, and answering a scaling problem as a
+      side effect of a retrieval change is how a store nobody decided on gets built. It is also the
+      trigger on the `DEFERRED.md` row for reagent/solvent set diffs in the turn-time comparison —
+      one change answers both.
+
+- [ ] **The results store has no live target** — [M]. `D-2026-08-25-a-cache-is-not-a-record` ships
+      the whole path — `src/chemclaw/publish/`, the canonical schema in `schema/result-store/`, two
+      drivers, the outbox (migration 050) and the drain — and it is proven end to end against a
+      local Postgres running the shipped DDL (`tests/test_publish_sql.py`). What has not happened is
+      an actual deployment pointing at an actual results database: `CHEMCLAW_RESULT_SINKS` is empty
+      by default and `src/chemclaw/publish/sinks/postgres/sink.yaml` addresses a host nobody runs.
+      Attaching one is configuration (`make sink-schema`, apply, set the variable), so this is a
+      deployment action rather than code — but until it happens, no number below has been measured
+      against a real corpus. `D-2026-08-26-a-route-is-not-a-shape` is why that matters more than it
+      reads: the composite half of the path was inert for a release and no test noticed, because
+      every test started at a projector rather than at a hook. A live target is the only thing that
+      would have made it obvious.
+- [ ] **Nothing has measured how many rows a real corpus produces** — [M]. The volume risk named in
+      `D-2026-08-25`: `cached_compute` publishes on every miss, and a conformer search projects one
+      record with ~47 conformer rows plus their structures. Before publishing is enabled by default
+      anywhere, run `python -m chemclaw.cli.backfill_publications --dry-run` against a populated
+      deployment and count rows-per-calculation per `calc_type`. That growth curve is also what
+      decides the deliberately open question of whether `property_value` needs partitioning, and on
+      what — a partition key chosen before the row count is known would be a guess.
 - [ ] **Postgres and Temporal are neither deployed nor owned** — [L]. The chart dials
       `chemclaw-temporal-frontend.temporal.svc:7233` and namespace `chemclaw`; there is no subchart
       and no statement of who runs either. `docs/guides/runbook.md:925` states what this system
@@ -324,25 +386,36 @@ topic).
       never was, and the cross-reference defeated the rule that a row must name a real anchor. The
       lock is buildable here: a Postgres advisory lock on the pool that already exists, ~60 lines.
 
-- [ ] **Egress is still port-scoped by default** — [S]. `networkPolicy.egressDestinations` is
-      declarable and empty, which renders `to: []` — any destination on the allowed ports, as the
-      template's own comment says. The chart cannot invent a site's CIDR, so the sound fix is to
-      make empty **fail** when the policy is enabled, with an explicit `allowAnyDestination: true`
-      escape hatch. ~15 lines plus tests, fully offline (the chart tests parse YAML).
+- [ ] **A durable deployment with no `framing_envelope_secret` silently loses the injection
+      marking on its oldest content, and nothing says so** — [S]. `agent/framing.py::_envelope_nonce`
+      falls back to `secrets.token_hex(8)` per process when the setting is empty, and the agent
+      instructions say only an envelope carrying *exactly* the current tag marks retrieved content
+      as data. With `session_store_dsn` set, a replayed thread carries envelopes written under a
+      previous process's nonce: they no longer match, and that content is read as ordinary prose.
+      `framing.py` claimed `Settings` warned about the pairing until 2026-08-26; it does not —
+      `grep -rl framing_envelope src/` returns three files and none of them is a validator. The
+      guard belongs in `core/config/__init__.py::_guards_that_the_comments_already_demand`, which
+      is the right place and the reason this is not a two-line fix: every guard there *raises*, and
+      raising would take down every existing durable deployment that has not set the value. So it
+      needs a warning mechanism that section does not have — and a decision about whether the
+      combination is an error at all.
 
-- [ ] **Three credentials are plain `str` on the settings object** — [S], **corrected**. The hazard
-      this row stated is already closed: `core/logging.py:972` (`SecretRedactingFilter._redact`)
-      redacts all nine `_SECRET_SETTINGS` values by exact match across `msg`, `args`, `exc_text` and
-      `stack_info`, and the module docstring (`core/logging.py:23`) names "a `repr` of a config
-      object" as a covered route — so `logger.debug("%s", settings)` is safe today, and as of
-      2026-08-17 so is logging's own `handleError` path. What is left is defence in depth on
-      `llm_api_key`, `hpc_api_token` and `temporal_api_key` — **5 read sites in 4 modules**
-      (`agent/llm_provider.py:251`, `core/embeddings.py:232`, `connectors/qm/hpc/nextflow.py:53`,
-      `core/temporal_client.py:74` and `:75`), ~20 lines. The three DSNs are explicitly *not* in scope:
-      **34 lines** read one (`grep -rno "settings\.\(postgres_dsn\|postgres_migration_dsn\|session_store_dsn\)" src/ --include=*.py | sed 's/:settings.*//' | sort -u | wc -l`
-      — 41 occurrences over 27 modules; the row said 43 and never said what it was counting), all
-      feeding psycopg conninfo, which needs the plain string straight back. Rotation is a separate
-      concern with no anchor and is dropped.
+- [ ] **Three credentials cannot be set through the chart at all** — [S], and the half of the
+      settings-secret row that did **not** close with
+      `D-2026-08-26-a-credential-is-a-type-not-a-convention`. `hpc_artifact_store_token`,
+      `llm_fallback_api_key` and `temporal_api_key` are `SecretStr` fields with readers
+      (`connectors/qm/hpc/nextflow.py:73`, `agent/llm_provider.py:251`, `core/temporal_client.py:74`)
+      and no entry under `secrets.keys` or `secrets.optionalKeys` in
+      `deploy/helm/chemclaw/values.yaml:519`, so `chemclaw.env` renders no `secretKeyRef` and a
+      deployment has no supported way to provide them. The consequence differs per credential and
+      that is what makes it a judgement rather than three identical additions:
+      `hpc_artifact_store_token` unset means a *cross-origin* artifact store is fetched
+      unauthenticated (`_artifact_headers` falls through to `{}`), which is the one with a live
+      security shape; `llm_fallback_api_key` unset silently reuses the primary's key, which is
+      correct for the common case (a second replica of one deployment) and wrong for a second
+      vendor; `temporal_api_key` is Temporal Cloud only and the chart ships self-hosted with mTLS,
+      so it may be right that it has no key — but nothing says so. All three go under
+      `optionalKeys`, for the upgrade reason `framingEnvelopeSecret` already records.
 
 - [ ] **No session pagination and no per-session delete** — [M], **corrected**. This row claimed a
       data-subject erasure request "has no route across the seven tables". It does:
@@ -376,17 +449,6 @@ topic).
       product call — the migration's stated rationale and the code that ships disagree about what the
       "newest and most-evidenced first" bucket actually orders by.
 
-- [ ] **`connectors.<name>.enabled` in the chart never reaches the agent** — [M].
-      `values.yaml:135` says "CHEMCLAW_CONNECTORS_ENABLED in `config` below decides which bundles
-      the agent loads at all" — and that key is in none of the 33 `config` entries. The chart derives
-      `CHEMCLAW_CONNECTOR_URLS`, `SERVICE_FLEET_REPLICAS` and `PG_FLEET_POOLED_PROCESSES` from
-      `.Values.connectors` and not the enable list, so `enabled: false` removes the pods and leaves
-      the tool on the agent's surface: the launcher starts the wrapper on the polled queue and its
-      child on `connector-qm`, which nobody polls, and the chemist is told "running" until the 25 h
-      ceiling. Latent today (all seven shipped entries are `enabled: true`); it fires the first time
-      someone uses the switch the file documents. Fix is a `chemclaw.connectorsEnabled` helper
-      mirroring `connectorUrls`, plus deleting the sentence that points at the absent key.
-
 - [ ] **A jobs-only bundle has no reachability signal at all** — [M]. `connectors/health.py:81-99`
       derives its target from `health_url(manifest)`, which is `None` for a bundle with no
       `endpoint:` — so `qm` reports `unprobed` whether its worker fleet is at two replicas or zero,
@@ -396,16 +458,197 @@ topic).
       in the same sweep, reported as `unpolled` and counted like `unreachable`, is the runtime twin
       of the manifest check `connector-validate` now does — and it catches the row above too.
 
-- [ ] **One `replicas` knob drives two differently-shaped Deployments** — [S].
-      `templates/deployment-connectors.yaml:35` and `:98` both read `$cfg.replicas`, so scaling
-      `calc`'s MCP server to 4 also scales its Temporal worker to 4, and `pooledProcesses` counts it
-      twice against the `pg_fleet_max_connections` startup ceiling. Worse, the guard requires
-      `replicas` only when there is no `url`, while the worker block is deliberately not conditioned
-      on `url` — so a `url:` bundle that owns durable work renders an empty `replicas` (Kubernetes
-      defaults to 1) and contributes `nil | int` = 0 to the declared fleet. Split into
-      `serverReplicas`/`workerReplicas` defaulting to `replicas`, and extend the chart test to
-      require it whenever `worker` is set.
+---
 
+## 5 — Where the field moved past us
+
+Filed by the 2026-08-25 field benchmark — see
+[`docs/archive/REVIEW-2026-08-25-agentic-field-benchmark.md`](../archive/REVIEW-2026-08-25-agentic-field-benchmark.md)
+for the measurements and the sources behind every figure here. These rows are unlike the four
+sections above: none of them names broken code. Each names a place where something outside this
+repository now has a **measured** better answer to a problem this repository solved earlier and has
+not revisited. That is a different kind of debt and it needs its own section, because a queue that
+only holds defects can only ever restore the system to what it already intended to be.
+
+- [ ] **One merge added eighteen tools and 32% to what every turn costs** — [M], and it is the first
+      thing the two new gates caught. The GFN multi-step work took the `default` profile's static
+      prefix from **18,805 to 24,838 tokens** — measured by `tests/test_context_floor.py`, which
+      landed in the same window and so reported a cost that had already been paid. Its ceiling was
+      raised to 27,500 deliberately rather than the merge blocked, because blocking would have
+      punished an unrelated branch; the figure and the cause are in the constant's comment.
+
+      Two things are owed. **Eighteen probes**, because those tools are in
+      `tests/test_probe_coverage.py::GRANDFATHERED` — a list that claims nothing, only records what
+      predated the gate, and that the suite forbids growing. And a look at whether the eighteen need
+      to be eighteen *advertised* names: `run_bond_strength_survey` and `survey_bond_strengths` sit
+      beside each other on one surface, and `enumerate_*`/`run_*` reads like a primitive set that a
+      profile could narrow rather than every turn carrying all of it. **Bringing the ceiling back
+      down is the commit that proves that happened.**
+
+- [ ] **A tool schema is 38% developer rationale, and it ships on every turn** — [M], and it is
+      what `§ 5`'s deferral row turned into once measured. `science/bo/problem.py`'s nested models
+      carry design arguments in their class docstrings — *"One `objectives` field rather than a lead
+      objective plus a sidecar list (W3)"* — and Pydantic turns a class docstring into the schema
+      `description`, so `convert_to_openai_tool` ships them. Measured 2026-08-25 on the `default`
+      profile: `start_optimization_campaign` is 8,063 chars of schema, 4,392 of it description and
+      **3,047 of that elaboration past the first paragraph**; `propose_knowledge_note` 4,259/2,262/663.
+      Those two are 25% of the profile's 12,536-token tool budget between them, and both are already
+      in `tests/test_context_floor.py::KNOWN_OVERSIZED`.
+
+      **Not a blanket cut.** Some elaboration is genuinely the caller's — when to supply categorical
+      descriptors changes what the model should send — so this is per-paragraph judgment: rationale
+      moves to a `#` comment, guidance stays in the docstring. **And it does not ship until the live
+      lane can show every probe still reaching its tool**, because a cheaper prompt that stops
+      finding tools is a regression with a good-looking metric. Blocked on the live-lane row in § 1.
+
+- [ ] **Half the probe corpus tests one tool** — [S]. `gather_evidence` is in `expects_tools` for 116
+      of 232 probes; `find_notes` 91; `expand_note` 60; the tail is thin. Two consequences worth
+      separating: the corpus mostly measures one retrieval path, and ChemToolAgent's finding — that
+      tool augmentation **does not consistently beat the base LLM**, and hurts on general chemistry
+      questions — cannot be reproduced here. Bucket C (51 probes) scores restraint but never runs the
+      same question tool-free for comparison. `evals/ab.py::compare_tool_utility` is already written
+      and already registered as `plan_execute_utility`; an A/B arm over bucket A is mostly wiring.
+
+      **Blocked on a working model credential** (see §4), and the mock cannot stand in: `cli.mock_llm` emits scripted tool calls without *choosing* them in response to a question, so both arms of any comparison would measure the script. Measured 2026-08-25 through the real lane: expected-tool-reached 0/3.
+
+- [ ] **No external benchmark has ever been run** — [M]. `make eval` gates 23 metric values over 14
+      case files, a **7-document** retrieval corpus and a **39-note** knowledge graph, with the
+      science half resting on one solubility value, one BO regret replay and two mass balances. It is
+      honest and it is not comparable to anything. ChemRAG-Bench (1,932 expert-curated chemistry QA
+      pairs) is the best first target because it scores the retrieval half — where this system's
+      science actually lives — and it runs against an OpenAI-compatible endpoint, which is exactly the
+      seam `agent/llm_provider.py` already has. ChemBench and AstaBench are the follow-ups. A number
+      somebody else can also produce is the only kind that survives an argument with a chemist.
+
+      **Blocked on a working model credential** (see the row in §4), and the mock cannot stand in: `cli.mock_llm` emits scripted tool calls without *choosing* them in response to a question, so both arms of any comparison would measure the script. Measured 2026-08-25 through the real lane: expected-tool-reached 0/3.
+
+- [ ] **`deep-research` has no index behind it** — [M]. `agent/research_tools.py::gather_evidence`
+      sweeps the knowledge graph, the ELN, the mounted document share and the fingerprint store —
+      every one internal. `skills/deep-research/SKILL.md` describes a capability whose corpus is
+      whatever notes exist (39 on this checkout). `Chemclaw3-mcp/MODULES.md` files `litsearch`
+      (Europe PMC / OpenAlex / Crossref bulk, built at image time, no egress) as *proposed*, and says
+      in as many words that it "gives Chemclaw3's existing `deep-research` skill a real index".
+      ChemRAG measured **+17.4% average relative gain** from a chemistry corpus and — the design input
+      that matters — that corpus choice is task-dependent: reaction prediction wants literature,
+      nomenclature wants structured databases. A process chemist asking "has anyone run this coupling
+      on a deactivated aryl chloride" currently gets whatever those 39 notes happen to say.
+
+- [ ] **`pyexec` is merged in the fleet and unreachable from any deployment here** — **[M], not
+      [S], and the sizing changed when somebody looked.** `Chemclaw3-mcp` #12 shipped
+      `servers/pyexec` and `D-2026-08-25-a-sandbox-is-a-server-not-a-verb` records the decision, but
+      `grep -rn pyexec` in this tree finds only that ADR and `tasks/todo.md`: no entry under
+      `connectors:` in `deploy/helm/chemclaw/values.yaml:161`, so no `url`, no
+      `networkPolicy.egressDestinations` host, and nothing telling an operator to provide
+      `CHEMCLAW_PYEXEC_TOKEN`. The seam working as designed is why it is easy to miss — **zero core
+      edits also means zero core changes to remind anybody.**
+
+      **The obvious fix is wrong, and this is the part worth reading before starting.** Copying
+      `chem`/`safety` means adding a manifest stub under `src/chemclaw/connectors/pyexec/`. But
+      `registry.enabled()` is *"discovery is enablement until you say otherwise"* — an empty
+      `connectors_enabled` loads every discovered bundle — so shipping that stub would:
+
+      1. put `run_python` on the agent surface of **every fresh checkout**, by default;
+      2. make the front door dial `127.0.0.1:8899`, which under the `connectors_required=true` the
+         chart ships means **it refuses to boot** unless somebody is running the sandbox;
+      3. trip `tests/test_probe_coverage.py` (no probe names `run_python`) and raise the context
+         floor.
+
+      Turning a code-execution tool on by default is a decision, not a wiring change, and (2) makes
+      it a breaking one for every existing deployment. **So this needs an ADR about the default
+      before it needs a diff**, and the branch point is whether `CHEMCLAW_CONNECTORS_ENABLED` stops
+      meaning "empty loads everything" — which is a chart-wide behavioural change with its own
+      blast radius. Whichever way it goes, the change also owes a `run_python` probe, an
+      `egressPorts` entry for 8899 (the egress rule restricts by port independently of the peer
+      list, so a destination with no matching port still drops), and the token obligation in the
+      comment `chem` already models.
+
+- [ ] **This environment's `API-KEY` is present and rejected, which blocks three rows** — [S], and
+      it is operational rather than code. Measured 2026-08-25: `anthropic.AuthenticationError: 401`
+      from `api.anthropic.com`, with and without the session's `ANTHROPIC_BASE_URL` cleared.
+      `CLAUDE.md` documents the variable as "may not exist in every environment"; present-and-stale
+      is the case it does not cover and the worse one, because it reads as a defect rather than as a
+      missing credential. `tests/test_prompt_caching.py` now probes reachability and skips with a
+      reason naming which case it is, so the suite is honest about it — but the *live* half of the
+      eval plan (the bucket-C control arm, any external benchmark, and grading any probe on the
+      model's judgement rather than on the harness) needs a working one and nothing else.
+
+- [ ] **Memory records; it does not change what the next turn does** — [L], and it needs an ADR
+      before it needs code. Six tiers exist and all six are *read on request*:
+      `memory/campaign.py`, `interaction.py`, `failure.py`, `playbook.py`, `progression.py`,
+      `observations.py`, surfaced by `recall_observations`, `find_past_jobs` and `record_failure`.
+      Nothing in that set changes the agent's behaviour on the next turn unless a human writes a
+      `SKILL.md`: `skills/playbook-distillation/SKILL.md` is the distillation *judgment*, and the
+      PR-gate is where a distilled playbook becomes knowledge — but the loop is manual end to end and
+      nobody has measured how often it closes. The 2026 work (SkillRL, SkillForge and the
+      self-evolving surveys) is specifically about abstracting recurring trajectories into reusable
+      procedure automatically. **The PR-gate is the right control for that, not an argument against
+      it** — a proposed skill is exactly the shape the gate already carries. What is owed first is a
+      measurement rather than a mechanism: over the sessions on disk, how many recurring trajectories
+      *are* there, and would a distilled one have changed a later answer? A generator built before
+      that number is a routing hypothesis nobody measured, which is the mistake
+      `D-2026-08-15` already made once here.
+
+      **Attempted 2026-08-25, and the corpus to measure does not exist.** Against a live Postgres:
+      `session_messages` 12 (all from that day's own probe run), `session_turns` 0, `observations` 0,
+      `note_proposals` 0, `audit_events` 3. The five notes under `knowledge/playbook/` are committed
+      examples, not distillations of anything. So this row is blocked on **deployment history**
+      rather than on effort — nobody can count recurring trajectories in a database that has never
+      served a user. Its trigger is therefore a deployment with real sessions in it, and until then
+      building the generator would be building against an imagined corpus, which is the row's own
+      objection.
+
+### The upstream-capability register — what our pinned dependencies now ship that we build ourselves
+
+*Re-derived 2026-08-25, and re-derive it whenever a dependency is bumped.* `make upstream-check` and
+`tests/test_upstream_surface.py` guard the *shapes* this repository borrows — the coupling that
+breaks on a bump. Nothing guarded its **decisions** against upstream shipping the thing, which is
+why the Temporal LangGraph plugin sat five weeks old and reached no list here. This is prose rather
+than a test, deliberately: what is being watched is judgement, and a test cannot hold one.
+
+Pinned at the time of writing: `temporalio` 1.31.0 · `langchain` 1.3.15 · `langgraph` 1.2.11 ·
+`langchain-core` 1.5.5 · `deepagents` 0.7.6.
+
+| Upstream ships | We | Standing |
+| --- | --- | --- |
+| `temporalio.contrib.langgraph.LangGraphPlugin` — graph nodes as activities, durable `interrupt()` | run two durability layers | **declined**, `D-2026-08-25-the-plugin-solves-an-interrupt-we-do-not-use` — we use no `interrupt()`; the human gate is already a Temporal workflow |
+| `langchain.agents.middleware.ContextEditingMiddleware` / `ClearToolUsesEdit` | use it, on its own trigger since 2026-08-25 | **adopted** |
+| `SummarizationMiddleware` | construct it switched off (`disabled_summarizer`) | **declined** — a summary is new model prose over content `agent/framing.py` marked untrusted, and the envelope does not survive it |
+| `ModelCallLimitMiddleware` | subclass our own cap | **reverted**, `D-2026-08-15-an-after-model-counter-is-a-counter-that-can-be-skipped` — measured, a cap of 2 ran 4 model calls |
+| `ToolErrorMiddleware`, `ToolRetryMiddleware` | neither | **declined** — both trigger on raised exceptions and MCP tools never raise |
+| `HumanInTheLoopMiddleware` | our own plan gate | **open** — its own row; the gate predates it and the shapes have not been compared |
+| `deepagents.SkillsMiddleware` | use it, narrowed at the backend | **adopted**, with the narrowing on the backend because deepagents publishes skill *paths* into the prompt |
+| `deepagents` `execute` filesystem verb | withhold it | **declined**, and answered elsewhere — `D-2026-08-25-a-sandbox-is-a-server-not-a-verb` puts the capability in the fleet instead |
+| LangSmith tracing | first-party OTel + OpenInference | **declined** — proprietary, no OSS self-host, and its core value is prompt/response content in a third party |
+
+**How to use this.** On a dependency bump, read the release notes against the middle column and ask
+one question per row: *does upstream now do this, and better?* A row that changes answer needs an
+ADR, not an edit here. A capability upstream ships that this table does not mention is the gap this
+register exists to catch — add the row in the same pull request that notices it.
+
+- [ ] **Memory records; it does not change what the next turn does** — [L], and it needs an ADR
+      before it needs code. Six tiers exist and all six are *read on request*:
+      `memory/campaign.py`, `interaction.py`, `failure.py`, `playbook.py`, `progression.py`,
+      `observations.py`, surfaced by `recall_observations`, `find_past_jobs` and `record_failure`.
+      Nothing in that set changes the agent's behaviour on the next turn unless a human writes a
+      `SKILL.md`: `skills/playbook-distillation/SKILL.md` is the distillation *judgment*, and the
+      PR-gate is where a distilled playbook becomes knowledge — but the loop is manual end to end and
+      nobody has measured how often it closes. The 2026 work (SkillRL, SkillForge and the
+      self-evolving surveys) is specifically about abstracting recurring trajectories into reusable
+      procedure automatically. **The PR-gate is the right control for that, not an argument against
+      it** — a proposed skill is exactly the shape the gate already carries. What is owed first is a
+      measurement rather than a mechanism: over the sessions on disk, how many recurring trajectories
+      *are* there, and would a distilled one have changed a later answer? A generator built before
+      that number is a routing hypothesis nobody measured, which is the mistake
+      `D-2026-08-15` already made once here.
+
+- [ ] **Nothing watches for upstream shipping a decision we made ourselves** — [S], and it is the
+      meta-row the four above are instances of. `make upstream-check` guards the six *shapes* this
+      repo borrows against a dependency bump — the coupling that breaks. Nothing guards its
+      *decisions* against upstream shipping the thing: the Temporal LangGraph plugin row above is five
+      weeks old and reached no list here. `tests/test_upstream_surface.py` is the right precedent
+      (two of its assertions are *absences*, so upstream fixing something turns the workaround red).
+      The cheap version is a dated section in this file, re-derived when a dependency is bumped,
+      listing what each pinned upstream now ships that this repository implements itself.
 
 ---
 
@@ -420,10 +663,35 @@ above when it becomes the next thing worth doing, and delete it from here when i
 
 The large multi-item programmes that used to be tracked here as sections are records now, not
 plans: the F0–F9 foundation build, the F10 parity pass, the F11 gap closure, the BO capability
-roadmap and the xTB/QM (X-series) roadmap. Their remaining live edges — real Entra tenant, real
-Temporal broker, real cluster, real HPC, real Snowflake — are in
+roadmap and the xTB/QM (X-series) roadmap. Their remaining live edges — real Temporal broker, real
+cluster, real HPC, real Snowflake — are in
 [`DEFERRED.md`](DEFERRED.md), each with the trigger that would revisit it, which is the register
 those belong in.
+
+## `turn_cost_ratio` scores a fixture, not the system
+
+`data/evals/cases/autonomy-turn-cost.md` carries literal turn records, so the metric returns
+0.9845458333333333 whatever changes in the agent — the 32% static-prefix growth that
+`tests/test_context_floor.py` caught would leave its `baseline.json` row untouched. The metric's
+arithmetic is right and tested; what is missing is a case fed from real recorded `TurnCost` rows.
+
+Blocked on the same thing the memory-distillation row is: a deployment with turns in it. This
+system has 12 session messages and 0 recorded turns, so there is nothing to build the case from
+yet. Trigger: the first live lane run that persists a session's worth of turns.
+
+## The live lane and the four-repo lane fight over `chem` and `safety`
+
+`infra/live/processes.sh` uses `RUN_DIR=$LIVE_DIR/run` and `infra/live/e2e-full-stack/up.sh` uses
+`$LIVE_DIR/e2e/run`, and both now start `chem` and `safety`. Run them together and the second
+lane's pidfile guard cannot see the first's processes, so two uvicorns die on a bound port while
+`wait_for` passes off the servers that are already up — leaving dead pidfiles that make
+`processes.sh status` report both DOWN while the lane works fine.
+
+Not fixed here because the fix is a decision rather than an edit: either the two lanes share one
+run dir (and one lane learns to adopt the other's processes), or the fleet bundles move out of
+`processes.sh` and the four-repo lane becomes the only thing that starts them. The second is
+probably right — `processes.sh` grew them for a single-repo live test that the e2e lane supersedes
+— but it changes what `make live-up` alone can exercise, which wants measuring first.
 
 ## Recover the flow-Suzuki screen, or decide it stays out
 

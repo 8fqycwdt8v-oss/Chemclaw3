@@ -8,7 +8,7 @@ sections shared a single module (D-072 mixins, split per D-156).
 
 from typing import Literal, Self
 
-from pydantic import Field, model_validator
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings
 
 
@@ -37,7 +37,14 @@ class LlmSettings(BaseSettings):
     llm_provider: Literal["openai_compatible", "anthropic"] = "anthropic"
     llm_base_url: str = ""
     llm_model: str = ""
-    llm_api_key: str = ""
+    # A `SecretStr`, like every other credential on this object
+    # (`D-2026-08-26-a-credential-is-a-type-not-a-convention`): its `repr` is `**********`, so the
+    # value cannot reach a log line, a `model_dump()` or a pydantic error message through a route
+    # `core/logging.py`'s exact-match redaction has not been taught about. That filter stays and is
+    # still the control; this is the type making the same guarantee where the filter is not looking.
+    # Read it with `.get_secret_value()` — and note that an f-string does *not*, so a formatted
+    # credential renders as asterisks and fails as a 401 rather than leaking.
+    llm_api_key: SecretStr = SecretStr("")
     llm_tls_ca_bundle: str = ""
     llm_timeout_seconds: float = Field(default=60.0, gt=0)
     llm_max_retries: int = Field(default=3, ge=0)
@@ -67,7 +74,10 @@ class LlmSettings(BaseSettings):
     # different vendor — and a config that forced all three would make the cheap case verbose.
     llm_fallback_base_url: str = ""
     llm_fallback_model: str = ""
-    llm_fallback_api_key: str = ""
+    # A `SecretStr` for the reason `llm_api_key` above states — and it was missing from
+    # `core/logging.py`'s `_SECRET_SETTINGS` entirely until 2026-08-26, so the fallback
+    # endpoint's key was the one credential in this file that no redaction covered at all.
+    llm_fallback_api_key: SecretStr = SecretStr("")
     # Unset by default, and that default is load-bearing: current frontier models (the shipped
     # `agent_model`, claude-sonnet-5) reject an explicit `temperature` outright —
     # `400 invalid_request_error: temperature is deprecated for this model` — so a config that
@@ -123,6 +133,17 @@ class LlmSettings(BaseSettings):
     # verdict is one cheap structured call, and on expiry the verifier degrades to the offline
     # deterministic citation gate rather than holding the finished answer hostage.
     verifier_timeout_seconds: float = Field(default=30.0, gt=0)
+    # The per-protocol condensation call's own deadline (`agent.condense`). Per *map unit*, so
+    # one stalled extraction costs one row of the comparison and never the turn — the same
+    # degrade-per-item rule the verifier applies to the whole answer, one level down. Larger than
+    # the verifier's 30 s because the input is a whole procedure rather than a drafted answer, and
+    # far under `service_turn_timeout_seconds` so a slow endpoint cannot hold a finished turn.
+    #
+    # The model itself is routed through `model_routes` under the task key `"protocol-digest"`, so
+    # a deployment can point condensation at a cheap model without a second provider or a second
+    # import site. No enable flag: it ships on, and the deterministic degrade below every failure
+    # is what makes that honest with no credential present.
+    protocol_digest_timeout_seconds: float = Field(default=45.0, gt=0)
     # The ungrounded-parameter scan over a drafted answer: shapes a chemist would read as
     # specification — a flow rate, a gradient table, a wavelength, a back pressure, a column brand,
     # an ICH limit, a polymorph form — marked for review when no tool in the turn produced them.

@@ -86,7 +86,7 @@ async def _investigate() -> str:
     lines: list[str] = ["# Chemclaw research-loop demo (no LLM)\n"]
 
     # 1) Gather cited evidence across every internal source in one sweep.
-    evidence = await gather_evidence("yield", reaction_smiles=_ESTER)
+    evidence = (await gather_evidence("yield", reaction_smiles=_ESTER)).chunks
     lines.append("## 1. Evidence gathered (cited)")
     for chunk in evidence:
         lines.append(f"- [{chunk.retriever}] [[{chunk.source_note_id}]]: {chunk.content}")

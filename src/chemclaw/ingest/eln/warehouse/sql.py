@@ -23,19 +23,12 @@ from typing import Any
 
 from chemclaw.ingest.eln.warehouse.binding import (
     BindingError,
+    CorpusBinding,
     EntryBinding,
     RelatedBinding,
     VectorBinding,
 )
-
-# How each metric is called and which way it sorts. One table because the two facts move together:
-# a distance sorts ascending and a similarity descending, and a metric added with the wrong pairing
-# would return the *least* similar rows while looking entirely correct.
-_METRICS: dict[str, tuple[str, str]] = {
-    "cosine": ("VECTOR_COSINE_SIMILARITY", "DESC"),
-    "inner": ("VECTOR_INNER_PRODUCT", "DESC"),
-    "l2": ("VECTOR_L2_DISTANCE", "ASC"),
-}
+from chemclaw.ingest.eln.warehouse.driver import VectorDialect
 
 # The alias the similarity expression gets, so ordering and reading agree on one name and a site
 # column called `score` cannot collide with it.
@@ -82,6 +75,36 @@ def entry_statement(
     return sql, [since, limit]
 
 
+def corpus_statement(
+    corpus: CorpusBinding, placeholder: str, after: str, limit: int
+) -> tuple[str, list[Any]]:
+    """One bounded page of a bulk reaction corpus, resuming strictly after `after`.
+
+    **Keyset, not offset, and not a datetime.** `OFFSET n` on a multi-million-row table makes the
+    warehouse walk and discard n rows on every page, so a drain gets quadratically slower exactly
+    as it gets further in; and a datetime cursor is meaningless for a versioned release that was
+    loaded all at once. Resuming after the last key seen is O(index seek) per page and is what
+    makes a stopped drain resumable at no cost.
+
+    An empty `after` starts at the beginning, which is the first pass and also a full re-drain.
+    Re-drainng is safe: every write the corpus drain makes is an id-keyed upsert.
+
+    `SELECT *` for the same reason `entry_statement` uses it — the binding names the columns it
+    reads by path, and a projection would have to know a schema nobody can see yet.
+    """
+    cursor = corpus.cursor_column
+    predicate = f"{cursor} > {placeholder}" if after else "1 = 1"
+    if corpus.where:
+        predicate += f" AND ({corpus.where})"
+    sql = (
+        f"SELECT * FROM {corpus.relation} "  # identifier checked by `binding._check_identifier`
+        f"WHERE {predicate} "
+        f"ORDER BY {cursor} ASC "
+        f"LIMIT {placeholder}"
+    )
+    return sql, ([after, limit] if after else [limit])
+
+
 def related_statement(
     block: RelatedBinding, placeholder: str, keys: Sequence[str]
 ) -> tuple[str, list[Any]]:
@@ -107,6 +130,7 @@ def related_statement(
 def vector_statement(
     vector: VectorBinding,
     placeholder: str,
+    dialect: VectorDialect,
     query: str | Sequence[float],
     filters: dict[str, Any],
     top_k: int,
@@ -121,8 +145,12 @@ def vector_statement(
     `query` is the embedded vector under `embedding: local`, and the raw query text under `server`,
     where the warehouse's own function embeds it — the two paths differ only in what stands in the
     similarity call's second argument.
+
+    **The similarity function and the query-vector binding come from the driver**, not from a table
+    here: both are dialect facts, and this module contributes structure. See
+    `chemclaw.ingest.eln.warehouse.driver.VectorDialect` for why that moved.
     """
-    function, direction = _METRICS[vector.metric]
+    function, direction = dialect.similarity(vector.metric)
     params: list[Any] = []
     if vector.embedding == "server":
         # A model-taking embedder (Cortex) binds the model name ahead of the text; a plain UDF
@@ -134,11 +162,21 @@ def vector_statement(
             embedded = f"{vector.server_embed_function}({placeholder})"
             params.append(query)
     else:
-        embedded = f"{placeholder}::VECTOR(FLOAT, {embedding_dim})"
-        params.append(list(query))
+        # `embedding: local` means the caller embedded the query, so a string here is a wiring bug
+        # rather than a binding one — and it would otherwise reach the warehouse as a vector of
+        # characters. The guard is what narrows the union as well as what reports it.
+        if isinstance(query, str):
+            raise BindingError(
+                "embedding: local expects an embedded query vector, not the query text"
+            )
+        # The one value `sql.py` cannot render itself: a 1536-float vector is a *value*, and how it
+        # is bound is the sharpest dialect difference of all. The driver returns the expression and
+        # the single parameter that fills it.
+        embedded, bound = dialect.query_vector(placeholder, query, embedding_dim)
+        params.append(bound)
 
     columns = ", ".join([vector.key, *vector.content_columns])
-    predicates, filter_params = _vector_predicates(vector, placeholder, filters)
+    predicates, filter_params = vector_predicates(vector, placeholder, filters)
     params.extend(filter_params)
     where = f" WHERE {' AND '.join(predicates)}" if predicates else ""
     sql = (
@@ -152,7 +190,73 @@ def vector_statement(
     return sql, params
 
 
-def _vector_predicates(
+def scope_statement(
+    vector: VectorBinding, placeholder: str, filters: dict[str, Any], limit: int
+) -> tuple[str, list[Any]]:
+    """The keys eligible under `filters`, for an index-ranked source.
+
+    An index ranks the whole corpus; the caller's filters have to reach it *before* the top-k or a
+    narrow tag over a wide relation returns nothing at all — the k nearest vectors would all belong
+    to something else. `VectorStore.search` takes eligibility as a set of ids, so it is computed
+    here, in the one system that can evaluate a predicate over the site's own columns.
+
+    `LIMIT` is bound and one over the caller's cap, so a scope too broad to send is *detected*
+    rather than truncated: a silently truncated eligibility set is a wrong answer that looks like a
+    thin corpus. The residual this bounds is the one `retrieval/vectors/README.md` states — a scope
+    is a set, and a broad filter over a very large corpus builds a big one.
+    """
+    predicates, params = vector_predicates(vector, placeholder, filters)
+    where = f" WHERE {' AND '.join(predicates)}" if predicates else ""
+    sql = (
+        f"SELECT {vector.key} "  # identifier checked by `binding._check_identifier`
+        f"FROM {vector.relation}{where} "
+        f"LIMIT {placeholder}"
+    )
+    return sql, [*params, limit + 1]
+
+
+def resolve_statement(
+    vector: VectorBinding, placeholder: str, keys: Sequence[str]
+) -> tuple[str, list[Any]]:
+    """The content columns for the keys an index returned — the catalogue half of a split search.
+
+    The counterpart of `ExternalVectorDocumentIndex._resolve`, with the warehouse standing in for
+    Postgres: the store answers "which, and how similar", and the system that owns the text answers
+    "what does it say". One query for the whole batch, as `related_statement` does and for the same
+    reason — a warehouse charges per round trip.
+
+    No `ORDER BY`: the ranking is the store's and the caller re-imposes it. Ordering by the key here
+    would look tidy and would silently discard the ranking.
+
+    **`where:` is enforced here, and this is the only place it can be.** It is a *corpus*
+    restriction — "these rows are eligible at all" — so it is typically broad, and on an
+    index-ranked source the corpus is the size that made an index necessary. Enumerating it as a
+    key set to pre-filter with is therefore exactly what `vector_store_max_scope_keys` refuses; a
+    first attempt did that and turned a binding's `where:` into "this source answers nothing".
+    Applying it to the resolve costs one predicate on a query already keyed to `top_k` rows.
+
+    The residual, stated because it is a real cost: a row the `where:` excludes can still occupy a
+    slot in the store's top-k, so a search may return fewer than `top_k` hits. That is the
+    post-filter trade this seam otherwise refuses — and it is right *here* and wrong for the query's
+    own `tag`/`since`/`until`, because those are narrow. Post-filtering a narrow predicate loses
+    everything; post-filtering a broad one loses a slot or two.
+    """
+    if not keys:
+        raise BindingError("resolve_statement needs at least one key")
+    markers = ", ".join(placeholder for _ in keys)
+    columns = ", ".join([vector.key, *vector.content_columns])
+    predicate = f"{vector.key} IN ({markers})"
+    if vector.where:
+        predicate += f" AND ({vector.where})"
+    sql = (
+        f"SELECT {columns} "  # identifier checked by `binding._check_identifier`
+        f"FROM {vector.relation} "
+        f"WHERE {predicate}"
+    )
+    return sql, list(keys)
+
+
+def vector_predicates(
     vector: VectorBinding, placeholder: str, filters: dict[str, Any]
 ) -> tuple[list[str], list[Any]]:
     """Translate the honoured evidence filters onto the site's own columns.
@@ -160,6 +264,11 @@ def _vector_predicates(
     Only the keys the binding mapped are applied. An unmapped filter is ignored rather than guessed
     at — inventing a column name would either error on every query or, worse, match a column that
     means something else at this site.
+
+    **The scope query uses this; the resolve query does not.** An index-ranked search pre-filters on
+    the *query's* narrow keys and enforces the binding's broad `where:` at the resolve instead —
+    `resolve_statement` says why. So `where:` appears in both statements when a scope is built, and
+    in the resolve alone when one is not, which is what makes it unconditional either way.
     """
     predicates: list[str] = []
     params: list[Any] = []

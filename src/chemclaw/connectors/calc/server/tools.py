@@ -22,6 +22,7 @@ changed is one layer down.
 """
 
 import asyncio
+import json
 import logging
 from datetime import datetime
 from typing import Any
@@ -32,7 +33,7 @@ from rdkit import Chem
 
 from chemclaw.connectors.calc import compose
 from chemclaw.connectors.calc.remote import cached_remote, remote_version
-from chemclaw.core.chem import canonical_smiles, substructure_pattern
+from chemclaw.core.chem import canonical_smiles, require_canonical_smiles, substructure_pattern
 from chemclaw.core.config import settings
 from chemclaw.core.ids import stable_hash
 from chemclaw.science.calc.calibration import (
@@ -44,6 +45,7 @@ from chemclaw.science.calc.calibration import (
     record_observation,
     record_prediction,
 )
+from chemclaw.science.calc.geometry import without_geometry
 from chemclaw.science.calc.logd import logd_from_pka
 from chemclaw.science.calc.models import (
     DescriptorProfile,
@@ -54,12 +56,15 @@ from chemclaw.science.calc.models import (
     PkaResult,
     SiteReactivityResult,
     SolubilityResult,
+    Structure,
     ThermochemistryResult,
     XtbResult,
 )
 from chemclaw.science.calc.postgres_artifacts import default_artifact_store
 from chemclaw.science.calc.postgres_store import PostgresStore
+from chemclaw.science.calc.postgres_structures import default_structure_store
 from chemclaw.science.calc.store import CalculationQuery, ResultPayload, ResultStore, StoredResult
+from chemclaw.science.calc.structures import require_structure
 from chemclaw.science.calc.thermo import ThermoSettings
 
 server = FastMCP("calc")
@@ -188,12 +193,26 @@ class CalculationRecord(BaseModel):
     reader and would spend the model's attention on them. `calc_ref` is the same key in the flat
     form a knowledge note cites (`type@version:hash:hash`), so a result found here can be quoted
     as evidence by the reference that resolves back to it.
+
+    **`result` is bounded, and `result_omitted` says when the bound bit.** This model was the
+    largest unbounded model-facing payload in the system and nothing said so: a stored
+    `xtb.conformers` row holds *every* member the search found, untruncated — measured at 66,520
+    characters for one 40-atom molecule — and `calc_find_max_results` is 50. That is ~830,000
+    tokens from one read-only call on two agent profiles, which is not a degraded answer but a
+    hard context-limit failure (`agent/compaction.py`). Geometries now project to their addresses
+    (D-2026-08-21) and what is still oversized after that is withheld rather than silently cut,
+    because a truncated JSON payload that still parses reads as a complete one — the same rule
+    `ArtifactContent.truncated` and the substructure scan's verdict already follow.
     """
 
     calc_ref: str
     calc_type: str
     calc_version: str
     result: dict[str, Any]
+    # True when `result` is empty because the stored payload was over `calc_find_max_result_chars`,
+    # as opposed to a calculation that genuinely stored nothing. Ask for that one calculation
+    # directly to see it.
+    result_omitted: bool = False
     provenance: str
     computed_at: datetime | None = None
     compute_seconds: float | None = None
@@ -202,6 +221,7 @@ class CalculationRecord(BaseModel):
 @server.tool()
 async def find_calculations(
     smiles: str = "",
+    structure_id: str = "",
     calc_type: str = "",
     calc_version: str = "",
     since: str = "",
@@ -228,8 +248,16 @@ async def find_calculations(
             form, so "CCO" and "OCC" find the same rows). Empty means every molecule. This reaches
             the molecule-keyed calculators — pka, solubility, descriptors, dft. The xTB task
             results and geometry pointers are keyed by a 3-D structure, which a molecule alone
-            does not determine, so ask for those by `calc_type` with no molecule filter; asking
-            for both together is refused rather than answered with a misleading empty list.
+            does not determine, so address those with `structure_id`; asking for a molecule and a
+            structure-keyed `calc_type` together is refused rather than answered with a
+            misleading empty list.
+        structure_id: Restrict to calculations that *ran on* one specific geometry, as the
+            `st_...` address reported by `optimize_geometry`, `sample_conformers`,
+            `scan_coordinate` or `compute_thermochemistry`. This is the question "what do we
+            already know about *this conformer*" — the relaxation started from it, its properties,
+            its Hessian — which a molecule cannot ask, because a molecule does not determine a
+            geometry. It matches the calculation's input, so a relaxation is found by the geometry
+            it started from rather than by the minimum it reached. Empty means every geometry.
         calc_type: Restrict to one kind of calculation, e.g. "xtb", "pka", "dft". Empty means all.
         calc_version: Restrict to one calculator version. Empty means every version — useful
             precisely when asking whether an older version's number is still what is on file.
@@ -243,6 +271,7 @@ async def find_calculations(
     """
     query = CalculationQuery(
         smiles=smiles or None,
+        structure_id=structure_id or None,
         calc_type=calc_type or None,
         calc_version=calc_version or None,
         since=_timestamp(since),
@@ -265,12 +294,34 @@ def _timestamp(value: str) -> datetime | None:
 
 
 def _record(stored: StoredResult) -> CalculationRecord:
-    """Flatten one stored result into the agent-facing record."""
+    """Flatten one stored result into the agent-facing record, bounded.
+
+    Two reductions, in the order that matters. Geometries become addresses first, because that is
+    lossless for a reader — a `structure_id` is what the *next* calculation takes, where the
+    coordinates were something no tool accepted — and on the shapes that motivated the bound it is
+    most of the reduction. Only what is still over the ceiling afterwards is dropped, whole, with
+    `result_omitted` set.
+
+    The ceiling is measured on the rendered JSON rather than on the parsed object, because
+    characters are what the bound is about: this payload is going into a model's context.
+    """
+    projected = without_geometry(stored.result)
+    rendered = len(json.dumps(projected, default=str))
+    omitted = rendered > settings.calc_find_max_result_chars
+    if omitted:
+        logger.info(
+            "%s renders %d characters, over the %d-character listing budget; its result is "
+            "reported as omitted",
+            stored.key.as_str(),
+            rendered,
+            settings.calc_find_max_result_chars,
+        )
     return CalculationRecord(
         calc_ref=stored.key.as_str(),
         calc_type=stored.key.calc_type,
         calc_version=stored.key.calc_version,
-        result=stored.result,
+        result={} if omitted else projected,
+        result_omitted=omitted,
         provenance=stored.provenance,
         computed_at=stored.created_at,
         compute_seconds=stored.compute_seconds,
@@ -307,13 +358,17 @@ class ArtifactContent(BaseModel):
 
 @server.tool()
 async def list_artifacts(calc_ref: str) -> list[StoredArtifact]:
-    """List the files a stored calculation left behind — geometries, Hessians, spectra.
+    """List the packed arrays a stored calculation left behind.
 
     A calculation's *answer* is a small set of numbers, and `find_calculations` returns it. This is
-    everything else the run produced and the system kept: the relaxed coordinates, the second
-    derivatives, the raw vibrational spectrum. Those are the inputs that make the *next* question
-    cheap — thermochemistry at another temperature, a conformer search seeded from a known
-    structure — and until now nothing could see that they existed.
+    the bulk data a run produced and the system kept — today that means the second derivatives a
+    Hessian computed, held out of the result row because they are megabytes.
+
+    **Not geometries.** A computed structure is addressed by its `structure_id`, which every
+    geometry calculation reports and which `optimize_geometry`, `compute_thermochemistry`,
+    `compute_electronic_properties`, `scan_coordinate` and `sample_conformers` all *take* — that is
+    how a conformer is carried from one calculation into the next, and it needs no file. This tool
+    predates that and used to be the only route to one.
 
     An empty list is a real answer and usually the right one: most calculations produce no
     by-products worth keeping. It does not mean the calculation is missing — ask
@@ -342,17 +397,19 @@ async def list_artifacts(calc_ref: str) -> list[StoredArtifact]:
 
 @server.tool()
 async def fetch_artifact(artifact_ref: str, max_chars: int = 0) -> ArtifactContent:
-    """Read a stored calculation by-product — an optimized geometry, a spectrum, a log.
+    """Read a stored calculation by-product a knowledge note cites in its `artifact_refs`.
 
-    Use it to quote a computed structure or spectrum exactly rather than describing it from
-    memory: the coordinates of a relaxed geometry, the band positions in a `vibspectrum`, the
-    contents of a file a knowledge note cites in its `artifact_refs`.
+    It refuses a binary artifact (a packed `.npy` array, an SCF restart) instead of returning
+    something unreadable — those exist to seed a further calculation, not to be read — and it
+    truncates at a configured ceiling, reporting `truncated` and the full `byte_size`, so a large
+    file costs a bounded amount of context; if `truncated` is set, say the value came from part of
+    the file.
 
-    Two things it will not do, both deliberately. It refuses a binary artifact (a packed `.npy`
-    array, an SCF restart) instead of returning something unreadable — those exist to seed a
-    further calculation, not to be read. And it truncates at a configured ceiling, reporting
-    `truncated` and the full `byte_size`, so a large file costs a bounded amount of context; if
-    `truncated` is set, say the value came from part of the file.
+    **In this release every artifact is one of those binary arrays, so this refuses more often
+    than it answers.** The text by-products it was written for — an `xtbopt.xyz`, a `vibspectrum` —
+    have no producer since the calculators moved to their own server. For a geometry, use the
+    `structure_id` a calculation reports: it names the structure exactly and the next calculation
+    takes it directly, which is what quoting coordinates was ever a substitute for.
 
     Args:
         artifact_ref: `<calculation key>#<name>`, as `list_artifacts` returns it and as a note's
@@ -636,6 +693,31 @@ async def _only_matching(residuals: list[Residual], query: str) -> list[Residual
         ) from exc
 
 
+async def _starting_geometry(smiles: str, structure_id: str) -> Structure:
+    """The geometry a calculation starts from: a named one, or a fresh embedding.
+
+    The tool-path twin of `connectors/calc/activities._subject`, and separate from it for the
+    reason the two modules are separate at all — an activity resolves inside a durable retry and a
+    tool resolves inside a turn. What they share is the rule, and the rule is short enough that one
+    home would cost an import from `activities` into the MCP server for four lines.
+
+    Refuses a handle for a different molecule, canonically compared, because a `structure_id`
+    addresses a geometry rather than a compound: nothing about the id says which molecule it is of,
+    while `smiles` is what the answer is reported and cited under.
+    """
+    if not structure_id:
+        return await compose.embed(smiles)
+    structure = await require_structure(default_structure_store(), structure_id)
+    named = require_canonical_smiles(smiles)
+    if structure.smiles is not None and require_canonical_smiles(structure.smiles) != named:
+        raise ValueError(
+            f"{structure_id!r} is a geometry of {structure.smiles!r}, not of {smiles!r}. "
+            "A structure id addresses one 3D geometry; use one reported by a calculation on the "
+            "molecule you are asking about."
+        )
+    return structure
+
+
 @server.tool()
 async def compute_xtb_energy(smiles: str, charge: int = 0) -> XtbResult:
     """Compute the GFN2-xTB total energy of a molecule (fast, semiempirical).
@@ -717,7 +799,7 @@ async def predict_pka(smiles: str) -> PkaResult:
 
 @server.tool()
 async def compute_electronic_properties(
-    smiles: str, solvent: str | None = None
+    smiles: str, solvent: str | None = None, structure_id: str = ""
 ) -> ElectronicProperties:
     """Compute frontier orbitals, dipole, partial charges and bond orders (GFN2-xTB).
 
@@ -734,23 +816,48 @@ async def compute_electronic_properties(
         smiles: The molecule as a SMILES string.
         solvent: Optional implicit solvent name (e.g. "water", "toluene") for an ALPB
             solvated calculation; omit for gas phase.
+        structure_id: A specific geometry to evaluate at, as the `st_...` address reported by
+            `optimize_geometry`, `sample_conformers` or `scan_coordinate`. Empty describes a
+            force-field geometry embedded from `smiles` — which is the default and is fine for
+            comparing related molecules, and is the wrong answer when the question is about a
+            particular conformer.
 
     Returns:
         The total energy, HOMO/LUMO/gap in eV, dipole in Debye, per-atom charges and
         the bond orders. Atom indices match the heavy atoms of the canonical SMILES,
         with hydrogens following them.
     """
+    # Two routes to one answer, and which one runs is decided by whether a geometry was named.
+    #
+    # The SMILES route stays byte-identical rather than being folded into the other, and that is
+    # deliberate: `compute_electronic_properties` keys on the geometry the *server* embeds, and
+    # routing it through `compute_properties_at` would key on the geometry embedded here. The two
+    # agree today — both are `structure_from_smiles(smiles, optimize=True)` for every molecule this
+    # tool accepts — but "agree today" is not a property a cache may rest on, and forking it would
+    # orphan every `xtb.properties` row on disk for no gain the named-geometry route does not
+    # already deliver.
+    if not structure_id:
+        payload, _ = await cached_remote(
+            default_store(),
+            "compute_electronic_properties",
+            {"smiles": smiles, "solvent": solvent},
+        )
+        return ElectronicProperties.model_validate(payload)
+    structure = await _starting_geometry(smiles, structure_id)
     payload, _ = await cached_remote(
         default_store(),
-        "compute_electronic_properties",
-        {"smiles": smiles, "solvent": solvent},
+        "compute_properties_at",
+        {"structure": structure.model_dump(mode="json"), "solvent": solvent},
     )
     return ElectronicProperties.model_validate(payload)
 
 
 @server.tool()
 async def predict_site_reactivity(
-    smiles: str, mode: FukuiMode = "electrophilic", top_n: int = 0
+    smiles: str,
+    mode: FukuiMode = "electrophilic",
+    top_n: int = 0,
+    structure_id: str = "",
 ) -> SiteReactivityResult:
     """Rank the atoms of a molecule by how susceptible they are to attack (GFN2-xTB).
 
@@ -773,12 +880,35 @@ async def predict_site_reactivity(
         mode: Which attack to rank for.
         top_n: How many atoms to return, most susceptible first. 0 uses the configured
             default; pass a larger number to see the whole molecule.
+        structure_id: A specific 3D geometry to rank at, as reported by `optimize_geometry`,
+            `sample_conformers`, `scan_coordinate` or `compute_thermochemistry`. Empty describes a
+            force-field geometry embedded from `smiles` — fine for comparing related molecules, and
+            the wrong answer to "which site is reactive *in this conformer*", which is the question
+            a chemist asks right after a conformer search.
 
     Returns:
         The ranked sites with all three Fukui indices per atom, and the total number
         of atoms the ranking was drawn from. Atom indices match the heavy atoms of the
         canonical SMILES, with hydrogens following them.
     """
+    # Two routes to one answer, exactly as `compute_electronic_properties` above. The SMILES route
+    # stays byte-identical rather than being folded into the other: it keys on the geometry the
+    # *server* embeds, and routing it through `compute_fukui_at` would key on the geometry embedded
+    # here. Forking it would orphan every `xtb.fukui` row on disk for no gain the named-geometry
+    # route does not already deliver.
+    if structure_id:
+        structure = await _starting_geometry(smiles, structure_id)
+        payload, _ = await cached_remote(
+            default_store(),
+            "compute_fukui_at",
+            # `mode` and `top_n` are withheld here for the same reason as below — the server keys
+            # `xtb.fukui` without them and `ranked_for` re-sorts locally, so one row serves every
+            # mode and every slice of one geometry.
+            {"structure": structure.model_dump(mode="json")},
+        )
+        result = SiteReactivityResult.model_validate(payload).ranked_for(mode)
+        limit = top_n if top_n > 0 else settings.xtb_fukui_top_n
+        return result.model_copy(update={"sites": result.sites[:limit]})
     payload, _ = await cached_remote(
         default_store(),
         "predict_site_reactivity",
@@ -798,7 +928,9 @@ async def predict_site_reactivity(
 
 
 @server.tool()
-async def optimize_geometry(smiles: str, solvent: str | None = None) -> OptimizationSummary:
+async def optimize_geometry(
+    smiles: str, solvent: str | None = None, structure_id: str = ""
+) -> OptimizationSummary:
     """Relax a molecule to its nearest stable 3D shape with GFN2-xTB.
 
     Every other fast calculation here describes whichever conformer was embedded from
@@ -812,9 +944,17 @@ async def optimize_geometry(smiles: str, solvent: str | None = None) -> Optimiza
     conformers and this relaxes into whichever basin it started in. Cached, so repeats
     are free, and the thermochemistry and reaction tools reuse the same result.
 
+    **To relax a conformer you have already found, pass its `structure_id`.** That is the
+    cheap-search-then-careful-optimization sequence: run `sample_conformers` first, then bring
+    each member's `structure_id` here. Without it this starts from a fresh force-field embedding,
+    which discards whichever conformer the search settled on.
+
     Args:
         smiles: The molecule as a SMILES string.
         solvent: Optional implicit solvent name (e.g. "water", "thf"); omit for gas phase.
+        structure_id: A specific geometry to relax, as the `st_...` address reported by
+            `sample_conformers`, `scan_coordinate` or an earlier call here. Empty starts from a
+            fresh embedding of `smiles`. A geometry of a different molecule is refused.
 
     Returns:
         The converged energy, how much the relaxation lowered it, how far the atoms
@@ -829,7 +969,9 @@ async def optimize_geometry(smiles: str, solvent: str | None = None) -> Optimiza
     # validation error on a *hit* deep inside a reaction job. One key, one payload shape: the full
     # result is stored, and the summary is derived from it here, where dropping the geometry costs
     # nothing.
-    relaxed, _ = await compose.relax(default_store(), await compose.embed(smiles), solvent)
+    relaxed, _ = await compose.relax(
+        default_store(), await _starting_geometry(smiles, structure_id), solvent
+    )
     return OptimizationSummary.of(relaxed)
 
 
@@ -840,6 +982,7 @@ async def compute_thermochemistry(
     symmetry_number: int = 1,
     temperature_k: float = 0.0,
     top_bands: int = 0,
+    structure_id: str = "",
 ) -> ThermochemistryResult:
     """Compute vibrational frequencies, an IR spectrum, and free energy (GFN2-xTB).
 
@@ -865,6 +1008,10 @@ async def compute_thermochemistry(
         temperature_k: Temperature for the thermal corrections; 0 uses 298.15 K.
         top_bands: How many IR bands to report, strongest first. 0 uses the configured
             default; imaginary modes are always reported in full.
+        structure_id: A specific conformer to describe, as the `st_...` address reported by
+            `sample_conformers` or `optimize_geometry`. Empty starts from a fresh embedding.
+            Since everything here describes *one* conformer, naming which one is usually the
+            difference between a free energy that means something and one that does not.
 
     Returns:
         Frequencies with IR intensities, whether the geometry is a minimum, and the
@@ -874,7 +1021,7 @@ async def compute_thermochemistry(
     # thermochemistry would have to name the geometry the refinement loop settles on, which is an
     # output, so it has no cache row of its own and never had one — its economy is entirely the two
     # nested entries, and a single remote call would swallow both.
-    structure = await compose.embed(smiles)
+    structure = await _starting_geometry(smiles, structure_id)
     thermo = ThermoSettings(
         symmetry_number=symmetry_number,
         temperature_k=temperature_k or settings.xtb_thermo_temperature_k,

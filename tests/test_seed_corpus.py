@@ -143,3 +143,59 @@ def test_the_seed_corpus_and_the_eval_corpus_stay_separate() -> None:
     gold = {note.id for note in load_notes(_GOLD_CORPUS)}
     assert gold, f"the gold corpus is not at {_GOLD_CORPUS}; an empty set intersects nothing"
     assert not seeded & gold
+
+
+def _seed_reactions() -> list[Note]:
+    """Every `reaction` note in the shipped corpus."""
+    notes = [n for n in load_notes(_KNOWLEDGE) if n.type == "reaction"]
+    assert notes, "the seed corpus must hold reaction notes"
+    return notes
+
+
+def test_a_seed_reaction_records_its_figures_where_a_machine_can_read_them() -> None:
+    """A figure stated only in prose is a figure the comparative tools cannot use.
+
+    Every one of these notes describes a run that was performed and states its temperature, time or
+    yield in the body — and for a while every one of them stated it *only* there. `conditions` is
+    the frontmatter form those tools read (`ProcessConditions` says why), so a seed note that keeps
+    its numbers in sentences is a corpus that cannot exercise the half of the comparison built to
+    need no model at all.
+
+    At least one figure, not all three: what a note may claim is bounded by what its prose says.
+    Two of these record no temperature because their prose gives none — "0 °C to rt" is a ramp and
+    "reflux" is not a setpoint — and supplying a number the record does not contain is the one thing
+    every artifact downstream refuses to do.
+    """
+    for note in _seed_reactions():
+        assert note.conditions is not None, (
+            f"{note.id} states its run in prose alone; transcribe the figures it gives into "
+            "`conditions`, or say in the note why it describes no performed run"
+        )
+        recorded = note.conditions.model_dump(exclude_none=True)
+        assert recorded, f"{note.id} carries an empty conditions block, which claims nothing"
+
+
+def test_the_corpus_exercises_the_comparison_that_needs_no_model() -> None:
+    """The deterministic half of `condense_protocols`, over the real corpus, with no client.
+
+    This is the property the frontmatter exists for, asserted end to end rather than on a field:
+    `drop_empty_columns` removes a column no protocol recorded, so a corpus whose figures live in
+    prose renders a comparison with the recorded columns silently gone — which is exactly what
+    every local run and demo showed before the transcription. Driven with `client=None`, because
+    the point is that this half answers from the record and needs no credential.
+    """
+    import asyncio
+
+    from chemclaw.agent.condense import Protocol, condense_protocols
+
+    protocols = [
+        Protocol(ref=note.id, conditions=note.conditions, text="") for note in _seed_reactions()
+    ]
+    table = asyncio.run(condense_protocols(protocols, client=None)).table
+
+    for column in ("Temp (°C)", "Time (h)", "Yield (%)"):
+        assert column in table, (
+            f"no seed reaction records {column}, so the comparison drops it — the deterministic "
+            "half of the digest is unexercised by the corpus it ships with"
+        )
+    assert "→" in table, "with recorded figures the changes column must report a real change"

@@ -50,7 +50,11 @@ _STATE_BY_LAUNCHER_STATUS = {
 
 def _auth_headers() -> dict[str, str]:
     """Bearer auth for the launcher (token arrives via the HPC bridge / a mounted secret, F4-T6)."""
-    return {"Authorization": f"Bearer {settings.hpc_api_token}"} if settings.hpc_api_token else {}
+    # `.get_secret_value()`, and an f-string over the `SecretStr` would not: it renders
+    # `Bearer **********`, which the launcher answers with a 401 rather than a leak — the failure
+    # direction that type is chosen for, and still a failure.
+    token = settings.hpc_api_token.get_secret_value()
+    return {"Authorization": f"Bearer {token}"} if token else {}
 
 
 def _same_origin(url_a: str, url_b: str) -> bool:
@@ -70,8 +74,8 @@ def _artifact_headers() -> dict[str, str]:
     artifacts). A cross-origin store with no token of its own is fetched unauthenticated, so the
     Seqera credential — which can launch and cancel pipelines — is never handed to a third host.
     """
-    if settings.hpc_artifact_store_token:
-        return {"Authorization": f"Bearer {settings.hpc_artifact_store_token}"}
+    if store_token := settings.hpc_artifact_store_token.get_secret_value():
+        return {"Authorization": f"Bearer {store_token}"}
     if _same_origin(settings.hpc_artifact_store_url, settings.hpc_api_base_url):
         return _auth_headers()
     return {}
@@ -105,21 +109,30 @@ async def launch_run(
     Raises:
         NextflowError: When the launcher rejects the launch or returns no run id.
     """
+    params: dict[str, object] = {
+        "smiles": job.molecule_smiles,
+        "method": job.method,
+        "basis_set": job.basis_set,
+        # **The chemist, on the run itself.** Four places — this bundle's manifest, the
+        # workflow, the activity and `QmJobSpec` — say the requesting user is carried to the
+        # launcher, and none of them was true: the POST body carried molecule, method and basis
+        # and nothing else, so Tower's run list and the cluster's own accounting saw only the
+        # shared HPC service identity. That is the one place the attribution is actually needed,
+        # since inside Chemclaw the `JobRecord` and the note already hold it.
+        "requested_by": job.requested_by,
+    }
+    # The starting geometry, when the chemist named one and the deployment says its pipeline reads
+    # one (D-2026-08-21). Added rather than always present, so a pipeline that takes only a SMILES
+    # receives exactly the body it received before — Nextflow ignores an unconsumed param, which is
+    # precisely why a request naming a geometry is refused at launch instead of sent hopefully.
+    if job.geometry_xyz:
+        params["geometry_xyz"] = job.geometry_xyz
+        params["charge"] = job.charge
+        params["multiplicity"] = job.multiplicity
     payload = {
         "pipeline": settings.hpc_pipeline_name,
         "revision": settings.hpc_pipeline_version,
-        "params": {
-            "smiles": job.molecule_smiles,
-            "method": job.method,
-            "basis_set": job.basis_set,
-            # **The chemist, on the run itself.** Four places — this bundle's manifest, the
-            # workflow, the activity and `QmJobSpec` — say the requesting user is carried to the
-            # launcher, and none of them was true: the POST body carried molecule, method and basis
-            # and nothing else, so Tower's run list and the cluster's own accounting saw only the
-            # shared HPC service identity. That is the one place the attribution is actually needed,
-            # since inside Chemclaw the `JobRecord` and the note already hold it.
-            "requested_by": job.requested_by,
-        },
+        "params": params,
     }
     # Idempotency (COR-2): Temporal retries `submit_to_hpc` at-least-once, so a lost launch response
     # would otherwise re-POST and double-submit an expensive HPC run. The key is deterministic so a

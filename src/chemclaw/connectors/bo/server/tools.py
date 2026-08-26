@@ -41,6 +41,8 @@ from chemclaw.connectors.bo.calculators import properties_for
 from chemclaw.connectors.caller import caller_provenance
 from chemclaw.science.bo.campaign_record import (
     CampaignThread,
+    campaign_id_for,
+    campaign_is_known,
     read_campaign_thread,
     record_suggestion,
 )
@@ -151,6 +153,17 @@ class ExperimentSuggestion(BaseModel):
     # precision. Carried so the summary can say which, rather than leaving a reader to assume the
     # stricter reading was the deliberate one.
     front_tolerance: float | None = None
+    # True when this ask opened a campaign that had no prior suggestions *while observations were
+    # supplied* — almost always an accidental fork rather than a new optimization
+    # (D-2026-08-21-a-geometry-is-an-address-not-a-payload).
+    #
+    # A campaign id is a hash of its decision space, so a widened bound or a swapped ligand is a
+    # different campaign with no history, correctly. The canonicalisation in `campaign_id_for`
+    # removes the ways a *re-typed* space forks without meaning to; this reports the ones it
+    # cannot — an added option, a bound the chemist moved and did not mention — because the
+    # symptom is silent by construction: `record_suggestion` upserts, so a fork looks exactly like
+    # a first ask. Runs supplied against a campaign with no history is the signature of one.
+    opened_new_campaign: bool = False
 
     @computed_field  # type: ignore[prop-decorator]
     @property
@@ -509,6 +522,12 @@ async def suggest_next_experiment(
             difference as real and is usually shorter than the chemist's true trade-off. Same
             number and same meaning as `campaign_progress`'s required argument.
 
+    **If `opened_new_campaign` comes back true, say so before presenting the candidates.** It
+    means runs were supplied against a decision space this system has never been asked about, which
+    is usually a space that drifted from the one the chemist has been working — an option added, a
+    bound moved — and the history is now split across two campaigns. Ask which they meant rather
+    than reporting the suggestion as a continuation.
+
     The suggestion is **recorded** against the campaign this problem defines, and the returned
     `campaign_id` is the handle for it. Quote that id back to the chemist: asking again about the
     same decision space accumulates onto the same campaign, so the sequence of proposals — and the
@@ -554,6 +573,10 @@ async def suggest_next_experiment(
     # `_recorded_provenance`, not `caller_provenance`: this path's actor is an unauthenticated
     # header, and the row it writes is the record of who proposed an experiment. See that
     # function for why the name is marked rather than replaced by a validated one.
+    # Asked *before* the write, because after it every campaign has a suggestion. A read on the
+    # suggestion path is one indexed lookup against a table this same call is about to write, and
+    # it buys the one signal a silent fork produces.
+    was_known = await campaign_is_known(campaign_id_for(featurized.problem))
     campaign_id = await record_suggestion(
         problem=featurized.problem,
         candidates=candidates,
@@ -578,6 +601,7 @@ async def suggest_next_experiment(
             else []
         ),
         front_tolerance=assay_noise,
+        opened_new_campaign=bool(history) and not was_known,
     )
 
 

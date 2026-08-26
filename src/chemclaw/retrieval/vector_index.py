@@ -78,6 +78,24 @@ class NoteIndex(Protocol):
         """
         ...
 
+    async def retire_absent(self, keep: set[str]) -> int:
+        """Delete every indexed note whose id is not in `keep`; return how many went.
+
+        Phrased as "keep exactly these" rather than "delete these" because that is what the caller
+        knows: `reindex_notes` has just listed the corpus on disk, and asking it to also enumerate
+        what the backend holds would be a second round trip to compute a difference the backend can
+        compute itself.
+
+        **An empty `keep` must delete nothing.** A missing or mis-pointed notes directory would
+        otherwise wipe the index, and a rebuild costs one embedding call per note.
+
+        Until D-2026-08-25 there was no such method and nothing ever pruned: a note deleted from
+        disk left a row behind, which is harmless in Postgres — the retrievers drop a hit whose note
+        no longer loads — and is not harmless once the vectors live in a store that bills for them
+        and that no other sweep reaches.
+        """
+        ...
+
     async def fingerprints(self, embedding_key: str) -> dict[str, str]:
         """The stored `note_id -> fingerprint` for notes embedded under `embedding_key`.
 
@@ -153,6 +171,16 @@ class InMemoryNoteIndex:
         for record in records:
             self._records[record.note_id] = record
             self._embedding_keys[record.note_id] = embedding_key
+
+    async def retire_absent(self, keep: set[str]) -> int:
+        """Drop every record whose note id is not in `keep`; an empty `keep` drops nothing."""
+        if not keep:
+            return 0
+        gone = [note_id for note_id in self._records if note_id not in keep]
+        for note_id in gone:
+            del self._records[note_id]
+            self._embedding_keys.pop(note_id, None)
+        return len(gone)
 
     async def fingerprints(self, embedding_key: str) -> dict[str, str]:
         """Fingerprints of rows embedded under `embedding_key`; empty ones omitted.
@@ -367,6 +395,17 @@ class PostgresNoteIndex:
         async with db.connection(self._dsn) as conn:
             yield conn
 
+    def _row_vector(self, record: NoteRecord) -> str | None:
+        """The value bound into this row's `embedding` column — the vector, here.
+
+        A hook with one line in it, because the subclass whose vectors live elsewhere needs to bind
+        `NULL` and everything else about the write is identical. `%(emb)s::vector(N)` renders
+        `NULL::vector(N)` for `None`, which is a valid insert, so the statement itself is shared
+        rather than rebuilt — a second copy of an `INSERT … ON CONFLICT` is how two writers stop
+        agreeing about what a row holds.
+        """
+        return _vector_literal(record.embedding)
+
     async def upsert(self, records: list[NoteRecord], embedding_key: str) -> None:
         """Insert or replace each record (embedding + tsvector + fingerprint + key) by note id."""
         if not records:
@@ -377,13 +416,35 @@ class PostgresNoteIndex:
                     self._upsert,
                     {
                         "id": record.note_id,
-                        "emb": _vector_literal(record.embedding),
+                        "emb": self._row_vector(record),
                         "text": record.text,
                         "fp": record.fingerprint or None,
                         "key": embedding_key,
                     },
                 )
             await conn.commit()
+
+    async def retire_absent(self, keep: set[str]) -> int:
+        """Delete rows for notes no longer on disk, returning the ids so a subclass can follow.
+
+        `RETURNING note_id` rather than a count: `ExternalVectorNoteIndex` needs the ids to remove
+        the matching points from its store, and asking the table twice would race its own delete.
+        """
+        return len(await self._retire_absent_ids(keep))
+
+    async def _retire_absent_ids(self, keep: set[str]) -> list[str]:
+        """The shared half: delete and report which ids went. Empty `keep` deletes nothing."""
+        if not keep:
+            return []
+        async with self._connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "DELETE FROM note_index WHERE NOT (note_id = ANY(%(keep)s)) RETURNING note_id",
+                    {"keep": sorted(keep)},
+                )
+                rows = await cur.fetchall()
+            await conn.commit()
+        return [row[0] for row in rows]
 
     async def fingerprints(self, embedding_key: str) -> dict[str, str]:
         """Stored fingerprints for every row that has one *and* was embedded under this key.
@@ -434,9 +495,22 @@ class PostgresNoteIndex:
         return [IndexHit(note_id=r[0], score=float(r[1])) for r in rows]
 
 
-def default_note_index() -> PostgresNoteIndex:
-    """The production note index (Postgres) — one place the retrievers get their backend."""
-    return PostgresNoteIndex()
+def default_note_index() -> NoteIndex:
+    """The production note index — one place the retrievers get their backend.
+
+    Two shapes, chosen by `vector_store_provider`, exactly as `default_document_index()` chooses
+    (`ingest/documents/index.py`). `pgvector` (the default) keeps the vectors in the same statement
+    that ranks and filters them; any other provider moves **only** the dense half to that store and
+    leaves the text, the `tsvector`, the fingerprint and the embedding key in `note_index`, because
+    those are relational work a vector database has no `ts_rank` for.
+    """
+    if settings.vector_store_provider == "pgvector":
+        return PostgresNoteIndex()
+
+    from chemclaw.retrieval.external_note_index import ExternalVectorNoteIndex
+    from chemclaw.retrieval.vectors.registry import default_vector_store
+
+    return ExternalVectorNoteIndex(default_vector_store())
 
 
 def _needs_embedding(note_id: str, current: dict[str, str], stored: dict[str, str]) -> bool:
@@ -489,9 +563,15 @@ async def reindex_notes(
     `full=True` re-embeds every note unconditionally (the CLI's `--full`), for recovery from a
     corrupted index.
 
-    Idempotent either way (upsert by id), so it is safe to run on a schedule or after a merge. Notes
-    deleted from disk leave a harmless stale row — the retrievers drop any hit whose note no longer
-    loads — so a full teardown is never required.
+    Idempotent either way (upsert by id), so it is safe to run on a schedule or after a merge.
+
+    **Notes deleted from disk are retired here** (D-2026-08-25). They used to be left behind as
+    stale rows, on the argument that the retrievers drop a hit whose note no longer loads — true,
+    and enough while every vector sat in a Postgres table nobody bills per row. It stops being
+    enough once the dense half can live in an external store: nothing else in this system ever
+    deletes a note vector, so an unpruned index would grow by one orphan per deleted note forever.
+    The prune runs before the "nothing changed" exit below, because a run whose only news is a
+    deletion has nothing to embed and must still remove it.
 
     **Reads past the graph cache deliberately.** This is the one in-process moment that correlates
     with a merge — the PR-gate's merge webhook triggers it — and the note list below is compared
@@ -506,6 +586,12 @@ async def reindex_notes(
     if not notes:
         return 0
     current_fingerprints = await asyncio.to_thread(note_file_fingerprints, directory)
+    # Guarded twice over against wiping the index: `notes` is non-empty by the return above, and
+    # `retire_absent` itself does nothing for an empty `keep`. A mis-pointed directory costs one
+    # embedding call per note to recover from, so it is worth saying no twice.
+    retired = await index.retire_absent({note.id for note in notes})
+    if retired:
+        log.info("retired %d note(s) no longer on disk", retired)
     embedding_key = embedding_config_key()
     stored_fingerprints = {} if full else await index.fingerprints(embedding_key)
     changed = [

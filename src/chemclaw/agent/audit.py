@@ -8,8 +8,7 @@ tool uniformly — the audit trail is a single reusable piece (DRY), like the PR
 
 It is observe-only: it never alters the arguments or the result. Each call records the
 correlation id (which conversation), the actor (who — a Phase-6 seam, the configured
-`service_actor_id` until Entra identity lands), which specialist ran it (beside the human, never
-instead — empty for the main agent), the tool name, its truncated arguments, the
+`service_actor_id` until Entra identity lands), the tool name, its truncated arguments, the
 outcome and a short effect summary (e.g. the PR ref a `propose_*` tool returned), and the latency.
 Records go to the stdlib log always, and additionally to a durable `AuditSink` when one is
 supplied (the Postgres append-only trail) — the log is the floor, the sink is the durable record.
@@ -56,7 +55,6 @@ from chemclaw.core.config import settings
 from chemclaw.core.identity_context import (
     get_current_actor,
     get_current_correlation_id,
-    get_current_specialist,
 )
 from chemclaw.core.metrics_bridge import record_metric
 from chemclaw.core.session_context import get_current_session_id
@@ -102,16 +100,18 @@ class AuditEvent(BaseModel):
     # Which specialist made this call — the `AgentProfile` name of the running subagent, empty for
     # the main agent (D-2026-08-10-a-subagent-is-an-attenuation-not-a-new-actor, invariant 3).
     #
-    # **Beside `actor`, never instead of it**, and deliberately not folded into either neighbouring
-    # field. Overloading `actor` — the human's Entra oid — would produce exactly the D-040 failure
-    # this system has already been bitten by: the trail recorded an agent's self-authorization under
-    # the chemist's identity, which is worse than an unrecorded act because it *looks* attributable.
-    # And `purpose` is reserved for why a call was made, which is a different question with a
-    # different (still unanswerable) answer; filling it with an agent name would spend the one
-    # column that is honest about being empty.
-    #
-    # A trail that names only the person cannot say which of five specialists ran a tool; a trail
-    # that names only the agent is worthless: it has to carry both, so it does.
+    # **Nothing writes it, and that is now visible rather than claimed.** The contextvar this field
+    # was read from had no setter in `src/` for as long as it existed, so the column was empty on
+    # every row ever written while three docstrings said the trail named the agent beside the human
+    # (`D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution`). The field and its
+    # column stay because `infra/sql/006` is merged and a merged migration is never edited, and
+    # because the shape is right for when subagents return: **beside `actor`, never instead of it**.
+    # Overloading `actor` — the human's Entra oid — would produce exactly the D-040 failure this
+    # system has already been bitten by: the trail recorded an agent's self-authorization under the
+    # chemist's identity, which is worse than an unrecorded act because it *looks* attributable. And
+    # `purpose` is reserved for why a call was made, which is a different question with a different
+    # (still unanswerable) answer; filling it with an agent name would spend the one column that is
+    # honest about being empty.
     agent: str = ""
     tool: str
     arguments: str
@@ -341,13 +341,6 @@ async def _recording(
     # context, and an agent is cached per profile for the process's life, so anything bound at
     # build time would be shared by every user on the pod. Empty off the request path.
     event_session = get_current_session_id() or ""
-    # Which specialist is running, read here and once, so the trail names the agent beside the human
-    # without any tool signature growing a field. Empty means the main agent, which is a complete
-    # answer rather than a missing one. No fallback: unlike the actor and the correlation id there
-    # is nothing sensible to bind at build time — an agent is cached per profile for the process's
-    # life, so a build-time specialist would label every turn on the pod with whichever subgraph
-    # happened to be built first.
-    event_agent = get_current_specialist()
     start = time.perf_counter()
 
     def event_for(outcome: str, detail: str, elapsed_ms: float) -> AuditEvent:
@@ -356,7 +349,6 @@ async def _recording(
             correlation_id=event_cid,
             session_id=event_session,
             actor=event_actor,
-            agent=event_agent,
             tool=name,
             arguments=args,
             outcome=outcome,

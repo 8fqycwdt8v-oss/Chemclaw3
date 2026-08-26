@@ -64,6 +64,10 @@ class JobRecord(BaseModel):
     result: dict[str, Any] = Field(default_factory=dict)
     # The note this run proposed, or "" — a join to the graph, not proof of a merge.
     note_id: str = ""
+    # The calculation keys the run rested on, from its envelope (D-2026-08-21). Kept beside the
+    # note rather than inside `result` for the same reason `note_id` is: `result` is the
+    # connector's domain payload and this is a fact about the run.
+    calc_refs: list[str] = Field(default_factory=list)
     # Wall-clock seconds the run took, measured by the wrapper across the child workflow. The row
     # said what ran and why and nothing about what it cost, so a two-second xTB call and a six-hour
     # DFT run were one row shape and one increment of `chemclaw_jobs_started_total` — on the most
@@ -71,6 +75,11 @@ class JobRecord(BaseModel):
     # parallelism belongs to the launcher and none reports it back yet. Runtime is the factor
     # node-hours multiplies, and it is measurable today.
     runtime_seconds: float = Field(default=0.0, ge=0)
+    # The name of the model `result` was dumped from, off the envelope's own `payload_kind`. The
+    # backfill's only way to route a composite: `result` is a bare dict by the time it lands here,
+    # and `<connector>.<job>` is a route rather than a shape. Empty means the run did not say,
+    # which is every row written before this column and which the projector reads as "infer".
+    payload_kind: str = ""
     completed_at: datetime | None = None
 
 

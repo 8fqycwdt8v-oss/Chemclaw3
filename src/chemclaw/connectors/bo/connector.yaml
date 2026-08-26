@@ -15,7 +15,19 @@ endpoint:
   health_url: http://127.0.0.1:8816/healthz
   request_timeout: 120
   auth:
-    mode: none
+    # **Bearer, and the token is this bundle's own `/mcp` credential — not the one core presents to
+    # anything downstream.** `connectors/server.py`'s `BearerAuthMiddleware` reads the mode from this
+    # manifest and refuses every MCP request without it, so `mode: none` here meant exactly what it
+    # said: any process that could reach the pod could call a durable optimization campaign.
+    # A NetworkPolicy selects peers, not paths, and it was the only thing in the way.
+    #
+    # The variable is named rather than carried, and read per request on both sides, so a rotated
+    # secret takes effect without a restart. `_MCP_TOKEN` rather than `_TOKEN` because the shorter
+    # name is a different hop for two of these bundles: `CHEMCLAW_CALC_TOKEN` is already the
+    # credential *core* presents to the remote calc server (`core/config/calculators.py`), and a
+    # name that means two hops is a name someone will eventually point at the wrong one.
+    mode: bearer
+    token_env: CHEMCLAW_BO_MCP_TOKEN
   tools:
     - suggest_next_experiment
     - resume_campaign

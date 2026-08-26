@@ -16,14 +16,18 @@ already in flight, so this module is a *contract* boundary rather than an import
 side stays leaf.
 """
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from chemclaw.science.calc.models import (
+    BondDissociationSurvey,
     ConformerEnsemble,
+    EnsembleProperty,
     InteractionResult,
     ReactionEnergyResult,
+    RefinedEnsemble,
     ScanResult,
     SolventComparisonResult,
+    SpeciesDistribution,
 )
 
 
@@ -37,8 +41,19 @@ class XtbJobResult(BaseModel):
 
     kind: str
     summary: str
+    # The calculation keys this job reached, for the envelope to carry and a note to cite
+    # (D-2026-08-21). Additive and defaulted, because this crosses the Temporal wire and histories
+    # are in flight; a result decoded from an older history simply has none.
+    calc_refs: list[str] = Field(default_factory=list)
     reaction: ReactionEnergyResult | None = None
     solvents: SolventComparisonResult | None = None
     scan: ScanResult | None = None
     ensemble: ConformerEnsemble | None = None
     interaction: InteractionResult | None = None
+    # The four multi-step results. Additive and defaulted like `calc_refs` above and for the same
+    # reason: this crosses the Temporal wire and histories are in flight, so a result decoded from
+    # an older one simply has none of them.
+    refined: RefinedEnsemble | None = None
+    averaged: EnsembleProperty | None = None
+    distribution: SpeciesDistribution | None = None
+    bonds: BondDissociationSurvey | None = None

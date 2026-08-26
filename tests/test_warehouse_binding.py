@@ -21,15 +21,50 @@ from chemclaw.core.config import settings
 from chemclaw.ingest.eln.warehouse.binding import BindingError, load_binding
 from chemclaw.ingest.eln.warehouse.expr import TransformError, apply_transforms, resolve_path
 
-_MANIFEST = (
-    Path(__file__).resolve().parents[1]
-    / "src"
-    / "chemclaw"
-    / "ingest"
-    / "sources"
-    / "eln-snowflake"
-    / "datasource.yaml"
-)
+_SOURCES = Path(__file__).resolve().parents[1] / "src" / "chemclaw" / "ingest" / "sources"
+_MANIFEST = _SOURCES / "eln-snowflake" / "datasource.yaml"
+
+# Every shipped warehouse manifest, with a row shaped the way that site's schema is. Both are worked
+# examples a binding author copies, so both are held to the same two checks below rather than only
+# the first — and the *casing* is the point of having two fixtures rather than one: Snowflake
+# upper-cases unquoted identifiers in its result metadata while Spark returns the schema's own case,
+# and every path here is an exact-case lookup on the returned row.
+_SHIPPED_WAREHOUSES: list[tuple[str, dict[str, Any]]] = [
+    (
+        "eln-snowflake",
+        {
+            "REACTION_ID": "RX-1",
+            "PROJECT_CODE": "PRJ-7",
+            "OBJECTIVE": "drop to 60 C",
+            "PROTOCOL_TEXT": "charge, reflux, work up",
+            "EXPERIMENT_DATE": "2026-05-01",
+            "TEMP_C": "60",
+            "DURATION_MIN": "90",
+            "YIELD_PCT": "82.5",
+            "ASSAY_PCT": "99.1",
+            "RESULT_FLAG": "OK",
+            "FAILURE_NOTE": "",
+            "OPERATOR": "a.chemist",
+        },
+    ),
+    (
+        "eln-databricks",
+        {
+            "reaction_id": "RX-1",
+            "project_code": "PRJ-7",
+            "objective": "drop to 60 C",
+            "protocol_text": "charge, reflux, work up",
+            "experiment_date": "2026-05-01",
+            "temp_c": "60",
+            "duration_min": "90",
+            "yield_pct": "82.5",
+            "assay_pct": "99.1",
+            "result_flag": "OK",
+            "failure_note": "",
+            "operator": "a.chemist",
+        },
+    ),
+]
 
 
 def _ingest(**overrides: Any) -> dict[str, Any]:
@@ -145,7 +180,9 @@ def test_a_related_block_may_not_be_called_root() -> None:
 
 def test_a_binding_with_neither_half_is_rejected() -> None:
     """A connection nothing would ever open is a configuration nobody meant to write."""
-    with pytest.raises(BindingError, match="must declare an 'ingest' or a 'vector' section"):
+    with pytest.raises(
+        BindingError, match="must declare an 'ingest', a 'corpus' or a 'vector' section"
+    ):
         load_binding({"connection": {"driver": "tests.warehouse_fake:open_fake"}})
 
 
@@ -184,41 +221,34 @@ def test_a_path_that_does_not_resolve_is_silence_not_an_error() -> None:
     assert resolve_path("analytics[0].C", payload) is None
 
 
-def test_the_shipped_manifest_binding_is_valid() -> None:
-    """The example this repository ships parses under the same rules a real one will."""
-    manifest = yaml.safe_load(_MANIFEST.read_text(encoding="utf-8"))
+@pytest.mark.parametrize("source", [name for name, _ in _SHIPPED_WAREHOUSES])
+def test_the_shipped_manifest_binding_is_valid(source: str) -> None:
+    """Every example this repository ships parses under the same rules a real one will."""
+    path = _SOURCES / source / "datasource.yaml"
+    manifest = yaml.safe_load(path.read_text(encoding="utf-8"))
     binding = load_binding(manifest["config"]["binding"])
 
     assert binding.ingest is not None and binding.vector is not None
-    assert manifest["name"] == _MANIFEST.parent.name
+    assert manifest["name"] == path.parent.name
     assert manifest["ingest"].endswith(":WarehouseElnAdapter")
     assert manifest["retrieve"].endswith(":WarehouseVectorRetriever")
 
 
-def test_every_path_in_the_shipped_manifest_resolves_against_a_realistic_row() -> None:
+@pytest.mark.parametrize(("source", "row"), _SHIPPED_WAREHOUSES)
+def test_every_path_in_the_shipped_manifest_resolves_against_a_realistic_row(
+    source: str, row: dict[str, Any]
+) -> None:
     """The worked example is worked — not a plausible-looking file nobody ever ran.
 
     A shipped example whose paths do not resolve is worse than none: it is the thing a binding
-    author copies, and it would teach a shape that silently yields nothing.
+    author copies, and it would teach a shape that silently yields nothing. The row is written out
+    per source rather than derived from the binding, because a derived row resolves by construction
+    and would assert nothing at all.
     """
-    manifest = yaml.safe_load(_MANIFEST.read_text(encoding="utf-8"))
+    manifest = yaml.safe_load((_SOURCES / source / "datasource.yaml").read_text(encoding="utf-8"))
     binding = load_binding(manifest["config"]["binding"])
     assert binding.ingest is not None
 
-    row = {
-        "REACTION_ID": "RX-1",
-        "PROJECT_CODE": "PRJ-7",
-        "OBJECTIVE": "drop to 60 C",
-        "PROTOCOL_TEXT": "charge, reflux, work up",
-        "EXPERIMENT_DATE": "2026-05-01",
-        "TEMP_C": "60",
-        "DURATION_MIN": "90",
-        "YIELD_PCT": "82.5",
-        "ASSAY_PCT": "99.1",
-        "RESULT_FLAG": "OK",
-        "FAILURE_NOTE": "",
-        "OPERATOR": "a.chemist",
-    }
     payload: dict[str, Any] = {"root": row, "charges": [], "analytics": []}
 
     unresolved = [

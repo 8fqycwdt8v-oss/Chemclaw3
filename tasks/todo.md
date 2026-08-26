@@ -1,56 +1,80 @@
-# Task — `agent/durable_tools.py` imports workflow implementations: is that a D-002 layering break?
+# Backlog / DEFERRED sweep — 2026-08-26
 
-Raised as: "agent/durable_tools.py imports workflow implementations in order to launch them, where
-D-002 puts durability only in Temporal. That's a genuine layering question and wants its own ADR,
-not a readability edit."
+## Task
+Work the queue rather than add to it: pick the rows in `docs/planning/BACKLOG.md` that are
+closable **offline and in full**, re-measure each against `HEAD` first (the file's own rule),
+implement, prove, and delete the row in the commit that closes it.
 
-## Plan
+`DEFERRED.md` was read end to end: **no row's trigger has fired.** Every one is gated on a
+cluster, a tenant, a licence, an upstream release or a corpus none of which this environment
+has. Nothing to close there — which is itself the answer to "what should be done" for that file.
 
-- [x] Establish the real surface: which modules outside `durable/` import a workflow class
-- [x] Read what D-002 actually says (vs. what the concern assumes it says)
-- [x] Measure the marginal import closure the workflow-class imports add to the agent process
-- [x] Measure whether the agent/front-door process currently loads bundle-only heavy deps
-- [x] Measure what the by-name alternative costs under `mypy --strict`
-- [x] Check whether the edge is already declared/enforced anywhere
-- [x] Decide, write the ADR, add the ledger row
-- [x] Close the one gap the investigation actually found, with a test
-- [x] `make lint type test` green
+## Selected rows (7)
 
-## What was measured
+Rejected as not-now, with the reason, so the next session does not re-derive it:
+`CalculationKey` escaping (needs an ADR + a full-cache-invalidation migration plan),
+`fetch_artifact` (waits on the fleet's `vibspectrum`), tool-result framing (ADR-sized, needs a
+content-field convention), the pydantic-repr row (blast radius is every tool at once),
+`observations_status_idx` and `session_owners` disposal (both need a product call, not a diff),
+the whole of §5 (blocked on a working model credential or on deployment history).
 
-| Question | Result |
-|---|---|
-| Launch sites outside `durable/` | **4**, not 1 (`agent/durable_tools`, `agent/interaction_tools`, `connectors/jobs`, `templates/registry`) |
-| Marginal closure of the 2 workflow imports in `durable_tools` | **10 modules, 0 new third-party roots** (1898 → 1888) |
-| Bundle-only heavy deps in agent / front door | **none** (`bofire`, `botorch`, `tblite`, `gpytorch`, `xgboost`) |
-| Bundle modules loaded by agent / front door | **zero**, across 7 discovered bundles |
-| Wrong workflow argument, typed launch | `mypy --strict` **errors** |
-| Wrong workflow argument, by-name launch | **silent** |
-| Dependency direction | already **bidirectional** — `durable/template_activities.py` imports `chemclaw.agent` to run a turn inside an activity |
-| Edge already declared? | **yes** — `tests/test_layering.py::_CYCLE_EDGES` has `("chemclaw.agent", "chemclaw.durable")` with its reason |
+- [x] **1 · §1 The audit trail's `agent` column can never be non-empty.** `set_current_specialist`
+      has zero callers in `src/`; `record_handoff` has none anywhere. Delete the contextvar trio,
+      `record_handoff`, `HandoffSignal` and the audit write. Keep `HandoffEvent` (a union member is
+      a three-repo change) and the SQL column (a merged migration is never edited). ADR.
+- [x] **2 · §2 `changes_between` diffs against *absent*.** Move `_changes`'s "both sides recorded
+      it" rule out of `agent/condense.py` and into `memory/progression.py`, one rule instead of two.
+- [x] **3 · §3 A rejoined durable run never reaches the second chemist.** `handle.describe()` on
+      the `WorkflowAlreadyStartedError` path; announce when the status is RUNNING.
+- [x] **4 · §4 `connectors.<name>.enabled` never reaches the agent.** A `chemclaw.connectorsEnabled`
+      helper mirroring `connectorUrls`; delete the sentence pointing at the absent key.
+- [x] **5 · §4 One `replicas` knob drives two differently-shaped Deployments.** Split into
+      `serverReplicas`/`workerReplicas` defaulting to `replicas`; fix the `nil | int` = 0 hole a
+      `url:` bundle with a worker leaves in the connection ceiling.
+- [x] **6 · §4 Egress is still port-scoped by default.** Empty `egressDestinations` under an
+      enabled policy must `fail`, with an explicit `allowAnyDestination: true` escape hatch.
+- [x] **7 · §4 Three credentials are plain `str`.** `SecretStr` on `llm_api_key`, `hpc_api_token`,
+      `temporal_api_key` — defence in depth beside the redacting filter, which stays.
+
+## Verification
+`make lint type test` with the Postgres/Temporal stack **up** (`dockerd` + `make up` +
+`make db-migrate`) — a green run that skipped ~157 Postgres tests proves nothing about the
+durable layer. Report what was skipped.
 
 ## Review
 
-**The premise does not hold, and the measurement is what settles it.** D-002 forbids merging
-*durability models* — a second durable store in the conversation layer — and asks for the
-integration to be "one thin DIY adapter". `durable_tools.py` is that adapter: it stores nothing
-durable, and the import is Temporal's own typed launch API. Removing it would trade a compile-time
-error for a runtime one at precisely the site where durable identity and D-011 idempotency are
-decided.
+**Three ADRs**, one per decision rather than one per commit:
+`an-attribution-nothing-can-write-is-not-an-attribution` (row 1),
+`a-knob-that-renders-nothing-is-not-a-knob` (rows 4–6, one failure with three faces),
+`a-credential-is-a-type-not-a-convention` (row 7). Rows 2 and 3 are defect fixes with tests and
+need no decision recorded.
 
-**What the concern does correctly point at is one layer down, and it was real:** the rule that
-actually protects the agent process is not "agent must not import durable" — it is *"the agent must
-never import a **bundle's** workflow"*, which is what the connector seam's by-name cross-queue
-dispatch exists for. That held (measured above) and **nothing asserted it**. Core's *worker* has
-exactly that guard (`test_cores_workers_import_no_bundle`); the agent layer, which also launches
-workflows, had none — and `test_layering.py`'s policy is package-granular, so it structurally
-cannot express it. The same gap, on the other side of the seam, is why
-`test_the_connector_job_wrapper_imports_no_connector` was written.
+**Two rows were wrong as written, and correcting them was part of the work** — which is what the
+file's own header asks for.
 
-Closed by `tests/test_layering.py::test_the_agent_layer_imports_no_bundle_workflow`. ADR:
-`D-2026-08-17-a-workflow-type-is-a-launch-contract-not-a-durability-leak`.
+1. **Row 2 asked for too much.** `BACKLOG.md` said the "both sides recorded it" rule should cover
+   the two setpoints *and* the species sets. Applied to species, `test_a_reagent_added_mid_procedure_is_diffed_too`
+   went red — correctly. A setpoint is an optional scalar, so `None` means nobody wrote it down; a
+   role's species set is derived from a components list that is *present either way*, so an empty
+   `reagent` set is the record saying the run used no reagent. That is a real change and the most
+   common one a series carries. The rule now covers optional scalars and stops there, with the
+   asymmetry pinned by a test so nobody "unifies" it later.
+2. **Row 7 was three fields and is seven.** A settings object where some secrets hide in a `repr`
+   and others do not teaches the wrong rule. Two things surfaced on the way: `llm_fallback_api_key`
+   was in no redaction list at all — the one credential nothing covered — and both readers in
+   `core/logging.py` test `isinstance(value, str)`, which a `SecretStr` is not, so the "hardening"
+   would have silently switched the redaction off for exactly the fields it hardened.
 
-**Not done:** no change to `durable_tools.py`'s launch shape — the investigation concluded the
-import is correct, so editing it would have been the readability edit the task explicitly excluded.
-One comment was added at the import site, because "why is this allowed?" is a question this
-investigation shows a reader will have again.
+**One new row queued**, from the same measurement: `hpc_artifact_store_token`,
+`llm_fallback_api_key` and `temporal_api_key` are typed and read and have no chart Secret key, so a
+deployment cannot set them at all. Typing them did not fix that and the row says so.
+
+**Nothing was closable in `DEFERRED.md`.** Every row is gated on a cluster, a tenant, a licence, an
+upstream release or a corpus this environment does not have. That is the answer to "what should be
+done" there, not an omission.
+
+**What the fail-closed chart costs.** `helm template` on the shipped defaults now needs
+`--set networkPolicy.allowAnyDestination=true`. Three call sites pay it and a test asserts every
+shipped-defaults render carries it, so the next one added without it fails offline. `helm` is not
+installed here, so the render itself is unproven until `make helm-validate` runs on a machine that
+has it — every assertion added is over template *text*, like the rest of that suite.

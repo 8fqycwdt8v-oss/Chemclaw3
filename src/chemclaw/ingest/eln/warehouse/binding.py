@@ -39,6 +39,7 @@ from chemclaw.ingest.eln.warehouse.expr import (
     validate_path,
     validate_transform,
 )
+from chemclaw.science.labels.vocabulary import LabelGroup
 
 # A relation or column name, optionally qualified (`ELN_PROD.REACTIONS.V_REACTION`). Interpolated
 # into SQL, so it is checked rather than trusted: everything a binding contributes to a statement
@@ -450,7 +451,16 @@ class VectorBinding(BaseModel):
 
     relation: Identifier
     key: Identifier
-    vector_column: Identifier
+    # Empty when `index:` is set: an index ranks on its own copy of the vectors, so there is no
+    # column here to call a similarity function on.
+    vector_column: str = ""
+    # A Mosaic AI Vector Search index (a three-level Unity Catalog name), when the corpus is too
+    # large to scan. Ranking then happens on the index through the configured `VectorStore` and this
+    # relation is queried only to *resolve* the winning keys into content — which is the same
+    # division `ingest/documents/external_index.py` makes, with Databricks SQL standing in for
+    # Postgres as the catalogue. The endpoint serving it is a deployment fact
+    # (`CHEMCLAW_VECTOR_STORE_ENDPOINT_NAME`), not a per-source one, so it is not named here.
+    index: str = ""
     content_columns: list[Identifier] = Field(
         min_length=1,
         description="Columns rendered into the evidence chunk a chemist reads.",
@@ -497,7 +507,32 @@ class VectorBinding(BaseModel):
         """Identifiers are checked; `server` embedding needs the function it will call."""
         _check_identifier(self.relation, "vector relation")
         _check_identifier(self.key, "vector key")
-        _check_identifier(self.vector_column, "vector column")
+        if self.index:
+            # An index-ranked source and a scanned one are two different shapes, and a binding that
+            # half-declares both would silently take one of them. Each contradiction is named.
+            if self.vector_column:
+                raise BindingError(
+                    "a `vector:` block naming an `index` must not also name a `vector_column`: "
+                    "the index holds the vectors, and the relation is queried only to resolve the "
+                    "keys it returns into content"
+                )
+            if self.metric != "cosine":
+                raise BindingError(
+                    f"an index-ranked source is scored by `VectorMatch`, which is a cosine, so "
+                    f"metric must be 'cosine' rather than {self.metric!r}"
+                )
+            if self.embedding != "local":
+                raise BindingError(
+                    "an index-ranked source embeds the query here and sends the vector; there is "
+                    "no statement for a warehouse embedding function to appear in"
+                )
+        else:
+            if not self.vector_column:
+                raise BindingError(
+                    "a `vector:` block needs either a `vector_column` to rank on, or an `index` to "
+                    "rank in"
+                )
+            _check_identifier(self.vector_column, "vector column")
         for column in self.content_columns:
             _check_identifier(column, "vector content column")
         known = {"tag", "since", "until"}
@@ -528,20 +563,129 @@ class VectorBinding(BaseModel):
         return self
 
 
+class CorpusBinding(BaseModel):
+    """A bulk reaction corpus in the warehouse: one row per reaction, already a reaction SMILES.
+
+    Deliberately far simpler than `IngestBinding`, and the difference is what the two are for. An
+    ELN hands us a run and its charge table, so a binding has to reassemble a reaction from rows in
+    several relations. A reaction corpus — Pistachio, an HTE export, any bulk extract — hands us the
+    reaction *already assembled* as `reactants>agents>products`, plus whatever metadata the vendor
+    classified. There is nothing to reassemble, so there is no `related:`, no `components:` and no
+    `impurities:` block: the species come from splitting the SMILES, and their refined roles come
+    from the labeller, which is the whole point of the label index.
+
+    **Keyset pagination, not a datetime cursor.** A corpus release is a versioned load addressed by
+    key; it is not a live feed where "everything since Tuesday" is meaningful. `order_by` names the
+    column the drain walks, and each pass resumes strictly after the last key it saw — which also
+    means a drain is safe to stop and resume at any point, and that a re-run over an unchanged
+    release is a no-op rather than a re-ingest.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    relation: Identifier
+    key: Identifier = Field(description="The column carrying the stable per-reaction id.")
+    order_by: Identifier = Field(
+        default="",
+        description=(
+            "The column the drain paginates on, if not the key itself. Must be unique and stable "
+            "across the release, because 'resume strictly after this value' is the whole cursor."
+        ),
+    )
+    where: str = Field(
+        default="",
+        description=(
+            "An extra predicate, ANDed with the keyset filter — the corpus's own notion of which "
+            "rows are usable. Inserted literally, so it is as trusted as the manifest itself; the "
+            "same trade `EntryBinding.where` makes and for the same reason."
+        ),
+    )
+    fetch_limit: int = Field(
+        default=1_000,
+        ge=1,
+        le=20_000,
+        description=(
+            "Rows read per pass. Higher than the ELN's ceiling because there are no child-table "
+            "`IN (...)` lists to blow a bind limit — one relation, one query — and a corpus is "
+            "millions of rows rather than a decade of one site's runs."
+        ),
+    )
+
+    smiles: FieldBinding = Field(
+        description="The reaction SMILES, `reactants>agents>products`. The one required value."
+    )
+    citation: FieldBinding = Field(
+        description=(
+            "What an answer cites for this row — a patent number, a DOI, a document id. Required, "
+            "because a precedent a chemist cannot follow back is not a precedent."
+        )
+    )
+    published_on: FieldBinding | None = None
+    temperature_c: FieldBinding | None = None
+    time_h: FieldBinding | None = None
+    yield_percent: FieldBinding | None = None
+    workup_text: FieldBinding | None = None
+
+    # The labels a corpus may already carry. Declaring one here is what its `labels: provides:`
+    # block in the manifest claims, and `make datasource-validate` checks the two against each
+    # other — a `provides` naming a group no column supplies would be a lie the coverage report
+    # then repeats to a chemist.
+    named_reaction: FieldBinding | None = None
+    reaction_class: FieldBinding | None = None
+    rxno_id: FieldBinding | None = None
+    mapped_smiles: FieldBinding | None = None
+
+    @model_validator(mode="after")
+    def _identifiers_are_identifiers(self) -> Self:
+        """Everything interpolated into the statement is checked; `where` is trusted by design."""
+        _check_identifier(self.relation, "corpus relation")
+        _check_identifier(self.key, "corpus key")
+        if self.order_by:
+            _check_identifier(self.order_by, "corpus order_by")
+        return self
+
+    @property
+    def cursor_column(self) -> str:
+        """The column the keyset walk resumes after — `order_by` when given, else the key."""
+        return self.order_by or self.key
+
+    def label_groups(self) -> frozenset[LabelGroup]:
+        """Which label groups this binding actually maps a column for.
+
+        The declaration `make datasource-validate` compares the manifest's `labels: provides:`
+        against, so a source cannot claim to carry a name it has no column for.
+        """
+        groups: set[LabelGroup] = set()
+        if self.named_reaction is not None or self.rxno_id is not None:
+            groups.add(LabelGroup.NAMED_REACTION)
+        if self.mapped_smiles is not None:
+            groups.add(LabelGroup.ATOM_MAPPING)
+        return frozenset(groups)
+
+
 class WarehouseBinding(BaseModel):
-    """One warehouse, and whichever of the two halves this source declares."""
+    """One warehouse, and whichever of the three sections this source declares.
+
+    `ingest` reassembles an ELN run from several relations and ends at the PR-gate; `corpus` walks
+    a bulk reaction table into the label index as cited evidence and never touches the PR-gate;
+    `vector` is similarity search over an embedding the warehouse already holds. A source may
+    declare any combination, and most declare one.
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     connection: ConnectionBinding
     ingest: IngestBinding | None = None
+    corpus: CorpusBinding | None = None
     vector: VectorBinding | None = None
 
     @model_validator(mode="after")
     def _declares_something(self) -> Self:
         """A binding with neither half configures a connection that nothing would ever open."""
-        if self.ingest is None and self.vector is None:
-            raise BindingError("a warehouse binding must declare an 'ingest' or a 'vector' section")
+        if self.ingest is None and self.corpus is None and self.vector is None:
+            raise BindingError(
+                "a warehouse binding must declare an 'ingest', a 'corpus' or a 'vector' section"
+            )
         return self
 
 

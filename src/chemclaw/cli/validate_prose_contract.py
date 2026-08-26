@@ -266,6 +266,13 @@ _NON_SETTINGS_ENV = frozenset(
     {
         "CHEMCLAW_COMPONENT",  # read by deploy/entrypoint.sh to pick a role, never by Settings
         "CHEMCLAW_REVISION",  # a Containerfile build ARG, exported as CHEMCLAW_DEPLOYMENT_REVISION
+        # A live-lane knob read by `infra/live/processes.sh` alone, like the ports beside it. It
+        # names the issuer to mint a probe identity from, and deriving `entra_issuer`,
+        # `entra_jwks_url` and `entra_audience` from it is the whole of what it does — those three
+        # *are* Settings fields, and this is the one endpoint they all resolve from. A Settings
+        # field with no Python reader is the shape D-2026-08-20-a-ui-that-cannot-authenticate-is-
+        # not-a-fallback just deleted three of.
+        "CHEMCLAW_LIVE_ENTRA_TOKEN_URL",
         # Documented *as removed*, so the prose naming them is correct and must stay readable.
         "CHEMCLAW_ENTRA_CLIENT_ID",
         "CHEMCLAW_MCP_SERVERS",
@@ -414,10 +421,13 @@ def _connector_token_envs() -> set[str]:
         for endpoint in (manifest.endpoint,)
         if isinstance(endpoint, HttpEndpoint) and isinstance(endpoint.auth, BearerAuth)
     }
-    # The calculation server's bearer, whose name is a *setting's value* rather than a manifest
-    # field. Read the same way — off the declaration, never hard-coded — so renaming the variable
-    # in config keeps this gate correct with no edit here.
+    # The two out-of-release servers' bearers, whose names are *settings' values* rather than
+    # manifest fields — neither server's manifest is mounted here, deliberately, because these are
+    # internal primitives and mounting them would put them in the agent's prompt. Read off the
+    # declarations, never hard-coded, so renaming either variable in config keeps this gate correct
+    # with no edit here.
     declared.add(settings.calc_server_token_env.removeprefix("CHEMCLAW_").lower())
+    declared.add(settings.rxnlabel_server_token_env.removeprefix("CHEMCLAW_").lower())
     return declared
 
 

@@ -27,18 +27,29 @@ from chemclaw.science.calc.store import (
 
 _UPSERT = """
     INSERT INTO calculation_results
-        (key, calc_type, calc_version, input_hash, params_hash, result, provenance, compute_seconds)
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        (key, calc_type, calc_version, input_hash, params_hash, result, provenance,
+         compute_seconds, structure_id)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
     ON CONFLICT (key) DO UPDATE SET
         result = EXCLUDED.result,
         provenance = EXCLUDED.provenance,
+        -- Keep a recorded geometry when a rewrite does not carry one, by the same rule as the
+        -- cost below: a row written before migration 048, or by a caller that did not ask the
+        -- server for an identity, must not erase what an earlier write knew.
+        structure_id = CASE
+            WHEN EXCLUDED.structure_id <> '' THEN EXCLUDED.structure_id
+            ELSE calculation_results.structure_id
+        END,
         -- Keep the recorded cost when a rewrite does not carry one, so a backfill or a
         -- re-`put` of an existing payload cannot erase what the original miss measured.
         compute_seconds = COALESCE(EXCLUDED.compute_seconds, calculation_results.compute_seconds),
         created_at = now()
 """
 
-_SELECT = "SELECT result, provenance, compute_seconds FROM calculation_results WHERE key = %s"
+_SELECT = (
+    "SELECT result, provenance, compute_seconds, structure_id "
+    "FROM calculation_results WHERE key = %s"
+)
 
 # The browse query (`find`). Every filter is `%s IS NULL OR <column> = %s`-shaped so one prepared
 # statement serves every combination — the alternative is assembling SQL from whichever filters
@@ -46,11 +57,12 @@ _SELECT = "SELECT result, provenance, compute_seconds FROM calculation_results W
 # because an unbounded scan of the one table that is never evicted (D-011) is not a query.
 _FIND = """
     SELECT key, calc_type, calc_version, input_hash, params_hash,
-           result, provenance, compute_seconds, created_at
+           result, provenance, compute_seconds, created_at, structure_id
       FROM calculation_results
      WHERE (%(calc_type)s::text IS NULL OR calc_type = %(calc_type)s)
        AND (%(calc_version)s::text IS NULL OR calc_version = %(calc_version)s)
        AND (%(input_hash)s::text IS NULL OR input_hash = %(input_hash)s)
+       AND (%(structure_id)s::text IS NULL OR structure_id = %(structure_id)s)
        AND (%(since)s::timestamptz IS NULL OR created_at >= %(since)s)
        AND (%(until)s::timestamptz IS NULL OR created_at <= %(until)s)
      ORDER BY created_at DESC
@@ -91,11 +103,15 @@ class PostgresStore:
                 row = await cur.fetchone()
         if row is None:
             return None
-        result, provenance, compute_seconds = row
+        result, provenance, compute_seconds, structure_id = row
         # JSONB comes back already parsed by psycopg; str only if driver differs.
         payload = result if isinstance(result, dict) else json.loads(result)
         return StoredResult(
-            key=key, result=payload, provenance=provenance, compute_seconds=compute_seconds
+            key=key,
+            result=payload,
+            provenance=provenance,
+            compute_seconds=compute_seconds,
+            structure_id=structure_id,
         )
 
     async def put(self, stored: StoredResult) -> None:
@@ -114,6 +130,7 @@ class PostgresStore:
                         Jsonb(stored.result),
                         stored.provenance,
                         stored.compute_seconds,
+                        stored.structure_id,
                     ),
                 )
             await conn.commit()
@@ -130,6 +147,7 @@ class PostgresStore:
             "calc_type": query.calc_type,
             "calc_version": query.calc_version,
             "input_hash": None if query.smiles is None else molecule_hash(query.smiles),
+            "structure_id": query.structure_id,
             "since": query.since,
             "until": query.until,
             "limit": query.limit,
@@ -149,7 +167,7 @@ def _stored_from_row(row: TupleRow) -> StoredResult:
     key, not a serialization format.
     """
     _, calc_type, calc_version, input_hash, params_hash = row[:5]
-    result, provenance, compute_seconds, created_at = row[5:]
+    result, provenance, compute_seconds, created_at, structure_id = row[5:]
     return StoredResult(
         key=CalculationKey(
             calc_type=calc_type,
@@ -162,6 +180,7 @@ def _stored_from_row(row: TupleRow) -> StoredResult:
         provenance=provenance,
         compute_seconds=compute_seconds,
         created_at=created_at,
+        structure_id=structure_id,
     )
 
 

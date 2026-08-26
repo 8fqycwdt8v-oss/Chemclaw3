@@ -53,6 +53,7 @@ from chemclaw.connectors.manifest import (
 from chemclaw.connectors.transport import ConnectorSpec, HeldConnectorSession
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
+from chemclaw.core.mcp_session import CONNECT_TIMEOUT_SECONDS, READ_TIMEOUT_GRACE_SECONDS
 from chemclaw.core.metrics_bridge import record_metric
 from chemclaw.core.tool_registry import CapabilityTool
 
@@ -62,12 +63,10 @@ logger = logging.getLogger(__name__)
 # `scripts.validate_connectors`) and a typo in either would report "no connectors found".
 MANIFEST_FILENAME = "connector.yaml"
 
-# How long to wait for the TCP/TLS handshake to a connector, as distinct from how long its tools
-# may take to answer (the manifest's `request_timeout`, which bounds the read). Deliberately not a
-# config field: it is a property of "is this host there at all", the same for every bundle, and a
-# deployment that needs a longer one has a network problem a setting would only hide. Short,
-# because a dark connector must degrade quickly — the whole point of `HeldConnectorSession`.
-_CONNECT_TIMEOUT_SECONDS = 5.0
+# The two transport bounds every outbound MCP client shares now live with the client itself
+# (`core/mcp_session.py`), because the reaction labeller became a second caller that needs both.
+# Re-exported under their old private names so this module's own call sites read unchanged.
+_CONNECT_TIMEOUT_SECONDS = CONNECT_TIMEOUT_SECONDS
 
 # How long a tool call may take when the manifest does not say. `HttpEndpoint.request_timeout`
 # defaults to `None`, and `None` used to mean *unbounded*: nothing set `session_kwargs`, so the MCP
@@ -79,14 +78,7 @@ _CONNECT_TIMEOUT_SECONDS = 5.0
 # that a legitimately slow tool is not cut off, finite so a mute connector cannot hold a turn.
 _DEFAULT_REQUEST_TIMEOUT_SECONDS = 60.0
 
-# How much looser the HTTP read timeout is than the MCP session's own bound. The two must not be
-# equal, and their order is the fix rather than a tuning detail: when the httpx read timeout fires
-# first, `mcp.client.streamable_http` swallows it (it catches `Exception` at debug level and
-# reconnects only on an SSE event id, which FastMCP never sends), so the answer is lost *silently*
-# and the caller keeps waiting. When the session bound fires first, `send_request` raises `McpError`
-# naming the timeout. So the visible bound must always be the one that trips, and the invisible one
-# is kept strictly behind it as a backstop for a connection that stops producing bytes entirely.
-_READ_TIMEOUT_GRACE_SECONDS = 5.0
+_READ_TIMEOUT_GRACE_SECONDS = READ_TIMEOUT_GRACE_SECONDS
 
 # What one configured connector endpoint becomes, whichever transport it declares. Both open into a
 # session advertising the same agent-facing surface, so callers never branch on the transport.

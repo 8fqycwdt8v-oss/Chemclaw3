@@ -1,0 +1,50 @@
+# A results database this deployment runs itself, reached over psycopg.
+#
+# Discovered but NOT enabled — `CHEMCLAW_RESULT_SINKS` decides that, and it is empty by default.
+# Enable this only once the target actually has the schema: run
+# `python -m chemclaw.cli.sink_schema --all` and apply the output with a principal that holds DDL,
+# which is deliberately not the principal this system publishes with.
+#
+# **This file describes how to reach the store, not what its tables are called.** That is the one
+# way this seam differs from the warehouse ELN binding next door, where the site's schema *is* the
+# manifest: there, a schema nobody can see yet cannot be written into Python. Here the schema is
+# ours — `schema/result-store/` — so what a deployment configures is an address and a credential.
+#
+# A site whose results must land in tables it already owns writes its own driver and names it in
+# `driver:` below; nothing about that path is special-cased.
+name: postgres
+description: >-
+  A PostgreSQL results database running the shipped canonical schema. Every computed value — single
+  compound, multi-compound, reaction and conformer ensemble alike — is written as typed, queryable
+  rows with its full provenance.
+
+# `module:callable` building the sink, resolved on the first delivery rather than at import, so a
+# process that never publishes never loads psycopg for this.
+driver: chemclaw.publish.drivers.sql:SqlResultSink
+
+config:
+  connection:
+    # The `Warehouse` implementation. psycopg here; a Snowflake target names
+    # `chemclaw.ingest.eln.warehouse.snowflake:SnowflakeWarehouse` instead and changes nothing else.
+    driver: chemclaw.publish.drivers.postgres:PostgresWarehouse
+    # **Environment variable NAMES, never values.** Read at connect time and registered with the
+    # log-redaction inventory before they are read, so a rotated secret is picked up by the next
+    # connection rather than the next deploy, and a driver that echoes its own configuration into a
+    # traceback cannot leak one.
+    # **Unprefixed, deliberately.** These are the *results database's* credentials, not settings
+    # of this application — the same reason the Snowflake ELN binding names `SNOWFLAKE_ACCOUNT`
+    # rather than `CHEMCLAW_SNOWFLAKE_ACCOUNT`. A `CHEMCLAW_` name would also read as a `Settings`
+    # field, which `make prose-validate` checks and these are not.
+    user_env: RESULTS_DB_USER
+    password_env: RESULTS_DB_PASSWORD
+    # Non-secret addressing. Every key here is passed to the driver's own constructor — its
+    # signature is the schema for this block, which is why a Snowflake target simply names
+    # different keys rather than needing a different model.
+    #
+    # A deployment overrides these by mounting its own copy of this folder and putting it first on
+    # CHEMCLAW_RESULT_SINKS_DIR, so attaching a real database is not a change to this repository.
+    host: chemclaw-results
+    port: 5432
+    database: chemclaw_results
+    schema: public
+    query_timeout_seconds: 60

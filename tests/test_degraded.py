@@ -44,12 +44,25 @@ _EXPECTED_SUBSYSTEMS = {
     "log_redaction",
     "plan_approval",
     "preferences",
+    # `agent.condense`, added with the protocol condenser. Two degradations share it and both
+    # are per protocol rather than per turn: no reachable `"protocol-digest"` route (the comparison
+    # still renders from every record's own figures), and one extraction that failed or timed out
+    # (that row keeps its recorded figures and says its procedure was not read). Without the
+    # counter, a condensing endpoint that is down looks exactly like a corpus of protocols whose
+    # procedures happen to be empty.
+    "protocol_digest",
     # `agent/session_store.message_from_row`, added when its catch was widened to `Exception`. The
     # counter is the point of that widening: a catch that broad also swallows a converter *bug*,
     # which degrades every row of every transcript into plausible prose, and a log line nobody
     # alerts on cannot tell that apart from one unreadable legacy row.
     "session_transcript",
     "skill_manifest",
+    # `science/calc/geometry.check_server_address`, added with the geometry store
+    # (D-2026-08-21-a-geometry-is-an-address-not-a-payload). It is the one degradation in this
+    # system that is *only* visible as a counter: a `structure_id` the calculation server and this
+    # deployment derive differently costs no calculation and produces no wrong number — every
+    # lookup keyed on it simply misses, forever, while the service looks healthy.
+    "structure_id",
     "tool_result_store",
     "transcript_projection",
 }

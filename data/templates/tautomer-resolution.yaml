@@ -1,0 +1,87 @@
+# Which form is the molecule actually in — asked before anything else is computed about it.
+#
+# **This is the template with the widest blast radius in the catalogue.** A pKa, a Fukui ranking, a
+# dipole and a reaction free energy all describe whichever tautomer was drawn in the SMILES. If that
+# is the minor form, none of those numbers is wrong by a little; each is a number about a different
+# molecule. The failure is silent, which is why the order is fixed here rather than left to a model
+# that might reasonably answer the question it was asked instead of the one behind it.
+#
+# Why a template and not a profile: an agent asked "what is the pKa of this pyrazole" will compute a
+# pKa. Nothing about that request says "first establish which tautomer you are computing it for",
+# and the caveat is exactly the kind that gets dropped when the answer looks reasonable.
+#
+# The enumeration is free and structural; only the ranking costs anything. That asymmetry is the
+# reason the two are separate steps rather than one tool: enumerating is a question about the
+# molecular graph, and ranking is a question about free energy.
+summary: Enumerate a molecule's tautomers and rank them by free energy, with the mixture reported.
+description: >-
+  A fixed three-step tautomer resolution. Enumerates every prototropic tautomer from the molecular
+  graph, ranks the set by free energy in the requested solvent, and reports which form dominates —
+  and, when the gap is small, that both are present and no single-form property is a single number.
+  Use it before any other calculation on a molecule with a mobile proton between heteroatoms:
+  heterocyclic N-H (pyrazoles, imidazoles, triazoles, purines), 1,3-dicarbonyls, amidines,
+  2-pyridone/2-hydroxypyridine. For a molecule with no mobile proton this is a wasted job — ask
+  describe_topology first if you are unsure.
+
+inputs:
+  - name: smiles
+    type: string
+    description: The molecule to resolve, as SMILES.
+  - name: solvent
+    type: string
+    description: Implicit solvent name (e.g. "water", "thf"). Omit it for gas phase.
+    required: false
+
+steps:
+  - id: forms
+    kind: tool
+    purpose: >-
+      The species set, from the molecular graph. Free and structural — no calculation runs — which
+      is why it is safe to do first and unconditionally.
+    tool: enumerate_tautomers
+    arguments:
+      smiles: "${inputs.smiles}"
+
+  - id: ranking
+    kind: job
+    purpose: >-
+      Free energies for the enumerated set. `ranking: tautomers` is not decoration: the same
+      arithmetic ranks microstates and stereoisomers, and the label is what stops a reader inferring
+      the question from the SMILES.
+    job: rank_species
+    arguments:
+      # The whole list, by value. A tautomer that is not here was not ranked, so this reference is
+      # what makes the distribution's universe the enumeration's universe rather than a guess.
+      species: "${steps.forms.result.smiles}"
+      ranking: tautomers
+      solvent: "${inputs.solvent}"
+      # **`thorough` — a conformer search per tautomer — and this default was measured, not chosen.**
+      # Acetylacetone ranked from one embedding per tautomer at GFN2 comes out 99.9% keto; it is
+      # ~80% *enol* in the gas phase. The enol is stabilised by an intramolecular hydrogen bond that
+      # exists in one planar conformer and in none of the others, so a ranking that does not search
+      # conformational space does not see the thing that makes the enol favourable — and gets the
+      # textbook case qualitatively backwards while looking entirely reasonable.
+      #
+      # This is the most expensive default in the catalogue and it is the right one: a cheap
+      # tautomer ranking that inverts the answer is worse than no ranking, because every downstream
+      # number then describes the wrong form with no sign that anything went wrong. Where the cost
+      # is not affordable, call `rank_species` directly at a lower level and say in the answer that
+      # the ranking did not search conformers.
+      level: thorough
+
+  - id: report
+    kind: agent
+    purpose: Say which form everything downstream should be about, and when that is not one form.
+    prompt: >-
+      Report the tautomer resolution of ${inputs.smiles}.
+
+      Enumerated forms: ${steps.forms.result}
+      Free-energy ranking: ${steps.ranking.result}
+
+      State which tautomer dominates and at what population. Then apply the rule that matters: a
+      gap above about 3 kcal/mol is a real answer and everything downstream should use that form;
+      a *small* gap is also an answer and a more important one — both forms are populated, and any
+      property that differs between them is not a single number, so report the mixture rather than
+      picking the lower one. Say plainly that semiempirical tautomer energies rank more reliably
+      than they quantify, and quote the reported uncertainty. Close by naming which downstream
+      numbers this changes.

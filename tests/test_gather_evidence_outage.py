@@ -17,7 +17,7 @@ import pytest
 
 from chemclaw.agent import research_tools
 from chemclaw.core.errors import ChemclawError
-from chemclaw.retrieval.evidence import EvidenceChunk
+from chemclaw.retrieval.evidence import EvidenceChunk, EvidenceSweep
 
 
 class _Dead:
@@ -49,7 +49,7 @@ class _Live:
         ]
 
 
-def _gather() -> list[EvidenceChunk]:
+def _gather() -> EvidenceSweep:
     """Call the tool's underlying coroutine, as the agent would."""
     return asyncio.run(research_tools.gather_evidence(query="have we run this nitration"))
 
@@ -83,7 +83,10 @@ def test_all_sources_healthy_and_empty_is_still_a_real_empty_answer(
         lambda _anchor: [("graph", _Live("graph")), ("lexical", _Live("lexical"))],
     )
 
-    assert _gather() == []
+    sweep = _gather()
+    assert sweep.chunks == []
+    # And it says so as an absence rather than as a degradation: nothing failed, nothing was cut.
+    assert sweep.sources_failed == [] and sweep.truncated_by is None
 
 
 def test_one_source_down_still_answers_from_the_others(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -94,4 +97,9 @@ def test_one_source_down_still_answers_from_the_others(monkeypatch: pytest.Monke
         lambda _anchor: [("graph", _Live("graph", 2)), ("lexical", _Dead("lexical"))],
     )
 
-    assert len(_gather()) == 2
+    sweep = _gather()
+    assert len(sweep.chunks) == 2
+    # **The half that used to be invisible.** A partial outage returned real-but-incomplete
+    # evidence with the degradation visible only on the stream, so a chemist reading the tool's
+    # result could not tell this from a corpus that genuinely holds two chunks.
+    assert sweep.sources_failed == ["lexical"]

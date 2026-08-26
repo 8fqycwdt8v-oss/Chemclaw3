@@ -1,19 +1,24 @@
-"""Map a canonical ORD reaction to an agent knowledge-graph note (plan step 4.5).
+"""Map a canonical ORD reaction to an ELN transcription record (D-2026-08-25).
 
-The pure mapping from an `OrdReaction` to a `reaction` note, proposed through the **same**
-PR-gate as every other agent note (D-005) — no second write path. Kept separate from the
-sync activity so it is tested directly. The note records the reaction SMILES, headline
-conditions (scale first), the charge sheet behind that scale, and the full **step-by-step
-procedure** in prose so a detailed development recipe survives ingestion intact (a human
-reviewer signs off on the recipe, not just a SMILES). Its `tags` are the record's project, so
-the documented project filter (`gather_evidence(tag=…)`) reaches reaction notes at all. It
-carries no `[[wikilink]]` (a dangling link would fail `chemclaw.kg.validate` on the very PR this
-opens); compound cross-links are a later step once compound notes exist. That last sentence is
-enforced by `_without_wikilinks` rather than merely asserted — the source's free text reaches this
-body verbatim, so until it was enforced the ELN could spell a relation the graph then believed.
+The pure mapping from an `OrdReaction` to the `ReactionRecord` the transcription tier stores. It
+records the reaction SMILES, headline conditions (scale first), the charge sheet behind that scale,
+the impurity profile, and the full **step-by-step procedure** in prose, so a detailed development
+recipe survives ingestion intact and a chemist who reaches this record from a structure search gets
+the recipe rather than an id.
+
+**Nothing here infers anything**, which is why the result is data rather than a PR-gated note
+(`chemclaw.ingest.eln.records`): every field is read from the entry or rendered from fields that
+were, so there is no claim for a reviewer to accept or reject. What a human *asserts* about these
+runs is a playbook or a campaign in `knowledge/`, gated as it always was, citing this record as
+`reaction-<id>`.
+
+The record carries no `[[wikilink]]`, and that is enforced by `_without_wikilinks` rather than
+merely asserted — the source's free text reaches this body verbatim, and a record that could spell
+a relation would let an ELN write an edge into the graph that cites it.
 """
 
 import re
+from typing import Literal
 
 from chemclaw.ingest.eln.ord import (
     Component,
@@ -23,7 +28,8 @@ from chemclaw.ingest.eln.ord import (
     ReactionStep,
     Role,
 )
-from chemclaw.kg.note import Note, note_id_for_reaction
+from chemclaw.ingest.eln.records import ReactionRecord
+from chemclaw.kg.note import ProcessConditions
 
 # Each `[` that another `[` follows. A lookahead so the match consumes one character and the next
 # is re-examined, which is what makes the substitution unable to manufacture the delimiter it is
@@ -63,8 +69,8 @@ def _without_wikilinks(body: str) -> str:
     return _OPENING_BRACKET_PAIR.sub("[ ", body)
 
 
-def note_from_ord_reaction(reaction: OrdReaction) -> Note:
-    """Map an `OrdReaction` to an agent-authored `reaction` note (idempotent id)."""
+def record_from_ord_reaction(reaction: OrdReaction) -> ReactionRecord:
+    """Map an `OrdReaction` to the transcription record the corpus stores (idempotent id)."""
     body = _without_wikilinks(
         f"Reaction `{reaction.reaction_smiles()}` from ELN entry {reaction.reaction_id}.\n\n"
         f"{_hypothesis_block(reaction)}"
@@ -74,41 +80,84 @@ def note_from_ord_reaction(reaction: OrdReaction) -> Note:
         f"{_procedure_block(reaction)}"
         f"{_attribute_block(reaction)}"
     )
-    return Note(
-        id=note_id_for_reaction(reaction.reaction_id),
-        type="reaction",
-        created_by="agent",
+    return ReactionRecord(
+        # The ELN's own id, unprefixed. `reaction-<id>` is the *citation* spelling
+        # (`kg.note.note_id_for_reaction`) and belongs to whoever cites this, not to the row.
+        reaction_id=reaction.reaction_id,
         source=reaction.provenance,
         compound_smiles=_principal_product(reaction),
-        # The project is the one grouping key the record already carries, and it reached the graph
-        # from nowhere on the largest note class: `gather_evidence(tag=…)` is documented as the
-        # project filter and matched nothing on reactions. Exactly the project and nothing else —
-        # a derived tag vocabulary (a scale band, an outcome word) would be a taxonomy this mapping
-        # invented, filterable against a scheme no chemist agreed to and no other note class uses.
-        # `memory.campaign` already tags its notes with the projects behind them; one convention.
-        tags=[reaction.project] if reaction.project else [],
-        # The experiment's own date is what makes the note time-scopable (gap KNW-1). F10-G2 added
-        # `valid_from`/`valid_to` to answer "what did we know at time T", and for the largest note
-        # class nothing populated them — a reaction became valid-since-forever. A run is evidence
-        # from the day it was run; `valid_to` stays open (a result does not expire on its own, it
-        # is superseded, which is a separate edit).
-        valid_from=reaction.performed_at,
+        # The project is the one grouping key the entry already carries, and the whole of what a
+        # `tag=` filter narrows on here. Exactly the project and nothing else — a derived
+        # vocabulary (a scale band, an outcome word) would be a taxonomy this mapping invented,
+        # filterable against a scheme no chemist agreed to and no other note class uses.
+        project=reaction.project or None,
+        # The experiment's own date is what makes the record time-scopable (gap KNW-1): "what have
+        # I tried on this step in the last two weeks" is a `since`/`until` window over this column.
+        # A run is evidence from the day it was run, and it has no expiry — a result does not
+        # lapse on its own, it is superseded, which is a claim a human makes in a note.
+        performed_at=reaction.performed_at,
+        # The numbers a chemist compares, kept as numbers. The body renders them as prose for a
+        # human; this is the same facts in the form anything comparing runs can read without
+        # re-deriving them from the sentences it just wrote (`ProcessConditions` says why).
+        #
+        # `ProcessConditions` argues for frontmatter over "a second table", and that argument
+        # survives the move rather than being overridden by it: the reaction row already exists
+        # (D-2026-08-25), so these ride on it and there is still exactly one place a run's numbers
+        # live. What it rejected was a store *just* for conditions, which this is not.
+        conditions=_conditions(reaction),
         body=body,
     )
 
 
+# The outcome classes worth writing down, spelled rather than derived from `.value`. `SUCCESS` is
+# absent on purpose — the field defaults to it on every record and every source that does not report
+# one, so writing it would turn "the ELN did not say" into an assertion that the run worked. Written
+# out because the frontmatter type is a `Literal`: a fourth `OutcomeClass` member does not silently
+# become a new frontmatter value, it fails to type-check here, which is where the decision belongs.
+_NON_DEFAULT_OUTCOMES: dict[OutcomeClass, Literal["failure", "inconclusive"]] = {
+    OutcomeClass.FAILURE: "failure",
+    OutcomeClass.INCONCLUSIVE: "inconclusive",
+}
+
+
+def _conditions(reaction: OrdReaction) -> ProcessConditions | None:
+    """The run's setpoints and outcomes as frontmatter, or `None` when it recorded none of them.
+
+    `None` rather than an all-empty block: a note carrying `conditions: {}` would claim the
+    question was asked and answered emptily, where the honest reading is that this note is not
+    about a run with recorded conditions at all. Same rule as `_quality_columns` dropping a column
+    nothing filled.
+
+    `outcome_class` is written only when it is *not* the default. The field defaults to success on
+    every record and every source that does not report it, so writing it unconditionally would turn
+    "the ELN did not say" into an assertion that the run worked.
+    """
+    impurity = reaction.major_impurity()
+    conditions = ProcessConditions(
+        temperature_c=reaction.temperature_c,
+        time_h=reaction.time_h,
+        yield_percent=reaction.yield_percent,
+        purity_percent=reaction.purity_percent,
+        outcome=_NON_DEFAULT_OUTCOMES.get(reaction.outcome_class),
+        major_impurity=(impurity.name or impurity.smiles) if impurity else None,
+        impurity_area_percent=impurity.area_percent if impurity else None,
+    )
+    # An explicit field check rather than a `model_dump(exclude_none=True)`: serializing the whole
+    # model to ask whether any of it is set is work for an answer the fields already give.
+    return conditions if any(dict(conditions).values()) else None
+
+
 def _principal_product(reaction: OrdReaction) -> str | None:
-    """The molecule this note is *about*, when the record names exactly one product.
+    """The molecule this record is *about*, when the entry names exactly one product.
 
-    The largest note class in the graph carried no `compound_smiles` at all, which is why nothing
-    that groups by compound could ever see a reaction: `kg.conflicts` groups on
-    `(type, compound_smiles)`, `find_notes` searches it, and every future by-compound question
-    starts there. The structure was in the record the whole time — it goes into the body as part
-    of the reaction SMILES — it simply never reached the field.
+    The column every by-compound question starts from: "what else have we made this way", and the
+    join a playbook uses when it groups runs by what they produced. The structure is in the entry
+    either way — it goes into the body as part of the reaction SMILES — this is what puts it
+    somewhere a query can reach without parsing prose.
 
-    **Only when there is one outcome.** "The molecule this note is about" has no honest answer for
-    a reaction that reports a product and two by-products, and picking the first (or the largest
-    by amount, which an ELN often omits) would file the note under a compound the chemist did not
+    **Only when there is one outcome.** "The molecule this record is about" has no honest answer
+    for a reaction reporting a product and two by-products, and picking the first (or the largest
+    by amount, which an ELN often omits) would file the run under a compound the chemist did not
     mean. A wrong `compound_smiles` is worse than none: it is what a by-compound search would
     return, and it would look right.
     """
@@ -264,11 +313,51 @@ def _impurity_line(impurity: Impurity) -> str:
 
 
 def _procedure_block(reaction: OrdReaction) -> str:
-    """Render the ordered procedure as a numbered list (empty when there are no steps)."""
+    """Render the recipe: the ordered steps, the prose the source recorded, or both.
+
+    **The prose branch exists because without it a whole class of source lost its protocol
+    silently.** This function used to return `""` whenever `steps` was empty, and
+    `chemclaw.ingest.eln.warehouse.binding` excludes `steps` from what a binding may map, on the
+    stated grounds that "a warehouse records a protocol as prose, which lands in
+    `procedure_text` verbatim". Both
+    statements were true and nothing rendered that prose: measured, a warehouse-shaped reaction
+    carrying 251 characters of procedure produced a 63-character note body containing none of it,
+    and `procedure_text` had three writers and exactly one reader in the tree — a 240-character
+    excerpt in `memory/optimization`. For the first live connector, a Snowflake ELN, `expand_note`
+    answered with a reaction that had no recipe.
+
+    **Why both are sometimes rendered, decided by containment rather than by a threshold.** The two
+    file-drop adapters populate `steps` *and* `procedure_text`, and they do it differently.
+    `json_adapter` segments the prose, so its steps are that prose recut — measured, 0.992 string
+    similarity, and every step's text appears verbatim inside it. `ord_adapter` derives steps from
+    structured ORD fields while `procedure_text` is the chemist's own `notes.procedure_details` —
+    measured, 0.555 similarity, with the steps reading `Add CCO` where the prose reads "a catalytic
+    amount of sulfuric acid over 30 min". Rendering steps alone would have dropped that sentence,
+    which is the same defect one source over; rendering both always would duplicate the whole
+    recipe on every `json_adapter` note.
+
+    So the question asked is the exact one that matters — *are these steps a cut of this prose?* —
+    and it is answered by containment, which needs no tuned number and cannot drift: if every step's
+    text is inside the prose, the steps are the better presentation of it and stand alone.
+    """
+    prose = " ".join((reaction.procedure_text or "").split())
     if not reaction.steps:
-        return ""
+        return f"\n## Procedure\n\n{prose}\n" if prose else ""
     lines = "".join(f"{step.index}. {_step_line(step)}\n" for step in reaction.steps)
-    return f"\n## Procedure\n\n{lines}"
+    block = f"\n## Procedure\n\n{lines}"
+    if prose and not _steps_segment(reaction, prose):
+        block += f"\n### Procedure as recorded\n\n{prose}\n"
+    return block
+
+
+def _steps_segment(reaction: OrdReaction, prose: str) -> bool:
+    """Whether these steps are a segmentation of `prose` rather than an independent account.
+
+    True when every step's text appears verbatim in the whitespace-normalized prose — which is what
+    a segmenter produces and what a mapper reading structured fields cannot. `_procedure_block`
+    says why this is the question and why containment is how it is asked.
+    """
+    return all(" ".join(step.text.split()) in prose for step in reaction.steps)
 
 
 def _step_line(step: ReactionStep) -> str:

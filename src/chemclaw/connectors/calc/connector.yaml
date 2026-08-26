@@ -28,7 +28,19 @@ endpoint:
   health_url: http://127.0.0.1:8815/healthz
   request_timeout: 60
   auth:
-    mode: none
+    # **Bearer, and the token is this bundle's own `/mcp` credential — not the one core presents to
+    # anything downstream.** `connectors/server.py`'s `BearerAuthMiddleware` reads the mode from this
+    # manifest and refuses every MCP request without it, so `mode: none` here meant exactly what it
+    # said: any process that could reach the pod could call an xTB geometry optimization.
+    # A NetworkPolicy selects peers, not paths, and it was the only thing in the way.
+    #
+    # The variable is named rather than carried, and read per request on both sides, so a rotated
+    # secret takes effect without a restart. `_MCP_TOKEN` rather than `_TOKEN` because the shorter
+    # name is a different hop for two of these bundles: `CHEMCLAW_CALC_TOKEN` is already the
+    # credential *core* presents to the remote calc server (`core/config/calculators.py`), and a
+    # name that means two hops is a name someone will eventually point at the wrong one.
+    mode: bearer
+    token_env: CHEMCLAW_CALC_MCP_TOKEN
   tools:
     - compute_xtb_energy
     - compute_electronic_properties
@@ -153,6 +165,8 @@ jobs:
       Drives one coordinate through the requested values, re-optimizing everything else at each
       point — a conformational profile or a rotational barrier, not a reaction path. Give two atom
       indices for a bond, three for an angle, four for a dihedral (0-based, as RDKit numbers them).
+      Pass a `structure_id` to scan from a conformer a search already found: a barrier depends on
+      which conformer it is measured in, so re-embedding is a different question.
       The barrier it reports is an upper bound on the *ground-state* profile and is not a transition
       state.
     params_model: chemclaw.connectors.calc.specs:ScanJobSpec
@@ -167,6 +181,12 @@ jobs:
       than one arbitrary geometry. Needs the optional CREST binary; without it the job reports that
       the search is unavailable rather than silently returning a single conformer. Effort trades
       wall-clock for coverage; a search is never cheap, so expect a job id.
+
+      Each conformer comes back as a `structure_id` with its population, not as coordinates, and
+      that id is what carries the search forward: take `lowest_structure_id` (or any member's) to
+      optimize_geometry, compute_thermochemistry, compute_electronic_properties or scan_coordinate
+      and the next calculation runs on the conformer this search chose. Handing the SMILES on
+      instead re-embeds the molecule and throws the search away.
     params_model: chemclaw.connectors.calc.specs:EnsembleJobSpec
     precondition: chemclaw.science.calc.solvents:require_supported_solvents
     # A CREST search is the one genuinely costly thing in this bundle — minutes of saturated
@@ -198,4 +218,117 @@ jobs:
     # `run_xtb_task`'s gate was `DEFAULT_WRITE_TOOL_GATES` membership, which went with the tool,
     # and `expensive: true` authorized nothing at all until `authz.expensive_actions` derived the
     # gate's set from these declarations.
+    expensive: true
+
+  # --- the multi-step protocols ---------------------------------------------------------------
+  #
+  # Four jobs that are each a **fan-out**, which is why they are jobs and not templates: a template
+  # has deliberately no loops, and the agent's own loop is iteration-capped, so "once per tautomer"
+  # and "once per bond" fit neither. The loop lives in the job spec; a template sequences these.
+  #
+  # All four count their cost before they start (`science/calc/budget.py`) and refuse above
+  # `calc_max_primitive_calls` with the count in the message. That refusal is a `ValueError`, which
+  # `BAD_DATA_RETRY` treats as non-retryable, so an over-budget request fails in the first second
+  # rather than three times over four hours.
+
+  - name: refine_ensemble
+    workflow: CalcJobWorkflow
+    inline_wait_seconds: 20
+    summary: Re-weight a conformer ensemble by free energy instead of by electronic energy.
+    description: >-
+      The populations `sample_conformers` reports are Boltzmann weights over *electronic* energies,
+      which assumes every conformer has the same zero-point, thermal and entropic contribution. For
+      the molecules a conformer search is worth running on that is exactly wrong: a compact,
+      hydrogen-bonded fold has both a low electronic energy and a stiff set of low modes, so it is
+      over-populated by E alone. This optimizes and takes a Hessian for each of the lowest members
+      and weights them by G.
+
+      It is a different treatment, not a better one, and it costs one Hessian per member — minutes
+      each on a drug-sized molecule. So it refines the top `top_n` only, and the result reports
+      `refined_population_covered`: the share of the ensemble population those members carry. Below
+      about 90% it warns, and you should say so when reporting — "free energies over 5 of 47
+      conformers" is a different claim from "the ensemble", and the free energy is the one that
+      looks more careful.
+
+      Use it when a population is the answer (which tautomer, which rotamer, how much of the folded
+      form) rather than when a geometry is. For a geometry, `sample_conformers` already gives you
+      the lowest member's structure_id.
+    params_model: chemclaw.connectors.calc.specs:RefinedEnsembleJobSpec
+    precondition: chemclaw.science.calc.solvents:require_supported_solvents
+    expensive: true
+
+  - name: compute_ensemble_property
+    workflow: CalcJobWorkflow
+    inline_wait_seconds: 20
+    summary: Boltzmann-average a property over a molecule's populated conformers.
+    description: >-
+      Lifts the caveat under every other number here. A dipole, a HOMO-LUMO gap, a partial-charge
+      set or a Fukui ranking computed once describes **one** conformer — whichever geometry was
+      embedded — and for a flexible molecule those quantities can differ more between two of its own
+      populated shapes than between two different molecules. This computes the property at each
+      member's own geometry and weights by population.
+
+      **Read the spread, not only the mean.** The result carries the minimum and maximum as well.
+      When the values scatter across the ensemble by more than the difference you are using the
+      number to argue, the honest report is that the molecule does not have one value of this
+      property at this temperature — reporting the mean alone turns that into a false precision
+      that reads exactly like a measurement.
+
+      `prop="fukui"` and `prop="charges"` are per-atom and come back per atom; the rest are single
+      values. Needs the conformer search first, so expect a job id.
+    params_model: chemclaw.connectors.calc.specs:EnsemblePropertyJobSpec
+    precondition: chemclaw.science.calc.solvents:require_supported_solvents
+    expensive: true
+
+  - name: rank_species
+    workflow: CalcJobWorkflow
+    inline_wait_seconds: 20
+    summary: Rank tautomers, protonation microstates or stereoisomers by free energy.
+    description: >-
+      One job for the three questions that are the same arithmetic over different species sets:
+      which tautomer dominates, which protonation microstate is present, which diastereomer is
+      favoured. Set `ranking` to say which you are asking — the number means something different in
+      each, and a reader should not have to infer it from the SMILES.
+
+      **Enumerate first; this does not.** Use `chem`'s enumerate_tautomers,
+      enumerate_protonation_states or enumerate_stereoisomers to build the list. That split is not
+      bookkeeping: a form that is not in `species` was not ranked, so a distribution over an
+      incomplete enumeration is confident about the wrong universe. The result reports how many it
+      was given.
+
+      The tautomer case has the widest blast radius of anything in this bundle. A pKa, a Fukui
+      ranking, a dipole and a reaction free energy all describe whichever tautomer was drawn; if
+      that is the minor form, none of them is a number about the compound. A gap above ~3 kcal/mol
+      is a real answer; a small gap is also an answer, and a more important one — both forms are
+      present and any property that differs between them is not a single number.
+
+      `level="quick"` ranks by electronic energy and says so in a warning; `standard` adds a Hessian
+      per species for a free energy; `thorough` adds a conformer search per species and is the
+      expensive case.
+    params_model: chemclaw.connectors.calc.specs:SpeciesRankingJobSpec
+    precondition: chemclaw.science.calc.solvents:require_supported_solvents
+    expensive: true
+
+  - name: survey_bond_strengths
+    workflow: CalcJobWorkflow
+    inline_wait_seconds: 20
+    summary: Rank a molecule's bonds by how much energy it costs to break each one.
+    description: >-
+      Answers "which bond breaks first" — the question behind autoxidation liability,
+      hydrogen-atom-transfer selectivity and a forced-degradation study design. Each bond is one
+      balanced reaction, parent on the left and its two radical fragments on the right, so the
+      arithmetic and the open-shell handling are the ones the reaction job already uses.
+
+      **Enumerate first** with `chem`'s enumerate_bond_cleavages, which writes the fragments with
+      explicit radical electrons ([CH3], [H]) — that is what makes the multiplicity derivable and
+      the homolysis computable without a declared spin state. It skips ring bonds, because breaking
+      one of those gives one fragment and its energy is a ring-opening rather than a dissociation.
+
+      **The ordering is the answer; the magnitudes are not.** Semiempirical bond dissociation
+      energies carry several kcal/mol of error — enough that a number should never be quoted as a
+      BDE, and little enough that the ranking within one molecule is informative. Defaults to
+      `level="quick"` for that reason: a Hessian per fragment per bond triples the cost for a
+      magnitude the method does not deliver.
+    params_model: chemclaw.connectors.calc.specs:BondSurveyJobSpec
+    precondition: chemclaw.science.calc.solvents:require_supported_solvents
     expensive: true
