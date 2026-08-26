@@ -1,10 +1,18 @@
 # An unassigned peak, or a forced-degradation study to design — narrowed to a short list worth computing.
-summary: Propose a molecule's likely degradants and rank them, for peak assignment or study design.
+summary: Propose a molecule's likely degradants, for peak assignment or forced-degradation design.
 description: >-
   A fixed three-step degradation triage. Applies the curated oxidative, hydrolytic and dealkylation
-  transforms to propose candidate degradants, ranks them by free energy, and writes them up as a
-  short list to check rather than a prediction. Use it when a stability study has an unassigned peak
-  or when a forced-degradation protocol needs designing.
+  transforms to propose candidate degradants, screens the parent for the hazards a stability study
+  runs into, and writes the candidates up as a short list to check rather than a prediction. Use it
+  when a stability study has an unassigned peak or when a forced-degradation protocol needs
+  designing.
+
+  **It does not rank them, and that is chemistry rather than a gap.** `rank_species` computes an
+  *equilibrium* distribution, which requires the species to interconvert. Degradants do not: they
+  are the products of different, irreversible reactions with different stoichiometry, so a
+  Boltzmann weight across a sulfoxide and a hydrolysis fragment is a number with no referent. What
+  orders these is the rate of the reaction that makes each, which nothing here computes. Ask
+  `run_bond_strength_survey` when the question is which bond gives way first.
 
   **Structural hypotheses, never predictions.** Nothing here computes a rate or a yield: a proposal
   says the molecule carries the group a stress condition attacks. A structure that is not in the
@@ -31,8 +39,9 @@ steps:
   - id: hazards
     kind: tool
     purpose: >-
-      Screen the parent while the candidates are being proposed. A degradation study is bench work,
-      and the structural hazards of the compound it runs on are part of designing it.
+      Screen the parent for structural hazards. A degradation study is bench work, and the hazards
+      of the compound it runs on are part of designing it. Steps run in order, not concurrently —
+      this one is second because it does not depend on the first, not because it overlaps it.
     tool: screen_hazards
     arguments:
       smiles: ["${inputs.smiles}"]

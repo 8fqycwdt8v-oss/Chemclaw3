@@ -45,7 +45,7 @@ of error. Populations of 60/40 and 55/45 are the same answer.
 | Is this dipole/gap/charge a real number for a floppy molecule? | `run_regioselectivity_in_conformer` for sites, `compute_ensemble_property` otherwise |
 | Which bond breaks first? | `run_bond_strength_survey` |
 | Which diastereomer is favoured? | `run_stereoisomer_ranking` |
-| What could this have degraded into? | `run_degradant_triage` |
+| What could this have degraded into? | `run_degradant_triage` — a structural short list, **not** a ranking |
 
 **Ask `describe_topology` first when you are not sure it is worth it.** It is free and structural:
 few rotatable bonds means a conformer search will find little, one ionisable site means
