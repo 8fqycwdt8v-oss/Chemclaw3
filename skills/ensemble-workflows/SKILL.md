@@ -39,13 +39,13 @@ of error. Populations of 60/40 and 55/45 are the same answer.
 
 | The question | Reach for |
 |---|---|
-| Which form is this molecule *in*? | `run_tautomer-resolution` — before anything else about it |
-| What is charged, at which pH? | `run_microspecies-profile` (amphoteric/polyprotic); `predict_pka` for one site |
-| How much of the folded form is there? | `run_ensemble-free-energy` |
-| Is this dipole/gap/charge a real number for a floppy molecule? | `run_regioselectivity-in-conformer` for sites, `compute_ensemble_property` otherwise |
-| Which bond breaks first? | `run_bond-strength-survey` |
-| Which diastereomer is favoured? | `run_stereoisomer-ranking` |
-| What could this have degraded into? | `run_degradant-triage` |
+| Which form is this molecule *in*? | `run_tautomer_resolution` — before anything else about it |
+| What is charged, at which pH? | `run_microspecies_profile` (amphoteric/polyprotic); `predict_pka` for one site |
+| How much of the folded form is there? | `run_ensemble_free_energy` |
+| Is this dipole/gap/charge a real number for a floppy molecule? | `run_regioselectivity_in_conformer` for sites, `compute_ensemble_property` otherwise |
+| Which bond breaks first? | `run_bond_strength_survey` |
+| Which diastereomer is favoured? | `run_stereoisomer_ranking` |
+| What could this have degraded into? | `run_degradant_triage` |
 
 **Ask `describe_topology` first when you are not sure it is worth it.** It is free and structural:
 few rotatable bonds means a conformer search will find little, one ionisable site means
@@ -131,7 +131,7 @@ Measured: acetylacetone ranked from one embedding per tautomer at GFN2 comes out
 against roughly 80% *enol* in the gas phase. The enol is stabilised by an intramolecular hydrogen
 bond that exists in one planar conformer and in none of the others, so a ranking that never looks
 for that conformer cannot see the thing that makes the enol favourable — and inverts the textbook
-case while looking entirely reasonable. `run_tautomer-resolution` therefore ranks at
+case while looking entirely reasonable. `run_tautomer_resolution` therefore ranks at
 `level="thorough"`, a conformer search per tautomer, which is the most expensive default here and
 the right one. If you rank at a cheaper level, say so in the answer.
 

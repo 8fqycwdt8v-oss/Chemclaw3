@@ -165,3 +165,44 @@ def test_skills_enabled_list_parses_the_pathsep_token() -> None:
         _env_file=None, skills_enabled=os.pathsep.join(["deep-research", "reaction-search"])
     )
     assert configured.skills_enabled_list == ["deep-research", "reaction-search"]
+
+
+def test_every_template_tool_a_skill_names_is_a_real_template_tool() -> None:
+    """A skill's routing table named seven tools that do not exist, and no gate saw it.
+
+    `templates/registry.py::tool_name` is `f"run_{name.replace('-', '_')}"`, so the tool for
+    `data/templates/tautomer-resolution.yaml` is `run_tautomer_resolution`. Both shipped skills
+    wrote `run_tautomer-resolution` — the file stem, dashes and all — in every row of the "which
+    workflow" table the whole feature exists to provide.
+
+    `make skill-validate` could not catch it. Its "taught implies declared" half extracts tool names
+    with `validate_prose_contract._BARE`, whose lookbehind excludes a backticked name with no
+    parens — so it extracted *nothing* from `ensemble-workflows/SKILL.md` and the bidirectional
+    check was vacuous on exactly the file that needed it. This closes that specific hole rather than
+    widening `_BARE`, which would change what every other skill is checked against.
+
+    Scanned over the raw text, not the frontmatter, because the wrong names were in prose: a
+    `run_*` token anywhere in a skill is a claim that a template by that name is launchable.
+    """
+    import re
+
+    from chemclaw.templates.registry import enabled, tool_name
+
+    real = {tool_name(template) for template in enabled()}
+    assert real, "no templates discovered; this test would pass vacuously"
+
+    roots = [Path("skills"), Path("src/chemclaw/connectors")]
+    files = sorted(path for root in roots for path in root.rglob("SKILL.md") if path.is_file())
+    assert files, "no SKILL.md found; this test would pass vacuously"
+
+    wrong: dict[str, set[str]] = {}
+    for path in files:
+        named = set(re.findall(r"\brun_[a-z0-9_-]+", path.read_text()))
+        if unknown := {name for name in named if name not in real}:
+            wrong[str(path)] = unknown
+
+    assert not wrong, (
+        f"skills name template tools that do not exist: {wrong}. "
+        f"The real names are {sorted(real)} — `run_` plus the file stem with dashes replaced by "
+        "underscores, never the stem as written."
+    )
