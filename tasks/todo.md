@@ -117,3 +117,41 @@ shape's own. `make lint type test`: 4744 passed, 3 skipped. Three validators gre
 
 Publishing now: 9/10 primitives, **10 of 11 jobs**. The eleventh is `bo`, which is a question
 rather than a gap and keeps its row.
+
+---
+
+# PR 3 — the remaining review findings
+
+## Task
+Close what the review found and PRs 1 and 2 did not cover, and settle the one question the
+code could not answer for itself.
+
+## Done
+- [x] `transform_structure` dropped from the `chem` manifest — no caller, no template, no skill
+      reference, no documented signature in either repository. Serving it would have meant
+      inventing its contract; `Chemclaw3-mcp#18` serves the other six and says so.
+- [x] `results` worker started by the live lane (and stopped by it) — the chart renders it a
+      worker Deployment and the lane exists to run the deployed shape
+- [x] `label_batch_size` bounded at the server's `MAX_BATCH = 500`, so a raise past it fails at
+      startup rather than refusing every drain attempt of a nightly run
+- [x] The BO question answered in `publish/README.md`: a campaign deliberately does not publish
+- [x] Four BACKLOG rows resolved, one rewritten to what is actually still open
+
+## Review
+**Two things I got wrong, both caught by the repo's own guards rather than by me.** Removing
+`transform_structure` from the manifest left it in `test_probe_coverage`'s grandfathered baseline —
+the test's own message is the right rule: *a debt list that outlives the debt reads as live state*.
+And a docstring pointer used a `path::function` form the convention beside it does not use. Neither
+would have been caught by `make lint type test` alone.
+
+**The BO question was worth answering rather than deferring.** `CampaignResult` is a `best` and a
+`history` of `Observation`s — a parameter set and an objective value, with no molecular subject at
+all, while every `subject.kind` the sink schema accepts is structural. Its record is `bo_campaigns`
+and `bo_suggestions`, where a sequence *is* the history. `payload_kind` stays because it is a true
+statement about the payload and the backfill reads it. What is not acceptable is the state the
+review found: two readings, indistinguishable from the code.
+
+**A methodology error worth recording.** My first attempt to reproduce #231's CI failure ran
+`make ci` in the background and then switched branches while it ran, so the tree changed underneath
+it. It reported a `test_probe_coverage` failure that was an artifact of that, not a finding. The
+real failure turned up only on a clean run. A background suite and a `git checkout` do not compose.
