@@ -33,6 +33,7 @@ from chemclaw.connectors.calc.results import XtbJobResult
 from chemclaw.connectors.calc.specs import (
     ComplexJobSpec,
     EnsembleJobSpec,
+    MicrostatePkaJobSpec,
     ReactionJobSpec,
     RotationJobSpec,
     ScanJobSpec,
@@ -255,3 +256,33 @@ def test_a_rotation_job_refuses_a_handle_that_is_not_this_molecule_s(
     with pytest.raises(ValueError, match="does not name a bond of"):
         _run(RotationJobSpec(smiles="CCCC", torsion=torsion))
     assert rotation_server.count("scan_point") == 0
+
+
+def test_a_pka_job_names_the_proton_it_is_about(server: FakeCalcServer) -> None:
+    """Two searches, and a summary that says *which* proton — the half a bare pKa does not carry.
+
+    The site is perceived from the winning geometry on the server side, so this asserts the
+    passthrough rather than the perception: what a chemist reads in the job list has to name the
+    equilibrium that was computed, because "pKa 9.9" for a molecule with three ionisable centres is
+    an answer to a question nobody asked.
+    """
+    result = _run(MicrostatePkaJobSpec(smiles="Oc1ccccc1"))
+
+    assert result.pka is not None
+    assert result.pka.branch == "acid"
+    assert result.pka.site_smiles == "[O-]c1ccccc1"
+    assert server.count("search_conformer_ensemble") == 2
+    assert "[O-]c1ccccc1" in result.summary
+
+
+def test_a_pka_job_carries_the_branch_into_its_summary(server: FakeCalcServer) -> None:
+    """A base reports `pKaH`, not `pKa`, and the summary is where a reader sees which.
+
+    They are different numbers about different equilibria — pyridine's 5.2 is its conjugate acid's —
+    and a job list that called both "pKa" would invite exactly the confusion the branch field exists
+    to prevent.
+    """
+    result = _run(MicrostatePkaJobSpec(smiles="c1ccncc1"))
+
+    assert result.pka is not None and result.pka.branch == "base"
+    assert "pKaH" in result.summary

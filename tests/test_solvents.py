@@ -199,7 +199,7 @@ def test_every_declared_job_that_takes_a_solvent_declares_the_precondition() -> 
             assert (
                 job.precondition == "chemclaw.science.calc.solvents:require_supported_solvents"
             ), f"job {job.name!r} takes a solvent but declares precondition {job.precondition!r}"
-    assert checked == 11, f"expected the eleven solvent-taking calc jobs, swept {checked}"
+    assert checked == 12, f"expected the twelve solvent-taking calc jobs, swept {checked}"
 
 
 def test_the_launcher_refuses_the_screen_before_it_starts_any_durable_work() -> None:
