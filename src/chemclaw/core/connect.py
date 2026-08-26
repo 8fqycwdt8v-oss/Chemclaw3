@@ -168,7 +168,8 @@ def open_connection(
     driver = resolve_driver(reference, error=error, what=f"{what} driver")
     options = connect_options(connection, error=error, what=what)
     # Logged at the level a deployment reads to answer "which database did this pod attach to".
-    # Only non-secret keys can appear here: every `*_env` value became a secret-registered read.
+    # `_is_address` decides what may be named: a resolved secret sits in `options` under its stem
+    # (`access_token`), so filtering has to be by key rather than by where the value came from.
     logger.info(
         "opening %s via %s (%s)",
         what,
