@@ -89,9 +89,18 @@ def _profiles_loaded() -> None:
 #:
 #: Eighteen of them arrived in one merge — the GFN multi-step work — which is precisely the event
 #: this gate was built to make visible, and it landed while the gate was still on a branch. Draining
-#: this list is a `BACKLOG.md` row. **The set may only shrink**, which the test below enforces, so a
-#: future merge cannot use it as a place to put a nineteenth.
-GRANDFATHERED: frozenset[str] = frozenset(
+#: this list is a `BACKLOG.md` row.
+#:
+#: **This literal is a dated baseline and is never edited.** The live debt is `_grandfathered()`
+#: below, *computed* as this set minus whatever now has a probe — so a tool leaves the moment
+#: its probe is written, with no edit here, and nothing can be added to it at all.
+#:
+#: The first attempt asserted `len(GRANDFATHERED) <= 18`, which does not say "only shrinks": drain
+#: one entry and a merge may add a fresh unprobed tool with the gate still green. The second
+#: attempt froze a copy — `frozenset(GRANDFATHERED)` — which is worse, because it is derived from
+#: the same literal and can never differ from it; a test built on it passed against a deliberately
+#: planted addition. Only a baseline the working set cannot influence expresses the invariant.
+_GRANDFATHERED_AT_INTRODUCTION: frozenset[str] = frozenset(
     {
         "compute_ensemble_property",
         "describe_topology",
@@ -115,27 +124,32 @@ GRANDFATHERED: frozenset[str] = frozenset(
 )
 
 
-def test_the_grandfathered_set_only_shrinks() -> None:
-    """A tool that gains a probe leaves this list; nothing may be added to it.
+def _grandfathered() -> frozenset[str]:
+    """The debt as it stands right now: the baseline, less everything that has since been probed."""
+    return _GRANDFATHERED_AT_INTRODUCTION - _expected_tools()
 
-    Without this, `GRANDFATHERED` is just `EXEMPT` without the honesty requirement — the next merge
-    to add a tool would drop it in here and the gate would measure nothing. The count is asserted
-    rather than the membership so that *removing* one needs no edit here beyond the deletion.
+
+def test_the_grandfathered_set_can_only_shrink() -> None:
+    """The baseline is a closed record, so the live debt is a subset of it by construction.
+
+    There is nothing here to keep in step by hand — a probe written for a grandfathered tool
+    removes it, and a tool added to the surface after this gate existed can never reach the set at
+    all, because the only way in is editing a literal marked as a dated baseline.
+
+    What is left to assert is that the record has not gone stale in the other direction: a name in
+    the baseline that is no longer a tool at all is a line describing debt that no longer exists.
     """
-    assert len(GRANDFATHERED) <= 18, (
-        f"GRANDFATHERED has grown to {len(GRANDFATHERED)}. It is a record of tools that predate "
-        "this gate, not a place to put a new one — write a probe instead."
-    )
-    covered = sorted(GRANDFATHERED & _expected_tools())
-    assert not covered, (
-        f"{covered} now have probes and are no longer grandfathered. Delete them from the set — a "
-        "debt list that outlives the debt reads as live state."
+    assert _grandfathered() <= _GRANDFATHERED_AT_INTRODUCTION
+    stale = sorted(_GRANDFATHERED_AT_INTRODUCTION - available_tool_names())
+    assert not stale, (
+        f"{stale} are in the grandfathered baseline but are no longer agent-callable tools. "
+        "Delete them — a debt list that outlives the debt reads as live state."
     )
 
 
 def test_every_agent_callable_tool_is_probed_or_exempt() -> None:
     """The first direction: a tool the corpus has never heard of is a tool nothing measures."""
-    unprobed = sorted(available_tool_names() - _expected_tools() - set(EXEMPT) - GRANDFATHERED)
+    unprobed = sorted(available_tool_names() - _expected_tools() - set(EXEMPT) - _grandfathered())
     assert not unprobed, (
         f"{len(unprobed)} agent-callable tool(s) appear in no probe's `expects_tools`:\n  "
         + "\n  ".join(unprobed)

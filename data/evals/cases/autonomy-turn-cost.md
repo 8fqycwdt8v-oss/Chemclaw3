@@ -62,5 +62,19 @@ gate the suite on a number nobody measured. What it buys today is a row in `base
 more expensive, something says so.
 
 The baseline of 60,000 is this session's own recorded cost at the time the case was written, so the
-ratio reads as 1.0-ish at rest and moves only when the system does. It is not a target and not a
-budget; `agent_context_token_budget` is the budget and it is a different instrument entirely.
+ratio reads as 1.0-ish at rest. It is not a target and not a budget; `agent_context_token_budget` is
+the budget and it is a different instrument entirely.
+
+**What this case does not yet do, stated plainly: it does not measure the system.** Every number
+above is a literal committed to this file, so `turn_cost_ratio` computes a constant of the case
+data — 0.9845458333333333, to every decimal, no matter what changes in the agent. An earlier
+version of this paragraph said the ratio "moves only when the system does", and that was written
+about the *metric* while being read as a claim about *this case*; the metric does have that
+property, and this case cannot exercise it, because nothing here is measured at run time. The
+32%-static-prefix growth that the sibling ratchet in `tests/test_context_floor.py` caught would
+leave this row in `baseline.json` untouched.
+
+That makes it a fixture that proves the arithmetic — the cache weighting, the billed-vs-sent
+distinction, the counting of turns that never answered — and a placeholder for the measurement.
+Wiring it to real recorded `TurnCost` rows needs a deployment with turns in it, which is the same
+blocker `BACKLOG.md` records for the memory-distillation work, and it is a row there.

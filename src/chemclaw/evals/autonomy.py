@@ -246,6 +246,13 @@ def turn_cost_ratio(case: EvalCase) -> MetricResult:
     and — the part that matters for a drift band — moves only when *this system* changes. The token
     counts and the per-token arithmetic stay in the provenance, where a reader can see them.
 
+    **That property belongs to the metric and not yet to any case that uses it.** The one shipped
+    case, `autonomy-turn-cost`, carries literal turn records, so its score is a constant of
+    committed data and no change to the agent can move it. The case file says so; it is repeated
+    here because a reader arriving at the paragraph above would otherwise take "moves only when
+    this system changes" as a description of what the suite currently measures, which is how the
+    claim came to be written in the first place.
+
     **Billed tokens, which is not the same as tokens sent.** `cache_read_tokens` are charged at a
     fraction of the input rate and `cache_write_tokens` at a premium, so a change that adds a cache
     breakpoint moves the sent count and the billed count in opposite directions. Scoring the sent

@@ -620,3 +620,79 @@ def test_a_pydantic_tool_return_still_reaches_the_model_as_repr() -> None:
         "`exclude=True` now survives tool-result stringification; the comment on "
         "`Condensation.rows` saying it does not is stale"
     )
+
+
+def test_the_skills_middleware_still_formats_its_listing_under_a_private_name() -> None:
+    """`tests/test_context_floor.py` renders the skills block through upstream's own formatter.
+
+    The alternative was re-deriving the block from `SKILL.md` frontmatter, which would be a second
+    implementation of upstream's formatting to keep in step — and the floor has to be the number
+    the model is actually sent. So the coupling is deliberate; what was missing is it being
+    *recorded*, which is this file's whole job.
+
+    `_format_skills_list` is private, so a rename is a patch-release away and the symptom would be
+    an `AttributeError` inside a token-counting helper, several layers from the cause.
+    """
+    from deepagents.middleware.skills import SkillsMiddleware
+
+    assert hasattr(SkillsMiddleware, "_format_skills_list"), (
+        "deepagents' SkillsMiddleware no longer exposes `_format_skills_list`. "
+        "tests/test_context_floor.py::_skills_listing calls it to render the skills block the "
+        "static-prefix ratchet measures."
+    )
+
+
+def test_before_agent_still_accepts_the_three_argument_call_the_floor_uses() -> None:
+    """The arity `test_context_floor.py` invokes `before_agent` with, pinned because arity moved.
+
+    This is the one dependency in this file with previous form. `ReloadingSkillsMiddleware` was
+    rewritten onto a single `UntrackedValue` channel specifically to *stop* depending on the number
+    of arguments LangChain invokes a hook with
+    (`D-2026-08-14-the-coupling-is-the-cost-not-the-line-count`), and production no longer does.
+    The floor helper calls the hook directly, so it depends on the signature again — narrowly, in a
+    test, and now visibly rather than silently.
+
+    Asserted against the signature rather than by calling it, so this stays a shape assertion and
+    does not need a loaded skills backend.
+    """
+    import inspect
+
+    from deepagents.middleware.skills import SkillsMiddleware
+
+    params = list(inspect.signature(SkillsMiddleware.before_agent).parameters)
+    assert len(params) >= 4, (
+        f"deepagents' SkillsMiddleware.before_agent now takes {params}; "
+        "tests/test_context_floor.py::_skills_listing calls it as "
+        "`before_agent({}, None, None)` (three arguments after self) to load the skills the "
+        "static-prefix ratchet measures. Adjust that call, or move the helper onto whatever "
+        "load path upstream now publishes."
+    )
+
+
+def test_a_cleared_tool_result_is_still_marked_in_response_metadata() -> None:
+    """`agent/compaction.py::_cleared_calls` identifies cleared results by upstream's stamp.
+
+    The alternative — matching the placeholder text — is first-party and would break silently the
+    moment the string is reworded, so the metadata key is the dependency worth pinning. If it
+    changes, the repeat guard is told nothing was cleared and goes on refusing calls whose answers
+    the model no longer holds.
+    """
+    from langchain.agents.middleware import ClearToolUsesEdit
+    from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, ToolMessage
+    from langchain_core.messages.utils import count_tokens_approximately
+
+    messages: list[AnyMessage] = [
+        HumanMessage("go"),
+        AIMessage("", tool_calls=[{"name": "t", "args": {}, "id": "c0"}]),
+        ToolMessage("x " * 6000, tool_call_id="c0"),
+        AIMessage("", tool_calls=[{"name": "t", "args": {"n": 1}, "id": "c1"}]),
+        ToolMessage("x " * 6000, tool_call_id="c1"),
+    ]
+    ClearToolUsesEdit(trigger=1, keep=1, placeholder="[cleared]").apply(
+        messages, count_tokens=count_tokens_approximately
+    )
+    assert messages[2].response_metadata.get("context_editing", {}).get("cleared") is True, (
+        "ClearToolUsesEdit no longer stamps response_metadata['context_editing']['cleared']. "
+        "agent/compaction.py::_cleared_calls reads it to tell agent/repeat_guard.py which calls "
+        "lost their answers."
+    )
