@@ -107,6 +107,65 @@ def embed(smiles: str, multiplicity: int = 1) -> dict[str, Any]:
     }
 
 
+def ionised(structure: dict[str, Any], search: str) -> dict[str, Any]:
+    """What a protonation search returns: a *different species* from the one it was given.
+
+    Reproduced here because getting it wrong is what shipped. Driven against crest 3.0.2, a
+    `--deprotonate` run returns one atom fewer at charge -1 and a `--protonate` run one atom more at
+    charge +1 — and the parser that fed them into this repository reused the input's element list
+    and the input's charge, so the deprotomer search had never once returned an ensemble and the
+    protomer search would have relaxed a cation at charge 0. A fake that hands back the neutral
+    molecule for every search cannot see either.
+
+    The electron count is untouched by both, because a proton is a nucleus without electrons — which
+    is why the multiplicity carries over and `Structure` accepts the result.
+
+    The label is *derived* from the input SMILES here, where the real server perceives it from the
+    returned geometry. The composite depends on a label and a shifted charge arriving, not on how
+    they were obtained, and perceiving bond orders from a nudged ETKDG geometry with an atom taken
+    out of it would be testing RDKit rather than this repository.
+    """
+    if search not in ("protomers", "deprotomers"):
+        return structure
+    elements = list(structure["elements"])
+    positions = [list(row) for row in structure["positions"]]
+    if search == "deprotomers":
+        index = len(elements) - 1 - elements[::-1].index(1)
+        elements.pop(index)
+        positions.pop(index)
+        shift = -1
+    else:
+        elements.append(1)
+        positions.append([value + 1.0 for value in positions[0]])
+        shift = 1
+    return {
+        **structure,
+        "elements": elements,
+        "positions": positions,
+        "charge": structure["charge"] + shift,
+        "smiles": _ionised_smiles(structure.get("smiles"), shift),
+    }
+
+
+def _ionised_smiles(smiles: str | None, shift: int) -> str | None:
+    """The SMILES of the ionised form, or None when this molecule has no obvious site."""
+    if smiles is None:
+        return None
+    mol = Chem.RWMol(Chem.MolFromSmiles(smiles))
+    for atom in mol.GetAtoms():
+        if shift < 0 and atom.GetAtomicNum() in (7, 8, 16) and atom.GetTotalNumHs() > 0:
+            atom.SetNumExplicitHs(atom.GetTotalNumHs() - 1)
+            atom.SetNoImplicit(True)
+            atom.SetFormalCharge(-1)
+            return str(Chem.MolToSmiles(mol))
+        if shift > 0 and atom.GetAtomicNum() == 7 and atom.GetTotalNumHs() + atom.GetDegree() < 4:
+            atom.SetNumExplicitHs(atom.GetTotalNumHs() + 1)
+            atom.SetNoImplicit(True)
+            atom.SetFormalCharge(1)
+            return str(Chem.MolToSmiles(mol))
+    return None
+
+
 def harmonic_hessian(structure: dict[str, Any], *, imaginary: bool = False) -> dict[str, Any]:
     """A well-formed Hessian payload for `structure`, optionally carrying one negative eigenvalue.
 
@@ -314,7 +373,7 @@ class FakeCalcServer:
         return self._ensemble(arguments, search="complex")
 
     def _ensemble(self, arguments: dict[str, Any], *, search: str) -> dict[str, Any]:
-        structure = arguments["structure"]
+        structure = ionised(arguments["structure"], search)
         return {
             "calc_version": FAKE_VERSION,
             "calc_key": None,

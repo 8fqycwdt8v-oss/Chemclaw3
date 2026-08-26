@@ -199,6 +199,35 @@ jobs:
     # gate's set from these declarations.
     expensive: true
 
+  - name: predict_pka_ensemble
+    workflow: CalcJobWorkflow
+    inline_wait_seconds: 20
+    summary: pKa from sampled conformers and every protonation microstate (CREST + GFN2-xTB).
+    description: >-
+      The careful pKa, and a different calculation from `predict_pka` rather than a slower setting
+      of it. `predict_pka` enumerates candidate sites by structural rules and evaluates one
+      conformer of each, in under a second, cached. This searches: CREST removes (or adds) every
+      proton in turn, optimises each product and ranks them, and both sides of the equilibrium are
+      conformer-sampled — so the site is decided by energy rather than by a rule, and the free
+      energy is the sum over every microstate that carries population instead of one drawn form.
+      Minutes to hours; expect a job id.
+
+      Use it when the answer matters and the molecule is one where the fast predictor is weakest:
+      several ionisable centres, an unusual acid, an intramolecular hydrogen bond, or a flexible
+      molecule whose conformers differ in how they stabilise the anion. For a first pass, or for a
+      series of close analogues being ranked against each other, `predict_pka` is the right tool.
+
+      Reports which proton it is about (`site_smiles`, perceived from the winning geometry), how
+      many microstates were found and how many lie within RT of the best — more than one means the
+      molecule has no single conjugate base and the number is the macrostate's. The two calibrations
+      are fitted over neutral heteroatom acids and aromatic/aryl nitrogen bases respectively;
+      anything outside that, including a carbanion or an aliphatic amine, comes back with the
+      warning rather than silently.
+    params_model: chemclaw.connectors.calc.specs:MicrostatePkaJobSpec
+    precondition: chemclaw.science.calc.solvents:require_supported_solvents
+    # Two CREST searches, so the same unbounded-cost gate the other two sampling jobs carry.
+    expensive: true
+
   - name: compute_interaction_energy
     workflow: CalcJobWorkflow
     inline_wait_seconds: 20

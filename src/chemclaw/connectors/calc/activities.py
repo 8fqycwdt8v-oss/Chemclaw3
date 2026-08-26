@@ -49,6 +49,7 @@ from chemclaw.connectors.calc.specs import (
     ComplexJobSpec,
     EnsembleJobSpec,
     EnsemblePropertyJobSpec,
+    MicrostatePkaJobSpec,
     ReactionJobSpec,
     RefinedEnsembleJobSpec,
     ScanJobSpec,
@@ -217,6 +218,28 @@ async def _dispatch(spec: XtbJobSpec) -> XtbJobResult:
                 f"{ensemble.conformers[0].population:.0%} population"
             ),
             ensemble=ensemble,
+        )
+    if isinstance(spec, MicrostatePkaJobSpec):
+        pka = await compose.microstate_pka(
+            store,
+            spec.smiles,
+            subject=await _subject(spec.structure_id, spec.smiles),
+            branch=spec.branch,
+            solvent=spec.solvent,
+            temperature_k=spec.temperature_k,
+            effort=spec.effort,
+            progress=activity.heartbeat,
+            run=_beating,
+        )
+        equilibrium = "pKa" if pka.branch == "acid" else "pKaH"
+        return XtbJobResult(
+            kind=spec.kind,
+            summary=(
+                f"{pka.smiles}: {equilibrium} {pka.pka:.1f} ± {pka.uncertainty:.1f} "
+                f"at {pka.site_smiles or 'an unperceived site'}, over {pka.microstates_found} "
+                f"microstates"
+            ),
+            pka=pka,
         )
     if isinstance(spec, ComplexJobSpec):
         pair = (

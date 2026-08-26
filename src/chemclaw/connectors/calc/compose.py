@@ -38,6 +38,7 @@ from rdkit import Chem
 from chemclaw.connectors.calc.remote import cached_remote, remote_call
 from chemclaw.core.chem import require_canonical_smiles
 from chemclaw.core.config import settings
+from chemclaw.core.config.calculators import PkaCalibration
 from chemclaw.science.calc.artifacts import (
     HESSIAN_ARRAYS,
     ArrayOffloadingStore,
@@ -57,6 +58,7 @@ from chemclaw.science.calc.models import (
     EnsembleSearch,
     HessianPayload,
     InteractionResult,
+    MicrostatePka,
     OptimizationResult,
     RankedSpecies,
     ReactionEnergyResult,
@@ -87,9 +89,12 @@ from chemclaw.science.calc.thermo import (
     ensemble_entropy,
     ensemble_from_members,
     free_energy_populations,
+    macrostate_free_energy_kcal,
+    rt_kcal,
     thermochemistry_from_hessian,
     weighted_average,
 )
+from chemclaw.science.calc.uncertainty import CalculationDomainError
 
 # What `ensemble_property` can average, and the field each name reads off its result model. A
 # closed set rather than a free-form attribute name: a caller naming a field that does not exist
@@ -471,6 +476,41 @@ async def conformer_ensemble(
     of it. The cache is what makes it stable: the first run's members are what every later question
     about that molecule is weighted from.
     """
+    payload, cached = await searched_members(
+        store, smiles, subject=subject, search=search, effort=effort, solvent=solvent, run=run
+    )
+    return (
+        ensemble_from_members(
+            payload,
+            smiles=require_canonical_smiles(smiles),
+            search=search,
+            temperature_k=temperature_k or settings.xtb_thermo_temperature_k,
+            max_members=settings.crest_max_members,
+        ),
+        cached,
+    )
+
+
+async def searched_members(
+    store: ResultStore,
+    smiles: str,
+    *,
+    subject: Structure | None = None,
+    search: EnsembleSearch = "conformers",
+    effort: CrestEffort | None = None,
+    solvent: str | None = None,
+    run: RemoteRunner = plain,
+) -> tuple[EnsemblePayload, bool]:
+    """One CREST search, cached, with its members' **absolute** energies still on them.
+
+    Split out of `conformer_ensemble` once a second caller needed what that function drops.
+    `ConformerEnsemble` reports energies *relative to its own lowest member* and truncates to
+    `crest_max_members`, which is right for reading an ensemble and useless for comparing two of
+    them: an acid and its conjugate base have different lowest members, so a difference of
+    relative energies is a difference of nothing. `microstate_pka` needs the absolute Hartrees and
+    the whole member list, and taking them by repeating the remote call would have been a second
+    place for the arguments — and therefore the cache key — to be written.
+    """
     starting = subject if subject is not None else await embed(smiles, run=run)
     payload, cached = await run(
         cached_remote(
@@ -485,16 +525,285 @@ async def conformer_ensemble(
         ),
         f"{search} of {smiles}",
     )
-    return (
-        ensemble_from_members(
-            EnsemblePayload.model_validate(await kept(payload)),
-            smiles=require_canonical_smiles(smiles),
-            search=search,
-            temperature_k=temperature_k or settings.xtb_thermo_temperature_k,
+    return EnsemblePayload.model_validate(await kept(payload)), cached
+
+
+# --- acid/base equilibria -----------------------------------------------------------------------
+
+# Heteroatoms whose bound protons mean "the pKa" is the acid one. It is a *domain* guard rather than
+# a site enumeration, and that distinction is the whole point of doing this with CREST: which proton
+# actually comes off is decided by energy over every site the sampler finds, including the C-H ones
+# no rule here would have offered. What this decides is only which of the two questions to ask.
+#
+# **Nitrogen is deliberately not in this tuple even though N-H protons exist.** An amine has N-H and
+# nobody means its N-H acidity (pKa ~36) by "the pKa of ethylamine" — they mean the conjugate acid,
+# 10.7. Amides and anilines are the same: their N-H is too weak an acid in water to be the number
+# anyone quotes. So an N-H molecule with no O-H or S-H takes the base branch, and a molecule that is
+# genuinely both — an aminophenol — is the case the `branch` argument exists for.
+_ACIDIC_HETEROATOMS = (8, 16)  # O, S
+
+
+def _acid_or_base(smiles: str) -> Literal["acid", "base"]:
+    """Which equilibrium to compute when the caller did not say.
+
+    Acid whenever a proton sits on O or S — the pKa a chemist means by "the pKa" of a carboxylic
+    acid, a phenol or a thiol. Base for anything else carrying nitrogen, which covers both pyridine
+    (no N-H at all) and ethylamine (N-H, but 10.7 is its *conjugate acid's* number, not its N-H
+    acidity at ~36).
+
+    **Oxygen and sulfur are deliberately not a base branch.** CREST will happily protonate an ether
+    or a ketone and rank the protomers, and the result would be a confident pKaH for a species that
+    is not protonated at any pH a chemist works at. A caller who genuinely wants that number asks
+    for it explicitly.
+    """
+    mol = Chem.MolFromSmiles(smiles)
+    if mol is None:
+        raise ValueError(f"invalid SMILES: {smiles!r}")
+    if any(
+        atom.GetAtomicNum() in _ACIDIC_HETEROATOMS and atom.GetTotalNumHs() > 0
+        for atom in mol.GetAtoms()
+    ):
+        return "acid"
+    if any(atom.GetAtomicNum() == 7 for atom in mol.GetAtoms()):
+        return "base"
+    raise CalculationDomainError(
+        f"{smiles!r} has no proton on O or S and no nitrogen to protonate, so it has no "
+        "acid/base equilibrium in water. Name the branch explicitly if you meant the C-H acidity "
+        "or the protonation of an ether or carbonyl — both are outside this calibration"
+    )
+
+
+def _macrostate_hartree(payload: EnsemblePayload, temperature_k: float) -> float:
+    """One ensemble's free energy in Hartree: its lowest member plus the sum over the rest.
+
+    The whole member list, not the truncated one a `ConformerEnsemble` reports — a macrostate is the
+    sum over everything that carries population, and dropping the tail biases the side with more
+    accessible states, which is systematically the anion.
+    """
+    lowest = min(member.energy_hartree for member in payload.members)
+    relative = [(member.energy_hartree - lowest) * HARTREE_TO_KCAL for member in payload.members]
+    degeneracies = [member.degeneracy for member in payload.members]
+    correction = macrostate_free_energy_kcal(relative, degeneracies, temperature_k)
+    return lowest + correction / HARTREE_TO_KCAL
+
+
+def _aryl_protonation(site_smiles: str | None) -> bool | None:
+    """Whether a protonated nitrogen is aromatic or aryl-attached; None where it cannot be read.
+
+    The one class boundary this composite still has to police, and it is physics rather than
+    enumeration — which is why CREST does not remove it. Over 13 reference aliphatic amines the
+    computed basicity correlates with the measured pKa at Spearman **-0.17**: no ranking ability at
+    all. The cause is the continuum solvent, since aqueous aliphatic amine basicity is set by how
+    many hydrogen bonds the ammonium ion donates to water, and that is not a thing ALPB can see.
+    Aromatic and aryl nitrogen is dominated instead by delocalisation into the ring, which GFN2 does
+    capture.
+    """
+    if site_smiles is None:
+        return None
+    mol = Chem.MolFromSmiles(site_smiles)
+    if mol is None:
+        return None
+    protonated = [
+        atom for atom in mol.GetAtoms() if atom.GetAtomicNum() == 7 and atom.GetFormalCharge() == 1
+    ]
+    if not protonated:
+        return None
+    return any(
+        atom.GetIsAromatic() or any(neighbour.GetIsAromatic() for neighbour in atom.GetNeighbors())
+        for atom in protonated
+    )
+
+
+def _anionic_carbon(site_smiles: str) -> bool:
+    """Whether the deprotonation landed on carbon — parsed, not pattern-matched.
+
+    A C-H acid is a real answer to "which proton is most acidic" and a wrong one to "what is its
+    pKa in water": the calibration is fitted on heteroatom acids, and DMSO-scale carbon acidity is
+    not what it maps. Read off the atom carrying the charge, because a substring test cannot tell
+    `[CH2-]` from `[Cl-]` or from a bracketed carbon that is not the anion.
+    """
+    mol = Chem.MolFromSmiles(site_smiles)
+    if mol is None:
+        return False
+    return any(atom.GetAtomicNum() == 6 and atom.GetFormalCharge() < 0 for atom in mol.GetAtoms())
+
+
+async def microstate_pka(
+    store: ResultStore,
+    smiles: str,
+    *,
+    subject: Structure | None = None,
+    branch: Literal["auto", "acid", "base"] = "auto",
+    solvent: str | None = None,
+    temperature_k: float | None = None,
+    effort: CrestEffort | None = None,
+    progress: Progress = no_progress,
+    run: RemoteRunner = plain,
+) -> MicrostatePka:
+    """Predict a pKa from two sampled macrostates: the neutral's conformers and its microstates.
+
+    Two CREST searches and one subtraction. The neutral molecule's conformer ensemble gives the
+    protonated macrostate; `--deprotonate` (or `--protonate`) enumerates every site, optimises each
+    product and ranks them, giving the other. Each side is reduced to `-RT ln sum g exp(-E/RT)` over
+    everything it found, and the difference is mapped to a pKa by a calibration fitted through this
+    same pipeline.
+
+    **Why this is a composite here rather than a tool on the server.** Its key would have to name
+    the microstate the deprotonation search settles on, which is an *output* — the structural
+    giveaway that a calculation is a loop with state and belongs to whoever orchestrates it. Both
+    searches underneath are keyed primitives, so the expensive halves are cached separately: asking
+    about the same molecule at another temperature, or asking for its conformer ensemble on its own,
+    is arithmetic over rows that already exist.
+
+    **What it is not.** A macroscopic aqueous pKa of one ionisable centre, at the semiempirical
+    level, in a continuum solvent. Not a microscopic pKa per site (the ranking of sites is reported,
+    the individual constants are not), not a polyprotic titration curve, and not a number to put in
+    a specification — quote the uncertainty, which is the fit's own standard error.
+    """
+    canonical = require_canonical_smiles(smiles)
+    chosen: Literal["acid", "base"] = _acid_or_base(canonical) if branch == "auto" else branch
+    medium = solvent if solvent is not None else settings.pka_ensemble_solvent
+    temperature = temperature_k or settings.xtb_thermo_temperature_k
+    calibration = settings.pka_ensemble_acid if chosen == "acid" else settings.pka_ensemble_base
+    # Two CREST searches, counted before either starts: the second is not conditional on the first,
+    # and a ceiling reached after the expensive half has been paid is not a ceiling.
+    require_within_budget(
+        estimate_units(2, level="thorough"), f"the pKa of {canonical} from two CREST searches"
+    )
+
+    starting = subject if subject is not None else await embed(canonical, run=run)
+    progress(f"conformer search of {canonical}")
+    neutral_payload, _ = await searched_members(
+        store,
+        canonical,
+        subject=starting,
+        search="conformers",
+        effort=effort,
+        solvent=medium,
+        run=run,
+    )
+    search: EnsembleSearch = "deprotomers" if chosen == "acid" else "protomers"
+    progress(f"{search} search of {canonical}")
+    ionised_payload, _ = await searched_members(
+        store, canonical, subject=starting, search=search, effort=effort, solvent=medium, run=run
+    )
+
+    # Deprotonated minus protonated, always — so one calibration sign convention covers a base's
+    # conjugate acid (B + H+ <- BH+) and an acid's own dissociation without a second formula.
+    neutral_g = _macrostate_hartree(neutral_payload, temperature)
+    ionised_g = _macrostate_hartree(ionised_payload, temperature)
+    delta_g = (
+        (ionised_g - neutral_g) if chosen == "acid" else (neutral_g - ionised_g)
+    ) * HARTREE_TO_KCAL
+    pka = calibration.slope * delta_g + calibration.intercept
+
+    ordered = sorted(ionised_payload.members, key=lambda member: member.energy_hartree)
+    site = ordered[0].structure.smiles
+    within_rt = sum(
+        1
+        for member in ordered
+        if (member.energy_hartree - ordered[0].energy_hartree) * HARTREE_TO_KCAL
+        <= rt_kcal(temperature)
+    )
+    warnings = _pka_warnings(
+        chosen, site, pka, within_rt, medium, neutral_payload.effort, calibration
+    )
+    return MicrostatePka(
+        smiles=canonical,
+        branch=chosen,
+        pka=round(pka, 2),
+        uncertainty=calibration.uncertainty,
+        delta_g_kcal=round(delta_g, 3),
+        site_smiles=site,
+        method=neutral_payload.method,
+        solvent=medium,
+        temperature_k=temperature,
+        neutral=ensemble_from_members(
+            neutral_payload,
+            smiles=canonical,
+            search="conformers",
+            temperature_k=temperature,
             max_members=settings.crest_max_members,
         ),
-        cached,
+        ionised=ensemble_from_members(
+            ionised_payload,
+            smiles=canonical,
+            search=search,
+            temperature_k=temperature,
+            max_members=settings.crest_max_members,
+        ),
+        microstates_found=ionised_payload.total_found,
+        microstates_within_rt=within_rt,
+        warnings=warnings,
     )
+
+
+def _pka_warnings(
+    branch: Literal["acid", "base"],
+    site: str | None,
+    pka: float,
+    within_rt: int,
+    solvent: str | None,
+    effort: str,
+    calibration: PkaCalibration,
+) -> list[str]:
+    """Everything a reader has to know before using the number, gathered in one place.
+
+    Each of these is a case where the arithmetic succeeds and the answer means less than it looks
+    like it does — which is exactly the class that has to be *carried on the result* rather than
+    left in a docstring nobody reads at the point of use.
+    """
+    warnings: list[str] = []
+    if branch == "base":
+        aryl = _aryl_protonation(site)
+        if aryl is False:
+            warnings.append(
+                "the most stable protomer is an aliphatic nitrogen, which this calibration does "
+                "not cover: over 13 reference amines the computed basicity correlates with the "
+                "measured pKa at Spearman -0.17, so this number carries no ranking information. "
+                "The cause is the implicit solvent — aqueous aliphatic amine basicity is set by "
+                "the ammonium ion's hydrogen bonding to water, which a continuum cannot represent"
+            )
+        elif aryl is None:
+            warnings.append(
+                "the protonation site could not be read from the winning geometry, so whether it "
+                "falls in this calibration's aromatic/aryl-nitrogen domain is unknown"
+            )
+    if site is None:
+        warnings.append(
+            "the ionised microstate's constitution could not be perceived from its geometry, so "
+            "which proton this pKa is about is not reported"
+        )
+    elif branch == "acid" and _anionic_carbon(site):
+        warnings.append(
+            f"the most stable deprotomer is a carbanion ({site}): CREST ranks every site including "
+            "C-H, and this calibration was fitted on heteroatom acids only"
+        )
+    if not calibration.fitted_from < pka < calibration.fitted_to:
+        warnings.append(
+            f"pKa {pka:.1f} is outside the range this calibration was fitted over "
+            f"({calibration.fitted_from:g} to {calibration.fitted_to:g}), so the residual off the "
+            "end of the reference set is unknown rather than merely larger"
+        )
+    if within_rt > 1:
+        warnings.append(
+            f"{within_rt} ionised microstates lie within RT of the best, so this molecule has no "
+            "single conjugate base — the number is the macrostate's, and a site-resolved "
+            "(microscopic) pKa would be a different question"
+        )
+    if effort != calibration.fitted_effort:
+        warnings.append(
+            f"this ran at effort={effort!r} and the calibration was fitted at "
+            f"{calibration.fitted_effort!r}: a deeper search finds lower members on both sides, so "
+            "the ensembles are the better ones and the mapping to a pKa is still the quick one's"
+        )
+    if solvent != settings.pka_ensemble_solvent:
+        warnings.append(
+            f"both calibrations were fitted in {settings.pka_ensemble_solvent}; this ran in "
+            f"{solvent or 'gas phase'}, so the free energy is for that medium and the mapping to a "
+            "pKa is not"
+        )
+    return warnings
 
 
 # --- non-covalent complexes -----------------------------------------------------------------

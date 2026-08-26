@@ -18,8 +18,42 @@ makes that checkable rather than remembered.
 
 from typing import Literal
 
-from pydantic import Field
+from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings
+
+
+class PkaCalibration(BaseModel):
+    """The linear map from a computed deprotonation free energy to a pKa, and its fitted domain.
+
+    **One model rather than five flat fields, because these five numbers are one measurement.** A
+    slope moved without its intercept is a different calibration silently claiming to be this one,
+    and an uncertainty or a domain left behind describes a fit that no longer exists. Overridden
+    together as JSON (`CHEMCLAW_PKA_ENSEMBLE_ACID='{"slope": ..., "intercept": ...}'`) or not at
+    all.
+
+    Unlike the calculator knobs this module refuses to hold, this one is genuinely **this**
+    repository's: `connectors/calc/compose.py::microstate_pka` is the composite that reads it, and
+    the pKa it produces is arithmetic performed here over ensembles the server sampled. Nothing on
+    `Chemclaw3-mcp` can see it, and its own `predict_pka` calibration — a different pipeline, fitted
+    separately — is unaffected by anything set here.
+    """
+
+    slope: float
+    intercept: float
+    # One standard error of the fit, reported beside every prediction. A semiempirical pKa is for
+    # ranking related compounds; the number without its spread invites a decision it cannot carry.
+    uncertainty: float
+    # The experimental pKa span the fit was made over. A prediction outside it is extrapolation and
+    # says so — the map is linear and the physics behind it is not, so the residual off the end of
+    # the reference set is unknown rather than merely larger.
+    fitted_from: float
+    fitted_to: float
+    # The CREST search depth the reference set was measured at. It belongs to the fit for the same
+    # reason the solvent does: a deeper search finds lower members on both sides of the equilibrium,
+    # so it moves the free-energy difference the slope was fitted against. A caller who pays for a
+    # better ensemble gets the better ensemble and a warning that the *mapping* is the quick one's.
+    fitted_effort: Literal["quick", "normal", "extensive"] = "quick"
+
 
 
 class CalculatorSettings(BaseSettings):
@@ -57,6 +91,22 @@ class CalculatorSettings(BaseSettings):
     # ~19 minutes and there were 13 members, so refining all of them is the search again several
     # times over. The result carries `refined_population_covered` so a truncation says so.
     ensemble_refine_top_n: int = Field(default=5, ge=1)
+    # The solvent every CREST search behind a `microstate_pka` runs in. Water, because the pKa a
+    # chemist means is the aqueous one and both calibrations below were fitted there; a caller may
+    # ask for another medium and gets the ensembles and the free energy, with the calibration
+    # warned about rather than silently reapplied.
+    pka_ensemble_solvent: str = "water"
+    # **The two calibrations, each fitted through the exact pipeline that reads it** — a CREST
+    # conformer search of the neutral, a CREST `--deprotonate`/`--protonate` microstate search, and
+    # the macrostate free energy of each side. Refitting is a measurement, not a tuning: see
+    # `docs/decisions/D-2026-08-26-a-pka-is-a-macrostate-not-a-microstate.md` for the reference set
+    # and the statistics these numbers came from.
+    pka_ensemble_acid: PkaCalibration = PkaCalibration(
+        slope=0.0, intercept=0.0, uncertainty=0.0, fitted_from=0.0, fitted_to=0.0
+    )
+    pka_ensemble_base: PkaCalibration = PkaCalibration(
+        slope=0.0, intercept=0.0, uncertainty=0.0, fitted_from=0.0, fitted_to=0.0
+    )
     # How many distinct species one ranking may cover — tautomers, microstates, stereoisomers.
     # RDKit will happily enumerate twenty tautomers of a purine; each one is a separate CREST
     # search, so this is the difference between a question and a project.

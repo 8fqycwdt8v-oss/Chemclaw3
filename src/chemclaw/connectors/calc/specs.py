@@ -123,6 +123,32 @@ class EnsembleJobSpec(BaseModel):
     structure_id: str | None = Field(default=None, description=_STRUCTURE_ID_DESCRIPTION)
 
 
+class MicrostatePkaJobSpec(BaseModel):
+    """A durable pKa from two CREST searches (`microstate_pka`).
+
+    Its own job rather than a level on the existing `predict_pka` tool, because the cost class is
+    different by three orders of magnitude: that tool is a cached sub-second lookup and this is two
+    metadynamics searches, minutes to hours. A knob that turns a fast tool into an expensive one is
+    the shape that gets set by accident.
+    """
+
+    kind: Literal["microstate_pka"] = "microstate_pka"
+    smiles: str = Field(min_length=1)
+    branch: Literal["auto", "acid", "base"] = Field(
+        default="auto",
+        description=(
+            "Which equilibrium to compute. `auto` asks the acid question of anything carrying a "
+            "proton on N, O or S and the base question of a nitrogen compound without one. Name it "
+            "explicitly for a molecule that is both — an aminophenol has an acid pKa and a "
+            "conjugate-acid pKaH, and they are different numbers."
+        ),
+    )
+    solvent: str | None = None
+    temperature_k: float | None = None
+    effort: Literal["quick", "normal", "extensive"] = "quick"
+    structure_id: str | None = Field(default=None, description=_STRUCTURE_ID_DESCRIPTION)
+
+
 class ComplexJobSpec(BaseModel):
     """A durable non-covalent complex search over two molecules (xTB plan X11)."""
 
@@ -269,6 +295,7 @@ XtbJobSpec = Annotated[
     | SolventScreenJobSpec
     | ScanJobSpec
     | EnsembleJobSpec
+    | MicrostatePkaJobSpec
     | ComplexJobSpec
     | RefinedEnsembleJobSpec
     | EnsemblePropertyJobSpec

@@ -245,6 +245,20 @@ inherit it — so the fix is to give the fingerprint tables the same key, and it
 it happens.
 ## 3 — Work that is lost, dropped or invisible
 
+- [ ] **Every `calc` composite is dropped by the publish seam** — [M]. Measured while adding
+      `predict_pka_ensemble`: `projector_for("calc.compute_reaction_energy", "XtbJobResult")` is
+      `None`, and `XtbJobResult` is what `CalcJobWorkflow` stamps as `payload_kind`, so all nine of
+      this bundle's durable composites queue nothing. This is the *same* defect
+      `D-2026-08-26-a-route-is-not-a-shape` found and fixed for the jobs whose result model is the
+      shape — `qm` returns a `QMJobResult` and `bo` its own, both of which have projectors, while
+      `calc` returns an **envelope** carrying one populated optional field. So the ADR's rule holds
+      and this bundle sits outside its reach. The cached *primitives* underneath still publish
+      through the store hook, so the loss is the composite record — the reaction energy, the
+      ensemble, the ranking — not the parts. Fix: have the envelope name the shape it actually
+      carries (the populated field's model name) rather than its own class, which routes all nine at
+      once and needs no new projector for eight of them. `MicrostatePka` is the ninth and would need
+      one, so this row and that model land together.
+
 - [ ] **A decided approval hold can be reopened** — [M]. `agent/interaction_tools.py::start_approval`
       passes no `id_reuse_policy`, so temporalio's default lets a decided hold be started again under
       the same id. `REJECT_DUPLICATE` is **not** the fix and the archive records why: expiry is not
