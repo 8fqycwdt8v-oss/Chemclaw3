@@ -29,7 +29,7 @@ from chemclaw.core.errors import ChemclawError
 from chemclaw.core.tool_registry import tool
 from chemclaw.ingest.eln.records import RECORD_TYPE, default_record_store
 from chemclaw.ingest.sources.registry import active_retrieve_sources
-from chemclaw.kg.graph import build_graph
+from chemclaw.kg.graph import build_graph, note_in
 from chemclaw.kg.note import Note, resolves_outside_graph
 
 logger = logging.getLogger(__name__)
@@ -166,7 +166,7 @@ async def condense_protocols(protocol_refs: list[str]) -> str:
     protocols: list[Protocol] = []
     missing: list[str] = []
     for ref in refs:
-        note = graph.nodes[ref].get("note") if ref in graph else None
+        note = note_in(graph, ref)
         if isinstance(note, Note):
             protocols.append(
                 Protocol(

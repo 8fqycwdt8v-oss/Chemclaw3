@@ -24,11 +24,11 @@ exactly the hits that did become notes.
 
 import asyncio
 import logging
-from pathlib import Path
 from typing import Any
 
 from chemclaw.core.config import settings
 from chemclaw.core.embeddings import embed_texts
+from chemclaw.ingest.eln.records import default_record_store
 from chemclaw.ingest.eln.warehouse import sql
 from chemclaw.ingest.eln.warehouse.binding import (
     BindingError,
@@ -39,7 +39,7 @@ from chemclaw.ingest.eln.warehouse.binding import (
 from chemclaw.ingest.eln.warehouse.connect import open_warehouse
 from chemclaw.ingest.eln.warehouse.driver import Warehouse, WarehouseQueryError
 from chemclaw.ingest.eln.warehouse.expr import as_text
-from chemclaw.kg.note import note_id_for_reaction, note_relative_path
+from chemclaw.kg.note import require_note_slug
 from chemclaw.retrieval.evidence import EvidenceChunk
 from chemclaw.retrieval.vectors.base import VectorStore
 
@@ -124,7 +124,7 @@ class WarehouseVectorRetriever:
         try:
             # `_chunks` is inside the guard too: it stats the knowledge tree per row
             # (`suppress_ingested`), which is one more way this leg can fail on a bad day.
-            return self._chunks(await self._search(query, filters))
+            return await self._chunks(await self._search(query, filters))
         except BindingError:
             logger.exception(
                 "%s: misconfigured, returning no evidence — every query will do this until it is "
@@ -276,15 +276,17 @@ class WarehouseVectorRetriever:
             raise WarehouseQueryError(message)
         return {str(row[self._vector.key]) for row in rows if row.get(self._vector.key)}
 
-    def _chunks(self, rows: list[dict[str, Any]]) -> list[EvidenceChunk]:
-        """Turn ranked rows into evidence, dropping the ones that already became notes."""
+    async def _chunks(self, rows: list[dict[str, Any]]) -> list[EvidenceChunk]:
+        """Turn ranked rows into evidence, dropping the ones already ingested as records."""
         chunks: list[EvidenceChunk] = []
         suppressed = 0
+        keys = [k for row in rows if (k := str(row.get(self._vector.key, "")).strip())]
+        ingested = await _ingested_keys(keys) if self._vector.suppress_ingested else set()
         for row in rows:
             key = str(row.get(self._vector.key, "")).strip()
             if not key:
                 continue
-            if self._vector.suppress_ingested and _is_merged_note(key):
+            if key in ingested:
                 suppressed += 1
                 continue
             content = self._describe(row)
@@ -324,41 +326,44 @@ class WarehouseVectorRetriever:
         return "\n".join(parts)
 
 
-def _is_merged_note(key: str) -> bool:
-    """Whether this reaction already has a merged note in the knowledge graph.
+async def _ingested_keys(keys: list[str]) -> set[str]:
+    """Which of these warehouse keys the ELN corpus already holds as reaction records.
 
-    Asked per hit rather than by listing the directory, because the question is about a handful of
-    ids and the answer for each is one filename: the graph *is* the checkout, so this is a `stat`
-    per returned row instead of a full `readdir` of a corpus that grows without bound. On the chat
-    hot path that difference is the whole cost of the check. The layout it depends on comes from
-    `chemclaw.kg.note.note_relative_path` rather than being re-spelled here, so this cannot be the
-    one reader that disagrees with the PR-gate about where a note lands.
+    **This asked the filesystem until D-2026-08-25 made that answer permanently `False`.** It
+    stat'd `knowledge/reaction/reaction-<key>.md`, which is exactly the file ingestion stopped
+    writing when a transcription became a row — so `suppress_ingested` (default `True`) became a
+    no-op, a curated warehouse reaction reached the agent twice, and the duplicate read as
+    corroboration rather than as one source counted once. Nothing failed; the check simply stopped
+    checking, which is why the suite did not notice.
 
-    Deliberately not cached: a merge lands between two queries, and a stale answer would keep
-    surfacing a reaction a reviewer had just signed off on — the exact duplication this prevents.
+    One query for the whole result set rather than a lookup per row. The stat-per-row shape it
+    replaces was argued as cheaper than a `readdir` of an unbounded corpus, and that argument holds
+    for stats; it does not survive the move to a store, where per-row would be a round trip per hit
+    on the chat hot path. `known()` takes the ids as one parameter and the corpus size never enters.
 
-    The key is a warehouse-controlled string, so the joined path is confined to the graph before it
-    is stat'd. `reaction-../../../etc/passwd` used to build a path outside `knowledge_path`; the
-    stat is the only operation and nothing is read, but the answer it produces is the one that
-    decides whether a hit is *suppressed*, so a key escaping the graph could hide evidence by
-    landing on any file that happens to exist. Confinement rather than a slug pattern, because a
-    site's own row keys are its business — one containing a slash is unusual, not hostile, and it
-    still has no note, which is exactly what this returns for it.
+    Deliberately not cached: an ingest lands between two queries, and a stale answer would keep
+    surfacing a reaction the corpus had just absorbed — the exact duplication this prevents.
 
-    Guarded rather than bare, because `resolve()` is stricter than the `is_file()` it feeds:
-    `is_file()` answers `False` for a path with an embedded NUL or a symlink loop, while
-    `resolve()` raises `ValueError`/`RuntimeError` on both. Unguarded, one warehouse row with a NUL
-    in its key propagated out of `_chunks` to `retrieve()`'s backstop and returned `[]` for the
-    **entire leg** — discarding every other legitimate hit in that result set. That is the same
-    "hide evidence" outcome the confinement exists to prevent, reached from the other side, and the
-    confinement widened its trigger from one case to three. A key this system cannot resolve has no
-    note, which is what every one of these returns.
+    The path-confinement this function used to need is gone with the path. A key is now a bound
+    parameter in a SQL predicate, so a warehouse row spelling `reaction-../../../etc/passwd` selects
+    no row rather than stat'ing whatever that resolves to.
+
+    **A key that could not be a record id is filtered out before the query, not asked about.** That
+    is exactness rather than caution: a record id validates through `kg.note.require_note_slug`, so
+    a key the rule rejects has no record by construction and the store would answer `False` for it
+    anyway — while *asking* can be worse than useless. Postgres text cannot hold a NUL, so one
+    warehouse row with a NUL byte in its key would raise out of the driver, through `retrieve()`'s
+    backstop, and return `[]` for the **entire leg** — discarding every legitimate hit beside it.
+    That is the "hide evidence" outcome this check exists to prevent, reached from the other side;
+    it is the same defect the old path form had with `resolve()`, and it survives the move to a
+    store unless the filter does.
     """
-    root = Path(settings.knowledge_path).resolve()
-    try:
-        note = (root / note_relative_path("reaction", note_id_for_reaction(key))).resolve()
-        if not note.is_relative_to(root):
-            return False
-        return note.is_file()
-    except (OSError, ValueError, RuntimeError):
-        return False
+    askable = []
+    for key in keys:
+        try:
+            askable.append(require_note_slug(key))
+        except ValueError:
+            continue  # cannot be a record id, so it has no record — no query needed
+    if not askable:
+        return set()
+    return await default_record_store().known(askable)

@@ -97,7 +97,21 @@ async def promote_observations_activity() -> list[str]:
     judges the same evidence the threshold counted rather than taking the count on trust.
     """
     references: list[str] = []
-    for observation in await promotable():
+    promoted: list[frozenset[str]] = []
+    # **Best-supported first, so a superset is seen before the subset it supersedes.**
+    # `promotable()` orders by id, which is a hash and therefore arbitrary here.
+    for observation in sorted(await promotable(), key=lambda o: o.support, reverse=True):
+        evidence = frozenset(observation.evidence_note_ids)
+        if any(evidence <= larger for larger in promoted):
+            # A row this pass has already promoted rests on every note this one does, and more:
+            # `memory.ids`-anchored ids move when a cluster gains a member that sorts below the
+            # anchor, so the same finding can hold two `open` rows, both over threshold. This used
+            # to be unreachable because promotion ran inside every mining pass; D-2026-08-25 split
+            # them, so the guarantee has to be made here instead of inherited from the schedule.
+            # Retired rather than promoted: the corpus superseded it, and it is not a finding a
+            # reviewer should see twice.
+            await set_status(observation.id, "retired")
+            continue
         note = playbook_note(
             f"playbook-{observation.id.removeprefix('observation-')}",
             _promotion_summary(observation),
@@ -110,6 +124,7 @@ async def promote_observations_activity() -> list[str]:
         # submission failed: it would no longer be open, so nothing would ever retry it, and the
         # finding would be silently dropped at the one moment it had proved itself worth keeping.
         await set_status(observation.id, "promoted")
+        promoted.append(evidence)
     return references
 
 
