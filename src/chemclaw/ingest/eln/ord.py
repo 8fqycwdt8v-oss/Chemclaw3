@@ -169,10 +169,22 @@ class OrdReaction(BaseModel):
     # fingerprint: they are *outcomes*, not structure.
     purity_percent: float | None = Field(default=None, ge=0.0, le=100.0)
     impurities: list[Impurity] = Field(default_factory=list)
-    # How the experiment turned out, and (for a failure) why in the chemist's own words. Defaults
-    # to SUCCESS so every existing record and every source that does not report it keeps today's
-    # meaning — the field adds the ability to say "this failed", it does not reinterpret silence.
-    outcome_class: OutcomeClass = OutcomeClass.SUCCESS
+    # How the experiment turned out, and (for a failure) why in the chemist's own words.
+    #
+    # **`None` is "the source did not say", and that is not the same as success.** This defaulted to
+    # SUCCESS, on the argument that silence had always meant an ordinary run and reinterpreting it
+    # would retroactively weaken the corpus. That argument holds for a source with a status column
+    # that happened to be null. It does not hold for a source that cannot state an outcome at all —
+    # an ELN keeping its results in free text — where the default made **every** record assert a
+    # success nobody claimed, and did it silently, on the one field whose whole purpose is that a
+    # failure must not read as an ordinary run (`OutcomeClass`). A corpus of unread prose came out
+    # as a 100% success rate. See `D-2026-08-26-silence-is-not-a-successful-run`.
+    #
+    # `None` is deliberately not folded into `INCONCLUSIVE`: that value means the run carries no
+    # evidence about the chemistry, which is itself a statement somebody made. "Nobody has read the
+    # prose yet" is a different fact, and collapsing the two teaches the corpus something untrue —
+    # the same argument `OutcomeClass` already makes for keeping INCONCLUSIVE apart from FAILURE.
+    outcome_class: OutcomeClass | None = None
     failure_reason: str | None = None
 
     @model_validator(mode="after")

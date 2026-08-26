@@ -332,16 +332,16 @@ def _product_number(payload: dict[str, Any], field: str) -> float | None:
     return float(value) if value is not None else None
 
 
-def _outcome_class(payload: dict[str, Any]) -> OutcomeClass:
-    """Read the entry's outcome, defaulting to success (gap KNW-3).
+def _outcome_class(payload: dict[str, Any]) -> OutcomeClass | None:
+    """Read the entry's outcome, or `None` when the entry does not state one (gap KNW-3).
 
-    Defaulting to success preserves the meaning of every record written before the field existed —
-    silence has always meant "an ordinary run", and reinterpreting it as unknown would retroactively
-    weaken the whole corpus.
+    Silence is passed through as silence rather than read as success: this export format has an
+    `outcome` key or it does not, and an entry without one has told us nothing about how the run
+    turned out. See `OrdReaction.outcome_class` for why that is not the same as INCONCLUSIVE.
     """
     raw = payload.get("outcome")
     if raw is None:
-        return OutcomeClass.SUCCESS
+        return None
     try:
         return OutcomeClass(str(raw).strip().lower())
     except ValueError as exc:

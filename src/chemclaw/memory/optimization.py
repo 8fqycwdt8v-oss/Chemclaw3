@@ -100,28 +100,34 @@ def optimization_campaign_note(
     # disagreement would have mispaired every row silently rather than raising.
     series = progression([reactions[rid] for rid in campaign.reaction_ids])
     members = [reactions[step.reaction_id] for step in series.steps]
-    quality = _quality_columns(members)
-    headers = [
-        "Run",
-        "Performed",
-        "Temp (°C)",
-        "Time (h)",
-        "Yield (%)",
-        *(name for name, _ in quality),
-        "Changed vs previous",
+    pairs = list(zip(series.steps, members, strict=True))
+    # Every column but the two that are always answerable goes through `drop_empty_columns`, and
+    # that includes the three headline setpoints. They used to be hardcoded, on the assumption that
+    # an ELN always records a temperature, a time and a yield — true of a columnar source and false
+    # of one that keeps its conditions in prose, where all three render `—` on every row. That is
+    # the exact reading `drop_empty_columns` exists to prevent ("a column of dashes invites a reader
+    # to conclude the quantity was measured and found absent"), and the turn-time comparison in
+    # `agent.condense` has always applied it to the same three. Two tables built from one renderer
+    # disagreeing about which columns are real is the drift this module was extracted to stop.
+    columns = [("Run", [f"[[reaction-{step.reaction_id}]]" for step, _ in pairs])] + [
+        *drop_empty_columns(
+            [
+                ("Performed", [date_cell(step.performed_at) for step, _ in pairs]),
+                ("Temp (°C)", [cell(run.temperature_c) for _, run in pairs]),
+                ("Time (h)", [cell(run.time_h) for _, run in pairs]),
+                ("Yield (%)", [cell(run.yield_percent) for _, run in pairs]),
+                *_quality_columns(members),
+            ]
+        ),
+        # Never dropped: it always says something — a delta, "first run" or "unchanged (repeat)" —
+        # and it is the column carrying the development argument.
+        (
+            "Changed vs previous",
+            [changes_cell(step, first=index == 0) for index, (step, _) in enumerate(pairs)],
+        ),
     ]
-    rows = [
-        [
-            f"[[reaction-{step.reaction_id}]]",
-            date_cell(step.performed_at),
-            cell(run.temperature_c),
-            cell(run.time_h),
-            cell(run.yield_percent),
-            *(cells[index] for _, cells in quality),
-            changes_cell(step, first=index == 0),
-        ]
-        for index, (step, run) in enumerate(zip(series.steps, members, strict=True))
-    ]
+    headers = [name for name, _ in columns]
+    rows = [[cells[index] for _, cells in columns] for index in range(len(pairs))]
     body = (
         f"Optimization campaign: {len(members)} runs of the same transformation "
         f"(DRFP-similar), representative `{members[0].reaction_smiles()}`.\n\n"
@@ -164,8 +170,13 @@ def _quality_columns(members: list[OrdReaction]) -> list[tuple[str, list[str]]]:
     candidate survives is `comparison.drop_empty_columns`' rule — a column appears only if some run
     recorded it — which lives there because the turn-time digest needs the same rule over its own
     columns, and a second copy is how the two come to disagree about what `—` means.
+
+    **The rule is applied by the caller, over every column at once, not here.** This function used
+    to drop its own and hand back survivors, which was harmless only for as long as the setpoint
+    columns beside it were assumed always-present; once those go through the same filter, running it
+    twice is one filter too many to reason about. Candidates in, filtering out.
     """
-    candidates = [
+    return [
         ("Purity (%)", [cell(run.purity_percent) for run in members]),
         ("Major impurity", [_impurity_cell(run.major_impurity()) for run in members]),
         (
@@ -173,7 +184,6 @@ def _quality_columns(members: list[OrdReaction]) -> list[tuple[str, list[str]]]:
             [cell(imp.area_percent if (imp := run.major_impurity()) else None) for run in members],
         ),
     ]
-    return drop_empty_columns(candidates)
 
 
 def _impurity_cell(impurity: Impurity | None) -> str:

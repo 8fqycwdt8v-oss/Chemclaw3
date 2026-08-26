@@ -109,12 +109,18 @@ def record_from_ord_reaction(reaction: OrdReaction) -> ReactionRecord:
     )
 
 
-# The outcome classes worth writing down, spelled rather than derived from `.value`. `SUCCESS` is
-# absent on purpose — the field defaults to it on every record and every source that does not report
-# one, so writing it would turn "the ELN did not say" into an assertion that the run worked. Written
-# out because the frontmatter type is a `Literal`: a fourth `OutcomeClass` member does not silently
-# become a new frontmatter value, it fails to type-check here, which is where the decision belongs.
-_NON_DEFAULT_OUTCOMES: dict[OutcomeClass, Literal["failure", "inconclusive"]] = {
+# Every outcome a source can state, spelled rather than derived from `.value`. Written out because
+# the frontmatter type is a `Literal`: a fourth `OutcomeClass` member does not silently become a new
+# frontmatter value, it fails to type-check here, which is where the decision belongs.
+#
+# **`SUCCESS` is in the map now, and that is the point of the change beside it.** It used to be
+# omitted so that a record would not assert a success the ELN never claimed — necessary while the
+# field defaulted to SUCCESS, and the cost was that a run the chemist *did* record as successful was
+# indistinguishable in the frontmatter from one nobody had assessed. With `outcome_class` optional
+# (`D-2026-08-26-silence-is-not-a-successful-run`) silence is carried by `None` and a stated success
+# can be written as what it is.
+_STATED_OUTCOMES: dict[OutcomeClass, Literal["success", "failure", "inconclusive"]] = {
+    OutcomeClass.SUCCESS: "success",
     OutcomeClass.FAILURE: "failure",
     OutcomeClass.INCONCLUSIVE: "inconclusive",
 }
@@ -128,9 +134,9 @@ def _conditions(reaction: OrdReaction) -> ProcessConditions | None:
     about a run with recorded conditions at all. Same rule as `_quality_columns` dropping a column
     nothing filled.
 
-    `outcome_class` is written only when it is *not* the default. The field defaults to success on
-    every record and every source that does not report it, so writing it unconditionally would turn
-    "the ELN did not say" into an assertion that the run worked.
+    `outcome` is written when the source stated one and left `None` when it did not — the same
+    "absent means nobody wrote it down" rule as every other field here, now that `outcome_class`
+    can say that (`D-2026-08-26-silence-is-not-a-successful-run`).
     """
     impurity = reaction.major_impurity()
     conditions = ProcessConditions(
@@ -138,7 +144,9 @@ def _conditions(reaction: OrdReaction) -> ProcessConditions | None:
         time_h=reaction.time_h,
         yield_percent=reaction.yield_percent,
         purity_percent=reaction.purity_percent,
-        outcome=_NON_DEFAULT_OUTCOMES.get(reaction.outcome_class),
+        outcome=(
+            None if reaction.outcome_class is None else _STATED_OUTCOMES[reaction.outcome_class]
+        ),
         major_impurity=(impurity.name or impurity.smiles) if impurity else None,
         impurity_area_percent=impurity.area_percent if impurity else None,
     )
@@ -193,9 +201,12 @@ def _conditions_block(reaction: OrdReaction) -> str:
         conditions.append(f"purity: {reaction.purity_percent}%")
     if reaction.performed_at is not None:
         conditions.append(f"performed: {reaction.performed_at.isoformat()}")
-    if reaction.outcome_class is not OutcomeClass.SUCCESS:
+    if reaction.outcome_class in (OutcomeClass.FAILURE, OutcomeClass.INCONCLUSIVE):
         # Stated first-class in the body, not implied by a missing yield: a reader (and retrieval)
         # must be able to tell "this did not work" from "nobody recorded the number" (gap KNW-3).
+        # A stated success is deliberately not written here — the body lists what a chemist would
+        # read as notable, and the frontmatter carries the value for anything comparing runs. An
+        # *unstated* outcome writes nothing at all, exactly like an unrecorded temperature.
         outcome = f"outcome: {reaction.outcome_class.value}"
         if reaction.failure_reason:
             outcome += f" — {reaction.failure_reason}"

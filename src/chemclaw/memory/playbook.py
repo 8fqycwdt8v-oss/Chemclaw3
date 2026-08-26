@@ -61,6 +61,13 @@ def find_playbook_candidates(
     # A playbook is a rule worth *transferring*, so a failed or inconclusive run must not evidence
     # one (gap KNW-3). Without this filter a recurring failure across two projects would distil
     # into a recommendation — the exact inversion of what the record says.
+    #
+    # **A run whose outcome nobody stated is excluded by the same test, and that is deliberate.**
+    # Since `outcome_class` became optional (`D-2026-08-26-silence-is-not-a-successful-run`) an
+    # identity test against SUCCESS drops `None` for free. A playbook says "this works"; distilling
+    # one from runs nobody has assessed is a claim built on silence. The visible consequence is that
+    # a source recording no outcome distils nothing — which is the honest answer, and the reason the
+    # ADR names supplying the outcome as the thing such a site has to do.
     reactions = [r for r in reactions if r.outcome_class is OutcomeClass.SUCCESS]
     # Only *projected*, fingerprintable reactions can evidence cross-project recurrence, so
     # scope to those before clustering (a degenerate reaction is dropped by the fingerprinter).

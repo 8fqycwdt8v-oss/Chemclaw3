@@ -16,7 +16,7 @@ has to reach into core to add a source is evidence the seam does not work.
 import asyncio
 import os
 import textwrap
-from datetime import datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -28,19 +28,6 @@ from chemclaw.core.config import settings
 from chemclaw.ingest.eln.adapter import RawEntry
 from chemclaw.ingest.sources.base import DataSource, SourceSpec
 from chemclaw.retrieval.evidence import EvidenceChunk
-
-
-@pytest.fixture(autouse=True)
-def _fresh_discovery() -> Any:
-    """Drop the discovery cache around every test in this module.
-
-    `discovered()` is `@cache`d for production, where the layout is fixed for the process's life.
-    Tests move `data_sources_dir`, so a cache entry from a previous test would answer for the wrong
-    directory — and would do it silently, by returning a *plausible* set of sources.
-    """
-    registry.discovered.cache_clear()
-    yield
-    registry.discovered.cache_clear()
 
 
 def _write_source(directory: Path, name: str, body: str) -> None:
@@ -247,6 +234,7 @@ def test_manifest_config_reaches_the_adapter(
     This is what replaced the typed `data_source_specs` union: two ELN drops with different
     directories are two manifests, not two pydantic variants plus a branch in core.
     """
+    from chemclaw.ingest.eln.adapter import DatedIngest
     from chemclaw.ingest.eln.json_adapter import JsonExportAdapter
 
     manifests, drop = tmp_path / "manifests", tmp_path / "drop"
@@ -265,8 +253,13 @@ def test_manifest_config_reaches_the_adapter(
     monkeypatch.setattr(settings, "data_sources_dir", str(manifests))
 
     source = registry.make_data_source("eln-json-staging")
-    assert isinstance(source.ingest, JsonExportAdapter)
-    assert source.ingest._dir == drop  # the manifest's dir, not the global `eln_export_dir`
+    # The registry hands back the adapter inside the seam's normalisation (`DatedIngest`), so the
+    # config assertion goes through `.inner`. The wrapper is asserted too, not just unwrapped:
+    # a normalisation that silently stopped being applied is the failure it exists to prevent.
+    assert isinstance(source.ingest, DatedIngest)
+    assert isinstance(source.ingest.inner, JsonExportAdapter)
+    # The manifest's dir, not the global `eln_export_dir`.
+    assert source.ingest.inner._dir == drop
 
 
 def test_a_config_key_the_adapter_rejects_names_both_sides(
@@ -363,11 +356,13 @@ def test_an_earlier_dir_overrides_a_shipped_source(
 
 def test_rehosted_eln_source_carries_provenance() -> None:
     """The re-hosted ELN source rides the seam; its adapter is the existing one (F7-T4)."""
+    from chemclaw.ingest.eln.adapter import DatedIngest
     from chemclaw.ingest.eln.json_adapter import JsonExportAdapter
 
     source = registry.make_data_source("eln-json")
     assert source.name == "eln-json"
-    assert isinstance(source.ingest, JsonExportAdapter)  # the existing adapter, unchanged
+    assert isinstance(source.ingest, DatedIngest)  # inside the seam's normalisation
+    assert isinstance(source.ingest.inner, JsonExportAdapter)  # the adapter itself, unchanged
     assert source.retrieve is None  # ELN is ingest-only; retrieval is the graph source's job
 
 
@@ -397,3 +392,80 @@ def test_a_config_that_shadows_the_source_name_is_refused(
     monkeypatch.setattr(settings, "data_sources_dir", str(tmp_path))
     with pytest.raises(registry.DataSourceError, match="`config:` block"):
         registry.discovered()
+
+
+def test_the_seam_dates_a_record_the_adapter_left_undated() -> None:
+    """`performed_at` falls back to the entry timestamp every entry is required to carry.
+
+    A timeline is the whole of "where did development start and what changed next":
+    `memory.progression` orders on `performed_at`, and `Progression.is_timeline()` will not
+    narrate a trajectory without it. A source with no experiment date therefore produces a
+    corpus that answers that question with "this is a stable id listing, not a timeline" — honestly,
+    and completely — while `RawEntry.created_at` sits in every one of those rows, required, because
+    the sync watermark cannot advance without it (D-2026-08-26-silence-is-not-a-successful-run).
+
+    Asserted in both directions, because a floor that overwrote what an adapter knew would be worse
+    than the gap: an entry timestamp is when the record was *written*, and a chemist-entered
+    experiment date is the better fact wherever a source has one.
+    """
+    from chemclaw.ingest.eln.adapter import DatedIngest
+    from chemclaw.ingest.eln.ord import Component, OrdReaction, Role
+
+    class _Adapter:
+        """Maps a record dated only when the entry payload says so — a bound column, in effect."""
+
+        async def fetch_new_entries(self, since: datetime) -> list[RawEntry]:
+            return []
+
+        def map_to_ord(self, raw: RawEntry) -> OrdReaction:
+            return OrdReaction(
+                reaction_id=raw.entry_id,
+                provenance="test",
+                inputs=[Component(smiles="CC", role=Role.REACTANT)],
+                outcomes=[Component(smiles="CCO", role=Role.PRODUCT)],
+                performed_at=raw.payload.get("run_on"),
+            )
+
+    written = datetime(2026, 5, 4, 9, 0, tzinfo=UTC)
+    seam = DatedIngest(_Adapter())
+
+    undated = RawEntry(entry_id="E1", created_at=written, payload={})
+    assert _Adapter().map_to_ord(undated).performed_at is None, "the adapter alone has no date"
+    assert seam.map_to_ord(undated).performed_at == date(2026, 5, 4)
+
+    stated = RawEntry(entry_id="E2", created_at=written, payload={"run_on": date(2026, 4, 1)})
+    assert seam.map_to_ord(stated).performed_at == date(2026, 4, 1), "the adapter's date wins"
+
+
+def test_both_ingest_readers_get_the_same_normalisation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The sync and the corpus miner build through one construction point, so a rule reaches both.
+
+    `map_to_ord` has six call sites and no shared downstream — the durable sync validates, and
+    `durable.memory_jobs.read_corpus`, which builds the optimization-campaign note this whole
+    question asks for, does not. A normalisation put in either caller silently misses the other,
+    which is the shape of the defect it exists to fix, so it goes at the registry and both entry
+    points are asserted to carry it.
+    """
+    from chemclaw.ingest.eln.adapter import DatedIngest
+
+    manifests = tmp_path / "manifests"
+    _write_source(
+        manifests,
+        "eln-json-two-readers",
+        """\
+        name: eln-json-two-readers
+        description: A JSON ELN drop reached through both registry entry points.
+        ingest: chemclaw.ingest.eln.json_adapter:JsonExportAdapter
+        """,
+    )
+    monkeypatch.setattr(settings, "data_sources_dir", str(manifests))
+    monkeypatch.setattr(settings, "data_sources", "eln-json-two-readers")
+
+    by_name = registry.make_data_source("eln-json-two-readers").ingest
+    active = registry.active_ingest_sources()
+    assert isinstance(by_name, DatedIngest), "make_data_source: the durable sync's entry point"
+    assert [type(half) for half in active] == [DatedIngest], (
+        "active_ingest_sources: the corpus miner's entry point, and the one that validates nothing"
+    )

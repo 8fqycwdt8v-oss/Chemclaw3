@@ -500,11 +500,14 @@ def test_a_note_about_no_recorded_run_carries_no_conditions_block() -> None:
     assert record_from_ord_reaction(reaction).conditions is None
 
 
-def test_a_successful_run_does_not_assert_its_own_success() -> None:
-    """`outcome_class` defaults to success on every source that does not report one.
+def test_the_frontmatter_tells_three_outcomes_apart() -> None:
+    """Stated success, stated failure and "nobody said" are three facts, and the record keeps them.
 
-    Writing it unconditionally would turn "the ELN did not say" into a claim that the run worked —
-    and a failure that reads as an ordinary run is the one row in a comparison nobody may misread.
+    This used to be two: `outcome_class` defaulted to SUCCESS, so the renderer had to omit success
+    to avoid turning "the ELN did not say" into a claim that the run worked — which meant a run a
+    chemist *did* record as successful was indistinguishable in the frontmatter from one nobody had
+    assessed. `D-2026-08-26-silence-is-not-a-successful-run` gives silence its own value, so both
+    can now be written as what they are.
     """
 
     def _run(**extra: Any) -> ProcessConditions:
@@ -520,7 +523,8 @@ def test_a_successful_run_does_not_assert_its_own_success() -> None:
         assert conditions is not None
         return conditions
 
-    assert _run().outcome is None
+    assert _run().outcome is None, "unstated stays unstated"
+    assert _run(outcome_class=OutcomeClass.SUCCESS).outcome == "success"
     failed = _run(outcome_class=OutcomeClass.FAILURE, failure_reason="decomposed on scale")
     assert failed.outcome == "failure"
 

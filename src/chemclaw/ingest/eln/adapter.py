@@ -146,3 +146,60 @@ class ElnAdapter(Protocol):
     def map_to_ord(self, raw: RawEntry) -> OrdReaction:
         """Map one raw entry to a canonical `OrdReaction` (the ELN-specific step)."""
         ...
+
+
+class DatedIngest:
+    """An `ElnAdapter` that carries the entry's own timestamp onto a record with no date.
+
+    **Why this is a floor and not a duplicate.** `performed_at` is what makes a series a timeline:
+    `memory.progression` orders on it, and `Progression.is_timeline()` refuses to narrate a
+    trajectory without it, so a corpus that loses the date loses the whole "what was tried, in what
+    order" question — honestly, but completely. Both file-drop adapters already map
+    `raw.created_at.date()` onto the record and are unaffected by this wrapper. The warehouse
+    adapter maps `performed_at` from its own bound column and has no fallback, so a site whose ELN
+    keeps its conditions in prose — no experiment-date column to bind — produces an entire corpus of
+    undated records while `RawEntry.created_at` sits in every one of them, **required**, because the
+    sync watermark cannot advance without it.
+
+    So the rule belongs to the seam rather than to any adapter: an adapter *may* know better than
+    the entry timestamp and its value always wins; when it does not, the entry's own time is a
+    defensible ordering and nothing is a better one.
+
+    **What the date then means, and why the note must not overclaim.** A record-creation time is
+    when the entry was written, not necessarily when the run was performed — usually the same day,
+    occasionally not. That is a weaker fact than a chemist-entered experiment date, and it is
+    exactly the weakening `ordering_caveat` already exists to describe. It does not license
+    causality either: `memory.progression`'s rule that a date proves sequence and never response is
+    untouched, and is if anything more load-bearing here.
+    """
+
+    def __init__(self, inner: ElnAdapter) -> None:
+        """Wrap `inner`, whose mapping decisions are otherwise untouched."""
+        self._inner = inner
+
+    @property
+    def inner(self) -> ElnAdapter:
+        """The adapter this wraps.
+
+        Public because the wrapper sits between the registry and every caller that asks what a
+        source is: without it, "which adapter did this manifest build?" is unanswerable from outside
+        and a test can only reach it through a private name. Read-only — nothing swaps an adapter
+        out from under a built source.
+        """
+        return self._inner
+
+    async def fetch_new_entries(self, since: datetime) -> list[RawEntry]:
+        """Delegate unchanged — dating is purely a mapping concern."""
+        return await self._inner.fetch_new_entries(since)
+
+    def map_to_ord(self, raw: RawEntry) -> OrdReaction:
+        """Map through the wrapped adapter, then date the record if it came back undated."""
+        reaction = self._inner.map_to_ord(raw)
+        if reaction.performed_at is not None:
+            return reaction
+        # `model_copy` rather than a mutation: the mapped reaction is the adapter's answer, and a
+        # wrapper that edits it in place makes "what did the adapter return" unanswerable in a
+        # debugger and in a test. Validation is deliberately not re-run — the only field changed is
+        # a date the model already accepts as optional, and re-validating would re-do the structural
+        # checks `sync_entries` runs immediately afterwards anyway.
+        return reaction.model_copy(update={"performed_at": raw.created_at.date()})
