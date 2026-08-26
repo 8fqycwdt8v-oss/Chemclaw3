@@ -31,6 +31,7 @@ from typing import Any
 from chemclaw.core.chem import canonical_smiles, compound_id
 from chemclaw.publish.properties import to_canonical
 from chemclaw.publish.record import (
+    CandidateFact,
     Conditions,
     ConformerFact,
     FlagFact,
@@ -464,6 +465,342 @@ def _ensemble(payload: dict[str, Any]) -> tuple[Subject, Conditions, TheoryLevel
         _text("conformer_treatment", payload.get("treatment")),
     )
     return subject, conditions, level, {"properties": facts, "conformers": conformers}
+
+
+def _refined_ensemble(
+    payload: dict[str, Any],
+) -> tuple[Subject, Conditions, TheoryLevel, dict[str, Any]]:
+    """A conformer ensemble re-weighted by free energy over its top N members.
+
+    Shares `_ensemble`'s subject and conformer rows, and deliberately does **not** share its
+    property names. `RefinedEnsemble` renamed its own entropy and correction to `refined_*` because
+    they are computed over the refined subset and renormalized within it — the ensemble-wide names
+    mean something else one model away — and publishing them under the shared names would put two
+    meanings in one column, which is the exact confusion the model's own comment exists to prevent.
+
+    **`energy_hartree` carries the electronic energy, not the Gibbs energy**, even though the
+    ranking here is by G. `ConformerFact` holds one absolute energy, and the electronic one is the
+    value that means the same thing in both ensemble shapes — so "the same conformer, E-weighted
+    and G-weighted" is a comparison on one column rather than on two that silently differ. The free
+    energy is not lost: it is what `relative_kcal` and `population` express, and
+    `TheoryLevel.treatment` (`free-energy-weighted-top-n`) is what says so. The per-member
+    *absolute* G is the one thing this does not publish, and that is a stated omission rather than
+    an oversight — there is no second absolute-energy column to put it in.
+    """
+    smiles = payload.get("smiles")
+    subject = Subject(kind="ensemble", members=[_molecule(smiles)], label=smiles or "")
+    conditions = Conditions(
+        solvent=canonical_solvent(payload.get("solvent")),
+        solvent_model="alpb" if payload.get("solvent") else "",
+        temperature_k=payload.get("temperature_k"),
+    )
+    level = TheoryLevel(
+        method=payload.get("method") or "unknown",
+        family="semiempirical",
+        engine="crest",
+        treatment=payload.get("treatment") or "",
+    )
+    conformers: list[ConformerFact] = []
+    for index, member in enumerate(payload.get("conformers") or []):
+        structure_id = (member.get("structure") or {}).get("structure_id") or ""
+        if not structure_id:
+            logger.warning("publish: refined member %d has no structure_id; skipped", index)
+            continue
+        conformers.append(
+            ConformerFact(
+                ordinal=index,
+                structure_id=structure_id,
+                energy_hartree=member.get("electronic_energy_hartree"),
+                relative_kcal=member.get("relative_kcal"),
+                population=member.get("population"),
+                degeneracy=int(member.get("degeneracy", 1)),
+            )
+        )
+    facts = _kept(
+        _fact("total_conformers", payload.get("total_found"), ""),
+        _fact("refined_conformers", payload.get("refined_count"), ""),
+        _fact("refined_population_covered", payload.get("refined_population_covered"), ""),
+        _fact(
+            "refined_conformational_entropy",
+            payload.get("refined_conformational_entropy_cal_per_mol_k"),
+            "cal/(mol*K)",
+        ),
+        _fact(
+            "refined_ensemble_correction",
+            payload.get("refined_ensemble_correction_kcal"),
+            "kcal/mol",
+        ),
+        _text("conformer_treatment", payload.get("treatment")),
+    )
+    return (
+        subject,
+        conditions,
+        level,
+        {
+            "properties": facts,
+            "conformers": conformers,
+            "flags": _warnings(list(payload.get("warnings") or [])),
+        },
+    )
+
+
+# Which registered property an ensemble average is *of*, by the name the job was asked for.
+# `EnsembleProperty.property_name` is the tool's own vocabulary (`EnsembleProperties`), and the
+# registry's is the cross-calculator one — a scalar average has to land on the same name a single
+# -point calculation of it lands on, or "the dipole of this molecule" is two columns depending on
+# whether an ensemble was averaged. The two per-atom entries map to a *site* property instead,
+# which is why this table names the scope as well as the property.
+_AVERAGED_PROPERTIES: dict[str, tuple[str, str, str]] = {
+    # asked-for name -> (registered property, unit, scope)
+    "dipole_debye": ("dipole", "debye", "calculation"),
+    "homo_ev": ("homo", "ev", "calculation"),
+    "lumo_ev": ("lumo", "ev", "calculation"),
+    "gap_ev": ("homo_lumo_gap", "ev", "calculation"),
+    "charges": ("partial_charge", "e", "site"),
+    "fukui": ("fukui_zero", "", "site"),
+}
+
+
+def _ensemble_property(
+    payload: dict[str, Any],
+) -> tuple[Subject, Conditions, TheoryLevel, dict[str, Any]]:
+    """One property, Boltzmann-averaged over a conformer ensemble.
+
+    **The average lands on the same registered name a single-point calculation of it lands on**, so
+    "the dipole of this molecule" is one column whether or not an ensemble was averaged;
+    `TheoryLevel.treatment` and `members_averaged` are what say an average was taken. The
+    alternative — `dipole_averaged` beside `dipole` — is the registry split
+    `test_no_two_properties_of_one_dimension_land_on_the_same_subject` exists to catch.
+
+    **The spread is not published, and that is a decision.** `WeightedValue` carries min, max and
+    spread, and each is in the averaged property's *own* unit — debye here, eV there, dimensionless
+    for a Fukui index. One registered `property_spread` would therefore have no canonical unit, and
+    a per-property companion name for each is the registry bloat this table exists to avoid. What
+    is published is the mean, which is the value the job was asked for; `population_covered` says
+    how much of the ensemble stands behind it.
+    """
+    smiles = payload.get("smiles")
+    subject = Subject(kind="ensemble", members=[_molecule(smiles)], label=smiles or "")
+    conditions = Conditions(
+        solvent=canonical_solvent(payload.get("solvent")),
+        solvent_model="alpb" if payload.get("solvent") else "",
+        temperature_k=payload.get("temperature_k"),
+    )
+    level = TheoryLevel(
+        method=payload.get("method") or "unknown",
+        family="semiempirical",
+        engine="xtb",
+        treatment="boltzmann-averaged",
+    )
+    asked = str(payload.get("property_name") or "")
+    mapped = _AVERAGED_PROPERTIES.get(asked)
+    if mapped is None:
+        # A property this release cannot name is dropped rather than stored under the tool's own
+        # vocabulary: an unregistered name is refused at write time anyway, and storing it under a
+        # made-up one would put a value nobody can find beside values they can.
+        raise ProjectionError(
+            f"ensemble average of {asked!r} has no registered property; add it to "
+            "`_AVERAGED_PROPERTIES` and to `publish.properties`"
+        )
+    name, unit, scope = mapped
+    facts = _kept(
+        _fact("members_averaged", payload.get("members_averaged"), ""),
+        _fact("total_conformers", payload.get("total_found"), ""),
+        _fact("population_covered", payload.get("population_covered"), ""),
+    )
+    sites: list[SiteFact] = []
+    value = payload.get("value") or {}
+    if scope == "calculation" and value.get("mean") is not None:
+        fact = _fact(name, value["mean"], unit)
+        if fact is not None:
+            facts.append(fact)
+    for atom in payload.get("per_atom") or []:
+        mean = (atom.get("value") or {}).get("mean")
+        if mean is None:
+            continue
+        sites.append(
+            SiteFact(
+                atom_i=int(atom.get("index", 0)),
+                element=str(atom.get("element") or ""),
+                property=name,
+                value=to_canonical(name, float(mean), unit),
+            )
+        )
+    return (
+        subject,
+        conditions,
+        level,
+        {
+            "properties": facts,
+            "sites": sites,
+            "flags": _warnings(list(payload.get("warnings") or [])),
+        },
+    )
+
+
+def _species_distribution(
+    payload: dict[str, Any],
+) -> tuple[Subject, Conditions, TheoryLevel, dict[str, Any]]:
+    """A ranked population over related species: tautomers, microstates, stereoisomers.
+
+    **The species are candidates, not subject members.** A subject's members are what the
+    calculation was *about* — for a reaction, its reactants and products — while these are what it
+    *produced*: an open-ended ranked set whose length is the enumeration's, not the question's.
+    `CandidateFact` is the shape for exactly that ("one ranked output ... what does this suggest,
+    and how strongly"), and this is its first producer; the table it writes has existed since the
+    schema shipped with nothing to fill it.
+
+    The subject is therefore the enumeration itself, as a `system` — there is no single molecule
+    this is about, and calling it one would make the tautomer set of a compound collide with the
+    compound.
+    """
+    species = list(payload.get("species") or [])
+    if not species:
+        raise ProjectionError("a species distribution with no species has nothing to publish")
+    members = [
+        SubjectMember(
+            ordinal=index,
+            role="subject",
+            compound_id=_identify(item.get("smiles"))[0],
+            smiles=_identify(item.get("smiles"))[1],
+            structure_id=str(item.get("structure_id") or ""),
+        )
+        for index, item in enumerate(species)
+    ]
+    subject = Subject(kind="system", members=members, label=str(payload.get("kind") or ""))
+    conditions = Conditions(
+        solvent=canonical_solvent(payload.get("solvent")),
+        solvent_model="alpb" if payload.get("solvent") else "",
+        temperature_k=payload.get("temperature_k"),
+    )
+    level = TheoryLevel(
+        method=payload.get("method") or "unknown",
+        family="semiempirical",
+        engine="xtb",
+        treatment="boltzmann-populated",
+    )
+    uncertainty = payload.get("uncertainty_kcal")
+    candidates = [
+        CandidateFact(
+            ordinal=index,
+            kind="compound",
+            smiles=_identify(item.get("smiles"))[1],
+            compound_id=_identify(item.get("smiles"))[0],
+            score=item.get("population"),
+            score_property="population",
+            # The tool's own extra fields, verbatim and never a predicate — the relative energy
+            # that produced the population, the label a chemist reads, and how many conformers
+            # stood behind each species.
+            detail={
+                "relative_kcal": item.get("relative_kcal"),
+                "label": item.get("label") or "",
+                "structure_id": item.get("structure_id") or "",
+                "conformers_found": item.get("conformers_found", 0),
+                "electronic_energy_hartree": item.get("electronic_energy_hartree"),
+                "gibbs_free_energy_hartree": item.get("gibbs_free_energy_hartree"),
+            },
+        )
+        for index, item in enumerate(species)
+    ]
+    facts = _kept(
+        _fact("species_enumerated", payload.get("enumerated"), ""),
+        _text("distribution_kind", payload.get("kind")),
+        _text("reaction_level", payload.get("level")),
+        _fact(
+            "relative_energy",
+            species[0].get("relative_kcal"),
+            "kcal/mol",
+            uncertainty=uncertainty,
+            uncertainty_kind="reported" if uncertainty is not None else "",
+        ),
+    )
+    return (
+        subject,
+        conditions,
+        level,
+        {
+            "properties": facts,
+            "candidates": candidates,
+            "flags": _warnings(list(payload.get("warnings") or [])),
+        },
+    )
+
+
+def _bond_survey(
+    payload: dict[str, Any],
+) -> tuple[Subject, Conditions, TheoryLevel, dict[str, Any]]:
+    """Bond dissociation energies across one molecule's breakable bonds.
+
+    **Each bond is a `SiteFact` pair, which is what that shape is for** — `atom_j >= 0` makes it a
+    pair rather than a single site, the same representation a bond order uses. The alternative, a
+    `PropertyFact` per bond with a synthetic member ordinal, is the cardinality mistake `SiteFact`'s
+    own docstring argues against: a 33-atom molecule contributes one calculation-scope energy and
+    dozens of bonds, and folding those into the scalar table builds the index that answers "pKa
+    between 4 and 6" over rows that are overwhelmingly bond energies.
+
+    The weakest bond is published as a calculation-scope fact as well as being flagged on its site
+    row, because "which bond breaks first" is the question this survey exists to answer and it
+    should not require a window function over the site table to ask.
+    """
+    smiles = payload.get("smiles")
+    if not smiles:
+        raise ProjectionError("a bond survey with no subject SMILES has nothing to publish")
+    subject = Subject(kind="molecule", members=[_molecule(smiles)], label=str(smiles))
+    conditions = Conditions(
+        solvent=canonical_solvent(payload.get("solvent")),
+        solvent_model="alpb" if payload.get("solvent") else "",
+        temperature_k=payload.get("temperature_k"),
+    )
+    level = TheoryLevel(
+        method=payload.get("method") or "unknown",
+        family="semiempirical",
+        engine="xtb",
+        treatment=str(payload.get("mode") or ""),
+    )
+    sites: list[SiteFact] = []
+    weakest: dict[str, Any] | None = None
+    for bond in payload.get("bonds") or []:
+        atoms = list(bond.get("atoms") or [])
+        energy = bond.get("dissociation_energy_kcal")
+        if len(atoms) != 2 or energy is None:
+            # A bond that names anything other than its two atoms, or carries no energy, cannot be
+            # addressed or ranked. Skipped loudly rather than stored unusable.
+            logger.warning("publish: bond %r has no atom pair or no energy; skipped", atoms)
+            continue
+        sites.append(
+            SiteFact(
+                atom_i=int(atoms[0]),
+                atom_j=int(atoms[1]),
+                element=str(bond.get("bond") or ""),
+                property="bond_dissociation_energy",
+                value=to_canonical("bond_dissociation_energy", float(energy), "kcal/mol"),
+            )
+        )
+        if bond.get("is_weakest"):
+            weakest = bond
+    uncertainty = payload.get("uncertainty_kcal")
+    facts = _kept(
+        _fact("bonds_considered", payload.get("considered"), ""),
+        _text("dissociation_mode", payload.get("mode")),
+        _text("weakest_bond", None if weakest is None else str(weakest.get("bond") or "")),
+        _fact(
+            "weakest_bond_dissociation_energy",
+            None if weakest is None else weakest.get("dissociation_energy_kcal"),
+            "kcal/mol",
+            uncertainty=uncertainty,
+            uncertainty_kind="reported" if uncertainty is not None else "",
+        ),
+    )
+    return (
+        subject,
+        conditions,
+        level,
+        {
+            "properties": facts,
+            "sites": sites,
+            "flags": _warnings(list(payload.get("warnings") or [])),
+        },
+    )
 
 
 def _interaction(
@@ -934,6 +1271,10 @@ PAYLOAD_PROJECTORS: dict[str, _Projector] = {
     "ReactionEnergyResult": _reaction,
     "SolventComparisonResult": _solvent_screen,
     "ConformerEnsemble": _ensemble,
+    "RefinedEnsemble": _refined_ensemble,
+    "EnsembleProperty": _ensemble_property,
+    "SpeciesDistribution": _species_distribution,
+    "BondDissociationSurvey": _bond_survey,
     "EnsemblePayload": _ensemble,
     "InteractionResult": _interaction,
     "ScanResult": _scan,
