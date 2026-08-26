@@ -207,12 +207,13 @@ async def condense_protocols(protocol_refs: list[str]) -> str:
     if missing:
         # Said out loud rather than dropped: a comparison silently missing a protocol the caller
         # asked for reads as a complete answer about a smaller set.
-        result = result.model_copy(
-            update={
-                "complete": False,
-                "degraded": [*result.degraded, *missing],
-            }
-        )
+        #
+        # **On `unresolved` rather than appended to `degraded`.** These refs have no row: they were
+        # never resolved, so nothing about them is in the table. `degraded` means the opposite —
+        # the protocol is a row and only its prose is missing — and merging the two made the
+        # rendered payload tell the model that a reference nobody could resolve had "recorded
+        # figures above", and that a two-row comparison covered all three references it was given.
+        result = result.model_copy(update={"complete": False, "unresolved": missing})
     # **Rendered here, not handed over as a model.** A pydantic return is stringified by
     # `langchain_core.tools.base._stringify`, which falls back to `str()` — pydantic's repr — for
     # anything `json.dumps` cannot take. Returning the string means the payload measured and the
