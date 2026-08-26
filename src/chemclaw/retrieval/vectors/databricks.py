@@ -320,10 +320,25 @@ def _rows(response: Any) -> list[dict[str, Any]]:
             column.get("name") for column in (response.get("manifest") or {}).get("columns", [])
         ]
         if not names:
+            # The likelier client-version change of the two, and until now the quietest: an envelope
+            # this adapter recognises whose *column* metadata moved. `data_array` cannot be read
+            # without names, and an empty result here is indistinguishable from an empty corpus.
+            logger.warning(
+                "databricks returned %d row(s) with no readable column names; the manifest shape "
+                "has moved and `_rows` in this module is what needs teaching",
+                len(data),
+            )
             return []
         return [dict(zip(names, values, strict=False)) for values in data]
     if isinstance(response, list):
-        return [dict(row) for row in response if isinstance(row, dict)]
+        rows = [dict(row) for row in response if isinstance(row, dict)]
+        if len(rows) != len(response):
+            logger.warning(
+                "databricks returned %d entries of which %d were not mappings; dropping them",
+                len(response),
+                len(response) - len(rows),
+            )
+        return rows
     # Never silently: tolerant parsing is here to absorb a client-version change, and returning an
     # empty list without a word would turn one into "this corpus has no matches" on every search —
     # the failure the tolerance exists to prevent, inverted. `qdrant._matches` warns per dropped
