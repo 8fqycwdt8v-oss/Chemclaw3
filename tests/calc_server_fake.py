@@ -238,7 +238,11 @@ class FakeCalcServer:
     """One MCP session's worth of calculation server, counting every tool call it answers."""
 
     def __init__(
-        self, *, saddle_first: bool = False, torsion: tuple[int, int, int, int] | None = None
+        self,
+        *,
+        saddle_first: bool = False,
+        torsion: tuple[int, int, int, int] | None = None,
+        solvent_shifts: dict[tuple[str, str], float] | None = None,
     ) -> None:
         """Start with no calls recorded.
 
@@ -251,13 +255,22 @@ class FakeCalcServer:
         here models a potential energy surface at all, and this one does for a reason rather than
         for realism — the rotational profile's whole claim is that releasing a scan point's
         constraint moves it to a different geometry with a different energy. A fake whose relaxation
-        returns its input unchanged cannot express that claim being false, and a fake that cannot
-        express the failure is not evidence
+        returns its input unchanged cannot express that claim being false.
+
+        `solvent_shifts` maps `(smiles, solvent)` to a shift in Hartree added to that species'
+        relaxed energy in that medium, so a fan-out over solvents can be made to *reorder* rather
+        than only to shift. Without it every medium returns the same energy — the fake's energy is
+        a function of atom count alone — and `dominance_changes`, the one finding a solvent screen
+        over species exists to report, could never be observed.
+
+        The two arrived on branches that did not know about each other and reach the same
+        conclusion: a fake that cannot express the failure is not evidence
         (`D-2026-08-26-a-tool-result-is-not-a-model-on-the-wire`).
         """
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self._saddle_first = saddle_first
         self._torsion = torsion
+        self._solvent_shifts = dict(solvent_shifts or {})
         self.overrides: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {}
         # Where the composites' geometries land once `install` has wired it in. On the fake rather
         # than built by `install`, so a test can read it back — resolving an id a result reported
@@ -373,6 +386,7 @@ class FakeCalcServer:
         return result
 
     def _optimization(self, structure: dict[str, Any], solvent: str | None) -> dict[str, Any]:
+        shift = self._solvent_shifts.get((structure.get("smiles") or "", solvent or ""), 0.0)
         return {
             "calc_version": FAKE_VERSION,
             "calc_key": f"xtb.opt@{FAKE_VERSION}:{_structure_id(structure)}:0",
@@ -382,8 +396,8 @@ class FakeCalcServer:
             "method": "GFN2-xTB",
             "engine": "tblite",
             "solvent": solvent,
-            "initial_energy_hartree": -1.0 * len(structure["elements"]) + 0.01,
-            "energy_hartree": -1.0 * len(structure["elements"]),
+            "initial_energy_hartree": -1.0 * len(structure["elements"]) + shift + 0.01,
+            "energy_hartree": -1.0 * len(structure["elements"]) + shift,
             "relaxation_kcal": 6.3,
             "steps": 4,
             "max_gradient": 1e-5,

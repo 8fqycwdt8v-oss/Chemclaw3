@@ -55,6 +55,7 @@ from chemclaw.connectors.calc.specs import (
     ScanJobSpec,
     SolventScreenJobSpec,
     SpeciesRankingJobSpec,
+    SpeciesSolventScreenJobSpec,
     XtbJobSpec,
 )
 from chemclaw.connectors.queues import bundle_queue
@@ -346,6 +347,36 @@ async def _dispatch(spec: XtbJobSpec) -> XtbJobResult:
                 f"{dominant.label or dominant.smiles} dominates at {dominant.population:.0%}"
             ),
             distribution=distribution,
+        )
+    if isinstance(spec, SpeciesSolventScreenJobSpec):
+        labels = spec.labels or [""] * len(spec.species)
+        screen = await compose.species_solvent_comparison(
+            store,
+            list(zip(spec.species, labels, strict=True)),
+            spec.solvents,
+            kind=spec.ranking,
+            temperature_k=spec.temperature_k,
+            level=spec.level,
+            symmetry_numbers=spec.symmetry_numbers,
+            progress=activity.heartbeat,
+            run=_beating,
+        )
+        # The summary is what a completion push-back and a job listing show, so it carries the one
+        # finding that changes what every downstream number is about: whether the major form is the
+        # same everywhere. "shifts" and "reorders" are different answers and a reader must not have
+        # to open the payload to tell which happened.
+        verdict = (
+            "the dominant form changes with the medium"
+            if screen.dominance_changes
+            else f"{screen.distributions[0].dominant.label or 'the same form'} dominates in all"
+        )
+        return XtbJobResult(
+            kind=spec.kind,
+            summary=(
+                f"{spec.ranking} of {len(spec.species)} across {len(screen.distributions)} "
+                f"media: {verdict}, largest swing {screen.largest_swing_kcal:.1f} kcal/mol"
+            ),
+            species_solvents=screen,
         )
     if isinstance(spec, BondSurveyJobSpec):
         survey = await compose.bond_dissociation_survey(

@@ -1,0 +1,93 @@
+{
+  "error_codes": [
+    "bad_tool_arguments",
+    "budget_exhausted",
+    "empty_answer",
+    "internal",
+    "llm_timeout",
+    "loop_cap_reached",
+    "storage_unavailable",
+    "turn_timeout"
+  ],
+  "members": {
+    "answer": {
+      "challenged": "bool",
+      "confidence": "float | None",
+      "review_hold_id": "str | None",
+      "review_required": "bool",
+      "text": "str",
+      "unsupported_claims": "list[str]",
+      "verified_by": "Optional[Literal['judge', 'citation-gate']]"
+    },
+    "approval_request": {
+      "approval_id": "str",
+      "prompt": "str"
+    },
+    "capability_degraded": {
+      "connectors": "list[str]"
+    },
+    "error": {
+      "code": "Literal['internal', 'storage_unavailable', 'llm_timeout', 'turn_timeout', 'budget_exhausted', 'loop_cap_reached', 'bad_tool_arguments', 'empty_answer']",
+      "correlation_id": "str",
+      "message": "str",
+      "retryable": "bool"
+    },
+    "evidence_source": {
+      "chunks": "int",
+      "failed": "bool",
+      "source": "str"
+    },
+    "handoff": {
+      "reason": "str",
+      "to": "str"
+    },
+    "job_completed": {
+      "job_id": "str",
+      "summary": "dict[str, object]"
+    },
+    "job_failed": {
+      "job_id": "str",
+      "reason": "str"
+    },
+    "job_started": {
+      "job_id": "str",
+      "kind": "str"
+    },
+    "note_proposed": {
+      "note_id": "str",
+      "reference": "str"
+    },
+    "plan": {
+      "plan_hash": "str",
+      "todos": "list[str]"
+    },
+    "question": {
+      "options": "list[str]",
+      "question": "str"
+    },
+    "queued": {},
+    "token": {
+      "agent": "str",
+      "text": "str"
+    },
+    "tool_call": {
+      "agent": "str",
+      "arguments": "str",
+      "tool": "str"
+    },
+    "tool_failed": {
+      "agent": "str",
+      "message": "str",
+      "reason": "Optional[Literal['plan_gate']]",
+      "tool": "str"
+    },
+    "tool_result": {
+      "agent": "str",
+      "note_ids": "list[str]",
+      "numbers": "list[float]",
+      "preview": "str",
+      "result_ref": "str",
+      "tool": "str"
+    }
+  }
+}
