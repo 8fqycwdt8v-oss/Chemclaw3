@@ -1,85 +1,90 @@
-# Unblock the reaction-history user story — 2026-08-26
+# Atom-addressable reactivity — implementation
 
-## The story
-"Summarise the activities for reaction abc; where did development start and why was it
-altered; list every change on a timeline with its rationale; recommend where to go next."
+Concept: `tasks/reactivity-labels-concept.md` · ADR: `docs/decisions/D-2026-08-26-an-atom-index-is-not-a-name.md`
 
-## The dataset it must run on
-Materials and reaction SMILES arrive structured through an `ElnAdapter`. Everything else —
-protocol, observations, the initial hypothesis — is **one free-text cell, completely free-form**.
-A project code exists but is only reliable on well-kept projects; **reaction SMILES is the
-grouping key**, and a reaction step is sometimes present. (Confirmed with the user, this session.)
+## ADR
+- [x] `D-2026-08-26-an-atom-index-is-not-a-name.md` + ledger row
 
-## Plan
-- [x] 1 · `performed_at` falls back to the entry timestamp, once, at the registry
-- [x] 2 · `outcome_class` becomes optional — silence is not success (ADR)
-- [x] 3 · The prose reader is asked for the run's intent, marked as read
-- [x] 4 · A binding may not derive `hypothesis` from a transform chain
-- [x] 5 · The campaign note drops columns nothing recorded
-- [x] 6 · `eln-validate` validates the adapters that are actually attached
-- [x] 7 · Verify: `make lint type test`, the validators, and a rendered end-to-end timeline
+## Tier 0 — structural site labels (Chemclaw3-mcp / servers/chem)
+- [x] `engine/sites.py`: `Site` + `describe_atom_sites`, one entry per symmetry class
+- [x] content-addressed `site_id` on the `torsion_handle` construction
+- [x] `describe_sites` tool, declared `read_only`
+- [x] 27 tests: symmetry classes, ring relationships, C-H folding, handle stability
+
+## Tier 1 — free descriptor panel (Chemclaw3-mcp / servers/calc)
+- [x] read the ion energies `compute_fukui` was discarding
+- [x] global panel (IP/EA/mu/eta/S/omega) + local (dual, s±, omega_k) + free valence
+- [x] `test_the_panel_costs_no_extra_single_point` pins the SCF count at three
+
+## Tier 2 — xtb-binary descriptors (Chemclaw3-mcp / servers/calc)
+- [x] `engine/xtb_atomic.py` + `compute_atomic_descriptors`
+- [x] property-table and ESP-grid parsers, written against a captured 6.6.1 run
+- [x] refuses by name when the binary is absent; the *key* still derives (CREST's convention)
+
+## Composition (Chemclaw3)
+- [x] mirrored reader models, `CALCULATION_EPOCH` -> "2" in both repos
+- [x] `compute_atomic_descriptors` on the `calc` bundle; `describe_sites` on `chem`
+- [x] publish projector + property vocabulary carry the panel
+- [x] `skills/reactivity-descriptors` rewritten: start with `describe_sites`, scope the
+      question, aggregate by class, report only differences that exceed the class spread
+- [x] probe `an-34` for the new tool
+
+## Gate
+- [x] Chemclaw3 `make check`: **4799 passed, 3 skipped** — with Docker/Postgres up, so the
+      ~157 Postgres-backed tests really ran
+- [x] Chemclaw3-mcp `make check`: **1188 passed, 5 skipped** — the 5 are the binary-only Tier 2
+      tests, which run and pass with `xtb` installed (verified separately, 18 passed)
 
 ## Review
 
-All seven done; `make lint type test` green (4806 passed, 3 skipped, Postgres up so nothing was
-silently skipped) and every validator passes. `D-2026-08-26-silence-is-not-a-successful-run` is the
-record.
+**What the concept got right.** The diagnosis held: the failure was presentation, not physics.
+Phenol's *para* carbon is still rank 6 of 13 in the raw ranking, and scoping plus class
+aggregation is what makes it reportable.
 
-**What the change actually was, in one line:** three defects of one shape — a value the source could
-not supply was indistinguishable from a value it did.
+**What building it changed.**
 
-**What building it found that the analysis had not.**
+1. **Tier 2 was verifiable after all.** `apt` carries xtb 6.6.1. Installing it replaced guesswork
+   with captured output, and caught two things prose would have got wrong: the polarisability
+   table is on *stdout*, not in `xtbout.json`, and an `--esp` run aborts (SIGABRT) after writing
+   the grid and before the JSON — so a surface calculation cannot also carry the atomic multipoles.
+2. **It exposed a live defect unrelated to this work.** `xtb_engine` defaults to `"auto"`, so with
+   a binary present `compute_xtb_energy`, `compute_electronic_properties` and
+   `predict_site_reactivity` stamped `+xtb+xtb-6.6.1` onto results computed entirely by tblite —
+   none of the three has a binary code path. Fixed by making the backend a property of the
+   **task** (`_FIXED_BACKEND`), not of the caller.
+3. **`GetDefaultValence` is the wrong RDKit call for a free valence.** A sulfone's sulfur came out
+   at −2.94. `GetValenceList` is the right one, and an element with more than one normal valence
+   now gets `None`.
+4. **Rounding a derivation separately from its inputs** made `f_zero` disagree with its own
+   definition in the fourth decimal.
+5. **A ring fusion is not a substituent.** Naphthalene was being labelled "bearing the CH
+   substituent"; fused rings and two-heteroatom rings now refuse the classical *ortho/meta/para*
+   names rather than misapplying them.
+6. **A key derives without a binary; only computing refuses.** Got this backwards first;
+   `test_deriving_a_key_runs_no_scf` caught it.
 
-1. **A decorator cannot fix the outcome default.** The plan was one registry wrapper doing both the
-   date and the outcome. It can only do the date: by the time `map_to_ord` returns, the SUCCESS
-   default has already destroyed the distinction between "the adapter said success" and "nothing
-   said anything". The outcome had to be a model change, and therefore an ADR.
-2. **`observation_mining` was the dangerous consumer, not `playbook`.** `playbook` filters
-   `is SUCCESS` and drops `None` for free. `observation_mining` filtered `is not SUCCESS`, which
-   would have swept every unassessed run into a sentence counting how often a transformation
-   *failed* — the old default with its sign flipped, and worse than the thing being fixed.
-3. **The data-source discovery cache was cleared per-file, not in `conftest`.** One new test in
-   `test_eln.py` pointing the registry at its own `tmp_path` poisoned the cache for the session:
-   51 failures in four unrelated files. Two sibling caches were already in `conftest` for exactly
-   this reason; the third has joined them and the per-file fixture is gone.
-4. **The positional argument to `eln-validate` had to go.** With the validator reading the registry,
-   a CLI arg that overrides one setting is a second way to set it — the duplication the config rule
-   forbids. `CHEMCLAW_ELN_EXPORT_DIR` is the one way now.
-5. **The campaign-table tests indexed cells by position.** With every column now conditional, a
-   fixture that records no time shifts every assertion after it. They address by header name via a
-   new `_cell` helper, so they test values rather than layout.
+**Post-merge review (8 findings, all real, all fixed).** Tests were green and saw none of them.
+The two that mattered most: `describe_sites` numbered atoms from the caller's spelling while the
+calculators canonicalise, so the documented index join mis-attributed every per-atom number; and the
+ESP surface was a flag kept out of the cache key, so `surface=True` was served the panel-only row and
+returned nothing having run nothing. Also: no projector for `xtb.atomic` (results silently dropped),
+`free_valence` still meaningless on charged atoms, colliding labels on fused rings and azines, a
+`nitro_nitrogen` SMARTS matching a form RDKit never builds, a new cached payload outside the digest
+guard, and the skill instructing the model to report a `resolved` field no tool returns. Kept rather
+than fixed: resonance-equivalent atoms do not merge, because topological symmetry cannot see
+resonance — the label-uniqueness rule is what makes that safe.
 
-**Proved end to end** on the real schema (components + SMILES structured, everything else one
-free-form cell): the mined note is a dated timeline naming all three condition swaps, and the
-turn-time comparison carries a `Tested (read)` column quoting each run's stated aim — `—` for the
-run that stated none, which is the honest answer.
+**Left open, deliberately.**
 
-**Left open, filed rather than implied** (`docs/planning/BACKLOG.md`): the turn-time comparison
-cannot diff the components, because `reaction_records` keeps them only as prose in the body. The two
-artifacts together answer the story, and `experiment-progression` already starts from the note, so
-this is a seam to decide on rather than a break to patch.
-
-## Review round 2 — a code review of the whole diff, and what it caught
-
-Three findings, all real, all mine; all fixed in the same branch.
-
-1. **The date fallback was the very defect this change is about.** `DatedIngest` put the entry's
-   *write* time into `performed_at` with nothing marking it, so `is_timeline()` went true and the
-   campaign note asserted "Runs in the order they were performed" over what may be one afternoon of
-   transcription. Both the docstring and the ADR said `ordering_caveat` "already exists to describe"
-   the weakening; it did not — it only ever distinguished *missing* dates. Fixed at the source:
-   `OrdReaction.date_source`, stamped by the seam, carried through `ProgressionStep`, and a caveat
-   that says "in the order they were **recorded** … not proof of the order they were run".
-2. **The binding guard was too broad.** It refused *any* transform on `hypothesis`, so an
-   `OBJECTIVE` column with `{strip: {}}` — the case its own docstring called untouched — failed at
-   worker startup, accused of carving intent out of prose. Narrowed to the three transforms that can
-   put text in the field the cell does not hold: `regex`, `value_map`, `default`.
-3. **An exhaustiveness claim that was only a comment.** `_STATED_OUTCOMES[...]` said a fourth
-   `OutcomeClass` member "fails to type-check here"; mypy does not check a dict literal's keys, so it
-   would have type-checked clean and raised `KeyError` inside `record_from_ord_reaction` — outside
-   the reject-and-continue path, aborting the sync over one row. Now a `match` with `assert_never`,
-   **verified by adding a fourth member and watching mypy name it**, then reverting.
-
-The pattern across all three: *prose asserting a protection the code did not implement.* Two of them
-were in text I wrote in the same change that exists to stop exactly that. Re-verified after: lint,
-`mypy --strict`, 4768 passed / 3 skipped with Postgres up, seven validators green.
+- **The cross-molecule claim for local electrophilicity is unsettled.** omega is 3.24 eV for
+  phenol, 3.52 for *N,N*-dimethylacrylamide, 3.74 for pyridine — plausible ordering on a
+  demonstrably wrong absolute scale. It ships as a ranking quantity for the calibration ledger to
+  settle, not as an established one.
+- **The xtb binary Hessian path produces no dipole derivatives.** Pre-existing — proven by
+  stashing this change and re-running with the binary installed — so a deployment that adds xtb
+  loses IR dipole derivatives and fails two `test_engine.py` assertions. Not this change's to fix;
+  it needs its own decision about whether the binary Hessian route is supported at all.
+- **No `profile_reactivity` composite tool.** The join, the class aggregation and the noise-floor
+  rule live in the skill rather than in a cross-connector tool: the pieces are all free and
+  `read_only`, and a composite spanning two connectors has no precedent here. If a second caller
+  appears, that is the trigger to extract it.
