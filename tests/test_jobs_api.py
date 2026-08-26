@@ -59,7 +59,7 @@ def test_finished_jobs_are_listable(client: TestClient, monkeypatch: pytest.Monk
             JobRecordSummary(
                 job_id="job-1",
                 connector="qm",
-                job="compute_dft_energy",
+                job="sample_conformers",
                 rationale="the reviewer questioned the reported barrier",
                 summary="done",
             )

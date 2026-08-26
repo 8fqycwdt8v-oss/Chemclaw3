@@ -1,26 +1,20 @@
 # Rotational energies and rotamer barriers — implemented, then run for real — 2026-08-26
 
-## Task
-"Get rotational energies and the barrier energy between rotamers for individual compounds —
-especially, how the user tells the agent **which bond to rotate**." Concept first, then build it.
+**One control was rewritten rather than dropped, and it is the finding worth repeating.**
+`test_the_bundle_has_no_way_to_write_the_note_itself` asserted `not hasattr(qm_knowledge,
+"write_knowledge_node")` — a guard named after a single module, which would have gone *dark* the
+moment that module was deleted while still reading, in review, as a control. That is the
+`map_to_hpc_identity` shape this repo already has a name for. It is now an AST walk over every
+bundle asserting none imports `kg.pr_gate` or names `propose_note`: strictly stronger, and it does
+not depend on which bundles exist.
 
-`D-2026-08-26-a-torsion-is-named-not-indexed` is the record; this is the working log.
+**Two pieces of genuinely dead code fell out of the removal**, both kept alive only by tests that
+called them directly: `Structure.as_xyz` (its one caller was the launcher) and its test.
 
-## Plan
-- [x] **1 · Read what exists** — `scan_coordinate`, `compose.scan_profile`, `thermo`, and the two
-      skills that already hold the judgment.
-- [x] **2 · Measure the premise** rather than assert it (RDKit 2026.3.5, the pinned build).
-- [x] **3 · Decide** — three pieces, each on the side of a boundary already drawn.
-- [x] **4 · `Chemclaw3-mcp`** — `enumerate_torsions` on `servers/chem`, plus `render_structure`'s
-      `highlight_atoms`, plus the automorphism check and the contract table.
-- [x] **5 · Here** — `torsion_handle`, `Torsion`/`Rotamer`/`RotationBarrier`/`RotationProfile`,
-      Eyring in `thermo.py`, `rotation_units` in `budget.py`, `RotationJobSpec`,
-      `compose.rotation_profile`, the activity dispatch, the manifest job, the projector and its
-      properties, `rotational-barrier.yaml`, both skills.
-- [x] **6 · Tests** — 41 new, driven through the real composite against a fake with a real
-      torsional potential.
-- [x] **7 · Verify** — `make lint type test`, `connector-validate`, `template-validate`,
-      `skill-validate`, `prose-validate`; both repos.
+**What the validators caught that grep did not**: `make prose-validate` and `make skill-validate`
+found five live claims left over — two skills still declaring `compute_dft_energy` in their
+frontmatter, and three backticked paths naming deleted files. Worth running the whole validator set,
+not just `lint type test`.
 
 ## What building it found
 

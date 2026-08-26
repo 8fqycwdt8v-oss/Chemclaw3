@@ -1407,7 +1407,16 @@ def _single_point(
 
 
 def _dft(payload: dict[str, Any]) -> tuple[Subject, Conditions, TheoryLevel, dict[str, Any]]:
-    """A DFT energy from the HPC tier. The basis set is part of the level, not a condition."""
+    """A stored DFT energy. The basis set is part of the level, not a condition.
+
+    **Backfill-only, and kept deliberately.** The `qm` bundle that stamped `dft` rows is gone
+    (`D-2026-08-26-semiempirical-is-the-whole-tier`), so nothing can write one again — but
+    `calculation_results` is never pruned, so a deployment upgrading into this release still holds
+    every row it ever wrote. That is exactly the `xtb.scan` case the `_CALC_TYPE_PROJECTORS` note
+    below states the rule for: a retired calculator keeps its projector. What did *not* survive is
+    the `PAYLOAD_PROJECTORS` entry beside it, because that half is keyed by a pydantic model name
+    and `QMJobResult` no longer exists to be stated.
+    """
     smiles = payload.get("molecule_smiles")
     subject = Subject(kind="molecule", members=[_molecule(smiles)], label=smiles or "")
     return (
@@ -1465,7 +1474,6 @@ PAYLOAD_PROJECTORS: dict[str, _Projector] = {
     "LogdResult": _logd,
     "DescriptorProfile": _descriptors,
     "XtbResult": _single_point,
-    "QMJobResult": _dft,
 }
 
 # Longest prefix wins, so `xtb.properties` reaches `_electronic_properties` rather than being

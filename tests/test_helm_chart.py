@@ -289,7 +289,6 @@ def test_chart_declares_only_the_documented_secrets() -> None:
     """
     assert set(_VALUES["secrets"]["keys"].values()) == {
         "CHEMCLAW_LLM_API_KEY",
-        "CHEMCLAW_HPC_API_TOKEN",
         "CHEMCLAW_POSTGRES_DSN",
         "CHEMCLAW_KNOWLEDGE_REPO_TOKEN",
         "CHEMCLAW_NOTE_WEBHOOK_SECRET",
@@ -581,7 +580,7 @@ def test_the_chart_states_its_privileged_roles_rather_than_omitting_them(
 
     `expensive: true` in a connector manifest derives into the trigger gate, and that gate fails
     closed on an empty role set. So under the shipped `CHEMCLAW_ENTRA_REQUIRED=true` with no
-    privileged role, `compute_dft_energy` and its three siblings are refused for every authenticated
+    privileged role, `sample_conformers` and its siblings are refused for every authenticated
     user — while the pod boots, both probes pass, and reads work. There is no crash to notice.
 
     That is the intended posture (the chart cannot know an organization's role names, and inventing

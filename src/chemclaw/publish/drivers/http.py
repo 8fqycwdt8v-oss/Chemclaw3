@@ -7,7 +7,7 @@ between the two without the records changing meaning.
 
 **The URL is configuration, never a default in source.** `tests/test_no_egress.py` bans a
 third-party data *host* baked into a shipped module, and permits an address a deployment configures
-— the same class the LLM endpoint, Temporal and the Nextflow API are in. There is no default here
+— the same class the LLM endpoint and Temporal are in. There is no default here
 at all: a sink with no URL is a manifest error, not a silent fallback to somebody's service.
 
 **The credential is an environment variable name, read per request.** Reading at request time is

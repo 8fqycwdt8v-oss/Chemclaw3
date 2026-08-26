@@ -21,7 +21,6 @@ from chemclaw.api.runner import _job_results_message
 from chemclaw.connectors.calc.results import XtbJobResult
 from chemclaw.connectors.calc.specs import ComplexJobSpec, EnsembleJobSpec, ScanJobSpec
 from chemclaw.connectors.calc.workflows import job_envelope
-from chemclaw.connectors.qm.specs import QmJobSpec, require_geometry_supported
 from chemclaw.core.config import settings
 from chemclaw.durable.connector_job import ConnectorJobResult
 from chemclaw.science.calc.models import (
@@ -218,59 +217,6 @@ def test_a_dotted_reference_is_validated_against_the_step_that_produced_it() -> 
                 ],
             }
         )
-
-
-# --- the DFT launch ------------------------------------------------------------------------
-
-
-def test_a_dft_geometry_is_refused_where_the_pipeline_would_ignore_it(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Nextflow drops a param no process consumes, so an unverifiable capability ships off.
-
-    Silently running DFT on a fresh embedding while telling a chemist it ran on the conformer they
-    chose is a confidently wrong answer, which is the failure this system can least afford.
-    """
-    monkeypatch.setattr(settings, "hpc_pipeline_accepts_geometry", False)
-    spec = QmJobSpec(
-        molecule_smiles="CCO", method="B3LYP", basis_set="def2-SVP", structure_id="st_abc"
-    )
-    with pytest.raises(ValueError, match="CHEMCLAW_HPC_PIPELINE_ACCEPTS_GEOMETRY"):
-        require_geometry_supported(spec)
-
-    # And without a geometry the request is unaffected either way.
-    require_geometry_supported(QmJobSpec(molecule_smiles="CCO", method="B3LYP", basis_set="d"))
-
-    monkeypatch.setattr(settings, "hpc_pipeline_accepts_geometry", True)
-    require_geometry_supported(spec)
-
-
-def test_a_named_geometry_is_part_of_a_dft_calculations_identity() -> None:
-    """A named geometry is part of what the calculation *is*.
-
-    A molecule's default embedding and one of its conformers are different calculations — and this
-    digest is also the result note's id, so sharing one would have the second silently propose an
-    edit to the first.
-    """
-    from chemclaw.connectors.qm.specs import qm_job_key
-
-    plain = QmJobSpec(molecule_smiles="CCO", method="B3LYP", basis_set="def2-SVP")
-    named = plain.model_copy(update={"structure_id": "st_abc"})
-    assert qm_job_key(plain) != qm_job_key(named)
-    # Additive: a request that names none keys exactly as it did before the field existed.
-    assert qm_job_key(plain) == qm_job_key(plain.model_copy(update={"structure_id": None}))
-
-
-def test_a_geometry_crosses_to_the_cluster_as_xyz() -> None:
-    """The one boundary that is not this system's, so the one place a model is not the format."""
-    from tests.calc_server_fake import embed as fake_embed
-
-    block = Structure.model_validate(fake_embed("O")).as_xyz("water")
-    lines = block.splitlines()
-    assert lines[0] == "3"
-    assert lines[1] == "water"
-    assert lines[2].split()[0] == "O"
-    assert len(lines) == 5
 
 
 # --- the calc job specs ------------------------------------------------------------------------

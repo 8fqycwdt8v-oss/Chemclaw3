@@ -195,7 +195,7 @@ async def remote_key(
         return None
     # **The epoch is folded in on this side, because nothing else does it any more.**
     # `CalculationKey.build` is where `CALCULATION_EPOCH` enters a key, and after the physics left
-    # it had exactly one caller — `connectors/qm/cache.py`, the DFT path. Every `calc` key now comes
+    # it had exactly one caller — the removed DFT bundle's cache. Every `calc` key now comes
     # back from the server as its four parts and is rebuilt field-by-field here, so bumping the
     # epoch invalidated DFT rows and nothing else, while `science/calc/store.py`, `science/calc`'s
     # `__init__` and `tests/test_calc_payload_schemas.py`'s own failure message all prescribed

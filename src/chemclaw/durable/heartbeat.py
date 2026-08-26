@@ -1,18 +1,17 @@
 """Heartbeat-while-waiting: one idiom, extracted once it had three independent copies (Conn-F2).
 
-`connectors.calc`'s two CREST-backed jobs (ensemble, complex) and `connectors.qm`'s HPC poll both
-beat a Temporal activity's heartbeat at a cadence derived from a *configured* heartbeat timeout,
-because both wrap a wait with nothing finer to report than "still running" — a single opaque CREST
-subprocess with no unit boundary to hook a progress callback into, or a poll against an external
-scheduler. `connectors.bo`'s BoFire fit/acquisition step is the third instance of exactly the same
-shape (the fit is one opaque call into `botorch`, with the same "no unit to report progress at"
-property), which is the Rule of Three CLAUDE.md asks for: a third copy is a helper, not a pattern.
+`connectors.calc`'s two CREST-backed jobs (ensemble, complex) beat a Temporal activity's
+heartbeat at a cadence derived from a *configured* heartbeat timeout, because each wraps a wait
+with nothing finer to report than "still running" — a single opaque CREST subprocess with no unit
+boundary to hook a progress callback into. `connectors.bo`'s BoFire fit/acquisition step is the
+third instance of exactly the same shape (the fit is one opaque call into `botorch`, with the same
+"no unit to report progress at" property), which is the Rule of Three CLAUDE.md asks for: a third
+copy is a helper, not a pattern.
 
 Deliberately narrow: this covers the "opaque single call" case only. `connectors.calc`'s
-species/scan-point loops and `connectors.qm`'s poll loop both have a natural per-iteration
-boundary already and heartbeat directly at it (`activity.heartbeat` passed as `progress`, or called
-once per poll) — that shape needs no wrapper, and forcing it through this one would only hide the
-loop it is already heartbeating from.
+species/scan-point loops have a natural per-iteration boundary already and heartbeat directly at it
+(`activity.heartbeat` passed as `progress`) — that shape needs no wrapper, and forcing it through
+this one would only hide the loop it is already heartbeating from.
 """
 
 import asyncio

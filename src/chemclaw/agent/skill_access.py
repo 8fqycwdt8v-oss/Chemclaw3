@@ -17,7 +17,7 @@ sharing — it is what keeps an unconfigured decorator from paying for itself on
 `connectors_enabled`, a profile's `tool_names`/`mcp_server_names` — and the skill surface was
 narrowed by none of them. Measured against the shipped `property-lookup` profile (5 callable
 tools), 8 of 28 advertised skills had *no* reachable tool at all: the model was handed judgment
-about `suggest_next_experiment`, `compute_dft_energy` and the three fingerprint tools, none of
+about `suggest_next_experiment`, `sample_conformers` and the three fingerprint tools, none of
 which that agent can call. The profile compensated in prose ("if a question needs experimental
 history, say that it is outside this mode"), which is the failure this repository fixes with
 structure rather than with a longer instruction (D-2026-08-05).

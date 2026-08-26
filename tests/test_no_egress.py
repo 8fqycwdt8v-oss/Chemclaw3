@@ -9,7 +9,7 @@ constraint; nothing enforced it.
 
 **What "external" means here, precisely.** Not "no URLs" — the codebase legitimately holds the
 addresses of things it is deployed alongside: the LLM endpoint, Temporal, Postgres, the Entra
-token endpoint, the Nextflow/Tower API, the git remote for the knowledge repo. Those are
+token endpoint, the git remote for the knowledge repo. Those are
 *infrastructure the operator runs or contracts for*, configured per deployment and pointed at
 internal hosts. What is banned is a **hardcoded third-party data source** — a literature API, a
 structure lookup, a vendor catalogue — where the address of somebody else's service is baked into

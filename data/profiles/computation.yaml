@@ -46,7 +46,6 @@ tool_names:
   - compute_thermochemistry
   - compute_reaction_energy
   - compute_interaction_energy
-  - compute_dft_energy
   - optimize_geometry
   - predict_pka
   - predict_solubility

@@ -107,8 +107,7 @@ this unset, the following are refused for every authenticated user:
 
 | Job | Bundle |
 |---|---|
-| `compute_dft_energy` | `connectors/qm` |
-| `compute_interaction_energy` | `connectors/qm` |
+| `compute_interaction_energy` | `connectors/calc` |
 | `sample_conformers` | `connectors/calc` |
 | `start_optimization_campaign` | `connectors/bo` |
 
@@ -174,7 +173,7 @@ half-written.
 ## Network & probes
 
 - **NetworkPolicy** (`templates/networkpolicy.yaml`): egress is allowed on a fixed **port** list —
-  DNS, Postgres (5432), Temporal (7233), HTTPS (443, for the internal LLM + HPC launcher + Entra),
+  DNS, Postgres (5432), Temporal (7233), HTTPS (443, for the internal LLM + Entra),
   OTLP (4317), and the connector ports — to the **destinations you name**. Ingress rules bound which
   *peers* may open a connection to the front door, the connectors and the workers' probe port.
 - **The destinations are yours to state, and the chart will not render until you do.** This section

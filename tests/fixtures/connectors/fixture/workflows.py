@@ -38,8 +38,8 @@ class FixtureJobWorkflow:
         `requested_by` comes off the run's **memo**, not out of `payload`: the payload is exactly
         the model-authored arguments, so the actor cannot live there without becoming something an
         LLM could fill in. Core stamps the memo on the child call, and a bundle whose backend runs
-        under a shared service identity — the HPC cluster — reads it here to keep the run
-        attributable (`connectors/qm/workflows.py` is the real case).
+        under a shared service identity — a calculation backend — reads it here to keep the run
+        attributable (`connectors/calc/workflows.py` is the real case).
         """
         subject = str(payload["subject"])
         # One reserved subject that fails, so the wrapper's *failure* path has something real to

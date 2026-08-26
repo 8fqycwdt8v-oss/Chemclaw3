@@ -1,6 +1,6 @@
 """The ambient session **id** for the current turn (plan Phase F3-T3).
 
-When the agent launches a durable job (e.g. `compute_dft_energy`), the job must know *which
+When the agent launches a durable job (e.g. `sample_conformers`), the job must know *which
 session* to notify on completion — but the session id is not something the model should pass as a
 tool argument (it is not chemistry, and the model must not be able to spoof it). So the front-door
 runner stamps the current session into a `contextvar` for the duration of the turn, and
