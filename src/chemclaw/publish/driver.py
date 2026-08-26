@@ -58,3 +58,13 @@ class ResultSink(Protocol):
         promise that for a partial batch must raise rather than return.
         """
         ...
+
+    async def aclose(self) -> None:
+        """Release whatever the sink is holding. Called after every drain pass.
+
+        Part of the Protocol rather than an implementation detail, because the drain builds a sink
+        per run — so anything a sink holds open, it holds open once per pass, forever. A sink that
+        holds nothing implements this as a no-op; one that holds a connection must actually close
+        it. Must be safe to call twice, and on a sink that never connected.
+        """
+        ...

@@ -91,6 +91,10 @@ class CalcJobWorkflow:
         return ConnectorJobResult(
             summary=result.summary,
             calc_refs=result.calc_refs,
+            # The model's own name, so `chemclaw.publish` can route a composite exactly. A
+            # composite has no cache key, so its `calc_type` is `<connector>.<job>` and matches no
+            # projector prefix -- this is the only thing that identifies the shape.
+            payload_kind=type(result).__name__,
             data=without_geometry(
                 result.model_dump(mode="json", exclude_none=True, exclude={"calc_refs"})
             ),

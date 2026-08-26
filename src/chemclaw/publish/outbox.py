@@ -159,25 +159,33 @@ async def enqueue_payload(
     depends_on: list[str] | None = None,
     publication: Publication | None = None,
 ) -> int:
-    """Project one stored payload and queue it. Never raises — see the module docstring.
+    """Project one stored payload and queue what it becomes.
+
+    Never raises — see the module docstring. Returns how many rows were written, which is **not
+    always one**: a shape that decomposes queues the aggregate and its parts (`records_for`), so a
+    solvent screen is three rows rather than one.
 
     The single entry point every hook uses, so "what gets published" is decided in one place rather
     than three. A payload this release has no projector for is skipped with a debug line, not an
     error: `calculation_results` is never pruned, so a deployment legitimately holds rows from
     calculators that no longer ship.
+
+    `payload_kind` is the model's own name and is what routes a *composite*: its `calc_type` is
+    `<connector>.<job>`, a route, and no projector prefix matches one. Empty falls back to the
+    prefix inference, which is right for a cached primitive whose `calc_type` is its calculator.
     """
     if not publishing_enabled():
         return 0
     # Imported inside the function, deliberately: with no sink configured the projection machinery
     # and RDKit's canonicalization are never imported at all, so the hot cache path pays nothing
     # for a subsystem that is off.
-    from chemclaw.publish.project import ProjectionError, project, projector_for
+    from chemclaw.publish.project import projector_for, records_for
 
     if projector_for(calc_type, payload_kind) is None:
         logger.debug("publish: no projector for %s; not queued", calc_type)
         return 0
     try:
-        record = project(
+        records = records_for(
             calc_ref=calc_ref,
             calc_type=calc_type,
             payload=payload,
@@ -190,15 +198,28 @@ async def enqueue_payload(
             computed_at=computed_at,
             depends_on=depends_on,
         )
-    except (ProjectionError, ValueError):
-        # A payload the projector cannot read is a code gap, and worth an ERROR — but it is still
-        # not worth failing the calculation that produced it.
+    except Exception:
+        # **Every** exception, not a named tuple of them. The tuple was `(ProjectionError,
+        # ValueError)`, which is what a projector raises *deliberately* — and measured by mutating
+        # each of the 15 fixture shapes, four projectors raise a bare `KeyError` when a field is
+        # missing from a list element (`modes[].wavenumber_cm`, `atom_charges[].charge`,
+        # `sites[].index`, `points[].energy_hartree`). Those escaped.
+        #
+        # A live calculation never hit it — pydantic had just produced the payload — but
+        # `backfill_cached` walks rows a *different calculator version* wrote, and one of them
+        # aborted the whole walk. `backfill.py`'s own docstring promises the opposite ("a walk that
+        # aborted on the first one would never reach the rest"), so the narrow tuple was breaking
+        # the property the module was built around.
+        #
+        # The comment below has always stated the right policy; the tuple was narrower than the
+        # argument. A publish is best-effort by construction: nothing it can raise is worth failing
+        # a calculation that already succeeded and is already persisted.
         logger.exception("publish: could not project %s (%s)", calc_ref, calc_type)
         record_metric(lambda m: m.increment("chemclaw_result_publish_failures_total"))
         return 0
     if publication is not None:
-        record = record.model_copy(update={"publications": [publication]})
-    return await enqueue([record])
+        records = [record.model_copy(update={"publications": [publication]}) for record in records]
+    return await enqueue(records)
 
 
 async def claim(sink: str, limit: int) -> list[tuple[int, str, dict[str, Any]]]:

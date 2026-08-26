@@ -375,7 +375,10 @@ it happens.
       by default and `src/chemclaw/publish/sinks/postgres/sink.yaml` addresses a host nobody runs.
       Attaching one is configuration (`make sink-schema`, apply, set the variable), so this is a
       deployment action rather than code — but until it happens, no number below has been measured
-      against a real corpus.
+      against a real corpus. `D-2026-08-26-a-route-is-not-a-shape` is why that matters more than it
+      reads: the composite half of the path was inert for a release and no test noticed, because
+      every test started at a projector rather than at a hook. A live target is the only thing that
+      would have made it obvious.
 - [ ] **Nothing has measured how many rows a real corpus produces** — [M]. The volume risk named in
       `D-2026-08-25`: `cached_compute` publishes on every miss, and a conformer search projects one
       record with ~47 conformer rows plus their structures. Before publishing is enabled by default

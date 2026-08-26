@@ -359,19 +359,30 @@ async def cached_compute(
     await store.put(
         StoredResult(key=key, result=result, compute_seconds=elapsed, structure_id=structure_id)
     )
-    await _publish_best_effort(key, result, elapsed, structure_id)
+    # On the miss branch only. A cache *hit* returns above without touching this, which keeps the
+    # write off the hottest read in the system — the same reason `calculation_results` deliberately
+    # carries no `last_access_at`. A repeat call costs exactly what it cost before this existed.
+    await publish_stored_result(key, result, compute_seconds=elapsed, structure_id=structure_id)
     return result, False
 
 
-async def _publish_best_effort(
-    key: CalculationKey, result: ResultPayload, elapsed: float, structure_id: str
+async def publish_stored_result(
+    key: CalculationKey,
+    result: ResultPayload,
+    *,
+    compute_seconds: float | None = None,
+    structure_id: str = "",
+    payload_kind: str = "",
 ) -> None:
-    """Offer a freshly computed primitive to the external results store, if one is configured.
+    """Offer a just-persisted primitive to the external results store, if one is configured.
 
-    **On the miss branch only.** A cache *hit* returns without touching this, which keeps the write
-    off the hottest read in the system — the same reason `calculation_results` deliberately carries
-    no `last_access_at` and the artifact store does. A repeat call therefore costs exactly what it
-    cost before this existed.
+    **Public, and paired with `put` rather than with `cached_compute`.** Every writer to the
+    calculation store is a producer of publishable science, and there are two: `cached_compute`
+    below, and `connectors/qm/activities.py::persist_qm_result`, which cannot use `cached_compute`
+    because its computation happened on a cluster rather than behind a callable. The QM writer was
+    missed when this was private to this module, so DFT — the one calculator the `dft` projector
+    and the `basis_set`-carrying `theory_level` row exist for — published on backfill and never
+    live. One helper beside the write is what makes "persisted implies offered" checkable.
 
     **Imported inside the function, and that is load-bearing rather than stylistic.** `science` may
     not import a capability layer at module scope (`tests/test_layering.py`), and the publish path
@@ -388,9 +399,10 @@ async def _publish_best_effort(
         calc_ref=key.as_str(),
         calc_type=key.calc_type,
         payload=result,
+        payload_kind=payload_kind,
         calc_version=key.calc_version,
         input_hash=key.input_hash,
         params_hash=key.params_hash,
         structure_id=structure_id,
-        compute_seconds=elapsed,
+        compute_seconds=compute_seconds,
     )

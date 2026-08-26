@@ -821,6 +821,62 @@ change, not a chore: ask what the failure is telling you before undoing it.
 `test_migrations_are_additive`, `test_no_merged_migration_had_its_statements_changed` or anything
 else whose skip mentions truncated history.
 
+## 2026-08-26 — I tested the mechanism I wrote, not the one that calls it
+
+I shipped a publish seam whose headline claim was "every composite reaches the results store", and
+the composite path published nothing. All four shipped jobs resolved to no projector. The suite was
+green: 72 publish tests, four files, every result shape round-tripped.
+
+Every one of them started at `project()`. They passed `payload_kind="ReactionEnergyResult"` by hand
+— and no production call site set `payload_kind` at all. One test file called
+`records_from_solvent_screen()` directly; nothing else in the tree called it. `grep` for the
+composite hook across `tests/` returned zero hits.
+
+So the suite proved the projectors work. It said nothing about whether anything reaches them, and
+that was the only interesting question.
+
+This is the previous entry's rule one level up, and I want to be precise about why I missed it.
+That entry says *measure the mechanism, not the outcome*. I did measure a mechanism. A projector
+**is** a mechanism — it just isn't the one under test when the claim is about a path. What makes a
+mechanism the right one is not that it is concrete, it is that **something else in the system calls
+it**, and I get to choose my test's entry point exactly the way I got to choose that serializer.
+
+*Rule for myself: a test of a seam starts at the outermost thing production calls — the envelope a
+job returns, the row a walker reads — never at the function I am proud of. If I cannot name the
+production caller of the function my test invokes first, I have tested my own intentions.*
+
+The cheap check that would have caught all of it, in one line:
+`grep -rn "<the hook>" tests/` — if the hook has no test, the feature has no test, whatever the
+count of green assertions downstream says.
+
+**And the corollary, which cost me two more defects before I learned it.** Fixing the nine did not
+prove the path worked. *Assembling* it did — and it failed twice before it passed, on two things
+that make the feature completely unusable and that no unit test could have seen:
+
+- The one driver I ship failed the one sink I ship, because `Warehouse` is `@runtime_checkable` and
+  a runtime Protocol check tests for the presence of **every** member. Mine was missing one it had
+  no use for. Every delivery died at the connect.
+- Every drain pass leaked a database connection, because "build the sink per run" and "hold the
+  connection for the sink's life" are each correct alone and nothing closed the sink. Four an hour
+  against a default `max_connections` of 100.
+
+Both are invisible to a test that delivers to a stub and to a test that never builds a driver. Both
+are unmissable the first time two real pieces are put together.
+
+*Rule: for any seam with more than one part, one test must assemble all of them against something
+real — a database, not a fake — even when every part has its own test. The unit tests answer "does
+this piece work"; only the assembled one answers "is this a system".*
+
+Two smaller lessons from the same review, both about declarations:
+
+- **A field with no reader is a lie with a schema.** `required_roles` on the sink manifest was
+  documented as an access control and read by nothing. I had even cited the ADR
+  (`D-2026-08-07`) about the *exact* failure — an entitlement defaulting to `[]` — while writing a
+  version that defaulted to `[]` and had no `_entitled()` at all. Citing a lesson is not applying it.
+- **Prose describing a capability reads as a claim that it exists.** A docstring said Snowflake and
+  Oracle "spell it `MERGE`" beside an emitter that only writes `ON CONFLICT`. Nobody lied; the
+  sentence was about SQL dialects in general and read as being about this module. When a docstring
+  names a thing the code does not do, say which half is true.
 ## 2026-08-26 — the fixture held constant the axis the function branches on
 
 A third review pass over the same merged work found two more defects, and both are the same shape as
