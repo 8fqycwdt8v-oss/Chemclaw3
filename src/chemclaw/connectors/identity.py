@@ -35,6 +35,16 @@ actor to correlate its own records, and it must never make an access decision on
 shape as every other non-Entra transport here (architektur.md §7.2): the downstream runs under our
 service identity while the requesting user's oid travels with the request and is logged, so the
 audit trail can always answer "which real user drove this".
+
+**Which is exactly why `X-Chemclaw-Roles` is gone**
+(`D-2026-08-26-an-entitlement-set-is-not-provenance`). Being advisory is what made it pure cost:
+the sentence above says a connector must never decide on it, and correlating records needs the
+actor and the correlation id, not the caller's entitlements — so it had one writer and, measured
+across both repositories, zero readers. Meanwhile it was the one header with no bound: under
+`entra_group_claims_as_roles` it carries every AD group a user is in, to every connector including
+servers this family does not host, and the users it grows longest for are the ones
+`_principal_from_claims` already warns about. What is sent now is the minimum that makes the trail
+joinable.
 """
 
 import os
@@ -47,14 +57,12 @@ from chemclaw.connectors.manifest import BearerAuth, ConnectorAuth, NoAuth
 from chemclaw.core.identity_context import (
     get_current_actor,
     get_current_correlation_id,
-    get_current_roles,
 )
 from chemclaw.core.session_context import get_current_session_id
 from chemclaw.core.tracing import trace_headers
 
 # The header contract, as constants so the connector-side reader and this writer cannot drift.
 HEADER_ACTOR = "X-Chemclaw-Actor"
-HEADER_ROLES = "X-Chemclaw-Roles"
 HEADER_SESSION = "X-Chemclaw-Session"
 # The turn's correlation id, so a connector's own records join to core's audit trail on the same
 # key core uses (REV-11). Without it the trail stopped at this process boundary: `agents.audit`
@@ -70,7 +78,6 @@ HEADER_DRY_RUN = "X-Chemclaw-Dry-Run"
 # others do not — `tests/test_connector_identity.py` fails if the two ever drift.
 STAMPED_HEADERS = (
     HEADER_ACTOR,
-    HEADER_ROLES,
     HEADER_SESSION,
     HEADER_CORRELATION,
     HEADER_DRY_RUN,
@@ -106,12 +113,6 @@ def turn_headers() -> dict[str, str]:
     actor = get_current_actor()
     if actor is not None:
         headers[HEADER_ACTOR] = actor
-    roles = get_current_roles()
-    if roles:
-        # Space-delimited and sorted: the OAuth `scope` convention, and stable so two calls by
-        # the same user produce byte-identical headers (a log or a cache keyed on them stays
-        # useful).
-        headers[HEADER_ROLES] = " ".join(sorted(roles))
     session_id = get_current_session_id()
     if session_id:
         headers[HEADER_SESSION] = session_id
