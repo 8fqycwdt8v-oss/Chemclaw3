@@ -187,6 +187,37 @@ class EnsembleJobSpec(BaseModel):
     structure_id: str | None = Field(default=None, description=_STRUCTURE_ID_DESCRIPTION)
 
 
+class MicrostatePkaJobSpec(BaseModel):
+    """A durable pKa from two CREST searches (`microstate_pka`).
+
+    Its own job rather than a level on the existing `predict_pka` tool, because the cost class is
+    different by three orders of magnitude: that tool is a cached sub-second lookup and this is two
+    metadynamics searches, minutes to hours. A knob that turns a fast tool into an expensive one is
+    the shape that gets set by accident.
+    """
+
+    kind: Literal["microstate_pka"] = "microstate_pka"
+    smiles: str = Field(min_length=1)
+    branch: Literal["auto", "acid", "base"] = Field(
+        default="auto",
+        description=(
+            "`auto` asks the acid question of an O-H/S-H molecule and the base question of a "
+            "nitrogen one. Name it for a molecule that is both: an aminophenol has an acid pKa "
+            "and a conjugate-acid pKaH, and they are different numbers."
+        ),
+    )
+    solvent: str | None = None
+    temperature_k: float | None = None
+    effort: Literal["quick", "normal", "extensive"] = "quick"
+
+    # **No `structure_id`, and its absence is the point.** Every other geometry-taking spec here
+    # accepts one so a caller can carry a chosen conformer forward; this job's *first* act is a
+    # metadynamics conformer search, which re-samples whatever it is handed. A starting geometry
+    # therefore survives into nothing the answer depends on, and offering the argument would
+    # advertise a control that does not control anything — while costing every turn the
+    # description that explains it.
+
+
 class ComplexJobSpec(BaseModel):
     """A durable non-covalent complex search over two molecules (xTB plan X11)."""
 
@@ -381,6 +412,7 @@ XtbJobSpec = Annotated[
     | ScanJobSpec
     | RotationJobSpec
     | EnsembleJobSpec
+    | MicrostatePkaJobSpec
     | ComplexJobSpec
     | RefinedEnsembleJobSpec
     | EnsemblePropertyJobSpec

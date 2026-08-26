@@ -867,6 +867,57 @@ class ConformerEnsemble(BaseModel):
         return self.conformers[0].structure.structure_id
 
 
+class MicrostatePka(BaseModel):
+    """A pKa computed from two sampled *macrostates* rather than from one drawn microspecies.
+
+    What the number is: the neutral molecule's conformer ensemble and its deprotonated (or
+    protonated) microstate ensemble are each reduced to a macrostate free energy — the sum over
+    every site and conformer that carries population — and the difference is mapped to a pKa by a
+    linear calibration fitted through this exact pipeline.
+
+    **Why it is a different answer from `predict_pka`'s, and not merely a better-converged one.**
+    That predictor enumerates candidate sites with hand-written SMARTS-shaped rules over O-H/S-H
+    protons and lone-pair-bearing nitrogens, and evaluates one embedded conformer of each. This one
+    enumerates nothing: CREST removes (or adds) every proton in turn, optimises each product and
+    ranks them, so the site is decided by energy — which is how phenol's most stable protomer comes
+    back as the ring-protonated arenium ion rather than the O-protonated form a rule would have
+    produced. The two therefore keep separate calibrations and separate ledger histories, and a
+    disagreement between them is information rather than a defect.
+
+    `site_smiles` is *perceived from the winning geometry*, not asserted: bond orders come from
+    interatomic distances plus the known charge, and where that cannot be read the field is `None`
+    rather than a guess. It is the answer to "which proton?", which is the half of a pKa that a
+    bare number does not carry.
+    """
+
+    smiles: str
+    # Which equilibrium was computed. "acid" is HA -> A- + H+ and reports that molecule's own pKa;
+    # "base" is BH+ -> B + H+ and reports the *conjugate acid's* pKa (pKaH), which is what is
+    # tabulated for amines and what an extraction pH is set against.
+    branch: Literal["acid", "base"]
+    pka: float
+    uncertainty: float
+    # Macrostate free-energy difference in kcal/mol, always deprotonated minus protonated, so one
+    # sign convention covers both branches.
+    delta_g_kcal: float
+    # The perceived constitution of the lowest ionised microstate — which proton came off, or where
+    # one went on. `None` when the geometry could not be read as a single molecule.
+    site_smiles: str | None
+    method: str
+    solvent: str | None
+    temperature_k: float
+    # The evidence, in full: what was sampled on each side of the equilibrium.
+    neutral: ConformerEnsemble
+    ionised: ConformerEnsemble
+    # How many distinct ionised microstates the search found, and how many of them are within RT of
+    # the best. The second number is why this is a macrostate calculation: two sites within RT both
+    # carry population, and treating either alone as "the" conjugate base is wrong by up to
+    # RT ln 2 — half a pKa unit at 298 K.
+    microstates_found: int
+    microstates_within_rt: int
+    warnings: list[str] = Field(default_factory=list)
+
+
 class WeightedValue(BaseModel):
     """A Boltzmann-averaged property, with the spread of what was averaged.
 

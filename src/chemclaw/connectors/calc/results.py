@@ -23,6 +23,7 @@ from chemclaw.science.calc.models import (
     ConformerEnsemble,
     EnsembleProperty,
     InteractionResult,
+    MicrostatePka,
     ReactionEnergyResult,
     RefinedEnsemble,
     RotationProfile,
@@ -56,7 +57,8 @@ class XtbJobResult(BaseModel):
     rotation: RotationProfile | None = None
     ensemble: ConformerEnsemble | None = None
     interaction: InteractionResult | None = None
-    # The five multi-step results. Additive and defaulted like `calc_refs` above and for the same
+    pka: MicrostatePka | None = None
+    # The six multi-step results. Additive and defaulted like `calc_refs` above and for the same
     # reason: this crosses the Temporal wire and histories are in flight, so a result decoded from
     # an older one simply has none of them.
     refined: RefinedEnsemble | None = None

@@ -1322,6 +1322,65 @@ def _pka(payload: dict[str, Any]) -> tuple[Subject, Conditions, TheoryLevel, dic
     )
 
 
+def _microstate_pka(
+    payload: dict[str, Any],
+) -> tuple[Subject, Conditions, TheoryLevel, dict[str, Any]]:
+    """A pKa computed from two sampled macrostates — the same property as `_pka`, differently made.
+
+    It is a *separate* projector rather than a reuse of `_pka`, and the reason is the record rather
+    than the shapes: the two pipelines carry separate calibrations and separate ledger histories
+    (`D-2026-08-26-a-pka-is-a-macrostate-not-a-microstate`), so a query that could not tell them
+    apart would average a rule-enumerated single conformer against a sampled macrostate and call the
+    result "the computed pKa". The `method` string is what keeps them distinguishable in the store,
+    and it names the sampler.
+
+    Three facts beyond the number, each answering something the value alone cannot:
+
+    - `pka_site` is the winning microstate's *perceived* constitution — which proton this is about.
+      Absent when perception declined, which is a real state and not a missing value.
+    - `microstates_within_rt` is why the number is a macrostate's: more than one and the molecule
+      has no single conjugate base, so a site-resolved pKa is a different question.
+    - `deprotonation_free_energy` is the quantity actually computed; the pKa is a linear map of it,
+      and a refit changes the second without changing the first.
+
+    The solvent and the temperature are **conditions**, not properties: an aqueous pKa at 298 K and
+    the same free energy in acetonitrile are different rows of one table, and `_pka`'s own subject
+    shape (one molecule) is right here too — the ensembles are how it was computed, not what it is
+    about.
+    """
+    return (
+        Subject(
+            kind="molecule",
+            members=[_molecule(payload.get("smiles"))],
+            label=payload.get("smiles") or "",
+        ),
+        Conditions(
+            solvent=payload.get("solvent"),
+            temperature_k=payload.get("temperature_k"),
+        ),
+        TheoryLevel(
+            method=payload.get("method") or "unknown",
+            family="semiempirical",
+            engine="crest",
+        ),
+        {
+            "properties": _kept(
+                _fact(
+                    "pka",
+                    payload.get("pka"),
+                    "",
+                    uncertainty=payload.get("uncertainty"),
+                    uncertainty_kind="reported",
+                ),
+                _fact("deprotonation_free_energy", payload.get("delta_g_kcal"), "kcal/mol"),
+                _fact("microstates_within_rt", payload.get("microstates_within_rt"), ""),
+                _text("pka_site", payload.get("site_smiles")),
+                _text("pka_branch", payload.get("branch")),
+            )
+        },
+    )
+
+
 def _solubility(payload: dict[str, Any]) -> tuple[Subject, Conditions, TheoryLevel, dict[str, Any]]:
     """A predicted aqueous solubility, carrying its applicability-domain flag.
 
@@ -1470,6 +1529,7 @@ PAYLOAD_PROJECTORS: dict[str, _Projector] = {
     "OptimizationResult": _optimization,
     "OptimizationSummary": _optimization,
     "PkaResult": _pka,
+    "MicrostatePka": _microstate_pka,
     "SolubilityResult": _solubility,
     "LogdResult": _logd,
     "DescriptorProfile": _descriptors,

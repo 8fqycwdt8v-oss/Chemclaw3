@@ -95,7 +95,7 @@ class CalcToolError(ChemclawError):
 
 
 @asynccontextmanager
-async def calc_session() -> AsyncIterator[ClientSession]:
+async def calc_session(timeout_seconds: float | None = None) -> AsyncIterator[ClientSession]:
     """Open one MCP session to the calculation server, and name its failures for a chemist.
 
     Everything about *how* the session is opened — the connection-scoped bearer, the short connect
@@ -103,12 +103,18 @@ async def calc_session() -> AsyncIterator[ClientSession]:
     trips — is `core.mcp_session.open_session`. What this adds is the classification: a refused
     credential is bad data (a 401 never comes back on its own, so a durable job must not spend
     `activity_max_attempts` being told the same thing), and an unreachable host is an outage.
+
+    `timeout_seconds` overrides the default read bound for the one call class that outgrew it: a
+    CREST search is minutes to hours where every other primitive here is seconds to minutes, and a
+    client bound shorter than the server's own means the server finishes a calculation nobody is
+    still waiting for. Left unset it is `calc_server_timeout_seconds`, which is right for
+    everything that is not sampling.
     """
     try:
         async with open_session(
             settings.calc_server_url,
             token_env=settings.calc_server_token_env,
-            timeout_seconds=settings.calc_server_timeout_seconds,
+            timeout_seconds=timeout_seconds or settings.calc_server_timeout_seconds,
         ) as session:
             yield session
     except McpCredentialRefused as exc:
@@ -319,7 +325,11 @@ def _record(key: CalculationKey) -> None:
 
 
 async def cached_remote(
-    store: ResultStore, tool: str, arguments: dict[str, Any]
+    store: ResultStore,
+    tool: str,
+    arguments: dict[str, Any],
+    *,
+    timeout_seconds: float | None = None,
 ) -> tuple[ResultPayload, bool]:
     """One calculation: look it up by the server's own key, compute remotely only on a miss.
 
@@ -341,7 +351,7 @@ async def cached_remote(
     branch that cannot execute is not a safety net; it is a place for a future miswiring to land
     quietly and recompute forever.
     """
-    async with calc_session() as session:
+    async with calc_session(timeout_seconds) as session:
         keyed = await remote_key(session, tool, arguments)
         if keyed is None:
             raise CalcToolError(
