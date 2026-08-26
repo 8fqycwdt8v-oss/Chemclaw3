@@ -27,6 +27,7 @@ from chemclaw.ingest.eln.warehouse.driver import (
     WarehouseCursor,
     WarehouseQueryError,
 )
+from chemclaw.publish.connect import SinkConnectionError
 
 
 class _PostgresCursor:
@@ -97,6 +98,16 @@ class PostgresWarehouse:
         to decompose it. `schema` becomes a `search_path` option rather than a qualified table name
         in every statement, which is what keeps the SQL generator free of site-specific identifiers.
         """
+        if not 1 <= query_timeout_seconds <= 3600:
+            # `statement_timeout=0` is Postgres' spelling of *no* timeout, so an out-of-range value
+            # here disables the one bound on a runaway publish rather than tightening it. Checked in
+            # the driver because this is the driver's own keyword: a sink's `connection:` block is
+            # its constructor signature (`D-2026-08-26-the-driver-s-signature-is-the-schema`), and
+            # no shared model is left to hold a range for it.
+            raise SinkConnectionError(
+                "`query_timeout_seconds` must be between 1 and 3600; "
+                f"got {query_timeout_seconds}, and 0 means no statement timeout at all"
+            )
         options = [f"-c statement_timeout={int(query_timeout_seconds * 1000)}"]
         if schema:
             options.append(f"-c search_path={schema}")

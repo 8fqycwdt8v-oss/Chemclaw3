@@ -307,6 +307,29 @@ def test_a_connection_key_the_driver_will_not_take_is_caught_offline() -> None:
     assert problems and "role" in problems[0], problems
 
 
+def test_a_key_the_driver_will_not_take_fails_as_this_seams_error_at_connect_time() -> None:
+    """The gate sees the manifests this repository ships; a deployment mounts its own.
+
+    So the signature check runs again where the driver is actually built. The error class is the
+    point rather than the message: `BindingError` is a `ChemclawError`, which `durable/publish`
+    lists as non-retryable *by exact class name*, while the bare `TypeError` a constructor raises is
+    not on that list — a permanently broken mounted manifest would have been retried by every job
+    that touched it. The model this block replaced failed such a key as a `ValidationError`, so
+    keeping it non-retryable is what makes the trade like-for-like.
+    """
+    from chemclaw.core.connect import open_connection
+
+    block = {
+        "driver": "chemclaw.ingest.eln.warehouse.databricks:DatabricksWarehouse",
+        "server_hostname": "adb.example.net",
+        "access_token": "dapi-token",
+        "warehouse_id": "abc123",
+        "role": "CHEMCLAW_READER",
+    }
+    with pytest.raises(BindingError, match="role"):
+        open_connection(block, error=BindingError, what="warehouse connection")
+
+
 @pytest.mark.parametrize("source", ["eln-databricks", "pistachio"])
 def test_a_warehouse_source_is_discovered_but_not_enabled(source: str) -> None:
     """Shipping a source is not attaching it: a deployment enables what it has validated (D-018)."""

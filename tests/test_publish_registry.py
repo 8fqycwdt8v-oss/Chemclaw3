@@ -173,3 +173,43 @@ def test_every_exempted_dimension_is_actually_used() -> None:
         f"exempted dimension(s) {sorted(exempt - registered)} are no longer registered by any "
         "property; delete the exemption rather than leaving it standing"
     )
+
+
+# --- what `make sink-validate` catches about a `connection:` block -------------------------------
+
+
+def test_the_sink_gate_checks_the_block_against_the_driver_and_its_env_names() -> None:
+    """Both halves of "the driver's signature is the schema", on the outbound seam.
+
+    A sink's `connection:` block has no model behind it — by design
+    (`D-2026-08-26-the-driver-s-signature-is-the-schema`) — so the gate is the only place either
+    mistake is caught before a publish attempt makes it. The `*_env` check matters as much as the
+    signature one and used to run on neither side: a key holding a *value* rather than a variable
+    name, or a lower-case variable, reaches the driver as an unset credential and fails on the first
+    delivery, hours after the deploy.
+    """
+    from chemclaw.cli.validate_sinks import _driver_problems
+    from chemclaw.publish.manifest import ResultSinkManifest
+
+    def _manifest(**connection: object) -> ResultSinkManifest:
+        return ResultSinkManifest(
+            name="results",
+            description="a results database this deployment runs itself",
+            driver="chemclaw.publish.drivers.sql:SqlResultSink",
+            config={
+                "connection": {
+                    "driver": "chemclaw.publish.drivers.postgres:PostgresWarehouse",
+                    "host": "chemclaw-results",
+                    "database": "chemclaw_results",
+                    **connection,
+                }
+            },
+        )
+
+    assert _driver_problems(_manifest(password_env="RESULTS_DB_PASSWORD")) == []
+
+    pasted = _driver_problems(_manifest(password_env="hunter2"))
+    assert pasted and "NAME of an environment variable" in pasted[0], pasted
+
+    unknown = _driver_problems(_manifest(role="READER"))
+    assert unknown and "role" in unknown[0], unknown

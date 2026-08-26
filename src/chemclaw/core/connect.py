@@ -167,6 +167,16 @@ def open_connection(
         raise error(f"a {what} block must name a `driver:`")
     driver = resolve_driver(reference, error=error, what=f"{what} driver")
     options = connect_options(connection, error=error, what=what)
+    # **The same signature check the validators run, run again here.** `make datasource-validate`
+    # sees only the manifests this repository ships; a deployment mounts its own directory, which no
+    # CI run ever bound. Without this the mismatch surfaces as a bare `TypeError` from the
+    # constructor — and `TypeError` is not in `durable/publish`'s non-retryable list, so a
+    # permanently broken manifest would be *retried* by every job that touches it. The model this
+    # block replaced failed such a key as a `ValidationError` (a `ValueError`), which was retried by
+    # nothing; keeping that property is what makes "the driver's signature is the schema" a
+    # like-for-like trade rather than a loosening.
+    if mismatch := signature_mismatch(driver, connection):
+        raise error(f"{what} driver {reference!r} {mismatch}")
     # Logged at the level a deployment reads to answer "which database did this pod attach to".
     # `_is_address` decides what may be named: a resolved secret sits in `options` under its stem
     # (`access_token`), so filtering has to be by key rather than by where the value came from.

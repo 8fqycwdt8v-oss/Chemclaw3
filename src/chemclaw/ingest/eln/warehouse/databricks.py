@@ -179,6 +179,25 @@ class DatabricksWarehouse:
                 "there is no default compute to fall back on, and naming both leaves which one is "
                 "in force to the reader"
             )
+        if warehouse_id.startswith("/"):
+            # One field used to take either form and branch on this prefix. Two fields do not get
+            # to be lenient about it: interpolating a path into the template would build
+            # `/sql/1.0/warehouses//sql/1.0/warehouses/<id>`, which fails at connect time with a
+            # message about the *workspace* rather than about the binding.
+            raise BindingError(
+                f"`warehouse_id` is the bare id the SQL warehouse page shows, not a path; "
+                f"{warehouse_id!r} looks like an `http_path:` — name it in that field instead"
+            )
+        if not 1 <= query_timeout_seconds <= 3600:
+            # The one thing standing between a runaway scan and a shared warehouse's bill, so `0`
+            # is the worst possible value: Spark reads it as *no* timeout, the exact opposite of
+            # what the field is for. Bounded here rather than in the binding model because it is
+            # this driver's keyword — the model no longer knows any driver's vocabulary — and the
+            # session parameter it becomes is this vendor's too.
+            raise BindingError(
+                "`query_timeout_seconds` must be between 1 and 3600; "
+                f"got {query_timeout_seconds}, and 0 means no timeout at all to a SQL warehouse"
+            )
         self._options: dict[str, Any] = {
             "server_hostname": server_hostname,
             "access_token": access_token,

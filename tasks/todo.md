@@ -90,3 +90,30 @@ its own dialect — because with the connection vocabulary now the driver's, bor
 dialect would pin one vendor's spelling into every test of a module whose whole claim is that it has
 none. The shipped spelling is pinned twice instead: against the real dialect, and end to end through
 the retriever. That is more Databricks coverage than existed before, not less.
+
+## Review round 2 — `/code-review high`, and what it found
+
+Five defects, every one of them a *guard that the refactor moved and did not put back down*. Worth
+recording as a class: replacing a typed model with "the callable is the schema" trades one
+validation site for two (the gate, and the constructor), and anything the model was quietly doing
+belongs to whichever of the two now owns it.
+
+1. **A key the driver will not take escaped as a bare `TypeError`** (`core/connect.py`). The model
+   failed it as a `ValidationError` — a `ValueError`, non-retryable by class name — while
+   `TypeError` is on no list in `durable/publish`, so a permanently broken *mounted* manifest (the
+   case `make datasource-validate` cannot see) would have been retried by every job touching it.
+   The gate's signature check now runs again where the driver is built.
+2. **A full `/sql/1.0/warehouses/...` path in `warehouse_id`** built
+   `/sql/1.0/warehouses//sql/1.0/warehouses/<id>`. One field used to accept either form and branch;
+   two fields do not get to be lenient, so it is refused naming `http_path:`.
+3. **`vector_store_url`'s shipped-default check was keyed to `databricks` by name**, which reopened
+   its own hole the moment any `module:callable` could be a provider: a site's adapter inherited
+   Qdrant's `http://localhost:6333` and validated clean. Now every provider but Qdrant's own.
+4. **`query_timeout_seconds` lost its `ge=1, le=3600`** with the typed field, and `0` is the worst
+   value it can take — both Spark and Postgres read `statement_timeout=0` as *no* timeout. Restored
+   in each driver, because it is each driver's own keyword now.
+5. **`check_env_name` reached the publish seam's `*_env` keys but `make sink-validate` never ran
+   it**, so a pasted secret or a lower-case variable name passed CI and failed at first delivery.
+
+Each fix is pinned by a test **verified to fail against the pre-fix behaviour** by neutralising the
+guard in place and re-running: 7 failures, then green. Full gate after: 4772 passed, 3 skipped.

@@ -225,14 +225,19 @@ class StoreSettings(BaseSettings):
                 "store selected without it fails on the first search rather than at startup"
             )
         if (
-            self.vector_store_provider == "databricks"
+            self.vector_store_provider not in ("pgvector", "qdrant")
             and self.vector_store_url == _QDRANT_DEFAULT_URL
         ):
+            # **Every provider but Qdrant's own, not just the shipped second one.** The emptiness
+            # check above cannot catch this: the field has a non-empty default, so a deployment that
+            # selected another store and forgot its address passes startup and fails inside a
+            # worker. This used to name `databricks` literally, which reopened the same hole the
+            # moment the provider became any `module:callable` — a site's own adapter would have
+            # inherited Qdrant's localhost default and validated clean.
             raise ValueError(
-                "vector_store_provider='databricks' still has the shipped default "
-                f"vector_store_url={_QDRANT_DEFAULT_URL!r}, which is Qdrant's. The emptiness check "
-                "above cannot catch this, because the field has a non-empty default; set the "
-                "workspace URL"
+                f"vector_store_provider={self.vector_store_provider!r} still has the shipped "
+                f"default vector_store_url={_QDRANT_DEFAULT_URL!r}, which is Qdrant's; set the "
+                "address of the store you selected"
             )
         if self.vector_store_provider == "databricks" and not self.vector_store_endpoint_name:
             raise ValueError(

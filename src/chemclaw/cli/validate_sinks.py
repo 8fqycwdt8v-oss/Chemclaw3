@@ -26,8 +26,9 @@ import sys
 from typing import Any
 
 from chemclaw.core.config import settings
-from chemclaw.core.connect import signature_mismatch
+from chemclaw.core.connect import ENV_SUFFIX, check_env_name, signature_mismatch
 from chemclaw.core.logging import configure_logging
+from chemclaw.publish.connect import SinkConnectionError
 from chemclaw.publish.connect import resolve_driver as _resolve_connection_driver
 from chemclaw.publish.manifest import ResultSinkManifest
 from chemclaw.publish.properties import REGISTRY
@@ -76,6 +77,17 @@ def _driver_problems(manifest: ResultSinkManifest) -> list[str]:
             return [*problems, f"{manifest.name}: connection driver {reference!r}: {exc}"]
         if mismatch := signature_mismatch(nested, connection):
             problems.append(f"{manifest.name}: connection driver {reference!r} {mismatch}")
+        # A `*_env` key holds the NAME of an environment variable. The inbound seam checks this when
+        # its binding loads; this seam has no model to hang a validator on, so the gate is the only
+        # place it can be caught before a publish attempt fails on a variable that was never a
+        # variable name — the realistic mistake being a pasted value, or a lower-case one.
+        for key, value in connection.items():
+            if not key.endswith(ENV_SUFFIX):
+                continue
+            try:
+                check_env_name(key, str(value or ""), error=SinkConnectionError)
+            except SinkConnectionError as exc:
+                problems.append(f"{manifest.name}: connection: {exc}")
     return problems
 
 

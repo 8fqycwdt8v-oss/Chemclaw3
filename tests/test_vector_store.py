@@ -423,6 +423,22 @@ def test_databricks_will_not_accept_the_shipped_qdrant_url(
         StoreSettings(vector_store_provider="databricks", vector_store_endpoint_name="ep")
 
 
+def test_no_provider_but_qdrant_may_keep_qdrants_default_url() -> None:
+    """The check above cannot be keyed to one vendor's name once any adapter can be selected.
+
+    It was, and opening the provider to a `module:callable` reopened exactly the hole it exists to
+    close: a site's own store selected without `vector_store_url` inherits Qdrant's
+    `http://localhost:6333`, validates clean, and answers every search from a server it was never
+    pointed at.
+    """
+    from chemclaw.core.config.store import StoreSettings
+
+    with pytest.raises(ValueError, match="shipped default"):
+        StoreSettings(vector_store_provider="acme.vectors:MilvusVectorStore")
+    # Qdrant is the one provider that default belongs to, so it stays legitimate there.
+    assert StoreSettings(vector_store_provider="qdrant").vector_store_url
+
+
 def test_databricks_needs_the_endpoint_that_serves_its_index(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

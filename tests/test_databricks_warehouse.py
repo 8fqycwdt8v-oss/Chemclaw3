@@ -191,6 +191,31 @@ def test_exactly_one_compute_target_is_required(compute: dict[str, str]) -> None
         _warehouse(**compute)
 
 
+@pytest.mark.parametrize("seconds", [0, -1, 3601])
+def test_a_timeout_outside_the_bound_is_refused(seconds: int) -> None:
+    """`0` is the worst value the field can take, so it cannot be the one that slips through.
+
+    The bound used to live on the shared connection model, typed `int` with `ge=1, le=3600`. That
+    model no longer knows any driver's vocabulary, so the range moved to the driver whose keyword it
+    is — and it has to exist somewhere, because a SQL warehouse reads `statement_timeout=0` as *no*
+    timeout: the one setting standing between a runaway scan and a shared warehouse's bill, turned
+    off by the value a reader would assume means "none allowed".
+    """
+    with pytest.raises(BindingError, match="between 1 and 3600"):
+        _warehouse(query_timeout_seconds=seconds)
+
+
+def test_a_path_written_into_warehouse_id_is_refused_rather_than_interpolated() -> None:
+    """One field used to take either form; two fields do not get to be lenient about it.
+
+    A binding whose author pasted the full path into `warehouse_id` would otherwise build
+    `/sql/1.0/warehouses//sql/1.0/warehouses/<id>` and fail at connect time with a message about the
+    workspace — a defect in the binding, reported as a defect somewhere else.
+    """
+    with pytest.raises(BindingError, match="http_path"):
+        _warehouse(warehouse_id="/sql/1.0/warehouses/abc123")
+
+
 def test_a_key_this_driver_does_not_take_is_a_typeerror_naming_it() -> None:
     """The offline check for "the driver's signature is the schema", at the driver's own door.
 
