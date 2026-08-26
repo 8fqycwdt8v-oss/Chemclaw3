@@ -74,7 +74,7 @@ measured downstream of the policy rather than asserted beside it.
 """
 
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -85,7 +85,7 @@ from langchain.agents.middleware import (
     ModelRequest,
 )
 from langchain.agents.middleware.context_editing import ContextEdit, TokenCounter
-from langchain_core.messages import AnyMessage, HumanMessage
+from langchain_core.messages import AnyMessage, HumanMessage, ToolMessage
 from langchain_core.messages.utils import count_tokens_approximately, trim_messages
 
 from chemclaw.agent.repeat_guard import forget_calls
@@ -331,7 +331,37 @@ def _record_reduction(request: ModelRequest[Any]) -> None:
     # premise has expired. A cleared tool result leaves the model without the answer the guard
     # assumes it is holding, and the third identical call was then refused with advice — "answer
     # from what you already have" — about something it no longer had. See `repeat_guard`.
-    forget_calls()
+    #
+    # The calls are named rather than the counters wiped: clearing keeps the newest results, so a
+    # blanket reset forgave repeats the model can still read.
+    forget_calls(_cleared_calls(request.messages))
+
+
+def _cleared_calls(messages: Sequence[AnyMessage]) -> list[tuple[str, Any]]:
+    """The `(tool name, arguments)` of every result this reduction replaced with a placeholder.
+
+    Upstream stamps `response_metadata["context_editing"]["cleared"]` on a `ToolMessage` it clears,
+    which is the only reliable marker — the placeholder text is first-party and a content match
+    would break the moment it is reworded. The arguments come from the originating `AIMessage`'s
+    `tool_calls`, because the guard's identity is the call, not the tool.
+
+    The metadata key is pinned in `tests/test_upstream_surface.py`.
+    """
+    by_id: dict[str, tuple[str, Any]] = {}
+    for message in messages:
+        for call in getattr(message, "tool_calls", None) or ():
+            if call.get("id"):
+                by_id[str(call["id"])] = (str(call.get("name", "")), call.get("args"))
+    cleared: list[tuple[str, Any]] = []
+    for message in messages:
+        if not isinstance(message, ToolMessage):
+            continue
+        if not message.response_metadata.get("context_editing", {}).get("cleared"):
+            continue
+        identity = by_id.get(str(message.tool_call_id))
+        if identity is not None:
+            cleared.append(identity)
+    return cleared
 
 
 class RecordContextCompaction(AgentMiddleware[Any, Any, Any]):

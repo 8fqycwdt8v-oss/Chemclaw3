@@ -200,7 +200,16 @@ class Settings(
           "does anything in this deployment write `note_index`", and `note_reindex_enabled` is the
           third way that happens — the scheduled rebuild, which needs no retrieve source at all.
         """
-        if self.agent_tool_result_clear_trigger > self.agent_context_token_budget:
+        # Only when the operator *set* it. At its default the trigger is clamped instead, because a
+        # default is this repository's opinion and a budget is the deployment's: a small-context
+        # site setting `CHEMCLAW_AGENT_CONTEXT_TOKEN_BUDGET=20000` and nothing else would otherwise
+        # fail to construct `Settings()` at all, citing a variable it never heard of. That made a
+        # 30,000-token floor out of a field whose entire purpose is to sit *below* the budget.
+        if "agent_tool_result_clear_trigger" not in self.model_fields_set:
+            self.agent_tool_result_clear_trigger = min(
+                self.agent_tool_result_clear_trigger, self.agent_context_token_budget
+            )
+        elif self.agent_tool_result_clear_trigger > self.agent_context_token_budget:
             raise ValueError(
                 "agent_tool_result_clear_trigger must not exceed agent_context_token_budget: the "
                 "lossless tool-result edit exists to run *before* the destructive conversation "

@@ -496,3 +496,36 @@ def test_the_summarizer_in_the_compiled_stack_can_never_fire() -> None:
         "retrieved evidence will be rewritten as model prose and replayed as conversation with "
         "agent/framing.py's untrusted-data envelope stripped off it"
     )
+
+
+def test_only_the_cleared_results_are_reported_to_the_repeat_guard() -> None:
+    """The reduction names the calls that lost their answers, read off upstream's own marker.
+
+    Built from a real `ClearToolUsesEdit` run rather than from hand-stamped metadata, so this
+    breaks if upstream stops marking cleared results the way `_cleared_calls` reads them — which
+    is the failure mode that would otherwise surface as the repeat guard silently forgiving
+    nothing.
+    """
+    from langchain.agents.middleware import ClearToolUsesEdit
+    from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+    from langchain_core.messages.utils import count_tokens_approximately
+
+    from chemclaw.agent.compaction import _cleared_calls
+
+    body = "x " * 6000
+    messages: list[Any] = [HumanMessage("compare these")]
+    for i in range(4):
+        messages.append(
+            AIMessage(
+                "",
+                tool_calls=[{"name": f"tool_{i}", "args": {"n": i}, "id": f"call_{i}"}],
+            )
+        )
+        messages.append(ToolMessage(body, tool_call_id=f"call_{i}"))
+
+    ClearToolUsesEdit(trigger=1, keep=2, placeholder="[cleared]").apply(
+        messages, count_tokens=count_tokens_approximately
+    )
+
+    # `keep=2` preserves the two newest, so the two oldest are what the guard must be told about.
+    assert _cleared_calls(messages) == [("tool_0", {"n": 0}), ("tool_1", {"n": 1})]

@@ -268,7 +268,13 @@ up() {
   # introduced the moment those bundles started requiring a credential.
   #
   # 0600 and under the run dir, which `.gitignore` already covers. `processes.sh env` prints it.
-  ( umask 077; printf '%s\n' "$connector_exports" > "$RUN_DIR/connector-env.sh" )
+  #
+  # **Written after `start_fleet_bundles`, not here.** The paragraph above is the reason: a token is
+  # minted, not derived. `start_fleet_bundles` mints `CHEMCLAW_CHEM_TOKEN`/`CHEMCLAW_SAFETY_TOKEN`
+  # and rewrites `CHEMCLAW_CONNECTOR_URLS` with the fleet's two addresses, so persisting at this
+  # point captures the map *before* those exist and hands a second shell exactly the failure this
+  # comment warns about — 401s from a server that is plainly up. The file is written once, below,
+  # when every address and every credential is known.
   log "connector urls: $CHEMCLAW_CONNECTOR_URLS"
 
   # The probe identity, in the enforced posture only. Minted before the front door starts so the
@@ -278,10 +284,8 @@ up() {
     CHEMCLAW_LIVE_PROBE_TOKEN="$(mint_probe_token "$python")" \
       || die "could not mint a probe token from $ENTRA_TOKEN_URL — is the mock tenant running with MOCK_ENTRA_ENABLED=true?"
     export CHEMCLAW_LIVE_PROBE_TOKEN
-    # Into the same file as the connector credentials, for the same reason: `make live-probes` run
+    # Persisted with the connector credentials below, for the same reason: `make live-probes` run
     # from another terminal would otherwise present nothing and 401 before a probe starts.
-    ( umask 077; printf 'export CHEMCLAW_LIVE_PROBE_TOKEN=%q\n' "$CHEMCLAW_LIVE_PROBE_TOKEN" \
-      >> "$RUN_DIR/connector-env.sh" )
     log "identity enforced: issuer $CHEMCLAW_ENTRA_ISSUER, probe identity ${CHEMCLAW_LIVE_PROBE_OID:-live-probe-runner}"
   fi
 
@@ -290,6 +294,19 @@ up() {
   # not a degraded turn.
   start_fleet_bundles "$python"
   log "connector urls (with the fleet): $CHEMCLAW_CONNECTOR_URLS"
+
+  # Now every address and credential is known, so the file a second shell reads can be complete.
+  # `connector_env`'s own exports, then the fleet's two tokens and the URL map it rewrote.
+  ( umask 077
+    printf '%s\n' "$connector_exports"
+    printf 'export CHEMCLAW_CONNECTOR_URLS=%q\n' "$CHEMCLAW_CONNECTOR_URLS"
+    printf 'export CHEMCLAW_CHEM_TOKEN=%q\n' "$CHEMCLAW_CHEM_TOKEN"
+    printf 'export CHEMCLAW_SAFETY_TOKEN=%q\n' "$CHEMCLAW_SAFETY_TOKEN"
+  ) > "$RUN_DIR/connector-env.sh"
+  if [ "${CHEMCLAW_LIVE_PROBE_TOKEN:-}" != "" ]; then
+    ( umask 077; printf 'export CHEMCLAW_LIVE_PROBE_TOKEN=%q\n' "$CHEMCLAW_LIVE_PROBE_TOKEN" \
+      >> "$RUN_DIR/connector-env.sh" )
+  fi
 
   # The connectors themselves: the front door refuses to report ready without them under
   # `connectors_required=true`, and the workers call them through the same URLs.

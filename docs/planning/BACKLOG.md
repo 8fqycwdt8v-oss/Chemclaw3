@@ -731,6 +731,31 @@ cluster, real HPC, real Snowflake — are in
 [`DEFERRED.md`](DEFERRED.md), each with the trigger that would revisit it, which is the register
 those belong in.
 
+## `turn_cost_ratio` scores a fixture, not the system
+
+`data/evals/cases/autonomy-turn-cost.md` carries literal turn records, so the metric returns
+0.9845458333333333 whatever changes in the agent — the 32% static-prefix growth that
+`tests/test_context_floor.py` caught would leave its `baseline.json` row untouched. The metric's
+arithmetic is right and tested; what is missing is a case fed from real recorded `TurnCost` rows.
+
+Blocked on the same thing the memory-distillation row is: a deployment with turns in it. This
+system has 12 session messages and 0 recorded turns, so there is nothing to build the case from
+yet. Trigger: the first live lane run that persists a session's worth of turns.
+
+## The live lane and the four-repo lane fight over `chem` and `safety`
+
+`infra/live/processes.sh` uses `RUN_DIR=$LIVE_DIR/run` and `infra/live/e2e-full-stack/up.sh` uses
+`$LIVE_DIR/e2e/run`, and both now start `chem` and `safety`. Run them together and the second
+lane's pidfile guard cannot see the first's processes, so two uvicorns die on a bound port while
+`wait_for` passes off the servers that are already up — leaving dead pidfiles that make
+`processes.sh status` report both DOWN while the lane works fine.
+
+Not fixed here because the fix is a decision rather than an edit: either the two lanes share one
+run dir (and one lane learns to adopt the other's processes), or the fleet bundles move out of
+`processes.sh` and the four-repo lane becomes the only thing that starts them. The second is
+probably right — `processes.sh` grew them for a single-repo live test that the e2e lane supersedes
+— but it changes what `make live-up` alone can exercise, which wants measuring first.
+
 ## Backfill the ORD corpus on the four-repo lane's first bring-up
 
 `infra/live/e2e-full-stack/up.sh` seeds `CHEMCLAW_DATA_SOURCES=graph,eln-json,eln-ord` and points
