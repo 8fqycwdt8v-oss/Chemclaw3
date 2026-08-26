@@ -1132,8 +1132,9 @@ async def ensemble_property(
 
     Per-atom properties (`fukui`, `charges`) are averaged atom by atom over the same populations,
     which is the same arithmetic — `weighted_average` is called once per atom rather than once.
-    Atom order is the canonical SMILES order on every member, because every member came from one
-    search over one molecule.
+    **Atoms are paired by index, never by position in the returned list**: a Fukui result is ranked
+    by susceptibility and truncated, so its order is a property of the conformer rather than of the
+    molecule. `_per_atom` carries the argument; this sentence used to claim the opposite.
     """
     ensemble, _ = await conformer_ensemble(
         store, smiles, solvent=solvent, temperature_k=temperature_k, run=run
@@ -1177,6 +1178,40 @@ async def ensemble_property(
     )
 
 
+def _per_atom(
+    members: list[dict[int, tuple[str, float]]], populations: list[float]
+) -> list[WeightedAtom]:
+    """Average a per-atom property across conformers, pairing atoms by **index**.
+
+    **Not by list position, and the difference is a wrong answer rather than a rough one.** The
+    first version of this did `member[position]` over `enumerate(members[0])`, which is only correct
+    if every conformer returns its atoms in one order. `SiteReactivityResult` documents the
+    opposite in its own docstring: `sites` is *"ordered most-susceptible first by the index named in
+    `ranked_by`, and truncated to the most susceptible `len(sites)` of `total_atoms`"*. Ranked, and
+    cut. Two conformers of a floppy molecule rank their atoms differently — that is the entire
+    reason to average over an ensemble at all — so position *k* was a different atom in each, and
+    the mean was labelled with the first conformer's index.
+
+    The bug therefore fired hardest in exactly the case the composite exists for: had the ranking
+    not moved with geometry, `compute_fukui_at` and the `DEFERRED.md` row it closed would have had
+    no purpose. Truncation made it worse than a mispairing — conformers can carry different atom
+    *sets*, and a short list raised `IndexError`.
+
+    Atoms missing from any member are dropped rather than averaged over a subset, because a mean
+    over three of five conformers is not a population-weighted average and nothing downstream could
+    tell. The caller reports the count so a truncated ranking is visible instead of implied.
+    """
+    common = set.intersection(*(set(member) for member in members)) if members else set()
+    return [
+        WeightedAtom(
+            index=index,
+            element=members[0][index][0],
+            value=weighted_average([member[index][1] for member in members], populations),
+        )
+        for index in sorted(common)
+    ]
+
+
 def _averaged(
     prop: EnsembleProperties, payloads: list[Any], populations: list[float]
 ) -> tuple[WeightedValue | None, list[WeightedAtom]]:
@@ -1188,28 +1223,22 @@ def _averaged(
     if prop == "fukui":
         sites = [SiteReactivityResult.model_validate(payload).sites for payload in payloads]
         field = _FUKUI_FIELD[_DEFAULT_FUKUI_MODE]
-        return None, [
-            WeightedAtom(
-                index=first.index,
-                element=first.element,
-                value=weighted_average(
-                    [getattr(member[position], field) for member in sites], populations
-                ),
-            )
-            for position, first in enumerate(sites[0])
-        ]
+        return None, _per_atom(
+            [
+                {site.index: (site.element, getattr(site, field)) for site in member}
+                for member in sites
+            ],
+            populations,
+        )
     properties = [ElectronicProperties.model_validate(payload) for payload in payloads]
     if prop == "charges":
-        return None, [
-            WeightedAtom(
-                index=first.index,
-                element=first.element,
-                value=weighted_average(
-                    [member.atom_charges[position].charge for member in properties], populations
-                ),
-            )
-            for position, first in enumerate(properties[0].atom_charges)
-        ]
+        return None, _per_atom(
+            [
+                {charge.index: (charge.element, charge.charge) for charge in member.atom_charges}
+                for member in properties
+            ],
+            populations,
+        )
     values = [getattr(member, prop) for member in properties]
     if any(value is None for value in values):
         raise ValueError(

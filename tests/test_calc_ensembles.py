@@ -143,6 +143,56 @@ def test_an_averaged_fukui_ranking_reaches_the_geometry_taking_tool(
     assert averaged.value is None, "a per-atom property has no single scalar"
     assert len(averaged.per_atom) > 1
     assert all(atom.value.minimum <= atom.value.mean for atom in averaged.per_atom)
+    # Every atom appears once, and the indices are the molecule's rather than a rank order.
+    indices = [atom.index for atom in averaged.per_atom]
+    assert indices == sorted(set(indices)), "atoms must be reported once each, by index"
+
+
+def test_an_averaged_fukui_pairs_atoms_by_index_not_by_rank() -> None:
+    """Conformers rank their atoms differently, and averaging by list position mixes them up.
+
+    `SiteReactivityResult.sites` is ordered *most-susceptible first* and truncated to `top_n`, so
+    position k is a different atom in different conformers — which is the normal case, not the
+    exotic one: if the ranking did not move with geometry there would be no reason to average over
+    an ensemble at all. The first version of `_averaged` did `member[position]` and labelled the
+    result with the first conformer's index, so it averaged one atom's index with another's and
+    reported it under a third name.
+
+    Asserted against a hand-built input rather than through the fake, because the arithmetic is
+    what is being pinned: atom 0 is 0.1 in every conformer and atom 1 is 0.9 in every conformer, so
+    *any* correct pairing gives 0.1 and 0.9 with zero spread. Position-pairing gives 0.5 and 0.5
+    with a spread of 0.8 — the reordering is the only difference between the two members.
+    """
+    ranked_high_first = {0: ("C", 0.1), 1: ("O", 0.9)}
+    ranked_low_first = {1: ("O", 0.9), 0: ("C", 0.1)}
+
+    per_atom = compose._per_atom([ranked_high_first, ranked_low_first], [0.5, 0.5])
+
+    by_index = {atom.index: atom for atom in per_atom}
+    assert by_index[0].value.mean == pytest.approx(0.1)
+    assert by_index[1].value.mean == pytest.approx(0.9)
+    assert by_index[0].element == "C" and by_index[1].element == "O"
+    assert by_index[0].value.spread == pytest.approx(0.0), (
+        "one atom's value is identical in both conformers; a spread here means two atoms were "
+        "averaged together"
+    )
+
+
+def test_an_atom_missing_from_one_conformer_is_dropped_rather_than_part_averaged() -> None:
+    """Truncation means conformers can carry different atom *sets*, not merely different orders.
+
+    A Fukui result is cut to `top_n`, so a marginal atom can be inside one conformer's list and
+    outside another's. Position-pairing raised `IndexError` on the short list; averaging over
+    whichever members happen to carry the atom would be worse, because the result would look like a
+    population-weighted mean over the ensemble and be a mean over a subset, with nothing saying so.
+    """
+    both = {0: ("C", 0.2), 1: ("O", 0.4)}
+    truncated = {0: ("C", 0.6)}
+
+    per_atom = compose._per_atom([both, truncated], [0.5, 0.5])
+
+    assert [atom.index for atom in per_atom] == [0], "an atom absent from a member must be dropped"
+    assert per_atom[0].value.mean == pytest.approx(0.4)
 
 
 def test_a_property_no_conformer_defines_is_refused_rather_than_averaged() -> None:
