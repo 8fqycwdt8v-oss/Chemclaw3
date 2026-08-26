@@ -151,26 +151,18 @@ topic).
       payloads be JSON, or should each tool render its own boundary as `condense_protocols` now does
       — deserves deciding rather than defaulting.
 
-- [ ] **Seven `chem` enumerations and `compute_fukui_at` are declared here and served nowhere** —
-      [S], and it is a live gap rather than a plan. `src/chemclaw/connectors/chem/connector.yaml`
-      names `enumerate_tautomers`, `enumerate_protonation_states`, `enumerate_stereoisomers`,
-      `enumerate_bond_cleavages`, `enumerate_degradants`, `transform_structure` and
-      `describe_topology`; six of the seven templates added by
-      `D-2026-08-25-the-loop-is-a-composite-not-a-template` call one of them, and
-      `connectors/calc/compose.py::ensemble_property` calls `compute_fukui_at` for its `fukui`
-      field. All eight are implemented in `Chemclaw3-mcp` (`servers/chem/.../engine/species.py`,
-      `servers/calc/.../tools.py`) on branch `claude/chemclaw-gfn-workflows-5eie2t` **which was
-      never pushed** — that repository was outside the session's GitHub scope and `add_repo` with
-      push access was never approved, so the work exists only in that session's container and is
-      lost with it.
-      **What this costs until it lands:** `make template-validate` passes, because `chem` is a
-      bundle this repository declares and does not run, so those tools are name-checked and
-      argument-unchecked — the count it reports rose from 1 to 6 for exactly this reason. `make
-      connector-validate` against a running server is what would catch it, and the live lane is
-      where it will surface. Re-implementing is the fallback and the ADR's "What was measured
-      rather than assumed" section is the specification: it records the per-search `xtb` binary
-      requirement, the `protonated.xyz`/`protomers.xyz` filename, and the element-list defect that
-      only appears once a search changes the atom count.
+- [ ] **The `chem` enumerations and `compute_fukui_at` are served, pending that PR's merge** —
+      [S], and what is left is a version bump rather than an implementation.
+      `Chemclaw3-mcp#18` adds the six enumerations this repository's `chem` manifest declares plus
+      the `compute_fukui_at` that `connectors/calc/compose.py::ensemble_property` calls, so the six
+      templates `D-2026-08-25-the-loop-is-a-composite-not-a-template` added can complete. Delete
+      this row once that PR is merged **and the live lane has run one of those templates end to
+      end** — `make template-validate` cannot see the difference (`chem` is a bundle this
+      repository declares and does not run, so its tools are name-checked and argument-unchecked),
+      and `make connector-validate` against a running server is what would.
+      **`transform_structure` was the seventh name and is now gone from the manifest** rather than
+      implemented: it had no caller, no template, no skill reference and no documented signature in
+      either repository, so serving it would have meant inventing its contract.
 
 - [ ] **A solvate collapses onto whichever fragment is larger** — [M], and worse than filed: it is
       not only the cache key, it is the **knowledge-graph note id**. Measured,
@@ -246,19 +238,6 @@ it happens.
 
 ## 3 — Work that is lost, dropped or invisible
 
-- [ ] **Four multi-step result shapes reach the publish hook and route to no projector** — [M],
-      and it is the second half of a fix rather than a new finding. `RefinedEnsemble`,
-      `EnsembleProperty`, `SpeciesDistribution` and `BondDissociationSurvey` are what the seven
-      jobs `D-2026-08-25-the-loop-is-a-composite-not-a-template` added actually return, and
-      `PAYLOAD_PROJECTORS` has an entry for none of them — so those jobs run, cost real compute,
-      and publish nothing. Declared out loud in
-      `tests/test_publish_reaches_the_hooks.py::_NOT_YET_PUBLISHED` rather than quietly omitted,
-      and that set is the definition of done: each projector deletes its own entry, and a shape
-      *not* named there must route, so a tenth member field on `XtbJobResult` fails immediately.
-      Each is the `_ensemble` shape — a SMILES subject, solvent/temperature conditions, a method,
-      and a per-conformer or per-bond fact list — and `publish/properties.py` already registers
-      the quantities, so this is bounded work rather than a design question.
-
 - [ ] **A Hessian is cached and never published, and neither is the thermochemistry built from
       it** — [M], and the two halves are one question. `xtb.hess` is a `calc_type` the server
       stamps and `_CALC_TYPE_PROJECTORS` has no prefix for it, so vibrational frequencies never
@@ -269,30 +248,6 @@ it happens.
       this is a decision rather than a one-line addition. Named in
       `tests/test_publish_reaches_the_hooks.py::_PRIMITIVES_NOT_PUBLISHED` so the gap is declared
       and not merely absent.
-
-- [ ] **Decide whether a BO campaign is a scientific record** — [S].
-      `connectors/bo/workflows.py` sets `payload_kind` from `CampaignResult`, which implies it
-      should publish, and no projector exists — so it is currently in the same silent-drop state
-      the calc jobs were, but possibly *correctly*: a campaign is an optimization outcome rather
-      than a computed value, and `schema/result-store/` is molecule/reaction/ensemble-shaped.
-      Either write the projector or say in `publish/README.md` that a campaign deliberately does
-      not publish. What is not acceptable is the current state, where the two readings are
-      indistinguishable from the code.
-
-- [ ] **The `results` bundle's worker is not started by the live lane** — [S].
-      `deploy/helm/chemclaw/values.yaml` gives it `worker: true` and the chart renders the
-      Deployment, but `infra/live/processes.sh` starts four workers (background, calc, bo, qm) and
-      not this one, so `republish_calculations` cannot run there. Low urgency because publishing
-      is off until `CHEMCLAW_RESULT_SINKS` names a sink, and a backfill has a CLI route that needs
-      no worker — but the lane exists to make the deployed shape testable, and it currently
-      diverges from it.
-
-- [ ] **`label_batch_size` is unguarded against the labelling server's batch limit** — [S].
-      The default is 200 and `Chemclaw3-mcp`'s `rxnlabel` refuses above `MAX_BATCH = 500`, so an
-      operator raising the setting past 500 gets every drain attempt refused as bad data. The
-      house rule is that a rule worth writing down is worth failing on
-      (`core/config/__init__.py::_guards_that_the_comments_already_demand`), and the limit is not
-      written down on this side at all.
 
 - [ ] **A decided approval hold can be reopened** — [M]. `agent/interaction_tools.py::start_approval`
       passes no `id_reuse_policy`, so temporalio's default lets a decided hold be started again under
