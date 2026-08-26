@@ -287,6 +287,85 @@ _DEFINITIONS: tuple[PropertyDefinition, ...] = (
         "molecule only.",
         scope="site",
     ),
+    _d(
+        "fukui_dual",
+        "fukui",
+        "",
+        "Dual descriptor, f_plus minus f_minus. Positive marks a site that accepts electrons more "
+        "readily than it donates. Comparable within one molecule only.",
+        scope="site",
+    ),
+    _d(
+        "local_softness_minus",
+        "softness",
+        "1/ev",
+        "Global softness partitioned onto this site by its f_minus. Ranks the ends of an ambident "
+        "nucleophile, which f_minus alone cannot because it carries no softness scale.",
+        scope="site",
+    ),
+    _d(
+        "local_softness_plus",
+        "softness",
+        "1/ev",
+        "Global softness partitioned onto this site by its f_plus.",
+        scope="site",
+    ),
+    _d(
+        "local_electrophilicity",
+        "conceptual_dft",
+        "ev",
+        "Global electrophilicity partitioned onto this site by its f_plus. The one site index "
+        "carrying a global scale factor, so the only one that could in principle compare sites "
+        "across molecules — an unsettled claim, not an established one.",
+        scope="site",
+    ),
+    # --- conceptual DFT, per molecule ----------------------------------------------------------
+    _d(
+        "ionization_potential",
+        "conceptual_dft",
+        "ev",
+        "Vertical Delta-SCF ionization potential, E(N-1) minus E(N) on a fixed geometry. "
+        "Semiempirical and uncalibrated in absolute terms: GFN2 puts phenol at 13.5 eV against an "
+        "experimental 8.5. Orders a series; is not a measurement.",
+        scope="calculation",
+    ),
+    _d(
+        "electron_affinity",
+        "conceptual_dft",
+        "ev",
+        "Vertical Delta-SCF electron affinity, E(N) minus E(N+1). Uncalibrated in absolute terms, "
+        "for the same reason as the ionization potential beside it.",
+        scope="calculation",
+    ),
+    _d(
+        "chemical_potential",
+        "conceptual_dft",
+        "ev",
+        "Electronic chemical potential, -(IP + EA)/2 — the escaping tendency of the electrons. "
+        "Negative for a bound system.",
+        scope="calculation",
+    ),
+    _d(
+        "chemical_hardness",
+        "conceptual_dft",
+        "ev",
+        "Chemical hardness, IP minus EA: resistance to charge transfer. Large means hard.",
+        scope="calculation",
+    ),
+    _d(
+        "chemical_softness",
+        "softness",
+        "1/ev",
+        "Global softness, the reciprocal of the hardness. What the local softness indices scale.",
+        scope="calculation",
+    ),
+    _d(
+        "electrophilicity_index",
+        "conceptual_dft",
+        "ev",
+        "Electrophilicity index, mu^2 / 2 eta — the stabilisation on saturating with electrons.",
+        scope="calculation",
+    ),
     # --- vibrational -------------------------------------------------------------------------
     _d(
         "wavenumber",

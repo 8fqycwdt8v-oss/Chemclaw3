@@ -48,6 +48,7 @@ from chemclaw.science.calc.calibration import (
 from chemclaw.science.calc.geometry import without_geometry
 from chemclaw.science.calc.logd import logd_from_pka
 from chemclaw.science.calc.models import (
+    AtomicDescriptorResult,
     DescriptorProfile,
     ElectronicProperties,
     FukuiMode,
@@ -823,9 +824,10 @@ async def compute_electronic_properties(
             particular conformer.
 
     Returns:
-        The total energy, HOMO/LUMO/gap in eV, dipole in Debye, per-atom charges and
-        the bond orders. Atom indices match the heavy atoms of the canonical SMILES,
-        with hydrogens following them.
+        The total energy, HOMO/LUMO/gap in eV, dipole in Debye, per-atom charges, Wiberg and free
+        valences, and the bond orders. Atom indices match the heavy atoms of the canonical SMILES,
+        with hydrogens following them — `describe_sites` on `chem` maps those indices to positions a
+        chemist can read, and is free.
     """
     # Two routes to one answer, and which one runs is decided by whether a geometry was named.
     #
@@ -853,6 +855,45 @@ async def compute_electronic_properties(
 
 
 @server.tool()
+async def compute_atomic_descriptors(
+    smiles: str, solvent: str | None = None, surface: bool = False
+) -> AtomicDescriptorResult:
+    """Per-atom polarisability, dispersion and multipole descriptors (GFN2-xTB, binary only).
+
+    Answers what a partial charge cannot: which atom is **polarisable** — a soft, dispersion-driven
+    or halogen-bonding site — how anisotropic its own electron density is, and, with `surface=True`,
+    where the molecular electrostatic potential is most positive and most negative. A halogen's
+    sigma-hole is invisible to a point charge and shows up here.
+
+    Unlike Fukui indices, nothing in this panel is normalised per molecule, so these values **do**
+    compare between molecules. Use `describe_sites` on `chem` to report them by position.
+
+    **Needs the `xtb` binary and refuses by name where a deployment has none.** It does not
+    approximate: the in-process library exposes no atomic multipoles and no polarisability, so there
+    is nothing to fall back to. Partial charges, bond orders, frontier orbitals and site rankings
+    all come from `compute_electronic_properties` and `predict_site_reactivity`, neither of which
+    needs it.
+
+    Args:
+        smiles: The molecule as a SMILES string. Must be closed-shell.
+        solvent: Optional ALPB implicit solvent name; omit for gas phase.
+        surface: Also return the electrostatic-potential extrema. **Costs a second calculation** —
+            measured, an `--esp` run cannot also produce the atomic multipoles.
+
+    Returns:
+        One entry per atom, indexed as `compute_electronic_properties` and `predict_site_reactivity`
+        index them for the same structure, so the three panels join. Atomic units throughout except
+        the surface extrema, which are kcal/mol.
+    """
+    payload, _ = await cached_remote(
+        default_store(),
+        "compute_atomic_descriptors",
+        {"smiles": smiles, "solvent": solvent, "surface": surface},
+    )
+    return AtomicDescriptorResult.model_validate(payload)
+
+
+@server.tool()
 async def predict_site_reactivity(
     smiles: str,
     mode: FukuiMode = "electrophilic",
@@ -874,6 +915,17 @@ async def predict_site_reactivity(
     the model — and a heteroatom often tops the list because of its lone pair, so for
     a ring-substitution question compare the ring carbons with each other. Cached, and
     asking a second mode for the same molecule is free.
+
+    **Call `describe_sites` (on `chem`) first and report the answer by position, never by
+    index.** It is free, and it is what makes this ranking readable: it groups the atoms into
+    symmetry classes, names each one the way a chemist does ("the para aromatic carbon"), and says
+    which scope each belongs to. Two things follow that this tool cannot do on its own. Ranking
+    *within a scope* is the fix for the measured failure here — on phenol the para carbon, which is
+    the answer, ranks 6th of 13 behind the hydroxyl oxygen and four hydrogens, and no value of
+    `top_n` changes that because 15 already exceeds 13. And **the spread across a symmetry class is
+    this calculation's own error bar**: phenol's two equivalent ortho carbons differ by 0.0088
+    purely because its planar O-H makes one syn and the other anti, which is the same size as the
+    ortho-to-meta difference somebody would otherwise report as chemistry.
 
     Args:
         smiles: The molecule as a SMILES string. Must be closed-shell (no radicals).

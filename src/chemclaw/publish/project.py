@@ -1131,10 +1131,16 @@ def _electronic_properties(
 def _site_reactivity(
     payload: dict[str, Any],
 ) -> tuple[Subject, Conditions, TheoryLevel, dict[str, Any]]:
-    """Fukui indices: three numbers per atom, ranked.
+    """Fukui indices and the conceptual-DFT panel: per-atom facts plus per-molecule ones.
 
-    All three are published per atom rather than only the ranked one, because the ranking is a
-    presentation choice and the indices are the measurement.
+    All the per-atom indices are published rather than only the ranked one, because the ranking is a
+    presentation choice and the indices are the measurement. The same argument carries the global
+    panel: chemical potential, hardness, softness and electrophilicity describe the *molecule*, so
+    they are molecule-level properties beside the site facts rather than repeated onto every atom.
+
+    Publishing them is what makes them queryable at all — `calculation_results` is a cache keyed on
+    an opaque payload and refuses any predicate on it, so "every compound whose most electrophilic
+    carbon is a nitrile" is a question only the result store can answer.
     """
     smiles = payload.get("smiles")
     subject = Subject(
@@ -1156,14 +1162,29 @@ def _site_reactivity(
             ("f_minus", "fukui_minus"),
             ("f_plus", "fukui_plus"),
             ("f_zero", "fukui_zero"),
+            ("dual", "fukui_dual"),
+            ("local_softness_minus", "local_softness_minus"),
+            ("local_softness_plus", "local_softness_plus"),
+            ("local_electrophilicity_ev", "local_electrophilicity"),
         ):
             if site.get(key) is not None:
                 sites.append(
                     SiteFact(atom_i=index, element=element, property=name, value=float(site[key]))
                 )
+    panel = payload.get("descriptors") or {}
     facts = _kept(
         _fact("atom_count", payload.get("total_atoms"), ""),
         _text("fukui_mode", payload.get("mode")),
+        # Units on every one, because an electron-volt descriptor quoted bare is the thing a reader
+        # a year from now cannot check. `softness_per_ev` is the reciprocal of a hardness, so its
+        # unit really is 1/ev rather than ev. Lower-case, because that is the spelling the registry
+        # already uses for `homo`/`lumo` and a unit string is matched, not parsed.
+        _fact("ionization_potential", panel.get("ionization_potential_ev"), "ev"),
+        _fact("electron_affinity", panel.get("electron_affinity_ev"), "ev"),
+        _fact("chemical_potential", panel.get("chemical_potential_ev"), "ev"),
+        _fact("chemical_hardness", panel.get("hardness_ev"), "ev"),
+        _fact("chemical_softness", panel.get("softness_per_ev"), "1/ev"),
+        _fact("electrophilicity_index", panel.get("electrophilicity_ev"), "ev"),
     )
     return subject, conditions, level, {"properties": facts, "sites": sites}
 

@@ -68,7 +68,14 @@ ResultPayload = dict[str, Any]
 #   1 — introduced. Invalidates every row written before it, deliberately: a pre-epoch cache cannot
 #       be separated into "still correct" and "wrong linear-rotor thermochemistry / missing
 #       applicability-domain flag", and serving the wrong half is the failure this exists to stop.
-CALCULATION_EPOCH = "1"
+#   2 — the per-atom reactivity panel. `SiteReactivityResult` gained the conceptual-DFT global
+#       descriptors (IP, EA, chemical potential, hardness, softness, electrophilicity) and four
+#       local ones per site; `AtomCharge` gained its Wiberg and free valence. No stored number
+#       moved — the calculation server runs the same three SCFs on the same geometry and simply
+#       reads energies it used to discard — but every epoch-1 row is now *incomplete*, and the new
+#       fields are required, so one cannot come back validating as a panel it never carried.
+#       Bumped in `Chemclaw3-mcp/servers/calc/.../key.py` in the same change, as the rule requires.
+CALCULATION_EPOCH = "2"
 
 
 class CalculationKey(BaseModel):

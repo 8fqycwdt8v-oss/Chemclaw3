@@ -59,6 +59,7 @@ endpoint:
     - enumerate_degradants
     - transform_structure
     - describe_topology
+    - describe_sites
     - enumerate_torsions
   # Pure functions of their input plus a vendored-dataset lookup: nothing here spends real compute
   # or writes, so an agent can use every one of them to build the plan a human is asked to
@@ -82,6 +83,7 @@ endpoint:
     - enumerate_degradants
     - transform_structure
     - describe_topology
+    - describe_sites
     # Which bonds of a molecule can be rotated, each under a handle that survives a rewritten
     # SMILES (D-2026-08-26-a-torsion-is-named-not-indexed). A graph operation, free, and the thing
     # a chemist consults *before* authorizing a torsion scan — gating it would put the human in

@@ -103,7 +103,7 @@ PAYLOAD_MODELS: tuple[type[BaseModel], ...] = (
 # `calc.store.CALCULATION_EPOCH` if they are.
 RECORDED_SHAPES: dict[str, str] = {
     "DescriptorProfile": "81370985b8bb84c0",
-    "ElectronicProperties": "61f42bbba754c322",
+    "ElectronicProperties": "5c549d172443ea4c",
     # New with the split: the wire shape a `compute_hessian` row holds, base64 `.npy` and all. It
     # replaces `HessianResult`, whose content addresses pointed into an artifact store this
     # repository no longer writes to.
@@ -117,7 +117,7 @@ RECORDED_SHAPES: dict[str, str] = {
     "OptimizationResult": "3d934a3b36e47f11",
     "PkaResult": "f4928a91c06fc746",
     "QMJobResult": "fce36419000e7f0d",
-    "SiteReactivityResult": "0378ea844edafd37",
+    "SiteReactivityResult": "ddeb1c374840d99f",
     # Changed when `Estimate.method` dropped its unreachable `"conformal"` member: nothing ever
     # produced that value (the function behind it had no caller and was deleted), so every row on
     # disk carries `"reported"` and still validates and still means what it said. A narrowing that

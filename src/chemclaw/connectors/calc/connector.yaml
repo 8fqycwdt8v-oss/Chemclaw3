@@ -45,6 +45,7 @@ endpoint:
     - compute_xtb_energy
     - compute_electronic_properties
     - predict_site_reactivity
+    - compute_atomic_descriptors
     - optimize_geometry
     - compute_thermochemistry
     - predict_pka
@@ -70,6 +71,7 @@ endpoint:
     - compute_xtb_energy
     - compute_electronic_properties
     - predict_site_reactivity
+    - compute_atomic_descriptors
     - optimize_geometry
     - compute_thermochemistry
     - predict_pka

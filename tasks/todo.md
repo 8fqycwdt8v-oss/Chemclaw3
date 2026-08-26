@@ -1,119 +1,79 @@
-# Rotational energies and rotamer barriers — implemented — 2026-08-26
+# Atom-addressable reactivity — implementation
 
-## Task
-"Get rotational energies and the barrier energy between rotamers for individual compounds —
-especially, how the user tells the agent **which bond to rotate**." Concept first, then build it.
+Concept: `tasks/reactivity-labels-concept.md` · ADR: `docs/decisions/D-2026-08-26-an-atom-index-is-not-a-name.md`
 
-`D-2026-08-26-a-torsion-is-named-not-indexed` is the record; this is the working log.
+## ADR
+- [x] `D-2026-08-26-an-atom-index-is-not-a-name.md` + ledger row
 
-## Plan
-- [x] **1 · Read what exists** — `scan_coordinate`, `compose.scan_profile`, `thermo`, and the two
-      skills that already hold the judgment.
-- [x] **2 · Measure the premise** rather than assert it (RDKit 2026.3.5, the pinned build).
-- [x] **3 · Decide** — three pieces, each on the side of a boundary already drawn.
-- [x] **4 · `Chemclaw3-mcp`** — `enumerate_torsions` on `servers/chem`, plus `render_structure`'s
-      `highlight_atoms`, plus the automorphism check and the contract table.
-- [x] **5 · Here** — `torsion_handle`, `Torsion`/`Rotamer`/`RotationBarrier`/`RotationProfile`,
-      Eyring in `thermo.py`, `rotation_units` in `budget.py`, `RotationJobSpec`,
-      `compose.rotation_profile`, the activity dispatch, the manifest job, the projector and its
-      properties, `rotational-barrier.yaml`, both skills.
-- [x] **6 · Tests** — 41 new, driven through the real composite against a fake with a real
-      torsional potential.
-- [x] **7 · Verify** — `make lint type test`, `connector-validate`, `template-validate`,
-      `skill-validate`, `prose-validate`; both repos.
+## Tier 0 — structural site labels (Chemclaw3-mcp / servers/chem)
+- [x] `engine/sites.py`: `Site` + `describe_atom_sites`, one entry per symmetry class
+- [x] content-addressed `site_id` on the `torsion_handle` construction
+- [x] `describe_sites` tool, declared `read_only`
+- [x] 27 tests: symmetry classes, ring relationships, C-H folding, handle stability
 
-## What building it found
+## Tier 1 — free descriptor panel (Chemclaw3-mcp / servers/calc)
+- [x] read the ion energies `compute_fukui` was discarding
+- [x] global panel (IP/EA/mu/eta/S/omega) + local (dual, s±, omega_k) + free valence
+- [x] `test_the_panel_costs_no_extra_single_point` pins the SCF count at three
 
-1. **A stale atom index is not an error.** `(4, 5)` is the amide C–N of `c1ccc(NC(C)=O)cc1` and an
-   aromatic *ring* bond of `CC(=O)Nc1ccccc1`. `scan_profile` bounds-checks and nothing else.
-2. **The rotatable-bond descriptor is not a torsion list.** 0 for toluene, p-xylene and
-   *tert*-butylbenzene; 1 for acetanilide, and that one is not the amide.
-3. **Symmetry classes match automorphism orbits** on 21 molecules — 0 false merges. Shipped as a
-   test, not as a claim.
-4. **`skills/atropisomer-assessment`'s half-life anchors were wrong by two orders of magnitude.**
-   Its prose said "27 → about a day"; 27 kcal/mol is 80 days, and 30 is 35 years, not "a few".
-   The error was largest exactly at the ICH class boundary the skill exists to decide.
-5. **Every `calc` durable job was publishing nothing.** `CalcJobWorkflow` sends
-   `payload_kind=type(result).__name__` and its result is the `XtbJobResult` *envelope*, so
-   `projector_for("calc.compute_reaction_energy", "XtbJobResult")` was `None` — while
-   `tests/test_publish_reaches_the_hooks.py` was green asserting a `payload_kind` production has
-   never sent. Fixed at the projection boundary (`unwrap_envelope`), not by re-shaping what the
-   chat sees.
+## Tier 2 — xtb-binary descriptors (Chemclaw3-mcp / servers/calc)
+- [x] `engine/xtb_atomic.py` + `compute_atomic_descriptors`
+- [x] property-table and ESP-grid parsers, written against a captured 6.6.1 run
+- [x] refuses by name when the binary is absent; the *key* still derives (CREST's convention)
+
+## Composition (Chemclaw3)
+- [x] mirrored reader models, `CALCULATION_EPOCH` -> "2" in both repos
+- [x] `compute_atomic_descriptors` on the `calc` bundle; `describe_sites` on `chem`
+- [x] publish projector + property vocabulary carry the panel
+- [x] `skills/reactivity-descriptors` rewritten: start with `describe_sites`, scope the
+      question, aggregate by class, report only differences that exceed the class spread
+- [x] probe `an-34` for the new tool
+
+## Gate
+- [x] Chemclaw3 `make check`: **4799 passed, 3 skipped** — with Docker/Postgres up, so the
+      ~157 Postgres-backed tests really ran
+- [x] Chemclaw3-mcp `make check`: **1188 passed, 5 skipped** — the 5 are the binary-only Tier 2
+      tests, which run and pass with `xtb` installed (verified separately, 18 passed)
 
 ## Review
 
-The three pieces, and why each is where it is:
+**What the concept got right.** The diagnosis held: the failure was presentation, not physics.
+Phenol's *para* carbon is still rank 6 of 13 in the raw ranking, and scoping plus class
+aggregation is what makes it reportable.
 
-- **`enumerate_torsions` on `chem`** (so, `Chemclaw3-mcp`): a pure graph operation, the sixth in a
-  family of five, under the house rule *enumerate, then compute — and never the reverse*. It mints
-  a handle from the canonical symmetry classes plus the RDKit build, so a rewritten SMILES keeps the
-  name and a toolchain bump breaks it loudly.
-- **`profile_rotation` here**: its key would name the wells it settles on, so `D-2026-08-16` says
-  it is not shippable as a tool; it loops, so `D-2026-08-25-the-loop-is-a-composite-not-a-template`
-  says it is not a template. Every point it computes is a separately-keyed primitive.
-- **Eyring beside RRHO**: arithmetic over a result, not a calculation — the same rule that kept the
-  RRHO half here when the physics left.
+**What building it changed.**
 
-What is deliberately not done: 2D surfaces, transition-state claims, ring torsions, enumeration
-inside the compute job. And the two open ends, both needing the live lane rather than more code —
-no barrier has been computed against real xTB, and the conformer-dependence warning threshold is
-unset. Both are in the ADR.
+1. **Tier 2 was verifiable after all.** `apt` carries xtb 6.6.1. Installing it replaced guesswork
+   with captured output, and caught two things prose would have got wrong: the polarisability
+   table is on *stdout*, not in `xtbout.json`, and an `--esp` run aborts (SIGABRT) after writing
+   the grid and before the JSON — so a surface calculation cannot also carry the atomic multipoles.
+2. **It exposed a live defect unrelated to this work.** `xtb_engine` defaults to `"auto"`, so with
+   a binary present `compute_xtb_energy`, `compute_electronic_properties` and
+   `predict_site_reactivity` stamped `+xtb+xtb-6.6.1` onto results computed entirely by tblite —
+   none of the three has a binary code path. Fixed by making the backend a property of the
+   **task** (`_FIXED_BACKEND`), not of the caller.
+3. **`GetDefaultValence` is the wrong RDKit call for a free valence.** A sulfone's sulfur came out
+   at −2.94. `GetValenceList` is the right one, and an element with more than one normal valence
+   now gets `None`.
+4. **Rounding a derivation separately from its inputs** made `f_zero` disagree with its own
+   definition in the fourth decimal.
+5. **A ring fusion is not a substituent.** Naphthalene was being labelled "bearing the CH
+   substituent"; fused rings and two-heteroatom rings now refuse the classical *ortho/meta/para*
+   names rather than misapplying them.
+6. **A key derives without a binary; only computing refuses.** Got this backwards first;
+   `test_deriving_a_key_runs_no_scf` caught it.
 
----
+**Left open, deliberately.**
 
-**What is deliberately not fixed**, each with a BACKLOG row rather than a silent omission: the
-four multi-step GFN shapes (PR 2 — declared in `_NOT_YET_PUBLISHED`, so a tenth member field still
-fails), `xtb.hess` and `ThermochemistryResult` (needs a third hook, not a projector), and the BO
-campaign question (write the projector or say it deliberately does not publish).
-
-## Result, measured the same way as before
-
-| | before | after |
-| --- | --- | --- |
-| primitive calculators publishing | 8 of 10 | 9 of 10 (`xtb.hess` declared) |
-| durable jobs publishing | 1 of 11 | 6 of 11 (4 declared, 1 undecided) |
-
-`make lint type test`: 4699 passed, 3 skipped (the migration-history checks needing
-`fetch-depth: 0`), lint and `mypy --strict` clean. Five validators re-run green. End to end against
-Postgres, a reaction-energy job and a descriptor panel each queue 1 row where both queued 0.
-
-
----
-
-# PR 2 — a projector for every shape the GFN loop produces
-
-## Task
-Empty `_NOT_YET_PUBLISHED`: the four multi-step results the seven new jobs return had no
-projector, so those jobs reached the publish path (after PR 1) and were dropped.
-
-## Done
-- [x] `_refined_ensemble`, `_ensemble_property`, `_species_distribution`, `_bond_survey`
-- [x] 13 registry rows; an unmappable average raises rather than storing an unregistered name
-- [x] `_NOT_YET_PUBLISHED` emptied and **kept** — an empty exclusion is what makes the next
-      unroutable shape fail loudly
-- [x] 7 tests driving each shape through `job_envelope`, not through `project()`
-- [x] ADR + ledger (inserted in sorted position — the ledger is ascending, not append-order)
-- [x] BACKLOG row deleted in this commit, per the register's rule
-
-## Review
-Four choices worth recording, each of which could have gone the other way:
-
-1. **A refined ensemble's `energy_hartree` is the electronic energy**, though the ranking is by G.
-   One absolute-energy column, and the electronic one means the same thing in both ensemble
-   shapes — so E-weighted and G-weighted stay comparable. `treatment` disambiguates the relatives.
-2. **`refined_*` property names are kept apart** from the ensemble-wide ones, carrying the model's
-   own argument across the boundary instead of undoing it there.
-3. **An averaged property lands on the plain registered name** (`dipole`, not `dipole_averaged`) —
-   the alternative is the registry split a test already exists to catch.
-4. **A ranked species set is `candidates`, not members.** `CandidateFact` shipped with the schema
-   and had no producer at all; this is its first.
-
-The spread of an averaged property is deliberately not published: min/max/spread are each in the
-averaged property's own unit, so one `property_spread` has no canonical unit and a name per
-property is registry bloat.
-
-Verified by deleting one projector: three assertions turn red — routing, envelope, and that
-shape's own. `make lint type test`: 4744 passed, 3 skipped. Three validators green.
-
-Publishing now: 9/10 primitives, **10 of 11 jobs**. The eleventh is `bo`, which is a question
-rather than a gap and keeps its row.
+- **The cross-molecule claim for local electrophilicity is unsettled.** omega is 3.24 eV for
+  phenol, 3.52 for *N,N*-dimethylacrylamide, 3.74 for pyridine — plausible ordering on a
+  demonstrably wrong absolute scale. It ships as a ranking quantity for the calibration ledger to
+  settle, not as an established one.
+- **The xtb binary Hessian path produces no dipole derivatives.** Pre-existing — proven by
+  stashing this change and re-running with the binary installed — so a deployment that adds xtb
+  loses IR dipole derivatives and fails two `test_engine.py` assertions. Not this change's to fix;
+  it needs its own decision about whether the binary Hessian route is supported at all.
+- **No `profile_reactivity` composite tool.** The join, the class aggregation and the noise-floor
+  rule live in the skill rather than in a cross-connector tool: the pieces are all free and
+  `read_only`, and a composite spanning two connectors has no precedent here. If a second caller
+  appears, that is the trigger to extract it.

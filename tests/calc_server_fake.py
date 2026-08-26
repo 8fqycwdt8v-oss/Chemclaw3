@@ -41,6 +41,18 @@ from chemclaw.science.calc.structures import InMemoryStructureStore
 # A version string carrying **both** key delimiters, because a real one does: `esol-delaney@2004`
 # carries the `@` and `cal-0.28733:-29.3116` carries the `:`. A client that split the flat
 # `type@version:input:params` form would reassemble a key that matches nothing, forever.
+# The conceptual-DFT panel every Fukui payload carries. Internally consistent — eta = IP - EA,
+# S = 1/eta, omega = mu^2/2eta — because a reader that checks one against the others must not find
+# the fake disagreeing with arithmetic the real server keeps.
+_FAKE_PANEL: dict[str, float] = {
+    "ionization_potential_ev": 13.5,
+    "electron_affinity_ev": 3.0,
+    "chemical_potential_ev": -8.25,
+    "hardness_ev": 10.5,
+    "softness_per_ev": round(1 / 10.5, 6),
+    "electrophilicity_ev": round(8.25**2 / (2 * 10.5), 4),
+}
+
 FAKE_VERSION = "GFN2-xTB+fake@1/cal-0.28733:-29.3116"
 
 # Which cache type each compute tool answers under, and which of its arguments enter `params`. The
@@ -509,6 +521,23 @@ class FakeCalcServer:
                 "f_minus": round(1.0 - atom.GetIdx() / len(atoms), 4),
                 "f_plus": round(atom.GetIdx() / len(atoms), 4),
                 "f_zero": round(0.5 + nudge * (1 if atom.GetIdx() % 2 else -1), 4),
+                # Derived exactly as the real server derives them, from the rounded indices and the
+                # panel below — so a reader that recomputes one of these from the two it is given
+                # gets the number the payload also carries.
+                "dual": round(
+                    round(atom.GetIdx() / len(atoms), 4)
+                    - round(1.0 - atom.GetIdx() / len(atoms), 4),
+                    4,
+                ),
+                "local_softness_minus": round(
+                    _FAKE_PANEL["softness_per_ev"] * round(1.0 - atom.GetIdx() / len(atoms), 4), 6
+                ),
+                "local_softness_plus": round(
+                    _FAKE_PANEL["softness_per_ev"] * round(atom.GetIdx() / len(atoms), 4), 6
+                ),
+                "local_electrophilicity_ev": round(
+                    _FAKE_PANEL["electrophilicity_ev"] * round(atom.GetIdx() / len(atoms), 4), 4
+                ),
             }
             for atom in atoms
         ]
@@ -530,6 +559,7 @@ class FakeCalcServer:
             "mode": "electrophilic",
             "ranked_by": "f_minus",
             "total_atoms": len(atoms),
+            "descriptors": dict(_FAKE_PANEL),
             "sites": sites,
         }
 
@@ -589,11 +619,19 @@ class FakeCalcServer:
             # Varied *per molecule*, not just per atom: BoFire refuses a descriptor column with
             # no variation across categories, which is a real property of a featurized campaign —
             # a descriptor that is the same for every option tells the surrogate nothing.
+            # `wiberg_valence` and `free_valence` vary per atom rather than being constants, for
+            # the same reason the charges do: a fake that holds a field still cannot express a
+            # reader that mixes atoms up. `free_valence` is None for sulfur, which is what the real
+            # server reports for an element with more than one normal valence.
             "atom_charges": [
                 {
                     "index": atom.GetIdx(),
                     "element": atom.GetSymbol(),
                     "charge": round((0.1 + len(atoms) / 1000) * (-1) ** i, 4),
+                    "wiberg_valence": round(1.0 + atom.GetDegree(), 3),
+                    "free_valence": (
+                        None if atom.GetSymbol() in ("S", "P") else round(0.05 * (i + 1), 3)
+                    ),
                 }
                 for i, atom in enumerate(atoms)
             ],

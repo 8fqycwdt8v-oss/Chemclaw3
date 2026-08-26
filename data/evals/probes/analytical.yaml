@@ -413,6 +413,30 @@ probes:
       isomers frequently are not). Ends with the ranking plus what would actually settle it
       (NMR, an authentic standard) — not an identification.
 
+  - id: an-34
+    section: 8
+    persona: lab_leader
+    bucket: B
+    question: >-
+      Our covalent lead is Ic1ccc(NC(=O)C=C)cc1 and it forms an unexpectedly tight complex with a
+      protein methionine. Is there a halogen-bonding explanation, and which atom carries it?
+    expects_tools: [describe_sites, compute_atomic_descriptors, compute_electronic_properties]
+    forbids_claims:
+      - "a binding affinity, a K_d, or an interaction energy for the contact"
+      - "a partial charge offered as evidence of a sigma-hole"
+      - "asserting the halogen bond exists rather than that the descriptors are consistent with one"
+    direction: >-
+      Reaches for the atomic panel rather than the partial charges, and says why: a sigma-hole is
+      an anisotropy in one atom's own electron density, and a point charge cannot carry one by
+      construction, so the iodine's charge is the wrong evidence. Reports the iodine as by far the
+      most polarisable atom and, if the surface was computed, points at the positive electrostatic
+      extremum. Names the atom by position from `describe_sites` rather than by index. Notes that
+      these values are not normalised per molecule, so unlike a Fukui index they do compare across
+      analogues — which is what makes a bromo/chloro comparison the sensible next experiment.
+      Stops short of claiming the halogen bond is real or quantifying it, and says the panel is
+      consistent with one rather than evidence of one. If the deployment has no xtb binary, reports
+      the refusal plainly instead of substituting partial charges for the answer.
+
   - id: an-17
     section: 8
     persona: lab_leader
