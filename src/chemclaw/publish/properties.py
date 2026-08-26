@@ -319,6 +319,70 @@ _DEFINITIONS: tuple[PropertyDefinition, ...] = (
         "across molecules — an unsettled claim, not an established one.",
         scope="site",
     ),
+    # --- the binary-only atomic panel ----------------------------------------------------------
+    _d(
+        "atomic_polarisability",
+        "polarisability",
+        "au",
+        "Static isotropic atomic polarisability alpha(0). Not normalised per molecule, so unlike a "
+        "Fukui index this does compare across compounds — an iodine is more polarisable than a "
+        "fluorine wherever it sits.",
+        scope="site",
+    ),
+    _d(
+        "atomic_c6",
+        "polarisability",
+        "au",
+        "Atomic C6 dispersion coefficient, in atomic units.",
+        scope="site",
+    ),
+    _d(
+        "coordination_number",
+        "count",
+        "",
+        "Fractional covalent coordination number the GFN Hamiltonian uses. Fractional by "
+        "construction; not an integer ligand count.",
+        scope="site",
+    ),
+    _d(
+        "atomic_dipole",
+        "dipole",
+        "au",
+        "Magnitude of this atom's own dipole moment — the anisotropy a partial charge cannot "
+        "carry, and what a halogen bond or a close contact turns on.",
+        scope="site",
+    ),
+    _d(
+        "atomic_quadrupole",
+        "quadrupole",
+        "au",
+        "Magnitude of this atom's own quadrupole moment.",
+        scope="site",
+    ),
+    _d(
+        "surface_potential_min",
+        "surface_potential",
+        "kcal/mol",
+        "Most negative electrostatic potential on a molecular surface — the most electron-rich "
+        "patch, a lone pair or a pi face. An extremum over a grid, not a map.",
+        scope="calculation",
+    ),
+    _d(
+        "surface_potential_max",
+        "surface_potential",
+        "kcal/mol",
+        "Most positive electrostatic potential on a molecular surface — an acidic hydrogen, or a "
+        "heavy halogen's sigma-hole, which a partial charge cannot show at all.",
+        scope="calculation",
+    ),
+    _d(
+        "surface_grid_points",
+        "count",
+        "",
+        "How many surface points the extrema were taken over, so a reader can tell a coarse grid "
+        "from a fine one.",
+        scope="calculation",
+    ),
     # --- conceptual DFT, per molecule ----------------------------------------------------------
     _d(
         "ionization_potential",

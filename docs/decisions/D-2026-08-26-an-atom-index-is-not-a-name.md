@@ -178,6 +178,47 @@ made it unmissable.
   so `adjacent_ring_heteroatoms` is carried explicitly rather than left to be inferred from a
   relationship that cannot express it.
 
+## What the review found, after the tests were green
+
+Eight defects, none of which any test could see. Each was reproduced by running the code.
+
+- **`describe_sites` numbered atoms from the caller's spelling while every calculator canonicalises
+  first.** Measured: phenol written `c1ccccc1O` put the oxygen at index 6 there and index 0 in the
+  calculator, so the documented index join mis-attributed *every* per-atom number — silently, and
+  in exactly the way this whole change exists to prevent. It now canonicalises, and the join is
+  asserted against RDKit's canonical ordering rather than against itself.
+- **The ESP surface was a flag on the atomic panel, kept out of its key.** So a `surface=True` call
+  hit the row an earlier `surface=False` call wrote and returned `surface: null` having run
+  nothing. The flag is gone: `compute_surface_potential` is its own primitive with its own key,
+  which is what this repository's own primitive rule required in the first place — an `--esp` run
+  is a second SCF, and one key standing for two payloads is the composite failure in miniature.
+- **Nothing projected `xtb.atomic` into the result store**, so every atomic-descriptor result was
+  dropped by `enqueue_payload` with a debug line — the exact shape of
+  `D-2026-08-26-a-route-is-not-a-shape`, reintroduced by adding a calc type and no projector.
+- **`free_valence` was still meaningless on a charged atom.** The sulfur fix keyed on the element
+  having several normal valences; a quaternary ammonium nitrogen (−0.81) and a nitro nitrogen
+  (−0.90) have exactly one. Per-atom formal charges are now read back from the structure's
+  canonical SMILES, and an atom with no SMILES to read gets no free valence rather than one
+  computed against an assumption.
+- **Labels collided on fused rings and azines**, while the skill instructs naming sites by label
+  and never by index — two distinct sites spelled identically is two different answers. Colliding
+  labels now carry the representative atom index, and a test asserts uniqueness per molecule.
+- **The `nitro_nitrogen` SMARTS matched only the pentavalent form RDKit never builds**, leaving the
+  strongest electron-withdrawing group there is labelled "the heteroatom". Written against the
+  charge-separated form the canonicaliser actually produces, and nitro oxygens got a name too.
+- **`AtomicDescriptorResult` was a new cached payload outside `PAYLOAD_MODELS`**, so the digest
+  guard that caught the epoch question in the first place did not cover it.
+- **The skill told the model to report `resolved=False`, a field no tool returns.** That is
+  `D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution` in one sentence, shipped in
+  the same change that cites it. The skill now says the reader computes it and that no calculator
+  decides it.
+
+One limitation was found and kept rather than fixed: **symmetry here is topological, so
+resonance-equivalent atoms do not merge** — a nitro group's two oxygens are two sites. Merging them
+properly needs the resonance structures and merging them heuristically would join atoms a
+substituted case really distinguishes. What is guaranteed instead is that the two are always
+distinguishable, which is what the label-uniqueness rule is for.
+
 ## What this deliberately does not do
 
 - **No cross-molecule Fukui comparison.** Each Fukui function sums to 1 by construction.

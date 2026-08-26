@@ -1368,6 +1368,80 @@ def _dft(payload: dict[str, Any]) -> tuple[Subject, Conditions, TheoryLevel, dic
     )
 
 
+def _atomic_descriptors(
+    payload: dict[str, Any],
+) -> tuple[Subject, Conditions, TheoryLevel, dict[str, Any]]:
+    """The binary-only per-atom panel: polarisability, dispersion, coordination and multipoles.
+
+    Every value is per atom and none is normalised per molecule, so unlike a Fukui index these
+    compare across compounds — which is exactly what makes them worth putting in a store that can
+    be queried. "Every analogue whose halogen is more polarisable than chlorine" is the question the
+    calculation cache structurally cannot answer.
+    """
+    smiles = payload.get("smiles")
+    subject = Subject(
+        kind="geometry",
+        members=[_molecule(smiles, payload.get("structure_id") or "")],
+        label=smiles or "",
+    )
+    conditions = Conditions(
+        solvent=canonical_solvent(payload.get("solvent")),
+        solvent_model="alpb" if payload.get("solvent") else "",
+    )
+    level = TheoryLevel(
+        method=payload.get("method") or "unknown", family="semiempirical", engine="xtb"
+    )
+    sites: list[SiteFact] = []
+    for atom in payload.get("atoms") or []:
+        index, element = int(atom["index"]), atom.get("element", "")
+        # No unit beside each name: a `SiteFact` carries none, because the property registry is
+        # the one place a unit is stated — the same shape `_site_reactivity` uses for its indices.
+        for key, name in (
+            ("polarisability_au", "atomic_polarisability"),
+            ("c6_au", "atomic_c6"),
+            ("coordination_number", "coordination_number"),
+            ("charge", "partial_charge"),
+            ("dipole_norm_au", "atomic_dipole"),
+            ("quadrupole_norm_au", "atomic_quadrupole"),
+        ):
+            if atom.get(key) is not None:
+                sites.append(
+                    SiteFact(atom_i=index, element=element, property=name, value=float(atom[key]))
+                )
+    facts = _kept(_fact("total_energy", payload.get("total_energy_hartree"), "hartree"))
+    return subject, conditions, level, {"properties": facts, "sites": sites}
+
+
+def _surface_potential(
+    payload: dict[str, Any],
+) -> tuple[Subject, Conditions, TheoryLevel, dict[str, Any]]:
+    """The electrostatic-potential extrema on a molecular surface.
+
+    Two molecule-level numbers rather than a grid: the grid is thousands of points that nothing
+    downstream reads, and the extrema are what a sigma-hole or a lone-pair question turns on.
+    """
+    smiles = payload.get("smiles")
+    subject = Subject(
+        kind="geometry",
+        members=[_molecule(smiles, payload.get("structure_id") or "")],
+        label=smiles or "",
+    )
+    conditions = Conditions(
+        solvent=canonical_solvent(payload.get("solvent")),
+        solvent_model="alpb" if payload.get("solvent") else "",
+    )
+    level = TheoryLevel(
+        method=payload.get("method") or "unknown", family="semiempirical", engine="xtb"
+    )
+    surface = payload.get("surface") or {}
+    facts = _kept(
+        _fact("surface_potential_min", surface.get("minimum_kcal_per_mol"), "kcal/mol"),
+        _fact("surface_potential_max", surface.get("maximum_kcal_per_mol"), "kcal/mol"),
+        _fact("surface_grid_points", surface.get("grid_points"), ""),
+    )
+    return subject, conditions, level, {"properties": facts, "sites": []}
+
+
 # What each projector is keyed by. Two vocabularies reach this module and they are deliberately
 # kept apart:
 #
@@ -1397,6 +1471,8 @@ PAYLOAD_PROJECTORS: dict[str, _Projector] = {
     "ThermochemistryResult": _thermochemistry,
     "ElectronicProperties": _electronic_properties,
     "SiteReactivityResult": _site_reactivity,
+    "AtomicDescriptorResult": _atomic_descriptors,
+    "SurfacePotentialResult": _surface_potential,
     "OptimizationResult": _optimization,
     "OptimizationSummary": _optimization,
     "PkaResult": _pka,
@@ -1425,6 +1501,8 @@ PAYLOAD_PROJECTORS: dict[str, _Projector] = {
 # pruned, so those rows are still there for the backfill to find. A retired calculator keeps its
 # projector; a spelling that never existed does not get one.
 _CALC_TYPE_PROJECTORS: tuple[tuple[str, _Projector], ...] = (
+    ("xtb.atomic", _atomic_descriptors),
+    ("xtb.surface", _surface_potential),
     ("xtb.properties", _electronic_properties),
     ("xtb.conformers", _ensemble),
     ("xtb.complex", _interaction),

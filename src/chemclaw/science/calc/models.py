@@ -407,7 +407,6 @@ class SurfacePotential(BaseModel):
 class AtomicDescriptorResult(BaseModel):
     """The binary-only per-atom panel for one geometry.
 
-    `surface` is None when it was not asked for, never when it failed — a failed surface run raises.
     Atom indices match `ElectronicProperties` and `SiteReactivityResult` for the same structure, so
     the three panels join on index.
     """
@@ -418,7 +417,22 @@ class AtomicDescriptorResult(BaseModel):
     solvent: str | None
     total_energy_hartree: float
     atoms: list[AtomicDescriptor]
-    surface: SurfacePotential | None = None
+
+
+class SurfacePotentialResult(BaseModel):
+    """The electrostatic-potential extrema on a molecular surface, for one geometry.
+
+    **A separate calculation from the atomic panel, with its own cache entry.** An `--esp` run is a
+    second single point and cannot also produce the atomic multipoles, so folding it into the panel
+    as a flag made one key stand for two payloads — and a `surface=True` request was then served the
+    panel-only row it found, with no surface and nothing run.
+    """
+
+    smiles: str | None
+    structure_id: str
+    method: str
+    solvent: str | None
+    surface: SurfacePotential
 
 
 class FukuiSite(BaseModel):

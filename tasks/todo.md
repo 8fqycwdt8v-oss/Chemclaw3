@@ -63,6 +63,17 @@ aggregation is what makes it reportable.
 6. **A key derives without a binary; only computing refuses.** Got this backwards first;
    `test_deriving_a_key_runs_no_scf` caught it.
 
+**Post-merge review (8 findings, all real, all fixed).** Tests were green and saw none of them.
+The two that mattered most: `describe_sites` numbered atoms from the caller's spelling while the
+calculators canonicalise, so the documented index join mis-attributed every per-atom number; and the
+ESP surface was a flag kept out of the cache key, so `surface=True` was served the panel-only row and
+returned nothing having run nothing. Also: no projector for `xtb.atomic` (results silently dropped),
+`free_valence` still meaningless on charged atoms, colliding labels on fused rings and azines, a
+`nitro_nitrogen` SMARTS matching a form RDKit never builds, a new cached payload outside the digest
+guard, and the skill instructing the model to report a `resolved` field no tool returns. Kept rather
+than fixed: resonance-equivalent atoms do not merge, because topological symmetry cannot see
+resonance — the label-uniqueness rule is what makes that safe.
+
 **Left open, deliberately.**
 
 - **The cross-molecule claim for local electrophilicity is unsettled.** omega is 3.24 eV for

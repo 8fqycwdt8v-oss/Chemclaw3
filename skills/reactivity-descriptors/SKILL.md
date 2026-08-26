@@ -10,6 +10,7 @@ tools:
   - predict_site_reactivity
   - compute_electronic_properties
   - compute_atomic_descriptors
+  - compute_surface_potential
 ---
 
 # Reactivity descriptors
@@ -42,7 +43,8 @@ below four hydrogens. `top_n` does not fix it: the default is 15 and the molecul
 | Which of these two carbonyls reacts first? | `electrophilic_carbons` | f⁺, local electrophilicity |
 | Which end of an ambident nucleophile attacks? | `heteroatoms` | local softness s⁻ |
 | Where does this oxidise? | `heteroatoms`, `ch_sites` | f⁻, HOMO |
-| Which atom is polarisable / makes a halogen bond? | `heteroatoms` | polarisability, ESP maximum |
+| Which atom is polarisable / makes a halogen bond? | `heteroatoms` | polarisability (`compute_atomic_descriptors`) |
+| Is there a sigma-hole? Where is the surface most positive? | — | `compute_surface_potential` |
 | Is this bond single, double or delocalised? | — | Wiberg bond orders |
 
 For an azine, `adjacent_ring_heteroatoms` is often the fact that decides it: in
@@ -107,10 +109,14 @@ which you trust and why, and check whether the difference survives the class spr
 
 ## Presenting the result
 
-Name the sites by their `label`, never by index. State the mode you ranked for and why it matches
-the chemistry asked about. Give the class mean and the spread together. Say which comparisons the
-calculation resolved and which it did not — `resolved=False` is a real answer, and far more often
-the honest one than it is comfortable.
+Name the sites by their `label`, never by index — `describe_sites` guarantees the labels are unique
+within a molecule, so one always identifies one site. State the mode you ranked for and why it
+matches the chemistry asked about. Give the class mean and the spread together, and say which
+comparisons the spread resolved and which it did not. "These two positions are not resolved by this
+calculation" is a real answer, and far more often the honest one than it is comfortable.
+
+**No tool returns a "resolved" flag** — you compute it, from the class means and the spread, by the
+rule above. Do not report one as if a calculator had decided it.
 
 For a ring-substitution answer, pass the winning class's `atoms` to `render_structure`'s
 `highlight_atoms` so the chemist can check the position at a glance.

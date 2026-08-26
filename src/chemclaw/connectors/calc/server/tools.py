@@ -58,6 +58,7 @@ from chemclaw.science.calc.models import (
     SiteReactivityResult,
     SolubilityResult,
     Structure,
+    SurfacePotentialResult,
     ThermochemistryResult,
     XtbResult,
 )
@@ -856,14 +857,14 @@ async def compute_electronic_properties(
 
 @server.tool()
 async def compute_atomic_descriptors(
-    smiles: str, solvent: str | None = None, surface: bool = False
+    smiles: str, solvent: str | None = None
 ) -> AtomicDescriptorResult:
     """Per-atom polarisability, dispersion and multipole descriptors (GFN2-xTB, binary only).
 
     Answers what a partial charge cannot: which atom is **polarisable** — a soft, dispersion-driven
-    or halogen-bonding site — how anisotropic its own electron density is, and, with `surface=True`,
-    where the molecular electrostatic potential is most positive and most negative. A halogen's
-    sigma-hole is invisible to a point charge and shows up here.
+    or halogen-bonding site — and how anisotropic its own electron density is. For where the
+    potential is most positive or negative, which is where a halogen's sigma-hole shows up, call
+    `compute_surface_potential`: a second calculation with its own cost and its own cache entry.
 
     Unlike Fukui indices, nothing in this panel is normalised per molecule, so these values **do**
     compare between molecules. Use `describe_sites` on `chem` to report them by position.
@@ -877,20 +878,49 @@ async def compute_atomic_descriptors(
     Args:
         smiles: The molecule as a SMILES string. Must be closed-shell.
         solvent: Optional ALPB implicit solvent name; omit for gas phase.
-        surface: Also return the electrostatic-potential extrema. **Costs a second calculation** —
-            measured, an `--esp` run cannot also produce the atomic multipoles.
 
     Returns:
         One entry per atom, indexed as `compute_electronic_properties` and `predict_site_reactivity`
-        index them for the same structure, so the three panels join. Atomic units throughout except
-        the surface extrema, which are kcal/mol.
+        index them for the same structure, so the three panels join. Atomic units throughout.
     """
     payload, _ = await cached_remote(
         default_store(),
         "compute_atomic_descriptors",
-        {"smiles": smiles, "solvent": solvent, "surface": surface},
+        {"smiles": smiles, "solvent": solvent},
     )
     return AtomicDescriptorResult.model_validate(payload)
+
+
+@server.tool()
+async def compute_surface_potential(
+    smiles: str, solvent: str | None = None
+) -> SurfacePotentialResult:
+    """Where a molecule's electrostatic potential is most positive and most negative (GFN2-xTB).
+
+    The **maximum** is where an electrophilic patch sits — an acidic hydrogen, or a heavy halogen's
+    sigma-hole, which is what makes a halogen bond and which a partial charge cannot show at all.
+    The **minimum** marks the most electron-rich patch: a lone pair, a pi face. Both in kcal/mol.
+
+    Extrema over a grid, not a map: compare analogues with them (does the bromo congener still have
+    a positive sigma-hole?), do not use them to locate a patch in space.
+
+    **Needs the `xtb` binary and refuses by name where a deployment has none**, and it is a separate
+    calculation from `compute_atomic_descriptors` costing its own single point — an `--esp` run
+    cannot also produce the atomic multipoles. Cached, so repeats are free.
+
+    Args:
+        smiles: The molecule as a SMILES string. Must be closed-shell.
+        solvent: Optional ALPB implicit solvent name; omit for gas phase.
+
+    Returns:
+        The minimum and maximum potential in kcal/mol and the grid size they were taken over.
+    """
+    payload, _ = await cached_remote(
+        default_store(),
+        "compute_surface_potential",
+        {"smiles": smiles, "solvent": solvent},
+    )
+    return SurfacePotentialResult.model_validate(payload)
 
 
 @server.tool()

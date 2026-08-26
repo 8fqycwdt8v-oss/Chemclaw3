@@ -130,6 +130,13 @@ def test_no_two_properties_of_one_dimension_land_on_the_same_subject() -> None:
         "count": "a molecule has many independent counts (donors, acceptors, rings)",
         "molar_entropy": "total entropy and the conformational part of it are different terms",
         "fukui": "the three indices describe three different attacks on the same atom",
+        "polarisability": (
+            "an atom has a static polarisability and a dispersion coefficient; the two are related "
+            "by the model that produces them and are not two spellings of one number"
+        ),
+        "surface_potential": (
+            "a surface has a most-positive and a most-negative extremum, which are two readings"
+        ),
         "conceptual_dft": (
             "a molecule has an ionization potential, an electron affinity, a chemical potential, "
             "a hardness and an electrophilicity index at once — they are five readings of one "

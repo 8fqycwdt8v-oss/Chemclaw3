@@ -420,7 +420,7 @@ probes:
     question: >-
       Our covalent lead is Ic1ccc(NC(=O)C=C)cc1 and it forms an unexpectedly tight complex with a
       protein methionine. Is there a halogen-bonding explanation, and which atom carries it?
-    expects_tools: [describe_sites, compute_atomic_descriptors, compute_electronic_properties]
+    expects_tools: [describe_sites, compute_atomic_descriptors, compute_surface_potential]
     forbids_claims:
       - "a binding affinity, a K_d, or an interaction energy for the contact"
       - "a partial charge offered as evidence of a sigma-hole"
@@ -429,8 +429,9 @@ probes:
       Reaches for the atomic panel rather than the partial charges, and says why: a sigma-hole is
       an anisotropy in one atom's own electron density, and a point charge cannot carry one by
       construction, so the iodine's charge is the wrong evidence. Reports the iodine as by far the
-      most polarisable atom and, if the surface was computed, points at the positive electrostatic
-      extremum. Names the atom by position from `describe_sites` rather than by index. Notes that
+      most polarisable atom, and reaches for `compute_surface_potential` for the sigma-hole itself
+      — a separate calculation, so it costs another single point and is worth asking for here
+      because a positive surface maximum on the iodine is the actual evidence. Names the atom by position from `describe_sites` rather than by index. Notes that
       these values are not normalised per molecule, so unlike a Fukui index they do compare across
       analogues — which is what makes a bromo/chloro comparison the sensible next experiment.
       Stops short of claiming the halogen bond is real or quantifying it, and says the panel is

@@ -46,6 +46,7 @@ endpoint:
     - compute_electronic_properties
     - predict_site_reactivity
     - compute_atomic_descriptors
+    - compute_surface_potential
     - optimize_geometry
     - compute_thermochemistry
     - predict_pka
@@ -72,6 +73,7 @@ endpoint:
     - compute_electronic_properties
     - predict_site_reactivity
     - compute_atomic_descriptors
+    - compute_surface_potential
     - optimize_geometry
     - compute_thermochemistry
     - predict_pka
