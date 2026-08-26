@@ -1035,16 +1035,23 @@ async def refined_ensemble(
     `refined_population_covered` — the E-weighted population fraction the refined members account
     for — and warns below a threshold rather than leaving a reader to notice.
     """
+    # **Counted before the search, not after it.** This used to await `conformer_ensemble` first
+    # and then check the budget, which is the one thing `budget.py` exists to prevent: a CREST
+    # search is minutes to hours (measured, 1142 s at 33 atoms), so the fence was reached with the
+    # single most expensive call in the bundle already paid. The ceiling has to be read against the
+    # work the caller *asked for*, which is knowable here — the search plus a relax and a Hessian
+    # per conformer kept — rather than against the count the search happens to return.
+    keep = top_n or settings.ensemble_refine_top_n
+    require_within_budget(
+        estimate_units(1, level="thorough") + estimate_units(keep, level="standard"),
+        f"refining the top {keep} conformers of {smiles}",
+    )
+
     ensemble, _ = await conformer_ensemble(
         store, smiles, subject=subject, solvent=solvent, temperature_k=temperature_k, run=run
     )
-    keep = top_n or settings.ensemble_refine_top_n
     chosen = ensemble.conformers[:keep]
     temperature = temperature_k or settings.xtb_thermo_temperature_k
-    require_within_budget(
-        estimate_units(len(chosen), level="thorough", searched=False),
-        f"refining the top {len(chosen)} conformers of {smiles}",
-    )
 
     settled: list[tuple[Conformer, OptimizationResult, ThermochemistryResult]] = []
     for index, conformer in enumerate(chosen, start=1):
@@ -1136,15 +1143,20 @@ async def ensemble_property(
     by susceptibility and truncated, so its order is a property of the conformer rather than of the
     molecule. `_per_atom` carries the argument; this sentence used to claim the opposite.
     """
+    # `crest_max_members`, not `ensemble_refine_top_n`. That setting is documented as how many
+    # members get their own optimization *and Hessian*; a property average costs one single point
+    # per member and no Hessian, so borrowing it silently covered five of up to twenty members for
+    # the cheap composite. And counted before the search, for the reason `refined_ensemble` gives.
+    keep = max_members or settings.crest_max_members
+    require_within_budget(
+        estimate_units(1, level="thorough") + keep,
+        f"a {prop} average over {keep} conformers of {smiles}",
+    )
+
     ensemble, _ = await conformer_ensemble(
         store, smiles, solvent=solvent, temperature_k=temperature_k, run=run
     )
-    keep = max_members or settings.ensemble_refine_top_n
     chosen = ensemble.conformers[:keep]
-    require_within_budget(
-        estimate_units(len(chosen), level="standard", searched=False),
-        f"a {prop} average over {len(chosen)} conformers of {smiles}",
-    )
 
     tool = "compute_fukui_at" if prop == "fukui" else "compute_properties_at"
     payloads: list[Any] = []
@@ -1281,7 +1293,7 @@ async def species_ranking(
     considered = list(species[:ceiling])
     temperature = temperature_k or settings.xtb_thermo_temperature_k
     require_within_budget(
-        estimate_units(len(considered), level=level, searched=level == "thorough"),
+        estimate_units(len(considered), level=level),
         f"ranking {len(considered)} species",
     )
 
@@ -1379,7 +1391,7 @@ async def bond_dissociation_survey(
     if not cleavages:
         raise ValueError(f"no breakable bond was enumerated for {smiles}")
     require_within_budget(
-        estimate_units(len(cleavages) * 3, level=level, searched=False),
+        estimate_units(len(cleavages) * 3, level=level),
         f"a {len(cleavages)}-bond dissociation survey of {smiles}",
     )
 

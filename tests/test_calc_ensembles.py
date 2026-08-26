@@ -373,6 +373,41 @@ def test_a_fan_out_over_the_ceiling_refuses_before_it_computes_anything(
     assert server.count("search_conformer_ensemble") == 0
 
 
+@pytest.mark.parametrize(
+    "composite",
+    [
+        pytest.param(lambda store: compose.refined_ensemble(store, "CCO"), id="refined_ensemble"),
+        pytest.param(
+            lambda store: compose.ensemble_property(store, "CCO", prop="dipole_debye"),
+            id="ensemble_property",
+        ),
+    ],
+)
+def test_the_ensemble_composites_also_refuse_before_the_search(
+    monkeypatch: pytest.MonkeyPatch, composite: Any
+) -> None:
+    """Both of these awaited the CREST search and *then* checked the budget.
+
+    That is the exact inversion `budget.py` exists to prevent — "a timeout that fires after three
+    hours has already spent three hours" — and it left the most expensive call in the bundle
+    outside the fence. Only `species_ranking` was covered by the test above, so the two that had
+    the defect were the two nobody asserted.
+
+    The count assertion is the whole test: a refusal that arrives after `search_conformer_ensemble`
+    ran is not a preflight, however correct its message.
+    """
+    server = install(monkeypatch, FakeCalcServer())
+    monkeypatch.setattr(calc_settings, "calc_max_primitive_calls", 1)
+
+    with pytest.raises(ValueError, match=r"would run \d+ calculations"):
+        _run(composite(InMemoryStore()))
+
+    assert server.count("search_conformer_ensemble") == 0, (
+        "the conformer search ran before the budget was checked"
+    )
+    assert server.count("relax_structure") == 0
+
+
 def test_a_published_survey_names_the_method_the_server_ran(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
