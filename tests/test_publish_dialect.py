@@ -22,6 +22,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from chemclaw.publish import record as record_module
 from chemclaw.publish.dialect import (
     CONFLICT_KEYS,
@@ -30,9 +32,10 @@ from chemclaw.publish.dialect import (
     rows_for,
     upsert_statement,
 )
-from chemclaw.publish.project import project
+from chemclaw.publish.project import _fact, project
 from chemclaw.publish.record import (
     Conditions,
+    PropertyFact,
     Publication,
     ResultRecord,
     Subject,
@@ -240,3 +243,40 @@ def test_every_table_the_row_builder_emits_is_ordered_and_keyed() -> None:
     assert set(CONFLICT_KEYS) <= set(TABLE_ORDER), (
         f"{sorted(set(CONFLICT_KEYS) - set(TABLE_ORDER))} is keyed but never written"
     )
+
+
+def test_a_converted_fact_keeps_the_number_its_calculator_reported() -> None:
+    """`reported_value`/`reported_unit` are a *pair*, and one of them was the other's value.
+
+    The shipped DDL says of these two columns: "what the calculator actually said, before
+    canonicalization. Kept for audit and for the day a conversion is found wrong - at which point
+    the canonical column can be rebuilt from this." `PropertyFact` had only the canonical number to
+    offer, so this row builder wrote *that* under the reported unit — a number in kcal/mol labelled
+    `hartree`, which is not merely wrong but unrecoverable, and rebuilding from it would convert a
+    second time.
+
+    Invisible today because every projector reports the canonical unit already, which is the same
+    reason the conversion in `project._fact` is untested (`test_publish_projection.py` pins that
+    half). Asserted here through the columns, because that is where the pair is written.
+    """
+    record = _record().model_copy(
+        update={"properties": [_fact("reaction_delta_g", -0.02, "hartree")]}
+    )
+    row = rows_for(record, tenant_id="t", writer_version="w")["property_value"][0]
+
+    assert row["value_canonical"] == pytest.approx(-12.5502, abs=1e-3)
+    assert (row["reported_value"], row["reported_unit"]) == (-0.02, "hartree")
+
+
+def test_a_fact_with_no_reported_value_still_records_one() -> None:
+    """A `PropertyFact` built outside `_fact` reports the canonical number, not NULL.
+
+    `reported_value` is optional on the model — `_text` and `_flag` produce no number at all, and
+    one projector constructs a `PropertyFact` directly — so the fallback is what keeps this column
+    populated for the rows that have always populated it.
+    """
+    fact = PropertyFact(property="reaction_delta_g", value=-12.5, unit="kcal/mol")
+    record = _record().model_copy(update={"properties": [fact]})
+    row = rows_for(record, tenant_id="t", writer_version="w")["property_value"][0]
+
+    assert (row["value_canonical"], row["reported_value"]) == (-12.5, -12.5)

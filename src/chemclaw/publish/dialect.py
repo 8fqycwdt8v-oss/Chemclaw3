@@ -145,7 +145,12 @@ def rows_for(
                 "value_canonical": fact.value,
                 "value_bool": fact.value_bool,
                 "value_text": fact.value_text or None,
-                "reported_value": fact.value,
+                # What the calculator said, in `reported_unit`. Falls back to the canonical value
+                # for a fact built without one (a boolean, a coded string, or a `PropertyFact`
+                # constructed outside `project._fact`), where the two are the same number.
+                "reported_value": (
+                    fact.value if fact.reported_value is None else fact.reported_value
+                ),
                 "reported_unit": fact.unit or unit,
                 "uncertainty": fact.uncertainty,
                 "uncertainty_kind": fact.uncertainty_kind,

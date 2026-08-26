@@ -6,19 +6,32 @@ none, so it skips). The provider-selection test is a pure unit test with no data
 """
 
 import asyncio
+from typing import Any, cast
 
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage, message_to_dict
 
 from chemclaw.agent.chemclaw_agent import history_provider
+from chemclaw.agent.message_migration import LANGCHAIN_SHAPE
 from chemclaw.agent.session_store import (
     InMemoryHistoryProvider,
     PostgresHistoryProvider,
     SessionOwnerStore,
     SessionTurnClaims,
+    is_degraded_render,
+    message_from_row,
 )
+from chemclaw.cli.explain import explain
 from chemclaw.core import db
 from chemclaw.core.config import settings
+from chemclaw.core.identity_context import (
+    reset_current_correlation_id,
+    set_current_correlation_id,
+)
+from chemclaw.core.metrics import METRICS
 from tests.pg import migrated_db_or_skip
+
+# The counter that separates "one unreadable legacy row" from "the reader is broken for everyone".
+_DEGRADED = "chemclaw_degraded_total"
 
 
 def test_history_provider_selected_by_config(monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -327,6 +340,124 @@ def test_the_transcript_read_returns_the_whole_session_not_a_window() -> None:
         assert [m.content for m in loaded] == [f"question {index}" for index in range(turns)], (
             f"the transcript read returned {len(loaded)} of {turns} messages — a window would "
             "make a reloaded conversation look like it began later than it did"
+        )
+
+    asyncio.run(_run())
+
+
+def test_a_structured_turn_survives_the_round_trip_with_its_calls_intact() -> None:
+    """The shape stamp decides how a row is read, and nothing else asserted that it decides right.
+
+    `test_messages_survive_a_new_provider_instance` asserts a substring, and a substring is exactly
+    what the degraded fallback produces: deleting `message_from_row`'s `LANGCHAIN_SHAPE` branch
+    sends every row this system writes through the legacy converter, which refuses it, and the
+    recovered prose still contains "phenol". Measured with that branch removed, the transcript came
+    back as flat prose — the `AIMessage` with `tool_calls == []` and the `ToolMessage` as an
+    `AIMessage` with no `tool_call_id`, so a reloaded conversation attributes the tool's answer to
+    the model's own voice and loses the call that produced it — while the whole suite stayed green.
+
+    So the assertion is identity, not substring: the classes, the call and the id that pairs the
+    two. **And the counter on the happy path**, because that is the other half of what the wide
+    catch costs. `chemclaw_degraded_total{subsystem=session_transcript}` is what separates "one
+    unreadable legacy row" from "the reader is broken for everyone", and a reader that degrades
+    every row looks identical to a healthy one unless something asserts the counter stays put.
+    """
+
+    async def _run() -> None:
+        writer = await _provider_or_skip()
+        session_id = "sess-f3-structured"
+        await _clear(session_id)
+        turn = [
+            HumanMessage(content="what is the pKa of phenol?"),
+            AIMessage(
+                content="let me check",
+                tool_calls=[{"name": "predict_pka", "args": {"smiles": "Oc1ccccc1"}, "id": "c-1"}],
+            ),
+            ToolMessage(content="9.95", tool_call_id="c-1"),
+        ]
+        before = METRICS.value(_DEGRADED)
+        await writer.save_messages(session_id, turn)
+
+        loaded = await PostgresHistoryProvider().get_messages(session_id)
+
+        assert [type(message) for message in loaded] == [HumanMessage, AIMessage, ToolMessage], (
+            "the stored shape decided the reader wrong: a tool's answer came back in another voice"
+        )
+        assert [(c["name"], c["args"], c["id"]) for c in cast(Any, loaded[1]).tool_calls] == [
+            ("predict_pka", {"smiles": "Oc1ccccc1"}, "c-1")
+        ], "the call the model made is gone from the reloaded turn"
+        assert cast(Any, loaded[2]).tool_call_id == "c-1", "the answer no longer names its call"
+        assert not [m for m in loaded if is_degraded_render(m)], "a row was recovered, not decoded"
+        assert METRICS.value(_DEGRADED) == before, (
+            "reading a transcript this system itself wrote counted a degradation, which is the "
+            "reader being broken for everyone rather than one legacy row being unreadable"
+        )
+
+    asyncio.run(_run())
+
+
+def test_a_row_that_will_not_convert_is_marked_as_recovered_rather_than_passing_as_a_message() -> (
+    None
+):
+    """A guess must not be readable as the record — the fallback's own failure mode.
+
+    The catch is deliberately wide (a chemist must not lose a conversation to one bad row) and what
+    it returns is an ordinary message of a guessed class carrying the row's prose. Unmarked, that
+    is a forgery every reader downstream accepts: `chemclaw.cli.explain` printed a guessed speaker
+    as the audit record, and no test could tell a decoded transcript from a recovered one, which is
+    what let a deleted dispatch branch pass 251 tests.
+
+    No database: this is the reader, not the store.
+    """
+    recovered = message_from_row({"role": "assistant", "contents": ["not a content part"]}, None)
+    assert is_degraded_render(recovered), "a recovered row is indistinguishable from a decoded one"
+
+    decoded = message_from_row(message_to_dict(HumanMessage(content="hello")), LANGCHAIN_SHAPE)
+    assert not is_degraded_render(decoded), "a decoded row must not be marked as a guess"
+    assert decoded.content == "hello"
+
+
+def test_a_stored_message_carries_the_correlation_id_of_the_turn_that_wrote_it() -> None:
+    """The only key between what was said and what was run, asserted at both ends.
+
+    `save_messages` stamps `get_current_correlation_id()` so a transcript row joins to the audit
+    rows and job records of its own turn (D-2026-07-31-the-audit-chain-is-versioned). Stamping `""`
+    instead passes every test that touches the store, the explain CLI, the audit trail and the
+    pairing closure — and a blank column is not a missing feature, it reads exactly like a row
+    written before the id existed. `chemclaw explain` groups by that column, so every turn in the
+    session collapses into one "unattributed" pseudo-turn and the report is wrong in the one way
+    nobody double-checks: tool calls printed under a question that did not cause them.
+
+    So this asserts the *grouping*, through the real reconstruction over the real table, and not
+    only the column: the existing renderer test builds `(role, text)` tuples by hand and never
+    proves the two halves are joinable in the first place.
+    """
+
+    async def _run() -> None:
+        writer = await _provider_or_skip()
+        session_id = "sess-correlated"
+        await _clear(session_id)
+        for correlation_id, question in (("corr-a", "first question"), ("corr-b", "second")):
+            token = set_current_correlation_id(correlation_id)
+            try:
+                await writer.save_messages(session_id, [HumanMessage(content=question)])
+            finally:
+                reset_current_correlation_id(token)
+
+        async with db.connection(settings.postgres_dsn) as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT correlation_id FROM session_messages WHERE session_id = %s ORDER BY id",
+                    (session_id,),
+                )
+                stamped = [row[0] for row in await cur.fetchall()]
+        assert stamped == ["corr-a", "corr-b"], "a message cannot be joined to its own turn"
+
+        report = "\n".join(await explain(session_id))
+        assert "── turn corr-a" in report and "── turn corr-b" in report
+        assert "unattributed" not in report, (
+            "the reconstruction collapsed two turns into one pseudo-turn, which is what an "
+            "unstamped row looks like to every reader of this table"
         )
 
     asyncio.run(_run())

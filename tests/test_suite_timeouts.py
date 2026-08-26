@@ -1,4 +1,9 @@
-"""The suite's own wall-clock caps are relaxable on a loaded machine (T11).
+"""What a run says about itself: relaxable wall-clock caps (T11), and the tests that never ran.
+
+Both halves are about a run's headline number being believed without the things that qualify it: a
+timed-out test proves nothing about the assertions it never reached, and a skipped Postgres test
+proves nothing at all. `tests/conftest.py` owns both, and both are exercised here the only way a
+terminal-summary hook can be — through a real session.
 
 `pyproject.toml` caps every test at 180 s and two files tighten that further with
 `@pytest.mark.timeout(...)`. A marker overrides `--timeout` and `PYTEST_TIMEOUT`, so before
@@ -165,3 +170,60 @@ def test_the_knob_does_not_wear_the_products_config_prefix(monkeypatch: pytest.M
     monkeypatch.delenv("PYTEST_TIMEOUT_SCALE", raising=False)
     monkeypatch.setenv("CHEMCLAW_TEST_TIMEOUT_SCALE", "8")
     assert timeout_scale() == 1.0, "the product prefix must not name a pytest knob"
+
+
+def test_a_run_says_how_many_postgres_backed_tests_never_ran(pytester: pytest.Pytester) -> None:
+    """The count of what an unreachable database took away is measured, never written down.
+
+    `CLAUDE.md` warns that a green local run can mean the durable layer never executed, and it
+    stated the size of that as a number — "~157 Postgres tests" — which was stale by ~38% in the
+    direction that understates the risk it exists to warn about (216 measured). A count in prose
+    describes the suite on the day someone counted it; this one is produced by the run that is
+    reporting it, which is what `D-2026-08-01-the-count-lives-in-the-test-not-in-the-prose` asks
+    for wherever a count is worth having at all.
+
+    Driven through a real session that skips with the real marker `tests/pg.py` writes, because the
+    epilogue matches on that reason string and a hand-called helper would only prove the matcher
+    agrees with itself.
+    """
+    pytester.makeconftest(_CONFTEST)
+    pytester.makepyfile(
+        test_needs_pg="""
+import pytest
+
+
+@pytest.mark.parametrize("case", [1, 2, 3])
+def test_needs_a_database(case: int) -> None:
+    pytest.skip("Postgres unavailable (start it: sudo dockerd; make up): connection refused")
+
+
+def test_needs_nothing() -> None:
+    assert True
+"""
+    )
+    result = pytester.runpytest_subprocess("-p", "no:randomly")
+    result.assert_outcomes(passed=1, skipped=3)
+    result.stdout.fnmatch_lines(
+        ["*Postgres-backed tests did not run*", "3 tests were skipped because Postgres*"]
+    )
+
+
+def test_a_run_with_a_database_says_nothing_about_skips(pytester: pytest.Pytester) -> None:
+    """The other side, so the epilogue cannot be satisfied by printing the banner unconditionally.
+
+    A skip for any other reason is not this warning: the section is about one specific thing being
+    unreachable, and a banner that appeared on every run would be read as noise and stop working.
+    """
+    pytester.makeconftest(_CONFTEST)
+    pytester.makepyfile(
+        test_other_skip="""
+import pytest
+
+
+def test_skipped_for_another_reason() -> None:
+    pytest.skip("tblite shared library is not where the probe expects")
+"""
+    )
+    result = pytester.runpytest_subprocess("-p", "no:randomly")
+    result.assert_outcomes(skipped=1)
+    assert "Postgres-backed tests did not run" not in result.stdout.str()

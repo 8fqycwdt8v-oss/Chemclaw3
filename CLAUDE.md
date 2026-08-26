@@ -450,10 +450,15 @@ make db-migrate
 ```
 
 Why this matters enough to be written down: believing it costs coverage silently. A full local
-`pytest` skips ~157 Postgres tests and still prints a green line, so a change that breaks the
-durable layer, the session store, the note-proposal tables or retention passes locally and fails in
-CI — and the session that trusted the green line has already pushed. The same belief makes the live
-lane (`make live-infra`, `make live-up`, `make live-probes`) and the four-repo
+`pytest` skips every Postgres-backed test — the set that gates on `tests/pg.py::migrated_db_or_skip`
+— and still prints a green line, so a change that breaks the durable layer, the session store, the
+note-proposal tables or retention passes locally and fails in CI, and the session that trusted the
+green line has already pushed. **How many that is, the run itself says**: `tests/conftest.py`'s
+terminal epilogue counts them and names what the run is therefore not evidence about. A count is
+not written here, because the one that was said ~157 while the suite skipped 216 — stale by ~38%,
+in the direction that understates the risk it exists to warn about
+(`D-2026-08-01-the-count-lives-in-the-test-not-in-the-prose`). The same belief makes the live lane
+(`make live-infra`, `make live-up`, `make live-probes`) and the four-repo
 `infra/live/e2e-full-stack/up.sh` look impossible when they are not.
 
 **So: start the daemon before claiming anything about the suite, and never report a local run as

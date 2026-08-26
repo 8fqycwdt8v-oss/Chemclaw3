@@ -189,6 +189,15 @@ def _fact(
     Returning None for an absent number rather than substituting one is the whole discipline of
     this module: `delta_g_kcal is None` means the free energy was not established, and every caller
     below filters Nones out rather than defaulting them.
+
+    **`value` is canonical and `reported_value` is what the calculator said.** `to_canonical` is the
+    one place a unit conversion happens on the publish path, which is what makes a predicate over
+    `value_canonical` sound — and today every call site below passes a unit that already *is* the
+    property's canonical unit, so the conversion is an identity on every live path and only its own
+    unit test exercises it. The first projector reporting an energy difference in hartree or kJ/mol
+    — the natural shape for anything coming back from `servers/calc` — is the one that needs this,
+    and it lands off by 627.5 or 4.184 with the unit string beside it still right. Keeping the
+    reported pair is what makes that recoverable rather than merely wrong.
     """
     if value is None:
         return None
@@ -196,6 +205,7 @@ def _fact(
         property=name,
         value=to_canonical(name, value, unit),
         unit=unit,
+        reported_value=value,
         uncertainty=uncertainty,
         uncertainty_kind=uncertainty_kind,
         scope="member" if member is not None else "calculation",

@@ -939,3 +939,34 @@ def test_every_model_field_is_read_or_deliberately_ignored(
         f"{kind} lists {sorted(allowed - set(payload))} as deliberately unread, but the model has "
         "no such field — the exemption has outlived its reason and should be deleted."
     )
+
+
+def test_a_fact_reported_in_a_non_canonical_unit_is_converted_before_it_is_published() -> None:
+    """`value` is the predicate column's number, so it is canonical or the column is a lie.
+
+    Measured rather than assumed: an AST scan of all 79 `_fact` call sites in `project.py` shows
+    every one of them passing a unit that already *is* the property's canonical unit, and a runtime
+    probe over the whole publish suite recorded exactly one conversion — from `to_canonical`'s own
+    unit test. So replacing `value=to_canonical(name, value, unit)` with `value=value` passed 86
+    tests across six publish files: the guard is an identity function on every live path, and the
+    first projector reporting an energy difference in hartree or kJ/mol (the natural shape for
+    anything coming back from `servers/calc`) would land off by 627.5 or 4.184 with the unit string
+    beside it still right, silently in or out of every range filter the column exists for.
+
+    The reported pair is asserted beside it because a conversion nobody can undo is the other half
+    of the same problem: `value` alone cannot answer "what did the calculator actually say".
+    """
+    fact = projection._fact("reaction_delta_g", -0.02, "hartree")
+    assert fact is not None
+    assert fact.value == pytest.approx(-12.5502, abs=1e-3), (
+        "a hartree reached `value_canonical` unconverted; every kcal/mol predicate over this "
+        "property now silently excludes or includes the row"
+    )
+    assert (fact.reported_value, fact.unit) == (-0.02, "hartree"), (
+        "the number the calculator reported is unrecoverable, so a conversion found wrong later "
+        "cannot be rebuilt from the row"
+    )
+
+    # The identity path, so the assertion above cannot be satisfied by converting everything.
+    same = projection._fact("reaction_delta_g", -12.5, "kcal/mol")
+    assert same is not None and same.value == -12.5 and same.reported_value == -12.5

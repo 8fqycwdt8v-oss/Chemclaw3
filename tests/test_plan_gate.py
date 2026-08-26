@@ -16,6 +16,7 @@ from collections.abc import Iterator
 from typing import Any
 
 import pytest
+from langchain_core.messages import AIMessage
 
 from chemclaw.agent import plan_approval_store as store_module
 from chemclaw.agent import plan_gate as plan_gate_module
@@ -502,3 +503,99 @@ def test_a_spent_approval_stays_spent_across_a_rehydrate(
     before, after = asyncio.run(_run())
     assert not before, "the empty plan authorized a write even before the eviction"
     assert not after, "a spent approval re-armed itself when the session was rehydrated"
+
+
+async def _call_with_messages(tool: str, session: _Session, messages: list[Any]) -> bool:
+    """`_call`, but with the assistant messages this call arrives among.
+
+    `rewrites_the_plan_in_this_batch` reads the *batch* off `state["messages"]` rather than off the
+    state's `todos`, because that is the only place the other calls in the same assistant message
+    are visible — `ToolNode` builds every call's runtime from one pre-batch snapshot, so state
+    cannot answer "what else is running right now" by construction. So a test of that rule has to
+    supply the messages; `_call` supplies only the plan.
+    """
+    ran = False
+
+    async def _handler(_request: Any) -> Any:
+        nonlocal ran
+        ran = True
+        return None
+
+    request = tool_request(tool, call_id="c-write")
+    object.__setattr__(
+        request,
+        "state",
+        {"todos": [{"content": t} for t in session.titles], "messages": messages},
+    )
+    token = set_current_session_id(session.session_id)
+    try:
+        await run_middleware(enforce_plan_approval, request, _handler)
+    finally:
+        reset_current_session_id(token)
+    return ran
+
+
+def _batch(*calls: dict[str, Any]) -> AIMessage:
+    """One assistant message issuing `calls` together — what `ToolNode` fans out in one batch."""
+    return AIMessage(content="", tool_calls=list(calls))
+
+
+_WRITE_TODOS = {"name": "write_todos", "args": {"todos": []}, "id": "c-plan"}
+_GATED = {"name": "propose_knowledge_note", "args": {"type": "insight"}, "id": "c-write"}
+
+
+def test_a_gated_call_beside_a_plan_rewrite_is_refused_even_with_a_live_approval(
+    approvals: InMemoryPlanApprovalStore,
+) -> None:
+    """DARK-1's remaining shape, and the branch nothing exercised.
+
+    Turn 1 writes plan A and a chemist approves it. Turn 2 emits `write_todos(plan B)` and
+    `propose_knowledge_note(...)` in **one** assistant message. `request.state` is the snapshot
+    taken before the whole batch, so the gate sees plan A, the approval stands, and the note is
+    pushed to the knowledge repository under an approval given for a different plan — and
+    `consume_turn_approval` then hashes plan B, finds no decision, and leaves the approval unspent
+    for the next turn as well.
+
+    The approval here is *live for the plan in state*, deliberately: that is what makes this a test
+    of the batch rule rather than of the ordinary approval check. Deleting the two-line refusal in
+    `enforce_plan_approval` left 204 tests green; only the `return True` control failed, which
+    proved the function was reached and its true branch untested.
+    """
+
+    async def _run() -> None:
+        session = _Session("dark-1-batch")
+        await _set_plan(session, ["screen the species", "find precedent"])
+        await _approve(approvals, session)
+        # The control: alone in its own message, this exact call is allowed right now.
+        assert await _call_with_messages("propose_knowledge_note", session, [_batch(_GATED)])
+
+        with pytest.raises(PlanNotApprovedError):
+            await _call_with_messages(
+                "propose_knowledge_note", session, [_batch(_WRITE_TODOS, _GATED)]
+            )
+
+    asyncio.run(_run())
+
+
+def test_the_same_call_is_allowed_in_the_message_after_the_plan_was_rewritten(
+    approvals: InMemoryPlanApprovalStore,
+) -> None:
+    """The twin, without which the refusal above would break every legitimate re-issue.
+
+    Refusing costs a legitimate turn one retry: the model re-issues the call in the *next* message,
+    against the plan it just wrote, and a human approves that plan. If the gate refused that too,
+    `plan_only` would be a mode in which a plan can never be acted on — so the boundary is pinned
+    from both sides, exactly as the read-tool case is.
+    """
+
+    async def _run() -> None:
+        session = _Session("dark-1-next-message")
+        await _set_plan(session, ["compute the barrier"])
+        await _approve(approvals, session)
+        messages = [_batch(_WRITE_TODOS), _batch(_GATED)]
+        assert await _call_with_messages("propose_knowledge_note", session, messages), (
+            "a re-issued call in the next message was refused; the batch rule has overrun into "
+            "the retry it exists to leave open"
+        )
+
+    asyncio.run(_run())

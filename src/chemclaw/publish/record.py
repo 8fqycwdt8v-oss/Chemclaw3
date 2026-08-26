@@ -253,9 +253,19 @@ class PropertyFact(BaseModel):
     value: float | None = None
     value_bool: bool | None = None
     value_text: str = ""
-    # The unit the projection produced. Normalized to the registry's canonical unit at write time,
-    # with the reported pair kept beside it so a conversion found wrong later is recoverable.
+    # The unit the calculator reported, which is the unit `reported_value` is in — never the unit
+    # of `value`. `value` is always the registry's canonical unit for this property, because
+    # `project._fact` puts it there.
     unit: str = ""
+    # What the calculator actually said, before canonicalization, in `unit`. None where the two are
+    # the same number, which is every projector shipping today.
+    #
+    # **The pair has to travel together or it is not recoverable.** `dialect.py` writes
+    # `reported_value`/`reported_unit` so "the day a conversion is found wrong" the canonical column
+    # can be rebuilt from them — and with only `value` on this model to write there, it filed the
+    # *converted* number under the *reported* unit. Invisible while every call site reports the
+    # canonical unit already, and a silently unrecoverable row the first time one does not.
+    reported_value: float | None = None
     uncertainty: float | None = None
     uncertainty_kind: str = ""  # Estimate.method: reported | propagated | none
     in_domain: bool | None = None

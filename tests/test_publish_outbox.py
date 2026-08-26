@@ -525,3 +525,85 @@ def test_a_projection_that_cannot_succeed_is_not_counted_as_a_publish_failure(
         "nothing was queued and nothing was delivered, so the publish counter must not move — "
         "it is what an operator reads to decide whether a destination is unhealthy"
     )
+
+
+def test_two_workers_claiming_at_once_split_the_queue(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`FOR UPDATE SKIP LOCKED` is the whole of "two publisher replicas drain one queue".
+
+    Dropping it from `_CLAIM` passed all 35 tests in the outbox suite, `test_concurrency_claims.py`
+    included — that file races the *session-turn* claim with 32 claimants and gives this one only
+    sequential calls, and sequential calls cannot tell the two implementations apart: the claim
+    commits before delivery, so a second call afterwards legitimately sees the same rows again
+    (`test_claiming_a_row_spends_its_attempt` asserts exactly that).
+
+    What tells them apart is a second claimant arriving **while the first still holds its locks**,
+    which is the window `claim` occupies between its `UPDATE` and its commit. So the first worker
+    here runs the real statement on its own connection and does not commit until the second has
+    answered. With `SKIP LOCKED` the second steps over those rows and takes the rest; without it,
+    it blocks on them and this fails as a timeout rather than passing quietly — which is the
+    difference between two replicas splitting a queue and two replicas serializing on it, a drain
+    that takes twice as long and, under `result_publish_max_attempts` plus a statement timeout,
+    retires rows that were only ever blocked.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        _with_sink(monkeypatch, "alpha")
+        monkeypatch.setattr(settings, "result_publish_max_attempts", 5)
+        async with outbox._connect() as conn:
+            await _reset(conn)
+        await outbox.enqueue([_record(f"race-{index}") for index in range(4)])
+
+        async with outbox._connect() as first:
+            # Worker A, mid-claim: rows updated, transaction still open, locks still held.
+            cursor = await first.execute(outbox._CLAIM, ("alpha", 5, 2))
+            mine = {str(row[1]) for row in await cursor.fetchall()}
+            # Worker B, on its own connection, against that live lock. Bounded well under the
+            # statement timeout so a blocked claim is reported as a blocked claim.
+            theirs = {ref for _, ref, _ in await asyncio.wait_for(outbox.claim("alpha", 2), 10)}
+            await first.commit()
+
+        assert len(mine) == 2 and len(theirs) == 2
+        assert mine.isdisjoint(theirs), "two concurrent workers delivered the same rows"
+        assert mine | theirs == {f"race-{index}" for index in range(4)}, (
+            "the two claims together did not cover the queue"
+        )
+
+    asyncio.run(_run())
+
+
+def test_a_row_out_of_attempts_is_not_claimed_again_even_while_it_is_pending(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The attempt bound in the claim predicate, with `mark_failed` kept out of the way.
+
+    Dropping `attempts < %s` from `_CLAIM` also passed the whole suite, and the reason is that the
+    test which looks like it covers this reports each failure through `mark_failed` — which retires
+    the row to `failed`, so the `state = 'pending'` predicate excludes it whether or not the bound
+    is there. The bound's own job is the other case: a worker that claimed and then *died*, leaving
+    the row pending with its attempts spent. Without the predicate that row is claimed forever, and
+    a destination that is genuinely rejecting it is retried without limit.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        _with_sink(monkeypatch, "alpha")
+        monkeypatch.setattr(settings, "result_publish_max_attempts", 2)
+        async with outbox._connect() as conn:
+            await _reset(conn)
+        await outbox.enqueue([_record("abandoned")])
+
+        # Two claims, no failure reported — two workers that died mid-delivery.
+        assert len(await outbox.claim("alpha", 10)) == 1
+        assert len(await outbox.claim("alpha", 10)) == 1
+        assert await outbox.claim("alpha", 10) == [], "a row out of attempts was claimed again"
+
+        async with outbox._connect() as conn:
+            cursor = await conn.execute(
+                "SELECT state, attempts FROM result_publications WHERE calc_ref = 'abandoned'"
+            )
+            assert await cursor.fetchone() == ("pending", 2), (
+                "the row must still be pending — this is the bound doing the work, not the state"
+            )
+
+    asyncio.run(_run())

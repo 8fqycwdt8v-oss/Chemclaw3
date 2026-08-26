@@ -66,6 +66,32 @@ from chemclaw.core.metrics_bridge import degraded
 
 log = logging.getLogger(__name__)
 
+# Stamped into `additional_kwargs` of a message this module *recovered* rather than decoded, so a
+# reader can tell the two apart. Without it the degraded path is a forgery: it returns an ordinary
+# message of a guessed class carrying the row's prose, and nothing downstream — no reader, no test
+# — can distinguish "this row was decoded" from "this row was not, and these are its words". That
+# is not hypothetical. Deleting the `LANGCHAIN_SHAPE` branch outright sends *every* row this system
+# writes through the legacy converter, which refuses it, and every transcript comes back as flat
+# prose with its tool calls gone (an `AIMessage` loses `tool_calls`, a `ToolMessage` becomes an
+# `AIMessage` with no `tool_call_id`) — the M6 defect this module's docstring was written about,
+# reached from the inside. The counter says a degradation happened; this says *which row*, which is
+# what a reader rendering that row needs.
+#
+# `additional_kwargs` rather than a new field or a wrapper type: it is LangChain's own extension
+# point on `BaseMessage`, so the marker rides along on the ordinary object every caller already
+# handles and costs nothing to ignore.
+DEGRADED_RENDER = "chemclaw_degraded_render"
+
+
+def is_degraded_render(message: BaseMessage) -> bool:
+    """Whether this message is a recovered row rather than a decoded one.
+
+    Public for `chemclaw.cli.explain`, which reconstructs a conversation for the audit join and
+    must not present a guess as the record: a row whose prose was recovered has an *unknown*
+    speaker, whatever label it happens to carry.
+    """
+    return DEGRADED_RENDER in message.additional_kwargs
+
 
 def message_from_row(payload: dict[str, Any], shape: str | None) -> BaseMessage:
     """One stored row as a LangChain message, whichever shape it holds.
@@ -99,6 +125,13 @@ def message_from_row(payload: dict[str, Any], shape: str | None) -> BaseMessage:
     `Exception` and not a tuple — the whole promise of this branch is that *no* stored payload can
     cost a chemist their conversation, and a tuple is a list of the ways that have been seen so
     far.
+
+    **A recovered row says so** (`DEGRADED_RENDER`, read back by `is_degraded_render`). A catch that
+    wide swallows a converter *bug* as readily as one unreadable legacy row, and what it returns
+    then is an ordinary message of a guessed class carrying plausible prose — indistinguishable, to
+    every reader downstream, from a row that decoded. The counter says a degradation happened
+    somewhere; the stamp says which message is the guess, so the audit reconstruction can decline
+    to attribute it to a speaker it does not actually know.
     """
     if not isinstance(payload, dict):
         # `message` is a bare `jsonb` column — only `message_shape` is constrained — so a scalar or
@@ -106,7 +139,7 @@ def message_from_row(payload: dict[str, Any], shape: str | None) -> BaseMessage:
         # today; without this, three payload shapes still raised `AttributeError` past both callers
         # and answered the whole transcript with a 500, which is the promise this function makes.
         degraded(log, "session_transcript", "a stored message was not an object; rendering nothing")
-        return AIMessage(content="")
+        return AIMessage(content="", additional_kwargs={DEGRADED_RENDER: str(shape or "")})
     try:
         if shape == LANGCHAIN_SHAPE:
             return messages_from_dict([payload])[0]
@@ -124,7 +157,12 @@ def message_from_row(payload: dict[str, Any], shape: str | None) -> BaseMessage:
         # reader who cannot convert a row should still see what was said in it, and a blank message
         # says the turn was silent. Refusals became commonplace when the converter started stopping
         # on parallel results and unknown content types instead of quietly dropping them.
-        return _degraded_class(payload)(content=_stored_prose(payload))
+        # Stamped as recovered, not decoded. The prose below is a best effort at what was said;
+        # the structure of the row — which tool answered, under which call id — is gone, and a
+        # reader that cannot see the difference will present the guess as the record.
+        return _degraded_class(payload)(
+            content=_stored_prose(payload), additional_kwargs={DEGRADED_RENDER: str(shape or "")}
+        )
 
 
 # Which speaker each stored shape's label names. MAF stamps `role`, LangChain's `message_to_dict`
