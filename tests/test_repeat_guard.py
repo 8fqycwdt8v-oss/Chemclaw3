@@ -209,3 +209,65 @@ def test_a_refused_repeat_is_counted_so_a_deployment_can_alert_on_it(watching: N
         _drive(_ctx("find_past_jobs"), tool)
     assert METRICS.value("chemclaw_repeated_tool_calls_total") == before + 1
     assert 'tool="find_past_jobs"' in METRICS.render()
+
+
+# --------------------------------------------------------------------------------------------
+# The coupling to compaction, which both modules documented and neither tested.
+# --------------------------------------------------------------------------------------------
+
+
+def test_a_call_whose_result_was_cleared_is_forgiven() -> None:
+    """A cleared answer makes the next identical call a re-read rather than a repeat.
+
+    The premise the guard rests on is "the model already has the first answer", and compaction
+    takes that away — the whole reason `forget_calls` exists. Until now nothing exercised it from
+    either side.
+    """
+    from chemclaw.agent.repeat_guard import count_call, forget_calls
+
+    token = begin_call_watch()
+    try:
+        assert count_call("find_past_jobs", {"q": "suzuki"}) is None
+        assert count_call("find_past_jobs", {"q": "suzuki"}) is None
+        # Third identical call, with the answers still in context: refused.
+        assert isinstance(count_call("find_past_jobs", {"q": "suzuki"}), RepeatedCallRefusal)
+
+        forget_calls([("find_past_jobs", {"q": "suzuki"})])
+
+        # The answers are gone, so asking again is a re-read rather than a repeat.
+        assert count_call("find_past_jobs", {"q": "suzuki"}) is None
+    finally:
+        end_call_watch(token)
+
+
+def test_a_call_whose_result_survived_the_clearing_is_still_guarded() -> None:
+    """The precision that a blanket reset did not have, and the reason it was worth adding.
+
+    `ClearToolUsesEdit` preserves the newest `agent_keep_last_tool_groups` results, so after a
+    reduction the model is still holding some of its answers. `forget_calls()` used to wipe every
+    counter, which forgave those too — once per reduction, and a long turn reduces on many model
+    calls. The guard's strength was therefore a function of `agent_tool_result_clear_trigger`,
+    which is a token threshold and has nothing to do with whether a repeat is useful.
+    """
+    from chemclaw.agent.repeat_guard import count_call, forget_calls
+
+    token = begin_call_watch()
+    try:
+        for _ in range(3):
+            count_call("find_notes", {"q": "cleared"})
+            count_call("get_durable_job_status", {"id": "kept"})
+
+        # Only the first tool's results were replaced by a placeholder.
+        forget_calls([("find_notes", {"q": "cleared"})])
+
+        assert count_call("find_notes", {"q": "cleared"}) is None
+        assert isinstance(count_call("get_durable_job_status", {"id": "kept"}), RepeatedCallRefusal)
+    finally:
+        end_call_watch(token)
+
+
+def test_forgetting_is_a_no_op_off_the_request_path() -> None:
+    """Like every other function in the module — the CLI and the classic agent take this branch."""
+    from chemclaw.agent.repeat_guard import forget_calls
+
+    forget_calls([("find_notes", {"q": "anything"})])

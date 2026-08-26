@@ -29,7 +29,7 @@ the agent's stream is driven from a task of its own.
 import json
 import logging
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from contextvars import ContextVar
 from typing import Any
 
@@ -82,8 +82,8 @@ def _key(name: str, arguments: Any) -> tuple[str, str]:
     return (name, json.dumps(arguments, sort_keys=True, default=str))
 
 
-def forget_calls() -> None:
-    """Clear this turn's repeat counters, because the context they assumed no longer holds.
+def forget_calls(cleared: Iterable[tuple[str, Any]]) -> None:
+    """Clear the repeat counters for calls whose answers compaction just took away.
 
     **The dead end this removes.** The guard's whole justification is that a repeat "will not
     answer differently" and the model already has the first answer. Compaction takes that second
@@ -102,12 +102,28 @@ def forget_calls() -> None:
     `find_past_jobs` calls, 128-142 s against 16.9 s) happens inside a context that is not being
     reduced, and a turn large enough to compact will re-accumulate its counts from here.
 
+    **Only the calls whose results were actually cleared.** The reduction preserves the newest
+    `agent_keep_last_tool_groups` results, so a blanket reset also forgave repeats of answers the
+    model is still holding — and it did so once per reduction, which in a long turn is repeatedly.
+    That made the guard's effectiveness a function of the clearing threshold, and lowering that
+    threshold from 100k to 30k (`agent_tool_result_clear_trigger`) is what made the coupling worth
+    removing rather than documenting. Passing the calls that lost their answers keeps the premise
+    exact: a call is forgiven when, and only when, its own result is gone.
+
     A no-op off the request path, like every other function in this module.
+
+    Args:
+        cleared: The `(tool name, arguments)` pairs whose results were replaced by a placeholder.
     """
     counts = _calls.get()
-    if counts is not None and counts:
-        logger.info("context was compacted; %d repeat counter(s) cleared", len(counts))
-        counts.clear()
+    if counts is None or not counts:
+        return
+    forgotten = 0
+    for name, arguments in cleared:
+        if counts.pop(_key(name, arguments), None) is not None:
+            forgotten += 1
+    if forgotten:
+        logger.info("context was compacted; %d repeat counter(s) cleared", forgotten)
 
 
 def count_call(name: str, arguments: Any) -> RepeatedCallRefusal | None:

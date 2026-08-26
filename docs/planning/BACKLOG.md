@@ -16,11 +16,12 @@ row this queue has ever carried. 223 of its rows are open
 (`grep -c '^- \[ \]' docs/archive/findings-2026-08.md`; the header here said "~185" until
 2026-08-17). That is not "223 *further*" and the two counts do not subtract: promoting a row
 **restates** it, so a queued row is still open there under its original wording, and matching the
-two sets by title matched only 7 of the 30 rows this queue held when that was measured (it holds 41
-now — 40 after the 2026-08-26 sweep closed seven and queued one; §5 is the first thing here that is
-not a defect this repository found in itself, and none of its rows is in the archive at all). The
-overlap is real and unmeasurable by `grep`, which is why the number here is the archive's own and not a difference. When
-a queued row needs its full measurement history, that file has it under the review that found it.
+two sets by title matched only 7 of the 30 rows this queue held when that was measured; it holds 41
+now, after the 2026-08-26 sweep closed seven, deleted an eighth that `#221` had already closed
+without removing it, and queued two. §5 is the first thing here that is not a defect this repository
+found in itself, and none of its rows is in the archive at all. The overlap is real and unmeasurable
+by `grep`, which is why the number here is the archive's own and not a difference. When a queued row
+needs its full measurement history, that file has it under the review that found it.
 
 **A row must name an anchor in the tree** — a module, a line, a manifest key — so any row can be
 checked with one `grep` instead of an argument. A row that cannot name one is not ready to be
@@ -457,24 +458,6 @@ it happens.
       in the same sweep, reported as `unpolled` and counted like `unreachable`, is the runtime twin
       of the manifest check `connector-validate` now does — and it catches the row above too.
 
-- [ ] **Two tests guard on a credential being *present*, not on it working, and a stale one turns a
-      skip into a red suite** — [S]. `tests/test_prompt_caching.py:304` is
-      `@pytest.mark.skipif("API-KEY" not in os.environ, ...)` and
-      `test_which_shipped_profiles_clear_the_cache_floor` reads `os.environ["API-KEY"]` directly.
-      Measured on a Claude Code Remote box for this repo on 2026-08-25: the variable is set, the
-      value is rejected — `anthropic.AuthenticationError: 401 ... 'API key is invalid.'` — so both
-      tests **ran and failed** where the intent was plainly to skip, and `make test` came back
-      `3 failed, 4251 passed, 3 skipped` on an unmodified tree. `CLAUDE.md` already warns that the
-      credential "may not exist in every environment"; what it does not cover is the worse case,
-      present-and-stale, which reads as a defect in prompt caching rather than as an absent
-      credential. Guard on reachability (a `count_tokens` probe, which is unbilled and is what the
-      second test already uses) and skip with the reason, rather than on the key being non-empty.
-
-      Beside it, and *not* a defect worth a row of its own: `tests/test_reizman.py::test_bo_campaign_finds_high_yield`
-      also failed in that run, on the 180 s `pytest-timeout`, and **passes in 49 s in isolation** —
-      it was competing with four other pytest processes. Recorded here so the next person to see it
-      red under load does not go looking for a BoFire regression.
-
 ---
 
 ## 5 — Where the field moved past us
@@ -684,6 +667,31 @@ roadmap and the xTB/QM (X-series) roadmap. Their remaining live edges — real T
 cluster, real HPC, real Snowflake — are in
 [`DEFERRED.md`](DEFERRED.md), each with the trigger that would revisit it, which is the register
 those belong in.
+
+## `turn_cost_ratio` scores a fixture, not the system
+
+`data/evals/cases/autonomy-turn-cost.md` carries literal turn records, so the metric returns
+0.9845458333333333 whatever changes in the agent — the 32% static-prefix growth that
+`tests/test_context_floor.py` caught would leave its `baseline.json` row untouched. The metric's
+arithmetic is right and tested; what is missing is a case fed from real recorded `TurnCost` rows.
+
+Blocked on the same thing the memory-distillation row is: a deployment with turns in it. This
+system has 12 session messages and 0 recorded turns, so there is nothing to build the case from
+yet. Trigger: the first live lane run that persists a session's worth of turns.
+
+## The live lane and the four-repo lane fight over `chem` and `safety`
+
+`infra/live/processes.sh` uses `RUN_DIR=$LIVE_DIR/run` and `infra/live/e2e-full-stack/up.sh` uses
+`$LIVE_DIR/e2e/run`, and both now start `chem` and `safety`. Run them together and the second
+lane's pidfile guard cannot see the first's processes, so two uvicorns die on a bound port while
+`wait_for` passes off the servers that are already up — leaving dead pidfiles that make
+`processes.sh status` report both DOWN while the lane works fine.
+
+Not fixed here because the fix is a decision rather than an edit: either the two lanes share one
+run dir (and one lane learns to adopt the other's processes), or the fleet bundles move out of
+`processes.sh` and the four-repo lane becomes the only thing that starts them. The second is
+probably right — `processes.sh` grew them for a single-repo live test that the e2e lane supersedes
+— but it changes what `make live-up` alone can exercise, which wants measuring first.
 
 ## Backfill the ORD corpus on the four-repo lane's first bring-up
 
