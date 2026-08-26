@@ -76,6 +76,49 @@ def test_the_shell_halves_parse() -> None:
         assert result.returncode == 0, f"{script.name} does not parse: {result.stderr.strip()}"
 
 
+def _shell_as_the_shell_receives_it(block: str) -> str:
+    r"""Resolve a Groovy GString to the text bash is actually handed.
+
+    Three substitutions, and each is a real difference rather than a formality. `${...}` is
+    interpolated by Jenkins before the shell sees anything. `\${...}` and `\$(...)` reach the shell
+    verbatim — that escape is how a pipeline writes a *shell* variable inside an interpolated
+    string, and getting it backwards is the most common way one of these files breaks. A `\\` at
+    end of line reaches it as the single backslash that makes a line continuation.
+    """
+    resolved = re.sub(r"(?<!\\)\$\{[^}]*\}", "PLACEHOLDER", block)
+    return resolved.replace("\\$", "$").replace("\\\\", "\\")
+
+
+def _parses_as_shell(script: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(["bash", "-n"], input=script, capture_output=True, text=True)
+
+
+def test_every_shell_block_in_the_pipelines_parses() -> None:
+    """The one thing that can be executed about a pipeline nobody here can run.
+
+    A Jenkinsfile is checked by no compiler and no linter in this repository, and its shell bodies
+    are strings — so an unbalanced quote, or a `||` left on its own line by a lost continuation, is
+    invisible until a run, against a registry, on the way to a namespace. `bash -n` costs
+    milliseconds and speaks about the text the shell is handed rather than the text in the file.
+    """
+    checked = 0
+    for pipeline in _PIPELINES:
+        text = pipeline.read_text(encoding="utf-8")
+        for block in re.findall(r'"""(.*?)"""', text, re.S):
+            result = _parses_as_shell(_shell_as_the_shell_receives_it(block))
+            assert result.returncode == 0, (
+                f"a shell block in {pipeline.name} does not parse: {result.stderr.strip()}"
+            )
+            checked += 1
+        for block in re.findall(r"sh '''(.*?)'''", text, re.S):
+            result = _parses_as_shell(block)
+            assert result.returncode == 0, (
+                f"a shell block in {pipeline.name} does not parse: {result.stderr.strip()}"
+            )
+            checked += 1
+    assert checked >= 5, f"only {checked} shell blocks found — the parse has drifted"
+
+
 def test_the_cluster_target_deploys_bytes_rather_than_a_pointer() -> None:
     """`image.digest` is the chart's release knob; a tag would reintroduce the hole it closed.
 

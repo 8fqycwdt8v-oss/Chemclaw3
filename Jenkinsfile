@@ -122,12 +122,20 @@ dry run    ${params.DRY_RUN}"""
           "${runner}" run --rm --user 1001 -e CHEMCLAW_COMPONENT=not-a-component "${IMAGE_REF}" || status=$?
           test "${status}" -eq 64 || { echo "expected exit 64 for an unknown component, got ${status}" >&2; exit 1; }
 
+          # Derived from the bundles present, so this cannot drift from what ships — the same
+          # reasoning as `.github/workflows/image.yml`, which smoked a component that had not
+          # existed for months while its hand-kept list still named it. Four of the eight bundles
+          # have a server and no worker or the reverse, which is why each half is asked separately.
           for bundle in src/chemclaw/connectors/*/; do
             name="$(basename "${bundle}")"
-            [ -f "${bundle}/server/app.py" ] && \
-              "${runner}" run --rm --user 1001 --entrypoint python "${IMAGE_REF}" -c "import chemclaw.connectors.${name}.server.app"
-            [ -f "${bundle}/worker.py" ] && \
-              "${runner}" run --rm --user 1001 --entrypoint python "${IMAGE_REF}" -c "import chemclaw.connectors.${name}.worker"
+            if [ -f "${bundle}/server/app.py" ]; then
+              "${runner}" run --rm --user 1001 --entrypoint python "${IMAGE_REF}" \
+                -c "import chemclaw.connectors.${name}.server.app"
+            fi
+            if [ -f "${bundle}/worker.py" ]; then
+              "${runner}" run --rm --user 1001 --entrypoint python "${IMAGE_REF}" \
+                -c "import chemclaw.connectors.${name}.worker"
+            fi
           done
           echo "image verified"
         '''
