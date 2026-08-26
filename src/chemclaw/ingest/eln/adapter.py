@@ -174,6 +174,7 @@ def fetch_was_truncated(adapter: object) -> bool:
     """
     return adapter.fetch_truncated() if isinstance(adapter, BoundedFetch) else False
 
+
 class DatedIngest:
     """An `ElnAdapter` that carries the entry's own timestamp onto a record with no date.
 
