@@ -197,11 +197,18 @@ class InMemoryNoteIndex:
     async def search_dense(
         self, query_embedding: list[float], top_k: int, within: set[str] | None = None
     ) -> list[IndexHit]:
-        """Rank notes by cosine similarity to the query; drop zero-similarity, tie-break by id."""
+        """Rank notes by cosine similarity to the query; drop zero-similarity, tie-break by id.
+
+        Scoped to the live embedding configuration, exactly as `fingerprints` is — see
+        `PostgresNoteIndex.search_dense` for the defect that scoping both directions closes, and
+        why a reference that scoped only the write path could not stand in for the backend.
+        """
+        current = embedding_config_key()
         hits = [
             IndexHit(note_id=r.note_id, score=_cosine(query_embedding, r.embedding))
             for r in self._records.values()
-            if within is None or r.note_id in within
+            if (within is None or r.note_id in within)
+            and self._embedding_keys.get(r.note_id) == current
         ]
         hits = [h for h in hits if h.score > 0.0]
         hits.sort(key=lambda h: (-h.score, h.note_id))
@@ -337,10 +344,21 @@ class PostgresNoteIndex:
         # ids in the same order as the tie-break-free query. What it does *not* pin is which rows
         # win a tie *at the k-th place* — and neither did the old form, because HNSW is approximate:
         # the tie-break exists so two backends agree on the order of the hits they return.
+        # **`embedding_key` is a predicate on the read, not only on the rebuild.** The column was
+        # added (039, D-2026-08-08) because "a vector is only reusable for the configuration that
+        # made it… comparing its queries against the old model's vectors corrupts every similarity,
+        # silently, and no error is ever raised" — and it then gated `fingerprints` and nothing
+        # else. So an operator repointing `embedding_model` or `llm_base_url` at another model of
+        # the same width (which raises nothing at insert) put every row into a state where the
+        # rebuild treats it as absent and this statement scores it 0.99 against the *new* model's
+        # query. The claimed self-healing is a Temporal schedule, so the window is at least one
+        # `note_reindex_schedule_minutes` plus a corpus re-embed, and unbounded when it is off.
+        # An empty dense leg is something the sweep already reports honestly (`fanout._sweep`);
+        # cross-space garbage cited as evidence is not.
         self._dense = (
             "SELECT note_id, score FROM ("
             f"SELECT note_id, 1 - (embedding <=> %(q)s::vector({width})) AS score "
-            "FROM note_index WHERE embedding IS NOT NULL "
+            "FROM note_index WHERE embedding IS NOT NULL AND embedding_key = %(key)s "
             f"AND 1 - (embedding <=> %(q)s::vector({width})) > 0 "
             f"{scope}"
             f"ORDER BY embedding <=> %(q)s::vector({width}) LIMIT %(k)s"
@@ -446,6 +464,17 @@ class PostgresNoteIndex:
             await conn.commit()
         return [row[0] for row in rows]
 
+    def _read_key(self) -> str:
+        """The `embedding_key` a *read* must match — the live configuration, as stored.
+
+        A hook rather than a direct `embedding_config_key()` call for `_stored_key`'s reason:
+        `ExternalVectorNoteIndex` namespaces the key it writes by store and collection, so the two
+        would disagree the moment that subclass reached this statement. It does not today (it
+        overrides `search_dense` to rank in the store), which is exactly when a shared spelling is
+        cheap to get right and expensive to discover later.
+        """
+        return embedding_config_key()
+
     async def fingerprints(self, embedding_key: str) -> dict[str, str]:
         """Stored fingerprints for every row that has one *and* was embedded under this key.
 
@@ -466,13 +495,22 @@ class PostgresNoteIndex:
     async def search_dense(
         self, query_embedding: list[float], top_k: int, within: set[str] | None = None
     ) -> list[IndexHit]:
-        """Rank notes by cosine similarity to `query_embedding` (pgvector HNSW), positive only."""
+        """Rank notes by cosine similarity to `query_embedding` (pgvector HNSW), positive only.
+
+        **Only rows this deployment's current embedding configuration produced** — see the `_dense`
+        statement for what scoring the others silently cost.
+        """
         # A zero query vector (a token-less/symbol-only query under the hash embedder) has cosine 0
         # to everything — no hit, exactly as the InMemory reference returns. Short-circuit so we
         # never hand pgvector a zero vector (whose `<=>` distance is NaN) to order by.
         if not any(query_embedding):
             return []
-        params = {"q": _vector_literal(query_embedding), "k": top_k, "ids": _scope_array(within)}
+        params = {
+            "q": _vector_literal(query_embedding),
+            "k": top_k,
+            "ids": _scope_array(within),
+            "key": self._read_key(),
+        }
         async with self._connection() as conn:
             async with conn.cursor() as cur:
                 # Same transaction as the search below, which is the only place they mean anything:

@@ -187,7 +187,9 @@ async def sync_entries(
                 # this branch never sees it at all. Loaded lazily, once per run, and only when a
                 # replay actually happened; keyed on the ids this batch holds, never on the corpus.
                 if stored is None:
-                    stored = await record_store.bodies(_replay_record_ids(adapter, entries, since))
+                    stored = await record_store.bodies(
+                        _replay_record_ids(adapter, entries, since), source
+                    )
                 if stored.get(record.reaction_id) == record.body:
                     # Byte-identical to what is stored: nothing to index or write, so skip the
                     # whole ingest. A *different* body falls through and overwrites the record,

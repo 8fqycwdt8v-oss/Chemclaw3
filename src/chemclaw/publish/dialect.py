@@ -31,7 +31,7 @@ from typing import Any
 
 from chemclaw.core.ids import stable_hash
 from chemclaw.publish.properties import definition_for
-from chemclaw.publish.record import ResultRecord
+from chemclaw.publish.record import Publication, ResultRecord
 from chemclaw.publish.solvents import display_name
 
 # One statement per table, in dependency order: a row is never written before the rows it
@@ -85,8 +85,14 @@ def rows_for(
                     "structure_id": member.structure_id,
                     "compound_id": member.compound_id or None,
                     "atom_count": 0,
-                    "charge": member.charge or 0,
-                    "multiplicity": member.multiplicity or 1,
+                    # **Never fabricated.** These were `or 0` and `or 1` while no projector set
+                    # either, so every anion and every radical this writer published was recorded
+                    # as a neutral closed-shell singlet — and the values are not unknowable: they
+                    # are inside the `structure_id` hash and are in the payload wherever the
+                    # geometry itself is. Where the payload says nothing they stay `None`, which
+                    # reads as "not recorded" rather than as a state nobody computed.
+                    "charge": member.charge,
+                    "multiplicity": member.multiplicity,
                     "origin_calc_ref": "",
                     "geometry": {},
                     "created_at": now,
@@ -114,8 +120,8 @@ def rows_for(
                 "structure_id": conformer.structure_id,
                 "compound_id": (record.subject.members[0].compound_id or None),
                 "atom_count": 0,
-                "charge": 0,
-                "multiplicity": 1,
+                "charge": conformer.charge,
+                "multiplicity": conformer.multiplicity,
                 "origin_calc_ref": record.calc_ref,
                 "geometry": {},
                 "created_at": now,
@@ -139,7 +145,12 @@ def rows_for(
                 "value_canonical": fact.value,
                 "value_bool": fact.value_bool,
                 "value_text": fact.value_text or None,
-                "reported_value": fact.value,
+                # What the calculator said, in `reported_unit`. Falls back to the canonical value
+                # for a fact built without one (a boolean, a coded string, or a `PropertyFact`
+                # constructed outside `project._fact`), where the two are the same number.
+                "reported_value": (
+                    fact.value if fact.reported_value is None else fact.reported_value
+                ),
                 "reported_unit": fact.unit or unit,
                 "uncertainty": fact.uncertainty,
                 "uncertainty_kind": fact.uncertainty_kind,
@@ -220,6 +231,15 @@ def rows_for(
                 "payload": record.payload,
             }
         ],
+        # **One row even when the record names no publication**, which is the *normal* case: the
+        # cache hook and the backfill construct none, so every primitive — the overwhelming
+        # majority of the corpus — used to publish no publication row at all. The shipped DDL says
+        # a site's grants and row-level security attach to this table rather than to `calculation`,
+        # so following that advice hid every primitive, and the manifest's `tenant_id` (there so
+        # one shared results database can hold two deployments' output without their provenance
+        # merging) was unreachable for them. The tenant is a property of the *writer* and is the
+        # one field always knowable at write time; the actor is not, and stays empty rather than
+        # being guessed — a calculation's identity excludes who asked for it.
         "calculation_publication": [
             {
                 "calc_ref": record.calc_ref,
@@ -231,7 +251,7 @@ def rows_for(
                 "rationale": publication.rationale,
                 "published_at": now,
             }
-            for publication in (record.publications or [])
+            for publication in (record.publications or [Publication()])
         ],
         "calculation_input": [
             {"calc_ref": record.calc_ref, "depends_on_calc_ref": parent, "role": ""}
@@ -299,16 +319,6 @@ def rows_for(
             }
             for flag in record.flags
         ],
-        "calculation_artifact": [
-            {
-                "calc_ref": record.calc_ref,
-                "name": artifact.name,
-                "media_type": artifact.media_type,
-                "byte_size": artifact.byte_size,
-                "content_hash": artifact.content_hash,
-            }
-            for artifact in record.artifacts
-        ],
     }
 
 
@@ -332,7 +342,6 @@ CONFLICT_KEYS: dict[str, tuple[str, ...]] = {
     "conformer": ("calc_ref", "ordinal"),
     "calculation_candidate": ("calc_ref", "ordinal"),
     "calculation_flag": ("calc_ref", "ordinal"),
-    "calculation_artifact": ("calc_ref", "name"),
 }
 
 # Columns a *blank* incoming value must never overwrite.
@@ -349,8 +358,21 @@ CONFLICT_KEYS: dict[str, tuple[str, ...]] = {
 # is that a writer who does not know a fact cannot erase it from one who does, which is what this
 # says. A member row is not given `record.calc_ref` instead, because the geometry a calculation
 # *ran on* is its input -- claiming this calculation produced it would be a false provenance.
+# `charge` and `multiplicity` are here for the same reason and are the case that makes the rule
+# load-bearing rather than tidy: a subject member usually knows only the address, while a conformer
+# knows the state its search computed at, so a member row landing second would blank a real charge —
+# and a blanked charge is not a missing field but a *wrong* one, since 0/1 is a state a query
+# matches. Their blank is `NULL` rather than `0`/`1`, because a neutral closed-shell singlet is a
+# real answer that must be allowed to overwrite an unknown.
 PRESERVE_ON_BLANK: dict[str, tuple[str, ...]] = {
-    "structure": ("origin_calc_ref", "compound_id", "atom_count", "geometry"),
+    "structure": (
+        "origin_calc_ref",
+        "compound_id",
+        "atom_count",
+        "geometry",
+        "charge",
+        "multiplicity",
+    ),
 }
 
 # Dependency order. A row is never written before what it references, which is what makes the write
@@ -373,7 +395,6 @@ TABLE_ORDER: tuple[str, ...] = (
     "conformer",
     "calculation_candidate",
     "calculation_flag",
-    "calculation_artifact",
 )
 
 
@@ -384,6 +405,12 @@ _BLANKS: dict[str, str] = {
     "compound_id": "''",
     "atom_count": "0",
     "geometry": "'{}'::jsonb",
+    # `NULLIF(x, NULL)` is `x` (the comparison is NULL, so the CASE takes its ELSE branch), and
+    # `NULLIF(NULL, NULL)` is NULL — so the generated `COALESCE(NULLIF(EXCLUDED.charge, NULL),
+    # structure.charge)` keeps a stated value and leaves the stored one alone when nothing was
+    # stated. Spelled through the same generator as the other four rather than special-cased.
+    "charge": "NULL",
+    "multiplicity": "NULL",
 }
 
 

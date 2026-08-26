@@ -38,9 +38,10 @@ publications, which is also what makes re-delivery idempotent.
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from chemclaw.core.ids import stable_hash
+from chemclaw.publish.solvents import canonical_solvent
 
 # The contract version this writer builds records against. Stamped on every record so a consumer
 # can tell an absent *measurement* from an absent *column* — the question "why is `in_domain` NULL
@@ -154,11 +155,17 @@ class Conditions(BaseModel):
     **A continuum solvent lives here rather than in the subject**, because an implicit model is a
     parameter of the Hamiltonian and not a species present in the flask.
 
-    `solvent` is the name as it was *given*; canonicalization to a `solvent_id` happens at write
-    time against the shipped alias table. That distinction is not cosmetic: `ALPB_SOLVENTS` accepts
-    `thf` **and** `tetrahydrofuran`, `hexane`/`n-hexane`/`nhexane`, `dichloromethane` **and**
-    `dichlormethane`, and nothing in this tree maps between them — so a schema that stored the given
-    name would answer "every reaction in THF" with a confident subset and raise nothing.
+    `solvent` is canonicalized **here**, on the way in, against the shipped alias table. That
+    matters more than it looks: `ALPB_SOLVENTS` accepts `thf` **and** `tetrahydrofuran`,
+    `hexane`/`n-hexane`/`nhexane`, `dichloromethane` **and** `dichlormethane`, nothing in the
+    calculation layer maps between them, and `dialect.rows_for` mints `solvent_id` straight from
+    this field — so a name that arrived as given becomes a first-class solvent in the store and
+    "every reaction in THF" answers with a confident subset, raising nothing.
+
+    **It is a validator rather than a call each projector makes**, and that is the fix for a
+    measured defect: canonicalization was fourteen hand-written calls in `project.py` and the
+    fifteenth projector — the microstate pKa, the most expensive calculation in the tier — did not
+    make it. One model owning it is what makes the sixteenth safe.
 
     `solvent=None` means **gas phase**, which is a real state and not a missing value.
     """
@@ -172,6 +179,18 @@ class Conditions(BaseModel):
     ph: float | None = None
     charge: int | None = None
     multiplicity: int | None = None
+
+    @field_validator("solvent")
+    @classmethod
+    def _canonical_solvent(cls, value: str | None) -> str | None:
+        """Resolve an accepted spelling to the one id every query filters on.
+
+        An unrecognized name is normalized and kept rather than refused — a solvent this registry
+        has not heard of is still a fact about the run, and losing a finished calculation to
+        protect a lookup table would be the wrong trade. An empty or whitespace name reads as gas
+        phase, which is what `canonical_solvent` already decides for the calculation layer.
+        """
+        return canonical_solvent(value)
 
     @property
     def condition_id(self) -> str:
@@ -234,9 +253,19 @@ class PropertyFact(BaseModel):
     value: float | None = None
     value_bool: bool | None = None
     value_text: str = ""
-    # The unit the projection produced. Normalized to the registry's canonical unit at write time,
-    # with the reported pair kept beside it so a conversion found wrong later is recoverable.
+    # The unit the calculator reported, which is the unit `reported_value` is in — never the unit
+    # of `value`. `value` is always the registry's canonical unit for this property, because
+    # `project._fact` puts it there.
     unit: str = ""
+    # What the calculator actually said, before canonicalization, in `unit`. None where the two are
+    # the same number, which is every projector shipping today.
+    #
+    # **The pair has to travel together or it is not recoverable.** `dialect.py` writes
+    # `reported_value`/`reported_unit` so "the day a conversion is found wrong" the canonical column
+    # can be rebuilt from them — and with only `value` on this model to write there, it filed the
+    # *converted* number under the *reported* unit. Invisible while every call site reports the
+    # canonical unit already, and a silently unrecoverable row the first time one does not.
+    reported_value: float | None = None
     uncertainty: float | None = None
     uncertainty_kind: str = ""  # Estimate.method: reported | propagated | none
     in_domain: bool | None = None
@@ -339,6 +368,13 @@ class ConformerFact(BaseModel):
 
     ordinal: int = Field(ge=0)  # 0 = lowest, as `ensemble_from_members` orders them
     structure_id: str = Field(min_length=1)
+    # The electronic state this geometry was computed at, when the payload states it. Carried
+    # because `structure_id` is a hash *over* charge and multiplicity and so cannot be read back
+    # for them, and because the `structure` row these become is what "show me every anionic
+    # geometry we have optimised" filters on. `None` is "the payload did not say", which is not
+    # the same as neutral — see `dialect.PRESERVE_ON_BLANK`.
+    charge: int | None = None
+    multiplicity: int | None = None
     energy_hartree: float | None = None
     relative_kcal: float | None = None
     population: float | None = None
@@ -395,23 +431,6 @@ class FlagFact(BaseModel):
     severity: str = "info"
     message: str = ""
     detail: dict[str, Any] = Field(default_factory=dict)
-
-
-class ArtifactFact(BaseModel):
-    """A reference to a by-product a calculation produced — never its bytes.
-
-    A Hessian is megabytes, and `artifact_blobs` is deliberately LRU-evictable (D-124) because the
-    answer can be regenerated from it. Copying those bytes outward would duplicate the one thing
-    this system decided *not* to keep forever, so what crosses is the fact that the artifact
-    existed, what role it played and what type it is.
-    """
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    name: str = Field(min_length=1)  # 'hessian' | 'xtbopt.xyz' | 'density.restart'
-    media_type: str = "application/octet-stream"
-    byte_size: int | None = None
-    content_hash: str = ""
 
 
 class Publication(BaseModel):
@@ -479,7 +498,15 @@ class ResultRecord(BaseModel):
     conformers: list[ConformerFact] = Field(default_factory=list)
     candidates: list[CandidateFact] = Field(default_factory=list)
     flags: list[FlagFact] = Field(default_factory=list)
-    artifacts: list[ArtifactFact] = Field(default_factory=list)
+    # **No `artifacts` list, deliberately.** One shipped here, with an `ArtifactFact` model, a
+    # `calculation_artifact` table in `TABLE_ORDER` and a row builder to fill it — and no producer
+    # at any layer: no projector returned an `artifacts` key and `project()` never read one, so
+    # the list was empty on every record this system could build while a site was still required
+    # to create the table for delivery to work at all. Deleted rather than left half-wired, on
+    # `D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution`'s rule; the local
+    # `calculation_artifacts` table (migration 019) remains this deployment's own record of a
+    # calculation's by-products. Restoring it means shipping the producer in the same change, and
+    # `tests/test_publish_dialect.py` fails whoever does not.
 
     # --- provenance -----------------------------------------------------------------------
     provenance: str = "computed"  # computed | measured | imported

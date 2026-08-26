@@ -23,6 +23,7 @@ import logging
 from collections.abc import Sequence
 from typing import Any
 
+from chemclaw.core.config import settings
 from chemclaw.ingest.eln.warehouse.driver import Warehouse, WarehouseQueryError
 from chemclaw.publish.connect import SinkConnectionError, open_connection
 from chemclaw.publish.dialect import TABLE_ORDER, rows_for, upsert_statement
@@ -60,12 +61,23 @@ class SqlResultSink:
                 driver's signature takes. Any key ending `_env` names an environment variable to
                 read at connect time; the value itself is never written in a manifest.
             writer_version: The ChemClaw release stamped on each row, so a consumer can tell an
-                absent measurement from an absent column.
+                absent measurement from an absent column. Defaults to this deployment's own
+                revision; a manifest sets it only to override that.
         """
         self._name = name
         self._tenant_id = tenant_id
         self._connection_binding = dict(connection)
-        self._writer_version = writer_version
+        # **Defaulted to the deployment's revision rather than left empty.** Nothing in this tree
+        # computed a writer version and the shipped manifest declares none, so the column the DDL
+        # justifies with "without these, 'why is `in_domain` null for everything before March' is
+        # unanswerable" held `''` on every row a real deployment writes — recorded, and blank.
+        # `deployment_revision` is the same Git SHA the audit trail already stamps for exactly this
+        # question, so the two records of "which ChemClaw3 did this" agree by construction.
+        self._writer_version = writer_version or settings.deployment_revision
+        # The schema the driver was given, so the column probe below can be qualified the way the
+        # writes are. Empty for a driver that spells its namespace differently, which leaves the
+        # probe unqualified — the behaviour every target had until now.
+        self._schema = str(self._connection_binding.get("schema") or "")
         self._warehouse: Warehouse | None = None
         self._columns: dict[str, set[str]] | None = None
 
@@ -107,6 +119,26 @@ class SqlResultSink:
         """
         if self._columns is not None:
             return self._columns
+        # **Qualified by the same schema the writes resolve through.** The statements this class
+        # builds name no schema and are resolved by the connection's `search_path`, so a probe that
+        # asked by table *name* alone was answering about a different table the moment the target
+        # held a same-named relation anywhere else the role can see — an archive, a staging copy, a
+        # second tenant. The union then keeps a column the site's own table does not have and every
+        # row of that table is refused; the mirror case is a DDL applied off the search path, where
+        # the "the target has no ..." guard passes while every write fails.
+        #
+        # Split on commas, because `schema:` becomes a `search_path` and a search path may name
+        # several — matching the whole string would find nothing there and report every table
+        # missing, which is the failure this probe's `LOWER()` already exists to avoid.
+        schemas = [part.strip().lower() for part in self._schema.split(",") if part.strip()]
+        predicate = (
+            " AND LOWER(table_schema) IN ("
+            + ", ".join([warehouse.placeholder] * len(schemas))
+            + ")"
+            if schemas
+            else ""
+        )
+        parameters: list[str] = [*TABLE_ORDER, *schemas]
         async with warehouse.cursor() as cursor:
             await cursor.execute(
                 # `LOWER(table_name)`, because `information_schema` is not case-agnostic: Postgres
@@ -117,8 +149,9 @@ class SqlResultSink:
                 "SELECT table_name, column_name FROM information_schema.columns "
                 "WHERE LOWER(table_name) IN ("
                 + ", ".join([warehouse.placeholder] * len(TABLE_ORDER))
-                + ")",
-                list(TABLE_ORDER),
+                + ")"
+                + predicate,
+                parameters,
             )
             rows = await cursor.fetchall()
         found: dict[str, set[str]] = {}

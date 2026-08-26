@@ -12,12 +12,25 @@ failure it can say out loud.
 """
 
 import asyncio
+import hashlib
+import json
+from pathlib import Path
+from typing import Any
 
 import pytest
 
 from chemclaw.agent import research_tools
 from chemclaw.core.errors import ChemclawError
-from chemclaw.retrieval.evidence import EvidenceChunk, EvidenceSweep
+from chemclaw.ingest.documents.index import InMemoryDocumentIndex
+from chemclaw.ingest.documents.retriever import ShareDocumentRetriever
+from chemclaw.ingest.eln.warehouse.retriever import WarehouseVectorRetriever
+from chemclaw.ingest.sources.vendored_dataset import (
+    VendoredDatasetError,
+    VendoredDatasetRetriever,
+)
+from chemclaw.retrieval.evidence import EvidenceChunk, EvidenceSweep, SourceRetriever
+from chemclaw.retrieval.fanout import sweep_sources
+from tests import warehouse_fake
 
 
 class _Dead:
@@ -103,3 +116,109 @@ def test_one_source_down_still_answers_from_the_others(monkeypatch: pytest.Monke
     # evidence with the degradation visible only on the stream, so a chemist reading the tool's
     # result could not tell this from a corpus that genuinely holds two chunks.
     assert sweep.sources_failed == ["lexical"]
+
+
+def test_the_shipped_retrieve_halves_report_a_failure_instead_of_an_empty_result(
+    tmp_path: Path,
+) -> None:
+    """The other half of the same defect, one layer down — and where it actually lived.
+
+    The two tests above pin `sweep_sources`'s channel and `gather_evidence`'s guard, both of which
+    were correct all along. What made them unreachable is that three of the shipped retrieve halves
+    caught everything internally and returned `[]`, so their branch reported `failed=False,
+    chunks=0` — byte-identical to a source that ran fine and matched nothing. Driving the real
+    `sweep_sources` with the real halves over unreachable backings measured it:
+
+        raising halves    sources_failed=['sharedrive', 'eln-warehouse', 'vendored'] -> raises
+        swallowing halves sources_failed=[]                                          -> no raise
+
+    Row two was the shipped configuration. A retriever may still *decide* that a condition is not a
+    failure — an unentitled caller, a filter this source cannot honour, a blank query — and those
+    still return `[]`. What it may not do is decide that on behalf of its own backing store.
+    """
+    share_root = tmp_path / "share"
+    (share_root / "docs").mkdir(parents=True)
+
+    class _BrokenIndex(InMemoryDocumentIndex):
+        """A document index whose database is unreachable."""
+
+        async def search_dense(self, *args: Any, **kwargs: Any) -> Any:
+            raise ConnectionError("document index unreachable")
+
+    share = ShareDocumentRetriever(
+        binding={
+            "mount": str(share_root),
+            "roots": [{"path": "docs"}],
+            "public": True,
+            "extensions": [".txt"],
+        },
+        name="sharedrive",
+        index=_BrokenIndex(),
+    )
+    warehouse_fake.prime(V_EMBEDDING=[]).fail_with = ConnectionError("warehouse down")
+    warehouse = WarehouseVectorRetriever(
+        binding={
+            "connection": {"driver": "tests.warehouse_fake:open_fake"},
+            "vector": {
+                "relation": "V_EMBEDDING",
+                "key": "REACTION_ID",
+                "vector_column": "REACTION_VECTOR",
+                "content_columns": ["REACTION_SMILES"],
+            },
+        },
+        name="eln-warehouse",
+    )
+    # No manifest, no CSV: the corpus this half was told to read is not on disk.
+    vendored = VendoredDatasetRetriever(dataset_dir=str(tmp_path / "absent"), name="vendored")
+
+    sources: list[tuple[str, SourceRetriever]] = [
+        ("sharedrive", share),
+        ("eln-warehouse", warehouse),
+        ("vendored", vendored),
+    ]
+    ranked, failed = asyncio.run(sweep_sources(sources, "have we run this nitration", {}))
+
+    assert [len(chunks) for chunks in ranked] == [0, 0, 0]
+    assert sorted(failed) == ["eln-warehouse", "sharedrive", "vendored"], (
+        f"every source was unreachable and the sweep reported sources_failed={sorted(failed)}; "
+        "a failure that arrives as an empty list is a confident 'no prior art' during an outage"
+    )
+
+
+def test_a_vendored_corpus_that_failed_to_load_is_retried_rather_than_remembered_as_empty(
+    tmp_path: Path,
+) -> None:
+    """A cached failure is worse than a transient one: it outlives the condition that caused it.
+
+    `_load` used to store `[]` behind `if self._records is not None`, so one unreadable manifest at
+    the first query made the corpus report empty for the life of the pod — after a single warning
+    at startup, with every later query silent. The dataset is still read once *on success*; what
+    may not be cached is the failure.
+    """
+    dataset = tmp_path / "reagents"
+    dataset.mkdir()
+    retriever = VendoredDatasetRetriever(dataset_dir=str(dataset), name="vendored")
+
+    with pytest.raises(VendoredDatasetError):
+        asyncio.run(retriever.retrieve("acetone", {}))
+
+    # The operator mounts the corpus the deployment was missing. Nothing restarts.
+    (dataset / "dataset.json").write_text(
+        json.dumps(
+            {
+                "name": "reagents",
+                "version": "1",
+                "licence": "CC-BY-4.0",
+                "retrieved_from": "https://example.invalid/reagents.csv",
+                "description": "reagent names",
+                "sha256": hashlib.sha256(b"name\nacetone\n").hexdigest(),
+                "text_column": "name",
+            }
+        )
+    )
+    (dataset / "records.csv").write_bytes(b"name\nacetone\n")
+
+    chunks = asyncio.run(retriever.retrieve("acetone", {}))
+    assert [chunk.source_note_id for chunk in chunks] == ["vendored:reagents:0"], (
+        "the next query must read the corpus again; a remembered empty is a permanent outage"
+    )

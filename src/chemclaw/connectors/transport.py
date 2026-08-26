@@ -101,11 +101,18 @@ class ConnectorSpec:
     `allowed_tools` is carried here rather than applied at build time because it is the manifest's
     agent-facing allow-list, narrowed again by a profile, and it has to be applied to what the
     *server* advertises — which is not knowable until the session is open.
+
+    It is **not** optional, and that is the fix for a real hole rather than a tightening. It used to
+    be `tuple[str, ...] | None` with `None` meaning "everything this server offers", and an endpoint
+    that omitted `tools:` produced exactly that — so the manifest that enumerated nothing got the
+    server's whole surface, unclassified, which `agent.authz.side_effecting_call` then reported as
+    read-only. `manifest._check_classification` now refuses an empty `tools` list, which leaves no
+    way to build a spec without one; making the field total is what stops the state coming back.
     """
 
     name: str
     connection: Connection
-    allowed_tools: tuple[str, ...] | None
+    allowed_tools: tuple[str, ...]
 
 
 class HeldConnectorSession:
@@ -212,15 +219,14 @@ class HeldConnectorSession:
             self._opened.set()
 
 
-def _allowed(tools: list[BaseTool], allowed: tuple[str, ...] | None) -> list[BaseTool]:
+def _allowed(tools: list[BaseTool], allowed: tuple[str, ...]) -> list[BaseTool]:
     """Keep only the tools a connector's allow-list names.
 
     `load_mcp_tools` returns whatever the server advertises, so the allow-list has to be applied
-    here or a profile's narrowing would stop at the process boundary. `None` means the manifest
-    declared no allow-list, which is "everything this server offers".
+    here or a profile's narrowing would stop at the process boundary. There is no "no allow-list"
+    case to fall through: a manifest may not declare an empty `tools` list, so what a server
+    advertises beyond the declaration is dropped rather than bound.
     """
-    if allowed is None:
-        return list(tools)
     keep = set(allowed)
     return [tool for tool in tools if tool.name in keep]
 

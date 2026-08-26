@@ -214,3 +214,34 @@ def test_a_hard_gate_failure_outranks_the_drift_verdict(
     assert f"{len(regressed.regressions())} regression(s)" in out
     # The drift half still ran, and passed — so the 1 came from `--strict`, not from the baseline.
     assert f"**0 of {len(committed.metrics)} baseline metric(s) worsened**" in out
+
+
+def test_the_summary_says_how_many_of_the_watched_metrics_are_live() -> None:
+    """The gate's summary reads as thirteen watched quantities, and two of them are quantities.
+
+    `make ci` gates on `--baseline`, whose own documentation asks "did anything get *worse* than
+    last time?". Eleven of the thirteen baseline metrics — `e_factor`, `pmi`, `prediction_error`,
+    `bo_regret`, `precision`, `recall`, `f1`, `plan_quality`, `runaway_rate`,
+    `plan_execute_utility`, `turn_cost_ratio` — are pure arithmetic over literals committed in the
+    case files, so no change to retrieval, memory, the agent or a prompt can move them; only
+    editing a data file or the metric formula can. Only `retrieval_recall` and
+    `retrieval_precision` execute product code. Individual case files say so; the *gate* said
+    nothing, so a change that halved dense-leg recall passed a green CI step that looked like
+    thirteen guarded numbers.
+
+    The label is derived from the metric registry rather than from a second list, because a list of
+    live metric names beside the registry is the thing that goes stale the first time one is added.
+    """
+    committed = load_baseline(settings.eval_baseline_path)
+    cases = load_eval_cases(settings.eval_case_dir)
+    comparison = compare_to_baseline(
+        run_eval(cases, committed.case_set_version), committed, epsilon=settings.eval_drift_epsilon
+    )
+    live = [row.metric for row in comparison.rows if row.live]
+
+    assert sorted(live) == ["retrieval_precision", "retrieval_recall"]
+    rendered = render_comparison(comparison)
+    assert f"{len(live)} live" in rendered, rendered.splitlines()[-1]
+    assert f"{len(comparison.rows) - len(live)} pinned" in rendered
+    # And the table says which is which, so a reader is not left counting.
+    assert "| live |" in rendered and "| pinned |" in rendered

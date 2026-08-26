@@ -253,6 +253,37 @@ def test_create_deep_agent_still_takes_the_parameters_the_harness_is_assembled_f
     )
 
 
+def test_the_filesystem_middleware_still_takes_its_permissions_under_a_private_name() -> None:
+    """The deny-rules reach enforcement through `_permissions=`, which upstream marks private.
+
+    `create_deep_agent(permissions=…)` hands the rules only to the `FilesystemMiddleware` *it*
+    builds, and `agent/langgraph_agent._middleware` substitutes an instance of its own under the
+    same `.name` to withhold `execute`/`delete` — a replacement inherits nothing, so that instance
+    has to be handed the rules itself, and the only keyword that takes them is underscored.
+
+    That is exactly the coupling this file exists for: a rename upstream is not a build error, it
+    is `TypeError: unexpected keyword`, and the version before it was renamed disarmed the rules in
+    silence — measured, `_permissions == []` and a scripted `write_file("/outside/evil.md")`
+    succeeded while `tests/test_scratchpad.py` asserted the rule list and stayed green. The
+    *behaviour* is asserted there, on a compiled graph; what is pinned here is the name.
+    """
+    import inspect
+
+    from deepagents.middleware.filesystem import FilesystemMiddleware
+
+    parameters = inspect.signature(FilesystemMiddleware.__init__).parameters
+    assert "_permissions" in parameters, (
+        "FilesystemMiddleware no longer takes `_permissions`; agent/langgraph_agent._middleware "
+        "passes the deny-rules to its replacement instance under that name, and without it the "
+        "rules reach nothing"
+    )
+    assert "permissions" not in parameters, (
+        "FilesystemMiddleware now takes a *public* `permissions` — the underscored keyword this "
+        "repository reaches for has been promoted, so agent/langgraph_agent._middleware should "
+        "stop reaching past the API"
+    )
+
+
 def test_the_filesystem_tool_surface_is_still_the_eight_names_the_gate_answers_for() -> None:
     """Every filesystem verb has to be answered for, so a new one must not arrive quietly.
 
@@ -772,4 +803,30 @@ def test_a_read_bound_timeout_arrives_as_a_408_mcp_error() -> None:
         f"httpx.codes.REQUEST_TIMEOUT ({int(httpx.codes.REQUEST_TIMEOUT)}); "
         "core/mcp_session.py::cancel_on_timeout matches on that code to decide when to send "
         "notifications/cancelled"
+    )
+
+
+def test_a_streamed_tool_result_is_still_a_subclass_of_tool_message() -> None:
+    """Two modules decide "is this a tool result" with `isinstance`, and the subclass is why.
+
+    `agent/audit.returned_failure` and `api/graph_stream._from_update` both test the message with
+    `isinstance(x, ToolMessage)` rather than by class name, because `ToolMessageChunk` — what
+    upstream emits for a tool result on a *streaming* run — is a real subclass. Narrowing either to
+    `type(x) is ToolMessage` passed every test that touches them, and `ToolMessageChunk` appears
+    nowhere in this suite: whether a chunk arrives is a property of upstream's streaming mode, not
+    of this repository, which is exactly what belongs here.
+
+    Both consequences are silent. The audit trail records a failed connector call as `outcome='ok'`
+    with the error text in `detail`, and the stream traces no result at all: no `result_ref`, no
+    `tool_result` event, and the grounding check scoring an answer against evidence it never saw.
+    """
+    from langchain_core.messages import ToolMessage, ToolMessageChunk
+
+    assert issubclass(ToolMessageChunk, ToolMessage), (
+        "ToolMessageChunk is no longer a ToolMessage; agent/audit.returned_failure and "
+        "api/graph_stream._from_update both recognise a streamed tool result by isinstance"
+    )
+    chunk = ToolMessageChunk(content="Error: the instrument is offline", tool_call_id="c-1")
+    assert (chunk.status, chunk.tool_call_id) == ("success", "c-1"), (
+        "a chunk no longer carries the two fields both readers take off it"
     )

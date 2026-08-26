@@ -25,7 +25,9 @@ that loop and lose the hooks, which is the opposite of the decision.
 The middle position — calling `create_agent` and composing deepagents' middleware by hand — is the
 one this module held until the scratchpad arrived, and it is the one that stopped paying. Two of the
 three capabilities the harness now wants are reachable *only* through `create_deep_agent`:
-`permissions=` has no public seam on `FilesystemMiddleware`, and `subagents=` is what makes the
+`permissions=` has no public seam on `FilesystemMiddleware` — the rules reach the instance this
+module substitutes through upstream's *private* `_permissions=`, which is a coupling
+`tests/test_upstream_surface.py` counts rather than a seam — and `subagents=` is what makes the
 `task` tool's roster something this repository decides rather than inherits. Hand-assembly bought
 control of the middleware order; `_apply_custom_middleware` gives that back by splicing on `.name`,
 which is what `_middleware` below is arranged around and what `tests/test_middleware_order.py`
@@ -305,7 +307,30 @@ def _middleware(
     """
     return [
         *_harness_middleware(profile),
-        FilesystemMiddleware(backend=backend, tools=list(scratchpad_tools())),
+        # **`_permissions` is passed here because a replacement inherits nothing.**
+        # `create_deep_agent(permissions=…)` reaches enforcement only through the
+        # `FilesystemMiddleware` instance *upstream* builds with `_permissions=`, and the splice
+        # below replaces that instance rather than configuring it — so passing `permissions=` and
+        # substituting an instance without them left the deny-rules inert. Measured on the compiled
+        # graph: `_permissions == []` on the instance that ran, and a scripted
+        # `write_file("/outside/evil.md")` answered "Updated file /outside/evil.md" while
+        # `tests/test_scratchpad.py` asserted the rule list itself and stayed green. Both arguments
+        # are needed and neither replaces the other: `tools=` decides which *verbs* exist,
+        # `_permissions=` decides where they may point (`agent/scratchpad.py`).
+        #
+        # The leading underscore is upstream's, and it is why `tests/test_upstream_surface.py`
+        # carries this: it is a private keyword, so a rename is a silent re-disarming of the same
+        # control. `permissions=` stays on the `create_deep_agent` call above for the same reason
+        # rather than being deleted as inert — today it reaches nothing this build keeps, but it is
+        # the *public* way to state the rules, so it is what still delivers them if the splice rule
+        # or the keyword changes under a bump. Which of the two is enforcing is no longer a matter
+        # of belief: `tests/test_scratchpad.py` runs an out-of-bounds `write_file` through the
+        # compiled graph.
+        FilesystemMiddleware(
+            backend=backend,
+            tools=list(scratchpad_tools()),
+            _permissions=filesystem_permissions(),
+        ),
         # The second replacement, and the one that would otherwise have arrived by default rather
         # than by decision: `create_deep_agent` composes a summarizer unconditionally, and this
         # deployment has declined one since D-025 on indirect-prompt-injection grounds that the

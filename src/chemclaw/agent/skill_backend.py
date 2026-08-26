@@ -37,6 +37,13 @@ an agent that can edit `SKILL.md` can rewrite its own instructions, and D-038 di
 file-write batteries for the same reason. Refusing is not a narrowing that could be configured
 open — there is no deployment for which a writable skills tree is correct.
 
+**And it is refused in the vocabulary the tool chain already has.** These four verbs raised a bare
+`PermissionError`, which is neither of the two families `agent/tool_authz.py` words deliberately —
+so the one policy-bearing refusal this module makes arrived at the model as "that tool failed
+unexpectedly", with a traceback logged at ERROR beside it. `SkillsReadOnlyRefusal` is an
+`AuthorizationError`, which is what makes a refusal read as a refusal; its own docstring carries the
+argument.
+
 **That half grows, and it grew here.** deepagents 0.7 added `delete` to the protocol; nothing in
 this class refused it, so a bump alone would have inherited a working delete into the one backend
 whose reason to exist is that skills are read-only. It was caught by the derived enumeration in
@@ -57,12 +64,41 @@ from deepagents.backends.protocol import (
     ReadResult,
 )
 
+from chemclaw.agent.authz import AuthorizationError
+
 # What a refused read returns. A result rather than an exception, because these are model-facing
 # tool results: a refusal the model can read keeps the turn going, where a raised error surfaces as
 # a tool failure it may retry. It deliberately does not say whether the skill *exists* — "not
 # available to you" is the same answer for a gated skill and for a typo, and distinguishing them
 # would turn the gate into an enumeration oracle.
 REFUSED = "This path is not part of the skills available to you."
+
+# What a refused *write* says, once, because four verbs raise it. Worded for the model rather than
+# for a log: it says nothing was changed (so there is nothing to undo or retry) and names the root a
+# turn's own working notes belong under, since wanting to write a skill is usually wanting to write
+# something down.
+_READ_ONLY = (
+    "the skills tree is read-only — a skill is reviewed judgment, not something a turn may "
+    "rewrite. Nothing was changed; keep working notes under /scratch/ instead."
+)
+
+
+class SkillsReadOnlyRefusal(AuthorizationError):
+    """A turn tried to change the skills tree, which no deployment permits.
+
+    **An `AuthorizationError` because the chain has exactly one word for this, and a
+    `PermissionError` was not it.** `PermissionError` is neither a `ChemclawError` nor an
+    `AuthorizationError`, so `tool_authz.surface_domain_errors` caught it in its catch-all: the
+    model was told "that tool failed unexpectedly and returned nothing" — which is the opposite of
+    what happened and reads as something to retry — and `logger.exception` wrote a traceback at
+    ERROR, a log line any model could produce at will by naming a skills path. Under this class
+    `surface_authorization_denials` relays the message verbatim behind `Refused:`, which is the
+    prefix the system prompt already tells the model means an access-control decision rather than a
+    fault, and the audit row records a refusal rather than a failure.
+
+    Refusal rather than narrowing, so it carries no path and no configuration: there is no
+    deployment for which a writable skills tree is correct.
+    """
 
 
 class NarrowedSkillsBackend(FilesystemBackend):
@@ -161,11 +197,11 @@ class NarrowedSkillsBackend(FilesystemBackend):
 
     def write(self, *args: Any, **kwargs: Any) -> Any:
         """Refuse: a skill is reviewed judgment, never something a turn may rewrite."""
-        raise PermissionError("the skills tree is read-only")
+        raise SkillsReadOnlyRefusal(_READ_ONLY)
 
     def edit(self, *args: Any, **kwargs: Any) -> Any:
         """Refuse, for the reason `write` gives."""
-        raise PermissionError("the skills tree is read-only")
+        raise SkillsReadOnlyRefusal(_READ_ONLY)
 
     def delete(self, *args: Any, **kwargs: Any) -> Any:
         """Refuse, for the reason `write` gives — and it is the newest way in.
@@ -174,11 +210,11 @@ class NarrowedSkillsBackend(FilesystemBackend):
         turn that cannot rewrite a `SKILL.md` but can remove it still decides what judgment the
         next turn is able to load.
         """
-        raise PermissionError("the skills tree is read-only")
+        raise SkillsReadOnlyRefusal(_READ_ONLY)
 
     def upload_files(self, *args: Any, **kwargs: Any) -> Any:
         """Refuse, for the reason `write` gives."""
-        raise PermissionError("the skills tree is read-only")
+        raise SkillsReadOnlyRefusal(_READ_ONLY)
 
 
 def _path_of(hit: Any) -> str:

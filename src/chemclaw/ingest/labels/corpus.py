@@ -116,9 +116,24 @@ async def drain_corpus(
     structures: set[str] = set()
     for row in rows:
         bundle = {ROOT: row}
-        key = as_text(row.get(binding.key))
-        if key:
-            report.cursor = as_text(row.get(binding.cursor_column)) or key
+        key = _text(row.get(binding.key))
+        # **Read from the pagination column and from nothing else, and only when it holds a
+        # value.** Both halves were wrong here and both failed silently. `as_text` is `str()` for
+        # everything, so a NULL `order_by` became the six characters `"None"` — truthy, so the
+        # `or key` fallback never fired — and the next page resumed at `> 'None'`, skipping every
+        # key that sorts below it: all digits and `A`–`M`, i.e. most of a release. And the fallback
+        # itself compared a *key* against the `order_by` column, which is a second column with its
+        # own domain; substituting one for the other resumes the drain at an arbitrary point.
+        # This is the same defect `_field` documents three functions down, on the line that decides
+        # what the next page reads.
+        #
+        # A row with no value in the pagination column therefore holds the cursor where it is. That
+        # stops the source with `ReactionCorpusWorkflow`'s "no cursor advance" warning naming
+        # `order_by` — the honest outcome, because a NULL there makes the release un-resumable and
+        # no value this side can invent changes that.
+        cursor_value = row.get(binding.cursor_column)
+        if cursor_value is not None:
+            report.cursor = as_text(cursor_value)
         label = _record(bundle, binding, source, key)
         if label is None:
             report.skipped += 1
@@ -212,6 +227,17 @@ def _standardized(smiles: str) -> str:
         return standard_smiles(smiles)
     except (InvalidSmilesError, ValueError):
         return smiles
+
+
+def _text(value: Any) -> str:
+    """One raw column value as text, `""` when it is NULL — never the string `"None"`.
+
+    The `None` check `_field` calls load-bearing, for the two paths that read a column *directly*
+    rather than through a field binding: the row's key and its pagination cursor. Without it a NULL
+    key is a six-character id called "None" that `_record`'s `if not key` guard cannot see, so the
+    row is recorded as a precedent under a name no citation resolves.
+    """
+    return as_text(value) if value is not None else ""
 
 
 def _field(bundle: dict[str, Any], field: FieldBinding | None) -> str:

@@ -17,6 +17,7 @@ contains Starlette's untyped `app.state` in one place instead of leaking `Any` i
 
 import asyncio
 import logging
+import math
 import time
 import uuid
 from collections.abc import Callable
@@ -176,8 +177,29 @@ _WORKER_ID = uuid.uuid4().hex
 _CLAIM_REFRESHES_PER_LEASE = 3
 
 
-def _claim_turn_slot(active_turns: dict[str, float], session_id: str) -> bool:
-    """Take the in-process one-turn-per-session slot, or report that a live turn holds it.
+@dataclass(frozen=True)
+class TurnLease:
+    """One session's in-process turn slot: which turn holds it, and until when.
+
+    `token` is what makes a release *identity-checked*. Both teardown paths used to remove
+    whatever entry sat under the session id, so once one lease had lapsed and a successor had
+    claimed the slot, the first turn's teardown revoked the successor's claim and a third turn was
+    admitted beside a live one — a guard undoing itself.
+
+    `deadline` is `math.inf` for as long as `post_message`'s own `try/finally` owns the cleanup,
+    and a real wall clock from the moment it stops (see `_start_turn_lease`). A record rather than
+    a bare float because those two fields are one fact and had to be read together.
+    """
+
+    token: str
+    deadline: float
+
+
+def _claim_turn_slot(active_turns: dict[str, TurnLease], session_id: str) -> str | None:
+    """Reserve the in-process one-turn-per-session slot, or report that a live turn holds it.
+
+    Returns this turn's token (its identity for `_start_turn_lease` and `_release_turn_slot`), or
+    `None` when another turn holds the session.
 
     The slot is a *lease*, not a latch — the same semantics D-121 gave its durable counterpart
     (`session_turns`), for the same reason: every release site can be skipped. Both of this
@@ -187,9 +209,15 @@ def _claim_turn_slot(active_turns: dict[str, float], session_id: str) -> bool:
     An async generator that never started runs no `finally` at all, so a latch then answered 409
     for the pod's whole lifetime. A leased entry instead stops refusing once its deadline passes.
 
-    The deadline is the widest wall clock a *live* turn can hold the slot — the admission wait
-    plus the streamed run's own timeout — so an expired entry provably belongs to no running
-    turn and ignoring it cannot admit a second writer beside a first.
+    **The clock does not start here, and that is the correction.** The deadline used to be stamped
+    at this moment and justified as "the widest wall clock a *live* turn can hold the slot", but
+    two store round trips run between here and the streamed run — the title write and the durable
+    claim — so the real ceiling was `(store latency) + admission + turn timeout`, strictly larger.
+    Measured on the real app with a slow store, a second POST was admitted with 200 while the
+    first turn was still being set up, and both drove the same `TurnSession`. What actually holds
+    for that phase is stronger than any deadline: `post_message`'s `finally` releases the slot on
+    every exit, exception and cancellation alike, so the reservation needs no expiry until the
+    response is handed off and that `finally` stops owning it.
 
     Expired entries (this session's or any other's) are swept here rather than by a timer: the
     map stays bounded, the `turns_in_flight` gauge stays honest, and a leaked entry stops
@@ -198,17 +226,52 @@ def _claim_turn_slot(active_turns: dict[str, float], session_id: str) -> bool:
     so the gate has no race window.
     """
     now = time.monotonic()
-    for stale_id, deadline in list(active_turns.items()):
-        if deadline <= now:
+    for stale_id, lease in list(active_turns.items()):
+        if lease.deadline <= now:
             del active_turns[stale_id]
     if session_id in active_turns:
-        return False
-    active_turns[session_id] = (
-        now
-        + settings.service_turn_timeout_seconds
-        + settings.service_turn_admission_timeout_seconds
+        return None
+    token = uuid.uuid4().hex
+    active_turns[session_id] = TurnLease(token=token, deadline=math.inf)
+    return token
+
+
+def _start_turn_lease(active_turns: dict[str, TurnLease], session_id: str, token: str) -> None:
+    """Start this turn's lease clock, at the moment the request stops owning its cleanup.
+
+    Called immediately before the streaming response is handed off, which is exactly where the
+    unguarded window opens: from here on `post_message`'s `finally` no longer releases the slot,
+    and a client that vanishes before the generator's first advance runs no `finally` at all. So
+    from *here* the deadline is the widest wall clock a live turn can hold the slot — the
+    admission wait plus the streamed run's own timeout — and an expired entry again provably
+    belongs to no running turn.
+
+    Identity-checked like the release, so this can only ever restamp the entry it was given a
+    token for.
+    """
+    lease = active_turns.get(session_id)
+    if lease is None or lease.token != token:
+        return
+    active_turns[session_id] = TurnLease(
+        token=token,
+        deadline=(
+            time.monotonic()
+            + settings.service_turn_timeout_seconds
+            + settings.service_turn_admission_timeout_seconds
+        ),
     )
-    return True
+
+
+def _release_turn_slot(active_turns: dict[str, TurnLease], session_id: str, token: str) -> None:
+    """Give back the slot *this* turn holds — never a successor's.
+
+    The two teardown paths popped by key, so a turn whose lease had already lapsed removed
+    whatever entry it found and let a third turn in beside the second. Comparing the token first
+    makes a late teardown a no-op, which is the only correct thing it can be.
+    """
+    lease = active_turns.get(session_id)
+    if lease is not None and lease.token == token:
+        del active_turns[session_id]
 
 
 async def _hold_turn_claim(claims: SessionTurns, session_id: str, lease_seconds: float) -> None:
@@ -414,9 +477,9 @@ class FrontDoorState:
         return semaphore
 
     @property
-    def active_turns(self) -> dict[str, float]:
-        """Session id → monotonic lease deadline for the turn in flight (see `_claim_turn_slot`)."""
-        turns: dict[str, float] = self._app.state.active_turns
+    def active_turns(self) -> dict[str, TurnLease]:
+        """Session id → the lease held by the turn in flight (see `_claim_turn_slot`)."""
+        turns: dict[str, TurnLease] = self._app.state.active_turns
         return turns
 
     @property
@@ -457,6 +520,18 @@ class FrontDoorState:
     def connector_health_at(self, at: float) -> None:
         """Record the moment of the sweep the snapshot came from."""
         self._app.state.connector_health_at = at
+
+    @property
+    def readiness_probes(self) -> dict[str, "asyncio.Task[Any]"]:
+        """The readiness probes currently in flight, one entry per probe.
+
+        Started and awaited by `chemclaw/api/routes/ops.py`. On `app.state` rather than in a
+        module global for the reason every other structure here is: the probes belong to one app
+        and one event loop, and a global would be shared by two apps in one test process — and by
+        a task bound to a loop that has since closed.
+        """
+        probes: dict[str, asyncio.Task[Any]] = self._app.state.readiness_probes
+        return probes
 
     @property
     def database_reachable(self) -> bool:

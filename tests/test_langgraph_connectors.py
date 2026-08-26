@@ -101,7 +101,13 @@ class _ManifestStub:
         self.name = name
 
 
-def _spec(name: str, port: int, allowed: tuple[str, ...] = ()) -> ConnectorSpec:
+#: What `_probe_app` serves. The default allow-list rather than `()`, because a manifest may not
+#: declare an empty `tools` list any more: the empty list used to mean "everything this server
+#: offers", which is precisely the fail-open these tests would otherwise keep depending on.
+_PROBE_TOOLS = ("echo", "slow")
+
+
+def _spec(name: str, port: int, allowed: tuple[str, ...] = _PROBE_TOOLS) -> ConnectorSpec:
     """A spec pointing at the test server, built by the registry's own builder.
 
     Through `_mcp_connection` rather than by constructing a `ConnectorSpec` here, so these tests

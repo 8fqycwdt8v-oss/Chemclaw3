@@ -44,6 +44,24 @@ def split_link(target: str) -> tuple[str, str]:
     return relation, note_id
 
 
+def strip_links(text: str) -> str:
+    """`text` with every `[[wikilink]]` reduced to its target, so it carries no graph edges.
+
+    The one place that rule lives, because three renderers need it and each one that grows its own
+    copy is a place the report layer and the graph indexer can come to disagree about what a link
+    points at. Reduces to the *target* via `split_link` rather than to the whole bracket contents:
+    a typed edge reads `[[precursor-of:compound-x]]`, and substituting the raw group would drop
+    `precursor-of:compound-x` into prose a person reads.
+
+    **Retrieved text is what this is for.** A chunk's content becomes a bullet inside a PR-gated
+    report, and a `[[link]]` surviving that interpolation is not decoration — it is a real outgoing
+    edge on a note a human is about to merge, pointing at something no retriever returned. A share
+    or warehouse document is written by whoever wrote it; the report's citations must come from the
+    report.
+    """
+    return WIKILINK.sub(lambda match: split_link(match.group(1))[1], text)
+
+
 def cited_links(text: str) -> list[tuple[str, str]]:
     """Every `(relation, note id)` a body cites, deduplicated by pair in first-seen order.
 

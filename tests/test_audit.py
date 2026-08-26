@@ -486,3 +486,37 @@ def _served_tool(name: str, *, connector: str, revision: str) -> Any:
 
     _probe.name = name
     return _stamped([_probe], connector=connector, revision=revision)[0]
+
+
+@pytest.mark.parametrize("message_class", ["ToolMessage", "ToolMessageChunk"])
+def test_a_connector_failure_is_recorded_as_an_error_however_it_is_streamed(
+    message_class: str,
+) -> None:
+    """An MCP tool never raises, and on a streaming run its result is not a `ToolMessage`.
+
+    `returned_failure` is what stops a failed connector call from being audited as a success —
+    `langchain_mcp_adapters` converts `isError=True` inside `StructuredTool.ainvoke`, so the
+    failure arrives as an ordinary *return* and every reader that decides by control flow calls it
+    `ok`. The test is `isinstance` rather than a class-name comparison because `ToolMessageChunk`
+    is a real subclass, and narrowing it to `type(result) is ToolMessage` passed 80 tests across
+    five files: `ToolMessageChunk` appeared nowhere in this suite except in the two source comments
+    arguing for the `isinstance`.
+
+    Parametrised over both classes rather than asserted on the chunk alone, so the case that
+    currently works cannot quietly stop working either.
+    """
+    from langchain_core.messages import ToolMessage, ToolMessageChunk
+
+    built = {"ToolMessage": ToolMessage, "ToolMessageChunk": ToolMessageChunk}[message_class]
+    sink = _RecordingSink()
+    mw = make_audit_middleware(correlation_id="conv-3", actor="alice@corp", sink=sink)
+
+    async def _returns_failure() -> Any:
+        return built(content="Error: the instrument is offline", tool_call_id="c-1", status="error")
+
+    _drive_mw(mw, _ctx("screen_hazards", {}), _returns_failure)
+
+    assert [event.outcome for event in sink.events] == ["error"], (
+        f"a connector failure arriving as a {message_class} was audited as a successful call"
+    )
+    assert "instrument is offline" in sink.events[0].detail

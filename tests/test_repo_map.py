@@ -242,3 +242,37 @@ def test_the_runbook_names_every_bundle_that_owns_durable_work() -> None:
         f"the set of bundles owning durable work changed to {sorted(durable)}; update the runbook "
         "paragraph that names them, which is the claim this test exists to keep honest"
     )
+
+
+def test_no_tracked_text_file_carries_an_unresolved_conflict_marker() -> None:
+    """`<<<<<<<` in a committed file is invisible to every check that parses *structure*.
+
+    `test_decision_log.py` already asserts this — and only over `docs/decisions/`, because that is
+    where it was found the first time. Scoping a guard to the directory that produced the defect is
+    what let the same defect sit on `main` in `docs/planning/DEFERRED.md`: three marker lines and a
+    row duplicated on both sides of the conflict, while `test_deferred_register.py` passed over it,
+    because that file checks what the rows *say* and a marker line is not a row.
+
+    The lesson is the scope, not the file, so this asks git for every tracked text file and reads
+    the lines rather than the shapes. It is the cheapest check available and the one that
+    generalises: a conflict marker is never correct in any of them.
+    """
+    root = Path(__file__).resolve().parent.parent
+    tracked = subprocess.run(
+        ["git", "ls-files", "-z"], cwd=root, capture_output=True, text=True, check=True
+    ).stdout.split("\0")
+
+    offenders = []
+    for name in filter(None, tracked):
+        path = root / name
+        try:
+            content = path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, FileNotFoundError, IsADirectoryError):
+            continue  # binary, or a symlink into a tree this checkout does not have
+        for number, line in enumerate(content.splitlines(), start=1):
+            # `=======` needs the exact-match form: a Markdown setext rule is a run of `=` too, and
+            # matching a prefix would fail this repository's own documents.
+            if line.startswith(("<<<<<<< ", ">>>>>>> ")) or line == "=======":
+                offenders.append(f"{name}:{number}")
+
+    assert not offenders, f"unresolved merge conflict markers in tracked files: {offenders}"

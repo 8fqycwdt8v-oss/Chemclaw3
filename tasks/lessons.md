@@ -1094,3 +1094,26 @@ down. And a synthetic fixture can only express failures of the shape it was buil
 had three wells because n-butane has three, so the one-well case — an amide, the whole point of the
 capability — was untestable by construction and passed. When a fake is shaped after one real case,
 name the shapes it cannot produce and go find a real instance of each.*
+
+## 2026-08-26 — a grep that lists a file is not a grep that read it
+
+Tightening `_check_classification` to refuse an empty `tools` list broke five
+tests in `tests/test_langgraph_connectors.py`, and CI found them rather than I
+did. The file *was* in my first grep's output. I looked at the hit
+(`tools=list(allowed)`), saw a variable being passed through, and moved on
+without asking what `allowed` defaults to — which was `()`, the exact value the
+change makes illegal.
+
+Two more of the same shape landed earlier in the pass (`test_capability_degradation`,
+`test_hot_path_caching`), and I only learned about those because a reviewer
+working a different lens mentioned "10 pre-existing HttpEndpoint-validation
+failures" in passing.
+
+**The rule for myself: when a change makes a previously-legal value illegal,
+the search is for every site that can *produce* that value, not for every site
+that names the type.** Grep the constructor, then read each hit to the point
+where the argument's value is decided — a default, a fixture, a parametrisation
+— rather than to the point where it is passed along. And when the changed thing
+is a validation rule, run the whole suite before pushing rather than the suites
+that obviously relate to it: four of the five files that broke had nothing to do
+with connectors.

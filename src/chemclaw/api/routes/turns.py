@@ -12,29 +12,80 @@ at request time, which is the seam that let this route leave `create_app` unchan
 
 import asyncio
 import logging
+import uuid
 from collections.abc import AsyncIterator
 
 from fastapi import FastAPI, HTTPException, Request
-from sse_starlette.sse import EventSourceResponse
+from sse_starlette.sse import EventSourceResponse, SendTimeoutError
+from starlette.types import Receive, Scope, Send
 
 from chemclaw.api.budget import BudgetExceeded
 from chemclaw.api.deps import CurrentSession, CurrentUser
 from chemclaw.api.events import ErrorEvent, QueuedEvent
 from chemclaw.api.middleware import _AT_CAPACITY
-from chemclaw.api.runner import run_turn
+from chemclaw.api.runner import failure_event, run_turn
 from chemclaw.api.schemas import MessageIn, session_title
 from chemclaw.api.state import (
     _WORKER_ID,
     SessionTurns,
+    TurnLease,
     _claim_turn_slot,
     _hold_turn_claim,
     _release_turn_claim,
+    _release_turn_slot,
+    _start_turn_lease,
     state,
 )
 from chemclaw.core.config import settings
 from chemclaw.core.metrics import METRICS
 
 logger = logging.getLogger(__name__)
+
+
+class _TurnStream(EventSourceResponse):
+    """A turn stream that ends *itself* when the client stops reading, rather than being collected.
+
+    `asyncio.timeout` inside the generator bounds a stalled **model**: the cancellation lands in the
+    frame that entered the scope, becomes a `TimeoutError`, and the turn gets one error event. It
+    cannot bound a stalled **transport**. When `await send(...)` blocks on a client that has stopped
+    reading, the generator is parked at a `yield` and the cancellation lands in
+    `sse_starlette._stream_response` instead: `asyncio.timeout.__aexit__` never runs, no event can
+    be written (nobody is reading), and sse-starlette does not `aclose()` the body iterator on that
+    path — so the permit, the lease and the token booking were left to asyncio's async-generator GC
+    finalizer, which runs the teardown in a *different* `Context` (see `runner._turn_ambient`).
+
+    `send_timeout` is the bound sse-starlette answers by calling `aclose()` **in the task that was
+    serving the stream**, which is the one place the turn's teardown belongs: the same context that
+    stamped the ambients, promptly rather than whenever the collector runs. What it then raises is
+    `SendTimeoutError`, and letting that escape would trade a GC traceback for an unhandled-ASGI
+    one — so it is caught here, where the session id is still in scope to name in the log. This is
+    the same "the response's lifetime is the right scope" argument `_SlotBoundEventStream` makes in
+    `chemclaw.api.routes.streams`.
+    """
+
+    def __init__(
+        self,
+        content: AsyncIterator[dict[str, str]],
+        *,
+        session_id: str,
+        ping: int,
+        send_timeout: float,
+    ) -> None:
+        """Wrap `content`, bounding each send and remembering whose turn this is."""
+        super().__init__(content, ping=ping, send_timeout=send_timeout)
+        self._session_id = session_id
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        """Serve the stream; a client that stopped reading ends it quietly, not as a crash."""
+        try:
+            await super().__call__(scope, receive, send)
+        except SendTimeoutError:
+            METRICS.increment("chemclaw_turn_send_timeouts_total")
+            logger.warning(
+                "the client of session %s stopped reading for %ss; the turn was torn down",
+                self._session_id,
+                settings.service_sse_send_timeout_seconds,
+            )
 
 
 async def post_message(
@@ -53,9 +104,13 @@ async def post_message(
     ends with an error event on an open stream rather than an HTTP 503. The wait was
     previously invisible — up to `service_turn_admission_timeout_seconds` with no response at
     all — which is the one thing a busy front door and a dead one must not have in common.
-    The permit hold is wall-clock bounded (`service_turn_timeout_seconds`): a hung model
-    stream or a slow-reading client cannot pin a permit forever — on expiry the client gets
-    one error event and the permit is released.
+    The permit hold is wall-clock bounded twice, because one bound cannot cover both stalls.
+    `service_turn_timeout_seconds` bounds the turn: a hung model stream ends with one
+    `turn_timeout` error event on the open stream and the permit released.
+    `service_sse_send_timeout_seconds` bounds one *send*: a client that has stopped reading gets
+    no event — it is not reading, so there is nowhere to put one — and its stream is closed in the
+    task that was serving it, which is what returns the permit, the lease and the token booking
+    promptly instead of leaving them to a garbage collector (`_TurnStream`).
 
     **One turn at a time per session**, claimed twice, and both claims are *leases*. The
     in-process `active_turns` map answers a double-submit that lands on this same process
@@ -69,22 +124,17 @@ async def post_message(
     processes to corrupt.
     """
     front = state(request)
-    active_turns: dict[str, float] = front.active_turns
+    active_turns: dict[str, TurnLease] = front.active_turns
     claims: SessionTurns | None = front.turn_claims
     lease = settings.service_turn_claim_lease_seconds
-    if not _claim_turn_slot(active_turns, session_id):
+    semaphore = front.turn_semaphore
+    # Nothing may sit between this claim and the `try` below — no `await`, and nothing that can
+    # raise — because the reservation it takes does not expire until `_start_turn_lease` starts its
+    # clock, and until then only that `try`'s `finally` gives it back.
+    slot = _claim_turn_slot(active_turns, session_id)
+    if slot is None:
         METRICS.increment("chemclaw_turns_conflict_total", labels={"scope": "process"})
         raise HTTPException(status_code=409, detail="a turn is already running for this session")
-    semaphore = front.turn_semaphore
-
-    # Name the session after the message that opened it, so `GET /sessions` can render a
-    # conversation list rather than a column of ids. Here rather than in the history provider
-    # because here the message is still a plain string — the provider stores an opaque MAF payload
-    # it is not allowed to interpret. After the turn claim, so a rejected double-submit does not
-    # write; before the stream, so a turn that fails mid-answer still leaves the conversation named.
-    # `set_title_if_absent` is a no-op once there is a title, which is every turn after the first.
-    if front.session_owners is not None:
-        await front.session_owners.set_title_if_absent(session_id, session_title(body.message))
 
     async def _turn_events() -> AsyncIterator[dict[str, str]]:
         # Release the permit and the session's turn slot when the stream ends — normal
@@ -145,12 +195,14 @@ async def post_message(
                 return
             METRICS.increment("chemclaw_turns_started_total")
             try:
-                # The deadline covers the whole streamed run *including* client consumption:
-                # the generator is suspended inside this scope at each `yield`, so a stalled
-                # model stream and a slow-reading client are both bounded (AG-15's missing
-                # wall-clock half). A stall inside `run_turn` surfaces here as TimeoutError
-                # and becomes one user-safe error event; a stall in the transport tears the
-                # stream down, and the `finally` still frees the permit either way.
+                # The deadline covers the whole streamed run (AG-15's missing wall-clock half).
+                # A stall inside `run_turn` is cancelled in the frame that entered this scope, so
+                # it surfaces here as `TimeoutError` and becomes one user-safe error event.
+                # **It does not bound the transport**, which used to be claimed here: the
+                # generator is suspended at a `yield` while the send blocks, so the cancellation
+                # lands in sse-starlette instead and this `__aexit__` never runs. That half is
+                # `_TurnStream`'s `send_timeout`, which ends such a stream in the task serving it
+                # — and it is what makes this `finally` run at all in that case.
                 # There is no agent lease here any more, and its absence is the point of D-123
                 # rather than a regression against it. Two turns streaming through one shared
                 # chat client interleaved its tool-call bookkeeping and emitted a `tool_use`
@@ -197,18 +249,52 @@ async def post_message(
                     retryable=False,
                 )
                 yield {"event": timeout_event.type, "data": timeout_event.model_dump_json()}
+        except Exception as exc:
+            # **The stream's own catch-all, and it covers what `run_turn`'s cannot.** `run_turn`
+            # turns any `Exception` into one user-safe `ErrorEvent`, but that guard starts inside
+            # it — while everything this route *evaluates to call it* (`front.connector_factory`,
+            # `front.history`, `front.graph_factory`) and `run_turn`'s own pre-`try` statements run
+            # one frame above it. A failure there used to end the stream with an HTTP 200, an SSE
+            # content-type and zero events, with the exception escaping the ASGI app: by then
+            # `EventSourceResponse` has written `http.response.start`, so Starlette's
+            # `ExceptionMiddleware` cannot run a handler any more. The reachable trigger is an
+            # ordinary configuration change — a session whose stored profile the deployment no
+            # longer ships rehydrates unvalidated (deliberately, REV-14) and `connector_factory`
+            # raises `ValueError` on every turn, forever, silently.
+            #
+            # So the invariant `events.py` states — a stream ends with an answer or an error — is
+            # the *stream's*, not only `run_turn`'s. `failure_event` is the same classifier the
+            # runner uses, so a client cannot get two different accounts of one kind of failure.
+            METRICS.increment("chemclaw_turns_failed_total")
+            logger.exception("turn stream failed for session %s", session_id)
+            failed = failure_event(exc, session_id, uuid.uuid4().hex)
+            yield {"event": failed.type, "data": failed.model_dump_json()}
         finally:
             if heartbeat is not None:
                 heartbeat.cancel()
             if permit:
                 semaphore.release()
-            active_turns.pop(session_id, None)
+            _release_turn_slot(active_turns, session_id, slot)
             if claims is not None:
                 await _release_turn_claim(claims, session_id)
 
     claimed = False
     handed_off = False
     try:
+        # Name the session after the message that opened it, so `GET /sessions` can render a
+        # conversation list rather than a column of ids. Here rather than in the history provider
+        # because here the message is still a plain string — the provider stores an opaque payload
+        # it is not allowed to interpret. After the turn claim, so a rejected double-submit does
+        # not write; before the stream, so a turn that fails mid-answer still leaves the
+        # conversation named. `set_title_if_absent` is a no-op once there is a title, which is
+        # every turn after the first.
+        #
+        # **Inside this `try`, which is where it belongs and is now load-bearing.** It is a store
+        # round trip: it can raise (a failed checkout is shed 503) and it can be cancelled, and
+        # from outside the block neither path gave the session's slot back — a leak the old
+        # claim-time deadline merely time-boxed and the reservation would hold for good.
+        if front.session_owners is not None:
+            await front.session_owners.set_title_if_absent(session_id, session_title(body.message))
         # Runaway-cost guard (budget #3), first pass: refuse before taking a permit if this
         # session/user has *already* exhausted its budget — a clean 429, not a queued turn that
         # was never going to run. It is a fast path, not the guard: the binding check is the one
@@ -228,7 +314,16 @@ async def post_message(
                 status_code=409, detail="a turn is already running for this session"
             )
         claimed = claims is not None
-        response = EventSourceResponse(_turn_events(), ping=settings.service_sse_ping_seconds)
+        # The lease clock starts *here*, not at the claim: from the next statement on, the
+        # `finally` below no longer owns the cleanup and the slot needs an expiry of its own
+        # (see `_start_turn_lease`).
+        _start_turn_lease(active_turns, session_id, slot)
+        response = _TurnStream(
+            _turn_events(),
+            session_id=session_id,
+            ping=settings.service_sse_ping_seconds,
+            send_timeout=settings.service_sse_send_timeout_seconds,
+        )
         handed_off = True
         return response
     finally:
@@ -239,7 +334,7 @@ async def post_message(
         # for the one window neither covers (handed off, never advanced), which the lease
         # in `_claim_turn_slot` bounds instead.
         if not handed_off:
-            active_turns.pop(session_id, None)
+            _release_turn_slot(active_turns, session_id, slot)
             if claimed and claims is not None:
                 await _release_turn_claim(claims, session_id)
 

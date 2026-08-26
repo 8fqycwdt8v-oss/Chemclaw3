@@ -182,6 +182,18 @@ class ServiceSettings(BaseSettings):
     # a real turn (an async QM job is submitted, not awaited, within the turn), finite against a
     # stall.
     service_turn_timeout_seconds: float = Field(default=600.0, gt=0)
+    # Wall-clock bound on one *send* to an SSE client, which is a different stall from the one
+    # above and cannot be caught by it. `service_turn_timeout_seconds` is an `asyncio.timeout`
+    # entered inside the turn's generator, so it converts to an error event only while that
+    # generator is executing; a client that has stopped reading parks the generator at a `yield`
+    # and blocks the *transport* instead, where the same cancellation tears the stream down with
+    # no teardown of the turn at all (it is left to the async-generator garbage collector, in a
+    # context the turn's contextvar tokens do not belong to). sse-starlette answers this bound by
+    # closing the body iterator in the task serving the stream, which runs the turn's own
+    # teardown. Deliberately far below the turn timeout — a bound that is not reached first
+    # catches nothing — and far above `service_sse_ping_seconds`, so an idle-but-healthy stream
+    # is never cut.
+    service_sse_send_timeout_seconds: float = Field(default=60.0, gt=0)
     # Turn/token budgets — the runaway-cost guard (service.budget). A single turn is already
     # iteration-capped (`harness_max_loop_iterations`), but nothing caps the *number*
     # of turns, so a client or an automated push-back loop could accumulate unbounded LLM spend.

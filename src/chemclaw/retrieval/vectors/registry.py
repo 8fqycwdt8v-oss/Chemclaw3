@@ -41,18 +41,53 @@ SHIPPED: dict[str, str] = {
 }
 
 
+# The one live store, and the configuration that built it. A module slot rather than an
+# `lru_cache`, for `core.embeddings._openai_client`'s reason read the other way: an evicted entry
+# holding a client with a connection pool is a leak nothing can see, so there is exactly one entry
+# and replacing it is a deliberate act. `None` means "not built yet".
+_STORE: tuple[tuple[str, ...], VectorStore] | None = None
+
+
+def _configuration() -> tuple[str, ...]:
+    """Every setting that decides *which* store this is, as the cache key.
+
+    Named explicitly rather than hashed off the whole `Settings` object: these five are what the
+    two shipped adapters read in their constructors and their client factories, so a change to any
+    of them must yield a different store and a change to anything else must not. The same shape as
+    `core.embeddings._openai_client`'s key, and for the same reason — a test that swaps `Settings`
+    gets a fresh store instead of the previous test's.
+    """
+    return (
+        settings.vector_store_provider,
+        settings.vector_store_url,
+        settings.vector_store_api_key,
+        settings.vector_store_endpoint_name,
+        str(settings.vector_store_timeout_seconds),
+    )
+
+
 def default_vector_store() -> VectorStore:
-    """Build the configured external vector store.
+    """The configured external vector store, built once per process per configuration.
 
     Only ever called when `vector_store_provider` names something other than `pgvector` —
     `pgvector` is not a `VectorStore` at all but the absence of one, since its vectors live in the
     same statement as the catalogue's join and there is nothing to delegate. Asking this function
     for it is therefore a wiring bug rather than a configuration one, and it says so.
 
+    **Built once, because nothing can dispose one.** No adapter here has a `close`/`aclose` and no
+    caller has anywhere to put one: a store is reached from a retrieve half, and the data-source
+    seam builds a half per `gather_evidence` call. So this used to construct a fresh
+    `AsyncQdrantClient` — with its own httpx pool — or a fresh Databricks client on every tool
+    call, each dropped unreferenced with its sockets held until a garbage collection nobody
+    schedules. Holding one per configuration is what makes the absent teardown honest, and it is
+    also what the two adapters' own docstrings already claim ("One per process; the client pools
+    internally").
+
     Raises:
         VectorStoreConfigError: The provider is `pgvector`, or a reference that does not resolve to
             something callable.
     """
+    global _STORE
     provider = settings.vector_store_provider
     if provider == "pgvector":
         raise VectorStoreConfigError(
@@ -60,6 +95,9 @@ def default_vector_store() -> VectorStore:
             "statement that resolves the citation, so there is nothing to delegate. "
             "`default_document_index()` is what chooses between the two"
         )
+    configuration = _configuration()
+    if _STORE is not None and _STORE[0] == configuration:
+        return _STORE[1]
     reference = SHIPPED.get(provider, provider)
     driver = resolve_driver(reference, error=VectorStoreConfigError, what="vector store provider")
     logger.info(
@@ -69,4 +107,16 @@ def default_vector_store() -> VectorStore:
         settings.vector_store_endpoint_name or "-",
     )
     store: VectorStore = driver()
+    _STORE = (configuration, store)
     return store
+
+
+def forget_vector_store() -> None:
+    """Drop the remembered store, so the next call builds a fresh one.
+
+    For tests, which construct counting or in-memory stores and would otherwise be handed the one
+    a previous test built under an identical configuration. Not `close_…`, because there is nothing
+    to close — see `default_vector_store` for why that is the point rather than an oversight.
+    """
+    global _STORE
+    _STORE = None

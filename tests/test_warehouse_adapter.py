@@ -12,11 +12,12 @@ from typing import Any
 
 import pytest
 
+from chemclaw.durable.eln_sync import _BoundedIngest
 from chemclaw.ingest.eln.adapter import ElnMappingError
 from chemclaw.ingest.eln.ord import Role
 from chemclaw.ingest.eln.records import InMemoryReactionRecordStore
 from chemclaw.ingest.eln.sync import sync_entries
-from chemclaw.ingest.eln.warehouse.adapter import WarehouseElnAdapter
+from chemclaw.ingest.eln.warehouse.adapter import _MAX_TIE_PAGES, WarehouseElnAdapter
 from chemclaw.ingest.eln.warehouse.binding import BindingError, load_binding
 from chemclaw.science.fingerprints.store import InMemoryFingerprintStore
 from chemclaw.science.labels.store import InMemoryLabelIndex
@@ -168,7 +169,7 @@ def test_the_cursor_filters_on_the_later_of_created_and_modified() -> None:
 
     statement, params = fake.executed[0]
     assert "COALESCE(LAST_MODIFIED_TS, CREATED_TS) >= ?" in statement
-    assert "ORDER BY COALESCE(LAST_MODIFIED_TS, CREATED_TS) ASC" in statement
+    assert "ORDER BY COALESCE(LAST_MODIFIED_TS, CREATED_TS) ASC, REACTION_ID ASC" in statement
     assert params[0] == since
 
 
@@ -180,7 +181,10 @@ def test_a_source_without_amendments_filters_on_creation_alone() -> None:
 
     statement, _ = _primed().executed[0]
     assert "COALESCE" not in statement
-    assert "WHERE CREATED_TS >= ?" in statement
+    assert "WHERE (CREATED_TS >= ?)" in statement
+    # The tiebreaker is not optional here either: `LIMIT` over a non-unique order is a different
+    # subset of one watermark block on every fetch.
+    assert "ORDER BY CREATED_TS ASC, REACTION_ID ASC" in statement
 
 
 def test_every_value_is_bound_and_only_identifiers_are_written() -> None:
@@ -536,6 +540,128 @@ def test_a_page_of_amended_rows_does_not_stall_the_sync_forever() -> None:
         return seen
 
     assert "NEW-1" in asyncio.run(_run()), "the reaction created after the amendments is reachable"
+
+
+# --- the paging contract: a watermark block larger than one page must still be got past ----------
+
+
+def _drain(
+    adapter: WarehouseElnAdapter, since: datetime, *, batch: int, chunks: int
+) -> tuple[set[str], list[str]]:
+    """Run `ElnSyncWorkflow`'s own chunk loop against `adapter`, returning what it ingested.
+
+    The loop is transcribed rather than imported because it *is* the subject: the workflow decides
+    when to come back for another chunk (`has_more`), and its wedge guard decides when a source
+    that reports more work but no cursor advance is stopped and said out loud. A test that called
+    `sync_entries` directly would see neither.
+    """
+
+    async def _run() -> tuple[set[str], list[str]]:
+        rxn, mol, rec = (
+            InMemoryFingerprintStore(),
+            InMemoryFingerprintStore(),
+            InMemoryReactionRecordStore(),
+        )
+        label_index = InMemoryLabelIndex()
+        seen: set[str] = set()
+        wedged: list[str] = []
+        cursor = since
+        for _ in range(chunks):
+            bounded = _BoundedIngest(adapter, cursor, batch)
+            summary = await sync_entries(
+                bounded,
+                rxn,
+                mol,
+                rec,
+                cursor,
+                label_index=label_index,
+                source="eln-databricks",
+                apply_overlap=False,
+            )
+            seen.update(summary.ingested)
+            if not bounded.truncated:
+                break
+            if summary.next_cursor <= cursor:
+                # The workflow's guard: more entries reported, and a cursor that did not move.
+                wedged.append(cursor.isoformat())
+                break
+            cursor = summary.next_cursor
+        return seen, wedged
+
+    return asyncio.run(_run())
+
+
+def _tied_warehouse(count: int, watermark: datetime, later: datetime | None = None) -> None:
+    """`count` reactions all stamped `watermark`, plus one stamped `later` when asked."""
+    reactions = [_reaction_row(f"TIE-{i:03d}", watermark) for i in range(count)]
+    entries = [row["REACTION_ID"] for row in reactions]
+    if later is not None:
+        reactions.append(_reaction_row("AFTER-1", later))
+        entries.append("AFTER-1")
+    warehouse_fake.prime_warehouse(
+        warehouse_fake.WatermarkWarehouse(
+            {
+                "V_REACTION": reactions,
+                "V_CHARGE": [row for entry in entries for row in _charge_rows(str(entry))],
+            },
+            entry_relation="V_REACTION",
+            created_at="CREATED_TS",
+            modified_at="LAST_MODIFIED_TS",
+            key="REACTION_ID",
+        )
+    )
+
+
+def test_a_watermark_block_larger_than_one_page_is_drained_rather_than_truncated() -> None:
+    """The silent, permanent truncation: more rows share one watermark than a page can hold.
+
+    The page was ordered and cut on the watermark alone, and the persisted cursor is that same
+    timestamp — so the cursor could only ever advance *to* the tie value, every later fetch
+    returned the same first page, and the rest of the block was never seen again. Two entirely
+    ordinary shapes produce it: a `created_at:` bound to a DATE column, where every entry of one
+    day ties, and a bulk `UPDATE … SET LAST_MODIFIED_TS = now()` reload, which ties every row it
+    touched. Nothing reported it — the run logged `ingested=0 rejected=0` and read as a quiet day.
+    """
+    tie = datetime(2026, 6, 1, tzinfo=UTC)
+    binding = _binding()
+    binding["ingest"]["entry"]["fetch_limit"] = 2
+    _tied_warehouse(5, tie, later=tie + timedelta(days=1))
+    adapter = WarehouseElnAdapter(binding=binding, name="eln-test")
+
+    seen, wedged = _drain(adapter, tie - timedelta(days=1), batch=2, chunks=6)
+
+    assert seen == {f"TIE-{i:03d}" for i in range(5)} | {"AFTER-1"}
+    assert wedged == []
+    # And the child fan-out stayed inside the bound the binding declares. A batch is no longer one
+    # page — crossing the block accumulates several — while every key in it is a bind parameter in
+    # each `IN (...)`, which is what `fetch_limit` is capped to protect.
+    charges = [params for sql, params in _primed().executed if " V_CHARGE " in sql]
+    assert charges and all(len(params) <= 2 for params in charges)
+
+
+def test_a_block_too_large_to_page_past_stops_the_source_out_loud(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A tie the fetch cannot get past within its bound is reported, not silently truncated.
+
+    There is a bound on how far one fetch will page inside a single watermark value, because the
+    rows are held in memory; past it the source is genuinely un-resumable on a timestamp cursor and
+    the honest outcome is to say so. What must not happen is the old one: `has_more` false, a
+    cursor that never moves, and a log line that reads like there was nothing to do. Here the fetch
+    reports itself truncated, so the workflow's "reported more entries but no cursor advance" guard
+    is reached — and the adapter names the watermark value an operator has to fix the binding for.
+    """
+    tie = datetime(2026, 6, 1, tzinfo=UTC)
+    binding = _binding()
+    binding["ingest"]["entry"]["fetch_limit"] = 2
+    _tied_warehouse(2 * _MAX_TIE_PAGES + 4, tie)
+    adapter = WarehouseElnAdapter(binding=binding, name="eln-test")
+
+    with caplog.at_level("WARNING"):
+        _, wedged = _drain(adapter, tie, batch=2, chunks=4)
+
+    assert wedged == [tie.isoformat()], "the wedge guard must be able to fire on this case"
+    assert any("2026-06-01" in record.getMessage() for record in caplog.records)
 
 
 def test_a_binding_may_name_the_intent_column_but_not_carve_one_out_of_prose() -> None:

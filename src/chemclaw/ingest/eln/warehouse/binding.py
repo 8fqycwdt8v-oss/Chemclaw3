@@ -753,8 +753,8 @@ class CorpusBinding(BaseModel):
 class WarehouseBinding(BaseModel):
     """One warehouse, and whichever of the three sections this source declares.
 
-    `ingest` reassembles an ELN run from several relations and ends at the PR-gate; `corpus` walks
-    a bulk reaction table into the label index as cited evidence and never touches the PR-gate;
+    `ingest` reassembles an ELN run from several relations and ends at its `reaction_records`
+    transcription; `corpus` walks a bulk reaction table into the label index as cited evidence;
     `vector` is similarity search over an embedding the warehouse already holds. A source may
     declare any combination, and most declare one.
     """

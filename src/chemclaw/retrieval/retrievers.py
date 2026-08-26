@@ -18,7 +18,7 @@ from chemclaw.core.config import settings
 from chemclaw.core.embeddings import embed_texts
 from chemclaw.kg.conflicts import NoteConflicts, conflict_index
 from chemclaw.kg.graph import load_notes
-from chemclaw.kg.note import WIKILINK, Note, note_id_for_reaction, split_link
+from chemclaw.kg.note import Note, note_id_for_reaction, strip_links
 from chemclaw.kg.search import query_terms, term_coverage
 from chemclaw.retrieval.evidence import EvidenceChunk
 from chemclaw.retrieval.vector_index import IndexHit, NoteIndex, default_note_index
@@ -28,22 +28,63 @@ from chemclaw.science.fingerprints.store import FingerprintError, FingerprintSto
 log = logging.getLogger(__name__)
 
 
-def _excerpt(body: str) -> str:
-    """A report-sized excerpt of a note body, with wikilink markup stripped.
+def _excerpt(body: str, terms: Sequence[str] = ()) -> str:
+    """A report-sized excerpt of a note body, windowed on the match, with wikilinks stripped.
 
-    An excerpt must not carry a source note's `[[links]]` verbatim into the report body —
-    that would add unintended (possibly dangling) graph edges — so the shared
-    `chemclaw.kg.note.WIKILINK`
-    brackets are stripped, keeping the link target as plain text.
+    An excerpt must not carry a source note's `[[links]]` verbatim into the report body — that
+    would add unintended (possibly dangling) graph edges — so `chemclaw.kg.note.strip_links` is
+    applied here. It is applied *again* at the report, on every chunk rather than only on
+    note-backed ones: the share and warehouse retrievers build their content from raw document
+    text and never reach this function, so this was never the whole of that guarantee.
 
-    Strips to the *target*, via `chemclaw.kg.note.split_link`, not to the whole bracket contents:
-    with typed
-    edges a link may read `[[precursor-of:compound-x]]`, and substituting the raw group would drop
-    `precursor-of:compound-x` into prose a person reads. One shared splitter, so the report layer
-    and the graph indexer cannot disagree about what a link points at.
+    **The window follows the match, because a reviewer has to see what the note was retrieved
+    for.** A note matches on its whole searchable text — id, type, SMILES, tags and body — and the
+    excerpt was a blind character prefix of the body, so a note whose answer is at the end read as
+    an unexplained bullet plus a citation. Measured over the committed corpus for the query
+    `yield`: 32 of 38 notes have bodies past the 240-character budget, and 6 of 16 returned chunks
+    did not contain the term that matched. `campaign` and `optimization-campaign` are the worst
+    case by construction, since their yields and outcomes are in a table at the end — the same
+    failure `core/config/retrieval.py` articulates for `protocol_digest_max_chars`. In the
+    conversational tools this is recoverable with `expand_note`; in `report_note` it is the final
+    artifact a chemist signs at the PR-gate, and nothing there expands.
+
+    `terms` are the query's terms (`kg.search.query_terms`) when the caller has them. With none, or
+    with a match the head already covers, or with a match that is *not* in the body at all — the
+    note was found by its id, its type, its tags or its structure — this is a plain prefix, which
+    is what every excerpt was before and still is for the callers that pass nothing.
     """
-    stripped = WIKILINK.sub(lambda match: split_link(match.group(1))[1], body.strip())
-    return stripped[: settings.note_excerpt_chars]
+    stripped = strip_links(body.strip())
+    window = settings.note_excerpt_chars
+    if len(stripped) <= window:
+        return stripped
+    start = _window_start(stripped, terms, window)
+    if start == 0:
+        return stripped[:window]
+    # The leading marker is inside the budget rather than added to it: the cap is what a sweep's
+    # `gather_evidence_max_chars` was measured against, and an excerpt that silently starts
+    # mid-document reads as the note's opening line.
+    return "…" + stripped[start : start + window - 1]
+
+
+def _window_start(text: str, terms: Sequence[str], window: int) -> int:
+    """Where to start the excerpt so the first matched term is inside it. `0` = the head.
+
+    A third of the budget is spent on what came *before* the match, because a number with no
+    sentence in front of it is a number a reader cannot place — and the sentence a chemist wants
+    is the one the match is in, not the one after it. The start is pushed forward to the next word
+    boundary so the excerpt does not open mid-word, which is how the pre-windowing excerpts ended
+    (`in place of the cla`) and is no better at the other end.
+    """
+    lowered = text.casefold()
+    offsets = [found for term in terms if (found := lowered.find(term.casefold())) >= 0]
+    if not offsets:
+        return 0
+    first = min(offsets)
+    if first < window:  # the head already shows it
+        return 0
+    start = min(first - window // 3, len(text) - window)
+    space = text.find(" ", start)
+    return start if space < 0 or space >= first else space + 1
 
 
 async def _eligible_notes(directory: Path, filters: dict[str, Any]) -> dict[str, Note]:
@@ -173,7 +214,9 @@ class GraphRetriever:
                 if note.confidence is not None
                 else settings.retrieval_default_confidence
             )
-            scored.append((coverage, _chunk_for(note, self.name, score, conflicts.get(note.id))))
+            scored.append(
+                (coverage, _chunk_for(note, self.name, score, conflicts.get(note.id), terms))
+            )
         complete = [pair for pair in scored if pair[0] == len(terms)]
         # RRF reads each source's list as ranked best-first, so the list must be ordered by this
         # retriever's own relevance signal — disk order is not a ranking. Coverage leads only on
@@ -318,16 +361,22 @@ class FingerprintReactionRetriever:
 
 
 def _chunk_for(
-    note: Note, retriever_name: str, score: float, conflicts: NoteConflicts | None
+    note: Note,
+    retriever_name: str,
+    score: float,
+    conflicts: NoteConflicts | None,
+    terms: Sequence[str] = (),
 ) -> EvidenceChunk:
     """Build one evidence chunk from a note, carrying its provenance (D-160).
 
     One builder for every note-backed retriever, so provenance cannot be attached on the graph
     path and forgotten on the index path — which is precisely the drift that would produce a
-    partially-provenanced evidence list, the worst of the three possible states.
+    partially-provenanced evidence list, the worst of the three possible states. `terms` is what
+    lets the excerpt window on the match rather than on the head of the body; a caller with no
+    terms to offer gets the prefix, which is the honest fallback (see `_excerpt`).
     """
     return EvidenceChunk(
-        content=_excerpt(note.body) or note.id,
+        content=_excerpt(note.body, terms) or note.id,
         source_note_id=note.id,
         retriever=retriever_name,
         score=score,
@@ -344,6 +393,7 @@ def _chunks_from_hits(
     notes: dict[str, Note],
     retriever_name: str,
     conflicts: dict[str, NoteConflicts] | None = None,
+    terms: Sequence[str] = (),
 ) -> list[EvidenceChunk]:
     """Map index hits to cited evidence chunks, dropping any hit whose note no longer loads.
 
@@ -364,6 +414,7 @@ def _chunks_from_hits(
                 retriever_name,
                 min(max(hit.score, 0.0), 1.0),
                 (conflicts or {}).get(note.id),
+                terms,
             )
         )
     return chunks
@@ -406,7 +457,12 @@ class VectorRetriever:
         hits = await self._index.search_dense(
             query_embedding, settings.retrieval_top_k, within=set(notes)
         )
-        return _chunks_from_hits(hits, notes, self.name, await _conflict_index(self._dir))
+        # The query's own terms, even on the dense leg: this note was surfaced by meaning, but if
+        # a word the chemist typed is *in* the body then that is the part of it they can check.
+        # Where none is, `_excerpt` falls back to the head exactly as before.
+        return _chunks_from_hits(
+            hits, notes, self.name, await _conflict_index(self._dir), query_terms(query)
+        )
 
 
 class LexicalRetriever:
@@ -440,4 +496,6 @@ class LexicalRetriever:
             return []
         # Scoped to the eligible notes for the same recall reason as the dense retriever.
         hits = await self._index.search_lexical(query, settings.retrieval_top_k, within=set(notes))
-        return _chunks_from_hits(hits, notes, self.name, await _conflict_index(self._dir))
+        return _chunks_from_hits(
+            hits, notes, self.name, await _conflict_index(self._dir), query_terms(query)
+        )

@@ -524,3 +524,51 @@ def test_a_streamed_plan_carries_the_hash_a_decision_must_be_posted_against() ->
     # from being quietly collapsed into one.
     assert plans[0].todos == [f"[ ] {title}" for title in titles]
     assert plans[0].plan_hash != plan_identity(plans[0].todos)
+
+
+@pytest.mark.parametrize("streamed", [False, True])
+def test_a_tool_result_is_traced_however_upstream_spells_its_class(streamed: bool) -> None:
+    """A streamed tool result is a `ToolMessageChunk`, and the branch here recognises it by type.
+
+    `isinstance`, not a class-name test, and this is the assertion that says so. Narrowing it to
+    `type(message) is ToolMessage` passed 93 tests across six files, because `ToolMessageChunk`
+    occurs nowhere in this suite — only in the source comment arguing for the `isinstance`. What it
+    would cost is a result never traced: no `result_ref` stored, no `tool_result` event, a
+    transcript showing a call with no answer, and `ToolCallTrace.outputs` empty, so the answer gate
+    scores every claim in that turn as ungrounded (`docs/archive/live-grounded-2026-08-03.md` is
+    what that looks like live).
+
+    Driven through `_from_update` with the engine's own update shape, parametrised over both
+    classes so the case that works today cannot quietly stop working either.
+    """
+    from langchain_core.messages import ToolMessageChunk
+
+    from chemclaw.api.graph_stream import _from_update
+
+    built = ToolMessageChunk if streamed else ToolMessage
+    update = {
+        "agent": {
+            "messages": [
+                AIMessage(
+                    content="", tool_calls=[{"name": "predict_pka", "args": {}, "id": "c-1"}]
+                ),
+                built(content="9.95", tool_call_id="c-1"),
+            ]
+        }
+    }
+    trace = ToolCallTrace()
+
+    async def _collect() -> list[Any]:
+        return [
+            event
+            async for event in _from_update(
+                update, agent="", trace=trace, todos=[], emit_plan=False
+            )
+        ]
+
+    events = asyncio.run(_collect())
+
+    assert [event.type for event in events] == ["tool_call", "tool_result"], (
+        f"a {built.__name__} result produced no tool_result event; the call has no answer"
+    )
+    assert trace.outputs, "the trace the answer gate scores against was left empty"

@@ -12,6 +12,7 @@ second, ungated tier exists, which is why this lands before that one and on its 
 import asyncio
 from pathlib import Path
 
+from chemclaw.core.config import settings
 from chemclaw.kg.note import Note
 from chemclaw.retrieval.evidence import EvidenceChunk
 from chemclaw.retrieval.retrievers import GraphRetriever
@@ -139,3 +140,59 @@ def test_unestablished_authorship_is_empty_not_human() -> None:
     )
     assert bare.created_by == ""
     assert bare.confidence is None
+
+
+def test_an_excerpt_windows_on_the_matched_term_rather_than_the_head_of_the_body(
+    tmp_path: Path,
+) -> None:
+    """A reviewer must be able to see what a cited note was retrieved *for*.
+
+    A note matches on its whole searchable text — id, type, SMILES, tags and body — while the chunk
+    carried the first `note_excerpt_chars` of the body and nothing windowed it on the match.
+    Measured over the committed corpus for the query `yield`: of 38 notes, 32 have bodies longer
+    than 240 characters, and `16 chunks, 6 whose 240-char excerpt does NOT contain the matched
+    term`. For the conversational tool that is recoverable with `expand_note`; for `report_note` it
+    is the final artifact a chemist signs at the PR-gate, where a bullet of frontmatter and a
+    citation says nothing about why the note is there.
+
+    `campaign` and `optimization-campaign` are the worst case by construction — their yields,
+    purities and outcomes are in a table at the *end* of the body — which is the same failure
+    `core/config/retrieval.py` already articulates for `protocol_digest_max_chars`.
+    """
+
+    async def _run() -> None:
+        preamble = "Acetylation of salicylic acid with acetic anhydride. " * 8
+        _write(
+            tmp_path,
+            Note(
+                id="rxn-aspirin-acetylation",
+                type="reaction",
+                created_by="human",
+                body=f"{preamble}\n\nThe isolated yield was 87 percent after recrystallisation.",
+            ),
+        )
+        (chunk,) = await GraphRetriever(str(tmp_path)).retrieve("yield", {})
+
+        assert "yield" in chunk.content, (
+            f"the cited excerpt does not contain the term that matched: {chunk.content!r}"
+        )
+        assert len(chunk.content) <= settings.note_excerpt_chars
+
+    asyncio.run(_run())
+
+
+def test_an_excerpt_with_no_body_match_still_starts_at_the_beginning(tmp_path: Path) -> None:
+    """The control: a note matched on its id, type, tags or SMILES has no body offset to centre on.
+
+    Windowing on nothing would be windowing on the first character anyway, so the head is the
+    honest fallback rather than a special case — and it is what every excerpt was before.
+    """
+
+    async def _run() -> None:
+        body = "Charge the vessel, hold at 80 degrees, then work up into ethyl acetate. " * 6
+        _write(tmp_path, Note(id="rxn-esterification", type="reaction", body=body))
+        (chunk,) = await GraphRetriever(str(tmp_path)).retrieve("esterification", {})
+
+        assert chunk.content == body.strip()[: settings.note_excerpt_chars]
+
+    asyncio.run(_run())

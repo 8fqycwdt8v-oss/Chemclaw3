@@ -20,7 +20,7 @@ import asyncio
 import sys
 from typing import NamedTuple
 
-from chemclaw.agent.session_store import message_from_row
+from chemclaw.agent.session_store import is_degraded_render, message_from_row
 from chemclaw.api.schemas import message_role, message_text
 from chemclaw.core.config import settings
 from chemclaw.core.db import connection
@@ -84,6 +84,13 @@ def _speaker(message: object, shape: str | None = None) -> tuple[str, str]:
     A reconstruction tool must still not fail on a message it cannot parse — the row is evidence
     that *something* was said — so an unreadable payload renders as its repr under an `unknown`
     role rather than raising.
+
+    **A row the store could only *recover* gets that same `unknown` role**, because that is what it
+    is. `message_from_row` never raises: a payload it cannot convert comes back as prose under a
+    speaker guessed from whichever label the row happens to carry, which is the right answer for a
+    chemist reloading a conversation and the wrong one here — an audit reconstruction that prints a
+    guessed speaker as the record is a report nobody can tell apart from a true one. The store
+    stamps what it recovered (`is_degraded_render`); this is the reader that acts on it.
     """
     if not isinstance(message, dict):
         return "unknown", str(message)
@@ -91,6 +98,8 @@ def _speaker(message: object, shape: str | None = None) -> tuple[str, str]:
         restored = message_from_row(message, shape)
     except Exception:
         return "unknown", str(message)
+    if is_degraded_render(restored):
+        return "unknown", message_text(restored).strip()
     # Rendered by the transcript route's own projection, not a second one: a conversation that
     # reads `assistant` in the browser and `ai` here would make one turn look like two records.
     return message_role(restored), message_text(restored).strip()

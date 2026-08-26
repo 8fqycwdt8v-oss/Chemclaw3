@@ -138,21 +138,39 @@ def test_dimerization_passes_mass_balance() -> None:
 # --- adapter --------------------------------------------------------------------------
 
 
-def test_adapter_extracts_conditions_from_free_text() -> None:
-    """Missing structured conditions are recovered from the procedure prose (step 4.4)."""
+def test_prose_conditions_stay_on_the_step_that_states_them() -> None:
+    """A number read out of prose is the *step's*, and it is not promoted to the run's setpoint.
+
+    The transcription tier is ungated on the recorded grounds that it infers nothing
+    (`D-2026-08-25`), and this is the line where that stopped being true: the headline conditions
+    fell back to the **first** regex match in the whole procedure, so a run charged at 65 °C over
+    2.5 h and then held at 140 °C for 18 h was stored — in the typed columns a chemist compares
+    runs on, with nothing marking it as derived — as a reaction run at 65 °C for 2.5 h. The prose
+    is preserved verbatim either way, and each segment keeps the numbers *it* states, which is the
+    scope those numbers actually have.
+    """
     raw = RawEntry(
         entry_id="e1",
         created_at=_EPOCH,
         payload={
             "reactants": [{"smiles": "CCO", "role": "reactant"}],
             "products": [{"smiles": "CCO", "yield_percent": 50}],
-            "procedure": "Warmed to 65 °C for 2.5 h.",
+            "procedure": "1. Warmed to 65 °C over 2.5 h. 2. Held at 140 °C for 18 h.",
             "operator": "chemist-c",
         },
     )
     reaction = JsonExportAdapter().map_to_ord(raw)
-    assert reaction.temperature_c == 65.0  # from prose
-    assert reaction.time_h == 2.5  # from prose
+    assert reaction.temperature_c is None, "the entry states no reaction temperature"
+    assert reaction.time_h is None, "the entry states no reaction time"
+    assert [(step.temperature_c, step.duration_h) for step in reaction.steps] == [
+        (65.0, 2.5),
+        (140.0, 18.0),
+    ]
+    assert reaction.procedure_text is not None and "140 °C" in reaction.procedure_text
+    # And the record a chemist queries says nothing about conditions the entry never recorded.
+    conditions = record_from_ord_reaction(reaction).conditions
+    assert conditions is not None and conditions.temperature_c is None
+    assert conditions.time_h is None
     assert reaction.yield_percent == 50.0  # from structured field
     # The source system and the entry id, not only the operator: with two ELN sources enabled,
     # colliding entry ids produced the same note id with nothing saying they came from different
@@ -285,16 +303,26 @@ def _prose_entry(procedure: str) -> RawEntry:
     )
 
 
+def _prose_temperature(procedure: str) -> float | None:
+    """The temperature the prose states, read where it is kept: on the step that says it.
+
+    Read through the adapter rather than off the pattern, because what is being pinned is what a
+    reader of the record sees. Since `D-2026-08-26-a-transcription-may-not-infer-a-setpoint` that
+    is the step's own value — the run's `temperature_c` stays absent unless the entry recorded one.
+    """
+    steps = JsonExportAdapter().map_to_ord(_prose_entry(procedure)).steps
+    return steps[0].temperature_c if steps else None
+
+
 def test_temperature_range_extracts_upper_bound_not_negative() -> None:
     """A range like "60-80 °C" yields 80 (the documented upper-bound reading), never -80."""
-    reaction = JsonExportAdapter().map_to_ord(_prose_entry("heated at 60-80 °C overnight"))
-    assert reaction.temperature_c == 80.0
+    assert _prose_temperature("heated at 60-80 °C overnight") == 80.0
 
 
 def test_genuine_negative_temperature_still_extracted() -> None:
     """A real minus sign ("-10 °C") and a bare "0 °C" both still extract from prose."""
-    assert JsonExportAdapter().map_to_ord(_prose_entry("cooled to -10 °C")).temperature_c == -10.0
-    assert JsonExportAdapter().map_to_ord(_prose_entry("stirred at 0 °C")).temperature_c == 0.0
+    assert _prose_temperature("cooled to -10 °C") == -10.0
+    assert _prose_temperature("stirred at 0 °C") == 0.0
 
 
 def test_fetch_only_returns_entries_after_cursor(tmp_path: Path) -> None:
@@ -872,6 +900,12 @@ def test_sync_fetches_an_overlap_window_behind_the_cursor(
     asyncio.run(_run())
 
 
+# The registry source name these sync tests run under. Seeding a record under a *different* name
+# than the sync passes would make every replay look new, which is the collision the row key now
+# carries (`D-2026-08-26-a-transcription-is-keyed-by-its-source`) rather than a fixture detail.
+_SEED_SOURCE = "test-eln"
+
+
 async def _seed_record(store: InMemoryReactionRecordStore, entry: RawEntry) -> None:
     """Store the record for `entry` — exactly what an earlier sync run leaves behind.
 
@@ -879,7 +913,9 @@ async def _seed_record(store: InMemoryReactionRecordStore, entry: RawEntry) -> N
     not only its id: a stub would make "already ingested" and "unchanged" indistinguishable, which
     is what dropped every in-place ELN amendment before the body comparison existed.
     """
-    await store.record([record_from_ord_reaction(JsonExportAdapter().map_to_ord(entry))])
+    await store.record(
+        [record_from_ord_reaction(JsonExportAdapter().map_to_ord(entry))], _SEED_SOURCE
+    )
 
 
 def test_sync_skips_overlap_entry_whose_note_already_merged(
@@ -1674,7 +1710,7 @@ def test_a_reaction_record_is_reachable_by_its_project_tag() -> None:
     async def _run() -> None:
         store = InMemoryReactionRecordStore()
         record = record_from_ord_reaction(_ester().model_copy(update={"project": "prj-alpha"}))
-        await store.record([record])
+        await store.record([record], "eln-json")
         assert await store.eligible(["rxn-1"], {"tag": "prj-alpha"}) == {"rxn-1"}
         assert await store.eligible(["rxn-1"], {"tag": "prj-beta"}) == set()
 
@@ -1686,7 +1722,7 @@ def test_a_reaction_with_no_project_invents_no_tag() -> None:
 
     async def _run() -> None:
         store = InMemoryReactionRecordStore()
-        await store.record([record_from_ord_reaction(_ester())])
+        await store.record([record_from_ord_reaction(_ester())], "eln-json")
         stored = await store.read("rxn-1")
         assert stored is not None and stored.project is None
         # No project means no tag can match it — not that every tag matches.
@@ -1967,7 +2003,7 @@ def test_a_typographic_minus_before_a_temperature_is_still_a_minus(dash: str) ->
         },
     )
 
-    assert JsonExportAdapter().map_to_ord(raw).temperature_c == -78.0
+    assert JsonExportAdapter().map_to_ord(raw).steps[0].temperature_c == -78.0
 
 
 @pytest.mark.parametrize("dash", _MINUS_DASHES)
@@ -1984,7 +2020,7 @@ def test_a_dash_between_two_numbers_is_a_range_and_not_a_sign(dash: str) -> None
         },
     )
 
-    assert JsonExportAdapter().map_to_ord(raw).temperature_c == 80.0
+    assert JsonExportAdapter().map_to_ord(raw).steps[0].temperature_c == 80.0
 
 
 def test_a_typographic_minus_survives_step_segmentation_too() -> None:

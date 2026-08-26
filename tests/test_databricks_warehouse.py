@@ -53,29 +53,34 @@ class _Row:
 
 
 class _FakeCursor:
-    def __init__(self, rows: list[_Row], recorder: list[tuple[str, list[Any]]]) -> None:
-        self._rows = rows
-        self._recorder = recorder
+    def __init__(self, client: "_FakeClientModule") -> None:
+        self._client = client
         self.closed = False
 
     def execute(self, sql: str, params: list[Any]) -> None:
-        self._recorder.append((sql, params))
+        # Consulted at call time rather than patched in at connect time: a test that kills the
+        # session *between* two statements is the whole subject of the eviction tests below, and a
+        # failure baked into the connection object could not express it.
+        if self._client.raise_on_execute is not None:
+            raise self._client.raise_on_execute
+        self._client.executed.append((sql, params))
 
     def fetchall(self) -> list[_Row]:
-        return self._rows
+        return self._client.rows
 
     def close(self) -> None:
         self.closed = True
 
 
 class _FakeConnection:
-    def __init__(self, rows: list[_Row], recorder: list[tuple[str, list[Any]]]) -> None:
-        self._rows = rows
-        self._recorder = recorder
+    def __init__(self, client: "_FakeClientModule") -> None:
+        self._client = client
         self.cursors: list[_FakeCursor] = []
 
     def cursor(self) -> _FakeCursor:
-        made = _FakeCursor(self._rows, self._recorder)
+        if self._client.raise_on_cursor is not None:
+            raise self._client.raise_on_cursor
+        made = _FakeCursor(self._client)
         self.cursors.append(made)
         return made
 
@@ -94,25 +99,15 @@ class _FakeClientModule:
         self.executed: list[tuple[str, list[Any]]] = []
         self.connect_options: dict[str, Any] = {}
         self.raise_on_execute: Exception | None = None
+        # A SQL warehouse session is not permanent — it expires, and the warehouse itself can be
+        # stopped or scaled to zero — so what a test needs to express is "this handle is dead now".
+        self.raise_on_cursor: Exception | None = None
+        self.connects = 0
 
     def connect(self, **options: Any) -> _FakeConnection:
         self.connect_options = options
-        connection = _FakeConnection(self.rows, self.executed)
-        if self.raise_on_execute is not None:
-            error = self.raise_on_execute
-
-            def _boom(sql: str, params: list[Any]) -> None:
-                raise error
-
-            original = connection.cursor
-
-            def _cursor() -> _FakeCursor:
-                made = original()
-                made.execute = _boom  # type: ignore[method-assign]
-                return made
-
-            connection.cursor = _cursor  # type: ignore[method-assign]
-        return connection
+        self.connects += 1
+        return _FakeConnection(self)
 
 
 def _bind(monkeypatch: pytest.MonkeyPatch, client: _FakeClientModule) -> None:
@@ -364,3 +359,97 @@ def test_an_unverified_metric_is_refused_here_rather_than_by_the_server(metric: 
     """Guessing a function name would fail on the first query instead of naming the metric."""
     with pytest.raises(WarehouseQueryError, match="cosine"):
         DatabricksVectorDialect().similarity(metric)
+
+
+# --- a dead session is dropped, not kept ---------------------------------------------------------
+
+
+def test_a_dead_session_is_dropped_so_the_next_call_reconnects(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The connection is opened once and memoized; nothing ever cleared it.
+
+    A Databricks SQL session expires, and the warehouse behind it auto-stops overnight. After that
+    every statement failed against the same dead handle — *for the life of the process*, because
+    there is no reset path anywhere and the seam has no lifecycle hook to call one from. In the
+    retriever that leg then returned `[]` to every question with the pod reporting healthy; in the
+    sync it failed every attempt and every retry. Dropping the handle costs one reconnect and turns
+    a permanent outage into the transient failure it actually is — which is what `ConnectionError`
+    already promises the caller, and what Temporal's retry already knows how to ride out.
+    """
+    client = _FakeClientModule()
+    _bind(monkeypatch, client)
+    warehouse = _warehouse()
+
+    @_sync
+    async def run() -> None:
+        async with warehouse.cursor() as cursor:
+            await cursor.execute("SELECT 1", [])
+        assert client.connects == 1
+
+        # The session dies. `connection.cursor()` raises from *outside* `execute`'s translation,
+        # so this used to escape as the vendor's own error class — neither retryable nor reportable.
+        client.raise_on_cursor = client.Error("Invalid SessionHandle")
+        with pytest.raises(ConnectionError):
+            async with warehouse.cursor():
+                pass
+
+        client.raise_on_cursor = None
+        async with warehouse.cursor() as cursor:
+            await cursor.execute("SELECT 1", [])
+        assert client.connects == 2, "the dead handle was kept and every later call reused it"
+
+    run()
+
+
+def test_a_transient_statement_failure_also_drops_the_handle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`OperationalError` is "the session is gone", so keeping the session makes the retry futile.
+
+    The translation to `ConnectionError` was already right and already retried by Temporal; what
+    made the retry useless is that every attempt reached the same dead handle. The error and the
+    eviction are one decision, so they are made in one place.
+    """
+    client = _FakeClientModule()
+    client.raise_on_execute = client.OperationalError("socket closed")
+    _bind(monkeypatch, client)
+    warehouse = _warehouse()
+
+    @_sync
+    async def run() -> None:
+        async with warehouse.cursor() as cursor:
+            with pytest.raises(ConnectionError):
+                await cursor.execute("SELECT 1", [])
+        client.raise_on_execute = None
+        async with warehouse.cursor() as cursor:
+            await cursor.execute("SELECT 1", [])
+        assert client.connects == 2
+
+    run()
+
+
+def test_a_rejected_statement_keeps_the_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A relation the binding names and the warehouse does not have says nothing about the session.
+
+    The eviction is scoped to the transient arm on purpose: reconnecting on a `WarehouseQueryError`
+    would pay a handshake per bad statement and would hide nothing, since the next statement fails
+    identically. `_WAREHOUSES` and the adapter's own handle keep the same object either way — what
+    is dropped is the session under it, never the configured warehouse.
+    """
+    client = _FakeClientModule()
+    client.raise_on_execute = client.Error("[TABLE_OR_VIEW_NOT_FOUND]")
+    _bind(monkeypatch, client)
+    warehouse = _warehouse()
+
+    @_sync
+    async def run() -> None:
+        async with warehouse.cursor() as cursor:
+            with pytest.raises(WarehouseQueryError):
+                await cursor.execute("SELECT * FROM V_NOPE", [])
+        client.raise_on_execute = None
+        async with warehouse.cursor() as cursor:
+            await cursor.execute("SELECT 1", [])
+        assert client.connects == 1, "a rejected statement paid a reconnect it did not need"
+
+    run()

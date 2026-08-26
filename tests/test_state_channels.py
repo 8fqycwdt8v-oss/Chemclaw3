@@ -25,6 +25,16 @@ a
 direct hook call can never establish, and it is cheap enough to hold for every field automatically —
 `_declared_channels()` derives the list, so a field added tomorrow is covered without anyone
 remembering to add a case.
+
+**A second property joined it, from the other failure mode a channel has.** A channel can also be
+declared, present, written — and *refuse* the write, which LangGraph does loudly rather than
+silently: bare `UntrackedValue` raises `InvalidUpdateError` when one superstep delivers two values
+for its key. That is not hypothetical for anything `ChemclawState` declares, because
+`SubAgentMiddleware` returns each helper's whole state as an update and two `task` calls in one
+assistant message are one superstep — measured, it killed the turn after both helpers had spent
+their tokens. So every declared channel is also driven with two concurrent writers, for the same
+reason the first case is derived rather than listed: the next field added here will be written from
+inside a helper too, and nobody will remember.
 """
 
 from typing import Any, cast, get_type_hints
@@ -33,6 +43,7 @@ import pytest
 from langchain.agents import create_agent
 from langchain.agents.middleware import after_model, before_model
 from langchain.agents.middleware.todo import PlanningState
+from langgraph.graph import END, START, StateGraph
 
 from chemclaw.agent.state import ChemclawState
 from tests.fakes_langgraph import ScriptedChatModel
@@ -99,6 +110,40 @@ def test_a_declared_channel_survives_a_write_from_a_node(channel: str, value: An
         "the channel is missing from the compiled state schema"
     )
     assert final[channel] == value
+
+
+@pytest.mark.parametrize(("channel", "value"), _declared_channels())
+def test_a_declared_channel_takes_two_writers_in_one_superstep(channel: str, value: Any) -> None:
+    """Two nodes writing this channel together must produce a value, not `InvalidUpdateError`.
+
+    The fan-out is hand-built rather than driven through `task`, because the property belongs to the
+    *channel* and this parametrisation has to hold for every field the class declares — including
+    ones no subagent writes yet. `tests/test_subagents.py` drives the real `task` fan-out that made
+    this concrete; this is the general form, so a field added tomorrow cannot reintroduce it.
+
+    What is asserted is only that the graph completed and the channel holds something. *What* two
+    concurrent writers should mean is a per-field question with a per-field answer
+    (`agent/state.TurnTotal` sums the advances, `TurnFlag` ors), and asserting one of those here
+    would make this file the place a future field's semantics get decided by whichever probe value
+    the derivation picked.
+    """
+    builder = StateGraph(ChemclawState)
+    builder.add_node("fan", lambda state: {})
+    builder.add_node("left", lambda state: {channel: value})
+    builder.add_node("right", lambda state: {channel: value})
+    builder.add_edge(START, "fan")
+    builder.add_edge("fan", "left")
+    builder.add_edge("fan", "right")
+    builder.add_edge("left", END)
+    builder.add_edge("right", END)
+    graph = builder.compile()
+
+    final = graph.invoke(cast(Any, {"messages": []}))
+
+    assert channel in final, (
+        f"`{channel}` did not survive two writers in one superstep — a channel that refuses a "
+        "concurrent update loses the whole turn the moment two helpers finish together"
+    )
 
 
 def test_a_write_to_an_undeclared_channel_is_dropped_without_error() -> None:

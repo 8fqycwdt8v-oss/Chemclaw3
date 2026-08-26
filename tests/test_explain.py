@@ -138,3 +138,23 @@ def test_a_message_shape_this_tool_did_not_write_does_not_crash_it() -> None:
     assert _speaker("not a dict at all")[0] == "unknown"
     # A legacy row carrying no prose at all — an image part, say — has a role and nothing to say.
     assert _speaker({"role": "user", "contents": [{"type": "text", "text": ""}]}) == ("user", "")
+
+
+def test_a_row_the_store_could_only_recover_is_not_attributed_to_a_speaker() -> None:
+    """A reconstruction must not print a guess as the record.
+
+    `message_from_row` never raises — the read path is deliberately forgiving, because one
+    unreadable historical row must not cost a chemist the whole conversation — so what comes back
+    for a row it could not convert is prose under a speaker *guessed* from whichever label the row
+    happens to carry. For the transcript route that is the right answer. Here it is not: this
+    report is evidence, and a guessed speaker printed beside a real one is indistinguishable from
+    it. The store marks what it recovered; this asserts the marker is read.
+
+    The `except` below it stays for a payload that cannot even be rendered, which is why this is
+    asserted through `_speaker` rather than by reading the branch.
+    """
+    recovered, _ = _speaker({"role": "assistant", "contents": ["not a content part"]})
+    assert recovered == "unknown", "a recovered row was attributed to a speaker nobody established"
+    # The contrast is the whole assertion: a row that *did* convert keeps its real speaker, so this
+    # cannot be satisfied by calling everything unknown.
+    assert _speaker(legacy_text("user", "hello")) == ("user", "hello")

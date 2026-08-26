@@ -95,28 +95,50 @@ Metric = Callable[[EvalCase], MetricResult]
 
 _REGISTRY: dict[str, Metric] = {}
 _DIRECTIONS: dict[str, Direction] = {}
+_LIVE: set[str] = set()
 
 
-def register(name: str, fn: Metric, direction: Direction) -> None:
+def register(name: str, fn: Metric, direction: Direction, *, live: bool = False) -> None:
     """Register a metric under `name` with the way it improves; a duplicate name is a bug.
 
     `direction` is required rather than defaulted: a default would silently give every new metric
     one orientation, and a run-to-run comparison would then report half of them backwards.
+
+    `live` says whether scoring this metric *executes product code*. Most metrics here are
+    arithmetic over literals a case file commits (`output`/`reference`), so nothing a release
+    changes can move them — only editing a case or the formula can. Two run a real retriever. That
+    is a property of the metric and it was written nowhere, so the drift gate's summary read as
+    thirteen watched quantities when it was two: `evals.baseline.render_comparison` says which are
+    which because of this flag. Defaults to False, so a pinned metric — the ordinary kind — needs
+    no argument and a live one is a deliberate claim.
     """
     if name in _REGISTRY:
         raise ValueError(f"metric {name!r} already registered")
     _REGISTRY[name] = fn
     _DIRECTIONS[name] = direction
+    if live:
+        _LIVE.add(name)
 
 
-def metric(name: str, direction: Direction) -> Callable[[Metric], Metric]:
+def metric(name: str, direction: Direction, *, live: bool = False) -> Callable[[Metric], Metric]:
     """Decorator form of `register` — the idiom later phases use to add a metric."""
 
     def decorate(fn: Metric) -> Metric:
-        register(name, fn, direction)
+        register(name, fn, direction, live=live)
         return fn
 
     return decorate
+
+
+def is_live(name: str) -> bool:
+    """Whether scoring `name` runs product code rather than reading a case file's literals.
+
+    An unregistered name answers False rather than raising, because the one caller is a *report*
+    over a committed baseline, which may outlive a metric this build no longer has (see
+    `evals.baseline._known_direction`). A metric that cannot be scored at all is certainly not
+    scoring anything live, and a raise there would replace a labelled row with no report.
+    """
+    return name in _LIVE
 
 
 def get_metric(name: str) -> Metric:

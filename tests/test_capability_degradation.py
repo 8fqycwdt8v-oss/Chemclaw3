@@ -57,7 +57,12 @@ def _dark_connector(name: str) -> Any:
     and a stub that merely reported itself unreachable would keep passing over a runner that had
     stopped opening connectors at all.
     """
-    endpoint = HttpEndpoint(url=f"http://127.0.0.1:{_free_port()}/mcp")
+    # The tool never answers — this address is deliberately dark — but a manifest may not
+    # declare an empty `tools` list, because that used to turn the allow-list off and leave
+    # everything a server advertised unclassified.
+    endpoint = HttpEndpoint(
+        url=f"http://127.0.0.1:{_free_port()}/mcp", tools=["unreached"], read_only=["unreached"]
+    )
     return _mcp_connection(cast(ConnectorManifest, SimpleNamespace(name=name)), endpoint)
 
 

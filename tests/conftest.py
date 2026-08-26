@@ -13,6 +13,9 @@ that starts a real server instead of being redefined per file (Rule of Three).
 `pytest_collection_modifyitems` owns both wall-clock-cap adjustments: the `thread` timeout method
 for Temporal-backed modules, and `PYTEST_TIMEOUT_SCALE`, which is the one knob that relaxes *every*
 cap — including the per-test markers, which no command-line flag can reach.
+
+`pytest_terminal_summary` owns the two qualifications a run's headline number needs: which failures
+were wall-clock timeouts, and how many tests an unreachable Postgres took away.
 """
 
 import asyncio
@@ -27,8 +30,10 @@ from _pytest.terminal import TerminalReporter
 
 from chemclaw.connectors.registry import discovered as _connectors_discovered
 from chemclaw.core.config import settings
+from chemclaw.ingest.eln.warehouse.connect import forget_open_warehouses as _forget_warehouses
 from chemclaw.ingest.sources.registry import discovered as _sources_discovered
 from chemclaw.kg.submission import NoteSubmission
+from chemclaw.retrieval.vectors.registry import forget_vector_store as _forget_vector_store
 from chemclaw.templates.registry import discovered as _templates_discovered
 from tests.pg import create_test_schema, drop_test_schema, schema_dsn
 
@@ -122,6 +127,26 @@ def _fresh_discovery_caches() -> Iterator[None]:
     _connectors_discovered.cache_clear()
     _templates_discovered.cache_clear()
     _sources_discovered.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def _fresh_attached_connections() -> Iterator[None]:
+    """Forget the process-lived warehouse connections and vector store around every test.
+
+    Both are memoised in production for the reason their protocols already assume: neither has a
+    `close`, and the data-source seam builds a retrieve half per `gather_evidence` call, so a store
+    or a session built per call is one nothing can ever dispose. A remembered handle is exactly
+    wrong in a test session, though — `warehouse_fake.prime()` installs a new fake per test, and a
+    cached connection would serve every later test the *first* test's rows.
+
+    Autouse for `_fresh_discovery_caches`'s reason: "clear the cache" as a per-file convention is
+    something each new test file has to rediscover, and the failure it produces is order-dependent.
+    """
+    _forget_warehouses()
+    _forget_vector_store()
+    yield
+    _forget_warehouses()
+    _forget_vector_store()
 
 
 @pytest.fixture(autouse=True)
@@ -245,8 +270,45 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     _apply_timeout_scale(config, items)
 
 
+# The marker `tests/pg.py::migrated_db_or_skip` puts in its skip reason. Matched as a substring
+# rather than by counting test files, because what a reader needs is how many *tests* did not run,
+# and only the run knows that.
+_POSTGRES_SKIP = "Postgres unavailable"
+
+
+def _report_postgres_skips(terminalreporter: TerminalReporter) -> None:
+    """Say how many tests the unreachable database took away, because prose kept getting it wrong.
+
+    A run with no Postgres skips the whole durable layer — the session store, the note-proposal
+    tables, retention, the outbox — and still prints a green line, which reads as "the suite
+    passed" and means "the suite mostly did not run". `CLAUDE.md` warns about exactly this and
+    stated the size of it as a number, which went stale by ~38% in the direction that understates
+    the risk (it said ~157; the measured figure was 216). A count in prose describes the suite on
+    the day someone counted; this one is measured by the run that is reporting it, which is the
+    rule `D-2026-08-01-the-count-lives-in-the-test-not-in-the-prose` reached for the eight other
+    counts that were wrong.
+    """
+    skipped = [
+        report
+        for report in terminalreporter.stats.get("skipped", [])
+        if _POSTGRES_SKIP in str(report.longrepr)
+    ]
+    if not skipped:
+        return
+    terminalreporter.write_sep("=", "Postgres-backed tests did not run", yellow=True)
+    terminalreporter.write_line(
+        f"{len(skipped)} tests were skipped because Postgres was unreachable, so this run is not "
+        "evidence about the durable layer, the session store, the note-proposal tables, the "
+        "publish outbox or retention. Start it: `sudo -n dockerd &`, `make up`, `make db-migrate`."
+    )
+
+
 def pytest_terminal_summary(terminalreporter: TerminalReporter) -> None:
-    """Say plainly which failures were timeouts, because two readers already got it wrong.
+    """Say plainly which failures were timeouts, and how much of the suite never ran.
+
+    Both sections are about the same misreading: a run's headline number is believed without the
+    two things that qualify it. A timed-out test proves nothing about the assertions it never
+    reached, and a skipped Postgres test proves nothing at all — see `_report_postgres_skips`.
 
     `FAILED tests/test_pka.py::test_… - Failed: Timeout (>180.0s) from pytest-timeout` in the
     short summary was read as a numerical failure by two separate reviewers of this repository, and
@@ -256,6 +318,7 @@ def pytest_terminal_summary(terminalreporter: TerminalReporter) -> None:
 
     Printed as its own section, after the short summary, naming the knob that fixes it.
     """
+    _report_postgres_skips(terminalreporter)
     timed_out = sorted(
         report.nodeid
         for report in terminalreporter.stats.get("failed", [])

@@ -25,7 +25,7 @@ from datetime import date
 from pydantic import BaseModel
 
 from chemclaw.core.chem import standard_smiles
-from chemclaw.core.reagents import display_name
+from chemclaw.core.reagents import display_name, resolve_compound_name
 from chemclaw.ingest.eln.ord import Component, DateSource, OrdReaction, Role
 
 # The roles whose species set is worth diffing between consecutive runs. `product` is excluded: a
@@ -226,20 +226,52 @@ def number_change(
     )
 
 
+def canonical_condition(species: str) -> str:
+    """Fold a condition species to one canonical token (gap KNW-4).
+
+    `DMF`, `N,N-dimethylformamide` and `CN(C)C=O` are the same solvent and were three unrelated
+    tokens to every lexical and grouping path, so an optimization campaign could be split in two by
+    spelling alone. Resolution reuses the one identity table (`chemclaw.core.reagents`), so the
+    vocabulary here cannot drift from the one every other in-process caller uses. That guarantee is
+    now bounded by the process: after `D-2026-08-16-the-physics-leaves-the-cache-stays` the
+    calculators and the hazard screen answer from `Chemclaw3-mcp`, each carrying its own reagent
+    table, and a shared import no longer holds them together.
+
+    An unrecognised species folds to its own trimmed, lowercased form rather than being dropped:
+    an unknown reagent is still a real condition, and losing it would silently merge campaigns that
+    genuinely differ.
+
+    **It lives here because `text_change` is its caller**, and it had none. Defined next to the
+    campaign builder, it was reachable only from a test that called it directly — a control that
+    exists as a function and not as behaviour, which is the `reject_widening` shape `CLAUDE.md`
+    names by that name. `memory.optimization` imports this module already, so this is also the
+    direction that has no cycle in it.
+    """
+    match = resolve_compound_name(species)
+    return match.smiles if match is not None else species.strip().lower()
+
+
 def text_change(variable: str, before: str | None, after: str | None) -> ConditionChange | None:
     """A change in a condition the record only carries as words, or None when they agree.
 
     The condenser's counterpart to `_species_change`: a solvent read out of a procedure is a name,
-    not a structure, so it cannot be canonicalised and compared the way `_species` does. Compared
-    case- and whitespace-insensitively, because "2-MeTHF" and "2-methf " are one solvent written
-    twice and reporting a swap between them would be noise in the one column a reader scans for
-    real changes. What is *displayed* is what was written.
+    not a structure, so it cannot be compared as a graph the way `_species` does — but it can be
+    *resolved*, and `canonical_condition` is the one table that does it. Two spellings of one
+    solvent therefore agree here: `DMF` and `N,N-dimethylformamide`, `DIPEA` and
+    `N,N-diisopropylethylamine`, a name and its SMILES. Before that fold this compared casefolded,
+    whitespace-collapsed prose, so a technician writing the long name in one entry and the acronym
+    in the next produced `solvent DMF → N,N-dimethylformamide` in the "Changed vs previous" column
+    — a fabricated lever in the one artifact built for reading levers off. The casefold is not lost:
+    it is what `canonical_condition` falls back to for a species the table does not know, so
+    "2-MeTHF" and "2-methf " still agree and `Mystery-A` and `Mystery-B` still differ.
+
+    What is *displayed* is what was written; the fold decides only whether anything moved.
 
     A side that recorded no words at all is not a swap either: see `both_recorded`.
     """
     if not both_recorded(before, after):
         return None
-    if " ".join((before or "").split()).casefold() == " ".join((after or "").split()).casefold():
+    if canonical_condition(before or "") == canonical_condition(after or ""):
         return None
     return ConditionChange(variable=variable, before=before or "—", after=after or "—")
 

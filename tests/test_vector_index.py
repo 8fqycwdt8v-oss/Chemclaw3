@@ -391,3 +391,68 @@ def test_reindex_incremental_against_postgres_embeds_only_the_change(
         assert calls["texts"] == 1
 
     asyncio.run(_run())
+
+
+def test_a_vector_from_a_superseded_configuration_is_not_ranked_as_evidence() -> None:
+    """The read path never asked which model made the vector it was scoring.
+
+    `embedding_config_key()` exists because "a vector is only reusable for the configuration that
+    made it… comparing its queries against the old model's vectors corrupts every similarity,
+    silently, and no error is ever raised". It gated re-embedding and nothing else: `fingerprints`
+    scoped by it correctly, and `search_dense` had no such predicate. So an operator repointing
+    `embedding_model` at another model of the same width — a 1536-dim swap raises nothing at insert
+    — put every stored vector into a state where the rebuild treats it as absent and the reader
+    treats it as a perfect match. Measured on one record stored under a MODEL-A key:
+
+        fingerprints('…MODEL-B') -> {}
+        search_dense(…)          -> [IndexHit(note_id='n1', score=0.9938…)]
+
+    The window is at least one `note_reindex_schedule_minutes` plus a full corpus re-embed, and
+    unbounded when the schedule is off. An empty dense leg is a result the sweep already reports
+    honestly; arbitrary notes cited as evidence is not.
+    """
+
+    async def _run(monkeypatch: pytest.MonkeyPatch) -> None:
+        index = InMemoryNoteIndex()
+        stale = embedding_config_key()
+        await index.upsert(
+            [NoteRecord(note_id="n1", text="x", embedding=[1.0, 0.1], fingerprint="fp")], stale
+        )
+        monkeypatch.setattr(settings, "embedding_model", "another-model-of-the-same-width")
+        current = embedding_config_key()
+        assert current != stale, "sanity: the configuration really changed"
+
+        assert await index.fingerprints(current) == {}, "sanity: the rebuild sees it as absent"
+        hits = await index.search_dense([1.0, 0.1], top_k=5)
+        assert hits == [], f"a MODEL-A vector was ranked against a MODEL-B query: {hits}"
+        # And the row is still there for the configuration that made it, which is what makes this
+        # a scope rather than a deletion: the rebuild replaces it, it is not lost first.
+        assert await index.fingerprints(stale) == {"n1": "fp"}
+
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        asyncio.run(_run(monkeypatch))
+
+
+def test_postgres_dense_search_is_scoped_to_the_live_embedding_configuration() -> None:
+    """The same guarantee on the backend production runs, where the column already exists."""
+
+    async def _run(monkeypatch: pytest.MonkeyPatch) -> None:
+        await migrated_db_or_skip()
+        async with await connect(settings.postgres_dsn) as conn:
+            await conn.execute("TRUNCATE note_index")
+            await conn.commit()
+        index = PostgresNoteIndex()
+        stale = embedding_config_key()
+        vector = embed_texts(["a nitration of toluene"])[0]
+        await index.upsert(
+            [NoteRecord(note_id="n1", text="a nitration of toluene", embedding=vector)], stale
+        )
+        assert await index.search_dense(vector, top_k=5), "sanity: it is findable under its own key"
+
+        monkeypatch.setattr(settings, "embedding_model", "another-model-of-the-same-width")
+        assert embedding_config_key() != stale
+        hits = await index.search_dense(vector, top_k=5)
+        assert hits == [], f"pgvector ranked a superseded generation as evidence: {hits}"
+
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        asyncio.run(_run(monkeypatch))

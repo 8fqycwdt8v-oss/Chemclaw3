@@ -17,10 +17,11 @@ last stop decision was keep going" — which was sound and had a hole at a cap o
 predicate was never consulted at all and a capped turn reported no cap.
 
 **The count is per *turn*, and that is a property of the channel rather than of the caller.**
-`model_calls` and `loop_capped` are declared `UntrackedValue` in `chemclaw.agent.state`, so the
-checkpointer never persists them and every run of the graph starts the count at 0 — including a run
-on a `thread_id` a previous turn already used. Nothing here has to be reset, and nothing here can
-be forgotten.
+`model_calls` and `loop_capped` are untracked channels (`chemclaw.agent.state`'s `TurnTotal` and
+`TurnFlag`), so the checkpointer never persists them and every run of the graph starts the count at
+0 — including a run on a `thread_id` a previous turn already used. Nothing here has to be reset, and
+nothing here can be forgotten. Those two classes exist because the same fields cross the subagent
+boundary (regression 3 below), which is what puts two writes for one key in a single superstep.
 
 **Two readers, because they ask from different places.** `loop_capped(state)` reads the flag off
 the state a finished run *returns* — the untracked channel is absent from `get_state()`, by
@@ -117,7 +118,7 @@ def enforce_loop_cap(state: Mapping[str, Any], runtime: Any) -> dict[str, Any] |
        builds a specialist's report from the last non-empty `AIMessage`, so a capped specialist
        reported the limit string and dropped its work. And `messages` is checkpointed, so the
        fabricated turn is replayed into the model's context forever. This hook emits no message.
-    3. **The team's budget silently became per-specialist.** `model_calls` is `UntrackedValue` and
+    3. **The team's budget silently became per-specialist.** `model_calls` is untracked and
        *not* private, so it crosses into and out of a subagent and one budget spans the team.
        Upstream's counter is `PrivateStateAttr`, which `SubAgentMiddleware` strips both ways, so
        every specialist started at 0 — a five-specialist turn's ceiling went from ~N to ~6N.

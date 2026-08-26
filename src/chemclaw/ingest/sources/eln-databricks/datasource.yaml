@@ -20,9 +20,10 @@
 # wholesale.
 name: eln-databricks
 description: >-
-  The corporate ELN in Databricks: reactions with their charge and analytics tables, ingested to the
-  knowledge graph through the PR-gate, plus similarity search over the per-reaction embedding that
-  stays in the lakehouse.
+  The corporate ELN in Databricks: reactions with their charge and analytics tables, transcribed
+  into `reaction_records` and queryable the moment they are ingested (D-2026-08-25 — a
+  transcription is data, so there is no review queue in front of it), plus similarity search over
+  the per-reaction embedding that stays in the lakehouse.
 
 ingest: chemclaw.ingest.eln.warehouse.adapter:WarehouseElnAdapter
 retrieve: chemclaw.ingest.eln.warehouse.retriever:WarehouseVectorRetriever
@@ -62,8 +63,8 @@ config:
         relation: v_reaction
         key: reaction_id
         created_at: created_ts
-        # Declared so an amended run is re-ingested and the PR-gate shows the diff. Without it,
-        # every correction a chemist makes after the fact is invisible to this system forever.
+        # Declared so an amended run is re-fetched and its record re-rendered. Without it, every
+        # correction a chemist makes after the fact is invisible to this system forever.
         modified_at: last_modified_ts
         where: "status = 'COMPLETED'"
         fetch_limit: 500

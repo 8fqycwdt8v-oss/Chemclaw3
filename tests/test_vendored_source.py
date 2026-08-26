@@ -22,6 +22,23 @@ from chemclaw.ingest.sources.vendored_dataset import (
     _read_manifest,
     _read_records,
 )
+from chemclaw.retrieval.evidence import EvidenceChunk
+from chemclaw.retrieval.fanout import sweep_sources
+
+
+class _Graph:
+    """A healthy source beside the vendored one — what a degraded sweep must still return."""
+
+    name = "graph"
+
+    async def retrieve(self, _query: str, _filters: dict[str, object]) -> list[EvidenceChunk]:
+        """One chunk, so a leg that keeps answering is distinguishable from one that stops."""
+        return [
+            EvidenceChunk(
+                content="acetonitrile, solvent", source_note_id="cmp-1", retriever="graph"
+            )
+        ]
+
 
 _SHIPPED = Path(__file__).resolve().parents[1] / "data" / "vendored"
 
@@ -111,17 +128,26 @@ def test_a_manifest_naming_a_column_the_file_lacks_is_refused(tmp_path: Path) ->
         _read_records(directory, _read_manifest(directory))
 
 
-def test_a_missing_dataset_yields_no_evidence_rather_than_breaking_retrieval(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
-) -> None:
-    """An optional corpus that is not installed must not break every query in the process."""
+def test_a_missing_dataset_costs_its_own_leg_of_the_sweep_and_no_other(tmp_path: Path) -> None:
+    """An uninstalled corpus must not break every query in the process, nor answer one.
+
+    This asserted `== []` and a WARNING, which made an uninstalled corpus indistinguishable from an
+    installed one holding no match. Worse, `_load` cached that empty for the life of the process,
+    so the warning fired once and every later query was silent. The sweep's branch is where a dead
+    source belongs: `sources_failed` names it, the healthy leg beside it keeps answering, and
+    `gather_evidence` raises only when nothing at all could be asked.
+    """
     import asyncio
-    import logging
 
     retriever = VendoredDatasetRetriever(dataset_dir=str(tmp_path / "absent"))
-    with caplog.at_level(logging.WARNING, logger="chemclaw.ingest.sources.vendored_dataset"):
-        assert asyncio.run(retriever.retrieve("acetonitrile", {})) == []
-    assert "vendored dataset unavailable" in caplog.text
+    with pytest.raises(VendoredDatasetError):
+        asyncio.run(retriever.retrieve("acetonitrile", {}))
+
+    ranked, failed = asyncio.run(
+        sweep_sources([("graph", _Graph()), ("vendored", retriever)], "acetonitrile", {})
+    )
+    assert [len(chunks) for chunks in ranked] == [1, 0]
+    assert failed == ["vendored"]
 
 
 def test_a_lookup_returns_the_shortest_containing_entry_first(tmp_path: Path) -> None:

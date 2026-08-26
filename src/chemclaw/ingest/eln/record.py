@@ -12,6 +12,13 @@ were, so there is no claim for a reviewer to accept or reject. What a human *ass
 runs is a playbook or a campaign in `knowledge/`, gated as it always was, citing this record as
 `reaction-<id>`.
 
+That was true of this module and false of what it was handed, which is a distinction the argument
+does not survive: `eln-json` recovered `temperature_c` and `time_h` from procedure prose by taking
+the first regex match, and those landed in `conditions` as recorded fact. **The premise is a
+constraint on the whole path, not a property of this file**, and it is now enforced where it was
+broken — `D-2026-08-26-a-transcription-may-not-infer-a-setpoint`. Anything that would put a derived
+number into a field an entry did not state belongs on the other side of the gate, in a note.
+
 The record carries no `[[wikilink]]`, and that is enforced by `_without_wikilinks` rather than
 merely asserted — the source's free text reaches this body verbatim, and a record that could spell
 a relation would let an ELN write an edge into the graph that cites it.

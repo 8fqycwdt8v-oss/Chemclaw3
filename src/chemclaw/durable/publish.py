@@ -53,11 +53,21 @@ _BAD_DATA_TYPES = [
     # its verdict, and the identical call gets the identical refusal. The retryable neighbour is
     # `CalcServerError`, which means nobody answered at all.
     "ToolReturnedFailure",
+    # A turn tried to change the skills tree (`chemclaw.agent.skill_backend`). An
+    # `AuthorizationError` subclass, and registered for the same reason every other one is: Temporal
+    # matches by class *name*, and `tests/test_publish.py` walks that hierarchy so a subclass cannot
+    # go unregistered unnoticed.
+    "SkillsReadOnlyRefusal",
     "ConnectorJobError",
     "GitSubmitError",
     "CalculationDomainError",
     "ConnectorError",
     "DataSourceError",
+    # Two ingest sources have transcribed the same entry id, so a citation naming it has two
+    # answers (`chemclaw.ingest.eln.records`). Non-retryable because the ambiguity is a fact about
+    # the corpus rather than about this attempt: the identical read finds the identical two rows
+    # until a person decides which source the citation meant.
+    "AmbiguousReactionRecord",
     # A derived label written for a reaction whose record phase was never stored
     # (`chemclaw.science.labels.store`). Non-retryable because the missing row is a fact about the
     # corpus, not about this attempt: the drain must record the reaction before it can label it,

@@ -11,6 +11,7 @@ belongs to the response's lifetime rather than to the generator's, which is stri
 its docstring).
 """
 
+import logging
 from collections.abc import AsyncIterator, Callable
 
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -19,10 +20,12 @@ from starlette.types import Receive, Scope, Send
 
 from chemclaw.api import app as front_door
 from chemclaw.api.deps import CurrentUser, resolve_session
-from chemclaw.api.events import JobCompletedEvent, JobFailedEvent
+from chemclaw.api.events import ErrorEvent, JobCompletedEvent, JobFailedEvent
 from chemclaw.api.state import state
 from chemclaw.core.config import settings
 from chemclaw.core.metrics import METRICS
+
+logger = logging.getLogger(__name__)
 
 
 class _SlotBoundEventStream(EventSourceResponse):
@@ -108,24 +111,55 @@ async def session_events(
         # Through the front-door module so the suite's patch seam
         # (`chemclaw.agent.session_events.stream_new_events`) keeps reaching the tailer this
         # route runs.
-        async for pushed in front_door.stream_new_events(
-            session_id, kinds=("job_completed", "job_failed")
-        ):
-            job_id = str(pushed.payload.get("job_id", ""))
-            failed = pushed.kind == "job_failed"
-            reason = str(pushed.payload.get("reason", ""))
-            # The completion used to also be recorded against a harness todo waiting on this job,
-            # deferred rather than applied because this stream runs concurrently with whatever turn
-            # the session has in flight. Both halves are gone: the todo existed so the previous
-            # engine's loop predicate saw "waiting" rather than re-invoking the model, and
-            # the graph's loop ends when the model stops calling tools. What the chemist sees is
-            # unchanged — that was always this event, not the todo.
-            event: JobCompletedEvent | JobFailedEvent = (
-                JobFailedEvent(job_id=job_id, reason=reason)
-                if failed
-                else JobCompletedEvent(job_id=job_id, summary=pushed.payload)
+        try:
+            async for pushed in front_door.stream_new_events(
+                session_id, kinds=("job_completed", "job_failed")
+            ):
+                job_id = str(pushed.payload.get("job_id", ""))
+                failed = pushed.kind == "job_failed"
+                reason = str(pushed.payload.get("reason", ""))
+                # The completion used to also be recorded against a harness todo waiting on this
+                # job, deferred rather than applied because this stream runs concurrently with
+                # whatever turn the session has in flight. Both halves are gone: the todo existed
+                # so the previous engine's loop predicate saw "waiting" rather than re-invoking the
+                # model, and the graph's loop ends when the model stops calling tools. What the
+                # chemist sees is unchanged — that was always this event, not the todo.
+                event: JobCompletedEvent | JobFailedEvent = (
+                    JobFailedEvent(job_id=job_id, reason=reason)
+                    if failed
+                    else JobCompletedEvent(job_id=job_id, summary=pushed.payload)
+                )
+                yield {"event": event.type, "data": event.model_dump_json()}
+        except Exception as exc:
+            # **A stream that dies has to say so, and the registered handler cannot say it here.**
+            # `create_app` turns a failed Postgres checkout into a retryable 503, but that handler
+            # is structurally unreachable once a response has started: Starlette raises
+            # `RuntimeError("Caught handled exception, but response already started.")` *instead*
+            # of calling it. So the tailer's `ConnectionError` — Postgres rolled, or the pool
+            # saturated (its own load vector, since every open tab polls) — reached the browser as
+            # a truncated stream indistinguishable from "no job has finished yet", reached the log
+            # as an unhandled application error, and reached `chemclaw_db_unavailable_total` not at
+            # all: the counter an operator alerts on undercounted exactly the population that
+            # matters most, the open tabs.
+            #
+            # Counted under the same name the write side uses (`middleware._database_unavailable`),
+            # because it is one event seen from the read side. `ErrorEvent` rather than a new
+            # member on this stream's event set: `storage_unavailable` already means precisely
+            # this and is already in the closed taxonomy every surface switches on.
+            #
+            # `Exception`, so `GeneratorExit`/`CancelledError` — an ordinary client disconnect —
+            # still tear the generator down untouched rather than being reported as an outage.
+            METRICS.increment("chemclaw_db_unavailable_total")
+            logger.warning("push-back stream for session %s ended: %s", session_id, exc)
+            lost = ErrorEvent(
+                message=(
+                    "The connection to the job stream was lost; reconnect to keep receiving "
+                    f"results (session {session_id})."
+                ),
+                code="storage_unavailable",
+                retryable=True,
             )
-            yield {"event": event.type, "data": event.model_dump_json()}
+            yield {"event": lost.type, "data": lost.model_dump_json()}
 
     handed_off = False
     try:

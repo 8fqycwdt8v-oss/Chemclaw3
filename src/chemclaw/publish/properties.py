@@ -163,6 +163,17 @@ _DEFINITIONS: tuple[PropertyDefinition, ...] = (
         "Energy of removing a proton, underlying a predicted pKa.",
     ),
     _d(
+        "deprotonation_free_energy",
+        "energy_difference",
+        "kcal/mol",
+        "Macrostate free-energy difference behind a sampled pKa, always deprotonated minus "
+        "protonated. Its own name beside `deprotonation_energy`, not a synonym: that one is a "
+        "single microspecies' energy from the rule-based predictor, this one is a sum over every "
+        "site and conformer carrying population, and the two pipelines keep separate "
+        "calibrations (D-2026-08-26-a-pka-is-a-macrostate-not-a-microstate). The pKa is a linear "
+        "map of this, so a refit changes the pKa and leaves this unchanged.",
+    ),
+    _d(
         "conformational_entropy_correction",
         "energy_difference",
         "kcal/mol",
@@ -517,6 +528,16 @@ _DEFINITIONS: tuple[PropertyDefinition, ...] = (
         kind="integer",
     ),
     _d(
+        "microstates_within_rt",
+        "count",
+        "",
+        "Ionised microstates within RT of the best one. More than one and the molecule has no "
+        "single conjugate base: both carry population, so treating either alone as 'the' one is "
+        "wrong by up to RT ln 2 — half a pKa unit at 298 K. The number that says a sampled pKa is "
+        "a macrostate's.",
+        kind="integer",
+    ),
+    _d(
         "members_averaged",
         "count",
         "",
@@ -784,6 +805,17 @@ _DEFINITIONS: tuple[PropertyDefinition, ...] = (
         "different question. A property rather than a column because that is exactly the extension "
         "this schema is built for: a new fact about a calculation is a registry row and an INSERT, "
         "never an ALTER.",
+        kind="text",
+    ),
+    _d(
+        "ionised_microstate",
+        "identifier",
+        "",
+        "The perceived constitution of the lowest ionised microstate behind a sampled pKa, as "
+        "SMILES — which proton came off, or where one went on. Perceived from the winning "
+        "geometry rather than asserted, and absent when it could not be read as a single "
+        "molecule, which is a real state and not a missing value. Distinct from `pka_site`, "
+        "which says which equilibrium was computed.",
         kind="text",
     ),
     # --- similarity and ranking -------------------------------------------------------------------

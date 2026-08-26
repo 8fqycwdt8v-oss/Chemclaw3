@@ -297,6 +297,33 @@ def test_an_impurity_name_cannot_add_a_column_to_the_campaign_table() -> None:
     )
 
 
+def test_an_eln_procedure_cannot_forge_citations_into_the_campaign_note() -> None:
+    """The per-run block is ELN text, and the note it lands in is PR-gated and cited from.
+
+    `hypothesis` and `procedure_text` come from an ELN entry — free text a technician typed, or a
+    warehouse column a binding mapped — and `_run_detail` interpolated both into a Markdown body
+    that becomes an `optimization-campaign` note. A `[[wikilink]]` in either therefore became a
+    real outgoing edge on that note, pointing wherever the source text said. That is the same
+    forgery `retrieval.harness.report_note` carried, in the same shape, one module over: the report
+    was fixed by placing content as a cell, and the campaign note needs the identical rule.
+
+    Whitespace was already collapsed here, so the multi-line half never applied; the link half did.
+    """
+    runs = [_ester("rx-1", 60.0, 70.0), _ester("rx-2", 80.0, 85.0)]
+    runs[0].hypothesis = "Test [[playbook-degassing]] on this step"
+    runs[1].procedure_text = "Charged as in [[reaction-101]]; see [[sop-7]]."
+    note = optimization_campaign_note(
+        "optimization-campaign-x",
+        OptimizationCampaign(reaction_ids=[run.reaction_id for run in runs]),
+        {run.reaction_id: run for run in runs},
+    )
+
+    forged = [link for link in note.outgoing_links() if not link.startswith("reaction-rx-")]
+    assert forged == [], f"an ELN procedure forged {forged} onto a PR-gated campaign note"
+    # The text a reviewer reads is preserved — only the markup that made it an edge is gone.
+    assert "playbook-degassing" in note.body and "sop-7" in note.body
+
+
 def test_a_partly_dated_campaign_keeps_its_date_column() -> None:
     """The rule is emptiness, not datedness: one recorded value keeps the column for every row.
 

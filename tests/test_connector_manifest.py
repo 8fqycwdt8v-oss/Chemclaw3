@@ -47,7 +47,15 @@ def test_transport_tag_selects_its_variant() -> None:
     """`transport` picks the shape: a stdio entry needs no url, an http one no command."""
     http = _manifest()
     assert isinstance(http.endpoint, HttpEndpoint)
-    stdio = _manifest(endpoint={"transport": "stdio", "command": "python", "args": ["-m", "x"]})
+    stdio = _manifest(
+        endpoint={
+            "transport": "stdio",
+            "command": "python",
+            "args": ["-m", "x"],
+            "tools": ["search"],
+            "read_only": ["search"],
+        }
+    )
     assert isinstance(stdio.endpoint, StdioEndpoint)
 
 
@@ -251,3 +259,25 @@ def test_an_unclassified_tool_refuses_to_load() -> None:
         HttpEndpoint.model_validate(
             {"url": "http://127.0.0.1:8899/mcp", "tools": ["resolve_compound"]}
         )
+
+
+def test_an_endpoint_that_declares_no_tools_refuses_to_load() -> None:
+    """An empty `tools` list is the other way to be unclassified, and it used to be the quiet one.
+
+    `_check_classification` partitions `tools` against `state_changing` and `read_only`, and a
+    partition of nothing is trivially satisfied — so an endpoint that simply omitted `tools:`
+    passed the very check written to make an omission loud. Both of its guarantees inverted at
+    once: `registry` read the empty list as "no allow-list" and bound the server's entire
+    advertised surface, and none of what arrived was in `state_changing_tool_names()`, so
+    `side_effecting_call` answered `False` for every tool including a write — which is the input
+    the plan gate (D-167) and the dry-run gate ask. The manifest that declared the least got the
+    most, so the empty list is refused where the typo already was.
+    """
+    for endpoint in (HttpEndpoint, StdioEndpoint):
+        payload = (
+            {"url": "http://127.0.0.1:8899/mcp"}
+            if endpoint is HttpEndpoint
+            else {"command": "/bin/true"}
+        )
+        with pytest.raises(ValidationError, match="declares no tools"):
+            endpoint.model_validate(payload)

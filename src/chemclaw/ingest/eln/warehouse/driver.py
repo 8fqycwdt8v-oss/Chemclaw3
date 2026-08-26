@@ -121,10 +121,25 @@ class Warehouse(Protocol):
     def cursor(self) -> AbstractAsyncContextManager[WarehouseCursor]:
         """A cursor for one statement, released on exit.
 
-        The only method, and there is deliberately no `close`. The data-source seam builds a half
-        and never disposes it — there is no lifecycle hook to call one from — so a connection lives
-        for the process's life by design, and a `close()` nobody can reach would be an interface
-        promise with no mechanism behind it. A driver that needs teardown does it in its own
-        `__del__` or leaves it to the process exit its session timeout already assumes.
+        The only method, and there is deliberately no `close`. There is no lifecycle hook to call
+        one from — the data-source seam builds a retrieve half per `gather_evidence` call and
+        disposes it as garbage — so a `close()` nobody can reach would be an interface promise with
+        no mechanism behind it. A driver that needs teardown does it in its own `__del__` or leaves
+        it to the process exit its session timeout already assumes.
+
+        **What makes that defensible is `connect.open_warehouse`, not this seam.** This docstring
+        used to say the seam "builds a half and never disposes it", which was the wrong half of the
+        sentence: it disposes one on every tool call, and while the connection was opened per half
+        each of those calls leaked a SQL session no code could reach. The connection is now
+        remembered per `connection:` block instead, so "a connection lives for the process's life"
+        is a property of one function that can be read rather than a claim about a seam that was
+        not true. See `open_warehouse` for the measurement.
+
+        **"For the process's life" is about the connection, not about one session.** A driver whose
+        session can die under it — an expiring SQL-warehouse session, a warehouse scaled to zero —
+        drops that session on a transient failure and opens a new one on the next call, which is
+        its own business and needs nothing here. What it must not do is keep serving a handle it
+        already knows is dead: that is a permanent outage wearing a retry's clothes
+        (`DatabricksWarehouse._session_lost`).
         """
         ...

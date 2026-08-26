@@ -80,6 +80,15 @@ class ExternalVectorNoteIndex(PostgresNoteIndex):
         """`NULL`: the vector went to the store, and nothing here reads this column."""
         return None
 
+    def _read_key(self) -> str:
+        """The stored spelling of the live configuration, for the inherited catalogue statements.
+
+        Unused by this class's own `search_dense`, which ranks in the store — but the base's dense
+        statement now binds this, and a subclass that namespaces its keys and did not namespace
+        this one would silently match no row at all. One spelling, `_stored_key`'s.
+        """
+        return self._stored_key(super()._read_key())
+
     def _stored_key(self, embedding_key: str) -> str:
         """The `embedding_key` written to and read from `note_index`, namespaced by the store.
 

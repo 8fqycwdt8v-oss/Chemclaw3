@@ -17,7 +17,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 from chemclaw.core.ids import stable_hash
-from chemclaw.kg.note import Note
+from chemclaw.kg.note import Note, require_note_slug, strip_links
 from chemclaw.retrieval.evidence import EvidenceChunk, SourceRetriever
 from chemclaw.retrieval.fanout import sweep_sources
 
@@ -219,12 +219,61 @@ def verify_claims(
     return supported, discarded
 
 
+def _as_evidence(content: str) -> str:
+    """One chunk's text, unable to add structure to the report it is placed in.
+
+    Two rules, each closing one way content became markup. `strip_links` reduces a `[[wikilink]]`
+    to its target, so text written by whoever wrote a share document cannot become an edge on a
+    note this system asks a chemist to merge — `retrievers._excerpt` already did this for the three
+    note-backed retrievers, and the two sources whose content is *not* a note body never passed
+    through it. Collapsing whitespace runs is what keeps a chunk one bullet: a newline ends a
+    Markdown line and a leading `- ` starts a list item, so a multi-line excerpt did not render
+    badly, it rendered as *more evidence*.
+
+    The text is preserved rather than truncated or dropped: a reader still sees what the source
+    said, on one line, followed by the provenance that is actually its own.
+    """
+    return " ".join(strip_links(content).split())
+
+
+def _citation(source_note_id: str) -> str:
+    """How a chunk's source is cited: a wikilink for a note, a code span for anything else.
+
+    `[[…]]` is the graph's citation syntax and `kg.graph` reads it as one, so wikilinking an id
+    that is not a note id mints an edge to a note that does not exist — a dangling link that fails
+    `kg-validate` and makes the report's own pull request unmergeable. Worse than unmergeable, it
+    is wrong in a way a reviewer cannot see: `sharedrive:sop-7#0` parses through `split_link` as a
+    *typed* edge (`relation="share"`, id `"sop-7#0"`) rather than as the address of a document.
+
+    A share chunk, a warehouse row and a vendored record all cite something a reader can still
+    check — that is `EvidenceChunk`'s contract — so the address is kept verbatim and rendered as
+    literal text instead of as a link.
+    """
+    try:
+        require_note_slug(source_note_id)
+    except ValueError:
+        return f"`{source_note_id}`"
+    return f"[[{source_note_id}]]"
+
+
 def report_note(report: Report) -> Note:
     """Render the report as a PR-gated `report` note citing every source (5b.7).
 
     Each section shows its memory layer and lists its evidence, every chunk wikilinking its
     source note; an unsupported section says so explicitly. The draft is agent-authored and
     goes through the PR-gate for a chemist to validate before it counts as reliable (D-005).
+
+    **A chunk fills a bullet; it may not add one, and it may not add a citation.** Content reaches
+    here as raw retrieved text — a note body's first `note_excerpt_chars`, or up to a share
+    binding's `chunk_chars` of whatever a document said — and this body becomes a note a human
+    merges. Interpolated verbatim, every embedded newline started a new Markdown line and every
+    embedded `- ` started a new bullet, with the provenance suffix landing only on the excerpt's
+    *last* line: measured on the committed corpus, eight retrieved chunks rendered as twenty-three
+    bullets, fifteen of them note frontmatter reading as independent, uncited evidence. A document
+    carrying `[[playbook-degassing]]` did worse than mislead a reader — it put a real outgoing edge
+    on the PR-gated draft, citing a note no retriever returned. So each chunk is placed as a *cell*
+    (`_as_evidence`), the same rule and for the same reason as
+    `memory.comparison._placeable`, and cited as what it is (`_citation`).
 
     A bullet also carries the provenance its chunk *actually* holds, but only where that
     provenance is informative — a conflict, a stated confidence, an agent-authored source note.
@@ -247,7 +296,7 @@ def report_note(report: Report) -> Note:
             lines.append("_No supporting data found; section left unsupported._\n")
             continue
         for chunk in section.evidence:
-            provenance = [f"[[{chunk.source_note_id}]]", f"via {chunk.retriever}"]
+            provenance = [_citation(chunk.source_note_id), f"via {chunk.retriever}"]
             if chunk.created_by == "agent":
                 # "How much of this was AI-drafted?" — a distilled agent note and a human-merged
                 # one are indistinguishable in the body text, and only one of them was signed off
@@ -258,7 +307,7 @@ def report_note(report: Report) -> Note:
                 # the chunk as `score`, where it only orders truncation — being ranked lower is not
                 # the same as the reader being *told* the note is unsure.
                 provenance.append(f"confidence {chunk.confidence:.2f}")
-            lines.append(f"- {chunk.content} ({', '.join(provenance)})")
+            lines.append(f"- {_as_evidence(chunk.content)} ({', '.join(provenance)})")
             if chunk.conflicts_with:
                 # The conflicting ids stay plain text, not `[[wikilinks]]`: the report *warns
                 # about* those notes, it does not rest on them, and linking would add them to the

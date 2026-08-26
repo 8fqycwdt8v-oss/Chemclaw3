@@ -31,13 +31,30 @@ def reciprocal_rank_fusion(
             note's first (best) position counts, so repeating a note does not inflate it.
         k: The RRF constant (`settings.retrieval_fusion_k`); larger flattens the contribution of
             rank position. Must be positive.
-        weights: Optional per-retriever multipliers (source tier, gap IDEA-5). RRF is deliberately
+        weights: Optional per-retriever tier factors (gap IDEA-5). RRF is deliberately
             score-agnostic, which is right for combining heterogeneous *rankers* and wrong for
             combining heterogeneous *evidence classes*: a validated internal ELN entry, an
             agent-distilled playbook, and a literature analogy otherwise fuse identically. This is
             the mechanical expression of the architecture's own "keep evidenced history separate
             from transferred analogy" rule, which is otherwise enforced only by asking the model
-            nicely. Absent or empty = uniform weighting (today's behavior exactly).
+            nicely. Absent or empty = uniform weighting (today's behavior exactly). Every weight
+            must be positive; `retrieval_source_weights` refuses anything else.
+
+            **Applied in rank space (`k + rank / weight`), not as a multiplier on the score.** A
+            multiplier could not express a tier, because RRF's rank term is almost flat at the
+            default `k = 60`: rank 1 scores 0.01639 and rank 30 scores 0.01111, a ratio of 1.48
+            across thirty positions, so any weight above ~1.02 outranks a whole competing list. At
+            the value `core/config/retrieval.py`'s own ENV comment gives as its example
+            (`{"graph": 1.5, "vector": 0.8}`) a graph hit beat every other source's best hit for
+            all its own ranks below 31, and a measured 40-chunk sweep of four sources went from
+            15 graph / 8 lexical / 10 share / 7 vector to 34 / 3 / 3 / **0** — one leg contributing
+            nothing at all, which is the defect `D-2026-08-01-a-cap-that-starves-a-source` names as
+            this merge design's reason to exist, reintroduced by the knob meant to tune it.
+
+            Dividing the rank instead makes a weight mean what its documentation says: `1.5`
+            promotes a hit by a third of its own rank — graph rank 3 fuses like rank 2 — and no
+            weight can push a source's rank-1 hit below another source's *tail*, because every
+            source's best hit still scores within one rank position of every other's.
 
     Returns:
         The chunks, one per source note, ordered by descending fused score. Ties break by
@@ -55,6 +72,6 @@ def reciprocal_rank_fusion(
                 continue  # a source's best position for a note is the only one that counts
             seen_in_list.add(note_id)
             weight = (weights or {}).get(chunk.retriever, 1.0)
-            scores[note_id] = scores.get(note_id, 0.0) + weight / (k + rank)
+            scores[note_id] = scores.get(note_id, 0.0) + 1.0 / (k + rank / weight)
     ordered = sorted(scores, key=lambda note_id: (-scores[note_id], note_id))
     return [representative[note_id] for note_id in ordered]

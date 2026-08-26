@@ -92,6 +92,27 @@ def _molecule(
     )
 
 
+def _state(structure: dict[str, Any]) -> tuple[int | None, int | None]:
+    """The electronic state a geometry payload states — `(charge, multiplicity)` — or two Nones.
+
+    **Absent stays absent here too.** A geometry that reaches this module as a bare `structure_id`
+    (a scan's input, a rotamer, a ranked species) says nothing about its charge, and the published
+    `structure` row must say nothing either: `0`/`1` is a real state a query matches, so
+    substituting it makes "we did not record this" indistinguishable from "we recorded a neutral
+    singlet" — and it was doing exactly that for every ion this system has published.
+
+    A geometry that arrives whole does state it: a cached `Structure` dump always carries both
+    fields, and the job path's `without_geometry` projection carries them whenever they are not the
+    ordinary neutral closed-shell values it omits by design.
+    """
+    charge = structure.get("charge")
+    multiplicity = structure.get("multiplicity")
+    return (
+        None if charge is None else int(charge),
+        None if multiplicity is None else int(multiplicity),
+    )
+
+
 def _species_members(reactants: list[str], products: list[str]) -> list[SubjectMember]:
     """A reaction's members, one per stoichiometric equivalent.
 
@@ -168,6 +189,15 @@ def _fact(
     Returning None for an absent number rather than substituting one is the whole discipline of
     this module: `delta_g_kcal is None` means the free energy was not established, and every caller
     below filters Nones out rather than defaulting them.
+
+    **`value` is canonical and `reported_value` is what the calculator said.** `to_canonical` is the
+    one place a unit conversion happens on the publish path, which is what makes a predicate over
+    `value_canonical` sound — and today every call site below passes a unit that already *is* the
+    property's canonical unit, so the conversion is an identity on every live path and only its own
+    unit test exercises it. The first projector reporting an energy difference in hartree or kJ/mol
+    — the natural shape for anything coming back from `servers/calc` — is the one that needs this,
+    and it lands off by 627.5 or 4.184 with the unit string beside it still right. Keeping the
+    reported pair is what makes that recoverable rather than merely wrong.
     """
     if value is None:
         return None
@@ -175,6 +205,7 @@ def _fact(
         property=name,
         value=to_canonical(name, value, unit),
         unit=unit,
+        reported_value=value,
         uncertainty=uncertainty,
         uncertainty_kind=uncertainty_kind,
         scope="member" if member is not None else "calculation",
@@ -238,7 +269,7 @@ def _reaction(payload: dict[str, Any]) -> tuple[Subject, Conditions, TheoryLevel
     members = _species_members(reactants, products)
     subject = Subject(kind="reaction", members=members, label=_reaction_label(reactants, products))
     conditions = Conditions(
-        solvent=canonical_solvent(payload.get("solvent")),
+        solvent=payload.get("solvent"),
         solvent_model="alpb" if payload.get("solvent") else "",
         temperature_k=payload.get("temperature_k"),
     )
@@ -492,7 +523,7 @@ def _ensemble(payload: dict[str, Any]) -> tuple[Subject, Conditions, TheoryLevel
         label=smiles or seed_structure_id,
     )
     conditions = Conditions(
-        solvent=canonical_solvent(payload.get("solvent")),
+        solvent=payload.get("solvent"),
         solvent_model="alpb" if payload.get("solvent") else "",
         temperature_k=payload.get("temperature_k"),
     )
@@ -522,10 +553,13 @@ def _ensemble(payload: dict[str, Any]) -> tuple[Subject, Conditions, TheoryLevel
         if energy is None and relative is None:
             logger.warning("publish: ensemble member %d has no energy; skipped", index)
             continue
+        charge, multiplicity = _state(structure)
         conformers.append(
             ConformerFact(
                 ordinal=index,
                 structure_id=structure_id,
+                charge=charge,
+                multiplicity=multiplicity,
                 energy_hartree=None if energy is None else float(energy),
                 relative_kcal=None if relative is None else float(relative),
                 population=member.get("population"),
@@ -570,7 +604,7 @@ def _refined_ensemble(
     smiles = payload.get("smiles")
     subject = Subject(kind="ensemble", members=[_molecule(smiles)], label=smiles or "")
     conditions = Conditions(
-        solvent=canonical_solvent(payload.get("solvent")),
+        solvent=payload.get("solvent"),
         solvent_model="alpb" if payload.get("solvent") else "",
         temperature_k=payload.get("temperature_k"),
     )
@@ -582,14 +616,18 @@ def _refined_ensemble(
     )
     conformers: list[ConformerFact] = []
     for index, member in enumerate(payload.get("conformers") or []):
-        structure_id = (member.get("structure") or {}).get("structure_id") or ""
+        structure = member.get("structure") or {}
+        structure_id = structure.get("structure_id") or ""
         if not structure_id:
             logger.warning("publish: refined member %d has no structure_id; skipped", index)
             continue
+        charge, multiplicity = _state(structure)
         conformers.append(
             ConformerFact(
                 ordinal=index,
                 structure_id=structure_id,
+                charge=charge,
+                multiplicity=multiplicity,
                 energy_hartree=member.get("electronic_energy_hartree"),
                 relative_kcal=member.get("relative_kcal"),
                 population=member.get("population"),
@@ -662,7 +700,7 @@ def _ensemble_property(
     smiles = payload.get("smiles")
     subject = Subject(kind="ensemble", members=[_molecule(smiles)], label=smiles or "")
     conditions = Conditions(
-        solvent=canonical_solvent(payload.get("solvent")),
+        solvent=payload.get("solvent"),
         solvent_model="alpb" if payload.get("solvent") else "",
         temperature_k=payload.get("temperature_k"),
     )
@@ -749,7 +787,7 @@ def _species_distribution(
     ]
     subject = Subject(kind="system", members=members, label=str(payload.get("kind") or ""))
     conditions = Conditions(
-        solvent=canonical_solvent(payload.get("solvent")),
+        solvent=payload.get("solvent"),
         solvent_model="alpb" if payload.get("solvent") else "",
         temperature_k=payload.get("temperature_k"),
     )
@@ -827,7 +865,7 @@ def _bond_survey(
         raise ProjectionError("a bond survey with no subject SMILES has nothing to publish")
     subject = Subject(kind="molecule", members=[_molecule(smiles)], label=str(smiles))
     conditions = Conditions(
-        solvent=canonical_solvent(payload.get("solvent")),
+        solvent=payload.get("solvent"),
         solvent_model="alpb" if payload.get("solvent") else "",
         temperature_k=payload.get("temperature_k"),
     )
@@ -899,11 +937,13 @@ def _interaction(
             role="complex",
             smiles=f"{can_a}.{can_b}",
             structure_id=structure.get("structure_id") or "",
+            charge=_state(structure)[0],
+            multiplicity=_state(structure)[1],
         ),
     ]
     subject = Subject(kind="complex", members=members, label=f"{can_a} + {can_b}")
     conditions = Conditions(
-        solvent=canonical_solvent(payload.get("solvent")),
+        solvent=payload.get("solvent"),
         solvent_model="alpb" if payload.get("solvent") else "",
     )
     level = TheoryLevel(
@@ -930,7 +970,7 @@ def _scan(payload: dict[str, Any]) -> tuple[Subject, Conditions, TheoryLevel, di
         label=smiles or "",
     )
     conditions = Conditions(
-        solvent=canonical_solvent(payload.get("solvent")),
+        solvent=payload.get("solvent"),
         solvent_model="alpb" if payload.get("solvent") else "",
     )
     level = TheoryLevel(
@@ -1006,7 +1046,7 @@ def _rotation(
         label=smiles or "",
     )
     conditions = Conditions(
-        solvent=canonical_solvent(payload.get("solvent")),
+        solvent=payload.get("solvent"),
         solvent_model="alpb" if payload.get("solvent") else "",
         temperature_k=payload.get("temperature_k"),
     )
@@ -1093,7 +1133,7 @@ def _thermochemistry(
         kind="geometry", members=[_molecule(smiles, structure_id)], label=smiles or ""
     )
     conditions = Conditions(
-        solvent=canonical_solvent(payload.get("solvent")),
+        solvent=payload.get("solvent"),
         solvent_model="alpb" if payload.get("solvent") else "",
         temperature_k=payload.get("temperature_k"),
         pressure_pa=payload.get("pressure_pa"),
@@ -1179,7 +1219,7 @@ def _electronic_properties(
         kind="geometry", members=[_molecule(smiles, structure_id)], label=smiles or ""
     )
     conditions = Conditions(
-        solvent=canonical_solvent(payload.get("solvent")),
+        solvent=payload.get("solvent"),
         solvent_model="alpb" if payload.get("solvent") else "",
     )
     level = TheoryLevel(
@@ -1234,7 +1274,7 @@ def _site_reactivity(
         label=smiles or "",
     )
     conditions = Conditions(
-        solvent=canonical_solvent(payload.get("solvent")),
+        solvent=payload.get("solvent"),
         solvent_model="alpb" if payload.get("solvent") else "",
     )
     level = TheoryLevel(
@@ -1285,7 +1325,7 @@ def _optimization(
         kind="geometry", members=[_molecule(smiles, started_from)], label=smiles or ""
     )
     conditions = Conditions(
-        solvent=canonical_solvent(payload.get("solvent")),
+        solvent=payload.get("solvent"),
         solvent_model="alpb" if payload.get("solvent") else "",
     )
     level = TheoryLevel(
@@ -1360,12 +1400,23 @@ def _microstate_pka(
     result "the computed pKa". The `method` string is what keeps them distinguishable in the store,
     and it names the sampler.
 
-    Three facts beyond the number, each answering something the value alone cannot:
+    Four facts beyond the number, each answering something the value alone cannot:
 
-    - `pka_site` is the winning microstate's *perceived* constitution — which proton this is about.
-      Absent when perception declined, which is a real state and not a missing value.
+    - `pka_site` is which equilibrium was computed — `acid` (HA -> A- + H+) or `base`
+      (BH+ -> B + H+, so the number is the *conjugate acid's* pKa). **The same fact `_pka`
+      publishes under this name**, from `PkaResult.site`, which carries the same two values for
+      the same reason. It reached the registry as a second name, `pka_branch`, and that would have
+      split one property in two — every "which base pKas have we computed" query answering over
+      one pipeline while looking complete, which is the exact failure `property_definition` exists
+      to prevent.
+    - `ionised_microstate` is the winning microstate's *perceived* constitution — which proton this
+      is about. Absent when perception declined, which is a real state and not a missing value. Its
+      own name because it is not the fact above: one says which equilibrium, the other says which
+      proton, and storing a SMILES under `pka_site` would have made that column mean two things.
     - `microstates_within_rt` is why the number is a macrostate's: more than one and the molecule
       has no single conjugate base, so a site-resolved pKa is a different question.
+      `species_enumerated` beside it is how many the search found at all — the same quantity a
+      ranked-species enumeration publishes, reused rather than named again.
     - `deprotonation_free_energy` is the quantity actually computed; the pKa is a linear map of it,
       and a refit changes the second without changing the first.
 
@@ -1400,9 +1451,14 @@ def _microstate_pka(
                 ),
                 _fact("deprotonation_free_energy", payload.get("delta_g_kcal"), "kcal/mol"),
                 _fact("microstates_within_rt", payload.get("microstates_within_rt"), ""),
-                _text("pka_site", payload.get("site_smiles")),
-                _text("pka_branch", payload.get("branch")),
-            )
+                _fact("species_enumerated", payload.get("microstates_found"), ""),
+                _text("pka_site", payload.get("branch")),
+                _text("ionised_microstate", payload.get("site_smiles")),
+            ),
+            # Published as flags, exactly as every other projector here publishes a calculator's
+            # warnings — "two microstates within RT" is the caveat that decides how the number may
+            # be read, and it was the one shape dropping them.
+            "flags": _warnings(list(payload.get("warnings") or [])),
         },
     )
 

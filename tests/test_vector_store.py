@@ -793,3 +793,60 @@ def test_the_base_index_forgets_nothing_because_its_vectors_were_in_the_rows() -
     from chemclaw.ingest.documents.index import PostgresDocumentIndex
 
     assert PostgresDocumentIndex._forget_vectors is not ExternalVectorDocumentIndex._forget_vectors
+
+
+def test_the_store_is_built_once_per_process_and_not_once_per_tool_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A client with a connection pool and no `close` may be built once, and only once.
+
+    Nothing in `retrieval/vectors/` has a `close` or an `aclose`, and there is nowhere to call one
+    from: a store is reached from a retrieve half, and `active_retrieve_sources()` builds a fresh
+    half inside every `gather_evidence` body — measured, 100 constructions for 100 sweeps. So each
+    tool call opened a new `AsyncQdrantClient` (its own httpx pool) or a new Databricks client and
+    dropped it unreferenced, with its sockets held until a collection nobody schedules.
+
+    Counted rather than argued: 100 resolutions of the configured store must construct one.
+    """
+    built: list[object] = []
+
+    def counting() -> VectorStore:
+        store = _StubVectorStore()
+        built.append(store)
+        return store
+
+    monkeypatch.setattr(settings, "vector_store_provider", f"{__name__}:_counting_store")
+    monkeypatch.setitem(globals(), "_counting_store", counting)
+
+    stores = [default_vector_store() for _ in range(100)]
+
+    assert len(built) == 1, (
+        f"100 tool calls built {len(built)} vector-store client(s); none of them can be closed"
+    )
+    assert len({id(store) for store in stores}) == 1
+
+
+def test_a_reconfigured_store_is_rebuilt_rather_than_served_from_the_last_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The control on the key: the memo is per *configuration*, not per process outright.
+
+    The same trade `core.embeddings._openai_client` makes — a test that swaps `Settings`, or a
+    deployment that rotates the store's address, must get a client built for what is configured
+    now rather than the one built for what was configured before.
+    """
+    built: list[object] = []
+
+    def counting() -> VectorStore:
+        store = _StubVectorStore()
+        built.append(store)
+        return store
+
+    monkeypatch.setattr(settings, "vector_store_provider", f"{__name__}:_counting_store")
+    monkeypatch.setitem(globals(), "_counting_store", counting)
+
+    first = default_vector_store()
+    monkeypatch.setattr(settings, "vector_store_url", "acme://vectors:9001")
+    second = default_vector_store()
+
+    assert len(built) == 2 and first is not second

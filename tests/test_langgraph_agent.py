@@ -791,11 +791,13 @@ def test_the_loop_cap_counts_the_turn_and_not_the_session() -> None:
     **The input here is deliberately bare `{"messages": ...}`**, with nothing zeroing anything. That
     is what distinguishes the fix from the one it replaced: hand-zeroing in `turn_input` made
     per-turn-ness a property of every caller, and `graph.ainvoke` accepts a caller that forgets.
-    Under `Annotated[int, UntrackedValue]` there is nothing to forget — the checkpoint has no copy
-    of the count to restore. A test that went through `turn_input` could not tell the two apart.
+    Under an untracked channel (`state.TurnTotal`) there is nothing to forget — the checkpoint has
+    no copy of the count to restore. A test that went through `turn_input` could not tell the two
+    apart.
 
     Four turns at a cap of 3, on one thread, is therefore the shape: the fourth is the one that
-    would have failed. Mutation-checked — dropping `UntrackedValue` from either field fails here.
+    would have failed. Mutation-checked — making either field an ordinary (checkpointed) channel
+    fails here.
     """
     from langgraph.checkpoint.memory import InMemorySaver
 

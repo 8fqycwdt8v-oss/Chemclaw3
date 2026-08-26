@@ -278,13 +278,27 @@ def filesystem_permissions() -> list[Any]:
     order matters because `FilesystemPermission` is first-match-wins, so the allows are declared
     first and the blanket deny closes the surface behind them.
 
+    **Where they are enforced is not where they are passed, and getting that wrong made them
+    inert.** `create_deep_agent(permissions=…)` only ever hands them to the `FilesystemMiddleware`
+    *it* constructs, and `langgraph_agent._middleware` substitutes an instance of its own under the
+    same name — so the rules have to be handed to that instance too, as `_permissions=`. They were
+    not, and for as long as they were not a `write_file` to *any* path succeeded while this
+    docstring said they were evaluated first. `langgraph_agent._middleware` carries the
+    measurement.
+
+    Riding the middleware list is also what carries them into a helper, which
+    `create_deep_agent`'s own argument could not: a helper is compiled by `create_agent`, which
+    takes no `permissions` at all, and it is handed the same middleware.
+
     **`/skills/` is refused twice, and that is deliberate rather than redundant.** These rules are
     the outer half; `NarrowedSkillsBackend` refuses the write itself on every call. A security
-    property that arrives as somebody else's default can leave the same way, so the backend keeps
-    its own refusal and this states the intent where a reader looks for it.
+    property that arrives as somebody else's default can leave the same way — a splice rule, a
+    private keyword, a release — so the backend keeps its own refusal, worded as a refusal
+    (`agent/skill_backend.SkillsReadOnlyRefusal`) rather than as a crash.
 
     Returns:
-        The rules to pass `create_deep_agent(permissions=…)`.
+        The rules to pass `create_deep_agent(permissions=…)` **and** the `FilesystemMiddleware` that
+        replaces upstream's.
     """
     from deepagents import FilesystemPermission
 

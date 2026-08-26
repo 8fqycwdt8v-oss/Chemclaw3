@@ -91,6 +91,12 @@ _COUNTERS: dict[str, str] = {
     "chemclaw_turns_refused_budget_total": "Turns refused with 429 by the turn/token budget.",
     "chemclaw_turns_conflict_total": "Turns rejected with 409 (a turn was already running).",
     "chemclaw_turn_timeouts_total": "Turns cancelled by the wall-clock turn timeout.",
+    # A separate series from the one above, and deliberately so: this counts turns cut because the
+    # *client* stopped reading (`service_sse_send_timeout_seconds`), not because the turn ran long.
+    # Two populations in one counter is a denominator nobody can interpret.
+    "chemclaw_turn_send_timeouts_total": (
+        "Turn streams closed because a client stopped reading past the SSE send timeout."
+    ),
     # The wall-clock timeout's sibling, and the reason it needed one: a turn stopped by the
     # harness loop's iteration cap used to return normally and emit nothing, so the runaway guard
     # firing was invisible to everything outside the process. A rising rate here is an agent that
@@ -119,6 +125,17 @@ _COUNTERS: dict[str, str] = {
     ),
     "chemclaw_result_publish_failures_total": (
         "Result publications that could not be queued or delivered."
+    ),
+    # The fourth, and it is a different question from the three above: those are about a
+    # *destination* (down, slow, refusing), this one is about this release's own code. A projector
+    # that raises does so for every payload of that shape, forever, until someone changes the
+    # projection — so folding it into the counter above made a permanent gap read as a transient
+    # publish failure. Measured: `_microstate_pka` emitted three properties the registry did not
+    # define, so `to_canonical` raised on **every** microstate pKa (two CREST metadynamics
+    # searches, minutes to hours) and every one of them was dropped at the enqueue behind a series
+    # that also rises when a warehouse is busy.
+    "chemclaw_result_projection_failures_total": (
+        "Stored payloads this release could not project into a record (a code gap, not an outage)."
     ),
     "chemclaw_audit_sink_failures_total": (
         "Audit records that could not be persisted (the trail is incomplete)."

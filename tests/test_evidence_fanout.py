@@ -185,14 +185,23 @@ def test_the_failure_counter_names_the_source_that_failed() -> None:
     dark" were two numbers with no way to decide whether they described one event or two. That is
     the correlation `D-2026-08-01-a-cap-that-starves-a-source` needed and did not have, and an
     unlabelled counter cannot supply it however long it is retained.
+
+    **The source names are unique to this test, because the registry is process-global.** The
+    absence half — "the healthy source got no failure series" — is the assertion that carries the
+    labelling claim, and it was written against the names `graph` and `dense`, which any other test
+    in the session may also have swept. `test_gather_evidence_outage` sweeps a *failing* source
+    called `graph`, so this passed or failed on collection order alone (measured: green with these
+    two files in alphabetical order, red with them reversed) — and this suite runs under
+    `pytest-randomly`, which picks a different order every run.
     """
     from chemclaw.core.metrics import METRICS
 
-    _swept([_Retriever("graph", 1), _Retriever("dense", 1, fails=True)])
+    healthy, broken = "fanout-labelled-healthy", "fanout-labelled-broken"
+    _swept([_Retriever(healthy, 1), _Retriever(broken, 1, fails=True)])
     rendered = METRICS.render()
 
-    assert 'chemclaw_evidence_source_failures_total{source="dense"}' in rendered
-    assert 'chemclaw_evidence_source_failures_total{source="graph"}' not in rendered
+    assert f'chemclaw_evidence_source_failures_total{{source="{broken}"}}' in rendered
+    assert f'chemclaw_evidence_source_failures_total{{source="{healthy}"}}' not in rendered
 
 
 def test_no_sources_is_an_empty_sweep_and_not_an_error() -> None:

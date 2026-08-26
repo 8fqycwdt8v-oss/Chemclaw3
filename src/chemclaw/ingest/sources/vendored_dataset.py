@@ -130,10 +130,16 @@ def _read_records(directory: Path, manifest: DatasetManifest) -> list[VendoredRe
 class VendoredDatasetRetriever:
     """Retrieve from a dataset baked into the image at build time. A `SourceRetriever`.
 
-    Loads lazily and once: a dataset is immutable for the life of the image, so re-reading it per
-    query would be pure cost. A load failure is logged and yields no evidence rather than raising —
-    a missing optional corpus must not break every retrieval in the process, and the log line names
-    the dataset and the reason.
+    Loads lazily and once **on success**: a dataset is immutable for the life of the image, so
+    re-reading it per query would be pure cost. A load *failure* is not cached and not swallowed —
+    it raises, and `retrieval.fanout._sweep` degrades this one branch of the sweep with it.
+
+    **Caching the failure was the worse half of the two.** `_load` used to store `[]` behind
+    `if self._records is not None`, so a single unreadable manifest at the first query made this
+    corpus report "no matches" for the life of the pod, after one warning nobody was watching for.
+    Every later query was silent, and an empty answer from here is indistinguishable to
+    `gather_evidence` from a corpus that was read and held nothing — which is the sentence its
+    docstring promises the model means *nothing on file, never invented*.
     """
 
     def __init__(self, dataset_dir: str | None = None, name: str = "vendored") -> None:
@@ -149,22 +155,26 @@ class VendoredDatasetRetriever:
         self._manifest: DatasetManifest | None = None
 
     def _load(self) -> list[VendoredRecord]:
-        """The dataset's rows, read once per process."""
+        """The dataset's rows, read once per process — on success only.
+
+        Raises:
+            VendoredDatasetError: The corpus is not there, does not match its checksum, or does not
+                have the column its manifest declares. Left to propagate, and left *uncached*: a
+                remembered failure outlives the condition that caused it, so a share mounted a
+                minute later would never be seen, while a corpus that is genuinely gone simply
+                fails this branch of every sweep — loudly, which is the honest report.
+        """
         if self._records is not None:
             return self._records
-        try:
-            self._manifest = _read_manifest(self._dir)
-            self._records = _read_records(self._dir, self._manifest)
-            logger.info(
-                "vendored dataset %s v%s loaded: %d records (%s)",
-                self._manifest.name,
-                self._manifest.version,
-                len(self._records),
-                self._manifest.licence,
-            )
-        except VendoredDatasetError:
-            logger.warning("vendored dataset unavailable at %s", self._dir, exc_info=True)
-            self._records = []
+        self._manifest = _read_manifest(self._dir)
+        self._records = _read_records(self._dir, self._manifest)
+        logger.info(
+            "vendored dataset %s v%s loaded: %d records (%s)",
+            self._manifest.name,
+            self._manifest.version,
+            len(self._records),
+            self._manifest.licence,
+        )
         return self._records
 
     async def retrieve(self, query: str, filters: dict[str, Any]) -> list[EvidenceChunk]:

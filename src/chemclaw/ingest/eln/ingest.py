@@ -59,11 +59,20 @@ async def ingest_reaction(
     `label_index` and `source` are keyword-only and **required**, with no default, which is
     deliberate: the label index's record phase can only be written here, from the canonical record
     in hand (`ingest/labels/record.py` says why), so a default of `None` would let a caller quietly
-    stop writing the half of the row that cannot be reconstructed afterwards. `source` is the
-    registry source name, and it is the other half of the label row's key — two ELNs may
-    legitimately use one entry id, which the fingerprint tables, keyed on the bare id, cannot
-    represent. `ReactionRecord` keys on the bare id and carries its own `source` column beside it;
-    the label row needs the pair *in* the key because a facet count must not merge two sites' runs.
+    stop writing the half of the row that cannot be reconstructed afterwards.
+
+    `source` is the registry source name, and it is the other half of the key of *both* rows this
+    writes — two ELNs may legitimately use one entry id, and a facet count must not merge two
+    sites' runs any more than one site's transcription may overwrite the other's. The transcription
+    tier keyed on the bare id until
+    `D-2026-08-26-a-transcription-is-keyed-by-its-source`, carrying the rendered provenance in a
+    `source` column beside it — which recorded which site won rather than keeping both.
+
+    **The fingerprint tables are still keyed on the bare id**, so two sites sharing one id still
+    collapse to one structural row. That is a narrower harm — a hit resolves to a run that exists,
+    and `ReactionRecordStore.read` now refuses rather than substituting when the citation is
+    ambiguous — but it is not fixed here, and saying so is the point: this function writes four
+    indexes and only three of them can tell the two sites apart.
     """
     problems = validate_ord(reaction)
     if problems:
@@ -86,7 +95,7 @@ async def ingest_reaction(
     await label_index.record(record_phase(reaction, source))
 
     record = record_from_ord_reaction(reaction)
-    await record_store.record([record])
+    await record_store.record([record], source)
     return record
 
 

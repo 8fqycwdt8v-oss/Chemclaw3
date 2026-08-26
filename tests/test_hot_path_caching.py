@@ -60,9 +60,13 @@ def test_connector_probes_share_one_http_client(monkeypatch: pytest.MonkeyPatch)
 
         def __init__(self, name: str) -> None:
             self.name = name
+            # `tools` is irrelevant to a health probe and may not be empty: an endpoint that
+            # declares nothing used to bind whatever a server advertised, unclassified.
             self.endpoint = HttpEndpoint(
                 url=f"http://127.0.0.1:1/{name}/mcp",
                 health_url=f"http://127.0.0.1:1/{name}/healthz",
+                tools=["unprobed"],
+                read_only=["unprobed"],
             )
 
     monkeypatch.setattr(httpx, "AsyncClient", _counting_client)

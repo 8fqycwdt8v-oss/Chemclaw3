@@ -45,7 +45,7 @@ from chemclaw.agent.session import TurnSession
 from chemclaw.agent.state import turn_config
 from chemclaw.agent.turn_cost import TurnCost, record_turn_cost
 from chemclaw.agent.turn_flags import reset_dry_run, set_dry_run
-from chemclaw.agent.turn_usage import TurnUsage
+from chemclaw.agent.turn_usage import TurnUsage, reset_turn_usage, set_turn_usage
 from chemclaw.api.budget import BudgetTracker
 from chemclaw.api.events import (
     CapabilityDegradedEvent,
@@ -170,7 +170,9 @@ async def run_turn(
     # (ISSUE-B-10). What the snapshot is for, and why only `session.state` is in it, is in
     # `_roll_back_unfinished`.
     state_snapshot = copy.deepcopy(session.state)
-    with _turn_ambient(session.session_id, actor, roles, dry_run, ledger.correlation_id):
+    with _turn_ambient(
+        session.session_id, actor, roles, dry_run, ledger.correlation_id, ledger.usage
+    ):
         try:
             async with AsyncExitStack() as stack:
                 # The turn span, which is the parent every other span in this request hangs from —
@@ -357,9 +359,14 @@ class _TurnLedger:
 
 @contextmanager
 def _turn_ambient(
-    session_id: str, actor: str | None, roles: frozenset[str], dry_run: bool, correlation_id: str
+    session_id: str,
+    actor: str | None,
+    roles: frozenset[str],
+    dry_run: bool,
+    correlation_id: str,
+    usage: TurnUsage,
 ) -> Iterator[None]:
-    """Stamp the five ambients a turn runs under, and unstamp every one on the way out.
+    """Stamp the six ambients a turn runs under, and unstamp every one on the way out.
 
     **Synchronous on purpose, and that is the point of extracting it.** These resets used to sit at
     the bottom of `run_turn`'s `finally`, under a comment warning that nothing in that block may
@@ -382,7 +389,13 @@ def _turn_ambient(
       re-executed (`chemclaw.agent.repeat_guard`);
     - the loop watch, so a turn stopped by the runaway cap can say so instead of looking exactly
       like one that finished (`chemclaw.agent.loop_cap`). A no-op without the harness, which is what
-      attaches the cap.
+      attaches the cap;
+    - the token ledger, so a model call that rides no stream can still be booked against this turn.
+      Every call the graph makes is metered off its `messages` stream — including the ones a tool
+      body makes, which inherit the graph's callbacks — but the verifier's judge runs *after* that
+      stream is exhausted, so its tokens reached neither the budget guard nor the `turn_costs` row.
+      Ambient rather than threaded, because that call sits three frames below `build_answer_event`
+      inside a provider's own chain (`chemclaw.agent.turn_usage.off_stream_metering`).
 
     `dry_run` rides here too for the reason it is ambient at all: the model can neither set it nor
     clear it (IDEA-4).
@@ -396,17 +409,45 @@ def _turn_ambient(
     correlation_token = set_current_correlation_id(correlation_id)
     calls_token = begin_call_watch()
     loop_token = begin_loop_watch()
+    usage_token = set_turn_usage(usage)
     dry_run_token = set_dry_run(dry_run)
     try:
         yield
     finally:
-        end_call_watch(calls_token)
-        end_loop_watch(loop_token)
-        reset_dry_run(dry_run_token)
-        reset_current_session_id(session_token)
-        reset_current_correlation_id(correlation_token)
+        _unstamp(session_id, end_call_watch, calls_token)
+        _unstamp(session_id, end_loop_watch, loop_token)
+        _unstamp(session_id, reset_turn_usage, usage_token)
+        _unstamp(session_id, reset_dry_run, dry_run_token)
+        _unstamp(session_id, reset_current_session_id, session_token)
+        _unstamp(session_id, reset_current_correlation_id, correlation_token)
         if identity_token is not None:
-            reset_current_identity(identity_token)
+            _unstamp(session_id, reset_current_identity, identity_token)
+
+
+def _unstamp(session_id: str, reset: Callable[[Any], None], token: Any) -> None:
+    """Undo one ambient, tolerating a token whose `Context` is not the one closing the turn.
+
+    A contextvar `Token` remembers the `Context` it was created in, and one teardown path closes
+    the turn from somewhere else: when a client stops reading, the turn's generator is abandoned
+    at a `yield` and asyncio's async-generator finalizer runs `aclose()` in a *new task with a new
+    context*. Every reset then raises `ValueError` — and the first one aborted the five after it,
+    including `reset_current_identity`, while surfacing as an unretrieved-task traceback naming a
+    `ContextVar` and no session.
+
+    Tolerating it loses nothing: the context those tokens belong to is being discarded either way,
+    so the values are gone whether or not the reset lands. What is gained is that the *rest* of the
+    teardown runs, and that the log line names the session. Only `ValueError` — anything else from
+    a reset is a real defect and must not be swallowed.
+    """
+    try:
+        reset(token)
+    except ValueError:
+        logger.warning(
+            "the turn for session %s was torn down in a foreign context; "
+            "its ambient %s could not be reset",
+            session_id,
+            reset.__name__,
+        )
 
 
 async def _open_turn_surface(
@@ -592,24 +633,36 @@ def _empty_answer_event(
     )
 
 
-def _failure_event(exc: Exception, session: TurnSession, ledger: _TurnLedger) -> ErrorEvent:
-    """Turn one turn's failure into one user-safe event, never a 500 mid-stream or a leaked trace.
+def failure_event(exc: Exception, session_id: str, correlation_id: str) -> ErrorEvent:
+    """One failed turn as one user-safe, classified event — never a leaked trace.
+
+    Public, and takes ids rather than a session and a ledger, because the *route* is the second
+    caller: everything `chemclaw.api.routes.turns` evaluates to call `run_turn` (the connector
+    factory, the history provider, the graph factory) runs one frame above every handler this
+    module owns, and a failure there used to end the stream with no event at all — the shape
+    `empty_answer` exists to eliminate, reproduced one layer up. There is exactly one way a turn
+    stream reports a failure, so the two sites cannot disagree about a code or about what is
+    disclosed.
 
     The exception detail (DB hosts, SMILES, workflow ids, driver errors) stays server-side in the
-    log; the client gets a *classified* failure plus the correlation id the audit trail is keyed on,
-    so a bug report is findable without leaking internals.
+    caller's log; the client gets the classification plus the correlation id the audit trail is
+    keyed on, so a bug report is findable without leaking internals.
     """
-    logger.exception("turn failed for session %s", session.session_id)
     code, retryable = _classify(exc)
     return ErrorEvent(
         message=(
-            "The turn could not be completed due to an internal error "
-            f"(session {session.session_id})."
+            f"The turn could not be completed due to an internal error (session {session_id})."
         ),
         code=code,
         retryable=retryable,
-        correlation_id=ledger.correlation_id,
+        correlation_id=correlation_id,
     )
+
+
+def _failure_event(exc: Exception, session: TurnSession, ledger: _TurnLedger) -> ErrorEvent:
+    """`failure_event` for a turn that is already running, with this turn's log line beside it."""
+    logger.exception("turn failed for session %s", session.session_id)
+    return failure_event(exc, session.session_id, ledger.correlation_id)
 
 
 def _roll_back_unfinished(

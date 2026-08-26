@@ -3,8 +3,11 @@
 CI provides a real (pgvector-enabled) database, and a dev sandbox has one too once `sudo dockerd`
 and `make up` have run — the daemon is simply not started by default, which reads as "no Postgres
 here" and is not (CLAUDE.md, "The sandbox is not offline"). Until it is running,
-`migrated_db_or_skip` turns an unreachable server into a skip, so a green local run can mean ~157
-tests never executed. Kept in one place
+`migrated_db_or_skip` turns an unreachable server into a skip, so a green local run can mean most
+of the durable layer never executed. How many tests that is, the run reports for itself — the
+terminal epilogue in `tests/conftest.py` counts the skips this marker produced — because the figure
+written down here was stale by ~38% and understated the risk it exists to warn about. Kept in one
+place
 so every Postgres-backed test uses the same connect-check + migration (DRY); each
 test file only constructs its own store on top of the migrated database.
 

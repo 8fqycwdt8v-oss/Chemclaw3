@@ -30,16 +30,11 @@ from typing import Any
 from chemclaw.core.config import settings
 from chemclaw.core.embeddings import embed_texts
 from chemclaw.core.identity_context import get_current_actor, get_current_roles
-from chemclaw.ingest.documents.binding import (
-    DocumentShareBinding,
-    DocumentShareError,
-    load_binding,
-)
+from chemclaw.ingest.documents.binding import DocumentShareBinding, load_binding
 from chemclaw.ingest.documents.index import (
     DocumentFilter,
     DocumentHit,
     DocumentIndex,
-    DocumentIndexError,
     DocumentText,
     default_document_index,
     require_schema_vector_width,
@@ -130,18 +125,28 @@ class ShareDocumentRetriever:
     async def retrieve(self, query: str, filters: dict[str, Any]) -> list[EvidenceChunk]:
         """Return the share's best-matching document chunks for `query`, best first.
 
-        **Never raises**, and it stays that way now that the sweep would survive it anyway. A
-        database the share index lives in being briefly unreachable must not take down answers the
-        knowledge graph could have given on its own — the call `WarehouseVectorRetriever` and
-        `VendoredDatasetRetriever` both made too.
+        **An empty list means this share was asked and had nothing to say; a failure is raised.**
+        The two are different facts about a deployment and `gather_evidence`'s docstring promises
+        the model that the first one means *nothing on file, never invented* — so a share whose
+        index is unreachable may not answer with the sentence that says the company has no
+        precedent. `fanout._sweep` is what catches it: the branch degrades through `degraded()`,
+        increments `chemclaw_evidence_source_failures_total{source=…}` and puts this source's name
+        in the sweep's `failed` channel, which is where `gather_evidence` reads it to decide
+        whether *any* source could be asked at all.
 
-        The *reason* this docstring used to give has expired and is corrected rather than deleted:
-        `gather_evidence` fanned its retrievers out through a plain `asyncio.gather` with no
-        `return_exceptions`, so one raising leg failed the whole question. It now sweeps them as
-        graph branches that each degrade on their own (`chemclaw.retrieval.fanout`), so a raise
-        here would cost this source and not the sweep. Answering emptily is still right — a source
-        that knows why it found nothing can log it, where a caught exception one layer up cannot —
-        but it is no longer the only thing standing between one outage and a dead turn.
+        **This method used to promise the opposite, and the promise outlived its reason.** It was
+        written when `gather_evidence` fanned its retrievers out through a plain `asyncio.gather`
+        with no `return_exceptions`, where one raising leg lost the whole question; catching
+        everything here was the only thing standing between one outage and a dead turn. The sweep
+        became per-source graph branches that each degrade alone, and this handler then discarded
+        the very distinction those branches were built to carry — measured, three raising sources
+        gave `sources_failed=['graph', 'sharedrive', 'vendored']` and three of this shape gave
+        `sources_failed=[]`. The narrower logging is not lost either: `_sweep` names the exception
+        type it caught, which is the part of it a chemist's answer never depended on.
+
+        What still returns `[]` is every case where this source *decided* it has nothing to
+        contribute — a blank query, an unentitled caller, a filter it cannot honestly honour. Those
+        are answers, not failures.
         """
         if not query.strip() or not self._entitled():
             return []
@@ -150,31 +155,7 @@ class ShareDocumentRetriever:
         # — returning documents anyway would be ignoring the filter.
         if filters.get("type"):
             return []
-        try:
-            hits = await self._search(query, filters)
-        # Ordered: `DocumentIndexError` is the narrower type and must be tested first. A backend
-        # that timed out is transient and worth a warning; a binding that is wrong is permanent and
-        # worth an error naming it as such.
-        except (DocumentIndexError, ConnectionError, OSError, RuntimeError):
-            logger.warning("%s: document search failed, returning no evidence", self.name)
-            logger.debug("%s: search failure detail", self.name, exc_info=True)
-            return []
-        except DocumentShareError:
-            logger.exception(
-                "%s: misconfigured, returning no evidence — every query will do this until it is "
-                "fixed",
-                self.name,
-            )
-            return []
-        except Exception:
-            # What makes "never raises" above true rather than aspirational. `_search` embeds the
-            # query through the provider seam, which raises its own client's exception types — an
-            # `openai.APIError` is in neither list above, so a rate-limited embedding endpoint
-            # escaped this leg and failed the whole turn. Naming that vendor's tree here would
-            # import it; the contract is the promise in the docstring, so it is written as one.
-            logger.exception("%s: unexpected search failure, returning no evidence", self.name)
-            return []
-        return hits
+        return await self._search(query, filters)
 
     async def read_document(self, doc_id: str) -> DocumentText | None:
         """Return one whole document of this share, or `None` when it cannot be read.

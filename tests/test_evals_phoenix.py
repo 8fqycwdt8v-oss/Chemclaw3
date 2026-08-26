@@ -225,3 +225,69 @@ def test_a_run_window_uses_the_latency_the_transcript_kept(archived: Path) -> No
     for run in client.experiments.runs:
         assert run["start_time"] == anchor
         assert (run["end_time"] - run["start_time"]).total_seconds() == 1.5
+
+
+def test_an_unmeasurable_signal_is_absent_rather_than_scored_zero(tmp_path: Path) -> None:
+    """A zero is a claim, and two of these evaluations were making it about probes nobody measured.
+
+    `_evaluations` wrote `1.0 if outcome.expected_tools_met else 0.0`, so `None` — "this probe
+    declares no expected tool", the correct state of 57 of the 258 committed probes and of 53 of
+    the bucket-C ones, where calling no tool *is* the right behaviour — scored identically to
+    `False`, "the tool existed and was not called". It wrote `1.0 if verdict == "served" else 0.0`,
+    so `ungraded` — "the judge's own reply hit the token ceiling" — scored identically to
+    `unserved`, "the system did not serve the asker". Measured, a bucket-C outcome with an ungraded
+    judgement published
+
+        expected_tools_met -> score 0.0 label none
+        judge_verdict      -> score 0.0 label ungraded
+
+    byte-identical in score to a probe that failed a user. The docstring calls those scores "the
+    number a second run should be compared on": the published `expected_tools_met` mean was capped
+    at 0.78 by the corpus's composition and a release adding bucket-C probes "regressed" it, while
+    a run whose judge timed out on twenty probes was indistinguishable from one that failed twenty
+    chemists. `live_judge` already keeps `ungraded` separate for the same reason — collapsing it
+    "mislabelled 65 of 190 probes and inflated the headline unserved rate from at most 22 to 87".
+
+    Phoenix's aggregate wants the evaluation *absent*. The labels stay on the run either way.
+    """
+    probe = load_probes(_PROBE_DIR)[-1]
+    directory = tmp_path / "transcripts"
+    directory.mkdir()
+    (directory / f"{probe.id}.json").write_text(
+        json.dumps(
+            {
+                "probe": {**probe.model_dump(), "expects_tools": [], "bucket": "C"},
+                "outcome": {
+                    "probe_id": probe.id,
+                    "section": probe.section,
+                    "persona": probe.persona,
+                    "bucket": "C",
+                    "question": probe.question,
+                    "answer": "answered from what the corpus holds",
+                    "answered": True,
+                    "tools_called": [],
+                    "expected_tools_met": None,
+                    "uncited_note_ids": [],
+                    "latency_seconds": 1.5,
+                },
+            }
+        )
+    )
+    (directory / "grades.json").write_text(
+        json.dumps([{"probe_id": probe.id, "verdict": "ungraded", "reason": "judge ran out"}])
+    )
+
+    client = _Client()
+    publish_run(directory, experiment_name="arm", client=client, probe_dir=_PROBE_DIR)
+    published = {e["name"]: e for e in client.experiments.evaluations}
+
+    assert "expected_tools_met" not in published, (
+        f"a probe that declares no expected tool published {published.get('expected_tools_met')}"
+    )
+    assert "judge_verdict" not in published, (
+        f"an ungraded probe published {published.get('judge_verdict')}"
+    )
+    # The signals that *were* measured still publish, so an absent evaluation is a scope and not a
+    # dropped run.
+    assert published["answered"]["score"] == 1.0
+    assert published["uncited_note_ids"]["score"] == 0.0

@@ -1,4 +1,4 @@
-"""Durable ELN sync (plan step 4.5): fetch → validate → index → PR-gate, on the bg queue.
+"""Durable ELN sync (plan step 4.5): fetch → validate → index → transcribe, on the bg queue.
 
 A thin Temporal wrapper over `chemclaw.ingest.eln.sync.sync_entries`: the activity wires the
 production
@@ -28,7 +28,7 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.core.config import settings
     from chemclaw.core.errors import ChemclawError
     from chemclaw.durable.registry import durable_activity, durable_workflow
-    from chemclaw.ingest.eln.adapter import RawEntry
+    from chemclaw.ingest.eln.adapter import RawEntry, fetch_was_truncated
     from chemclaw.ingest.eln.cursor import load_cursor, store_cursor
     from chemclaw.ingest.eln.ord import OrdReaction
     from chemclaw.ingest.eln.records import default_record_store
@@ -101,6 +101,13 @@ class _BoundedIngest:
     of ingest work no matter how large the backlog, and `truncated` tells the workflow to come
     back for the rest with the advanced cursor. Because the cap applies only past `since`, every
     kept chunk that was truncated strictly advances the cursor — the loop always makes progress.
+
+    **The source's own truncation counts too** (`fetch_was_truncated`), and this is the half that
+    was missing. This cap sees only what the fetch handed over, so a source that cut its page short
+    of what the caller asked for — a warehouse whose `fetch_limit` landed inside a block of rows
+    sharing one watermark — looked exactly like a source with nothing new: `has_more` was `False`,
+    the workflow stopped, and the guard below it was never reached. Asking the adapter turns that
+    into "come back", which either advances the cursor or trips the guard out loud.
     """
 
     def __init__(self, inner: IngestHalf, since: datetime, limit: int) -> None:
@@ -117,7 +124,7 @@ class _BoundedIngest:
         )
         overlap = [entry for entry in entries if entry.created_at <= self._since]
         new = [entry for entry in entries if entry.created_at > self._since]
-        self.truncated = len(new) > self._limit
+        self.truncated = len(new) > self._limit or fetch_was_truncated(self._inner)
         return overlap + new[: self._limit]
 
     def map_to_ord(self, raw: RawEntry) -> OrdReaction:

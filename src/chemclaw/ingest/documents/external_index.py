@@ -169,6 +169,15 @@ class ExternalVectorDocumentIndex(PostgresDocumentIndex):
                 [point_id(doc, chunking, ordinal) for doc, chunking, ordinal in keys],
             )
 
+    def _read_key(self) -> str:
+        """The stored spelling of the live configuration, for the inherited catalogue statements.
+
+        This class's `search_dense` ranks in the store rather than in the `_dense` statement, so
+        nothing reaches it today — which is exactly when a namespaced write and an un-namespaced
+        read are cheap to hold in step, rather than a scoped search that silently matches no row.
+        """
+        return self._stored_key(super()._read_key())
+
     def _stored_key(self, key: str) -> str:
         """The `embedding_key` a `document_chunks` row carries while its vector is in the store.
 

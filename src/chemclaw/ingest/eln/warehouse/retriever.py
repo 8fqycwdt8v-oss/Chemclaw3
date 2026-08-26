@@ -100,53 +100,34 @@ class WarehouseVectorRetriever:
     async def retrieve(self, query: str, filters: dict[str, Any]) -> list[EvidenceChunk]:
         """Return the warehouse's nearest reactions to `query`, best first.
 
-        **Every failure yields no evidence rather than raising**, so an unreachable warehouse does
-        not take down answers the graph and the fingerprint index could have given between them.
-        `ingest.sources.vendored_dataset` made the same call for the same reason.
+        **An empty list means the warehouse was asked and matched nothing; a failure is raised.**
+        `gather_evidence` tells the model that an absence of evidence means *nothing on file, never
+        invented*, so an unreachable lakehouse may not answer in the sentence reserved for a corpus
+        that genuinely holds no precedent. `fanout._sweep` catches it: the branch logs through
+        `degraded()`, counts `chemclaw_evidence_source_failures_total{source=…}`, and puts this
+        source's name in the sweep's `failed` channel — the one channel that can tell a chemist
+        "this answer is about less than the whole corpus".
 
-        The justification this used to carry has expired and is corrected rather than deleted:
+        **The justification this used to carry expired twice.** It was written when
         `gather_evidence` fanned its retrievers out through a plain `asyncio.gather` with no
-        `return_exceptions`, which made answering emptily the only thing preventing one outage from
-        failing the whole question. The sweep is now per-source graph branches that each degrade
-        alone (`chemclaw.retrieval.fanout`). Handling it here is still the better place — this is
-        where the difference between a transient outage and a missing driver is known, and the two
-        are logged differently below — but it is no longer load-bearing on its own.
+        `return_exceptions`, where a raising leg lost the whole question. Once the sweep became
+        per-source graph branches that each degrade alone, this handler was kept on the argument
+        that "this is where the difference between a transient outage and a missing driver is
+        known" — true of the *log*, and irrelevant to the *answer*, because the difference was then
+        discarded before the only channel that could carry it. Measured on the real `sweep_sources`:
+        raising sources gave `sources_failed=['graph', 'sharedrive']`, sources of this shape gave
+        `sources_failed=[]`. The classification the log wanted is now `_sweep`'s, which names the
+        exception type it caught.
 
-        The cases are logged differently on purpose. A transient failure is a WARNING, because
-        the next query may well succeed. A `BindingError` — a driver package the image does not
-        carry, a credential variable nobody set — is an ERROR: it will recur on every query until
-        someone changes the deployment, and it must not read as a quiet day for this source.
-        Anything else is an ERROR with its traceback: it is either the embedding provider's own
-        exception type or a defect here, and both need the stack the enumerated cases do not.
+        A blank query still returns `[]` without asking anything, because that is a decision this
+        source made rather than a failure it suffered.
         """
         if not query.strip():
             return []
-        try:
-            # `_chunks` is inside the guard too: it stats the knowledge tree per row
-            # (`suppress_ingested`), which is one more way this leg can fail on a bad day.
-            return await self._chunks(await self._search(query, filters))
-        except BindingError:
-            logger.exception(
-                "%s: misconfigured, returning no evidence — every query will do this until it is "
-                "fixed",
-                self.name,
-            )
-            return []
-        except (WarehouseQueryError, ConnectionError, OSError):
-            logger.warning("%s: warehouse search failed, returning no evidence", self.name)
-            logger.debug("%s: search failure detail", self.name, exc_info=True)
-            return []
-        except Exception:
-            # The backstop the enumerated list above cannot be, and the docstring's promise is only
-            # true with it. The embedding provider is reached from inside `_search`, and it raises
-            # its *own* client's exception types — an `openai.APIError` is none of the three above,
-            # so a rate-limited or briefly unreachable embedding endpoint escaped this retriever
-            # and, through a `gather` with no `return_exceptions`, failed the whole turn including
-            # the answer the knowledge graph had already produced. Enumerating a vendor's exception
-            # tree here would import it; the contract is "this leg yields no evidence, whatever
-            # happens", so that is what is written. Loud in the log, invisible to the other legs.
-            logger.exception("%s: unexpected search failure, returning no evidence", self.name)
-            return []
+        # `_chunks` is on the same path deliberately: it stats the knowledge tree per row
+        # (`suppress_ingested`), which is one more way this leg can fail on a bad day — and one
+        # more failure that must reach the sweep rather than read as an empty corpus.
+        return await self._chunks(await self._search(query, filters))
 
     async def _search(self, query: str, filters: dict[str, Any]) -> list[dict[str, Any]]:
         """Run the ranked search, embedding here or in the warehouse as the binding says."""

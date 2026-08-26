@@ -182,13 +182,27 @@ def _evaluations(
     aggregates a score across an experiment and a label only groups: "expected tools met" is the
     number a second run should be compared on, and a label would make that comparison a manual
     read of two lists.
+
+    **An unmeasurable signal is omitted, not scored zero**, and that follows from the same
+    sentence: a zero is a claim about the run, so a probe nobody could measure must not make one.
+    Two of these were making it. `1.0 if outcome.expected_tools_met else 0.0` scored `None` —
+    "this probe declares no expected tool", true of 57 of the 258 committed probes, 53 of them
+    bucket C where calling no tool is the *correct* behaviour — the same as `False`, "the tool
+    existed and was not called"; so the published aggregate was capped at 0.78 by the corpus's
+    composition and a release adding bucket-C probes read as a regression. `1.0 if verdict ==
+    "served" else 0.0` scored `ungraded` — the judge's own reply hit the token ceiling — the same
+    as `unserved`. `evals.live_judge` keeps `ungraded` a separate verdict precisely because
+    collapsing it "mislabelled 65 of 190 probes and inflated the headline unserved rate from at
+    most 22 to 87", and `evals.live.degradation_findings` already guards on `probe.expects_tools`.
+    The distinction survived in the labels and died in the numbers everything is compared on.
     """
-    yield {
-        "name": "expected_tools_met",
-        "annotator_kind": "CODE",
-        "score": 1.0 if outcome.expected_tools_met else 0.0,
-        "label": str(outcome.expected_tools_met).lower(),
-    }
+    if outcome.expected_tools_met is not None:
+        yield {
+            "name": "expected_tools_met",
+            "annotator_kind": "CODE",
+            "score": 1.0 if outcome.expected_tools_met else 0.0,
+            "label": str(outcome.expected_tools_met).lower(),
+        }
     yield {
         "name": "answered",
         "annotator_kind": "CODE",
@@ -216,13 +230,17 @@ def _evaluations(
         }
     if judgement is not None:
         verdict = str(judgement.get("verdict", "ungraded"))
-        yield {
-            "name": "judge_verdict",
-            "annotator_kind": "LLM",
-            "score": 1.0 if verdict == "served" else 0.0,
-            "label": verdict,
-            "explanation": str(judgement.get("reason") or "") or None,
-        }
+        # `ungraded` means the judge did not answer, which is a fact about the grading pass and not
+        # about the system under test. Publishing it as 0.0 put "the judge timed out" in the same
+        # column as "the chemist was not served".
+        if verdict != "ungraded":
+            yield {
+                "name": "judge_verdict",
+                "annotator_kind": "LLM",
+                "score": 1.0 if verdict == "served" else 0.0,
+                "label": verdict,
+                "explanation": str(judgement.get("reason") or "") or None,
+            }
 
 
 def _window(outcome: ProbeOutcome, at: datetime) -> tuple[datetime, datetime]:

@@ -18,6 +18,7 @@ The properties, in the order they would hurt:
    that would register `task` is absent.
 """
 
+import asyncio
 from typing import Any
 
 import pytest
@@ -26,6 +27,8 @@ from langchain_core.messages import AIMessage
 
 from chemclaw.agent.langgraph_agent import build_langgraph_agent
 from chemclaw.agent.profiles import AgentProfile
+from chemclaw.agent.state import turn_config, turn_input
+from chemclaw.core.config import settings
 
 
 def _model() -> GenericFakeChatModel:
@@ -192,3 +195,92 @@ def test_the_shipped_roster_passes_its_own_guard() -> None:
     """
     agent = build_langgraph_agent(model=_model(), profile=AgentProfile(name="default"))
     assert agent is not None
+
+
+class _FanOutModel(GenericFakeChatModel):
+    """A model whose first call spawns `helpers` helpers at once, and which then answers.
+
+    Shared by the parent graph and by every helper, because `_subagents` hands a helper the caller's
+    own chat model — so the call counter below is the *turn's*, which is exactly what the assertion
+    needs: the number this fake was asked for is what `model_calls` must end up reporting.
+    """
+
+    helpers: int = 2
+    calls: int = 0
+
+    def bind_tools(self, tools: Any, **kwargs: Any) -> Any:
+        """Accept the binding; the script does not reason about tools."""
+        return self
+
+    def _generate(
+        self, messages: Any, stop: Any = None, run_manager: Any = None, **kwargs: Any
+    ) -> Any:
+        from langchain_core.outputs import ChatGeneration, ChatResult
+
+        self.calls += 1
+        if self.calls == 1:
+            message = AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "task",
+                        "args": {"description": f"piece {i}", "subagent_type": "general-purpose"},
+                        "id": f"task-{i}",
+                        "type": "tool_call",
+                    }
+                    for i in range(self.helpers)
+                ],
+            )
+        else:
+            message = AIMessage(content=f"answer {self.calls}")
+        return ChatResult(generations=[ChatGeneration(message=message)])
+
+
+def _fan_out(helpers: int) -> tuple[Any, _FanOutModel]:
+    """The shipped posture — harness on — with a model that fans out to `helpers` at once."""
+    from chemclaw.agent.audit import NullAuditSink
+
+    model = _FanOutModel(messages=iter([]), helpers=helpers)
+    return (
+        build_langgraph_agent(
+            model=model, audit_sink=NullAuditSink(), profile=AgentProfile(name="default")
+        ),
+        model,
+    )
+
+
+@pytest.mark.parametrize("helpers", [1, 2, 3])
+def test_several_helpers_finishing_in_one_superstep_do_not_kill_the_turn(
+    monkeypatch: pytest.MonkeyPatch, helpers: int
+) -> None:
+    """Two `task` calls in one assistant message must answer, and must count what they spent.
+
+    **The whole failure lives in a superstep, so only a compiled graph shows it.** `task` returns
+    each helper's final state as a `Command` update, and `model_calls`/`loop_capped` deliberately
+    cross the subagent boundary (`agent/loop_cap.py`, regression 3) — so N helpers finishing
+    together deliver N values for one key. Under bare `UntrackedValue` that is
+    `InvalidUpdateError`, raised *after* every helper has run and spent its tokens: the chemist
+    loses the turn and the money. Measured on this graph before `agent/state.TurnTotal` existed:
+    `helpers=1` answered, `helpers=2` raised `At key 'model_calls'`.
+
+    Deterministic, not a race, and invited by the deployment: the chart ships
+    `CHEMCLAW_HARNESS_ENABLED: "true"` and the helper's own description tells the model to spawn
+    "one — or several at once".
+
+    **The count is asserted, not just the absence of the exception**, because `guard=False` also
+    stops the raise and quietly keeps one helper's total: the budget that is documented to span the
+    team would then be the largest branch's. The fake counts every call it was asked for, and the
+    two numbers must agree — one parent call to fan out, one per helper, one to answer.
+    """
+    monkeypatch.setattr(settings, "harness_enabled", True)
+    graph, model = _fan_out(helpers)
+
+    final = asyncio.run(graph.ainvoke(turn_input("split this in two"), config=turn_config()))
+
+    assert isinstance(final["messages"][-1], AIMessage)
+    assert final["messages"][-1].content, "the turn produced no answer"
+    assert model.calls == helpers + 2, "the fake was not driven the way this test assumes"
+    assert final["model_calls"] == model.calls, (
+        f"{model.calls} model calls were made and {final['model_calls']} were counted — a fan-out "
+        "that under-counts gives every helper its own share of one budget"
+    )
