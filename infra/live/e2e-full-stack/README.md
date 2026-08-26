@@ -19,6 +19,7 @@ Closes the gap `tasks/todo.md` used to name: *"the cross-repo sequence `Chemclaw
 | `rxnpredict` (forward/condition prediction, `fake_a`/`fake_c` doubles) | Chemclaw3-mcp | 8857 | this script |
 | `chem` (RDKit: resolve, stoichiometry, green metrics, render) | Chemclaw3-mcp | 8858 | this script |
 | `safety` (structural hazard / genotoxicity screen, ICH limits) | Chemclaw3-mcp | 8859 | this script |
+| `calc` (the physics behind this repo's calculator tools — *not* a connector) | Chemclaw3-mcp | 8860 | this script |
 | `mock-hpc-eln` (Nextflow-shaped HPC launcher + ELN/ORD data) | Chemclaw3_mock | 8090 | this script |
 | `mock-vendor` (building-block search/pricing MCP tool) | Chemclaw3_mock | 8091 | this script |
 | connectors, 4 Temporal workers, front door | this repo | 8810+, 9000-9003, 8000 | `infra/live/processes.sh` |
@@ -49,9 +50,31 @@ make live-e2e-full-stack-down
 ```
 
 Or drive it directly: `infra/live/e2e-full-stack/up.sh [up|down|status|restart <name>]`.
-`restart <name>` (`props`, `rxnpredict`, `mock-hpc-eln`, `mock-vendor`, or `ui-bff`) kills and
+`restart <name>` (`props`, `rxnpredict`, `chem`, `safety`, `calc`, `mock-hpc-eln`, `mock-vendor`,
+or `ui-bff`) kills and
 restarts one external process in place — the primitive the chaos round uses. Restarting a piece of
 this repo's own stack (a connector, a worker) is `infra/live/processes.sh restart <name>` instead.
+
+## The corpus is backfilled on bring-up, and it takes hours
+
+The last thing `up` does is start an `ElnSyncWorkflow` from the epoch. Without it the ORD half of
+the seeded data is **permanently invisible**: all ~10,000 exports share one mtime (the moment the
+repo was cloned) and carry older payload timestamps, so the incremental cursor passes them on its
+first firing and no later run can qualify them again. The bring-up only *starts* the drain and
+waits 120 s — a PR-gate proposal costs ~1.8 s, so the 4,251 ingestible records take a little over
+two hours — and the log lands in `.live/e2e-corpus-backfill.log`.
+
+`make live-data` is where a shortfall shows up, and it names the number:
+
+```sh
+make live-data                       # ... | corpus is reachable | FAIL | 1936/4251 ... |
+make live-data ARGS=--corpus-only    # the value checks alone, ~7s, no infrastructure needed
+```
+
+It also reports what can never arrive: 5,760 of the seeded ORD records (the flow-Suzuki screen)
+carry a coupling partner the source paper publishes only as a shorthand, so the adapter refuses
+them rather than inventing a structure. That is declared, not discovered — see
+`D-2026-08-18-a-corpus-is-not-reachable-because-it-is-on-disk`.
 
 ## Checking it is really wired up
 

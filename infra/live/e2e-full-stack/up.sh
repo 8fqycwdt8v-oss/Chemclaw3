@@ -312,7 +312,38 @@ up() {
   log "starting Chemclaw3_ui (BFF + SPA)"
   start_ui
 
+  backfill_corpus
+
   log "full stack up. UI: http://127.0.0.1:5173 · front door: http://127.0.0.1:${CHEMCLAW_LIVE_API_PORT:-8000} · logs: $LIVE_DIR"
+}
+
+# Make the seeded ELN/ORD corpus reachable at all.
+#
+# **Without this the ORD half of the mock's data is permanently invisible, and nothing says so.**
+# All ~10,000 ORD exports share one mtime — the moment the repo was cloned — and carry older
+# payload timestamps. The incremental sync's cursor passes that instant on its first scheduled
+# firing, and from then on no run can ever qualify them again. Chemclaw3 detects this exactly
+# right and loudly (`ingest/eln/adapter.py::warn_late_arrivals` aggregates one WARNING naming the
+# remedy); the gap was that this harness never took the remedy. The 2026-08-17 four-repo run
+# therefore graded the whole `grounded` probe suite — whose header names ORD record ids, operators
+# and counts — against a corpus holding **none** of it, while `/readyz` was green throughout.
+#
+# Runs the real `ElnSyncWorkflow` on the real broker from the epoch, via `cli/live_data`, and
+# reports what arrived. Non-fatal: a bring-up that got every process up should not be torn down
+# over an ingest, and the lane's own checks are where a bad corpus is supposed to go red.
+backfill_corpus() {
+  log "backfilling the seeded ELN/ORD corpus from the epoch (see cli/live_data)"
+  # A short wait on purpose: this only has to *start* the drain. Every proposal costs a PR-gate
+  # git branch and commit (~1.8 s/record measured), so the full corpus takes hours and a bring-up
+  # must not block on it. The workflow keeps running on the broker; `make live-data` reads how far
+  # it got and is the place a shortfall is supposed to show up.
+  if (cd "$REPO_ROOT" && uv run python -m chemclaw.cli.live_data --backfill-only \
+        --timeout 120 >"$LIVE_DIR/e2e-corpus-backfill.log" 2>&1); then
+    log "corpus backfill: $(grep -m1 '^Backfill:' "$LIVE_DIR/e2e-corpus-backfill.log" || echo done)"
+  else
+    log "WARNING: corpus backfill failed — see $LIVE_DIR/e2e-corpus-backfill.log."
+    log "         the ORD half of the corpus is unreachable until it succeeds; \`make live-data\` retries it"
+  fi
 }
 
 down() {

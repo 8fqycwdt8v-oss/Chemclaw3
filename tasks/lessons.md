@@ -519,6 +519,50 @@ it spends the whole retry budget proving the same thing.
 I also killed my own shell with `pkill -f` a second time, after writing the rule not to. Use
 `pgrep -f <pattern> | head -1` and kill the pid.
 
+## `x or default` erases a legitimate zero, and I shipped it into my own checker (2026-08-18)
+
+The first script written to verify the seeded corpus scored `abs((rx.yield_percent or -1) - want)`
+and reported 21 of 400 records as yield mismatches. There were none. `0.0 or -1` is `-1`, and 236
+of the 3,955 published Buchwald-Hartwig wells are exactly 0.00% — a *real* result meaning that
+combination failed, not a missing one.
+
+I nearly filed it as an adapter defect. What caught it was that 21/400 ≈ 5.3% matched the corpus's
+own 6% zero-yield rate too well to be a coincidence.
+
+**Rule:** never use `or` to default a numeric that can legitimately be zero — `is None`, always.
+And when a defect rate looks suspiciously close to some *proportion of the data*, suspect the
+measurement before the system. The lane now pins this invariant in a test, because the bug is one
+keystroke away and silent in both directions.
+
+## Measure the behaviour a fix depends on, even when the code reads clearly (2026-08-18)
+
+I re-targeted a probe (`gr-03`) from an unreachable dataset to a reachable one, on the assumption
+that *reachable* implies *findable*. Then I noticed the ingested notes were unmerged proposals — 39
+note files in the knowledge repo against 2,000+ ingested reactions — and that
+`FingerprintReactionRetriever._eligible` drops matches whose note is not on disk. That reads like
+the fix does not work.
+
+Running it showed **both** are true, depending on the path: an unfiltered `similar_reactions`
+returns 10 real wells, and the same search narrowed by `{"type": "reaction"}` returns 0. The probe
+names the unfiltered tool, so the re-target holds — but I only know that because I ran it, and the
+opposite conclusion was equally available from reading either function alone.
+
+**Rule:** a fix that depends on a system behaviour is not done until that behaviour is measured,
+however clearly the code reads. Two correct functions can compose into a consequence neither
+docstring states.
+
+## Read the bound; do not extrapolate the counter (2026-08-18)
+
+I estimated a corpus drain at ~43 chunks from `ingested=100` log lines and told the user so. The
+real number was ~108: `_BoundedIngest` caps a chunk at 100 *entries fetched*, not 100 ingested, so
+the drain walks all 10,011 exports rather than only the 4,251 that map. The counter I extrapolated
+from was reporting a different quantity than the one that governs the loop.
+
+Related, same session: I grepped a background log for an auth error, found none, and briefly
+concluded a test had failed for a different reason. The capture had been piped through `tail -12`
+and the traceback was cut. **Rule:** a conclusion from a truncated capture is not a measurement —
+re-run the specific thing.
+
 ## 2026-08-21 — a review is not finished until you have read the other side of the wire
 
 **The pattern.** I published a deep review of how information moves between agentic steps, and it
