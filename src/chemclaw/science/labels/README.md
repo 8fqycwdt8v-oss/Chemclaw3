@@ -4,9 +4,9 @@
 faceted precedent questions are asked of — per-species roles, the named reaction, the conditions,
 the structure features — plus the coverage statement every answer over it must carry.
 
-This is not the record of truth. For an ELN reaction that is the PR-gated note in git; for a patent
-corpus it is the source table. Both tables can be dropped and refilled, and the only thing lost is
-the time it takes.
+This is not the record of truth. For an ELN reaction that is its `reaction_records` row and the entry
+upstream it was transcribed from; for a patent corpus it is the source table. Both tables can be
+dropped and refilled, and the only thing lost is the time it takes.
 
 ## The two-phase row, and why
 

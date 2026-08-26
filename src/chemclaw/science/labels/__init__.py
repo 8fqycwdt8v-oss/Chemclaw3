@@ -2,8 +2,9 @@
 
 A reaction, in this tree, was three things and none of them queryable by facet: one `OrdReaction`
 value in flight, one `reaction_fingerprints` row holding DRFP bits and nothing else, and one
-PR-gated Markdown note. That is enough for "have we run a transformation like this", which is what
-DRFP answers, and it is enough for nothing else. "Which ligands did we use for Buchwald couplings",
+transcription — a `reaction_records` row, and a PR-gated Markdown note before that. That is
+enough for "have we run a transformation like this", which is what DRFP answers, and it is enough
+for nothing else. "Which ligands did we use for Buchwald couplings",
 "what conditions worked for a product like this", "how do we work this up" are all *facet*
 questions — they need per-species roles, a named reaction, conditions in columns and a substructure
 index — and `skills/reaction-search/SKILL.md` already records what happens when you ask them of a

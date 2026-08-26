@@ -25,6 +25,7 @@ from temporalio.client import (
 from chemclaw.core.config import settings
 from chemclaw.durable.eln_sync import ElnSyncWorkflow
 from chemclaw.durable.eval_drift import EvalDriftWorkflow
+from chemclaw.durable.label_sync import ReactionLabelWorkflow
 from chemclaw.durable.memory_jobs import (
     CampaignSynthesisWorkflow,
     OptimizationCampaignWorkflow,
@@ -86,9 +87,14 @@ class _FakeTemporal:
 
 
 def test_plan_covers_all_periodic_jobs() -> None:
-    """The ELN sync is the one always-on Schedule, planned exactly once."""
+    """The two Schedules a plain reaction corpus earns, each planned exactly once.
+
+    They travel together because they ask one question between them: an ingest source writes ELN
+    entries, and every entry it writes needs labelling. Everything else in this file is gated on a
+    setting or a second declaration.
+    """
     plan = planned_schedules()
-    assert {p.workflow for p in plan} == {ElnSyncWorkflow}
+    assert {p.workflow for p in plan} == {ElnSyncWorkflow, ReactionLabelWorkflow}
     assert len({p.schedule_id for p in plan}) == len(plan)  # unique ids
 
 
@@ -292,6 +298,36 @@ def test_the_eln_sync_is_planned_only_where_there_is_an_eln_to_sync(
     plan = planned_schedules()
     assert ElnSyncWorkflow in {p.workflow for p in plan}
     assert len({p.schedule_id for p in plan}) == len(plan)
+
+
+def test_the_labelling_drain_is_planned_wherever_there_is_a_corpus_to_label(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The gate that decided whether this feature ran at all, and got the question wrong.
+
+    It used to be `if label_policies():` — some enabled source declaring a `labels:` block. Exactly
+    one source in this tree declares one and it ships disabled, so on a stock deployment this
+    Schedule was never created and no ELN reaction was ever labelled by anything. A block says what
+    a source already *carries*; what earns the Schedule is having reactions at all.
+
+    Both halves are asserted, because the original concern is still real: a deployment with neither
+    an ingest source nor a corpus binding would otherwise ask the labelling server for its version
+    every hour and then label nothing.
+    """
+    from chemclaw.durable import schedules as schedules_module
+
+    monkeypatch.setattr(schedules_module, "active_ingest_source_names", list)
+    monkeypatch.setattr(schedules_module, "corpus_sources", dict)
+    assert ReactionLabelWorkflow not in {p.workflow for p in planned_schedules()}
+
+    # An ELN alone earns it, and this is the case the old gate refused: no `labels:` block anywhere.
+    monkeypatch.setattr(schedules_module, "active_ingest_source_names", lambda: ["eln-json"])
+    assert ReactionLabelWorkflow in {p.workflow for p in planned_schedules()}
+
+    # And so does a bulk corpus with no ingest half at all.
+    monkeypatch.setattr(schedules_module, "active_ingest_source_names", list)
+    monkeypatch.setattr(schedules_module, "corpus_sources", lambda: {"pistachio": object()})
+    assert ReactionLabelWorkflow in {p.workflow for p in planned_schedules()}
 
 
 def test_a_re_apply_does_not_resume_a_schedule_an_operator_paused() -> None:
