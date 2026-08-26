@@ -1313,9 +1313,14 @@ async def species_ranking(
             "populations ignore the zero-point and entropy differences between these forms"
         )
     if len(species) > ceiling:
+        # `len(species) - ceiling`, not the reverse: this branch only runs when the set is *over*
+        # the ceiling, so the old expression was always negative and told a chemist that "-3
+        # species were not computed". And the cut is `species[:ceiling]` — first N in the order the
+        # caller passed them — so "lowest-priority" described a prioritisation that never happened.
         warnings.append(
-            f"{len(species)} species were enumerated and the {ceiling - len(species)} lowest-"
-            f"priority were not computed; the populations describe the {ceiling} that were"
+            f"{len(species)} species were enumerated and only the first {len(considered)} were "
+            f"computed, in the order they were given; the populations describe those and not the "
+            f"{len(species) - ceiling} that were dropped"
         )
     ranked = sorted(
         (
@@ -1379,19 +1384,25 @@ async def bond_dissociation_survey(
     )
 
     results: list[DissociatedBond] = []
+    methods: list[str] = []
     for index, (atoms, bond, fragments) in enumerate(cleavages, start=1):
         progress(f"bond {index}/{len(cleavages)} ({bond}) of {smiles}")
+        # Keyword arguments deliberately: `BondCleavageSpec`'s own docstring argues that a
+        # positional payload is one field-order change away from computing a different bond than
+        # the caller named, and seven positionals here — with the symmetry map in slot seven — is
+        # the same hazard one call up.
         reaction = await reaction_energy(
             store,
             [smiles],
             list(fragments),
-            solvent,
-            temperature_k,
-            level,
-            dict.fromkeys([smiles, *fragments], 1),
+            solvent=solvent,
+            temperature_k=temperature_k,
+            level=level,
+            symmetry_numbers=dict.fromkeys([smiles, *fragments], 1),
             progress=no_progress,
             run=run,
         )
+        methods.append(reaction.method)
         energy = (
             reaction.delta_h_kcal if reaction.delta_h_kcal is not None else reaction.delta_e_kcal
         )
@@ -1409,7 +1420,14 @@ async def bond_dissociation_survey(
         results[0] = results[0].model_copy(update={"is_weakest": True})
     return BondDissociationSurvey(
         smiles=require_canonical_smiles(smiles),
-        method=settings.xtb_method,
+        # **The server's method, not this deployment's configured name** — the argument
+        # `reaction_energy` already carries, and this composite is on the same publication path.
+        # `settings.xtb_method` describes a calculation this process no longer runs, so a
+        # deployment whose env says `GFN2-xTB` while the server runs GFN1 published a
+        # `BondDissociationSurvey` — a Temporal wire type, PR-gated into the knowledge graph —
+        # asserting the wrong level of theory. The two sibling composites added alongside this one
+        # both read it off the result; this one alone regressed a fix already argued for.
+        method=methods[0] or settings.xtb_method,
         solvent=solvent,
         temperature_k=temperature_k or settings.xtb_thermo_temperature_k,
         mode="homolytic",

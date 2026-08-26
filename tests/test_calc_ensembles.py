@@ -293,7 +293,15 @@ def test_a_ranking_past_the_ceiling_reports_what_it_left_out(
 
     assert distribution.enumerated == 3
     assert len(distribution.species) == 2
-    assert any("were enumerated" in warning for warning in distribution.warnings)
+    # The *number*, not just the substring. Asserting `"were enumerated" in warning` is what let
+    # this ship reading "3 species were enumerated and the -1 lowest-priority were not computed":
+    # the branch runs only when the set exceeds the ceiling, so `ceiling - len(species)` was always
+    # negative. A chemist-facing count is worth pinning as a count.
+    truncation = next(w for w in distribution.warnings if "were enumerated" in w)
+    assert "1 that were dropped" in truncation, truncation
+    assert "-" not in truncation.replace("lowest-", ""), (
+        f"a negative count reached a chemist-facing warning: {truncation}"
+    )
 
 
 def test_an_empty_species_set_is_refused() -> None:
@@ -363,3 +371,34 @@ def test_a_fan_out_over_the_ceiling_refuses_before_it_computes_anything(
 
     assert server.count("relax_structure") == 0, "the refusal came after work had started"
     assert server.count("search_conformer_ensemble") == 0
+
+
+def test_a_published_survey_names_the_method_the_server_ran(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`BondDissociationSurvey.method` must come off the result, never off local config.
+
+    `settings.xtb_method` describes a calculation this process no longer runs — the physics is
+    `Chemclaw3-mcp`'s since `D-2026-08-16-the-physics-leaves-the-cache-stays`. A deployment whose
+    env says one method while the server runs another would publish a Temporal wire type, PR-gated
+    into the knowledge graph, asserting the wrong level of theory. `reaction_energy` carries the
+    argument in a comment and reads it off the result; this composite did not, alone among the
+    three added beside it.
+
+    The setting is moved rather than the server's answer, so the test fails for the right reason:
+    with the defect present the survey reports "WRONG-METHOD" because that is what the env said.
+    """
+    install(monkeypatch, FakeCalcServer())
+    monkeypatch.setattr(calc_settings, "xtb_method", "WRONG-METHOD")
+
+    survey = _run(
+        compose.bond_dissociation_survey(
+            InMemoryStore(),
+            "CCO",
+            [((0, 1), "C-C", ["[CH3]", "[CH2]O"])],
+        )
+    )
+
+    assert survey.method == "GFN2-xTB", (
+        f"the survey published {survey.method!r} rather than what the server ran"
+    )
