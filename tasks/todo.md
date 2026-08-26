@@ -18,12 +18,21 @@ with findings verified by execution before any fix lands.
 - Each themed cluster of fixes is its own PR per repo, merged before the next starts, so the branch
   never carries two unrelated arguments.
 
-## Phase 0 — baseline (blocking)
+## Phase 0 — baseline (done)
 
-- [ ] `uv sync` in Chemclaw3 and Chemclaw3-mcp; `npm ci` in Chemclaw3_ui
-- [ ] `dockerd`, `make up`, `make db-migrate` — Postgres/pgvector + Temporal actually running
-- [ ] Record baseline: `make lint type test` (both Python repos), `npm run lint/typecheck/test` (ui),
-      and **write down what skipped** — a skip count is part of the baseline
+- [x] `uv sync` in Chemclaw3 and Chemclaw3-mcp; `npm ci` in Chemclaw3_ui
+- [x] `dockerd`, `make up`, `make db-migrate` — Postgres/pgvector + Temporal running
+- [x] Baseline recorded, including what did **not** run:
+  - **Chemclaw3**: `ruff check` + `ruff format --check` green (677 files); `mypy --strict` green
+    (677 files). The full `pytest` did not finish locally — the box was carrying ~24 concurrent
+    review agents and load average sat above 25, and one run died with a pytest `INTERNALERROR`
+    under that load rather than a test failure. **CI is the authoritative gate for this repo's
+    suite in this pass**, and every fix is verified against its own suites locally before push.
+  - **Chemclaw3-mcp**: `ruff` green (201 files), `mypy --strict` green (71 files). `pytest` was
+    killed by its own timeout at ~11% under the same load (exit 143) — not a failure, and not a
+    pass either. Recorded as unrun rather than green.
+  - **Chemclaw3_ui**: `tsc -b` green, `eslint` green, `vitest` **424 passed / 36 files / 0 skipped**.
+    Playwright could not run — no Chromium binary in this environment — so the e2e tier is unrun.
 
 ## Phase 1 — review fan-out (fresh, no prior results consulted)
 
