@@ -100,7 +100,70 @@ Output is a structured finding list (file:line, claim, failure scenario, confide
 
 ## Review
 
-(to be written at the end)
+**Merged**: `Chemclaw3#245`, `Chemclaw3-mcp#25`, `Chemclaw3_ui#28`. 27 review sweeps, 10 fix teams.
+
+### What the pass was worth
+
+The defects that mattered were not the ones a linter finds. Nearly all of them share one shape,
+and it is worth stating because it predicts where to look next time: **a design argued correctly in
+prose, resting on a premise the code contradicts.**
+
+- `_check_classification`'s docstring is *right* that refusing to load is the only option that
+  cannot be wrong quietly — and a partition of nothing is trivially satisfied, so the manifest that
+  declared the least got the widest surface, unclassified.
+- `D-2026-08-25` removed the ELN PR-gate because "`record_from_ord_reaction` infers nothing", which
+  was true of that function and false of the adapter beside it, so 80 °C for 12 h was stored as
+  0 °C for 0.5 h.
+- The `Warehouse` protocol omitted `close()` on the written premise that halves live for the
+  process; they were rebuilt per tool call, 100 for 100.
+- The retrievers' own `except` clauses made `fanout`'s `failed` channel unreachable, so an outage
+  read as "no prior art".
+
+Mutation testing put a number on it: 22 of 31 killed, and **all eight survivors were defences
+argued at length in a docstring and asserted nowhere**. That is the single most useful sentence
+this pass produced, and it is a search key, not a slogan.
+
+### What was checked and found sound
+
+Reported because a review that only lists failures cannot be calibrated. The authorization spine
+held under adversarial probing (22 of 22 routes, a full JWT bypass battery, the redaction filter
+against 15 real `LogRecord`s, the prompt-injection envelope against seven forgery spellings). The
+RRHO/Boltzmann arithmetic re-derived to CODATA at 1e-13. The magic-number rule genuinely holds
+across 355 settings. `mcp_server_kit`'s four documented traps all held against a running server.
+The `props` corpus survived four independent cross-checks. D-011 re-measured exactly as documented.
+
+### Three findings the fix teams refuted or redirected, by measuring
+
+- The condenser was reported unmetered; it is not — a model built inside a tool body inherits the
+  graph's callbacks (3 x 55 spent, 165 metered). Only the verifier's judge was.
+- `pyexec`'s per-call isolation was reported broken; it is not — the *claim* was too absolute, so
+  the README now says what the boundary does not cover instead of a control being invented.
+- `CALCULATION_EPOCH` was expected to need a bump; it does not — Chemclaw3 folds its own epoch over
+  the server's `params_hash`, so the two compose and a bump would invalidate unrelated rows.
+
+### What I got wrong
+
+One validation change (refusing an empty `tools` list) broke tests in **three separate rounds**,
+two of them found by someone else — a reviewer working a different lens, then CI. The file that
+broke last was in my first grep's output; I read the hit, saw a variable passed through, and did
+not ask what it defaulted to. The rule is in `tasks/lessons.md`: when a change makes a
+previously-legal value illegal, search for what *produces* that value, not what names the type —
+and run the whole suite, because four of the five files that broke had nothing to do with
+connectors. I also pushed once with `ruff` red, having chained the gate into the same command as
+the commit so it ran too late to stop anything.
+
+### Left open, deliberately
+
+- `FingerprintReactionRetriever`'s `except FingerprintError: return []` — that type means a bad
+  caller anchor as well as a corrupt index, and separating them is wider than this pass.
+- An X-H rotor still cannot be *scanned*: the fix needs a dihedral in `AddHs` numbering and a
+  Chemclaw3-side change, so it spans two repositories.
+- `connector-validate` still cannot check a remote server's declared surface against what it
+  serves, and nothing bounds a connector's *response* while its request is capped (64 MB arrived
+  intact). Both are named in `D-2026-08-26-an-empty-allow-list-is-not-an-allow-list` so neither
+  reads as covered.
+- The unfixed remainder of the finding register (durable/, core/, cli/, X4's 769 deletable LOC,
+  X5's chart seam) is real and unactioned — it was scoped out, not disproved.
 
 ---
 
