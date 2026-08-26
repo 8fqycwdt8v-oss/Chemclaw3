@@ -1,9 +1,10 @@
 """The reaction-label index: a derived, versioned, rebuildable view of every reaction corpus.
 
-**Not the record of truth.** For an ELN reaction that is the PR-gated note in git; for a patent
-corpus it is the source table. Both tables here can be dropped and refilled from those, and the
-only thing lost is the time it takes. That is what lets the schema change without a migration
-argument, and why nothing reads a label as evidence without also reading its citation.
+**Not the record of truth.** For an ELN reaction that is its `reaction_records` row and the entry
+upstream it was transcribed from; for a patent corpus it is the source table. Both tables here can
+be dropped and refilled from those, and the only thing lost is the time it takes. That is what
+lets the schema change without a migration argument, and why nothing reads a label as evidence
+without also reading its citation.
 
 Two write paths, and keeping them apart is the invariant this module exists to hold:
 
@@ -61,6 +62,15 @@ class LabelIndex:
         Deterministic order, so a drain that dies mid-batch resumes on the same rows — and so a
         row the labeller cannot process is the *same* row on every attempt, which is exactly why
         the drain retries the batch item by item before giving up on it.
+
+        **`sources` is a scoping affordance for tests, and the drain must not use it.** It exists
+        because the durable index is one schema shared by every test file, so a test asserting the
+        `LIMIT` and ordering contract needs a row set it controls. `enrich.label_stale` passes the
+        sources that declared a `labels:` block once, and the result was that an ELN corpus — which
+        declares none — was never labelled under any configuration, while the pass reported
+        `has_more=False`. A `labels:` block says what a source *carries*; the policy is looked up
+        per row, and which rows are stale is not a function of it.
+        `tests/test_label_enrichment.py` pins that the drain reads every source.
         """
         raise NotImplementedError
 

@@ -47,10 +47,13 @@ _labeller = RxnLabelServer
 def label_policies() -> dict[str, LabelPolicy]:
     """Every enabled source that declares a `labels:` block, by name.
 
-    Also what `durable/schedules.py` asks to decide whether this job earns a Schedule at all. That
-    is deliberately not a `labels_enabled` setting: `CHEMCLAW_DATA_SOURCES` plus a declared block
-    already answers the question, and a second flag could only restate it or contradict it — the
-    argument `core/config/sources.py` makes, and the shape `share_sources()` already has.
+    What a source *carries*, looked up per row by the drain — never which sources the drain reads.
+    A source absent from this map is labelled too, under `_DERIVE_EVERYTHING`, which is the
+    ordinary case: only one source in this tree declares a block at all.
+
+    It is deliberately not a `labels_enabled` setting: `CHEMCLAW_DATA_SOURCES` plus a declared
+    block already answers what this asks, and a second flag could only restate it or contradict it
+    — the argument `core/config/sources.py` makes, and the shape `share_sources()` already has.
     """
     return {m.name: m.labels for m in active_manifests() if m.labels is not None}
 

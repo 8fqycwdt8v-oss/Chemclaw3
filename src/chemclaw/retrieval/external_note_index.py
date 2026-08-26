@@ -56,7 +56,11 @@ import logging
 
 from chemclaw.core.config import settings
 from chemclaw.retrieval.vector_index import IndexHit, NoteRecord, PostgresNoteIndex
-from chemclaw.retrieval.vectors.base import VectorPoint, VectorStore
+from chemclaw.retrieval.vectors.base import (
+    VectorPoint,
+    VectorStore,
+    stored_embedding_key,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -82,8 +86,9 @@ class ExternalVectorNoteIndex(PostgresNoteIndex):
         One function so the write and the read cannot disagree — a second spelling of "which
         configuration made this row" is how they stop agreeing, which is the argument
         `ingest/documents/external_index.py::point_id` makes about addresses.
+        `stored_embedding_key` states the rule and what it does not catch.
         """
-        return f"{embedding_key}@{self._collection}"
+        return stored_embedding_key(embedding_key, settings.vector_store_provider, self._collection)
 
     async def fingerprints(self, embedding_key: str) -> dict[str, str]:
         """Fingerprints of rows this store actually holds vectors for."""
