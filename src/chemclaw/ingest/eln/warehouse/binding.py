@@ -412,22 +412,41 @@ def _refuse_derived_hypothesis(field: FieldBinding | None) -> None:
     a free-text ELN, and the error below names it rather than leaving an operator with a refusal and
     no alternative.
 
-    A plain `path:` with no transform is untouched: a column called OBJECTIVE is the chemist's own
-    field, which is precisely what this field is for.
+    **Only the transforms that can put text in the field which is not in the cell.** `regex` carves
+    a substring out of prose — the case this exists for; `value_map` substitutes one string for
+    another; `default` supplies one where the source had none. Whitespace and case normalisation
+    cannot misattribute anything, and refusing them was a real over-reach: an `OBJECTIVE` column
+    with `{strip: {}}` on it is the chemist's own field with its padding trimmed, which this
+    docstring called untouched while the code failed the worker at startup and accused the binding
+    of carving intent out of prose.
     """
     if field is None:
         return
-    derived = [step for binding in _chain(field) for step in binding.transform]
+    derived = sorted(
+        {
+            name
+            for binding in _chain(field)
+            for step in binding.transform
+            for name in step
+            if name in _FABRICATING_TRANSFORMS
+        }
+    )
     if derived:
         raise BindingError(
-            "reaction maps 'hypothesis' through a transform chain "
-            f"({sorted({name for step in derived for name in step})}), which would derive a run's "
+            "reaction maps 'hypothesis' through "
+            f"{derived}, which would derive a run's "
             "stated intent rather than read it. A hypothesis carved out of the protocol text is "
             "indistinguishable downstream from one the chemist wrote, so it must not enter the "
             "record. Map 'hypothesis' to the column that holds it and nothing else; if the intent "
             "lives inside the free-text protocol, map that text to 'procedure_text' and let the "
             "turn-time protocol digest read it, where it is marked as read and quoted."
         )
+
+
+# The transforms that can put text in a field which the source cell does not contain. Normalising
+# ones (`strip`, `upper`, `lower`) and the numeric/date coercions are absent deliberately: they
+# cannot invent or relocate a statement of intent, which is the only thing this rule protects.
+_FABRICATING_TRANSFORMS = frozenset({"regex", "value_map", "default"})
 
 
 def _chain(field: FieldBinding) -> list[FieldBinding]:

@@ -613,19 +613,38 @@ def test_a_binding_may_name_the_intent_column_but_not_carve_one_out_of_prose() -
     this maps. And the fallback chain is checked too, because a rule about a field that stops at its
     first binding is a rule with a documented way around it.
     """
-    plain = _binding()
-    plain["ingest"]["reaction"]["hypothesis"] = {"path": "root.OBJECTIVE"}
-    # A column holding the stated aim is exactly what this field is for.
-    ingest = load_binding(plain).ingest
-    assert ingest is not None and ingest.reaction["hypothesis"].path == "root.OBJECTIVE"
+    # A column holding the stated aim is exactly what this field is for — including with its
+    # padding trimmed. Only transforms that can put text in the field which the cell does not hold
+    # are refused; a rule that also failed `strip` would reject a chemist's own OBJECTIVE column at
+    # worker startup, accusing the binding of carving intent out of prose.
+    allowed_shapes = (
+        {"path": "root.OBJECTIVE"},
+        {"path": "root.OBJECTIVE", "transform": [{"strip": {}}]},
+    )
+    for allowed in allowed_shapes:
+        plain = _binding()
+        plain["ingest"]["reaction"]["hypothesis"] = allowed
+        ingest = load_binding(plain).ingest
+        assert ingest is not None and ingest.reaction["hypothesis"].path == "root.OBJECTIVE"
 
     for label, field in (
-        ("a transform", {"path": "root.NOTES", "transform": [{"regex": {"pattern": "Aim:(.+)"}}]}),
         (
-            "a fallback",
+            "regex carves a substring out of prose",
+            {"path": "root.NOTES", "transform": [{"regex": {"pattern": "Aim:(.+)"}}]},
+        ),
+        (
+            "default invents one outright",
+            {"path": "root.X", "transform": [{"default": {"value": "routine"}}]},
+        ),
+        (
+            "value_map substitutes one",
+            {"path": "root.X", "transform": [{"value_map": {"map": {"a": "b"}}}]},
+        ),
+        (
+            "and a fallback is part of the chain",
             {
                 "path": "root.X",
-                "fallback": {"path": "root.NOTES", "transform": [{"strip": {}}]},
+                "fallback": {"path": "root.NOTES", "transform": [{"regex": {"pattern": "(.+)"}}]},
             },
         ),
     ):

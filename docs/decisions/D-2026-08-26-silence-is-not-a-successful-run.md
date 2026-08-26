@@ -77,10 +77,26 @@ it and are unaffected.
 It goes at `ingest.sources.registry._build_ingest_half` because that is the **one construction point
 both production readers share** — `make_data_source` for the sync, `active_ingest_sources` for the
 miner. Putting the rule in either caller means the other silently does not get it, which is the shape
-of the defect being fixed. A record-creation time is when the entry was written rather than
-necessarily when the run was performed; that is weaker than a chemist-entered date, it is what
-`ordering_caveat` already exists to describe, and it licenses no causality — `memory.progression`'s
-rule that a date proves sequence and never response is untouched.
+of the defect being fixed.
+
+**The filled-in date carries its provenance, and the first draft of this decision did not.** A
+record-creation time is when the entry was *written*, not necessarily when the run was performed —
+and sometimes three weeks of bench work transcribed in one afternoon. That draft asserted the
+weakening was "what `ordering_caveat` already exists to describe". Reviewing the change against the
+code found it was not: that function distinguished *missing* dates from present ones and knew
+nothing about where a present one came from, so a filled-in date turned `Progression.is_timeline()`
+true and the campaign note claimed "Runs in the order they were performed" over an afternoon of
+typing. **A value the source could not supply reading as one it did — this decision's own subject,
+reintroduced by its own fix**, and asserted in prose rather than checked, which is the second failure
+this repository keeps a rule about.
+
+So `OrdReaction.date_source` records whether the date was stated or filled in, `DatedIngest` stamps
+`"entry"`, and `ordering_caveat` says "Runs in the order they were **recorded** … not proof of the
+order they were run" for such a series. That is the `DigestSource` pattern a third time in one
+change, and the reason it keeps recurring is that it is the same problem each time.
+
+None of it licenses causality: `memory.progression`'s rule that a date proves sequence and never
+response is untouched, and is more load-bearing here than before.
 
 **3 · The prose reader is asked for the run's intent, and marks it as read.**
 
@@ -98,7 +114,11 @@ the causal fabrication the design refuses.
 
 **4 · A binding may name the column holding the intent; it may not carve one out of prose.**
 
-`IngestBinding` refuses a transform chain on `hypothesis`, through fallbacks as well. The vocabulary
+`IngestBinding` refuses the transforms that can put text in `hypothesis` which the source cell does
+not hold — `regex`, `value_map`, `default` — through fallbacks as well. Normalising transforms
+(`strip`, `upper`, `lower`) are allowed: an `OBJECTIVE` column with its padding trimmed is the
+chemist's own field, and refusing *every* transform, as the first draft did, failed the worker at
+startup while accusing that binding of carving intent out of prose. The vocabulary
 has a `regex` transform, so a site whose objective lives inside the protocol text could have written
 `hypothesis: {path: root.PROTOCOL_TEXT, transform: [{regex: ...}]}` — loading, validating, ingesting
 and rendering a `Tested:` line indistinguishable from a chemist's own words. One half of a codebase

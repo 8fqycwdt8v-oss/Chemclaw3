@@ -18,7 +18,7 @@ a relation would let an ELN write an edge into the graph that cites it.
 """
 
 import re
-from typing import Literal
+from typing import Literal, assert_never
 
 from chemclaw.ingest.eln.ord import (
     Component,
@@ -109,21 +109,37 @@ def record_from_ord_reaction(reaction: OrdReaction) -> ReactionRecord:
     )
 
 
-# Every outcome a source can state, spelled rather than derived from `.value`. Written out because
-# the frontmatter type is a `Literal`: a fourth `OutcomeClass` member does not silently become a new
-# frontmatter value, it fails to type-check here, which is where the decision belongs.
-#
-# **`SUCCESS` is in the map now, and that is the point of the change beside it.** It used to be
-# omitted so that a record would not assert a success the ELN never claimed — necessary while the
-# field defaulted to SUCCESS, and the cost was that a run the chemist *did* record as successful was
-# indistinguishable in the frontmatter from one nobody had assessed. With `outcome_class` optional
-# (`D-2026-08-26-silence-is-not-a-successful-run`) silence is carried by `None` and a stated success
-# can be written as what it is.
-_STATED_OUTCOMES: dict[OutcomeClass, Literal["success", "failure", "inconclusive"]] = {
-    OutcomeClass.SUCCESS: "success",
-    OutcomeClass.FAILURE: "failure",
-    OutcomeClass.INCONCLUSIVE: "inconclusive",
-}
+def _stated_outcome(
+    outcome: OutcomeClass | None,
+) -> Literal["success", "failure", "inconclusive"] | None:
+    """The frontmatter spelling of an outcome a source stated, or `None` when it stated none.
+
+    **A `match` rather than a dict lookup, so the exhaustiveness claim is one mypy actually makes.**
+    The frontmatter type is a `Literal` and this mapping is where a new `OutcomeClass` member has to
+    be given a spelling. Written as a `dict[OutcomeClass, Literal[...]]` that intent was a comment
+    and nothing more: mypy does not exhaustiveness-check a dict literal's keys, so a fourth member
+    would have type-checked clean and raised `KeyError` here at runtime — inside
+    `record_from_ord_reaction`, outside the `ElnMappingError` path that rejects one entry and
+    continues, so it would have aborted the whole sync rather than one row. `assert_never` moves
+    that back to where the comment always claimed it was.
+
+    **`SUCCESS` is spelled here now**, where it used to be omitted so a record would not assert a
+    success the ELN never claimed. That was necessary while the field defaulted to SUCCESS, and it
+    cost the distinction between a run the chemist recorded as successful and one nobody assessed.
+    With `outcome_class` optional (`D-2026-08-26-silence-is-not-a-successful-run`) silence is
+    carried by `None`, and a stated success can be written as what it is.
+    """
+    match outcome:
+        case None:
+            return None
+        case OutcomeClass.SUCCESS:
+            return "success"
+        case OutcomeClass.FAILURE:
+            return "failure"
+        case OutcomeClass.INCONCLUSIVE:
+            return "inconclusive"
+        case _:
+            assert_never(outcome)
 
 
 def _conditions(reaction: OrdReaction) -> ProcessConditions | None:
@@ -144,9 +160,7 @@ def _conditions(reaction: OrdReaction) -> ProcessConditions | None:
         time_h=reaction.time_h,
         yield_percent=reaction.yield_percent,
         purity_percent=reaction.purity_percent,
-        outcome=(
-            None if reaction.outcome_class is None else _STATED_OUTCOMES[reaction.outcome_class]
-        ),
+        outcome=_stated_outcome(reaction.outcome_class),
         major_impurity=(impurity.name or impurity.smiles) if impurity else None,
         impurity_area_percent=impurity.area_percent if impurity else None,
     )

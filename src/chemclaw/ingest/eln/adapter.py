@@ -167,10 +167,19 @@ class DatedIngest:
 
     **What the date then means, and why the note must not overclaim.** A record-creation time is
     when the entry was written, not necessarily when the run was performed — usually the same day,
-    occasionally not. That is a weaker fact than a chemist-entered experiment date, and it is
-    exactly the weakening `ordering_caveat` already exists to describe. It does not license
-    causality either: `memory.progression`'s rule that a date proves sequence and never response is
-    untouched, and is if anything more load-bearing here.
+    and sometimes three weeks of bench work transcribed in one afternoon. That is a weaker fact than
+    a chemist-entered experiment date, so the record is stamped `date_source="entry"` and
+    `ordering_caveat` says so above the table.
+
+    An earlier draft of this asserted that `ordering_caveat` "already exists to describe" the
+    weakening. It did not: it distinguished *missing* dates from present ones and knew nothing about
+    where a present one came from. A filled-in date that says nothing about its own provenance turns
+    `Progression.is_timeline()` true and makes the note claim "Runs in the order they were
+    performed" over an afternoon of typing — the exact shape of defect this whole change is about,
+    reintroduced by the fix for it. The stamp is what makes the sentence true rather than hoped for.
+
+    It licenses no causality either: `memory.progression`'s rule that a date proves sequence and
+    never response is untouched, and is if anything more load-bearing here.
     """
 
     def __init__(self, inner: ElnAdapter) -> None:
@@ -202,4 +211,6 @@ class DatedIngest:
         # debugger and in a test. Validation is deliberately not re-run — the only field changed is
         # a date the model already accepts as optional, and re-validating would re-do the structural
         # checks `sync_entries` runs immediately afterwards anyway.
-        return reaction.model_copy(update={"performed_at": raw.created_at.date()})
+        return reaction.model_copy(
+            update={"performed_at": raw.created_at.date(), "date_source": "entry"}
+        )

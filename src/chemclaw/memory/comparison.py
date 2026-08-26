@@ -58,9 +58,21 @@ def ordering_caveat(series: Progression) -> str:
     undated runs parked at the end, and no time information at all — where the "changed vs
     previous" column compares neighbours in an arbitrary listing and must not be read as "what
     was tried next".
+
+    **A fourth thing cuts across the first two: where a date came from.** A source with no
+    experiment-date column is dated from the entry's creation timestamp by the ingest seam
+    (`adapter.DatedIngest`), which is when the record was *written*. Ordering by that is the best
+    available and is usually right, but a batch transcribed in one sitting orders by nothing — so
+    the sentence has to say which kind of timeline it is rather than claim the stronger one.
     """
     undated = series.undated()
     if series.is_timeline():
+        if entry := series.entry_dated():
+            return (
+                f"Runs in the order they were recorded. {_runs(len(entry))} carry no experiment "
+                "date, so the order is the order the entries were written, not proof of the order "
+                "they were run — a batch transcribed in one sitting carries no sequence at all."
+            )
         return "Runs in the order they were performed."
     if len(undated) < len(series.steps):
         return (
@@ -73,6 +85,11 @@ def ordering_caveat(series: Progression) -> str:
         "**No run carries a date**, so this is a stable id listing, not a timeline — the changes "
         "column compares neighbouring rows, which is not evidence of what was tried next."
     )
+
+
+def _runs(count: int) -> str:
+    """Render a run count for a sentence: `1 run`, or `n runs`, without a stray plural."""
+    return "1 run" if count == 1 else f"{count} runs"
 
 
 def drop_empty_columns(candidates: list[tuple[str, list[str]]]) -> list[tuple[str, list[str]]]:

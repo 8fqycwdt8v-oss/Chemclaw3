@@ -469,3 +469,52 @@ def test_both_ingest_readers_get_the_same_normalisation(
     assert [type(half) for half in active] == [DatedIngest], (
         "active_ingest_sources: the corpus miner's entry point, and the one that validates nothing"
     )
+
+
+def test_an_entry_dated_series_does_not_claim_it_was_ordered_by_experiment() -> None:
+    """A filled-in date must say where it came from, or the note overclaims with it.
+
+    `DatedIngest` uses the entry's *creation* timestamp, which is when the record was written. That
+    is the best ordering available and usually right — and a batch of three weeks' bench work
+    transcribed in one afternoon carries no sequence at all. Unstamped, it turns
+    `Progression.is_timeline()` true and the campaign note asserts "Runs in the order they were
+    performed" over an afternoon of typing: a value the source could not supply reading as one it
+    did, which is the exact defect `D-2026-08-26-silence-is-not-a-successful-run` is about,
+    reintroduced by the fix for it.
+    """
+    from chemclaw.ingest.eln.adapter import DatedIngest
+    from chemclaw.ingest.eln.ord import Component, OrdReaction, Role
+    from chemclaw.memory.comparison import ordering_caveat
+    from chemclaw.memory.progression import progression
+
+    class _Adapter:
+        async def fetch_new_entries(self, since: datetime) -> list[RawEntry]:
+            return []
+
+        def map_to_ord(self, raw: RawEntry) -> OrdReaction:
+            return OrdReaction(
+                reaction_id=raw.entry_id,
+                provenance="test",
+                inputs=[Component(smiles="CC", role=Role.REACTANT)],
+                outcomes=[Component(smiles="CCO", role=Role.PRODUCT)],
+                performed_at=raw.payload.get("run_on"),
+            )
+
+    seam = DatedIngest(_Adapter())
+    written = datetime(2026, 5, 4, 9, 0, tzinfo=UTC)
+    filled = seam.map_to_ord(RawEntry(entry_id="E1", created_at=written, payload={}))
+    stated = seam.map_to_ord(
+        RawEntry(entry_id="E2", created_at=written, payload={"run_on": date(2026, 4, 1)})
+    )
+    assert filled.date_source == "entry", "the seam stamps what it filled in"
+    assert stated.date_source == "stated", "and leaves the source's own date alone"
+
+    second = seam.map_to_ord(RawEntry(entry_id="E3", created_at=written, payload={}))
+    entry_series = progression([filled, second])
+    assert entry_series.is_timeline(), "it is still an ordering — the weaker kind, not none"
+    caveat = ordering_caveat(entry_series)
+    assert "order they were recorded" in caveat
+    assert "not proof of the order they were run" in caveat
+    assert "order they were performed." not in caveat, "the strong claim must not survive"
+
+    assert ordering_caveat(progression([stated])) == "Runs in the order they were performed."

@@ -32,7 +32,7 @@ from chemclaw.ingest.eln.ord import (
     StepKind,
 )
 from chemclaw.ingest.eln.ord_adapter import OrdFormatError, OrdJsonAdapter
-from chemclaw.ingest.eln.record import record_from_ord_reaction
+from chemclaw.ingest.eln.record import _stated_outcome, record_from_ord_reaction
 from chemclaw.ingest.eln.records import (
     InMemoryReactionRecordStore,
     PostgresReactionRecordStore,
@@ -563,3 +563,22 @@ def test_the_conditions_block_round_trips_through_the_stored_form() -> None:
         assert from_pg is not None and from_pg.conditions == record.conditions
 
     asyncio.run(_run())
+
+
+def test_a_new_outcome_class_member_fails_the_type_check_rather_than_the_sync() -> None:
+    """The mapping to frontmatter is exhaustive, and it is mypy that says so — not a comment.
+
+    `_stated_outcome` used to be a `dict[OutcomeClass, Literal[...]]` whose comment claimed a fourth
+    member "fails to type-check here". mypy does not exhaustiveness-check a dict literal's keys, so
+    it would have type-checked clean and raised `KeyError` at runtime inside
+    `record_from_ord_reaction` — outside the `ElnMappingError` path that rejects one entry and
+    continues, aborting the whole sync over one row.
+
+    Asserted here as behaviour: every member the enum declares has a spelling, so adding one without
+    a spelling cannot be silent. The compile-time half is `assert_never`, verified by adding a
+    member and watching mypy name it.
+    """
+    for member in OutcomeClass:
+        spelled = _stated_outcome(member)
+        assert spelled == member.value, f"{member} has no frontmatter spelling"
+    assert _stated_outcome(None) is None

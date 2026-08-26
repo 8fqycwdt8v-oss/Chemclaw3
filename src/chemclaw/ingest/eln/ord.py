@@ -18,6 +18,7 @@ purely additive procedural overlay (it never feeds the reaction SMILES / fingerp
 
 from datetime import date
 from enum import StrEnum
+from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -97,6 +98,11 @@ class ReactionStep(BaseModel):
     duration_h: float | None = Field(default=None, ge=0.0)
 
 
+# Where a record's `performed_at` came from. "stated" is the source's own experiment date; "entry"
+# is the entry's creation timestamp, filled in by the seam when the source has no date column.
+DateSource = Literal["stated", "entry"]
+
+
 class OutcomeClass(StrEnum):
     """How an experiment turned out (gap KNW-3).
 
@@ -163,6 +169,18 @@ class OrdReaction(BaseModel):
     # fallback ordering when the product->reactant graph is cyclic. Optional because a source may
     # genuinely not record it, never because we do not care.
     performed_at: date | None = None
+    # **Where `performed_at` came from, because the two sources are not equally strong.** A date the
+    # source stated is when the run was performed. The seam's fallback (`adapter.DatedIngest`) uses
+    # the entry's *creation* timestamp, which is when the record was written — usually the same day,
+    # and sometimes three weeks of bench work transcribed in one afternoon.
+    #
+    # Without this the weaker fact is indistinguishable from the stronger one, and the consequence
+    # is not cosmetic: `Progression.is_timeline()` goes true and the campaign note asserts "Runs in
+    # the order they were performed" over what may be one afternoon of typing. That is precisely the
+    # failure this field's own ADR is about (`D-2026-08-26-silence-is-not-a-successful-run`) — a
+    # value the source could not supply reading as one it did — so the fallback carries its
+    # provenance, exactly as `condense.DigestSource` does for a value read out of prose.
+    date_source: DateSource = "stated"
     # Outcome quality beyond yield (gap KNW-2). `purity_percent` is the headline assay/area figure
     # for the product; `impurities` is the profile behind it. Both optional — an early-route entry
     # may report yield only — and both deliberately excluded from the reaction SMILES and every

@@ -58,3 +58,28 @@ run that stated none, which is the honest answer.
 cannot diff the components, because `reaction_records` keeps them only as prose in the body. The two
 artifacts together answer the story, and `experiment-progression` already starts from the note, so
 this is a seam to decide on rather than a break to patch.
+
+## Review round 2 — a code review of the whole diff, and what it caught
+
+Three findings, all real, all mine; all fixed in the same branch.
+
+1. **The date fallback was the very defect this change is about.** `DatedIngest` put the entry's
+   *write* time into `performed_at` with nothing marking it, so `is_timeline()` went true and the
+   campaign note asserted "Runs in the order they were performed" over what may be one afternoon of
+   transcription. Both the docstring and the ADR said `ordering_caveat` "already exists to describe"
+   the weakening; it did not — it only ever distinguished *missing* dates. Fixed at the source:
+   `OrdReaction.date_source`, stamped by the seam, carried through `ProgressionStep`, and a caveat
+   that says "in the order they were **recorded** … not proof of the order they were run".
+2. **The binding guard was too broad.** It refused *any* transform on `hypothesis`, so an
+   `OBJECTIVE` column with `{strip: {}}` — the case its own docstring called untouched — failed at
+   worker startup, accused of carving intent out of prose. Narrowed to the three transforms that can
+   put text in the field the cell does not hold: `regex`, `value_map`, `default`.
+3. **An exhaustiveness claim that was only a comment.** `_STATED_OUTCOMES[...]` said a fourth
+   `OutcomeClass` member "fails to type-check here"; mypy does not check a dict literal's keys, so it
+   would have type-checked clean and raised `KeyError` inside `record_from_ord_reaction` — outside
+   the reject-and-continue path, aborting the sync over one row. Now a `match` with `assert_never`,
+   **verified by adding a fourth member and watching mypy name it**, then reverting.
+
+The pattern across all three: *prose asserting a protection the code did not implement.* Two of them
+were in text I wrote in the same change that exists to stop exactly that. Re-verified after: lint,
+`mypy --strict`, 4768 passed / 3 skipped with Postgres up, seven validators green.
