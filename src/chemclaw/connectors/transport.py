@@ -26,6 +26,13 @@ connector still opens in parallel, each in its own task.
 A failed open leaves the session not-connected and its tool set empty, which gives exactly the
 semantics wanted: the connector contributes no tools this turn, the turn proceeds without them, and
 the *next* turn tries again — so a connector that comes back needs no restart to be picked up.
+
+**And a call that times out is cancelled rather than merely abandoned.** The manifest's
+`request_timeout` bounds this side's wait; on its own it bounds nothing on the connector's, because
+the SDK raises locally and sends no `notifications/cancelled` while this session stays open for the
+rest of the turn. `core.mcp_session.cancel_on_timeout` is what closes that, and it is installed
+here on the same line of reasoning that made the session per-turn in the first place: work nobody
+is waiting for is work a pod is spending on nobody.
 """
 
 import asyncio
@@ -37,6 +44,8 @@ from types import TracebackType
 from langchain_core.tools import BaseTool
 from langchain_mcp_adapters.sessions import Connection, create_session
 from langchain_mcp_adapters.tools import load_mcp_tools
+
+from chemclaw.core.mcp_session import cancel_on_timeout
 
 logger = logging.getLogger(__name__)
 
@@ -184,6 +193,11 @@ class HeldConnectorSession:
         try:
             async with create_session(self._spec.connection) as session:
                 handshake = await session.initialize()
+                # A tool call that outlives the manifest's `request_timeout` must tell the server
+                # to stop, not merely stop waiting: this session stays open for the rest of the
+                # turn, so an abandoned call otherwise runs to completion on the connector's pod
+                # with nobody holding the answer (`core.mcp_session.cancel_on_timeout`).
+                cancel_on_timeout(session)
                 self._tools = _stamped(
                     _allowed(await load_mcp_tools(session), self._spec.allowed_tools),
                     connector=self._spec.name,
