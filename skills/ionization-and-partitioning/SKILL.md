@@ -7,6 +7,7 @@ description: >-
   while aromatic nitrogen is covered.
 tools:
   - predict_pka
+  - predict_pka_ensemble
   - predict_solubility
 ---
 
@@ -54,6 +55,28 @@ reach for a different tool and present its output as a pKa.
 
 Say which of the three cases you are in every time: acid site, aryl-nitrogen pKaH, or
 refused. They are different numbers about different equilibria.
+
+**3. `predict_pka_ensemble` is not the workaround for rule 2.** The careful route
+(`D-2026-08-26-a-pka-is-a-macrostate-not-a-microstate`: two CREST searches, every
+protonation site ranked by energy instead of offered by a rule, both macrostates summed
+over their microstates) is a real improvement in two specific places — *which* proton the
+answer is about, and how well each side is sampled — and it changes **nothing** about the
+aliphatic-amine failure, because that failure is the continuum solvent and not the
+enumeration. Better sampling of a species whose solvation model cannot represent it
+produces a better-sampled number with the same −0.17 ranking ability.
+
+It differs from `predict_pka` in what it does about that: it **warns** where the fast tool
+**refuses**, because it reports the free energy and the microstate ranking alongside the
+pKa and those are real. That warning is the refusal. Reporting the pKa from a result
+carrying it, without saying that this class is not predictable here, is exactly the
+workaround the paragraph above forbids — arrived at by a different route.
+
+Read its warnings before its number, every time. The others each mark a case where the
+arithmetic succeeded and means less than it looks like it does: a carbanion winner (CREST
+ranks C-H sites too, and the calibration is fitted on heteroatom acids), several
+microstates within RT (then the molecule has no single conjugate base and a site-resolved
+pKa is a different question), a site that could not be perceived, a non-aqueous solvent,
+a search deeper than the calibration's, or a pKa outside the fitted span.
 
 ## What it is genuinely good for
 
