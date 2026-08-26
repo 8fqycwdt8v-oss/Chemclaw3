@@ -628,3 +628,25 @@ def test_a_deprotonation_off_the_fitted_domain_says_so(monkeypatch: pytest.Monke
 
     assert result.site_smiles is not None
     assert any("came off nitrogen" in warning for warning in result.warnings)
+
+
+def test_a_search_is_given_the_samplers_budget_not_a_hessians(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The client may not abandon a calculation the server is still running.
+
+    Unreachable until the binary shipped, because every search refused in milliseconds. It is
+    reachable now, and the numbers did not fit: this repository's own measurement of a 33-atom
+    conformer search is 1142 s against a 900 s default read bound, while the server allows one
+    14400 s. A client bound shorter than the server's saves nothing — the server computes to
+    completion, the answer is discarded, and the chemist is told the service timed out.
+    """
+    server = install(monkeypatch, FakeCalcServer())
+    store = InMemoryStore()
+
+    _run(compose.conformer_ensemble(store, "CCO"))
+
+    # Two sessions: the embed takes the default, the search takes the sampler's. Both halves are
+    # the point — widening the bound for *every* call would drop the one that catches a mute host.
+    assert server.timeouts == [None, calc_settings.calc_sampling_timeout_seconds]
+    assert calc_settings.calc_sampling_timeout_seconds > calc_settings.calc_server_timeout_seconds

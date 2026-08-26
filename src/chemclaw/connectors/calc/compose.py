@@ -522,6 +522,11 @@ async def searched_members(
                 "effort": effort or settings.crest_effort,
                 "solvent": solvent,
             },
+            # The one call class that outgrew the default read bound. Measured here, a 33-atom
+            # conformer search is 1142 s against a 900 s default — so before this, a search on
+            # anything drug-sized would have been abandoned by the client while the server ran it
+            # to completion, and the chemist would have been told the service timed out.
+            timeout_seconds=settings.calc_sampling_timeout_seconds,
         ),
         f"{search} of {smiles}",
     )
@@ -906,6 +911,9 @@ async def interaction(
                 "effort": effort or settings.crest_effort,
                 "solvent": solvent,
             },
+            # A wall-potential search over a *pair* is the other CREST call, and it is the more
+            # expensive of the two — same budget, same reason.
+            timeout_seconds=settings.calc_sampling_timeout_seconds,
         ),
         f"binding modes of {smiles_a} and {smiles_b}",
     )

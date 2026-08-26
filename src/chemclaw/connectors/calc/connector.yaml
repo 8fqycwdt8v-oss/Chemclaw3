@@ -204,22 +204,24 @@ jobs:
     inline_wait_seconds: 20
     summary: pKa from sampled conformers and every protonation microstate (CREST + GFN2-xTB).
     description: >-
-      The careful pKa, and a different calculation from `predict_pka` rather than a slower setting
-      of it. CREST removes (or adds) every proton in turn, optimises each product and ranks them,
-      and both sides of the equilibrium are conformer-sampled — so the site is decided by energy
-      rather than by a structural rule, and the free energy is a sum over every microstate that
-      carries population instead of one drawn form. Minutes to hours; expect a job id.
+      A different calculation from `predict_pka` rather than a more accurate one, and the
+      difference is *which question it answers*. CREST removes (or adds) every proton in turn,
+      optimises each product and ranks them, so the site is decided by energy rather than by a
+      structural rule, and both macrostates are summed over every microstate that carries
+      population. Minutes to hours; expect a job id.
 
-      Reach for it where the fast predictor is weakest: several ionisable centres, an unusual acid,
-      an intramolecular hydrogen bond, or a flexible molecule whose conformers differ in how they
-      stabilise the anion. For a first pass, or for ranking close analogues against each other,
-      `predict_pka` is the right tool — it is cached, sub-second and separately calibrated.
+      **Not the more accurate tool.** Over the same 31 reference compounds: RMSE 1.31 (acids) and
+      1.05 (bases) against `predict_pka`'s 1.34 and 1.16, ranking slightly worse, for two
+      metadynamics searches against a cached millisecond lookup. Choose it when the **site** is
+      the question — a polyfunctional molecule where "the pKa" is ambiguous, a proton no rule
+      offers (imide, sulfonamide, C-H), or where the number of populated microstates is itself the
+      finding. For a value, or to rank close analogues, use `predict_pka`.
 
-      Reports which proton the answer is about (`site_smiles`, perceived from the winning geometry)
-      and how many microstates lie within RT of the best; more than one means the molecule has no
-      single conjugate base. **Read `warnings` before the number** — the aliphatic-amine limit is
-      unchanged, because it is the solvent model rather than the enumeration, and this job warns
-      where `predict_pka` refuses. Load `ionization-and-partitioning` before using the value.
+      Reports `site_smiles` (perceived from the winning geometry) and how many microstates lie
+      within RT of the best; more than one means there is no single conjugate base. **Read
+      `warnings` first** — the aliphatic-amine limit is unchanged, being the solvent model rather
+      than the enumeration, and this job warns where `predict_pka` refuses. Load
+      `ionization-and-partitioning` before using the value.
     params_model: chemclaw.connectors.calc.specs:MicrostatePkaJobSpec
     precondition: chemclaw.science.calc.solvents:require_supported_solvents
     # Two CREST searches, so the same unbounded-cost gate the other two sampling jobs carry.

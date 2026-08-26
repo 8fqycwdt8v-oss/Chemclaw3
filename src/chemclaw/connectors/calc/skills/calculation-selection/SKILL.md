@@ -65,16 +65,14 @@ calculation; this skill assumes that decision is already made.
   returning a pKa. Load
   `ionization-and-partitioning` before using the value for anything — an acid site wins
   silently over a basic one, and individual predictions miss by up to two units.
-- **A pKa that has to be right** → `predict_pka_ensemble` (two CREST searches, minutes to
-  hours, so expect a job id). Not a slower setting of `predict_pka` but a different
-  calculation: nothing is enumerated by rule — CREST removes or adds *every* proton in
-  turn, optimises each product and ranks them — and both sides of the equilibrium are
-  conformer-sampled, so the free energy is a sum over every microstate that carries
-  population rather than one drawn form. Reach for it when the fast predictor is weakest:
-  several ionisable centres, an unusual acid, an intramolecular hydrogen bond, or a
-  flexible molecule whose conformers differ in how they stabilise the anion. Stay with
-  `predict_pka` for a first pass and for ranking close analogues — it is cached and
-  sub-second, and a consistent method matters more than an absolute value there.
+- **Which proton is the pKa about?** → `predict_pka_ensemble` (two CREST searches, minutes
+  to hours, so expect a job id). Not a slower setting of `predict_pka` and **not a more
+  accurate one**: measured over the same 31 reference compounds it scores RMSE 1.31 (acids)
+  and 1.05 (bases) against `predict_pka`'s 1.34 and 1.16, and ranks them slightly worse. What
+  it does differently is enumerate nothing by rule — CREST removes or adds *every* proton in
+  turn, optimises each product and ranks them — so it reports **which** site won, considers
+  sites no rule offers (an imide, a sulfonamide, a C-H acid), and says how many microstates
+  are populated. Choose it when that is the question; choose `predict_pka` when a value is.
   It reports **which** proton (`site_smiles`, perceived from the winning geometry) and how
   many microstates lie within RT of the best: more than one means the molecule has no
   single conjugate base, and a site-resolved pKa is then a different question. The same two

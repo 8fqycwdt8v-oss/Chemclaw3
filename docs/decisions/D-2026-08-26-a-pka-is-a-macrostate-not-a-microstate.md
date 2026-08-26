@@ -54,13 +54,57 @@ Fitted through this exact pipeline — conformer search of the neutral, microsta
 ionised form, macrostate free energies, both in ALPB water at 298.15 K, `effort="quick"`, crest
 3.0.2 / xtb 6.7.1 / tblite. Reference values are standard aqueous pKa at 25 °C.
 
-<!-- MEASURED-RESULTS -->
+| branch | n | span (exp. pKa) | slope | intercept | R² | RMSE | Spearman | worst residual |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| acid (O-H, S-H) | 19 | 0.66 – 15.9 | 0.31221 | −32.98637 | 0.911 | **1.31** | 0.940 | 2.54 (2,2,2-trifluoroethanol) |
+| base (aromatic/aryl N) | 12 | 0.72 – 9.11 | 0.32316 | −31.71601 | 0.798 | **1.05** | 0.888 | 2.47 (2-chloropyridine) |
+
+**The result that decides how this should be described: it is not more accurate.** `predict_pka` was
+run over the *same* compounds — a comparison that did not previously exist, because its published
+±1.6 came from ten acids that are not these nineteen:
+
+| | this composite | `predict_pka` |
+| --- | --- | --- |
+| 19 acids | RMSE **1.31**, Spearman 0.940 | RMSE **1.34**, Spearman 0.965 |
+| 12 aryl-N bases | RMSE **1.05**, Spearman 0.888 | RMSE **1.16**, Spearman 0.944 |
+
+The two are indistinguishable on error, and the fast predictor *ranks better* on both branches. The
+comparison is also biased in this composite's favour and still comes out level: its slope and
+intercept were fitted **in-sample** on exactly these compounds, while `predict_pka`'s were fitted on
+a different set entirely — so the honest reading is that two CREST searches per molecule buy no
+accuracy over a cached millisecond lookup.
+
+**Why it ships anyway, stated as narrowly as the measurement allows.** Three things it does that the
+fast predictor cannot, none of which is "a better number":
+
+- **It names the proton.** `site_smiles` comes back perceived from the winning geometry —
+  `[O-]c1ccccc1`, `Cc1cc[nH+]cc1`, `[NH3+]c1ccc(Cl)cc1`. A pKa without its site is unusable on
+  anything polyfunctional, and the rule-based path cannot report one it did not consider.
+- **It considers sites no rule offers.** CREST removes every proton in turn, so an imide, a
+  sulfonamide or a C-H acid is *ranked* rather than refused — with a warning that the mapping to a
+  pKa is then an extrapolation off this calibration's O-H/S-H domain.
+- **It reports the microstate count.** 7 protomers of 4-nitroaniline within the search, 5 of
+  4-chloroaniline; where more than one lies within RT the molecule has no single conjugate base and
+  the macroscopic number is the only one that means anything.
+
+**Two limits the numbers make concrete.** The residual is *class*-structured rather than random —
+acetic acid (pKa 4.76) sits at ΔG 125.6 kcal/mol while 4-nitrophenol (7.15) sits at 123.2, an
+inversion across families that a single line cannot absorb — and it is not conformational: splitting
+the acid residuals by flexibility gives rigid −0.16 against flexible +0.17, so the missing anion
+conformational entropy is worth 0.33 units of the 1.31. What is left is the continuum solvent, which
+is why `DEFERRED.md` points the next step at explicit solvation rather than at more sampling.
+
+Perception declines rather than guesses, and that is visible in the set: 4-nitroaniline's protomer
+came back with no `site_smiles` at all, because bond-order assignment on a delocalised nitro cation
+is ambiguous. The warning says so; nothing invents a structure.
 
 ## Consequences
 
-- A pKa that has to be right has a route that does not depend on a rule having offered the right
-  site. The site it used is reported (`site_smiles`, perceived from the winning geometry) and is
-  frequently the interesting half of the answer.
+- The question "which proton is this pKa about?" is answerable for the first time, and on a
+  polyfunctional molecule that is the half of the answer a number cannot carry. What is **not**
+  bought is accuracy, and every description of this job says so — the manifest, both skills and the
+  result's own warnings — because "the careful pKa" is exactly the phrase a reader would otherwise
+  translate into "the more accurate one".
 - **The aliphatic-amine limit survives**, and that is worth being explicit about: CREST fixes the
   *enumeration*, and the aliphatic-amine failure is the *solvent model*. Over 13 reference amines
   the computed basicity correlates with experiment at Spearman -0.17, because aqueous aliphatic

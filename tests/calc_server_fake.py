@@ -242,6 +242,9 @@ class FakeCalcServer:
         minimum, which is the sequence `relax_to_minimum`'s escape needs to be visible.
         """
         self.calls: list[tuple[str, dict[str, Any]]] = []
+        # The read bound each session was opened with, in order — `None` where the caller took the
+        # default. See `install`.
+        self.timeouts: list[float | None] = []
         self._saddle_first = saddle_first
         self.overrides: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {}
         # Where the composites' geometries land once `install` has wired it in. On the fake rather
@@ -614,7 +617,11 @@ def install(monkeypatch: pytest.MonkeyPatch, server: FakeCalcServer) -> FakeCalc
     """
 
     @asynccontextmanager
-    async def _session() -> AsyncIterator[FakeCalcServer]:
+    async def _session(timeout_seconds: float | None = None) -> AsyncIterator[FakeCalcServer]:
+        # Recorded rather than ignored: the read bound is a *property of the call*, and a sampling
+        # call that inherits a Hessian's bound is abandoned by the client while the server runs it
+        # to completion. A fake that dropped the argument could not see that.
+        server.timeouts.append(timeout_seconds)
         yield server
 
     monkeypatch.setattr("chemclaw.connectors.calc.remote.calc_session", _session)

@@ -55,7 +55,6 @@ class PkaCalibration(BaseModel):
     fitted_effort: Literal["quick", "normal", "extensive"] = "quick"
 
 
-
 class CalculatorSettings(BaseSettings):
     """How this repository orchestrates, budgets and caches a calculation it no longer runs.
 
@@ -101,11 +100,17 @@ class CalculatorSettings(BaseSettings):
     # the macrostate free energy of each side. Refitting is a measurement, not a tuning: see
     # `docs/decisions/D-2026-08-26-a-pka-is-a-macrostate-not-a-microstate.md` for the reference set
     # and the statistics these numbers came from.
+    #
+    # Acid: 19 neutral O-H/S-H acids spanning pKa 0.66-15.9. R^2 0.911, RMSE 1.31, Spearman 0.940,
+    # worst residual 2.54 (2,2,2-trifluoroethanol).
     pka_ensemble_acid: PkaCalibration = PkaCalibration(
-        slope=0.0, intercept=0.0, uncertainty=0.0, fitted_from=0.0, fitted_to=0.0
+        slope=0.31221, intercept=-32.98637, uncertainty=1.31, fitted_from=0.66, fitted_to=15.9
     )
+    # Base: 12 aromatic/aryl nitrogen bases spanning pKaH 0.72-9.11. R^2 0.798, RMSE 1.05,
+    # Spearman 0.888, worst residual 2.47 (2-chloropyridine, where the ortho chlorine's steric and
+    # inductive effect on the cation is what a continuum sees least well).
     pka_ensemble_base: PkaCalibration = PkaCalibration(
-        slope=0.0, intercept=0.0, uncertainty=0.0, fitted_from=0.0, fitted_to=0.0
+        slope=0.32316, intercept=-31.71601, uncertainty=1.05, fitted_from=0.72, fitted_to=9.11
     )
     # How many distinct species one ranking may cover — tautomers, microstates, stereoisomers.
     # RDKit will happily enumerate twenty tautomers of a purine; each one is a separate CREST
@@ -233,6 +238,16 @@ class CalculatorSettings(BaseSettings):
     # guidance now says duration is not the property it promises. A durable job's activity bounds
     # the same wait again with its own timeout and heartbeat.
     calc_server_timeout_seconds: float = Field(default=900.0, gt=0)
+    # **The same bound for a CREST search, which is a different order of cost.** 900 s was
+    # unreachable while the binary shipped in no image: every sampling call refused in
+    # milliseconds. It ships now (`D-2026-08-26-a-sampler-nobody-ships-is-a-refusal-with-a-manual`)
+    # and the numbers no longer fit — this repository's own measurement of a 33-atom conformer
+    # search is **1142 s**, past the bound above, while the server allows one 14400 s
+    # (`CHEMCLAW_CREST_TIMEOUT_SECONDS`). A client bound shorter than the server's does not save
+    # anything: the server keeps computing, the answer is discarded, and the caller is told the
+    # service timed out. Matched to the server's own ceiling so the *server* is what bounds a
+    # search, with `crest_timeout_seconds` the one number to change.
+    calc_sampling_timeout_seconds: float = Field(default=14400.0, gt=0)
     # The molecule `connectors/calc/remote.py::remote_version` derives a key *for* when it asks the
     # server what version a calculator is on. `calculation_key` answers an identity, and an identity
     # is of something — but the `calc_version` it reports is a property of the programs and the
