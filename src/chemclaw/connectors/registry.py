@@ -183,7 +183,8 @@ def server_tools_module(connector: str) -> ModuleType | None:
     `make template-validate` (does a template step pass arguments the tool takes) — had opposite
     answers to the same question, and only one of them was right.
 
-    Both callers skip an endpoint-less bundle before asking (that is how `qm`, which is jobs-only,
+    Both callers skip an endpoint-less bundle before asking (that is how `results`, which is
+    jobs-only,
     never reaches here), so `None` means the narrower thing: a bundle that declares an endpoint and
     has no module behind it.
 

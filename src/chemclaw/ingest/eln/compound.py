@@ -72,7 +72,7 @@ def compound_dependencies(note: Note) -> list[Note]:
     `compound_id` is derived from the canonical structure, the target is fully determined by the
     SMILES the note already carries — so the note can honestly write `[[compound-<hash>]]` and the
     PR-gate makes the link resolve, instead of the note avoiding the link because the target might
-    not exist yet (`connectors/qm/knowledge.py` documented exactly that avoidance).
+    not exist yet (the removed DFT bundle's note builder documented exactly that avoidance).
 
     Returns an empty list for a note with no `compound_smiles` or one that does not link its
     compound. Re-proposing a compound note that is already merged is a no-op: it renders

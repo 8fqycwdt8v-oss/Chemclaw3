@@ -621,9 +621,9 @@ def test_every_named_secret_is_a_real_settings_field() -> None:
 
     No credential was actually exposed by it, because the entry was dead rather than wrong. The
     hazard is the next rename: renaming a listed field in `config.py` would leave a real secret
-    reaching the log with the suite still green. (`hpc_api_token`, `hpc_artifact_store_token` and
-    `temporal_api_key` were the three that no other test touched at all; since 2026-08-26
-    `tests/test_credentials.py` drives two of them through their real consumers.)
+    reaching the log with the suite still green. (`temporal_api_key` was one of three that no other
+    test touched at all; since 2026-08-26 `tests/test_credentials.py` drives it through its real
+    consumer, and the other two went with the HPC tier.)
 
     Deliberately one-directional *here*. It does not assert that every secret-looking field is
     listed, because "secret-looking" is exactly the name-pattern heuristic the inventory's own

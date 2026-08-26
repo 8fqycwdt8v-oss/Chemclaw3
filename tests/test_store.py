@@ -103,7 +103,7 @@ def test_the_epoch_reaches_every_calculator_not_just_the_one_that_needed_it() ->
     fix of ours. Since `D-2026-08-16-the-physics-leaves-the-cache-stays` those keys are built on
     the calculation server, which is why `CALCULATION_EPOCH` is the one constant both repositories
     must change in the same PR; what is checked here is that `build` still folds it in, for the
-    keys this repository does derive (the QM job's, `connectors/qm/cache.py`).
+    keys this repository does derive (`CalculationKey.build`, which folds in `CALCULATION_EPOCH`).
     """
     structure = Structure(
         elements=[1, 1], positions=[[0.0, 0.0, 0.0], [0.0, 0.0, 0.74]], smiles="[H][H]"

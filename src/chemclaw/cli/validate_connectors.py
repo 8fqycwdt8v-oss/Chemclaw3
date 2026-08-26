@@ -129,7 +129,8 @@ def _served_tool_problems(manifest: ConnectorManifest) -> list[str]:
     attributes — or a core PR-gate tool. That is D-029's actual shape; an undeclared MCP tool was
     never the third option it looked like.
 
-    A bundle with no server module is not a violation: `qm` is job-only, and its capability is a
+    A bundle with no server module is not a violation: `results` is job-only, and its capability
+    is a
     Temporal workflow behind `jobs:` rather than an MCP surface. A bundle that *has* one and no
     `server` object in it is a different thing entirely, and used to return the same empty list:
     the rule then passed without ever asking what is served. All six bundles with an endpoint
@@ -145,7 +146,8 @@ def _served_tool_problems(manifest: ConnectorManifest) -> list[str]:
     if manifest.endpoint is None:
         return []
     try:
-        # `server_tools_module` returns None only for "this bundle has no server module" — `qm` is
+        # `server_tools_module` returns None only for "this bundle has no server module" —
+        # `results` is
         # job-only, its capability a Temporal workflow behind `jobs:`. A *transitive*
         # ModuleNotFoundError (a missing rdkit, a renamed dependency) means the bundle is broken and
         # comes back out of it, because swallowing that made the rule pass vacuously for exactly the

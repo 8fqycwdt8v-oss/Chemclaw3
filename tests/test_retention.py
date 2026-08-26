@@ -80,7 +80,7 @@ def test_the_calculation_cache_is_never_pruned_by_age() -> None:
     """Evicting a cached result silently converts a cache hit into a recomputation (D-011).
 
     That is a cost policy question (LRU by access, or by compute cost), not a retention clock —
-    an age cutoff could quietly re-run an expensive HPC job.
+    an age cutoff could quietly re-run an expensive conformer search.
     """
     assert "calculation_results" not in _PRUNABLE
 
@@ -285,7 +285,7 @@ def test_an_undelivered_push_back_event_survives_the_window() -> None:
 
     The module docstring justifies pruning `session_events` with "a **consumed** push-back mailbox
     row is spent", and the sweep was a bare age cutoff with no `consumed_at` predicate. So a
-    `job_completed` that outlived the window was destroyed before anyone read it: a QM or HPC run
+    `job_completed` that outlived the window was destroyed before anyone read it: a long search
     longer than the retention window — exactly the jobs this channel exists for — lost its
     completion, the session waited on it forever, and the harness "awaiting job" todo never
     flipped. It also deleted the `system-audit-integrity` and `system-eval-drift` alerts, which are

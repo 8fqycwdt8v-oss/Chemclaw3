@@ -46,7 +46,7 @@ def test_dev_mode_gate_is_open(monkeypatch: pytest.MonkeyPatch) -> None:
     """With enforcement off, every tool is callable (local dev, no tenant)."""
     monkeypatch.setattr(settings, "entra_required", False)
     monkeypatch.setattr(settings, "tool_authz_default", "deny")  # ignored in dev
-    authorize_tool("compute_dft_energy")  # does not raise
+    authorize_tool("sample_conformers")  # does not raise
 
 
 def test_allow_default_lets_ungated_tools_through(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -57,18 +57,18 @@ def test_allow_default_lets_ungated_tools_through(monkeypatch: pytest.MonkeyPatc
 
 def test_gated_tool_requires_a_permitted_role(monkeypatch: pytest.MonkeyPatch) -> None:
     """A gated tool is allowed for a role-holder and denied for a user lacking the role."""
-    _enforced(monkeypatch, tool_role_gates={"compute_dft_energy": ["process-chemist"]})
+    _enforced(monkeypatch, tool_role_gates={"sample_conformers": ["process-chemist"]})
 
     ok = set_current_identity("u-1", frozenset({"process-chemist"}))
     try:
-        authorize_tool("compute_dft_energy")  # holds the role → allowed
+        authorize_tool("sample_conformers")  # holds the role → allowed
     finally:
         reset_current_identity(ok)
 
     denied = set_current_identity("u-2", frozenset({"reader"}))
     try:
         with pytest.raises(AuthorizationError):
-            authorize_tool("compute_dft_energy")
+            authorize_tool("sample_conformers")
     finally:
         reset_current_identity(denied)
 
@@ -89,17 +89,19 @@ def test_write_tools_are_gated_by_default(monkeypatch: pytest.MonkeyPatch) -> No
 
     denied = set_current_identity("u-6", frozenset({"reader"}))
     try:
-        with pytest.raises(AuthorizationError, match="not authorized to use compute_dft_energy"):
-            authorize_tool("compute_dft_energy")
-        with pytest.raises(AuthorizationError):
+        with pytest.raises(
+            AuthorizationError, match="not authorized to use propose_knowledge_note"
+        ):
             authorize_tool("propose_knowledge_note")
+        with pytest.raises(AuthorizationError):
+            authorize_tool("record_confirmed_answer")
         authorize_tool("find_notes")  # read tools stay open under 'allow'
     finally:
         reset_current_identity(denied)
 
     ok = set_current_identity("u-7", frozenset({"process-chemist"}))
     try:
-        authorize_tool("compute_dft_energy")  # privileged role → allowed
+        authorize_tool("propose_knowledge_note")  # privileged role → allowed
     finally:
         reset_current_identity(ok)
 
@@ -127,12 +129,12 @@ def test_explicit_operator_gate_overrides_the_default_write_gate(
     """A `tool_role_gates` entry for a write tool replaces the built-in privileged-role gate."""
     _enforced(
         monkeypatch,
-        tool_role_gates={"compute_dft_energy": ["reader"]},
+        tool_role_gates={"sample_conformers": ["reader"]},
         entra_privileged_roles="process-chemist",
     )
     token = set_current_identity("u-9", frozenset({"reader"}))
     try:
-        authorize_tool("compute_dft_energy")  # operator opened it to 'reader' → allowed
+        authorize_tool("sample_conformers")  # operator opened it to 'reader' → allowed
     finally:
         reset_current_identity(token)
 
@@ -140,7 +142,7 @@ def test_explicit_operator_gate_overrides_the_default_write_gate(
 def test_dev_mode_leaves_write_tools_open(monkeypatch: pytest.MonkeyPatch) -> None:
     """With enforcement off, the built-in write gates are no-ops (local dev unchanged)."""
     monkeypatch.setattr(settings, "entra_required", False)
-    authorize_tool("compute_dft_energy")
+    authorize_tool("sample_conformers")
     authorize_tool("propose_knowledge_note")
     authorize_tool("record_confirmed_answer")
 
@@ -156,7 +158,7 @@ def test_deny_default_blocks_ungated_tools(monkeypatch: pytest.MonkeyPatch) -> N
     try:
         authorize_tool("find_notes")  # gated + role held → allowed
         with pytest.raises(AuthorizationError):
-            authorize_tool("compute_dft_energy")  # not in the allowlist → denied
+            authorize_tool("sample_conformers")  # not in the allowlist → denied
     finally:
         reset_current_identity(token)
 
@@ -179,7 +181,7 @@ def test_deny_default_refuses_write_tools_even_for_privileged_roles(
     token = set_current_identity("u-10", frozenset({"process-chemist"}))
     try:
         with pytest.raises(AuthorizationError, match="not authorized to use"):
-            authorize_tool("compute_dft_energy")
+            authorize_tool("sample_conformers")
         with pytest.raises(AuthorizationError, match="not authorized to use"):
             authorize_tool("propose_knowledge_note")
     finally:
@@ -213,7 +215,7 @@ def test_middleware_blocks_a_denied_call_before_the_tool_runs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """`enforce_tool_authz` raises for an unauthorized tool and never invokes the tool body."""
-    _enforced(monkeypatch, tool_role_gates={"compute_dft_energy": ["process-chemist"]})
+    _enforced(monkeypatch, tool_role_gates={"sample_conformers": ["process-chemist"]})
     ran = False
 
     async def _body() -> None:
@@ -223,7 +225,7 @@ def test_middleware_blocks_a_denied_call_before_the_tool_runs(
     token = set_current_identity("u-4", frozenset({"reader"}))
     try:
         with pytest.raises(AuthorizationError):
-            _drive(_ctx("compute_dft_energy"), _body)
+            _drive(_ctx("sample_conformers"), _body)
     finally:
         reset_current_identity(token)
     assert ran is False  # the tool body was never reached
@@ -231,7 +233,7 @@ def test_middleware_blocks_a_denied_call_before_the_tool_runs(
 
 def test_middleware_passes_an_authorized_call_through(monkeypatch: pytest.MonkeyPatch) -> None:
     """An authorized tool runs unchanged through the middleware."""
-    _enforced(monkeypatch, tool_role_gates={"compute_dft_energy": ["process-chemist"]})
+    _enforced(monkeypatch, tool_role_gates={"sample_conformers": ["process-chemist"]})
     ran = False
 
     async def _body() -> None:
@@ -240,7 +242,7 @@ def test_middleware_passes_an_authorized_call_through(monkeypatch: pytest.Monkey
 
     token = set_current_identity("u-5", frozenset({"process-chemist"}))
     try:
-        _drive(_ctx("compute_dft_energy"), _body)
+        _drive(_ctx("sample_conformers"), _body)
     finally:
         reset_current_identity(token)
     assert ran is True
@@ -268,13 +270,13 @@ def test_surfacing_converts_a_denial_into_the_tool_s_own_result() -> None:
 
     async def _denied() -> None:
         raise AuthorizationError(
-            "u-9 lacks a privileged role for the write tool compute_dft_energy"
+            "u-9 lacks a privileged role for the write tool propose_knowledge_note"
         )
 
-    ctx = _ctx("compute_dft_energy")
+    ctx = _ctx("propose_knowledge_note")
     _drive_surfacing(ctx, _denied)  # must not raise
     assert ctx.result == (
-        "Refused: u-9 lacks a privileged role for the write tool compute_dft_energy"
+        "Refused: u-9 lacks a privileged role for the write tool propose_knowledge_note"
     )
 
 
@@ -402,7 +404,7 @@ def _denial_message(tool: str, monkeypatch: pytest.MonkeyPatch) -> str:
     [
         ("predict_pka", "explicit_gate"),
         ("predict_pka", "deny_default"),
-        ("compute_dft_energy", "write_gate"),
+        ("propose_knowledge_note", "write_gate"),
     ],
 )
 def test_every_denial_reads_as_an_access_decision(

@@ -42,8 +42,7 @@ def test_the_queues_do_not_overlap() -> None:
     and wrote `"background"` would silently ask core's worker to serve its heavy closure.
     """
     import chemclaw.connectors.bo.worker
-    import chemclaw.connectors.calc.worker
-    import chemclaw.connectors.qm.worker  # noqa: F401 — registration
+    import chemclaw.connectors.calc.worker  # noqa: F401 — registration
     from chemclaw.connectors.queues import bundle_queue
     from chemclaw.connectors.registry import discovered
     from chemclaw.durable import background_worker  # noqa: F401 — registration
@@ -57,15 +56,15 @@ def test_the_queues_do_not_overlap() -> None:
 
 def test_a_connectors_durable_work_is_on_its_own_queue_only() -> None:
     """A bundle's workflows run on the bundle's own worker — the point of the seam."""
+    from chemclaw.connectors.bo.activities import propose_next
+    from chemclaw.connectors.bo.workflows import BoCampaignWorkflow
     from chemclaw.connectors.calc.activities import run_xtb_calculation
     from chemclaw.connectors.calc.workflows import CalcJobWorkflow
-    from chemclaw.connectors.qm.activities import submit_to_hpc
-    from chemclaw.connectors.qm.workflows import QMJobWorkflow
     from chemclaw.connectors.queues import bundle_queue
 
     for workflow_cls, activity, bundle in (
         (CalcJobWorkflow, run_xtb_calculation, "calc"),
-        (QMJobWorkflow, submit_to_hpc, "qm"),
+        (BoCampaignWorkflow, propose_next, "bo"),
     ):
         own = bundle_queue(bundle)
         assert workflow_cls in registered_workflows(own)
@@ -147,12 +146,12 @@ def test_re_registering_the_same_definition_is_allowed() -> None:
 
 def test_describe_names_what_a_worker_serves() -> None:
     """The startup log line is derived, not restated — so it cannot go stale."""
-    import chemclaw.connectors.qm.worker  # noqa: F401 — registration
+    import chemclaw.connectors.calc.worker  # noqa: F401 — registration
     from chemclaw.connectors.queues import bundle_queue
 
-    line = describe(bundle_queue("qm"))
-    assert "workflows=[QMJobWorkflow]" in line
-    assert "parse_qm_output" in line
+    line = describe(bundle_queue("calc"))
+    assert "workflows=[CalcJobWorkflow]" in line
+    assert "run_xtb_calculation" in line
 
 
 def test_every_workflow_on_the_job_path_can_actually_fail() -> None:
@@ -181,8 +180,7 @@ def test_every_workflow_on_the_job_path_can_actually_fail() -> None:
     hole existed at all: nothing checked it.
     """
     import chemclaw.connectors.bo.workflows
-    import chemclaw.connectors.calc.workflows
-    import chemclaw.connectors.qm.workflows  # noqa: F401 — registration
+    import chemclaw.connectors.calc.workflows  # noqa: F401 — registration
     from chemclaw.connectors.queues import bundle_queue
     from chemclaw.connectors.registry import discovered
     from chemclaw.durable.connector_job import ConnectorJobWorkflow

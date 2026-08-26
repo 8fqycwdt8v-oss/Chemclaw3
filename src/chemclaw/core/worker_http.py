@@ -118,7 +118,8 @@ async def worker_http(*, component: str, ready: Callable[[], bool]) -> AsyncIter
     """Serve `/healthz`, `/readyz` and `/metrics` for the body of this context manager.
 
     Args:
-        component: What this process is (`background-worker`, `connector-worker-qm`), echoed in the
+        component: What this process is (`background-worker`, `connector-worker-calc`), echoed in
+            the
             health payloads so a probe response identifies the pod that answered it.
         ready: Called per readiness probe. Cheap and non-blocking — it runs on the worker's event
             loop, so a predicate that does I/O would make the probe part of the problem it reports

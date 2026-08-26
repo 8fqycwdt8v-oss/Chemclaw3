@@ -1,119 +1,99 @@
-# Rotational energies and rotamer barriers — implemented — 2026-08-26
+# Remove every HPC-dependent workflow
 
-## Task
-"Get rotational energies and the barrier energy between rotamers for individual compounds —
-especially, how the user tells the agent **which bond to rotate**." Concept first, then build it.
+**Ask.** "Remove completely any hpc dependent workflow. For now all I want to have in this repo
+are semi empirical calculations using xtb tblite or crest. They will not run on a hpc but rather
+in a own pod on databricks or openshift."
 
-`D-2026-08-26-a-torsion-is-named-not-indexed` is the record; this is the working log.
+**Reading.** Exactly one capability in this family is HPC-dependent: the `qm` bundle
+(`compute_dft_energy`), whose whole dependency closure is the Nextflow/Seqera launcher, the HPC
+artifact store and a 24 h poll. The semiempirical tier — xTB/tblite via `servers/calc` in
+`Chemclaw3-mcp`, CREST conformer/complex searches, the D-011 cache and the calibration ledger —
+already runs as its own pod addressed over HTTP, so nothing there needs building; it needs the
+DFT tier taken out from under it and every knob, secret, queue and sentence that only existed to
+reach a cluster removed with it.
 
-## Plan
-- [x] **1 · Read what exists** — `scan_coordinate`, `compose.scan_profile`, `thermo`, and the two
-      skills that already hold the judgment.
-- [x] **2 · Measure the premise** rather than assert it (RDKit 2026.3.5, the pinned build).
-- [x] **3 · Decide** — three pieces, each on the side of a boundary already drawn.
-- [x] **4 · `Chemclaw3-mcp`** — `enumerate_torsions` on `servers/chem`, plus `render_structure`'s
-      `highlight_atoms`, plus the automorphism check and the contract table.
-- [x] **5 · Here** — `torsion_handle`, `Torsion`/`Rotamer`/`RotationBarrier`/`RotationProfile`,
-      Eyring in `thermo.py`, `rotation_units` in `budget.py`, `RotationJobSpec`,
-      `compose.rotation_profile`, the activity dispatch, the manifest job, the projector and its
-      properties, `rotational-barrier.yaml`, both skills.
-- [x] **6 · Tests** — 41 new, driven through the real composite against a fake with a real
-      torsional potential.
-- [x] **7 · Verify** — `make lint type test`, `connector-validate`, `template-validate`,
-      `skill-validate`, `prose-validate`; both repos.
+## Chemclaw3 (core)
 
-## What building it found
+- [x] Delete `src/chemclaw/connectors/qm/` whole (activities, cache, knowledge, specs, worker,
+      workflows, `hpc/nextflow.py`, `connector.yaml`, `skills/qm-job-submission/`).
+- [x] Delete `src/chemclaw/core/config/hpc.py`; rehome the one knob that is not about HPC
+      (`qm_activity_timeout_seconds`, read by three core workflows) onto `TemporalSettings` under
+      an honest name; delete every `hpc_*` field and both derived properties.
+- [x] Drop the `HpcSettings` mixin and the `_the_job_ceiling_covers_the_poll_it_bounds`
+      cross-section validator from `core/config/__init__.py`.
+- [x] `publish/project.py`: remove the `QMJobResult` projector.
+- [x] `agent/authz.py`: drop `compute_dft_energy` from the write-tool gates.
+- [x] `agent/chemclaw_agent.py` + `connectors/calc/connector.yaml`: remove the prose pointing at
+      the DFT escalation (prose-contract rules 1-2 would fail on a tool that no longer exists).
+- [x] Helm chart: the `connectors.qm` entry, `CHEMCLAW_HPC_*` env, the `hpcApiToken` secret row.
+- [x] `.env.example`, `README.md`, `deploy/README.md`, `SECURITY.md`, `ARCHITECTURE.md`,
+      `docs/guides/runbook.md`, `docs/guides/xtb-use-cases.md`, `docs/reference/architektur.md`,
+      `CLAUDE.md`, `docs/planning/{BACKLOG,DEFERRED}.md`.
+- [x] `infra/live/e2e-full-stack/`: drop the HPC launcher env and rename the mock process.
+- [x] Tests: delete `test_nextflow_adapter.py`, `test_qm_workflow.py`, `test_qm_persistence.py`;
+      fix every other test that names `qm`, `QMJob*`, `compute_dft_energy` or a `hpc_*` setting.
+- [x] ADR recording the removal and what re-adding one would cost.
 
-1. **A stale atom index is not an error.** `(4, 5)` is the amide C–N of `c1ccc(NC(C)=O)cc1` and an
-   aromatic *ring* bond of `CC(=O)Nc1ccccc1`. `scan_profile` bounds-checks and nothing else.
-2. **The rotatable-bond descriptor is not a torsion list.** 0 for toluene, p-xylene and
-   *tert*-butylbenzene; 1 for acetanilide, and that one is not the amide.
-3. **Symmetry classes match automorphism orbits** on 21 molecules — 0 false merges. Shipped as a
-   test, not as a claim.
-4. **`skills/atropisomer-assessment`'s half-life anchors were wrong by two orders of magnitude.**
-   Its prose said "27 → about a day"; 27 kcal/mol is 80 days, and 30 is 35 years, not "a few".
-   The error was largest exactly at the ICH class boundary the skill exists to decide.
-5. **Every `calc` durable job was publishing nothing.** `CalcJobWorkflow` sends
-   `payload_kind=type(result).__name__` and its result is the `XtbJobResult` *envelope*, so
-   `projector_for("calc.compute_reaction_energy", "XtbJobResult")` was `None` — while
-   `tests/test_publish_reaches_the_hooks.py` was green asserting a `payload_kind` production has
-   never sent. Fixed at the projection boundary (`unwrap_envelope`), not by re-shaping what the
-   chat sees.
+## Chemclaw3_mock
 
-## Review
+- [x] Delete `app/hpc/` (the Nextflow-shaped launcher + artifact store), its router mount, its
+      five settings, its tests and its `start.sh` env.
 
-The three pieces, and why each is where it is:
+## Chemclaw3_ui
 
-- **`enumerate_torsions` on `chem`** (so, `Chemclaw3-mcp`): a pure graph operation, the sixth in a
-  family of five, under the house rule *enumerate, then compute — and never the reverse*. It mints
-  a handle from the canonical symmetry classes plus the RDKit build, so a rewritten SMILES keeps the
-  name and a toolchain bump breaks it loudly.
-- **`profile_rotation` here**: its key would name the wells it settles on, so `D-2026-08-16` says
-  it is not shippable as a tool; it loops, so `D-2026-08-25-the-loop-is-a-composite-not-a-template`
-  says it is not a template. Every point it computes is a separately-keyed primitive.
-- **Eyring beside RRHO**: arithmetic over a result, not a calculation — the same rule that kept the
-  RRHO half here when the physics left.
+- [x] Remove `compute_dft_energy` from the tool tables (`shared/events.ts`, `src/chem/provenance.ts`),
+      the `qm` capability-loss line, and the DFT step of the full-stack e2e.
 
-What is deliberately not done: 2D surfaces, transition-state claims, ring torsions, enumeration
-inside the compute job. And the two open ends, both needing the live lane rather than more code —
-no barrier has been computed against real xTB, and the conformer-dependence warning threshold is
-unset. Both are in the ADR.
+## Chemclaw3-mcp
 
----
+- [x] `CLAUDE.md`: the "DFT via Nextflow/HPC | `qm`" row of the never-duplicate table.
 
-**What is deliberately not fixed**, each with a BACKLOG row rather than a silent omission: the
-four multi-step GFN shapes (PR 2 — declared in `_NOT_YET_PUBLISHED`, so a tenth member field still
-fails), `xtb.hess` and `ThermochemistryResult` (needs a third hook, not a projector), and the BO
-campaign question (write the projector or say it deliberately does not publish).
+## Verification
 
-## Result, measured the same way as before
-
-| | before | after |
-| --- | --- | --- |
-| primitive calculators publishing | 8 of 10 | 9 of 10 (`xtb.hess` declared) |
-| durable jobs publishing | 1 of 11 | 6 of 11 (4 declared, 1 undecided) |
-
-`make lint type test`: 4699 passed, 3 skipped (the migration-history checks needing
-`fetch-depth: 0`), lint and `mypy --strict` clean. Five validators re-run green. End to end against
-Postgres, a reaction-energy job and a descriptor panel each queue 1 row where both queued 0.
-
-
----
-
-# PR 2 — a projector for every shape the GFN loop produces
-
-## Task
-Empty `_NOT_YET_PUBLISHED`: the four multi-step results the seven new jobs return had no
-projector, so those jobs reached the publish path (after PR 1) and were dropped.
-
-## Done
-- [x] `_refined_ensemble`, `_ensemble_property`, `_species_distribution`, `_bond_survey`
-- [x] 13 registry rows; an unmappable average raises rather than storing an unregistered name
-- [x] `_NOT_YET_PUBLISHED` emptied and **kept** — an empty exclusion is what makes the next
-      unroutable shape fail loudly
-- [x] 7 tests driving each shape through `job_envelope`, not through `project()`
-- [x] ADR + ledger (inserted in sorted position — the ledger is ascending, not append-order)
-- [x] BACKLOG row deleted in this commit, per the register's rule
+- [x] `make lint type test` green in Chemclaw3 with Docker up (Postgres tests must not skip).
+- [x] `make check` in Chemclaw3-mcp; `pytest` in Chemclaw3_mock; `npm test` in Chemclaw3_ui.
+- [x] `grep -ri "hpc\|nextflow"` over `src/`, `deploy/`, `tests/`, live docs returns nothing live.
 
 ## Review
-Four choices worth recording, each of which could have gone the other way:
 
-1. **A refined ensemble's `energy_hartree` is the electronic energy**, though the ranking is by G.
-   One absolute-energy column, and the electronic one means the same thing in both ensemble
-   shapes — so E-weighted and G-weighted stay comparable. `treatment` disambiguates the relatives.
-2. **`refined_*` property names are kept apart** from the ensemble-wide ones, carrying the model's
-   own argument across the boundary instead of undoing it there.
-3. **An averaged property lands on the plain registered name** (`dipole`, not `dipole_averaged`) —
-   the alternative is the registry split a test already exists to catch.
-4. **A ranked species set is `candidates`, not members.** `CandidateFact` shipped with the schema
-   and had no producer at all; this is its first.
+Done, across all four repos. Notes worth carrying:
 
-The spread of an averaged property is deliberately not published: min/max/spread are each in the
-averaged property's own unit, so one `property_spread` has no canonical unit and a name per
-property is registry bloat.
+**Three things had to be kept rather than deleted with the tier, and each was a judgement call the
+grep did not make for me.**
 
-Verified by deleting one projector: three assertions turn red — routing, envelope, and that
-shape's own. `make lint type test`: 4744 passed, 3 skipped. Three validators green.
+1. The `dft` **projector** stays (`publish/project.py`). `calculation_results` is never pruned, so a
+   deployment upgrading into this release still holds every `dft` row it wrote; the backfill path
+   resolves a row by `calc_type` prefix alone. That module already states the rule — "a retired
+   calculator keeps its projector" — and `xtb.scan` is the same shape from an earlier move. The
+   `PAYLOAD_PROJECTORS["QMJobResult"]` half *did* go, because it is keyed by a model name no live
+   payload can state. A test now asserts the retired-row case directly.
+2. The **parent-ceiling invariant** stays. `_the_job_ceiling_covers_the_poll_it_bounds` guarded a real
+   defect (a ceiling no larger than one child activity makes the retry budget unreachable and fails
+   with a message naming neither setting). Deleting it with the poll would have left `calc` exposed
+   to exactly that, since `xtb_job_timeout_seconds` (4 h) is the longest activity now. Rewritten as
+   `_the_job_ceiling_covers_the_activity_it_bounds`, with `connector_job_timeout_seconds` re-derived
+   from 90,000 (24 h DFT poll + 1 h) to 18,000 (4 h search + 1 h).
+3. `job-result` moves **back into core's `KNOWN_NOTE_TYPES`**. It sat in `qm`'s manifest under the
+   rule that a type a bundle *mints* belongs to that bundle. No bundle mints one now, so by that same
+   rule it is core's vocabulary again — and `knowledge/job-result/` holds three notes that would
+   otherwise fail `kg-validate`. `bo-candidate` stays with `bo`.
 
-Publishing now: 9/10 primitives, **10 of 11 jobs**. The eleventh is `bo`, which is a question
-rather than a gap and keeps its row.
+**One control was rewritten rather than dropped, and it is the finding worth repeating.**
+`test_the_bundle_has_no_way_to_write_the_note_itself` asserted `not hasattr(qm_knowledge,
+"write_knowledge_node")` — a guard named after a single module, which would have gone *dark* the
+moment that module was deleted while still reading, in review, as a control. That is the
+`map_to_hpc_identity` shape this repo already has a name for. It is now an AST walk over every
+bundle asserting none imports `kg.pr_gate` or names `propose_note`: strictly stronger, and it does
+not depend on which bundles exist.
+
+**Two pieces of genuinely dead code fell out of the removal**, both kept alive only by tests that
+called them directly: `Structure.as_xyz` (its one caller was the launcher) and its test.
+
+**What the validators caught that grep did not**: `make prose-validate` and `make skill-validate`
+found five live claims left over — two skills still declaring `compute_dft_energy` in their
+frontmatter, and three backticked paths naming deleted files. Worth running the whole validator set,
+not just `lint type test`.
+
+**Scope note.** `docs/reference/architektur.md` keeps its HPC/SLURM/Nextflow prose deliberately: it
+is a pre-implementation design document, not a description of the system, and CLAUDE.md already
+frames it that way. §6 carries a note saying which parts this change retracted.

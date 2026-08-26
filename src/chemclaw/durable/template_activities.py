@@ -184,7 +184,7 @@ async def authorize_job_step(step: JobStepInput) -> ResolvedJob:
     **The template's job step used to do none of this** (DARK-2, D-168). `ResolvedJob` carried the
     connector, workflow and queue and dropped `expensive` and `precondition` on the floor, and
     `TemplateWorkflow._run_job_step` started the child workflow with `resolve(step.arguments,
-    scope)` exactly as written. So a template naming `compute_dft_energy` started HPC work for
+    scope)` exactly as written. So a template naming `sample_conformers` started expensive work for
     anyone entitled to run its `run_<name>` tool, a job's declared domain guard — the one
     `JobSpec.precondition` documents as having no other replay-safe home — never ran on this path,
     and the launch left no audit row. The module docstring above claimed the opposite.

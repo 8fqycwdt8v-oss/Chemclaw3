@@ -85,6 +85,6 @@ skills:
   - experiment-design
 
 # The note type this bundle's campaign mints (`connectors/bo/knowledge.py`) — see the same
-# declaration in `connectors/qm/connector.yaml` for why it moved out of core's frozenset.
+# `chemclaw.kg.note.known_note_types` for why a bundle's own type does not need a line in core.
 note_types:
   - bo-candidate

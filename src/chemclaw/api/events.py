@@ -110,11 +110,11 @@ class TokenEvent(BaseModel):
 
 
 class JobStartedEvent(BaseModel):
-    """An async (Temporal/HPC/BO) job was launched; the UI shows "job started (id …)"."""
+    """An async (Temporal calc/BO) job was launched; the UI shows "job started (id …)"."""
 
     type: Literal["job_started"] = "job_started"
     job_id: str
-    # What kind of durable job this is ("qm", "report", "campaign"), so a surface can label it
+    # What kind of durable job this is ("calc", "report", "campaign"), so a surface can label it
     # without parsing the id. Defaulted so the field is additive for any existing consumer.
     kind: str = "job"
 

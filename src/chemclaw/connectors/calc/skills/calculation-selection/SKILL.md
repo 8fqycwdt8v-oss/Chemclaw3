@@ -174,8 +174,9 @@ electronic energies is needed; it skips every Hessian.
 - Every result is cached, so exploring many related structures is cheap — do the
   comparison rather than reasoning from one number.
 - If a property predictor reports an uncertainty, state it; if the question needs
-  higher accuracy than a fast method gives, say so rather than over-claiming (the
-  heavier QM/DFT path is deferred and would be the escalation).
+  higher accuracy than a fast method gives, say so rather than over-claiming. There is
+  **no** heavier tier to escalate to — semiempirical is all of it — so the honest move
+  is to name the limit and propose the experiment that would settle it.
 - The **fast** calculators (single point, properties, Fukui, pKa) run on a force-field
   geometry, not a GFN2-optimized one. Fine for ranking and for comparing related
   structures; when the question is about a specific conformation or needs a real

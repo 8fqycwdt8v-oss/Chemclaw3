@@ -317,7 +317,6 @@ up() {
   start_worker worker-background 9000 "$python" -m chemclaw.durable.background_worker
   start_worker worker-calc 9001 "$python" -m chemclaw.connectors.calc.worker
   start_worker worker-bo 9002 "$python" -m chemclaw.connectors.bo.worker
-  start_worker worker-qm 9003 "$python" -m chemclaw.connectors.qm.worker
 
   # The mock model, when the lane is pointed at it. Started before the front door because the front
   # door builds a chat client at startup and would come up pointed at nothing.
@@ -347,7 +346,7 @@ up() {
     log "  'make live-jobs' (Temporal + Postgres) runs without it; 'make live-probes' needs it."
   fi
 
-  for worker in worker-background worker-calc worker-bo worker-qm; do
+  for worker in worker-background worker-calc worker-bo; do
     wait_for "$worker" "http://127.0.0.1:$(cat "$RUN_DIR/$worker.port")/readyz"
   done
   if llm_configured; then

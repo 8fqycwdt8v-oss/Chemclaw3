@@ -179,7 +179,7 @@ def test_both_tools_the_unapproved_turn_ran_are_gated() -> None:
     assert "propose_knowledge_note" in gated
     assert "compute_xtb_energy" in gated
     # A declared job, gated structurally — no bundle has to remember to list one.
-    assert "compute_dft_energy" in gated
+    assert "sample_conformers" in gated
     # And the reads a plan is built from are not.
     assert "resolve_compound" not in gated
     assert "screen_hazards" not in gated

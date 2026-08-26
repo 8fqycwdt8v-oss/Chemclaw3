@@ -7,10 +7,11 @@ Two assertions that look like one and are not
   error message or a debugger through a route `core/logging.py`'s exact-match redaction has not been
   taught about. That filter stays and is still the control; this is the same guarantee where the
   filter is not looking.
-- **The transmission.** `f"Bearer {settings.hpc_api_token}"` compiles, runs, and sends
-  `Bearer **********`. The request then fails as a 401 rather than leaking — the right direction,
-  and still a failure. "The header is present" and "the header is correct" are different
-  assertions, and only the second one catches it.
+- **The transmission.** An f-string does *not* unwrap a `SecretStr`, so a credential formatted
+  into a header, a signature or a client option compiles, runs, and sends `**********`. The call
+  then fails as a 401 rather than leaking — the right direction, and still a failure. "The
+  credential is present" and "the credential is correct" are different assertions, and only the
+  second one catches it. Every consumer below asserts the second.
 
 The two halves are tested together on purpose: a change that satisfies either alone is a regression.
 """
@@ -72,23 +73,6 @@ def test_a_secret_str_hides_its_value_from_the_shapes_that_leak() -> None:
     assert "sk-real-value" not in repr(holder.llm_api_key)
     assert "sk-real-value" not in str(holder.model_dump())
     assert holder.llm_api_key.get_secret_value() == "sk-real-value"
-
-
-def test_the_launcher_sends_the_token_rather_than_its_asterisks(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The f-string hazard, at the site that formats a credential into a header.
-
-    `f"Bearer {settings.hpc_api_token}"` renders `Bearer **********`. Nothing raises, nothing logs,
-    and the Seqera launcher answers 401 — which reads as a bad credential rather than as a bad
-    format string, five retried activity attempts deep.
-    """
-    from chemclaw.connectors.qm.hpc.nextflow import _auth_headers
-
-    monkeypatch.setattr(settings, "hpc_api_token", SecretStr("tower-token"))
-    assert _auth_headers() == {"Authorization": "Bearer tower-token"}
-    monkeypatch.setattr(settings, "hpc_api_token", SecretStr(""))
-    assert _auth_headers() == {}
 
 
 def test_the_webhook_signature_is_computed_over_the_real_secret(

@@ -379,8 +379,8 @@ def test_a_bundle_with_no_server_package_has_no_server_module() -> None:
 
 
 def test_a_jobs_only_bundle_has_no_server_module() -> None:
-    """The other `None`: `qm` declares no endpoint and ships no server, and never has."""
-    assert server_tools_module("qm") is None
+    """The other `None`: `results` declares no endpoint and ships no server, and never has."""
+    assert server_tools_module("results") is None
 
 
 def test_a_bundle_that_serves_tools_returns_its_module() -> None:

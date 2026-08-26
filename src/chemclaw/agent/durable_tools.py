@@ -25,9 +25,9 @@ reads: without it the report was the one durable job a chemist could poll to `co
 have no tool that hands over the answer.
 
 `get_durable_job_status` stays here for good: it is generic over every durable job,
-connector-owned or not, and it is the only *status tool* — the QM/HPC job was the last one with
-one of its own; it is a `qm` connector job as of D-118, `agents/job_status.py` is gone, and so is
-the envelope-shaped exception this tool made for it.
+connector-owned or not, and it is the only *status tool* — the DFT job was the last one with
+one of its own; D-118 made it a connector job, `agents/job_status.py` is gone, and so is the
+envelope-shaped exception this tool made for it.
 
 It is **not** the only place a finished job's result is collected, and the sentence that said so
 was wrong in a way that showed: three call sites collect one — this tool,
@@ -330,7 +330,7 @@ async def get_durable_job_status(job_id: str) -> DurableJobStatus:
     """Collect a durable job: its status, and its result once it has completed.
 
     This is the follow-up for **every** job id this system hands out — a connector job such as
-    `compute_dft_energy`, `compute_reaction_energy` or `start_optimization_campaign`, a development
+    `compute_reaction_energy`, `sample_conformers` or `start_optimization_campaign`, a development
     report, or a calculation deferred because it was too slow to answer inside the turn. Poll it
     until the status is no longer `running`; a completed connector job carries its result with it,
     so there is no second call to make.
@@ -352,14 +352,14 @@ async def get_durable_job_status(job_id: str) -> DurableJobStatus:
 
         A geometry in the result is reported by its `structure_id` rather than by its coordinates.
         That address is what the next calculation takes: pass it to `optimize_geometry`,
-        `compute_thermochemistry`, `scan_coordinate` or `compute_dft_energy` to carry one chosen
-        conformer forward instead of starting again from the molecule.
+        `compute_thermochemistry` or `scan_coordinate` to carry one chosen conformer forward
+        instead of starting again from the molecule.
 
     Raises:
         ValueError: When the id is unknown to both Temporal and the durable record, or names a
             completed workflow whose result is not the connector envelope. That second case used to
-            degrade to a bare status, because the HPC/DFT job returned its own typed result and had
-            its own status tool (`agents/job_status.py`). It is a `qm` connector job now (D-118), so
+            degrade to a bare status, because the DFT job returned its own typed result and had
+            its own status tool (`agents/job_status.py`). D-118 made it a connector job, so
             every durable job this system hands an id for returns the envelope — a result that is
             not one means the id belongs to a workflow no tool advertises, and reporting
             "completed" with an empty result would tell a chemist their calculation is done while
@@ -462,7 +462,7 @@ async def find_past_jobs(text: str = "", connector: str = "") -> list[JobRecordS
     Args:
         text: Words to look for in the recorded reason, the result summary or the job name.
             Empty returns the most recent runs.
-        connector: Restrict to one capability bundle (e.g. "bo", "qm"). Empty searches all.
+        connector: Restrict to one capability bundle (e.g. "bo", "calc"). Empty searches all.
 
     Returns:
         The matching runs, newest first: what ran, why, what came out in one line, and the note it
