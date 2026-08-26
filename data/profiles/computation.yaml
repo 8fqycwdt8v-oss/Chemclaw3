@@ -55,6 +55,11 @@ tool_names:
   - predict_developability_profile
   - compare_solvents
   - scan_coordinate
+  # Naming the bond, then profiling it. Both, and in that order: `profile_rotation` refuses a
+  # torsion whose handle it cannot mint from the molecule, so without the enumeration on this
+  # allow-list the job is reachable and unusable.
+  - enumerate_torsions
+  - profile_rotation
   - sample_conformers
   - refine_ensemble
   - compute_ensemble_property
@@ -78,6 +83,7 @@ tool_names:
   - run_stereoisomer_ranking
   - run_degradant_triage
   - run_conformer_refinement
+  - run_rotational_barrier
   - calculator_trust
   - calculator_outliers
   - report_measurement

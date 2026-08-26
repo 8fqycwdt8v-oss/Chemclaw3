@@ -178,7 +178,8 @@ def test_every_declared_job_that_takes_a_solvent_declares_the_precondition() -> 
     deployment's choice and the guard is not.
 
     The count is pinned deliberately and updating it is the point: the four multi-step jobs added by
-    `D-2026-08-25-the-loop-is-a-composite-not-a-template` each take a solvent, and each had to come
+    `D-2026-08-25-the-loop-is-a-composite-not-a-template` each take a solvent, and so does
+    `profile_rotation` (`D-2026-08-26-a-torsion-is-named-not-indexed`) — every one of them came
     through this assertion to get here. A sweep that adapted silently would let the tenth arrive
     with no precondition and fail thirty seconds into a durable run with tblite's own "String value
     for epsilon was not found among database of solvents".
@@ -195,7 +196,7 @@ def test_every_declared_job_that_takes_a_solvent_declares_the_precondition() -> 
             assert (
                 job.precondition == "chemclaw.science.calc.solvents:require_supported_solvents"
             ), f"job {job.name!r} takes a solvent but declares precondition {job.precondition!r}"
-    assert checked == 9, f"expected the nine solvent-taking calc jobs, swept {checked}"
+    assert checked == 10, f"expected the ten solvent-taking calc jobs, swept {checked}"
 
 
 def test_the_launcher_refuses_the_screen_before_it_starts_any_durable_work() -> None:

@@ -243,6 +243,7 @@ while designing the label index, which uses a composite `(source, reaction_id)` 
 inherit it — so the fix is to give the fingerprint tables the same key, and it is a migration plus
 `note_id_for_reaction`. Not urgent while one ELN is enabled anywhere; not detectable at all when
 it happens.
+
 ## 3 — Work that is lost, dropped or invisible
 
 - [ ] **Four multi-step result shapes reach the publish hook and route to no projector** — [M],
