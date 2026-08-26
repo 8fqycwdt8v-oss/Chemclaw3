@@ -152,13 +152,20 @@ async def mark_reported(subscription_id: int, note_ids: list[str]) -> None:
 async def watch_for(query: str, note_type: str | None = None) -> str:
     """Watch for new knowledge matching a query, and get told when it lands.
 
-    Use this when the chemist wants to be *notified* rather than to keep asking — "tell me when
-    anyone runs a Suzuki on a chloro-pyridine", "let me know when a playbook touching PRJ-114
-    merges". The query is matched the same way `gather_evidence` matches, so phrase it the same way.
+    Use this when the chemist wants to be *notified* rather than to keep asking — "let me know when
+    a playbook touching PRJ-114 merges", "tell me when a campaign cites the biaryl route". The
+    query is matched the same way `gather_evidence` matches, so phrase it the same way.
+
+    **It watches the knowledge graph, not the ELN.** Since D-2026-08-25 an ingested run is a row in
+    `reaction_records` rather than a note, and the digest reads merged notes — so "tell me when
+    anyone runs a Suzuki on a chloro-pyridine", which this docstring used to offer as the leading
+    example, is not what this does. It reports the *claims* people merge about runs (playbooks,
+    campaigns, hand-written reaction notes), not the runs themselves. For those, ask
+    `similar_reactions` when you want to know, which reads the index directly and answers now.
 
     Args:
         query: What to watch for (key terms, matched over note id, tags and body).
-        note_type: Optionally narrow to one note type, e.g. "reaction" or "playbook".
+        note_type: Optionally narrow to one merged note type, e.g. "playbook" or "campaign".
 
     Returns:
         Confirmation. Saving the same watch twice is a no-op, not a second notification.

@@ -17,6 +17,7 @@ seam between the tier and everything that reads it.
 """
 
 import asyncio
+import sys
 from collections.abc import Sequence
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -26,6 +27,7 @@ import pytest
 from chemclaw.agent.condense import Protocol
 from chemclaw.agent.graph_tools import expand_note
 from chemclaw.agent.protocol_tools import _from_record
+from chemclaw.cli.validate_kg import main as _validate_kg_main
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.ingest.eln.adapter import RawEntry
@@ -254,6 +256,43 @@ def test_a_structural_hit_still_expands_into_its_recipe(monkeypatch: pytest.Monk
     )
 
 
+def test_a_reaction_cited_by_a_campaign_still_expands(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The common case, and the one the first version of this file could not see.
+
+    `build_graph` mints a bare node for every cited-but-undefined link target, so a reaction cited
+    by any campaign or playbook **is** a member of the graph while carrying no note. `expand_note`
+    guarded its store fallback on `note_id not in graph`, which is therefore False for exactly the
+    reactions the fallback exists to serve — and `_require_note` raised "no note with id" for a run
+    that was sitting in the corpus.
+
+    The original test missed it by pointing `knowledge_dir` at a nonexistent path, so the graph was
+    empty and membership was never True. This one writes the citing campaign, which is what the
+    corpus actually looks like once `memory.campaign` has run.
+    """
+    (tmp_path / "campaign").mkdir()
+    (tmp_path / "campaign" / "campaign-x.md").write_text(
+        "---\nid: campaign-x\ntype: campaign\ncreated_by: agent\n---\n\n"
+        f"1. [[{note_id_for_reaction('rxn-cited')}]]: `CCO.CC(=O)O>>CCOC(C)=O`\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
+
+    async def _run() -> str:
+        store = InMemoryReactionRecordStore()
+        adapter = _ListAdapter([_entry("rxn-cited", datetime(2026, 3, 1, tzinfo=UTC))])
+        await store.record([record_from_ord_reaction(adapter.map_to_ord(adapter._entries[0]))])
+        monkeypatch.setattr("chemclaw.agent.graph_tools.default_record_store", lambda: store)
+        return (await expand_note(note_id_for_reaction("rxn-cited"))).body
+
+    body = asyncio.run(_run())
+    assert "Ethanol and acetic acid" in body, (
+        "a reaction cited by a campaign did not expand; the graph holds a bare node for it, so a "
+        "membership test skips the store fallback the citation exists to reach"
+    )
+
+
 def test_expanding_a_citation_to_an_unknown_record_says_so(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -422,3 +461,27 @@ def test_the_postgres_store_and_the_in_memory_one_answer_alike() -> None:
 def test_the_default_store_is_the_durable_one() -> None:
     """`default_record_store` must not quietly hand back an in-memory store."""
     assert isinstance(default_record_store(), PostgresReactionRecordStore)
+
+
+def test_the_citation_gate_fails_when_it_cannot_reach_the_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A gate that could not look has not passed — it printed a line and returned success.
+
+    `dangling_links` ignores every `reaction-` target since D-2026-08-25, deliberately, because the
+    graph cannot see the store. That makes this half the *only* thing between a typo'd run id and a
+    merge, so an unreachable database is a failed gate rather than a warning beside a zero exit.
+    """
+    _campaign_citing(tmp_path, note_id_for_reaction("rxn-1"))
+
+    class _Unreachable:
+        async def known(self, reaction_ids: Sequence[str]) -> set[str]:
+            raise ConnectionError("Postgres unreachable")
+
+    monkeypatch.setattr("chemclaw.cli.validate_kg.default_record_store", lambda: _Unreachable())
+    monkeypatch.setattr(sys, "argv", ["validate_kg", str(tmp_path)])
+    exit_code = _validate_kg_main()
+
+    printed = capsys.readouterr().out
+    assert exit_code == 1, f"the gate passed without checking anything:\n{printed}"
+    assert "NOT CHECKED" in printed and "did not pass" in printed

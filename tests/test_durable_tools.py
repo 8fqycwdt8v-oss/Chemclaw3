@@ -21,10 +21,12 @@ from typing import Any
 
 import pytest
 from temporalio.client import WorkflowExecutionStatus
+from temporalio.exceptions import WorkflowAlreadyStartedError
 
 import chemclaw.agent.durable_tools as durable_tools
 import chemclaw.connectors.jobs as jobs_module
 from chemclaw.agent.durable_tools import get_durable_job_status
+from chemclaw.core.config import settings
 
 
 class _Description:
@@ -260,4 +262,85 @@ def test_the_envelope_decode_has_exactly_one_definition() -> None:
         f"{offenders} decode the connector job envelope themselves; call "
         "`chemclaw.durable.connector_job.envelope_from_result` so every collector answers a "
         "foreign result with the same sentence"
+    )
+
+
+class _StartedHandle:
+    """The minimal handle `synthesize_memory` reads back."""
+
+    def __init__(self, workflow_id: str) -> None:
+        """Carry the id the launcher asked for."""
+        self.id = workflow_id
+
+
+class _StartingClient:
+    """A client that records what `start_workflow` was asked to run."""
+
+    def __init__(self) -> None:
+        """Start with nothing recorded."""
+        self.started: list[tuple[Any, str, str]] = []
+
+    async def start_workflow(self, run: Any, **kwargs: Any) -> _StartedHandle:
+        """Record the launch and hand back a handle carrying the requested id."""
+        self.started.append((run, str(kwargs["id"]), str(kwargs["task_queue"])))
+        return _StartedHandle(str(kwargs["id"]))
+
+
+def test_every_memory_job_kind_can_actually_be_started(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The four corpus miners must be reachable, which is exactly what they stopped being.
+
+    D-2026-08-25 took their Temporal Schedules away — rightly, since each opens pull requests and
+    knowledge arriving on a timer is knowledge nobody asked for — but removed the trigger without
+    adding one. For a while the only references to `CampaignSynthesisWorkflow`,
+    `PlaybookDistillationWorkflow`, `OptimizationCampaignWorkflow` and
+    `ObservationPromotionWorkflow` anywhere in `src/` were a docstring claiming they were "started
+    on demand". Campaigns, playbooks and promotions were never produced.
+
+    Asserted over `_MEMORY_JOBS` rather than a fixed list, so a kind added later is covered the day
+    it is added, and asserted on the *workflow method handed to Temporal* rather than on a returned
+    id, because an id proves only that this tool ran.
+    """
+    client = _StartingClient()
+
+    async def _connect() -> _StartingClient:
+        return client
+
+    monkeypatch.setattr(durable_tools, "connect", _connect)
+
+    for kind in durable_tools._MEMORY_JOBS:
+        job_id = asyncio.run(durable_tools.synthesize_memory(kind))
+        assert job_id.startswith(f"memory-{kind}-")
+
+    launched = [run for run, _, _ in client.started]
+    assert launched == list(durable_tools._MEMORY_JOBS.values()), (
+        "a kind did not reach Temporal with its own workflow; an unreachable miner produces "
+        "nothing while its docstring says it runs on demand"
+    )
+    assert {queue for _, _, queue in client.started} == {settings.background_task_queue}
+
+
+def test_asking_twice_in_a_day_rejoins_rather_than_re_scanning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two chemists asking one morning get one corpus scan, not two — and one PR, not two.
+
+    The id is keyed on the UTC date because there is no request to key on: the input is the whole
+    corpus as it stands. A second full scan would also risk two pull requests for one finding,
+    which `memory.ids.with_id`'s anchor can produce when a cluster grows between runs.
+    """
+
+    class _Rejecting(_StartingClient):
+        async def start_workflow(self, run: Any, **kwargs: Any) -> _StartedHandle:
+            raise WorkflowAlreadyStartedError(str(kwargs["id"]), "CampaignSynthesisWorkflow")
+
+    async def _connect() -> _Rejecting:
+        return _Rejecting()
+
+    monkeypatch.setattr(durable_tools, "connect", _connect)
+    job_id = asyncio.run(durable_tools.synthesize_memory("campaign"))
+    assert job_id == durable_tools._memory_job_id("campaign"), (
+        "a same-day repeat must hand back the existing run's id, so the caller sees a job rather "
+        "than silence"
     )
