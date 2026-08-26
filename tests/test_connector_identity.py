@@ -32,7 +32,6 @@ from chemclaw.connectors.identity import (
     HEADER_ACTOR,
     HEADER_CORRELATION,
     HEADER_DRY_RUN,
-    HEADER_ROLES,
     HEADER_SESSION,
     STAMPED_HEADERS,
     MissingConnectorCredential,
@@ -56,7 +55,6 @@ def test_no_ambient_identity_sends_no_identity_headers() -> None:
     """Off the request path there is no actor, and claiming one would corrupt an audit join."""
     headers = turn_headers()
     assert HEADER_ACTOR not in headers
-    assert HEADER_ROLES not in headers
     assert HEADER_SESSION not in headers
     # Dry-run is always sent: "not a dry run" is a real state, not an absence.
     assert headers[HEADER_DRY_RUN] == "false"
@@ -79,8 +77,6 @@ def test_headers_are_read_from_the_ambient_turn_at_call_time() -> None:
         reset_current_session_id(session)
         reset_current_identity(identity)
     assert headers[HEADER_ACTOR] == "user-1"
-    # Sorted and space-delimited (the OAuth `scope` convention), so two calls by one user match.
-    assert headers[HEADER_ROLES] == "admin process-chemist"
     assert headers[HEADER_SESSION] == "session-abc"
     assert headers[HEADER_DRY_RUN] == "true"
     # And once the turn is over, there is no identity to report again.
@@ -156,7 +152,6 @@ def test_the_hook_strips_the_identity_when_a_request_leaves_the_connector_origin
         reset_current_identity(identity)
 
     assert seen["connector"][HEADER_ACTOR] == "user-99"
-    assert seen["connector"][HEADER_ROLES] == "process-chemist"
     assert seen["connector"][HEADER_SESSION] == "session-leak"
     # Nothing of ours survived the hop, including the flags that are not identity themselves but
     # would still tell an eavesdropper which of our turns it is looking at.
@@ -771,3 +766,29 @@ def test_an_operator_supplied_credential_is_kept_and_shell_quoted(
     # Round-trip through the shell's own parser rather than asserting on the escaping: what matters
     # is the value a caller ends up with, not which of the several correct spellings we emit.
     assert shlex.split(line) == ["export", f"{env_var}=it's a token; echo pwned"]
+
+
+def test_the_callers_entitlements_are_not_sent_to_a_connector() -> None:
+    """`X-Chemclaw-Roles` is gone and must not come back without a reader.
+
+    `D-2026-08-26-an-entitlement-set-is-not-provenance`. An *absence* test, the shape
+    D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution established for a claim
+    with no producer, applied to the mirror case: a value with no consumer. It had one writer here
+    and, measured across this repository and `Chemclaw3-mcp`, no reader anywhere — while being the
+    one identity header with no bound on its size, carrying every AD group a user is in under
+    `entra_group_claims_as_roles` to every connector, including servers this family does not host.
+
+    Re-adding it is a decision, not a line: it needs a connector that reads it and an argument for
+    why an entitlement set is the thing that reader needs, given that a connector may never decide
+    on one.
+    """
+    identity = set_current_identity("user-1", frozenset({"process-chemist", "admin"}))
+    session = set_current_session_id("session-abc")
+    try:
+        headers = turn_headers()
+    finally:
+        reset_current_session_id(session)
+        reset_current_identity(identity)
+    assert not [name for name in headers if "role" in name.lower()], (
+        f"a connector request carries the caller's entitlements again: {sorted(headers)}"
+    )

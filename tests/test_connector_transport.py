@@ -40,7 +40,6 @@ from mcp.shared.exceptions import McpError
 from chemclaw.agent.audit import _served_by
 from chemclaw.connectors.identity import (
     HEADER_ACTOR,
-    HEADER_ROLES,
     HEADER_SESSION,
 )
 from chemclaw.connectors.manifest import ConnectorManifest, HttpEndpoint, StdioEndpoint
@@ -224,7 +223,6 @@ def test_the_turn_identity_actually_arrives_at_the_connector() -> None:
     # credential travels there rather than on a per-call hook.
     assert any(
         headers.get(HEADER_ACTOR.lower()) == "user-42"
-        and headers.get(HEADER_ROLES.lower()) == "process-chemist"
         and headers.get(HEADER_SESSION.lower()) == "session-xyz"
         for headers in received
     ), received
@@ -341,7 +339,6 @@ def test_a_redirecting_connector_cannot_harvest_the_turn_identity() -> None:
         reset_current_identity(identity)
 
     assert delivered and delivered[0][HEADER_ACTOR.lower()] == "user-99"
-    assert delivered[0][HEADER_ROLES.lower()] == "process-chemist"
     assert delivered[0][HEADER_SESSION.lower()] == "session-leak"
     # The redirect is surfaced to the caller and never walked, so nothing was ever sent onward.
     assert status == 307
@@ -596,6 +593,64 @@ def test_a_slow_tool_call_is_abandoned_at_the_declared_request_timeout() -> None
         finally:
             release.set()  # let the server's in-flight request finish so uvicorn can exit
     assert elapsed < 10, f"the call was abandoned only after {elapsed:.1f}s, not near its 2s bound"
+
+
+def test_a_timed_out_call_tells_the_connector_to_stop_working() -> None:
+    """Abandoning a call must stop the *server*, not only this side's wait.
+
+    The sibling of the test above, and the half that was missing. `request_timeout` bounded the
+    caller and nothing else: `mcp.shared.session.send_request` raises on expiry and sends the
+    server nothing, and the session stays open for the rest of the turn — so the tool ran to
+    completion and its answer was discarded. Measured before the fix, against a running server: a
+    20 s tool behind a 4 s bound printed "RAN TO COMPLETION with nobody waiting".
+
+    Affordable for a dictionary lookup, not for what the fleet actually hosts. `Chemclaw3-mcp`'s
+    `calc` server is documented as "minutes or hours, deliberately", and `cached_compute` retries a
+    miss — so an abandoned CREST search held a pod's CPU while the next attempt started a second
+    identical one beside it.
+
+    Asserts the *tool body* observed cancellation rather than that the client raised, because the
+    client raised before the fix too. The flag is written on the server's own loop and read here
+    only after that loop has had its chance, which is why the wait below is a poll rather than an
+    assertion on the spot.
+    """
+    cancelled = threading.Event()
+    server = FastMCP("cancel-probe")
+
+    @server.tool()
+    async def crawl() -> str:
+        """Sleep past any bound under test, and record if the request is cancelled under us."""
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+        return "too late to matter"
+
+    app = connector_app(server, name="cancel-probe")
+    port = _free_port()
+
+    async def _call() -> None:
+        spec = _mcp_connection(
+            cast(ConnectorManifest, SimpleNamespace(name="cancel-probe")),
+            HttpEndpoint(url=f"http://127.0.0.1:{port}/mcp", request_timeout=2),
+        )
+        async with AsyncExitStack() as stack:
+            tools, unreachable = await open_connector_specs(stack, [spec])
+            assert not unreachable
+            slow = next(tool for tool in tools if tool.name == "crawl")
+            with pytest.raises(McpError):
+                await slow.ainvoke({})
+            # Held open deliberately: this is the turn's own shape, and it is what made the
+            # abandoned work outlive the caller. The cancellation has to arrive *here*, while the
+            # session is still up, rather than as a side effect of tearing it down.
+            assert cancelled.wait(10), (
+                "the connector was never told to stop; it is still computing an answer nobody "
+                "is waiting for"
+            )
+
+    with _Server(app, port):
+        asyncio.run(asyncio.wait_for(_call(), timeout=20))
 
 
 def test_the_http_read_bound_is_looser_than_the_session_bound() -> None:

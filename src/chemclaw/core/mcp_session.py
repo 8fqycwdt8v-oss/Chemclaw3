@@ -18,7 +18,10 @@ server, four things that are easy to get wrong and invisible when you do:
   classified as an outage, because a 401 never comes back on its own and a durable job would spend
   its whole retry budget being told the same thing;
 * `isError=True` covers both "the tool refused you" and "the server fell over", and only the second
-  is worth a retry — the sibling repo's `mcp_server_kit` distinguishes them by a fixed string.
+  is worth a retry — the sibling repo's `mcp_server_kit` distinguishes them by a fixed string;
+* a call that hits the read bound gives up **locally only** — the SDK raises and sends the server
+  nothing — so the server runs the tool to completion and throws the answer away
+  (`cancel_on_timeout`).
 
 The second client (the reaction labeller) made that a duplication rather than a one-off, and 150
 lines of measured hazard-handling is the last thing to copy. What stays at each call site is the
@@ -31,6 +34,7 @@ one that knows which of its two error classes a given failure belongs in.
 """
 
 import json
+import logging
 import os
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
@@ -41,7 +45,18 @@ import httpx
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 from mcp.shared.exceptions import McpError
-from mcp.types import INVALID_PARAMS, INVALID_REQUEST, METHOD_NOT_FOUND, PARSE_ERROR
+from mcp.types import (
+    INVALID_PARAMS,
+    INVALID_REQUEST,
+    METHOD_NOT_FOUND,
+    PARSE_ERROR,
+    CancelledNotification,
+    CancelledNotificationParams,
+    ClientNotification,
+    ClientRequest,
+    EmptyResult,
+    PingRequest,
+)
 
 # How long to wait for the TCP/TLS handshake, as distinct from how long a tool may take to answer.
 # Deliberately not a config field: it is a property of "is this host there at all", the same for
@@ -59,6 +74,8 @@ READ_TIMEOUT_GRACE_SECONDS = 5.0
 # arguments that fail a tool's own schema before its body ever runs, which is the "atom index past
 # the molecule" class: bad data, and no retry changes it.
 REQUEST_FAULT_CODES = frozenset({PARSE_ERROR, INVALID_REQUEST, METHOD_NOT_FOUND, INVALID_PARAMS})
+
+logger = logging.getLogger(__name__)
 
 # What a fleet server says when a tool raised something that was *not* a deliberate domain message.
 # `Chemclaw3-mcp`'s `mcp_server_kit.app._sanitize_tool_errors` re-raises a `ValueError` cause
@@ -104,6 +121,109 @@ class McpServerFault(Exception):
         super().__init__(tool)
         self.tool = tool
         self.internal = internal
+
+
+# The JSON-RPC code the SDK puts on the `McpError` it raises when a request outlives its read
+# bound. It is `httpx.codes.REQUEST_TIMEOUT` (408), which is a *client-side* invention rather than
+# anything a server sent — `mcp.shared.session.send_request` builds it around its own
+# `anyio.fail_after`. That is what makes it usable as the signal here: a server answering a genuine
+# JSON-RPC error never uses it. Pinned in `tests/test_upstream_surface.py`.
+_READ_TIMEOUT_CODE = int(httpx.codes.REQUEST_TIMEOUT)
+
+
+def cancel_on_timeout(session: ClientSession) -> None:
+    """Make a request that outlives its read bound tell the server to stop, not just give up here.
+
+    **The read bound bounds our wait and nothing else, and that was the whole of the defect.**
+    `mcp.shared.session.send_request` waits inside `anyio.fail_after` and, on expiry, raises
+    `McpError` and sends the server nothing at all — no `notifications/cancelled` — while the
+    session stays open for the rest of the turn (`connectors.transport`). Measured against a running
+    server: a 30 s tool behind a 2 s bound ran to completion with nobody holding the answer, and was
+    interrupted only when the session was finally torn down.
+
+    That is affordable for a dictionary lookup and not for what this fleet actually hosts.
+    `Chemclaw3-mcp`'s `calc` server is documented as "a call here can be minutes or hours,
+    deliberately", and `science/calc/store.cached_compute` retries a miss — so an abandoned CREST
+    search kept a pod's CPU while the next attempt started a second identical one beside it.
+
+    The server half already exists: `mcp.shared.session` cancels the in-flight request when it
+    receives the notification. Only the client never sent one.
+
+    **The ping is not decoration, and it is the part that took measuring.** Sending the notification
+    alone is *not* enough over streamable HTTP: the POST is issued and answered 202, and the server
+    session does not observe it until further traffic moves on that session — reproducibly, the
+    cancelled tool ran on for the full ten seconds the probe waited and the server-side handler
+    logged nothing. Following it with a `ping` on the same session makes delivery deterministic
+    (measured across repeated runs, both ways). One round trip on a path that has just spent its
+    whole timeout is a cost worth paying, and it doubles as evidence the session is still usable.
+
+    **Two upstream shapes are read here, both pinned in `tests/test_upstream_surface.py`.** The id
+    to cancel is `session._request_id` — the counter `send_request` claims and increments — read
+    immediately before delegating, which is safe under concurrency because a coroutine runs
+    synchronously to its first `await` and `send_request`'s first is the stream write, so no other
+    task can interleave between this read and that increment. The second is `_READ_TIMEOUT_CODE`.
+
+    Best-effort by construction: a transport that is already gone cannot carry a cancellation, and
+    failing the call for that would replace a wasted computation with a lost error. The original
+    `McpError` is what the caller sees either way.
+
+    Args:
+        session: A live `ClientSession`, wrapped in place. Called once per session, right after
+            `initialize()`.
+    """
+    send_request = session.send_request
+
+    async def send_request_cancelling(*args: Any, **kwargs: Any) -> Any:
+        """Delegate, and on a read-bound timeout ask the server to abandon that request."""
+        request_id = session._request_id
+        try:
+            return await send_request(*args, **kwargs)
+        except McpError as exc:
+            if exc.error.code != _READ_TIMEOUT_CODE:
+                raise
+            await _ask_server_to_cancel(session, request_id, send_request)
+            raise
+
+    session.send_request = send_request_cancelling  # type: ignore[method-assign]
+
+
+async def _ask_server_to_cancel(session: ClientSession, request_id: int, send_request: Any) -> None:
+    """Send `notifications/cancelled` for `request_id` and flush it, swallowing whatever that costs.
+
+    Separate from `cancel_on_timeout` so the "never let this failure replace the caller's" rule is
+    one small function with one `except`, rather than a nested `try` inside the wrapper where a
+    later edit could let it escape.
+
+    `send_request` is the **unwrapped** bound method, and passing it rather than calling
+    `session.send_ping()` is what stops this recursing: the ping is subject to the same read bound,
+    so a session that has stopped answering entirely would time out here too, re-enter the wrapper,
+    and ping again — forever. The ping is a flush, not a request anyone is waiting on, so it must
+    not be able to schedule more work of its own.
+    """
+    try:
+        await session.send_notification(
+            ClientNotification(
+                CancelledNotification(
+                    method="notifications/cancelled",
+                    params=CancelledNotificationParams(
+                        requestId=request_id,
+                        reason="the caller's request timeout expired",
+                    ),
+                )
+            )
+        )
+        # See `cancel_on_timeout`: without this the notification sits undelivered until the session
+        # sees other traffic, which the last tool call of a turn never does.
+        await send_request(ClientRequest(PingRequest(method="ping")), EmptyResult)
+    # Broad on purpose: the caller's `McpError` is the error that matters, and no failure to
+    # deliver a courtesy cancellation may replace it.
+    except Exception:
+        logger.warning(
+            "could not tell the connector to cancel request %s; it may run to completion with "
+            "nobody waiting for the answer",
+            request_id,
+            exc_info=True,
+        )
 
 
 def bearer_from_env(variable: str) -> str | None:
@@ -218,6 +338,7 @@ async def open_session(
                 read, write, read_timeout_seconds=timedelta(seconds=timeout_seconds)
             ) as session:
                 await session.initialize()
+                cancel_on_timeout(session)
                 connected = True
                 yield session
     except Exception as exc:
