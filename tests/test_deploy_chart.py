@@ -1339,10 +1339,21 @@ def test_every_gate_make_ci_runs_is_a_step_ci_yml_runs() -> None:
     pinned; the *mechanism* was not, so the next gate to be added to one list and forgotten in the
     other fails nothing. This closes the class instead of the instance.
 
-    `helm-validate` is the one gate deliberately in the other job: it needs `helm` and
+    `helm-validate` is the one gate deliberately in a job of its own: it needs `helm` and
     `kubeconform` and no Python, so it runs in `chart` in parallel rather than lengthening `check`.
     The split is asserted rather than tolerated — a gate quietly moving between jobs is a change to
     what blocks a merge.
+
+    **Both directions, and the second one is why this test was rewritten.** It used to slice the
+    file in two on a literal newline-plus-`  chart:` and call the halves `check_job` and
+    `chart_job`, which stopped being true the moment a third job (`static`, holding lint and
+    type) was added:
+    the first "half" then silently contained two jobs. It still passed, because a union of two
+    buckets does not care how the text was cut — a test that survives the change it should have
+    noticed. Parsing the jobs is what makes the claim checkable. And a step in `ci.yml` that
+    `make ci` does *not* run breaks the same contract from the other side: CLAUDE.md promises "a
+    green `make` locally means a green CI", so CI running one extra gate makes the local gate a
+    weaker answer than it says it is.
     """
     ci_target = next(
         line
@@ -1353,17 +1364,119 @@ def test_every_gate_make_ci_runs_is_a_step_ci_yml_runs() -> None:
     assert len(gates) > 10, f"the `make ci` prerequisite list did not parse: {gates}"
 
     workflow = (DEPLOY.parent / ".github" / "workflows" / "ci.yml").read_text()
-    check_job, chart_job = workflow.split("\n  chart:")
+    jobs: dict[str, Any] = yaml.safe_load(workflow)["jobs"]
 
     def targets(job: str) -> set[str]:
-        """Every make target a job's steps invoke, `make lint type cov` counting as three."""
-        return {t for command in re.findall(r"run: make (.+)", job) for t in command.split()}
+        """Every make target a job's steps invoke, `make lint type` counting as two."""
+        return {
+            target
+            for step in jobs[job].get("steps", [])
+            for command in re.findall(r"^make (.+)", str(step.get("run", "")), re.MULTILINE)
+            for target in command.split()
+        }
 
-    assert "helm-validate" in targets(chart_job), "the chart gate left the job that has helm"
-    missing = [gate for gate in gates if gate not in targets(check_job) | targets(chart_job)]
+    assert "helm-validate" in targets("chart"), "the chart gate left the job that has helm"
+
+    everywhere: set[str] = set()
+    for job in jobs:
+        everywhere |= targets(job)
+
+    missing = [gate for gate in gates if gate not in everywhere]
     assert not missing, (
         f"`make ci` runs {missing} and no step in ci.yml does, so a green local gate is not a "
         "green CI — the exact drift that let deps-audit sit in neither list"
+    )
+    # `db-migrate` is the one target in the workflow that is not a gate: it builds the database the
+    # Postgres-backed tests then run against, which is why `make ci` does not depend on it (a
+    # developer's database already exists; a fresh runner's does not). Named rather than pattern-
+    # matched, so a *second* non-gate step has to be argued for here instead of slipping in.
+    setup = {"db-migrate"}
+    extra = [target for target in everywhere if target not in set(gates) | setup]
+    assert not extra, (
+        f"ci.yml runs {extra} and `make ci` does not, so CI gates on something the documented "
+        "pre-push gate never checks — the same drift running the other way"
+    )
+
+
+def test_the_default_branch_is_never_cancelled_mid_gate() -> None:
+    """A cancelled run on `main` is not a superseded answer, it is a missing one.
+
+    Both workflows key their concurrency group on the branch and cancel the loser, which is right
+    for a topic branch: the newer push has the answer the older one was computing. On the default
+    branch the two runs are about *different commits*, and nothing ever re-runs the cancelled one.
+    Measured over the 30 `ci` runs to 2026-08-26, three commits that are ancestors of `origin/main`
+    today have no completed run of that workflow at all — `548266233b`, cancelled 9.4 minutes in,
+    plus `9dfb02a5f6` and `3937fe568d`. The gate's entire claim is that what is on `main` passed
+    it.
+
+    Asserted as an expression rather than by name so the fix cannot be reverted to a bare `true`
+    while the comment above it still explains why it must not be.
+    """
+    for name in ("ci.yml", "image.yml"):
+        workflow = (DEPLOY.parent / ".github" / "workflows" / name).read_text()
+        document: Any = yaml.safe_load(workflow)
+        cancel = document["concurrency"]["cancel-in-progress"]
+        assert cancel is not True, (
+            f"{name} cancels in-progress runs unconditionally, so two merges landing inside one "
+            "run's duration leave the earlier commit on the default branch with no gate"
+        )
+        assert "main" in str(cancel), (
+            f"{name}'s cancel-in-progress no longer exempts the default branch: {cancel!r}"
+        )
+
+
+def test_every_action_is_pinned_to_a_commit_not_a_tag() -> None:
+    """The pipeline pins its Python closure with `--locked` and audits it; its actions floated.
+
+    `actions/checkout@v4` is a *mutable* reference — the tag is repointed on every v4 release, and
+    a compromised or retagged action runs with this workflow's token in the job that builds the
+    shipped image. That is the same threat class `deps-audit` and the SBOM exist to cover, left
+    open in the one place the repository executes third-party code on every push.
+
+    The readable version is kept as a trailing `# vX.Y.Z` comment, which is also the form
+    Dependabot rewrites — `.github/dependabot.yml` has a `github-actions` entry precisely because a
+    pin with no updater trades a supply-chain risk for a staleness one.
+    """
+    unpinned: list[str] = []
+    for workflow in sorted((DEPLOY.parent / ".github" / "workflows").glob("*.yml")):
+        for line in workflow.read_text().splitlines():
+            match = re.search(r"uses:\s*(\S+)", line)
+            if match is None or match.group(1).startswith("./"):
+                continue
+            reference = match.group(1)
+            if not re.fullmatch(r"[^@]+@[0-9a-f]{40}", reference):
+                unpinned.append(f"{workflow.name}: {reference}")
+            elif "#" not in line:
+                unpinned.append(f"{workflow.name}: {reference} (pinned, but no `# vX.Y.Z` comment)")
+    assert not unpinned, f"actions referenced by a mutable tag: {unpinned}"
+
+
+def test_every_downloaded_binary_is_checksummed_before_it_runs() -> None:
+    """A release asset is mutable in a way a git tag is not, and both of these execute as root.
+
+    `kubeconform` validates the chart that describes the deployment; `syft`'s installer runs on the
+    runner that just built the shipped image. Neither was verified — the kubeconform tarball was
+    taken on trust, and the syft installer was piped straight into `sh`, which additionally runs a
+    truncated download because a half-transferred script is a valid prefix.
+
+    The check is that a `curl` of one of these is accompanied by a `sha256sum -c`, not that any
+    particular digest is correct — a digest goes stale by design when the pinned version moves, and
+    the failure this guards against is somebody adding a third download with no verification at
+    all.
+    """
+    for name, marker in (("ci.yml", "kubeconform"), ("image.yml", "syft")):
+        workflow = (DEPLOY.parent / ".github" / "workflows" / name).read_text()
+        step = next(
+            block
+            for block in workflow.split("      - name:")
+            if marker in block and "curl" in block
+        )
+        assert "sha256sum -c" in step, (
+            f"{name} downloads {marker} and runs it without verifying a digest"
+        )
+    image_workflow = (DEPLOY.parent / ".github" / "workflows" / "image.yml").read_text()
+    assert "install.sh | sh" not in image_workflow and "| sh -s" not in image_workflow, (
+        "image.yml pipes a downloaded installer straight into a shell"
     )
 
 

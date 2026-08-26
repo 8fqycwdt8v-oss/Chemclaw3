@@ -316,6 +316,35 @@ it happens.
 
 ## 4 — Operating it
 
+- [ ] **Settle `pytest-xdist` on a real runner** — [S].
+      The `check` job is 87% one step: `make lint type cov` was **12m06s of a 13m56s job** on
+      `d8c312a`, of which lint is 1s and type 68s (measured), so ~11 min is the suite itself.
+      `D-2026-08-26-a-cancelled-run-on-main-is-a-missing-answer-not-a-superseded-one` took the free
+      half — lint and type now run in parallel in `static` — and deliberately left this one open,
+      because the evidence for it is a *reading* rather than a measurement.
+      **What the reading says**: the suite looks parallel-safe already. `tests/pg.py` suffixes its
+      `TEST_SCHEMA` with `os.getpid()` at import time, so an xdist worker gets its own
+      Postgres schema with no change at all, and the two files that use Temporal go through
+      `start_time_skipping()`, which binds an ephemeral port per environment. `pytest-cov` combines
+      across workers natively, so the 84% floor survives.
+      **Why it is not done**: "looks safe" is not a number, and the sandbox this was reviewed in ran
+      the suite far slower than a GitHub runner does, so a local figure would say nothing about CI.
+      The unknowns worth checking are tests that write into the repo tree rather than `tmp_path`,
+      and whether four workers on a 4-core runner contend on the single Postgres service container.
+      Closing this is one experiment: add `pytest-xdist`, run `-n auto` on a branch, compare the
+      job's wall time and its failure set against the serial run on the same commit. If it is not
+      a clear win, say so and delete this row.
+
+- [ ] **Turn the image scan back on, with its contradiction resolved** — [M].
+      Carried forward unchanged from the SBOM work and re-confirmed by the 2026-08-26 CI review:
+      `image.yml` now emits an SBOM and pins/verifies both binaries it downloads, but there is
+      still no scan of the built image. It ran once, found three real classes of problem now fixed
+      in `deploy/Containerfile`, and then reported two packages the build's own exhaustive
+      filesystem listing says are not present. A gate whose last word contradicts the artifact it
+      scanned makes every future red build ambiguous, so it goes back on with its own change rather
+      than riding along on someone else's. The SBOM is now `main`-only, so a scan reading it is
+      `main`-only too.
+
 - [ ] **`read_corpus` re-reads the entire ELN from `datetime.min` on every call** — [M].
       `durable/memory_jobs.py:63` calls `fetch_new_entries(datetime.min)` on every ingest half, so
       each of the three memory jobs (`build_campaign_notes_activity`,

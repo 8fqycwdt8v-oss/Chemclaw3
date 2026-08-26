@@ -17,36 +17,87 @@ on:
   push:
     branches: ["**"]
   pull_request:
+  # `deps-audit` scans the *lockfile* for known CVEs, so its coverage was a function of how often
+  # somebody happened to push: an advisory published against an unchanged dependency stayed
+  # invisible until the next commit. A blocking gate whose reach depends on commit frequency is
+  # not a gate on the dependency closure, it is a gate on activity. Weekly, so a quiet week still
+  # gets one audit of what is actually deployed.
+  schedule:
+    - cron: "0 6 * * 1"
+  # Re-running the gate against a ref otherwise costs an empty commit, which this repository's own
+  # rules forbid pushing.
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 # Keyed on the *branch*, not on `github.ref`, and that is a cost fix rather than a style one. Both
 # triggers above fire for a branch with an open pull request, and their refs differ
-# (`refs/heads/x` versus `refs/pull/N/merge`), so every PR ran this whole gate twice — ~4m40s and a
-# Postgres service container, duplicated, on every push to every PR branch. `head_ref` is the branch
-# name on a `pull_request` event and empty otherwise, so this collapses both events onto one key and
-# `cancel-in-progress` drops the loser. The branch-push trigger stays, because a push before the PR
-# exists is exactly the case `deps-audit` was moved here to cover.
+# (`refs/heads/x` versus `refs/pull/N/merge`), so every PR ran this whole gate twice — a full gate
+# and a Postgres service container, duplicated, on every push to every PR branch. `head_ref` is the
+# branch name on a `pull_request` event and empty otherwise, so this collapses both events onto one
+# key and `cancel-in-progress` drops the loser. The branch-push trigger stays, because a push before
+# the PR exists is exactly the case `deps-audit` was moved here to cover.
+#
+# **`main` is exempt from the cancellation, and that is a correctness fix rather than a cost one.**
+# The group key for a push to the default branch is just `main`, so two merges landing inside one
+# run's duration cancelled the earlier one — and nothing ever re-ran it. Measured over the 30 runs
+# to 2026-08-26: three commits that are ancestors of `origin/main` today have **no completed run of
+# this workflow at all** — `548266233b` (cancelled 9.4 min in), `9dfb02a5f6` and `3937fe568d`. The
+# gate's whole claim is that what is on `main` passed it, and for those three it never ran. On a
+# branch a cancelled run is a superseded answer; on `main` it is a missing one, so the merge queue
+# of one pays for its own gate.
 concurrency:
   group: "${{ github.workflow }}-${{ github.head_ref || github.ref_name }}"
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref_name != 'main' }}
 
 jobs:
+  # Lint and type, alone, ahead of everything that needs a database. Split out of `check` because
+  # they were 69s of a 12m06s step (measured: `make lint` 1s, `make type` 68s) and they were
+  # reported *last* — a misformatted file or a bad annotation, the two cheapest and most common
+  # failures there are, cost a full 14-minute job to hear about, behind a Postgres service
+  # container and a migration neither of them touches. Here the same failure lands in about ninety
+  # seconds.
+  #
+  # It does not gate `check`: they run in parallel, because making the slow job wait on the fast
+  # one would add the fast one's duration to every green run to save nothing.
+  static:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+        with:
+          python-version: "3.11"
+          enable-cache: true
+
+      - name: Sync dependencies
+        run: uv sync --locked
+
+      - name: Lint + type
+        run: make lint type
+
   check:
     runs-on: ubuntu-latest
     # A hung test must fail this job, not occupy a runner until GitHub's 6-hour ceiling (D-093:
     # tests/test_orchestrator.py's fan-out test used to do exactly that). `pytest-timeout`'s
     # per-test cap is the inner bound that names the offending test; this is the outer backstop.
     #
-    # Stays at 30 — the number was never the problem. This job was cancelled here on every run,
-    # `main` included, from the moment D-117 enabled the real gates, and the outer bound was the
-    # only thing that ever fired: `signal`-based interrupts cannot reach a test blocked in
-    # temporalio's Rust core, so a hung workflow burnt 28 minutes and reported no test name.
-    # `tests/conftest.py` now gives Temporal-backed tests the `thread` method, which fires
-    # regardless. With the hang fixed, the whole gate — every Temporal test included — runs in
-    # **4m38s**, so 30 is already 6x headroom and raising it would only lengthen the next burn.
-    timeout-minutes: 30
+    # **45, and the number that justified 30 had gone stale by 3.6x.** This line used to carry
+    # "the whole gate runs in 4m38s, so 30 is already 6x headroom". Re-measured 2026-08-26 over
+    # the 14 successful runs in the last 30: **median 16.8 min, max 22.0 min** — 1.36x headroom on
+    # the worst observed run, not 6x. That is close enough that ordinary variance starts cancelling
+    # green runs, and a spurious cancel here costs a full re-run *and* reports no test name, which
+    # is the exact failure this comment used to describe as fixed. The suite grew; the bound did
+    # not follow it. 45 restores roughly 2x on the worst run actually seen.
+    #
+    # Raising it does lengthen a genuine hang's burn, and that cost is real but bounded — the inner
+    # `pytest-timeout` cap (180s, `pyproject.toml`) is what actually catches a hung *test* and names
+    # it. This bound only catches a hang that escapes the inner one, which since the `thread` method
+    # landed in `tests/conftest.py` has not happened.
+    timeout-minutes: 45
     # Real Postgres so the calculation-store and session-store integration tests run (not skip).
     services:
       postgres:
@@ -72,12 +123,12 @@ jobs:
       # own content and every migration compares equal to itself — the check reported no edit
       # across all 42 while a smuggled `ALTER TABLE` appended to a merged file would have passed.
       # It now skips honestly instead of passing, and this is what makes it actually run.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
         with:
           python-version: "3.11"
           enable-cache: true
@@ -94,8 +145,12 @@ jobs:
 
       # `cov`, not `test`: the 80% floor is a regression gate, and it is measured over the shipped
       # package set (enforced by tests/test_packaging.py) so it measures what a deployment runs.
-      - name: Lint + type + test with the coverage floor
-        run: make lint type cov
+      #
+      # Lint and type used to ride along on this line and now run in `static` above, in parallel.
+      # They are still gates and still block a merge; what changed is that they no longer report
+      # their answer eleven minutes after they knew it.
+      - name: Test with the coverage floor
+        run: make cov
 
       - name: Validate knowledge graph
         run: make kg-validate
@@ -107,6 +162,15 @@ jobs:
       # separates a demonstration from a regression, which is what makes the name true.
       - name: Score the eval case-set (fails on a science regression)
         run: make eval-strict
+
+      # `eval-strict` above fails on a *regression* — a case that stopped passing. This fails on a
+      # **drift**: an aggregate that got quietly worse against `data/evals/baseline.json` without
+      # any single case flipping. It existed for exactly that and no workflow ran it, so the
+      # slower half of the science gate was a target somebody had to remember. It costs ~1s, and
+      # it refuses to compare across case-set versions rather than reporting a delta between two
+      # different quantities.
+      - name: Score against the recorded baseline (fails on a worsening drift)
+        run: make eval-baseline-check
 
       - name: Validate ELN exports
         run: make eln-validate
@@ -158,21 +222,32 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       # No uv here on purpose: `make helm-validate` shells out to `helm` and `kubeconform` and runs
       # no Python at all. Installing uv without ever calling `uv sync` leaves the action's cache
       # path empty, and its post-job save then fails the whole job — a green validation reported as
       # a red check.
       - name: Install Helm
-        uses: azure/setup-helm@v4
+        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
         with:
           version: "v3.13.0"
 
       - name: Install kubeconform
+        # Checksummed, because a release asset is mutable in a way a git tag is not: the tag names
+        # a commit, the asset is a file the release owner can replace. This binary then validates
+        # the chart that describes the deployment, so "whatever that URL served today" is a
+        # strange thing to trust when the same pipeline pins its Python closure with `--locked`
+        # and audits it. The digest below was verified against the release's own `CHECKSUMS` file
+        # rather than taken from one download of the tarball.
+        env:
+          KUBECONFORM_VERSION: v0.6.7
+          KUBECONFORM_SHA256: 95f14e87aa28c09d5941f11bd024c1d02fdc0303ccaa23f61cef67bc92619d73
         run: |
+          set -euo pipefail
           curl -sSLo /tmp/kubeconform.tar.gz \
-            https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz
+            "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz"
+          echo "${KUBECONFORM_SHA256}  /tmp/kubeconform.tar.gz" | sha256sum -c -
           tar -xzf /tmp/kubeconform.tar.gz -C /tmp kubeconform
           sudo install -m 0755 /tmp/kubeconform /usr/local/bin/kubeconform
 
