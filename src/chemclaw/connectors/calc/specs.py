@@ -213,6 +213,9 @@ class SpeciesRankingJobSpec(BaseModel):
     solvent: str | None = None
     temperature_k: float | None = None
     level: Literal["quick", "standard", "thorough"] = "standard"
+    symmetry_numbers: dict[str, int] | None = Field(
+        default=None, description=_SYMMETRY_NUMBERS_DESCRIPTION
+    )
 
     @model_validator(mode="after")
     def _labels_match_species(self) -> "SpeciesRankingJobSpec":

@@ -784,9 +784,12 @@ class EnsembleProperty(BaseModel):
     This is the shape that lifts it: each member's property computed at that member's own geometry,
     then weighted by the population the ensemble gives it.
 
-    `refined` says which populations were used. Weighting by electronic energy is free once the
-    search exists; weighting by free energy costs one Hessian per member, so the caller chooses and
-    the result records the choice rather than letting a reader assume the better one.
+    **These populations are electronic-energy weighted, always.** A `refined` flag once sat here to
+    say which weighting ran, and nothing ever wrote it — a promise with no implementation, which is
+    worse than the absence it papered over, because a reader takes `refined=False` for a recorded
+    choice rather than a default nobody set. Free-energy weighting costs one Hessian per member and
+    is what `RefinedEnsemble` is for; when a property average over *those* populations is wanted,
+    that is a new field on this model and a writer for it, not a boolean.
     """
 
     smiles: str | None
@@ -796,7 +799,6 @@ class EnsembleProperty(BaseModel):
     temperature_k: float
     members_averaged: int
     total_found: int
-    refined: bool = False
     sampled: Literal[True] = True
     value: WeightedValue | None = None
     per_atom: list[WeightedAtom] = Field(default_factory=list)
@@ -804,6 +806,11 @@ class EnsembleProperty(BaseModel):
     # Below 1.0 the average is over a *truncation* of the ensemble, and saying so is what stops
     # "the Boltzmann-averaged dipole" meaning "the dipole of the five conformers we could afford".
     population_covered: float = 1.0
+    # **`population_covered` records the truncation; this is what *says* it.** The field above
+    # shipped without one, so the cheap composite disclosed its partial coverage only to a reader
+    # who thought to divide, while `RefinedEnsemble` — the expensive one — warned. Same rule, both
+    # of them now.
+    warnings: list[str] = Field(default_factory=list)
 
 
 class RefinedConformer(BaseModel):
@@ -977,6 +984,12 @@ class SpeciesEnergy(BaseModel):
     # The -T*S_conf term the ensemble contributed, present only at `thorough`. Positive flexibility
     # lowers a free energy, so this is negative when it is present at all.
     conformational_entropy_kcal: float | None = None
+    # The geometry this energy describes, so a caller can carry it into the next calculation
+    # (D-2026-08-21). Additive and defaulted, because histories written before it exist.
+    structure_id: str = ""
+    # How many conformers the search found, at `thorough`; 0 where no search ran. `species_ranking`
+    # reported a hardcoded 0 beside `sampled=True`, which reads as "sampled and found nothing".
+    conformers_found: int = 0
     was_cached: bool
     # The method the *server* reported for this species' optimisation, so a reaction can state the
     # level of theory it was actually run at. Additive and defaulted because this crosses the

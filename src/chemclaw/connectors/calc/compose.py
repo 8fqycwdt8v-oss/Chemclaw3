@@ -30,7 +30,7 @@ a locally-derived version would be *well-formed*, match zero calibration rows, a
 
 import asyncio
 from collections import Counter
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any, Literal, Protocol, TypeVar
 
 from rdkit import Chem
@@ -708,6 +708,7 @@ async def _species_energy(
     """
     structure = await embed(smiles, run=run)
     ensemble_correction = 0.0
+    found = 0
     if level == "thorough":
         ensemble, _ = await conformer_ensemble(
             store,
@@ -718,6 +719,7 @@ async def _species_energy(
         )
         structure = ensemble.lowest
         ensemble_correction = ensemble.ensemble_correction_kcal
+        found = ensemble.total_found
     if thermo is None:
         optimization, cached = await relax(store, structure, solvent, run=run)
         return SpeciesEnergy(
@@ -729,6 +731,8 @@ async def _species_energy(
             enthalpy_hartree=None,
             gibbs_free_energy_hartree=None,
             is_minimum=None,
+            structure_id=optimization.structure.structure_id,
+            conformers_found=found,
             was_cached=cached,
             method=optimization.method,
         )
@@ -751,6 +755,8 @@ async def _species_energy(
         conformational_entropy_kcal=(
             round(ensemble_correction, 3) if level == "thorough" else None
         ),
+        structure_id=minimum.structure.structure_id,
+        conformers_found=found,
         is_minimum=result.is_minimum,
         was_cached=cached,
         method=minimum.method,
@@ -1175,7 +1181,21 @@ async def ensemble_property(
     populations = [conformer.population for conformer in chosen]
     total = sum(populations) or 1.0
     populations = [population / total for population in populations]
-    scalar, per_atom = _averaged(prop, payloads, populations)
+    scalar, per_atom, dropped = _averaged(prop, payloads, populations)
+    covered = sum(conformer.population for conformer in chosen)
+    property_warnings: list[str] = []
+    if covered < _REFINED_COVERAGE_WARNING:
+        property_warnings.append(
+            f"the {len(chosen)} conformers averaged carry {covered:.0%} of the ensemble "
+            f"population of {ensemble.total_found} found; this average describes that fraction "
+            "rather than the whole ensemble"
+        )
+    if dropped:
+        property_warnings.append(
+            f"{dropped} atom(s) were not present in every conformer's result and were left out of "
+            "the per-atom average; a Fukui result is truncated to the most susceptible sites, so a "
+            "marginal atom can fall inside one conformer's list and outside another's"
+        )
     return EnsembleProperty(
         smiles=require_canonical_smiles(smiles),
         property_name=prop,
@@ -1186,13 +1206,14 @@ async def ensemble_property(
         total_found=ensemble.total_found,
         value=scalar,
         per_atom=per_atom,
-        population_covered=round(sum(conformer.population for conformer in chosen), 4),
+        population_covered=round(covered, 4),
+        warnings=property_warnings,
     )
 
 
 def _per_atom(
     members: list[dict[int, tuple[str, float]]], populations: list[float]
-) -> list[WeightedAtom]:
+) -> tuple[list[WeightedAtom], int]:
     """Average a per-atom property across conformers, pairing atoms by **index**.
 
     **Not by list position, and the difference is a wrong answer rather than a rough one.** The
@@ -1213,8 +1234,11 @@ def _per_atom(
     over three of five conformers is not a population-weighted average and nothing downstream could
     tell. The caller reports the count so a truncated ranking is visible instead of implied.
     """
-    common = set.intersection(*(set(member) for member in members)) if members else set()
-    return [
+    if not members:
+        return [], 0
+    seen = [set(member) for member in members]
+    common = set.intersection(*seen)
+    averaged = [
         WeightedAtom(
             index=index,
             element=members[0][index][0],
@@ -1222,11 +1246,12 @@ def _per_atom(
         )
         for index in sorted(common)
     ]
+    return averaged, len(set.union(*seen) - common)
 
 
 def _averaged(
     prop: EnsembleProperties, payloads: list[Any], populations: list[float]
-) -> tuple[WeightedValue | None, list[WeightedAtom]]:
+) -> tuple[WeightedValue | None, list[WeightedAtom], int]:
     """Split one property out of each payload and weight it — scalar or per atom.
 
     A `match` over the property name rather than a registry, because there are four of them and a
@@ -1235,29 +1260,31 @@ def _averaged(
     if prop == "fukui":
         sites = [SiteReactivityResult.model_validate(payload).sites for payload in payloads]
         field = _FUKUI_FIELD[_DEFAULT_FUKUI_MODE]
-        return None, _per_atom(
+        per_atom, dropped = _per_atom(
             [
                 {site.index: (site.element, getattr(site, field)) for site in member}
                 for member in sites
             ],
             populations,
         )
+        return None, per_atom, dropped
     properties = [ElectronicProperties.model_validate(payload) for payload in payloads]
     if prop == "charges":
-        return None, _per_atom(
+        per_atom, dropped = _per_atom(
             [
                 {charge.index: (charge.element, charge.charge) for charge in member.atom_charges}
                 for member in properties
             ],
             populations,
         )
+        return None, per_atom, dropped
     values = [getattr(member, prop) for member in properties]
     if any(value is None for value in values):
         raise ValueError(
             f"{prop} is not defined for every conformer of this molecule "
             "(a species with no unoccupied orbital has no LUMO and no gap)"
         )
-    return weighted_average(values, populations), []
+    return weighted_average(values, populations), [], 0
 
 
 async def species_ranking(
@@ -1268,6 +1295,7 @@ async def species_ranking(
     solvent: str | None = None,
     temperature_k: float | None = None,
     level: ReactionLevel = "standard",
+    symmetry_numbers: Mapping[str, int] | None = None,
     progress: Progress = no_progress,
     run: RemoteRunner = plain,
 ) -> SpeciesDistribution:
@@ -1300,11 +1328,19 @@ async def species_ranking(
     thermo = (
         None if level == "quick" else ThermoSettings(temperature_k=temperature, symmetry_number=1)
     )
+    stated = dict(symmetry_numbers or {})
     energies: list[SpeciesEnergy] = []
     for index, (smiles, _) in enumerate(considered, start=1):
         progress(f"species {index}/{len(considered)}: {smiles}")
         energies.append(
-            await _species_energy(store, smiles, "reactant", solvent, thermo, 1, level, run)
+            # **`stated.get(smiles)`, not a literal 1.** Passing 1 marked the number *stated*, so
+            # the machinery `reaction_energy` uses to withhold or flag an assumed sigma never ran
+            # here — and this composite ranks by the free energy that sigma shifts. `None` computes
+            # at sigma=1 exactly as before but records that nobody said so, which is what makes the
+            # warning below possible.
+            await _species_energy(
+                store, smiles, "reactant", solvent, thermo, stated.get(smiles), level, run
+            )
         )
 
     gibbs = [energy.gibbs_free_energy_hartree for energy in energies]
@@ -1323,6 +1359,23 @@ async def species_ranking(
         warnings.append(
             "ranked by electronic energy: at level='quick' no species has a free energy, so the "
             "populations ignore the zero-point and entropy differences between these forms"
+        )
+    unstated = sorted({energy.smiles for energy in energies if energy.symmetry_number is None})
+    if unstated and use_gibbs:
+        # Warned rather than withheld, and the difference from `reaction_energy` is deliberate.
+        # There, an unstated sigma means no ΔG is reported at all, because ΔE and ΔH still answer
+        # the question. Here the free energy *is* the question — an E-only ranking is what `quick`
+        # already is — so downgrading silently would be its own wrong answer. sigma shifts G by
+        # exactly R·T·ln(sigma), ~0.41 kcal/mol per factor of two at 298 K, which is comparable to
+        # the tautomer gaps this job exists to resolve, so it is worth a sentence every time.
+        warnings.append(
+            "no rotational symmetry number was given for "
+            + ", ".join(unstated)
+            + ": their rotational entropy was computed at sigma=1. Any species with a rotational "
+            "axis is over-weighted here by R ln(sigma) — 0.41 kcal/mol per factor of two at "
+            "298 K — so a ranking whose forms differ in symmetry can be wrong by more than its "
+            "gap. Pass symmetry_numbers (1 = none, 2 = a C2 axis, 3 = ammonia, 6 = ethane, "
+            "12 = benzene) to correct it"
         )
     if len(species) > ceiling:
         # `len(species) - ceiling`, not the reverse: this branch only runs when the set is *over*
@@ -1343,7 +1396,12 @@ async def species_ranking(
                 population=round(population, 4),
                 gibbs_free_energy_hartree=energy.gibbs_free_energy_hartree,
                 electronic_energy_hartree=energy.electronic_energy_hartree,
-                conformers_found=0,
+                # Off the energy rather than hardcoded: this was a literal 0 beside
+                # `sampled=True`, which reads as "a search ran and found nothing", and the geometry
+                # of the dominant form was unreachable downstream — the one thing every other
+                # ensemble model in this bundle hoists an id for.
+                structure_id=energy.structure_id,
+                conformers_found=energy.conformers_found,
             )
             for (_, label), energy, value, population in zip(
                 considered, energies, relative, populations, strict=True

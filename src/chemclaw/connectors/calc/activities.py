@@ -264,8 +264,11 @@ async def _dispatch(spec: XtbJobSpec) -> XtbJobResult:
             # 47" is exactly the qualifier a reader would otherwise never see.
             summary=(
                 f"{spec.smiles}: {refined.refined_count} of {refined.total_found} conformers "
-                f"refined ({refined.refined_population_covered:.0%} of the population), lowest at "
-                f"{lowest.population:.0%}"
+                f"refined ({refined.refined_population_covered:.0%} of the population), "
+                # "lowest", not "dominant": `conformers[0]` is the lowest *free energy*, and with
+                # degeneracy weighting that need not be the most populated member — a two-rotamer
+                # conformer 0.3 kcal/mol up outranks it.
+                f"lowest free energy at {lowest.population:.0%}"
             ),
             refined=refined,
         )
@@ -301,6 +304,7 @@ async def _dispatch(spec: XtbJobSpec) -> XtbJobResult:
             solvent=spec.solvent,
             temperature_k=spec.temperature_k,
             level=spec.level,
+            symmetry_numbers=spec.symmetry_numbers,
             progress=activity.heartbeat,
             run=_beating,
         )

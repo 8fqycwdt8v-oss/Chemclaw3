@@ -166,7 +166,9 @@ def test_an_averaged_fukui_pairs_atoms_by_index_not_by_rank() -> None:
     ranked_high_first = {0: ("C", 0.1), 1: ("O", 0.9)}
     ranked_low_first = {1: ("O", 0.9), 0: ("C", 0.1)}
 
-    per_atom = compose._per_atom([ranked_high_first, ranked_low_first], [0.5, 0.5])
+    per_atom, dropped = compose._per_atom([ranked_high_first, ranked_low_first], [0.5, 0.5])
+
+    assert dropped == 0, "both conformers carry both atoms"
 
     by_index = {atom.index: atom for atom in per_atom}
     assert by_index[0].value.mean == pytest.approx(0.1)
@@ -189,10 +191,11 @@ def test_an_atom_missing_from_one_conformer_is_dropped_rather_than_part_averaged
     both = {0: ("C", 0.2), 1: ("O", 0.4)}
     truncated = {0: ("C", 0.6)}
 
-    per_atom = compose._per_atom([both, truncated], [0.5, 0.5])
+    per_atom, dropped = compose._per_atom([both, truncated], [0.5, 0.5])
 
     assert [atom.index for atom in per_atom] == [0], "an atom absent from a member must be dropped"
     assert per_atom[0].value.mean == pytest.approx(0.4)
+    assert dropped == 1, "the dropped atom must be counted so the caller can say so"
 
 
 def test_a_property_no_conformer_defines_is_refused_rather_than_averaged() -> None:
