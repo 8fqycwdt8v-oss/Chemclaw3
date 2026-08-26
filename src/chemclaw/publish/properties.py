@@ -204,6 +204,15 @@ _DEFINITIONS: tuple[PropertyDefinition, ...] = (
         "state barrier, not a transition state.",
     ),
     _d(
+        "rotational_barrier",
+        "energy_difference",
+        "kcal/mol",
+        "Barrier to rotation about one named bond, out of the populated rotamer. From a relaxed "
+        "profile with its maximum resolved, so it is a ground-state barrier estimate and not an "
+        "optimized transition state; `barrier_basis` says whether it is electronic or a free "
+        "energy.",
+    ),
+    _d(
         "relative_energy",
         "energy_difference",
         "kcal/mol",
@@ -396,7 +405,37 @@ _DEFINITIONS: tuple[PropertyDefinition, ...] = (
         kind="integer",
     ),
     _d("rotatable_bonds", "count", "", "Rotatable bond count.", kind="integer"),
+    _d(
+        "torsion_symmetry_order",
+        "count",
+        "",
+        "How many times a torsion profile repeats in a full turn — the reason a scan covers "
+        "360/N degrees rather than 360.",
+        kind="integer",
+    ),
+    _d(
+        "rotamer_count",
+        "count",
+        "",
+        "How many populated rotamers a torsion profile resolved.",
+        kind="integer",
+    ),
     _d("aromatic_rings", "count", "", "Aromatic ring count.", kind="integer"),
+    _d("torsion_period", "angle", "degree", "The range one full repeat of a torsion covers."),
+    # --- time: the first quantity here that is a duration -------------------------------------
+    #
+    # Seconds across twenty orders of magnitude, deliberately unconverted: a rotamer half-life runs
+    # from microseconds to geological time, and a registry that offered "hours" would invite a
+    # comparison between two rows quoted in different units. The band the number carries is in the
+    # payload; what is queryable is the mean.
+    _d(
+        "interconversion_half_life",
+        "time",
+        "s",
+        "Half-life for interconversion over the barrier, by Eyring at the stated temperature. "
+        "Exponential in the barrier, so read it with the uncertainty in the payload: a few "
+        "kcal/mol is several orders of magnitude here.",
+    ),
     _d(
         "lipinski_violations",
         "count",
@@ -496,6 +535,29 @@ _DEFINITIONS: tuple[PropertyDefinition, ...] = (
         kind="boolean",
     ),
     _d("fukui_mode", "category", "", "Which Fukui index the sites were ranked by.", kind="text"),
+    _d(
+        "torsion_label",
+        "category",
+        "",
+        "The bond a rotational profile is about, in the words a chemist recognises.",
+        kind="text",
+    ),
+    _d(
+        "torsion_id",
+        "category",
+        "",
+        "The content-addressed handle of that bond, stable across every way of writing the "
+        "molecule — so two records about one bond can be matched without comparing atom indices.",
+        kind="text",
+    ),
+    _d(
+        "barrier_basis",
+        "category",
+        "",
+        "Whether a reported barrier is electronic (E) or a free energy from a Hessian at the "
+        "pass (G).",
+        kind="text",
+    ),
     _d(
         "scan_coordinate",
         "category",

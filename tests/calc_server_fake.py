@@ -24,6 +24,7 @@ make the tests pass on a design that fails in production:
   caches the full result.
 """
 
+import math
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from typing import Any
@@ -31,7 +32,7 @@ from typing import Any
 import numpy as np
 import pytest
 from rdkit import Chem
-from rdkit.Chem import AllChem
+from rdkit.Chem import AllChem, rdMolTransforms
 
 from chemclaw.core.chem import require_canonical_smiles
 from chemclaw.core.ids import stable_hash
@@ -161,6 +162,66 @@ def _nudged(structure: dict[str, Any], index: int) -> dict[str, Any]:
     }
 
 
+# A three-well torsional potential in Hartree, shaped like n-butane's: minima at 60, 180 and 300
+# degrees, the anti well (180) about 1 kcal/mol below the two gauche wells, and a barrier of about
+# 2.5 kcal/mol between them. The numbers are placeholders; the *shape* is what the profile
+# composite is tested against, because a flat or monotonic surface has no rotamers to find.
+_BARRIER_HARTREE = 0.004
+_GAUCHE_HARTREE = 0.0016
+_WELLS = (60.0, 180.0, 300.0)
+
+
+def torsional_energy(degrees: float) -> float:
+    """The synthetic torsional potential at one dihedral, in Hartree above its own minimum."""
+    radians = math.radians(degrees)
+    threefold = _BARRIER_HARTREE * (1.0 + math.cos(3.0 * radians)) / 2.0
+    onefold = _GAUCHE_HARTREE * (1.0 + math.cos(radians)) / 2.0
+    return threefold + onefold
+
+
+def _nearest_well(degrees: float) -> float:
+    """Which of the three minima an unconstrained relaxation from `degrees` would settle into."""
+    return min(_WELLS, key=lambda well: min(abs(degrees - well), 360.0 - abs(degrees - well)))
+
+
+def dihedral_of(structure: dict[str, Any], atoms: tuple[int, int, int, int]) -> float:
+    """The dihedral these four atoms span, in degrees on [0, 360) — RDKit's own measurement."""
+    return float(rdMolTransforms.GetDihedralDeg(_conformer(structure), *atoms)) % 360.0
+
+
+def with_dihedral(
+    structure: dict[str, Any], atoms: tuple[int, int, int, int], degrees: float
+) -> dict[str, Any]:
+    """`structure` with that dihedral driven to `degrees`, moving the attached fragment with it.
+
+    Real geometry manipulation rather than a recorded number, because the composite reads the angle
+    back off the coordinates: a fake that reported a dihedral it had not actually set would let a
+    released well keep the constrained geometry and still look correct.
+    """
+    conformer = _conformer(structure)
+    rdMolTransforms.SetDihedralDeg(conformer, *atoms, degrees)
+    return {
+        **structure,
+        "positions": [
+            list(conformer.GetAtomPosition(index)) for index in range(conformer.GetNumAtoms())
+        ],
+    }
+
+
+def _conformer(structure: dict[str, Any]) -> Chem.Conformer:
+    """An RDKit conformer over a structure payload, with the bonds needed to drive a dihedral.
+
+    Built from the SMILES rather than from the elements alone: `SetDihedralDeg` moves everything
+    bonded beyond the axis, so it needs the connectivity, and a bare point cloud has none.
+    """
+    mol = Chem.AddHs(Chem.MolFromSmiles(require_canonical_smiles(structure["smiles"])))
+    conformer = Chem.Conformer(len(structure["positions"]))
+    for index, position in enumerate(structure["positions"]):
+        conformer.SetAtomPosition(index, [float(value) for value in position])
+    mol.AddConformer(conformer, assignId=True)
+    return mol.GetConformer()
+
+
 def _structure_id(structure: dict[str, Any]) -> str:
     """The content address of a structure dict, by the same rule `Structure.structure_id` uses."""
     return "st_" + stable_hash(
@@ -180,6 +241,7 @@ class FakeCalcServer:
         self,
         *,
         saddle_first: bool = False,
+        torsion: tuple[int, int, int, int] | None = None,
         solvent_shifts: dict[tuple[str, str], float] | None = None,
     ) -> None:
         """Start with no calls recorded.
@@ -187,16 +249,27 @@ class FakeCalcServer:
         `saddle_first` makes the first Hessian carry an imaginary frequency and every later one a
         minimum, which is the sequence `relax_to_minimum`'s escape needs to be visible.
 
+        `torsion` turns on a **one-dimensional torsional potential** over those four atoms: a
+        constrained point actually sets the dihedral and reports `_TORSIONAL` at it, and an
+        unconstrained relaxation actually settles into the nearest of its three wells. Nothing else
+        here models a potential energy surface at all, and this one does for a reason rather than
+        for realism — the rotational profile's whole claim is that releasing a scan point's
+        constraint moves it to a different geometry with a different energy. A fake whose relaxation
+        returns its input unchanged cannot express that claim being false.
+
         `solvent_shifts` maps `(smiles, solvent)` to a shift in Hartree added to that species'
         relaxed energy in that medium, so a fan-out over solvents can be made to *reorder* rather
         than only to shift. Without it every medium returns the same energy — the fake's energy is
         a function of atom count alone — and `dominance_changes`, the one finding a solvent screen
-        over species exists to report, could never be observed. A fake that cannot express the
-        behaviour under test is not evidence for it
+        over species exists to report, could never be observed.
+
+        The two arrived on branches that did not know about each other and reach the same
+        conclusion: a fake that cannot express the failure is not evidence
         (`D-2026-08-26-a-tool-result-is-not-a-model-on-the-wire`).
         """
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self._saddle_first = saddle_first
+        self._torsion = torsion
         self._solvent_shifts = dict(solvent_shifts or {})
         self.overrides: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {}
         # Where the composites' geometries land once `install` has wired it in. On the fake rather
@@ -287,12 +360,28 @@ class FakeCalcServer:
         }
 
     def _relax_structure(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        return self._optimization(arguments["structure"], arguments.get("solvent"))
+        structure = arguments["structure"]
+        if self._torsion is not None:
+            # Settle into the nearest well, geometry and energy together — which is what makes a
+            # released rotamer a different thing from the constrained point it came from.
+            settled = _nearest_well(dihedral_of(structure, self._torsion))
+            structure = with_dihedral(structure, self._torsion, settled)
+            result = self._optimization(structure, arguments.get("solvent"))
+            result["energy_hartree"] += torsional_energy(settled)
+            return result
+        return self._optimization(structure, arguments.get("solvent"))
 
     def _scan_point(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        # The driven coordinate shifts the energy, so a profile has a minimum somewhere to find.
-        result = self._optimization(arguments["structure"], arguments.get("solvent"))
-        result["energy_hartree"] += (float(arguments["value"]) - 1.5) ** 2
+        structure = arguments["structure"]
+        value = float(arguments["value"])
+        if self._torsion is not None and len(arguments["atoms"]) == 4:
+            structure = with_dihedral(structure, self._torsion, value)
+            result = self._optimization(structure, arguments.get("solvent"))
+            result["energy_hartree"] += torsional_energy(value)
+        else:
+            # The driven coordinate shifts the energy, so a profile has a minimum somewhere to find.
+            result = self._optimization(structure, arguments.get("solvent"))
+            result["energy_hartree"] += (value - 1.5) ** 2
         result["frozen_atoms"] = list(arguments["atoms"])
         return result
 

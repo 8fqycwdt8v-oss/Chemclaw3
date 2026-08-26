@@ -27,6 +27,7 @@ from temporalio import workflow
 # re-import isolation (the standard Temporal pattern).
 with workflow.unsafe.imports_passed_through():
     from chemclaw.connectors.calc.activities import run_xtb_calculation
+    from chemclaw.connectors.calc.results import XtbJobResult
     from chemclaw.connectors.calc.specs import XtbJobSpec
     from chemclaw.core.config import settings
     from chemclaw.durable.connector_job import ConnectorJobResult
@@ -35,6 +36,51 @@ with workflow.unsafe.imports_passed_through():
 from chemclaw.connectors.queues import bundle_queue
 from chemclaw.durable.publish import BAD_DATA_RETRY
 from chemclaw.durable.registry import durable_workflow
+
+
+def job_envelope(result: XtbJobResult) -> ConnectorJobResult:
+    """This bundle's activity result, as the envelope core carries, publishes and pushes back.
+
+    **A module-level function rather than three lines inside `run`, for the reason
+    `without_geometry` beside it is one.** The property worth asserting is that this is a *pure*
+    function of a value
+    already in history — a replay must produce byte-identical output — and a test can only assert
+    that by calling the same thing the workflow calls. When this was inlined, the test that existed
+    to prove the publish path routed built its own envelope by hand and paired the route with the
+    inner model, while the workflow paired it with the wrapper: the copy agreed with nobody, and
+    all nine of this bundle's jobs published nothing behind a green suite
+    (`D-2026-08-25-a-cache-is-not-a-record`).
+
+    Three facts about the shape it produces, each of which was once wrong:
+
+    - **`data` is the domain result, not the envelope around it.** `XtbJobResult` is bookkeeping —
+      `kind` and `summary` — and both already ride on `ConnectorJobResult` in their own right.
+      Sending the wrapper put the science one level down (`data.ensemble.…`) and made
+      `payload_kind` read `XtbJobResult` for every job, which matches no projector. Publishing the
+      member is what `qm` has always done, and it is the only fix available on this side:
+      `publish` may not import `connectors` (`tests/test_layering.py` allows that edge one way
+      only), so the unwrapping cannot live on the far side.
+    - **`calc_refs` rides on the envelope's own field**, not inside `data`: it is a cross-cutting
+      provenance fact every connector job could carry rather than this bundle's domain result, and
+      `propose_knowledge_note` takes it as one list.
+    - **`without_geometry` replaces each geometry with the address the next calculation accepts.**
+      Measured on a 40-atom molecule, a conformer search's envelope was 29,086 characters — 2,400
+      Cartesian coordinates no tool in this system accepts — reaching the turn three times over
+      (D-2026-08-21-a-geometry-is-an-address-not-a-payload).
+    """
+    outcome = result.outcome()
+    return ConnectorJobResult(
+        summary=result.summary,
+        calc_refs=result.calc_refs,
+        # The result model's own name, so `chemclaw.publish` can route a composite exactly. A
+        # composite has no cache key, so its `calc_type` is `<connector>.<job>` and matches no
+        # projector prefix -- this is the only thing that identifies the shape.
+        payload_kind=type(outcome).__name__,
+        # `exclude_none` keeps the payload to what the calculation actually reported, dropping the
+        # optional fields this result shape left empty rather than shipping explicit nulls for the
+        # model to read past.
+        data=without_geometry(outcome.model_dump(mode="json", exclude_none=True)),
+    )
 
 
 @durable_workflow(bundle_queue("calc"))
@@ -70,32 +116,9 @@ class CalcJobWorkflow:
             # bad input fails fast instead of burning the budget.
             retry_policy=BAD_DATA_RETRY,
         )
-        # `exclude_none` keeps the envelope to the one result shape that actually ran:
-        # `XtbJobResult` carries five optional fields and populates exactly one, so without it
-        # every reaction result would ship four explicit nulls for the model to read past.
-        #
-        # `without_geometry` is the other half of that same economy and a much larger one
-        # (D-2026-08-21-a-geometry-is-an-address-not-a-payload). Measured on a 40-atom molecule, a
-        # conformer search's envelope was 29,086 characters — 2,400 Cartesian coordinates the model
-        # cannot read and no tool in this system accepts — reaching the turn three times over: as
-        # the inline-wait return value, as the mid-turn resume message, and as
-        # `get_durable_job_status`'s result. Each geometry is replaced by the `structure_id` the
-        # activity has already persisted, which the *next* calculation does accept.
-        #
-        # Applied here rather than in the activity because the activity's return type is pinned by
-        # workflow histories in flight, and because this is a pure function of a value already in
-        # history: a replay produces byte-identical output from the same recorded result.
-        # `calc_refs` rides on the envelope's own field rather than inside `data`: it is a
-        # cross-cutting provenance fact every connector job could carry, not this bundle's domain
-        # result, and `propose_knowledge_note` takes it as one list.
-        return ConnectorJobResult(
-            summary=result.summary,
-            calc_refs=result.calc_refs,
-            # The model's own name, so `chemclaw.publish` can route a composite exactly. A
-            # composite has no cache key, so its `calc_type` is `<connector>.<job>` and matches no
-            # projector prefix -- this is the only thing that identifies the shape.
-            payload_kind=type(result).__name__,
-            data=without_geometry(
-                result.model_dump(mode="json", exclude_none=True, exclude={"calc_refs"})
-            ),
-        )
+        # Applied here rather than in the activity because the activity's return type is
+        # pinned by workflow histories in flight, and because `job_envelope` is a pure
+        # function of a value already in history: a replay produces byte-identical output
+        # from the same recorded result. It is a module-level function so that the test
+        # proving the publish path routes can call the same thing this line calls.
+        return job_envelope(result)

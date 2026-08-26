@@ -72,7 +72,30 @@ load_profiles()
 #: cause is named, and `docs/planning/BACKLOG.md` carries the row for bringing it back down.
 #: **Lowering a ceiling is the commit that proves a reduction happened**; raising one belongs in a
 #: pull request description, not in a diff nobody reads.
-CEILINGS: dict[str, int] = {"__default__": 27_500}
+#
+#: **28,250 as of 2026-08-26**, raised from 27,500 by `profile_rotation`
+#: (`D-2026-08-26-a-torsion-is-named-not-indexed`). Raising it is what this file asks for — the
+#: cost of a new capability becomes visible in the pull request that creates it — and the number to
+#: judge is what the tool costs *after* being narrowed, not before. That one measured 1,499 tokens
+#: on arrival, over `MAX_SINGLE_TOOL_TOKENS` and second only to `start_optimization_campaign`;
+#: trimming its manifest prose and moving two model docstrings into comments took it to ~870, since
+#: pydantic publishes a model's docstring as its JSON-schema `description` and a nested pair of them
+#: is bound to the model on every turn. The ~230 tokens that remain are what one more tool costs,
+#: and that is the right thing to pay for it.
+#:
+#: **29,000 as of 2026-08-26**, raised from 28,250 by `rank_species_across_solvents`
+#: (`D-2026-08-26-a-solvent-is-an-argument-not-a-job`), which measured 28,586 with it. The step is
+#: the same size as the one above it and for the same reason, but the *cause* is worth recording
+#: because it is not one tool: `profile_rotation` and this one were built on branches that did not
+#: know about each other, each stayed under `MAX_SINGLE_TOOL_TOKENS` on its own, and the ceiling was
+#: crossed only where they met. A per-tool bound cannot see that, which is exactly why this
+#: whole-prefix ratchet exists beside it.
+#:
+#: This one arrived at 1,011 tokens — over `MAX_SINGLE_TOOL_TOKENS`, and that test refused it until
+#: the manifest description and the spec's field descriptions were cut to what a model needs to
+#: choose and call it, which took it to 857. The ~340 that remain are what one more durable job
+#: costs on every turn.
+CEILINGS: dict[str, int] = {"__default__": 29_000}
 
 #: How much of the floor one tool may be. A schema above this is not expensive, it is *badly
 #: shaped* — the fix is pagination, a narrower argument, or splitting a tool that does two things.

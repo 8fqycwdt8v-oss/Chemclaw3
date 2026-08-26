@@ -243,7 +243,56 @@ while designing the label index, which uses a composite `(source, reaction_id)` 
 inherit it — so the fix is to give the fingerprint tables the same key, and it is a migration plus
 `note_id_for_reaction`. Not urgent while one ELN is enabled anywhere; not detectable at all when
 it happens.
+
 ## 3 — Work that is lost, dropped or invisible
+
+- [ ] **Four multi-step result shapes reach the publish hook and route to no projector** — [M],
+      and it is the second half of a fix rather than a new finding. `RefinedEnsemble`,
+      `EnsembleProperty`, `SpeciesDistribution` and `BondDissociationSurvey` are what the seven
+      jobs `D-2026-08-25-the-loop-is-a-composite-not-a-template` added actually return, and
+      `PAYLOAD_PROJECTORS` has an entry for none of them — so those jobs run, cost real compute,
+      and publish nothing. Declared out loud in
+      `tests/test_publish_reaches_the_hooks.py::_NOT_YET_PUBLISHED` rather than quietly omitted,
+      and that set is the definition of done: each projector deletes its own entry, and a shape
+      *not* named there must route, so a tenth member field on `XtbJobResult` fails immediately.
+      Each is the `_ensemble` shape — a SMILES subject, solvent/temperature conditions, a method,
+      and a per-conformer or per-bond fact list — and `publish/properties.py` already registers
+      the quantities, so this is bounded work rather than a design question.
+
+- [ ] **A Hessian is cached and never published, and neither is the thermochemistry built from
+      it** — [M], and the two halves are one question. `xtb.hess` is a `calc_type` the server
+      stamps and `_CALC_TYPE_PROJECTORS` has no prefix for it, so vibrational frequencies never
+      reach a results store; `ThermochemistryResult`, which is where a Hessian's scientific value
+      is actually realised, has a projector but **no hook at all** — it is a *tool* composite, so
+      it is neither written to the cache (composites are not cached, D-011) nor returned by a job
+      envelope. Publishing frequencies therefore needs a third hook, not a projector, which is why
+      this is a decision rather than a one-line addition. Named in
+      `tests/test_publish_reaches_the_hooks.py::_PRIMITIVES_NOT_PUBLISHED` so the gap is declared
+      and not merely absent.
+
+- [ ] **Decide whether a BO campaign is a scientific record** — [S].
+      `connectors/bo/workflows.py` sets `payload_kind` from `CampaignResult`, which implies it
+      should publish, and no projector exists — so it is currently in the same silent-drop state
+      the calc jobs were, but possibly *correctly*: a campaign is an optimization outcome rather
+      than a computed value, and `schema/result-store/` is molecule/reaction/ensemble-shaped.
+      Either write the projector or say in `publish/README.md` that a campaign deliberately does
+      not publish. What is not acceptable is the current state, where the two readings are
+      indistinguishable from the code.
+
+- [ ] **The `results` bundle's worker is not started by the live lane** — [S].
+      `deploy/helm/chemclaw/values.yaml` gives it `worker: true` and the chart renders the
+      Deployment, but `infra/live/processes.sh` starts four workers (background, calc, bo, qm) and
+      not this one, so `republish_calculations` cannot run there. Low urgency because publishing
+      is off until `CHEMCLAW_RESULT_SINKS` names a sink, and a backfill has a CLI route that needs
+      no worker — but the lane exists to make the deployed shape testable, and it currently
+      diverges from it.
+
+- [ ] **`label_batch_size` is unguarded against the labelling server's batch limit** — [S].
+      The default is 200 and `Chemclaw3-mcp`'s `rxnlabel` refuses above `MAX_BATCH = 500`, so an
+      operator raising the setting past 500 gets every drain attempt refused as bad data. The
+      house rule is that a rule worth writing down is worth failing on
+      (`core/config/__init__.py::_guards_that_the_comments_already_demand`), and the limit is not
+      written down on this side at all.
 
 - [ ] **A decided approval hold can be reopened** — [M]. `agent/interaction_tools.py::start_approval`
       passes no `id_reuse_policy`, so temporalio's default lets a decided hold be started again under
@@ -334,6 +383,18 @@ it happens.
       Closing this is one experiment: add `pytest-xdist`, run `-n auto` on a branch, compare the
       job's wall time and its failure set against the serial run on the same commit. If it is not
       a clear win, say so and delete this row.
+
+- [ ] **Two of the four deployables have no chart, so a release changes their bytes and nothing
+      else** — [M]. `D-2026-08-26-a-release-is-a-descriptor-and-a-target` deploys `Chemclaw3_ui`
+      and each `Chemclaw3-mcp` server with `oc set image` against a Deployment an operator created
+      by hand, because neither repository describes itself deployably: the fleet has seven
+      `Containerfile`s and a per-server `networkpolicy.yaml`, the UI has a `Dockerfile` and a
+      compose file for local work. That is the honest minimum — it changes the image and claims
+      nothing else — and it means a release cannot move a port, a probe, a resource limit or an
+      env var for either, and cannot create either from nothing. A chart per repository (or one
+      chart for the fleet, whose seven servers differ only in name, port and token env) closes it.
+      Not written from here, because doing so would be inventing somebody's Service, Route and
+      limits; it wants one real namespace to be written against.
 
 - [ ] **Turn the image scan back on, with its contradiction resolved** — [M].
       Carried forward unchanged from the SBOM work and re-confirmed by the 2026-08-26 CI review:
@@ -807,18 +868,22 @@ full-stack run — see `tasks/live-test/full-stack-e2e-2026-08-17.md`.
 matches no prefix. Measured:
 
 ```
-SpeciesDistribution        -> None      (fixed by D-2026-08-26-a-solvent-is-an-argument-not-a-job)
 RefinedEnsemble            -> None
 EnsembleProperty           -> None
 BondDissociationSurvey     -> None
 ```
 
-It is silent by design — `enqueue_payload` never raises, and a deployment legitimately holds rows
-from calculators that no longer ship — so nothing distinguishes "this release cannot read that
-shape" from "that shape is not published yet". `D-2026-08-25-a-cache-is-not-a-record` says this
-seam "projects every result — primitive or composite"; for three of the nine calc jobs it does not.
+They are named out loud rather than silently missing: `tests/test_publish_reaches_the_hooks.py`'s
+`_NOT_YET_PUBLISHED` is an exclusion list with a deadline, and it fails in **both** directions — a
+new `XtbJobResult` member field that routes to nothing fails immediately, and a listed shape that
+*starts* routing fails too, which is how `SpeciesDistribution` left the set. So this row is the
+deadline, and the test is what makes it impossible to forget.
+
+`D-2026-08-25-a-cache-is-not-a-record` says this seam "projects every result — primitive or
+composite"; for three of the ten calc jobs it does not.
 
 Each needs a projector, its property names registered in `publish/properties.py`, a `_cases()` entry
-and a `_DELIBERATELY_UNREAD` row so the field-coverage test covers it. `_species_distribution` is
-the worked example. Worth considering in the same change: a test asserting that every result model
-`XtbJobResult` can carry has a projector, so the next composite cannot ship unpublishable.
+in `tests/test_publish_projection.py` and a `_DELIBERATELY_UNREAD` row so the field-coverage test
+covers it. `_species_distribution` is the worked example, and
+`records_from_species_solvent_screen` is the one to copy where an aggregate has parts that must be
+stored beside it.

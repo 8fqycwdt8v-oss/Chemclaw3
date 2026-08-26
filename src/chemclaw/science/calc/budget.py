@@ -29,7 +29,7 @@ and it is the quantity that scales with the fan-out the caller chose.
 from chemclaw.core.config import settings
 from chemclaw.science.calc.models import ReactionLevel
 
-__all__ = ["estimate_units", "require_within_budget"]
+__all__ = ["estimate_units", "require_within_budget", "rotation_units"]
 
 # What one species costs, in remote primitives, at each level — read off `_species_energy` rather
 # than guessed. That function is `embed` -> (thorough: `conformer_ensemble` -> lowest) -> `relax`
@@ -62,6 +62,27 @@ def estimate_units(species: int, *, level: ReactionLevel = "standard") -> int:
         The number of remote calls, which is what the ceiling is expressed in.
     """
     return species * _PER_SPECIES[level]
+
+
+def rotation_units(points: int, passes: int, *, level: ReactionLevel = "quick") -> int:
+    """How many remote primitives a rotational profile will ask for.
+
+    Counted from the *shape of the request* rather than from what the profile turns out to contain,
+    because a preflight has to count before the first calculation runs. `passes` is therefore the
+    most maxima a period can hold at this step, not the number found.
+
+    The ladder, read off `connectors/calc/compose.py::rotation_profile`:
+
+        every level    one constrained optimization per coarse point, plus the refinement points
+                       around each maximum, plus one released optimization per well
+        standard       a Hessian and a re-optimization per well
+        thorough       also a constrained optimization and a Hessian per pass
+
+    A period can hold at most as many wells as maxima, so wells are counted at `passes`.
+    """
+    per_well = {"quick": 1, "standard": 3, "thorough": 3}[level]
+    per_pass = 2 if level == "thorough" else 0
+    return points + passes * (per_well + per_pass)
 
 
 def require_within_budget(units: int, what: str) -> None:

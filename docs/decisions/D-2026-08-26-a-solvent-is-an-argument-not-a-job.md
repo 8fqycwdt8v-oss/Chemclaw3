@@ -100,8 +100,13 @@ numbers with a calibration silently borrowed from water.
 - `rank_species` now publishes, and `rank_species_across_solvents` publishes as an aggregate plus
   parts. Three sibling protocol results still do not — `RefinedEnsemble`, `EnsembleProperty`,
   `BondDissociationSurvey` — and that is a `docs/planning/BACKLOG.md` row rather than this change,
-  with `_species_distribution` as the worked example. The row also proposes the test that would have
-  caught all four: every result model `XtbJobResult` can carry must have a projector.
+  with `_species_distribution` as the worked example.
+- **The test that would have caught all four was written independently, on another branch, while
+  this one was in flight**: `tests/test_publish_reaches_the_hooks.py` parametrises over
+  `XtbJobResult`'s own member fields and names the unroutable ones in `_NOT_YET_PUBLISHED`. It
+  fails in both directions, so giving `SpeciesDistribution` a projector *failed* it until the stale
+  entry was deleted — an exclusion list that cannot outlive its reason. Two branches reaching the
+  same conclusion about the same gap is the strongest evidence available that it was real.
 - The job is `expensive: true` like its siblings, so it sits behind the same role gate.
 - `compute_xtb_energy` still has no `solvent` argument while its docstring invites comparing "the
   same molecule in another solvent". It is reachable through `compute_electronic_properties`, which
