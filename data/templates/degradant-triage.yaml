@@ -17,7 +17,7 @@ inputs:
     description: The parent molecule, as SMILES.
   - name: solvent
     type: string
-    description: Implicit solvent name, or an empty string for gas phase.
+    description: Implicit solvent name. Omit it for gas phase.
     required: false
 
 steps:

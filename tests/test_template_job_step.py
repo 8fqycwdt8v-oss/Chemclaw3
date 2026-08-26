@@ -29,7 +29,7 @@ from typing import Any
 
 import pytest
 from pydantic import ValidationError
-from temporalio import workflow
+from temporalio import activity, workflow
 
 from chemclaw.agent.authz import AuthorizationError
 from chemclaw.connectors.registry import ConnectorError, enabled
@@ -529,3 +529,103 @@ def test_a_failed_template_step_wakes_the_session_and_names_which_step(
         "which step failed is the one thing this workflow knows that the failure does not"
     )
     assert payload["template"] == "fails-midway"
+
+
+def test_a_declared_optional_input_the_caller_omitted_resolves_to_none() -> None:
+    """Omitting an optional argument killed every template on its first step, at run time.
+
+    `registry.py` dumps the launch params with `exclude_none=True`, so an optional input the caller
+    left out was simply absent from `run.inputs` — and every template in the tree references its
+    optional `solvent` unconditionally (`solvent: "${inputs.solvent}"`). The result was
+
+        UnresolvedReference: template references 'inputs.solvent', which is not available;
+                             have: ['inputs.smiles']
+
+    on step 1, after the launch, inside the workflow. `conformer-refinement.yaml` has had it since
+    the day it shipped, so "run this in the gas phase" — the omitted-solvent default, and the
+    commonest call there is — had never worked for any template.
+
+    Driven through a real workflow rather than asserted on the scope dict, because the scope is
+    built inside `TemplateWorkflow.run` and the failure was in what the *launcher* handed it. The
+    template here is the exact shape the shipped ones use: one required input, one optional one, and
+    an argument that references the optional one whole.
+    """
+    from datetime import timedelta
+
+    from temporalio.worker import Worker
+
+    from chemclaw.durable.template_activities import AgentStepInput
+    from chemclaw.durable.template_job import TemplateRunInput, TemplateWorkflow
+    from chemclaw.templates.manifest import Template
+    from chemclaw.templates.resolve import resolve
+    from tests.temporal_env import pydantic_client, start_env_or_skip
+
+    template = Template.model_validate(
+        {
+            "name": "optional-input",
+            "summary": "Reference an optional input the caller did not give.",
+            "inputs": [
+                {"name": "smiles", "type": "string", "description": "The molecule."},
+                {
+                    "name": "solvent",
+                    "type": "string",
+                    "description": "Implicit solvent; omitted for gas phase.",
+                    "required": False,
+                },
+            ],
+            "steps": [
+                {
+                    "id": "note",
+                    "kind": "agent",
+                    "purpose": "Echo what resolved.",
+                    "prompt": "solvent=${inputs.solvent} smiles=${inputs.smiles}",
+                }
+            ],
+        }
+    )
+
+    seen: list[str] = []
+
+    @activity.defn(name="run_agent_step")
+    async def _agent(step: AgentStepInput) -> str:
+        seen.append(step.prompt)
+        return "ok"
+
+    async def _run() -> None:
+        async with await start_env_or_skip() as env:
+            client = pydantic_client(env)
+            async with Worker(
+                client,
+                task_queue="test-optional-input",
+                workflows=[TemplateWorkflow],
+                activities=[_agent],
+            ):
+                await asyncio.wait_for(
+                    client.execute_workflow(
+                        TemplateWorkflow.run,
+                        # `solvent` deliberately absent, exactly as `exclude_none` leaves it.
+                        TemplateRunInput(
+                            template=template,
+                            inputs={"smiles": "CCO"},
+                            requested_by="tester",
+                        ),
+                        id="template-optional-input",
+                        task_queue="test-optional-input",
+                        execution_timeout=timedelta(seconds=30),
+                    ),
+                    timeout=30,
+                )
+
+    asyncio.run(_run())
+
+    # Reaching the step at all is the assertion: before this, the run died here.
+    assert seen == ["solvent=null smiles=CCO"], (
+        "an omitted optional input must resolve rather than raise; "
+        "every shipped template references one unconditionally"
+    )
+
+    # And the form the templates actually use — a whole-string reference in `arguments:` — must
+    # carry `None` itself rather than the text "null", because that is what the calc specs default
+    # to and what `solvents.require_supported_solvents` reads as gas phase. An empty string does
+    # *not* work: `unsupported([""])` returns `[""]`, so a literal "" fails the precondition.
+    assert resolve("${inputs.solvent}", {"inputs.solvent": None}) is None
