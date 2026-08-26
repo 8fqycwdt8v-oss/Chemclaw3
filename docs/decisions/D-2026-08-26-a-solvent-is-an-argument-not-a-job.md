@@ -28,9 +28,9 @@ level — so the continuum model's systematic error largely cancels in the relat
 not true of an absolute solvation free energy, which is why this ADR builds the ranking fan-out and
 declines the per-compound ΔG_solv job that looks adjacent to it.
 
-**Building it surfaced a second thing.** `SpeciesDistribution` had no entry in
-`publish/project.py::PAYLOAD_PROJECTORS` and no `calc_type` prefix that reaches one, so
-`rank_species` published nothing at all. Measured:
+**Building it surfaced a second thing, and this ADR is not the one that fixed it.**
+`SpeciesDistribution` had no entry in `publish/project.py::PAYLOAD_PROJECTORS` and no `calc_type`
+prefix that reaches one, so `rank_species` published nothing at all. Measured at the time:
 
 ```
 SpeciesDistribution        -> None
@@ -40,14 +40,19 @@ BondDissociationSurvey     -> None
 SolventComparisonResult    -> <function _solvent_screen>
 ```
 
-Four of the nine calc jobs, silent by construction: `enqueue_payload` never raises and skips an
-unknown shape with a debug line, deliberately, because a deployment legitimately holds rows from
-calculators that no longer ship. So nothing distinguishes "this release cannot read that shape" from
-"that shape was never wired up". It is the same shape as
+Four of the then-nine calc jobs, silent by construction: `enqueue_payload` never raises and skips
+an unknown shape with a debug line, deliberately, because a deployment legitimately holds rows from
+calculators that no longer ship. So nothing distinguished "this release cannot read that shape"
+from "that shape was never wired up". It is the same shape as
 `D-2026-08-26-a-route-is-not-a-shape` — a composite's `calc_type` is `<connector>.<job>`, a route
-that names no shape and matches no prefix — and it stands against
+that names no shape and matches no prefix — and it stood against
 `D-2026-08-25-a-cache-is-not-a-record`'s claim that this seam "projects every result — primitive or
 composite".
+
+`D-2026-08-26-a-projector-per-shape-the-loop-produces` closed all four while this branch was in
+flight, having found the same gap independently. What remains here is the consequence for this
+change, recorded below: a distribution's projector is a *prerequisite* for a job that publishes one
+per medium, so this could not have shipped on top of a part that published nothing.
 
 ## Decision
 
@@ -97,16 +102,22 @@ numbers with a calibration silently borrowed from water.
 
 ## Consequences
 
-- `rank_species` now publishes, and `rank_species_across_solvents` publishes as an aggregate plus
-  parts. Three sibling protocol results still do not — `RefinedEnsemble`, `EnsembleProperty`,
-  `BondDissociationSurvey` — and that is a `docs/planning/BACKLOG.md` row rather than this change,
-  with `_species_distribution` as the worked example.
-- **The test that would have caught all four was written independently, on another branch, while
-  this one was in flight**: `tests/test_publish_reaches_the_hooks.py` parametrises over
-  `XtbJobResult`'s own member fields and names the unroutable ones in `_NOT_YET_PUBLISHED`. It
-  fails in both directions, so giving `SpeciesDistribution` a projector *failed* it until the stale
-  entry was deleted — an exclusion list that cannot outlive its reason. Two branches reaching the
-  same conclusion about the same gap is the strongest evidence available that it was real.
+- **The gap was real and somebody else closed it first.** While this branch was in flight,
+  `D-2026-08-26-a-projector-per-shape-the-loop-produces` (#231) gave all four composites a
+  projector *and* wrote the test proposed here — `tests/test_publish_reaches_the_hooks.py`
+  parametrises over `XtbJobResult`'s own member fields and names unroutable shapes in
+  `_NOT_YET_PUBLISHED`, now empty. Two branches finding the same silent gap independently is the
+  strongest evidence available that it was one.
+- **So this change keeps none of its own `SpeciesDistribution` projector.** Both existed in the
+  merged file for a moment, and only the later definition would ever have run — a duplicate that is
+  silent by construction, which is the failure mode this ADR's own subject matter is about. #231's
+  is also the better projection: it publishes the ranking as `CandidateFact` rows (a shape that had
+  existed with no producer since the schema shipped) with the species set as a `system` subject,
+  where this one had made every form a subject member with per-member property facts. Deleted here,
+  and `_species_solvent_screen` re-pointed at its vocabulary — `kind="system"`,
+  `distribution_kind` — because a comparison whose subject kind differed from its own parts' would
+  not join to them. Four property registrations went with it; `records_from_species_solvent_screen`
+  needed no change, because it delegates to whatever projects a distribution.
 - The job is `expensive: true` like its siblings, so it sits behind the same role gate.
 - `compute_xtb_energy` still has no `solvent` argument while its docstring invites comparing "the
   same molecule in another solvent". It is reachable through `compute_electronic_properties`, which

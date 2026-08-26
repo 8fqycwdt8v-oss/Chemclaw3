@@ -175,19 +175,41 @@ _DEFINITIONS: tuple[PropertyDefinition, ...] = (
         "Correction from the lowest conformer to the Boltzmann-weighted ensemble.",
     ),
     _d(
+        "refined_conformational_entropy",
+        "molar_entropy",
+        "cal/(mol*K)",
+        "The -T*S_conf term over the *refined subset*, with populations renormalized within it. "
+        "Its own name because it is not `conformational_entropy` measured differently: it is over "
+        "N states rather than all of them, so it is systematically too small.",
+    ),
+    _d(
+        "refined_ensemble_correction",
+        "energy_difference",
+        "kcal/mol",
+        "Correction from the lowest conformer to the free-energy-weighted top N. The "
+        "`ensemble_correction` twin over the refined subset, named apart for the same reason.",
+    ),
+    _d(
+        "bond_dissociation_energy",
+        "energy_difference",
+        "kcal/mol",
+        "Energy to break one bond into the two fragments named on the site row. Homolytic or "
+        "heterolytic per `dissociation_mode`; the two are not comparable.",
+        scope="site",
+    ),
+    _d(
+        "weakest_bond_dissociation_energy",
+        "energy_difference",
+        "kcal/mol",
+        "The lowest dissociation energy in a survey, hoisted so 'which bond breaks first' is a "
+        "scalar predicate rather than a window function over the site table.",
+    ),
+    _d(
         "solvent_spread",
         "energy_difference",
         "kcal/mol",
         "Range of a reaction energy across the solvents screened. Compare against the method "
         "uncertainty before reading a ranking.",
-    ),
-    _d(
-        "species_relative_energy",
-        "energy_difference",
-        "kcal/mol",
-        "Free energy of one species relative to the lowest of the set it was ranked against. "
-        "Meaningless outside that set — a species not enumerated was not ranked.",
-        scope="member",
     ),
     _d(
         "solvent_swing",
@@ -336,6 +358,37 @@ _DEFINITIONS: tuple[PropertyDefinition, ...] = (
         kind="integer",
     ),
     _d(
+        "refined_conformers",
+        "count",
+        "",
+        "Ensemble members re-scored by free energy. Below `total_conformers` by design: the "
+        "refinement is one Hessian per member, so it is bounded to the top N.",
+        kind="integer",
+    ),
+    _d(
+        "species_enumerated",
+        "count",
+        "",
+        "Species the enumeration produced before ranking — tautomers, protonation microstates or "
+        "stereoisomers. Above the number carried as candidates when any failed to converge.",
+        kind="integer",
+    ),
+    _d(
+        "members_averaged",
+        "count",
+        "",
+        "Ensemble members that entered a Boltzmann average. Read it beside "
+        "`population_covered`: five members can be 99% of the ensemble or 40% of it.",
+        kind="integer",
+    ),
+    _d(
+        "bonds_considered",
+        "count",
+        "",
+        "Bonds the dissociation survey attempted, including any that failed to converge.",
+        kind="integer",
+    ),
+    _d(
         "binding_modes",
         "count",
         "",
@@ -359,42 +412,25 @@ _DEFINITIONS: tuple[PropertyDefinition, ...] = (
         scope="conformer",
     ),
     _d(
-        "species_population",
-        "dimensionless",
-        "",
-        "Equilibrium population of one species within the set it was ranked against, at the "
-        "stated temperature. Meaningless without that temperature and that set.",
-        scope="member",
-    ),
-    _d(
-        "species_enumerated",
-        "count",
-        "",
-        "How many forms the enumeration produced before any cap. Read against species_ranked: a "
-        "distribution over a truncated set is confident about the wrong universe.",
-        kind="integer",
-    ),
-    _d(
-        "species_ranked",
-        "count",
-        "",
-        "How many forms were actually computed and ranked.",
-        kind="integer",
-    ),
-    _d(
-        "species_conformers_found",
-        "count",
-        "",
-        "Conformers found for one species, when the ranking searched them.",
-        kind="integer",
-        scope="member",
-    ),
-    _d(
         "media_compared",
         "count",
         "",
         "How many media a screen ranked in, the gas-phase reference included.",
         kind="integer",
+    ),
+    _d(
+        "refined_population_covered",
+        "dimensionless",
+        "",
+        "The electronic-energy-weighted population fraction the refined members account for. The "
+        "number that says whether refining the top N described the ensemble or a corner of it.",
+    ),
+    _d(
+        "population_covered",
+        "dimensionless",
+        "",
+        "The population fraction standing behind a Boltzmann-averaged property. An average over "
+        "40% of the ensemble is a different claim from one over 99% of it.",
     ),
     _d("hydrogen_bond_donors", "count", "", "Lipinski hydrogen-bond donor count.", kind="integer"),
     _d(
@@ -509,31 +545,6 @@ _DEFINITIONS: tuple[PropertyDefinition, ...] = (
         "uncertainty is not a ranking.",
         kind="text",
     ),
-    _d(
-        "ranking_kind",
-        "category",
-        "",
-        "What a species ranking was asked about: tautomers, microstates, stereoisomers or custom. "
-        "The number means something different in each.",
-        kind="text",
-    ),
-    _d(
-        "species_label",
-        "category",
-        "",
-        "The caller's own name for one ranked form ('keto', 'enol'). A word for this run rather "
-        "than an identity of the compound, which is what compound_id is.",
-        kind="text",
-        scope="member",
-    ),
-    _d(
-        "conformers_sampled",
-        "flag",
-        "",
-        "Whether a conformer search ran under each species of a ranking. Without it the relative "
-        "energies compare one arbitrary embedded geometry per form.",
-        kind="boolean",
-    ),
     _d("fukui_mode", "category", "", "Which Fukui index the sites were ranked by.", kind="text"),
     _d(
         "torsion_label",
@@ -588,6 +599,29 @@ _DEFINITIONS: tuple[PropertyDefinition, ...] = (
         "ensembles are not comparable without it - a quick search finds fewer conformers than an "
         "extensive one on the same molecule, so a population difference may be an effort "
         "difference.",
+        kind="text",
+    ),
+    _d(
+        "distribution_kind",
+        "category",
+        "",
+        "What a ranked species set enumerated: tautomers, microstates, stereoisomers or a "
+        "caller-supplied list.",
+        kind="text",
+    ),
+    _d(
+        "dissociation_mode",
+        "category",
+        "",
+        "Whether a bond survey broke bonds homolytically (radicals) or heterolytically (ions). "
+        "Energies from the two modes are not comparable.",
+        kind="text",
+    ),
+    _d(
+        "weakest_bond",
+        "category",
+        "",
+        "The bond label the survey found weakest, e.g. 'C-H'. The site row carries which atoms.",
         kind="text",
     ),
     _d(

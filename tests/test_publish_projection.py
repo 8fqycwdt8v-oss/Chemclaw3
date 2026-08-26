@@ -697,9 +697,11 @@ def test_a_species_solvent_screen_publishes_each_medium_as_its_own_distribution(
     # `solvent=None` is the gas phase — a real state, per `Conditions` — not a missing value.
     assert [record.conditions.solvent for record in parts] == [None, "water", "toluene"]
     assert all(record.depends_on == ["screen-9"] for record in parts)
-    # Each part stands on its own: the populations are what a distribution is for.
+    # Each part stands on its own: the populations are what a distribution is for, and they reach
+    # the record as ranked candidates rather than as property facts.
     for part in parts:
-        assert any(fact.property == "species_population" for fact in part.properties)
+        assert [candidate.score for candidate in part.candidates] == [0.8, 0.2]
+        assert {candidate.detail["label"] for candidate in part.candidates} == {"keto", "enol"}
     # And the aggregate carries the finding, as a flag rather than a number.
     assert any(flag.flag == "dominance_changes_with_medium" for flag in records[0].flags)
     # The comparison itself carries no solvent, the same as a reaction screen's aggregate: it is
@@ -772,7 +774,13 @@ _DELIBERATELY_UNREAD: dict[str, dict[str, str]] = {
         ),
     },
     "EnsemblePayload": {},
-    "SpeciesDistribution": {},
+    "SpeciesDistribution": {
+        "sampled": (
+            "whether a conformer search ran under each species, which `reaction_level` already "
+            "says — it is true exactly at level='thorough', so publishing both would store one "
+            "fact twice"
+        )
+    },
     "SpeciesSolventComparison": {
         "responses": (
             "the transpose of `distributions`, each of which publishes as its own record — "

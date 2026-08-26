@@ -246,19 +246,6 @@ it happens.
 
 ## 3 — Work that is lost, dropped or invisible
 
-- [ ] **Four multi-step result shapes reach the publish hook and route to no projector** — [M],
-      and it is the second half of a fix rather than a new finding. `RefinedEnsemble`,
-      `EnsembleProperty`, `SpeciesDistribution` and `BondDissociationSurvey` are what the seven
-      jobs `D-2026-08-25-the-loop-is-a-composite-not-a-template` added actually return, and
-      `PAYLOAD_PROJECTORS` has an entry for none of them — so those jobs run, cost real compute,
-      and publish nothing. Declared out loud in
-      `tests/test_publish_reaches_the_hooks.py::_NOT_YET_PUBLISHED` rather than quietly omitted,
-      and that set is the definition of done: each projector deletes its own entry, and a shape
-      *not* named there must route, so a tenth member field on `XtbJobResult` fails immediately.
-      Each is the `_ensemble` shape — a SMILES subject, solvent/temperature conditions, a method,
-      and a per-conformer or per-bond fact list — and `publish/properties.py` already registers
-      the quantities, so this is bounded work rather than a design question.
-
 - [ ] **A Hessian is cached and never published, and neither is the thermochemistry built from
       it** — [M], and the two halves are one question. `xtb.hess` is a `calc_type` the server
       stamps and `_CALC_TYPE_PROJECTORS` has no prefix for it, so vibrational frequencies never
@@ -857,33 +844,3 @@ visible failure the model can also correct from. Do not jump from `after_model` 
 `D-2026-08-15-an-after-model-counter-is-a-counter-that-can-be-skipped`. Verify with
 `make live-storm`'s `f-malformed-json` check, which currently fails. Found by the 2026-08-17
 full-stack run — see `tasks/live-test/full-stack-e2e-2026-08-17.md`.
-
-## Three multi-step calc results still publish nothing
-
-`RefinedEnsemble`, `EnsembleProperty` and `BondDissociationSurvey` have no entry in
-`publish/project.py::PAYLOAD_PROJECTORS` and no `calc_type` prefix that reaches one, so
-`refine_ensemble`, `compute_ensemble_property` and `survey_bond_strengths` are skipped at
-`enqueue_payload` with a debug line — the same shape as
-`D-2026-08-26-a-route-is-not-a-shape`, since a composite's `calc_type` is `<connector>.<job>` and
-matches no prefix. Measured:
-
-```
-RefinedEnsemble            -> None
-EnsembleProperty           -> None
-BondDissociationSurvey     -> None
-```
-
-They are named out loud rather than silently missing: `tests/test_publish_reaches_the_hooks.py`'s
-`_NOT_YET_PUBLISHED` is an exclusion list with a deadline, and it fails in **both** directions — a
-new `XtbJobResult` member field that routes to nothing fails immediately, and a listed shape that
-*starts* routing fails too, which is how `SpeciesDistribution` left the set. So this row is the
-deadline, and the test is what makes it impossible to forget.
-
-`D-2026-08-25-a-cache-is-not-a-record` says this seam "projects every result — primitive or
-composite"; for three of the ten calc jobs it does not.
-
-Each needs a projector, its property names registered in `publish/properties.py`, a `_cases()` entry
-in `tests/test_publish_projection.py` and a `_DELIBERATELY_UNREAD` row so the field-coverage test
-covers it. `_species_distribution` is the worked example, and
-`records_from_species_solvent_screen` is the one to copy where an aggregate has parts that must be
-stored beside it.

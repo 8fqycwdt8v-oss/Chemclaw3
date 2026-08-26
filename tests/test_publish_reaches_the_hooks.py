@@ -21,8 +21,10 @@ envelope. So it started at a hook it had written down rather than at the hook �
 while all nine calc jobs published nothing. What it parametrises over now is read from the things
 that decide the answer: `XtbJobResult`'s own member fields, the connector manifests, and the fake
 that states the calculation server's key contract. A new job, result shape or cache type reaches
-these assertions with no edit here, and the two things that genuinely cannot route yet are named
-in `_NOT_YET_PUBLISHED` and `_PRIMITIVES_NOT_PUBLISHED` rather than quietly omitted.
+these assertions with no edit here, and anything that genuinely cannot route yet is named in
+`_NOT_YET_PUBLISHED` or `_PRIMITIVES_NOT_PUBLISHED` rather than quietly omitted. Both sets are
+kept even when empty: an empty exclusion is what makes the next unroutable shape fail loudly
+instead of being added to a list nobody re-reads.
 """
 
 import asyncio
@@ -38,15 +40,23 @@ from chemclaw.connectors.registry import discovered
 from chemclaw.durable.connector_job import ConnectorJobResult, job_record_for
 from chemclaw.publish.project import PAYLOAD_PROJECTORS, projector_for, records_for
 from chemclaw.science.calc.models import (
+    BondDissociationSurvey,
     Conformer,
     ConformerEnsemble,
+    DissociatedBond,
+    EnsembleProperty,
+    RankedSpecies,
     ReactionEnergyResult,
+    RefinedConformer,
+    RefinedEnsemble,
     SolventComparisonResult,
     SolventEffect,
+    SpeciesDistribution,
     SpeciesEnergy,
     Structure,
     ThermochemistryResult,
     VibrationalMode,
+    WeightedValue,
 )
 from tests.calc_server_fake import _KEYED
 
@@ -74,17 +84,12 @@ _ENVELOPE_MEMBERS: tuple[str, ...] = tuple(
 )
 
 # Shapes that reach a hook and have no projector yet, so this file stays green while saying so out
-# loud. Every one is a multi-step result from `D-2026-08-25-the-loop-is-a-composite-not-a-template`
-# whose job runs and publishes nothing; their projectors empty this set. It is an *exclusion list
-# with a deadline*, not a permanent exemption: a shape not named here must route, so a new member
-# field fails immediately rather than joining the silent ones — and, in the other direction, a
-# shape here that *starts* routing fails too, which is how `SpeciesDistribution` left this set.
-# `D-2026-08-26-a-solvent-is-an-argument-not-a-job` gave it a projector, because
-# `rank_species_across_solvents` publishes one distribution per medium and could not have shipped
-# on top of a part that publishes nothing. The remaining three are a `docs/planning/BACKLOG.md` row.
-_NOT_YET_PUBLISHED: frozenset[str] = frozenset(
-    {"RefinedEnsemble", "EnsembleProperty", "BondDissociationSurvey"}
-)
+# loud. **Empty, and that is the point of keeping it**: the four multi-step results from
+# `D-2026-08-25-the-loop-is-a-composite-not-a-template` were named here for exactly one release and
+# `D-2026-08-26-a-projector-per-shape-the-loop-produces` emptied it. A shape not named here must
+# route, so a tenth member field on `XtbJobResult` fails immediately rather than joining a silent
+# set — which is the whole reason this is a declared exclusion rather than an omission.
+_NOT_YET_PUBLISHED: frozenset[str] = frozenset()
 
 # What the `qm` bundle returns. Listed rather than derived because it has no envelope to derive
 # from — the workflow returns its domain model directly, which is precisely why `qm` was the one
@@ -298,6 +303,232 @@ def test_what_the_calc_workflow_returns_projects_into_records() -> None:
     )
     assert records, "what the production hook returns projected nothing"
     assert records[0].subject.members, "the projected record names no species"
+
+
+def _refined() -> RefinedEnsemble:
+    """A free-energy-refined ensemble: two of forty-seven members re-scored."""
+    return RefinedEnsemble(
+        smiles="CCO",
+        method="GFN2-xTB",
+        solvent="thf",
+        temperature_k=298.15,
+        conformers=[
+            RefinedConformer(
+                structure=_structure(),
+                relative_kcal=0.0,
+                population=0.8,
+                degeneracy=1,
+                gibbs_free_energy_hartree=-154.15,
+                electronic_energy_hartree=-154.2,
+                is_minimum=True,
+            ),
+            RefinedConformer(
+                structure=_structure(2.0),
+                relative_kcal=0.9,
+                population=0.2,
+                degeneracy=2,
+                gibbs_free_energy_hartree=-154.14,
+                electronic_energy_hartree=-154.19,
+                is_minimum=True,
+            ),
+        ],
+        total_found=47,
+        refined_count=2,
+        refined_population_covered=0.62,
+        refined_conformational_entropy_cal_per_mol_k=0.9,
+        refined_ensemble_correction_kcal=-0.27,
+    )
+
+
+def _averaged() -> EnsembleProperty:
+    """A Boltzmann-averaged scalar property over an ensemble."""
+    return EnsembleProperty(
+        smiles="CCO",
+        property_name="dipole_debye",
+        method="GFN2-xTB",
+        solvent="thf",
+        temperature_k=298.15,
+        members_averaged=5,
+        total_found=47,
+        value=WeightedValue(mean=1.68, minimum=1.41, maximum=1.93, spread=0.52),
+        population_covered=0.91,
+    )
+
+
+def _distribution() -> SpeciesDistribution:
+    """A ranked tautomer population."""
+    return SpeciesDistribution(
+        kind="tautomers",
+        method="GFN2-xTB",
+        solvent="water",
+        temperature_k=298.15,
+        level="standard",
+        species=[
+            RankedSpecies(
+                smiles="CC(=O)CC(=O)C",
+                label="diketo",
+                relative_kcal=0.0,
+                population=0.93,
+                gibbs_free_energy_hartree=-345.1,
+                electronic_energy_hartree=-345.2,
+                structure_id=_structure().structure_id,
+                conformers_found=4,
+            ),
+            RankedSpecies(
+                smiles="CC(O)=CC(=O)C",
+                label="enol",
+                relative_kcal=1.5,
+                population=0.07,
+                gibbs_free_energy_hartree=-345.09,
+                electronic_energy_hartree=-345.18,
+                conformers_found=3,
+            ),
+        ],
+        enumerated=2,
+        uncertainty_kcal=2.0,
+    )
+
+
+def _bond_survey_result() -> BondDissociationSurvey:
+    """A homolytic bond dissociation survey with a named weakest bond."""
+    return BondDissociationSurvey(
+        smiles="CCO",
+        method="GFN2-xTB",
+        solvent=None,
+        temperature_k=298.15,
+        mode="homolytic",
+        bonds=[
+            DissociatedBond(
+                atoms=[0, 1],
+                bond="C-C",
+                fragments=["[CH3]", "[CH2]O"],
+                dissociation_energy_kcal=88.4,
+            ),
+            DissociatedBond(
+                atoms=[1, 2],
+                bond="C-O",
+                fragments=["CC", "[OH]"],
+                dissociation_energy_kcal=71.2,
+                is_weakest=True,
+            ),
+        ],
+        considered=2,
+        uncertainty_kcal=4.0,
+    )
+
+
+# The four multi-step shapes, each with the envelope field its job populates. Driven through
+# `job_envelope` rather than through `project()`, because "has a projector" and "the hook reaches
+# that projector" are the two different claims this file exists to keep apart.
+_MULTI_STEP: tuple[tuple[str, str, Any], ...] = (
+    ("refined", "RefinedEnsemble", _refined),
+    ("averaged", "EnsembleProperty", _averaged),
+    ("distribution", "SpeciesDistribution", _distribution),
+    ("bonds", "BondDissociationSurvey", _bond_survey_result),
+)
+
+
+@pytest.mark.parametrize(("field", "expected_kind", "build"), _MULTI_STEP)
+def test_each_multi_step_result_projects_through_its_job_envelope(
+    field: str, expected_kind: str, build: Any
+) -> None:
+    """The seven jobs `the-loop-is-a-composite` added, from envelope to projected record.
+
+    Each of these ran, cost real compute and published nothing for a release: their shapes reached
+    the hook and `PAYLOAD_PROJECTORS` had an entry for none of them. Asserting through
+    `job_envelope` is what makes this a statement about the seven jobs rather than about four
+    functions.
+    """
+    envelope = job_envelope(XtbJobResult(kind=field, summary="s", **{field: build()}))
+
+    assert envelope.payload_kind == expected_kind
+    records = records_for(
+        calc_ref=f"calc-job-{field}",
+        calc_type=f"calc.{field}",
+        payload=envelope.data,
+        payload_kind=envelope.payload_kind,
+    )
+    assert records, f"{expected_kind} projected no record"
+    record = records[0]
+    assert record.subject.members, "the projected record names nothing it is about"
+    # Something quantitative survived — a record with a subject and no facts is a row that says a
+    # calculation happened and nothing about what it found.
+    assert record.properties or record.sites or record.conformers or record.candidates
+
+
+def test_a_refined_ensemble_publishes_electronic_energies_and_free_energy_populations() -> None:
+    """The one place two ensemble shapes could silently disagree, asserted rather than argued.
+
+    `_refined_ensemble`'s docstring commits to `energy_hartree` carrying the *electronic* energy
+    even though the ranking is by G, so that "the same conformer, E-weighted and G-weighted" is a
+    comparison on one column. If that ever changes to the Gibbs energy, the two ensemble kinds stop
+    being comparable and nothing else in the suite would notice.
+    """
+    envelope = job_envelope(XtbJobResult(kind="refined", summary="s", refined=_refined()))
+    record = records_for(
+        calc_ref="calc-job-refined",
+        calc_type="calc.refine_ensemble",
+        payload=envelope.data,
+        payload_kind=envelope.payload_kind,
+    )[0]
+
+    assert [c.energy_hartree for c in record.conformers] == [-154.2, -154.19]
+    assert [c.relative_kcal for c in record.conformers] == [0.0, 0.9]
+    assert [c.population for c in record.conformers] == [0.8, 0.2]
+    assert record.level.treatment == "free-energy-weighted-top-n", (
+        "the treatment is what disambiguates the relative energies; without it the electronic "
+        "absolutes and the free-energy relatives read as one scale"
+    )
+    named = {fact.property for fact in record.properties}
+    assert "refined_conformational_entropy" in named and "conformational_entropy" not in named, (
+        "the refined subset's entropy must not be published under the ensemble-wide name"
+    )
+
+
+def test_a_bond_survey_publishes_pairs_and_hoists_the_weakest() -> None:
+    """A bond is an atom *pair*, and 'which breaks first' must be a scalar predicate.
+
+    Both are decisions `_bond_survey` states, and both are invisible from the routing test: a
+    projector that emitted one site per bond with `atom_j = -1` would route identically and make
+    every bond unaddressable.
+    """
+    envelope = job_envelope(XtbJobResult(kind="bonds", summary="s", bonds=_bond_survey_result()))
+    record = records_for(
+        calc_ref="calc-job-bonds",
+        calc_type="calc.survey_bond_strengths",
+        payload=envelope.data,
+        payload_kind=envelope.payload_kind,
+    )[0]
+
+    assert [(s.atom_i, s.atom_j) for s in record.sites] == [(0, 1), (1, 2)]
+    assert all(site.property == "bond_dissociation_energy" for site in record.sites)
+    scalars = {fact.property: fact for fact in record.properties}
+    assert scalars["weakest_bond"].value_text == "C-O"
+    assert scalars["weakest_bond_dissociation_energy"].value == 71.2
+    assert scalars["weakest_bond_dissociation_energy"].uncertainty == 4.0
+
+
+def test_a_species_distribution_publishes_candidates_not_subject_members() -> None:
+    """A ranked set is what a calculation *produced*, never what it was *about*.
+
+    `CandidateFact` shipped with the schema and had no producer at all until this projector; the
+    distinction it encodes is the one that keeps a compound's tautomer set from colliding with the
+    compound.
+    """
+    envelope = job_envelope(
+        XtbJobResult(kind="distribution", summary="s", distribution=_distribution())
+    )
+    record = records_for(
+        calc_ref="calc-job-dist",
+        calc_type="calc.rank_species",
+        payload=envelope.data,
+        payload_kind=envelope.payload_kind,
+    )[0]
+
+    assert record.subject.kind == "system"
+    assert [c.score for c in record.candidates] == [0.93, 0.07]
+    assert all(c.score_property == "population" for c in record.candidates)
+    assert record.candidates[0].detail["label"] == "diketo"
 
 
 def test_an_envelope_carrying_no_result_is_a_loud_failure() -> None:
