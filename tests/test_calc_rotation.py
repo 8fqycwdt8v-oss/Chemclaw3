@@ -32,6 +32,7 @@ from chemclaw.science.calc.thermo import (
 )
 from tests.calc_server_fake import (
     FakeCalcServer,
+    _structure_id,
     embed,
     install,
     torsional_energy,
@@ -415,15 +416,32 @@ class TestTheBarrierArithmetic:
         assert electronic.highest_barrier_kcal is not None
         assert free.highest_barrier_kcal == pytest.approx(electronic.highest_barrier_kcal, abs=1.0)
 
-    def test_a_rotamer_geometry_and_its_free_energy_describe_one_structure(
-        self, server: FakeCalcServer
+    def test_a_rotamer_is_the_geometry_its_free_energy_was_computed_at(
+        self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Above `quick` the refinement may move the geometry, and the result must move with it."""
+        """Above `quick` the refinement can move the geometry, and the result must move with it.
+
+        `relax_to_minimum` displaces along an imaginary mode and re-optimizes when the first
+        geometry is a saddle, and its *last* Hessian is the one the free energy comes from. Keeping
+        the pre-refinement structure published a `structure_id`, a dihedral and an electronic
+        energy for one geometry beside a free energy for another.
+
+        `saddle_first` forces exactly that escape on the first well, so the last Hessian is taken
+        somewhere the un-refined code never reports. Asserting that the last Hessian's geometry is
+        one of the published rotamers is what separates the two.
+        """
+        server = install(monkeypatch, FakeCalcServer(torsion=(0, 1, 2, 3), saddle_first=True))
         profile = _profile(server, level="standard")
-        for rotamer in profile.rotamers:
-            assert rotamer.relative_g_kcal is not None
-            assert rotamer.structure_id.startswith("st_")
-        assert len({rotamer.structure_id for rotamer in profile.rotamers}) == len(profile.rotamers)
+        hessians = server.arguments("compute_hessian")
+        assert len(hessians) > len(profile.rotamers), (
+            "the premise failed: no well needed a second Hessian, so nothing was refined"
+        )
+        published = {rotamer.structure_id for rotamer in profile.rotamers}
+        last = _structure_id(hessians[-1]["structure"])
+        assert last in published, (
+            "the last Hessian was taken at a geometry no rotamer reports, so a free energy and a "
+            "structure_id in this result describe different structures"
+        )
 
 
 class TestTheCache:

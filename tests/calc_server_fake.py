@@ -108,9 +108,7 @@ def embed(smiles: str, multiplicity: int = 1) -> dict[str, Any]:
     }
 
 
-def harmonic_hessian(
-    structure: dict[str, Any], *, imaginary: bool = False, curvature: float = 0.5
-) -> dict[str, Any]:
+def harmonic_hessian(structure: dict[str, Any], *, imaginary: bool = False) -> dict[str, Any]:
     """A well-formed Hessian payload for `structure`, optionally carrying one negative eigenvalue.
 
     Not physics: a diagonal matrix whose spectrum is chosen, base64-encoded exactly as the server
@@ -125,12 +123,11 @@ def harmonic_hessian(
     size = 3 * len(structure["elements"])
     diagonal = np.full(size, 0.5)
     if imaginary:
-        # `curvature` is how *steep* the downhill direction is. It matters because the imaginary
-        # mode is skipped in the RRHO sum, so a saddle's free energy is missing that mode's
-        # zero-point term — and a stiff one (the 0.5 default) removes several kcal/mol, which can
-        # outweigh a small electronic barrier and invert a free-energy barrier's sign. A torsional
-        # pass is shallow, so the torsional surface uses a shallow one.
-        diagonal[0] = -curvature
+        # One negative eigenvalue, the same magnitude as the rest: it comes out at about
+        # -64 cm^-1, which is above `xtb_imaginary_threshold_cm` and so counts as a real imaginary
+        # mode. Its zero-point term is ~0.09 kcal/mol, small enough that dropping it from the RRHO
+        # sum does not by itself invert a barrier.
+        diagonal[0] = -0.5
     matrix = np.diag(diagonal)
 
     def pack(array: np.ndarray) -> str:
@@ -182,11 +179,6 @@ _WELLS = (60.0, 180.0, 300.0)
 # exactly this, and a test that needed a large number to see it would not be testing the real case.
 _RELAXATION_HARTREE = 2.0e-4
 
-# How steep the downhill direction is at a torsional pass. Small, because a torsional saddle is
-# shallow: the imaginary mode is skipped in the RRHO sum, so a stiff one would take several
-# kcal/mol of zero-point energy out of the pass and invert a small free-energy barrier.
-_SADDLE_CURVATURE = 0.5
-
 
 def torsional_energy(degrees: float) -> float:
     """The synthetic torsional potential at one dihedral, in Hartree above its own minimum."""
@@ -196,7 +188,9 @@ def torsional_energy(degrees: float) -> float:
     return threefold + onefold
 
 
-def torsional_surface_energy(structure: dict[str, Any], atoms: tuple[int, int, int, int]) -> float:
+def torsional_surface_energy(
+    structure: dict[str, Any], atoms: tuple[int, int, int, int], shift: float = 0.0
+) -> float:
     """This surface's energy for a geometry, in Hartree — the one definition all three tools use.
 
     `scan_point`, `relax_structure` and `compute_hessian` must agree about what a geometry is worth,
@@ -204,10 +198,14 @@ def torsional_surface_energy(structure: dict[str, Any], atoms: tuple[int, int, i
     Hessian payload reported `-1.0 * atom_count` for *every* geometry, so a free-energy barrier
     computed as `G(pass) - G(well)` lost its electronic term entirely and came out negative — an
     artefact of this fake that looked exactly like a defect in the composite.
+
+    `shift` is the caller's `solvent_shifts` entry, passed in rather than looked up here so this
+    stays a pure function of the surface. Omitting it made the agreement hold only in the gas
+    phase, which is the kind of "true except when configured" invariant that is worse than none.
     """
     angle = dihedral_of(structure, atoms)
     relaxed = _RELAXATION_HARTREE if _near_a_well(angle) else 0.0
-    return -1.0 * len(structure["elements"]) + torsional_energy(angle) - relaxed
+    return -1.0 * len(structure["elements"]) + shift + torsional_energy(angle) - relaxed
 
 
 def _near_a_well(degrees: float, tolerance: float = 20.0) -> bool:
@@ -458,13 +456,16 @@ class FakeCalcServer:
             # — which is how it came to add a molecule's entire absolute thermal correction to an
             # electronic barrier and report 70 kcal/mol with nothing red.
             saddle = not _near_a_well(dihedral_of(arguments["structure"], self._torsion))
-            payload = harmonic_hessian(
-                arguments["structure"], imaginary=saddle, curvature=_SADDLE_CURVATURE
-            )
+            payload = harmonic_hessian(arguments["structure"], imaginary=saddle)
             # The energy *this surface* gives that geometry, so a free energy computed from this
             # Hessian is comparable with the scan point and the relaxation beside it.
             payload["electronic_energy_hartree"] = torsional_surface_energy(
-                arguments["structure"], self._torsion
+                arguments["structure"],
+                self._torsion,
+                self._solvent_shifts.get(
+                    (arguments["structure"].get("smiles") or "", arguments.get("solvent") or ""),
+                    0.0,
+                ),
             )
             payload["solvent"] = arguments.get("solvent")
             return payload

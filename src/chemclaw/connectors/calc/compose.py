@@ -2091,6 +2091,16 @@ async def _released_wells(
                 run=run,
             )
             gibbs = thermo.gibbs_free_energy_hartree
+            if not thermo.is_minimum:
+                # The refinement gave up: `relax_to_minimum` is bounded by
+                # `xtb_minimum_refinement_attempts` and returns what it has. A free energy at a
+                # geometry that is still a saddle is not a free energy, and this is the "a well
+                # that would not settle" the result model promises to report.
+                warnings.append(
+                    f"the rotamer near {angle:g} degrees is still a saddle point after "
+                    f"refinement ({thermo.imaginary_frequencies_cm} cm^-1), so its free energy "
+                    "and any barrier measured from it describe a geometry that is not a minimum"
+                )
         # Read the angle off the geometry that is actually being kept, and merge on *that* — so a
         # refinement that walked a well into its neighbour is caught rather than recorded twice.
         settled = _dihedral_of(relaxed.structure, atoms) % torsion.period_degrees
@@ -2246,7 +2256,7 @@ async def _barriers(
         forward, reverse, basis = _pass_energies(wells[index], wells[following], top)
         if level == "thorough":
             progress(f"free energy of the pass at {peak:g} degrees")
-            gibbs_forward, gibbs_reverse, gibbs_basis = await _free_energy_barrier(
+            gibbs_forward, gibbs_reverse, gibbs_basis, saddle_modes = await _free_energy_barrier(
                 store,
                 structure,
                 atoms,
@@ -2259,7 +2269,13 @@ async def _barriers(
                 reverse,
                 run,
             )
-            if gibbs_basis == "G" and min(gibbs_forward, gibbs_reverse) <= 0.0:
+            if gibbs_basis == "E":
+                warnings.append(
+                    f"the pass at {peak:g} degrees has {saddle_modes} imaginary mode(s) rather "
+                    "than the one a first-order saddle has, so its free energy is not a barrier's; "
+                    "the electronic barrier is reported instead"
+                )
+            elif min(gibbs_forward, gibbs_reverse) <= 0.0:
                 # **Keep the electronic barrier rather than dropping the pass.** A saddle's RRHO
                 # free energy is missing its imaginary mode's zero-point term, and where the
                 # electronic barrier is small that single mode can outweigh it and invert the sign.
@@ -2268,9 +2284,9 @@ async def _barriers(
                 # the electronic barrier, labelled `E`, and a warning saying why.
                 warnings.append(
                     f"the free-energy barrier at {peak:g} degrees came out non-positive "
-                    f"({gibbs_forward:+.2f} kcal/mol), which happens when the pass's missing "
-                    "imaginary mode outweighs a small electronic barrier; the electronic barrier "
-                    "is reported instead"
+                    f"({gibbs_forward:+.2f} forward, {gibbs_reverse:+.2f} reverse kcal/mol), "
+                    "which happens when the pass's missing imaginary mode outweighs a small "
+                    "electronic barrier; the electronic barrier is reported instead"
                 )
             else:
                 forward, reverse, basis = gibbs_forward, gibbs_reverse, gibbs_basis
@@ -2361,7 +2377,7 @@ async def _free_energy_barrier(
     forward: float,
     reverse: float,
     run: RemoteRunner,
-) -> tuple[float, float, Literal["E", "G"]]:
+) -> tuple[float, float, Literal["E", "G"], int]:
     """The barrier as a free energy — `G(pass) - G(well)` — or the electronic one, saying which.
 
     **Both sides must be free energies.** An earlier version added the pass's *absolute* thermal
@@ -2375,7 +2391,7 @@ async def _free_energy_barrier(
     absent; a `G` label on an `E` number is the failure this whole module is about.
     """
     if one.gibbs_hartree is None or other.gibbs_hartree is None:
-        return forward, reverse, "E"
+        return forward, reverse, "E", 0
     point, _ = await run(
         cached_remote(
             store,
@@ -2397,13 +2413,15 @@ async def _free_energy_barrier(
         top.structure,
         matrix,
     )
-    if len(thermo.imaginary_frequencies_cm) != 1:
-        return forward, reverse, "E"
+    modes = len(thermo.imaginary_frequencies_cm)
+    if modes != 1:
+        return forward, reverse, "E", modes
     gibbs = thermo.gibbs_free_energy_hartree
     return (
         (gibbs - one.gibbs_hartree) * HARTREE_TO_KCAL,
         (gibbs - other.gibbs_hartree) * HARTREE_TO_KCAL,
         "G",
+        modes,
     )
 
 
