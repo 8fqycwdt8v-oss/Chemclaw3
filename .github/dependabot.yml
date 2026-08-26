@@ -1,0 +1,40 @@
+# Automated dependency updates.
+#
+# The pipeline already *detects* a vulnerable closure — `make deps-audit` runs `pip-audit` against
+# `uv.lock`, blocking, in both workflows. What nothing did was *propose the fix*: a finding turned
+# into a red build and then into somebody hand-resolving a bump, which is the step that decides how
+# long the window between "we know" and "it is fixed" actually is. These two ecosystems are the ones
+# that gate a merge here.
+version: 2
+updates:
+  # The actions are SHA-pinned (see `.github/workflows/*.yml`), which is the reason this entry has
+  # to exist: a pinned digest never floats to a fix on its own, so pinning without an updater trades
+  # a supply-chain risk for a staleness one. Dependabot rewrites the digest and the `# vX.Y.Z`
+  # comment together, so the pin stays readable.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    commit-message:
+      prefix: "ci"
+    groups:
+      actions:
+        patterns: ["*"]
+
+  # Grouped into one pull request rather than one per package, deliberately. Every bump here runs
+  # the full gate — a ~17-minute job with a Postgres service container — and this tree pins no
+  # upper bounds, so an ungrouped week is a dozen of those. Security updates are exempted from the
+  # grouping below so a CVE fix is never queued behind an unrelated minor bump.
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "deps"
+    groups:
+      python-minor-and-patch:
+        applies-to: version-updates
+        update-types: ["minor", "patch"]

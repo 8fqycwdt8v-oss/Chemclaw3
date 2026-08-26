@@ -82,7 +82,7 @@ check: lint type test  ## The fast inner-loop gate: lint + type + test (no cover
 # alone. Last in the list rather than first: a dependency finding is a real failure but not one
 # that should mask a broken test, and it is the one gate whose fix lives in `uv.lock` rather than
 # in the diff under review.
-ci: lint type cov kg-validate eval-strict eln-validate skill-validate connector-validate datasource-validate sink-validate template-validate prose-validate helm-validate deps-audit  ## The full pre-push gate: lint + type + coverage + all validators + the dependency audit (what CI runs).
+ci: lint type cov kg-validate eval-strict eval-baseline-check eln-validate skill-validate connector-validate datasource-validate sink-validate template-validate prose-validate helm-validate deps-audit  ## The full pre-push gate: lint + type + coverage + all validators + the dependency audit (what CI runs).
 
 chat:  ## Chat with the agent from the terminal (admin/testing mode; needs ANTHROPIC_API_KEY).
 	uv run chemclaw --admin

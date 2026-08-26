@@ -21,24 +21,33 @@ on:
   push:
     branches: ["main"]
   pull_request:
+  workflow_dispatch:
 
+# `contents: read` and nothing else. This used to also request `actions: write`, which no step here
+# has ever needed — there is no API call, no cache deletion, and `upload-artifact` authenticates to
+# the artifact service with its own token rather than this scope. `git log -S` shows it arrived with
+# the file's first commit and was never argued for; every other line in these workflows that grants
+# something says why. Write access to Actions in the one workflow that builds the shipped artifact
+# is the wrong thing to hold by accident.
 permissions:
   contents: read
-  actions: write
 
+# `main` is exempt from the cancellation for the same reason as in `ci.yml`: on a branch a cancelled
+# run is a superseded answer, on the default branch it is a missing one, and this is the only gate
+# that proves the image builds and its components import as a non-root UID.
 concurrency:
   group: "${{ github.workflow }}-${{ github.ref }}"
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   image:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
         with:
           enable-cache: true
 
@@ -111,6 +120,13 @@ jobs:
           done
 
       - name: Record what this build actually contains (SBOM + digest)
+        # `main` only. The SBOM's stated job, two paragraphs down, is answering "what was in the
+        # image that produced this audit record" — a question that can only be asked about an image
+        # something ran. A pull-request build is thrown away when the job ends, so scanning it cost
+        # ~1m34s of every PR run and left a 90-day artifact nothing could ever be traced back to.
+        # The build, the revision check and both dispatch smokes still run on every PR, because
+        # those catch a broken image; this one only describes a kept one.
+        if: github.ref == 'refs/heads/main'
         # The other half of a floating base image. `deploy/Containerfile` defaults to a mutable
         # UBI9 tag so a developer build does not pull a base months behind on CVE fixes — which
         # means the bytes cannot be pinned *in advance*, so they have to be named *afterwards*.
@@ -122,6 +138,7 @@ jobs:
         # and those are exactly the components a Python-level scan would miss.
         env:
           SYFT_VERSION: v1.35.0
+          SYFT_SHA256: 01d0d15aff461f1bc54d1716feb4824341918c4f37e1b6a5a0c0caee2251be67
         run: |
           set -euo pipefail
           digest=$(docker image inspect chemclaw:ci --format '{{ index .RepoDigests 0 }}' 2>/dev/null \
@@ -134,8 +151,15 @@ jobs:
           # exit 22, so the check below says which tag is wrong.
           curl -sSfI "https://raw.githubusercontent.com/anchore/syft/${SYFT_VERSION}/install.sh" \
             >/dev/null || { echo "syft pin ${SYFT_VERSION} does not resolve - fix SYFT_VERSION"; exit 1; }
-          curl -sSfL "https://raw.githubusercontent.com/anchore/syft/${SYFT_VERSION}/install.sh" \
-            | sh -s -- -b /usr/local/bin
+          # Fetched to a file and checksummed before it is executed, rather than piped straight
+          # into `sh`. A tag is not immutable — `anchore/syft` can move `v1.35.0` — and this script
+          # runs as root on the runner that just built the shipped image. `curl | sh` also hides a
+          # truncated download: a half-transferred script is a valid prefix that `sh` will happily
+          # run. Update SYFT_SHA256 with SYFT_VERSION; a mismatch is meant to stop the build.
+          curl -sSfL -o /tmp/syft-install.sh \
+            "https://raw.githubusercontent.com/anchore/syft/${SYFT_VERSION}/install.sh"
+          echo "${SYFT_SHA256}  /tmp/syft-install.sh" | sha256sum -c -
+          sh /tmp/syft-install.sh -b /usr/local/bin
           # Both outputs from ONE scan, each written to a file. Two things were wrong with
           # `syft ... -o table | head -40`: it re-scanned the image (~3 minutes for a second copy
           # of the same answer), and `head` closes the pipe at line 40, so syft takes SIGPIPE and
@@ -145,7 +169,8 @@ jobs:
           head -40 sbom-table.txt
 
       - name: Upload the SBOM
-        uses: actions/upload-artifact@v4
+        if: github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: chemclaw-sbom
           path: |
