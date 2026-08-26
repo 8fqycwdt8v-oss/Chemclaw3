@@ -35,11 +35,41 @@ logger = logging.getLogger(__name__)
 # and duplicating it is how the two halves end up degrading differently.
 _T = TypeVar("_T")
 
-# The policy applied to a row whose source declares none — everything derived, nothing trusted.
-# A row can only exist because something recorded it, so this is reachable exactly when a source
-# was disabled after its rows were written; deriving is the safe answer, because the alternative is
-# leaving those rows out of every facet answer with no way for an operator to see why.
+# The policy applied to a row whose source declares none — everything derived, nothing trusted,
+# which is the ordinary case rather than an edge one: of the sources in this tree exactly one
+# declares a `labels:` block, and the other reaction corpora are ELNs that carry no labels at all.
+# The drain therefore reads every source and looks the policy up per row. It used to narrow
+# `stale()` to the declaring sources instead, which meant an ELN corpus was never labelled by any
+# configuration — and the pass reported `has_more=False` while it happened. A `labels:` block says
+# what a source *carries*; it is not permission to label it
+# (`D-2026-08-25-a-label-is-derived-not-recorded`: `provides` is read for the coverage report and
+# the `override` subset check, and nothing else).
 _DERIVE_EVERYTHING = LabelPolicy()
+
+
+# The index key of a row. The reaction id alone is not one, and that is the whole of why these
+# two helpers exist: `reaction_labels` keys on `(source, reaction_id)` precisely because two ELNs
+# may legitimately use one entry id, and `stale()` spans sources, so a single batch can hold both.
+# Keying the labeller's answers on the bare id let the second overwrite the first and gave one
+# reaction the other's atom map, named reaction and — positionally, via `merge._species` — the
+# other's per-species roles. Silently, and stamped as cleanly labelled.
+_Key = tuple[str, str]
+
+
+def _key(row: ReactionLabel) -> _Key:
+    """The index key a labelling answer has to be matched back to."""
+    return (row.source, row.reaction_id)
+
+
+def _token(index: int, row: ReactionLabel) -> str:
+    """A correlation id for one call: unique within the batch, and readable in a server log.
+
+    The server has no stake in our identity — it echoes whatever id it is handed — so what goes on
+    the wire is a token for this call rather than the reaction's name. The position is what makes
+    it unique; the reaction id rides along so a line in the server's own log still says what was
+    being labelled.
+    """
+    return f"{index}:{row.reaction_id}"
 
 
 class LabelReport(BaseModel):
@@ -79,7 +109,7 @@ async def label_stale(
     Returns:
         What was written, and whether more stale rows remain.
     """
-    stale = await index.stale(version, limit, sources=sorted(policies) or None)
+    stale = await index.stale(version, limit)
     if not stale:
         return LabelReport()
 
@@ -88,8 +118,8 @@ async def label_stale(
     unlabelled = 0
     for row in stale:
         policy = policies.get(row.source, _DERIVE_EVERYTHING)
-        representation = representations.get(row.reaction_id)
-        naming = namings.get(row.reaction_id)
+        representation = representations.get(_key(row))
+        naming = namings.get(_key(row))
         await index.store_labels(merge(row, policy, representation, naming), version)
         labelled += 1
         # "Unlabelled" is *the server answered for neither half*, read off the answers rather than
@@ -110,7 +140,7 @@ async def label_stale(
 
 async def _label(
     labeller: Labeller, stale: list[ReactionLabel]
-) -> tuple[dict[str, ReactionRepresentation], dict[str, ReactionNaming]]:
+) -> tuple[dict[_Key, ReactionRepresentation], dict[_Key, ReactionNaming]]:
     """Both halves for a whole batch, degrading to per-reaction calls when the batch fails.
 
     The two halves are independent on purpose: a reaction the atom mapper cannot handle may still
@@ -120,13 +150,13 @@ async def _label(
     """
     representations = await _batch(
         lambda rows: labeller.represent(
-            [(r.reaction_id, r.record_smiles, [s.smiles for s in r.species]) for r in rows]
+            [(token, r.record_smiles, [s.smiles for s in r.species]) for token, r in rows]
         ),
         stale,
         "represent",
     )
     namings = await _batch(
-        lambda rows: labeller.name([(r.reaction_id, r.record_smiles) for r in rows]),
+        lambda rows: labeller.name([(token, r.record_smiles) for token, r in rows]),
         stale,
         "name",
     )
@@ -134,28 +164,53 @@ async def _label(
 
 
 async def _batch(
-    call: Callable[[list[ReactionLabel]], Awaitable[dict[str, _T]]],
+    call: Callable[[list[tuple[str, ReactionLabel]]], Awaitable[dict[str, _T]]],
     stale: list[ReactionLabel],
     what: str,
-) -> dict[str, _T]:
+) -> dict[_Key, _T]:
     """Run one batch call, falling back to one call per reaction if the batch is refused.
+
+    Each row is tagged with a correlation token before the call and the answers are placed back on
+    their rows afterwards, so what the caller receives is keyed by the index key rather than by
+    whatever id went over the wire.
 
     Only `ChemclawError` is caught — the bad-data contract. A `LabelServerError` is an outage and
     must propagate, so Temporal retries the activity instead of this drain making 200 doomed
     single-reaction calls against a server that is not there.
     """
+    tagged = [(_token(index, row), row) for index, row in enumerate(stale)]
+    rows = dict(tagged)
     try:
-        return await call(stale)
+        return _placed(await call(tagged), rows, what)
     except ChemclawError as exc:
         logger.warning(
             "batch %s failed (%s); retrying %d reaction(s) individually", what, exc, len(stale)
         )
-    answered: dict[str, _T] = {}
-    for row in stale:
+    answered: dict[_Key, _T] = {}
+    for pair in tagged:
         try:
-            answered.update(await call([row]))
+            answered.update(_placed(await call([pair]), rows, what))
         except ChemclawError as exc:
             # `%r` on the id because it is external text: repr escapes the control characters that
             # would otherwise let a corpus row forge a log line.
-            logger.warning("could not %s reaction %r: %s", what, row.reaction_id, exc)
+            logger.warning("could not %s reaction %r: %s", what, pair[1].reaction_id, exc)
     return answered
+
+
+def _placed(answers: dict[str, _T], rows: dict[str, ReactionLabel], what: str) -> dict[_Key, _T]:
+    """Re-key one call's answers from their correlation tokens onto the rows they belong to.
+
+    A token this batch did not send is dropped with a warning rather than raised on: the server is
+    versioned separately from this repository, and one answer we cannot place is not a reason to
+    lose the ones we can.
+    """
+    placed: dict[_Key, _T] = {}
+    for token, answer in answers.items():
+        row = rows.get(token)
+        if row is None:
+            logger.warning(
+                "%s: server answered for id %r, which this batch did not send", what, token
+            )
+            continue
+        placed[_key(row)] = answer
+    return placed

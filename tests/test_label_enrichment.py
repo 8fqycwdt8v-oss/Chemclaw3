@@ -100,6 +100,8 @@ class _FakeLabeller:
         self.refuse_batches = refuse_batches
         self.outage = outage
         self.calls: list[int] = []
+        # The ids each `represent` call was handed, so a test can assert what went on the wire.
+        self.sent: list[list[str]] = []
 
     async def version(self) -> str:
         return _VERSION
@@ -108,19 +110,29 @@ class _FakeLabeller:
         self, reactions: list[tuple[str, str, list[str]]]
     ) -> dict[str, ReactionRepresentation]:
         self.calls.append(len(reactions))
-        self._maybe_fail([r[0] for r in reactions])
-        return {rid: _representation(rid) for rid, _, _ in reactions if rid not in self.refuse}
+        self.sent.append([rid for rid, _, _ in reactions])
+        self._maybe_fail([rid for rid, _, _ in reactions])
+        return {rid: _representation(rid) for rid, _, _ in reactions if not self._refused(rid)}
 
     async def name(self, reactions: list[tuple[str, str]]) -> dict[str, ReactionNaming]:
-        self._maybe_fail([r[0] for r in reactions])
-        return {rid: _naming(rid) for rid, _ in reactions if rid not in self.refuse}
+        self._maybe_fail([rid for rid, _ in reactions])
+        return {rid: _naming(rid) for rid, _ in reactions if not self._refused(rid)}
+
+    def _refused(self, wire_id: str) -> bool:
+        """Whether this call is for a reaction the test told the server to refuse.
+
+        The drain sends a *correlation token*, not the reaction id — it has to, because the index
+        keys on `(source, reaction_id)` and one batch can hold two sources using one id. The token
+        still names the reaction it stands for, which is what lets a test go on saying "refuse r2".
+        """
+        return wire_id.split(":", 1)[-1] in self.refuse
 
     def _maybe_fail(self, ids: list[str]) -> None:
         if self.outage:
             raise LabelServerError("the labelling server is not answering")
         if self.refuse_batches and len(ids) > 1:
             raise LabelToolError("batch refused")
-        if len(ids) == 1 and ids[0] in self.refuse:
+        if len(ids) == 1 and self._refused(ids[0]):
             raise LabelToolError(f"cannot parse {ids[0]}")
 
 
@@ -287,5 +299,74 @@ def test_the_drain_sends_one_batch_not_one_call_per_reaction() -> None:
         labeller = _FakeLabeller()
         await label_stale(index, labeller, {}, _VERSION, limit=5)
         assert labeller.calls == [5]
+
+    asyncio.run(_run())
+
+
+# --- what the drain reads, and how it matches an answer back to a row -------------------------
+
+
+def test_a_source_that_declares_no_labels_block_is_still_drained() -> None:
+    """The requirement, as a test: every reaction corpus gets labelled, not only declaring ones.
+
+    The drain used to narrow `stale()` to the sources that declared a `labels:` block. Exactly one
+    source in this tree declares one and it ships disabled, so an ELN corpus — which declares none
+    — was never labelled under any configuration, and the pass reported `has_more=False` while it
+    happened, which reads as "nothing left to do".
+
+    A block says what a source *carries*. It is read per row, as a policy, and never as permission.
+    """
+
+    async def _run() -> None:
+        index = InMemoryLabelIndex()
+        await index.record(_row("e1", source="eln-json"))
+        await index.record(_row("p1", source="pistachio"))
+        # What `label_policies()` returns today: only Pistachio declares a block.
+        policies = {"pistachio": LabelPolicy()}
+
+        report = await label_stale(index, _FakeLabeller(), policies, _VERSION, limit=10)
+
+        assert report.labelled == 2
+        assert {row.source for row in await index.stale("next-version", limit=10)} == {
+            "eln-json",
+            "pistachio",
+        }
+        assert await index.stale(_VERSION, limit=10) == []
+
+    asyncio.run(_run())
+
+
+def test_two_sources_sharing_a_reaction_id_each_keep_their_own_labels() -> None:
+    """One batch, one id, two rows — and neither may be given the other's chemistry.
+
+    `reaction_labels` keys on `(source, reaction_id)` precisely because two ELNs may use one entry
+    id, and `stale()` spans sources, so a batch can hold both. Keying the labeller's answers on the
+    bare id let the second overwrite the first: an esterification was stored with an amination's
+    atom map and named reaction, `merge._species` applied the wrong species list positionally, and
+    the pass reported both rows cleanly labelled.
+
+    The fake answers each id it is handed, so a mismatch here can only come from the drain.
+    """
+    ester = "CCO.CC(=O)O>>CCOC(C)=O"
+
+    async def _run() -> None:
+        index = InMemoryLabelIndex()
+        await index.record(_row("RXN-1", source="eln-a", record_smiles=ester))
+        await index.record(_row("RXN-1", source="eln-b"))
+
+        labeller = _FakeLabeller()
+        report = await label_stale(index, labeller, {}, _VERSION, limit=10)
+
+        assert report.labelled == 2 and report.unlabelled == 0
+        # Distinct ids went on the wire, which is what makes two answers possible at all.
+        assert len(set(labeller.sent[0])) == 2
+        rows = {r.source: r for r in await index.stale("next-version", limit=10)}
+        assert rows["eln-a"].record_smiles == ester
+        assert rows["eln-b"].record_smiles == _RECORD
+        # Each row carries the answer minted for its own id, not its neighbour's.
+        for row in rows.values():
+            assert row.mapped_smiles is not None
+            assert row.named_reaction == "Buchwald-Hartwig amination"
+            assert [s.derived_role for s in row.species][2] is SpeciesRole.LIGAND
 
     asyncio.run(_run())

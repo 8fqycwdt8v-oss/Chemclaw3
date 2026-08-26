@@ -19,8 +19,10 @@ import asyncio
 import shutil
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 
@@ -54,6 +56,7 @@ from chemclaw.ingest.documents.sync import (
     reembed_stale,
     sync_share,
 )
+from chemclaw.retrieval.vectors.base import stored_embedding_key
 from chemclaw.retrieval.vectors.memory import InMemoryVectorStore
 from tests.document_fixtures import (
     _blank_pdf_bytes,
@@ -1629,10 +1632,20 @@ def test_the_external_store_backend_carries_the_chunking_through_every_write() -
         assert coarse_hit.score == pytest.approx(1.0)
 
         # (2) Re-embedding one cutting marks that row and no other.
+        #
+        # The stored key is the caller's key namespaced by the store it went to
+        # (`retrieval/vectors/base.stored_embedding_key`), so that moving a corpus between backends
+        # cannot leave every row claiming a vector the new one has never held. What this step
+        # asserts is unchanged by that: *which* row got the new key, not how the key is spelled.
+        stored = partial(
+            stored_embedding_key,
+            provider=settings.vector_store_provider,
+            collection=index._collection,
+        )
         await index.store_embeddings(fine, "key-of-the-next-model")
         assert await _stored_keys("doc-1") == [
-            ("4000:400", 0, key),
-            ("400:40", 0, "key-of-the-next-model"),
+            ("4000:400", 0, stored(key)),
+            ("400:40", 0, stored("key-of-the-next-model")),
         ]
 
         # (4) The fine share is re-chunked coarsely. The base's per-write cleanup deletes the row
@@ -1897,5 +1910,66 @@ def test_both_backends_stop_at_the_same_piece() -> None:
 
         assert seen[0] == seen[1], f"the backends cut differently: {seen}"
         assert seen[0] == (3, True)
+
+    asyncio.run(_run())
+
+
+def test_moving_the_document_corpus_to_another_store_re_embeds_it() -> None:
+    """A provider switch must not leave every chunk claiming a vector the new store never held.
+
+    The note index got this in D-2026-08-25; the document corpus did not, and it is the larger of
+    the two. `stale_chunks` selects on `embedding_key IS DISTINCT FROM`, and that key answered only
+    *which model made this vector* — so repointing `vector_store_provider` left every row matching,
+    the re-embedding drain finding nothing, and dense document search answering from an empty
+    collection with no error anywhere.
+
+    The catalogue is shared between backends by design, so the switch has to be visible in the row.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        async with await connect(settings.postgres_dsn) as conn:
+            await conn.execute("TRUNCATE document_files, document_chunks")
+            await conn.commit()
+
+        key = embedding_config_key()
+        (vector,) = await asyncio.to_thread(embed_texts, ["a protocol worth finding"])
+        file_row = FileRecord(
+            doc_id="doc-1",
+            source="sharedrive",
+            path="a.md",
+            fingerprint="1:1",
+            chunking_key="400:40",
+            tags=[],
+            modified_at=None,
+        )
+        chunks = [
+            ChunkRecord(
+                doc_id="doc-1",
+                chunking_key="400:40",
+                ordinal=0,
+                content="a protocol worth finding",
+                embedding=vector,
+            )
+        ]
+
+        first = ExternalVectorDocumentIndex(InMemoryVectorStore(), collection="chunks")
+        await first.upsert([file_row], chunks, key)
+        assert await first.stale_chunks(key, 10, {"400:40"}) == [], "settled in its own store"
+
+        # The move: same catalogue, same model, a store that has never seen this corpus.
+        moved_to = InMemoryVectorStore()
+        with patch.object(settings, "vector_store_provider", "databricks"):
+            moved = ExternalVectorDocumentIndex(moved_to, collection="chunks")
+            stale = await moved.stale_chunks(key, 10, {"400:40"})
+            assert [(c.doc_id, c.ordinal) for c in stale] == [("doc-1", 0)], (
+                "every chunk must read as stale: its vector is in the store we just left"
+            )
+            await moved.store_embeddings(chunks, key)
+            assert await moved.stale_chunks(key, 10, {"400:40"}) == []
+
+        assert [m.id for m in await moved_to.search("chunks", vector, 5)], (
+            "and the vector landed in the new store, which is what search will ask"
+        )
 
     asyncio.run(_run())
