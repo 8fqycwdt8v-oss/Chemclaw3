@@ -1,119 +1,85 @@
-# Pistachio on Databricks: remove the Snowflake integration, generalise the database seam
+# Unblock the reaction-history user story — 2026-08-26
 
-## The ask
+## The story
+"Summarise the activities for reaction abc; where did development start and why was it
+altered; list every change on a timeline with its rationale; recommend where to go next."
 
-> The first database integrated will be pistachio using databricks. Remove the specific snowflake
-> integration but leave the generic database connector for easy connection of pistachio and
-> additional databases later on. Keep this connector that general that any modern database can be
-> easily integrated. Make sure to not only focus on classical databases like Postgres, snowflake or
-> databricks but as well vector databases.
-
-## What is already true (checked, not assumed)
-
-- `chemclaw.ingest.eln.warehouse` is already a schema-in-a-file engine naming no table, no column.
-- `servers`: two drivers exist — `snowflake.py` and `databricks.py`; `pistachio/datasource.yaml`
-  and `eln-databricks/datasource.yaml` already bind the Databricks one.
-- `chemclaw.retrieval.vectors` already has a `VectorStore` Protocol with three adapters
-  (`pgvector` = absence of one, `qdrant`, `databricks`).
-
-## What is *not* general, and is the actual work
-
-1. `ConnectionBinding` is **Snowflake-shaped**: `account_env`, `user_env`, `private_key_env`,
-   `warehouse`, `role`. `publish/connect.py` says so in its own docstring and refuses to reuse it.
-   The Databricks driver is contorted by it (`account` means hostname, `password` means token) and
-   has to *refuse* two fields that have no analogue.
-2. `vector_store_provider` is a closed `Literal` with an `if`-chain — a new vector database is a
-   core edit, which is exactly what the warehouse seam refuses to be.
-3. Two copies of "resolve `module:callable`, read `*_env` from the environment" exist
-   (`ingest/eln/warehouse/connect.py`, `publish/connect.py`).
+## The dataset it must run on
+Materials and reaction SMILES arrive structured through an `ElnAdapter`. Everything else —
+protocol, observations, the initial hypothesis — is **one free-text cell, completely free-form**.
+A project code exists but is only reliable on well-kept projects; **reaction SMILES is the
+grouping key**, and a reaction step is sometimes present. (Confirmed with the user, this session.)
 
 ## Plan
-
-- [x] P0 — read the seam, the two drivers, both connect modules, the vector registry, the manifests
-- [x] P1 — **The driver's signature is the schema.** `ConnectionBinding` keeps `driver:` and becomes
-      `extra="allow"`; every other key is the driver's own keyword, `*_env` naming an env var.
-      One shared implementation in `core/connect.py`, used by ingest, publish and the vector seam.
-- [x] P2 — `DatabricksWarehouse` takes its **own** vocabulary (`server_hostname`, `access_token`,
-      `http_path`/`warehouse_id`, `catalog`, `schema`); the three fields that "mean something
-      different here" stop meaning anything different.
-- [x] P3 — delete `warehouse/snowflake.py` and `ingest/sources/eln-snowflake/`; move the fixture
-      role onto `eln-databricks`; drop the mypy override and the key-material sanction.
-- [x] P4 — **A vector database is a driver too.** `vector_store_provider` accepts a shipped name or
-      a `module:callable`, late-bound through the same resolver. No core edit for a fourth store.
-- [x] P5 — manifests updated (`eln-databricks`, `pistachio`), READMEs, `.env.example`, CLAUDE.md,
-      the concept guide, DEFERRED rows that named the Snowflake tenant.
-- [x] P6 — ADR, `make lint type test` green with Postgres up (say what skipped otherwise).
-
-## Verification plan
-
-- `make lint type test` with `dockerd` + `make up` + `make db-migrate` running, so the ~157
-  Postgres tests actually run rather than skip.
-- `make datasource-validate --construct` — builds the halves, so it validates the *binding*.
-- New tests: a binding against a stub driver with an invented vocabulary proves "any modern
-  database"; a `module:callable` vector store proves the same for the vector half.
+- [x] 1 · `performed_at` falls back to the entry timestamp, once, at the registry
+- [x] 2 · `outcome_class` becomes optional — silence is not success (ADR)
+- [x] 3 · The prose reader is asked for the run's intent, marked as read
+- [x] 4 · A binding may not derive `hypothesis` from a transform chain
+- [x] 5 · The campaign note drops columns nothing recorded
+- [x] 6 · `eln-validate` validates the adapters that are actually attached
+- [x] 7 · Verify: `make lint type test`, the validators, and a rendered end-to-end timeline
 
 ## Review
 
-**What shipped.**
+All seven done; `make lint type test` green (4806 passed, 3 skipped, Postgres up so nothing was
+silently skipped) and every validator passes. `D-2026-08-26-silence-is-not-a-successful-run` is the
+record.
 
-1. **Snowflake is gone**: `warehouse/snowflake.py`, `ingest/sources/eln-snowflake/`, the
-   `snowflake.*` mypy override, and the `("chemclaw.ingest", "crypto")` layering row whose only site
-   was that driver's key-pair auth. `eln-databricks` is now the manifest the binding tests resolve
-   every path of, and `pistachio` beside it is the first integration.
-2. **`ConnectionBinding` declares `driver:` and nothing else** (`extra="allow"`). Every other key is
-   a keyword argument of the callable it names. `DatabricksWarehouse` consequently took its own
-   vocabulary (`server_hostname`, `access_token`, `warehouse_id`/`http_path`, `catalog`, `schema`)
-   and lost both the translation table in its docstring and the hand-written refusal of two fields
-   that had no analogue.
-3. **One implementation of "attach a database"** in `core/connect.py`, used by ingest, publish and
-   the vector registry. The ~90 duplicated lines in `publish/connect.py` are gone; its own docstring
-   had said the duplication existed only because the model was one vendor's shape.
-4. **The offline check moved to where it can be right**: `make datasource-validate` resolves the
-   driver and binds the block against its signature, sharing `signature_mismatch` with
-   `make sink-validate` so the two cannot drift on the `_env` stripping rule.
-5. **A vector database is a driver too**: `vector_store_provider` takes a shipped name or a
-   `module:callable`. The `Literal`'s typo check survives as a field validator.
+**What the change actually was, in one line:** three defects of one shape — a value the source could
+not supply was indistinguishable from a value it did.
 
-**Measured, not argued.**
+**What building it found that the analysis had not.**
 
-- `make lint type test` green with `dockerd` + `make up` + `make db-migrate` running:
-  **4805 passed, 3 skipped**. The three skips are the shallow-clone migration-history checks, not
-  Postgres skips — the ~157 Postgres tests ran (a bare run before starting the daemon showed 3515).
-- Every validator green: `datasource-validate` (and `--construct`), `sink-validate`,
-  `connector-validate`, `skill-validate`, `prose-validate`, `eln-validate`, `template-validate`.
-- The new gate demonstrated rather than asserted: a `role: ANALYST` added to `pistachio`'s
-  connection block failed `make datasource-validate` naming the keyword; a `hostt:` typo in the
-  sink manifest failed `make sink-validate` the same way. Both reverted.
+1. **A decorator cannot fix the outcome default.** The plan was one registry wrapper doing both the
+   date and the outcome. It can only do the date: by the time `map_to_ord` returns, the SUCCESS
+   default has already destroyed the distinction between "the adapter said success" and "nothing
+   said anything". The outcome had to be a model change, and therefore an ADR.
+2. **`observation_mining` was the dangerous consumer, not `playbook`.** `playbook` filters
+   `is SUCCESS` and drops `None` for free. `observation_mining` filtered `is not SUCCESS`, which
+   would have swept every unassessed run into a sentence counting how often a transformation
+   *failed* — the old default with its sign flipped, and worse than the thing being fixed.
+3. **The data-source discovery cache was cleared per-file, not in `conftest`.** One new test in
+   `test_eln.py` pointing the registry at its own `tmp_path` poisoned the cache for the session:
+   51 failures in four unrelated files. Two sibling caches were already in `conftest` for exactly
+   this reason; the third has joined them and the per-file fixture is gone.
+4. **The positional argument to `eln-validate` had to go.** With the validator reading the registry,
+   a CLI arg that overrides one setting is a second way to set it — the duplication the config rule
+   forbids. `CHEMCLAW_ELN_EXPORT_DIR` is the one way now.
+5. **The campaign-table tests indexed cells by position.** With every column now conditional, a
+   fixture that records no time shifts every assertion after it. They address by header name via a
+   new `_cell` helper, so they test values rather than layout.
 
-**One thing deliberately not done.** The engine tests no longer pin a vendor's SQL — the fake brings
-its own dialect — because with the connection vocabulary now the driver's, borrowing a shipped
-dialect would pin one vendor's spelling into every test of a module whose whole claim is that it has
-none. The shipped spelling is pinned twice instead: against the real dialect, and end to end through
-the retriever. That is more Databricks coverage than existed before, not less.
+**Proved end to end** on the real schema (components + SMILES structured, everything else one
+free-form cell): the mined note is a dated timeline naming all three condition swaps, and the
+turn-time comparison carries a `Tested (read)` column quoting each run's stated aim — `—` for the
+run that stated none, which is the honest answer.
 
-## Review round 2 — `/code-review high`, and what it found
+**Left open, filed rather than implied** (`docs/planning/BACKLOG.md`): the turn-time comparison
+cannot diff the components, because `reaction_records` keeps them only as prose in the body. The two
+artifacts together answer the story, and `experiment-progression` already starts from the note, so
+this is a seam to decide on rather than a break to patch.
 
-Five defects, every one of them a *guard that the refactor moved and did not put back down*. Worth
-recording as a class: replacing a typed model with "the callable is the schema" trades one
-validation site for two (the gate, and the constructor), and anything the model was quietly doing
-belongs to whichever of the two now owns it.
+## Review round 2 — a code review of the whole diff, and what it caught
 
-1. **A key the driver will not take escaped as a bare `TypeError`** (`core/connect.py`). The model
-   failed it as a `ValidationError` — a `ValueError`, non-retryable by class name — while
-   `TypeError` is on no list in `durable/publish`, so a permanently broken *mounted* manifest (the
-   case `make datasource-validate` cannot see) would have been retried by every job touching it.
-   The gate's signature check now runs again where the driver is built.
-2. **A full `/sql/1.0/warehouses/...` path in `warehouse_id`** built
-   `/sql/1.0/warehouses//sql/1.0/warehouses/<id>`. One field used to accept either form and branch;
-   two fields do not get to be lenient, so it is refused naming `http_path:`.
-3. **`vector_store_url`'s shipped-default check was keyed to `databricks` by name**, which reopened
-   its own hole the moment any `module:callable` could be a provider: a site's adapter inherited
-   Qdrant's `http://localhost:6333` and validated clean. Now every provider but Qdrant's own.
-4. **`query_timeout_seconds` lost its `ge=1, le=3600`** with the typed field, and `0` is the worst
-   value it can take — both Spark and Postgres read `statement_timeout=0` as *no* timeout. Restored
-   in each driver, because it is each driver's own keyword now.
-5. **`check_env_name` reached the publish seam's `*_env` keys but `make sink-validate` never ran
-   it**, so a pasted secret or a lower-case variable name passed CI and failed at first delivery.
+Three findings, all real, all mine; all fixed in the same branch.
 
-Each fix is pinned by a test **verified to fail against the pre-fix behaviour** by neutralising the
-guard in place and re-running: 7 failures, then green. Full gate after: 4772 passed, 3 skipped.
+1. **The date fallback was the very defect this change is about.** `DatedIngest` put the entry's
+   *write* time into `performed_at` with nothing marking it, so `is_timeline()` went true and the
+   campaign note asserted "Runs in the order they were performed" over what may be one afternoon of
+   transcription. Both the docstring and the ADR said `ordering_caveat` "already exists to describe"
+   the weakening; it did not — it only ever distinguished *missing* dates. Fixed at the source:
+   `OrdReaction.date_source`, stamped by the seam, carried through `ProgressionStep`, and a caveat
+   that says "in the order they were **recorded** … not proof of the order they were run".
+2. **The binding guard was too broad.** It refused *any* transform on `hypothesis`, so an
+   `OBJECTIVE` column with `{strip: {}}` — the case its own docstring called untouched — failed at
+   worker startup, accused of carving intent out of prose. Narrowed to the three transforms that can
+   put text in the field the cell does not hold: `regex`, `value_map`, `default`.
+3. **An exhaustiveness claim that was only a comment.** `_STATED_OUTCOMES[...]` said a fourth
+   `OutcomeClass` member "fails to type-check here"; mypy does not check a dict literal's keys, so it
+   would have type-checked clean and raised `KeyError` inside `record_from_ord_reaction` — outside
+   the reject-and-continue path, aborting the sync over one row. Now a `match` with `assert_never`,
+   **verified by adding a fourth member and watching mypy name it**, then reverting.
+
+The pattern across all three: *prose asserting a protection the code did not implement.* Two of them
+were in text I wrote in the same change that exists to stop exactly that. Re-verified after: lint,
+`mypy --strict`, 4768 passed / 3 skipped with Postgres up, seven validators green.

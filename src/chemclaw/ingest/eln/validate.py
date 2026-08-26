@@ -30,16 +30,12 @@ an entry was rejected and the CLI can report them.
 """
 
 import asyncio
-import sys
 from datetime import UTC, datetime
 
 from rdkit import Chem
 
-from chemclaw.core.config import settings
 from chemclaw.ingest.eln.adapter import ElnAdapter, ElnMappingError
-from chemclaw.ingest.eln.json_adapter import JsonExportAdapter
 from chemclaw.ingest.eln.ord import OrdReaction
-from chemclaw.ingest.eln.ord_adapter import OrdJsonAdapter
 
 
 def _elements(smiles_list: list[str]) -> tuple[set[str], list[str]]:
@@ -104,17 +100,41 @@ def _validate_source(adapter: ElnAdapter, label: str) -> int:
 
 
 def main() -> int:
-    """CLI: map and validate every ELN entry from both adapters; report problems (plan 4.4).
+    """CLI: map and validate every entry from the *enabled* ingest sources (plan 4.4).
 
-    Run as `python -m chemclaw.ingest.eln.validate [free_text_export_dir]`. Validates both the
-    free-text JSON
-    export (positional arg or `eln_export_dir`) and the native ORD export (`ord_export_dir`),
-    so both ingestion paths are gated. Exits non-zero if any entry is unmappable or fails
-    structure/mass-balance validation.
+    Run as `python -m chemclaw.ingest.eln.validate`. Exits non-zero if any entry is unmappable or
+    fails structure/mass-balance validation.
+
+    **It asks the registry which adapters are attached rather than naming two of them.** This used
+    to construct `JsonExportAdapter` and `OrdJsonAdapter` by name and validate those, which was
+    right while they were the only two — and became a gate looking somewhere other than where the
+    data comes in the moment an ELN could be attached through a manifest (D-120). A site whose ELN
+    arrives that way was outside the only check that maps and mass-balances entries before they
+    land, and this printed `OK` regardless: the shape `CLAUDE.md` records as "a README is not a
+    gate", in the one file whose entire job is being one.
+
+    The source's *name* is the label, so a failure names the manifest an operator has to go and fix
+    rather than a format. Sources are resolved one at a time through `make_data_source`, not by
+    zipping the names list against the halves list: two independently-built lists of the same length
+    mispair silently, which for a validator would attribute one source's rejections to another.
     """
-    export_dir = sys.argv[1] if len(sys.argv) > 1 else settings.eln_export_dir
-    total = _validate_source(JsonExportAdapter(export_dir), "free-text")
-    total += _validate_source(OrdJsonAdapter(), "ord")
+    from chemclaw.ingest.sources.registry import active_ingest_source_names, make_data_source
+
+    names = active_ingest_source_names()
+    if not names:
+        # Not a failure — a retrieve-only deployment is a legitimate configuration — but it must not
+        # read as a pass. "OK" over an empty set is exactly what this rewrite exists to stop.
+        print(
+            "No ingest sources are enabled (CHEMCLAW_DATA_SOURCES), so no ELN entries were "
+            "validated. This is not a pass: nothing was checked."
+        )
+        return 0
+    total = 0
+    for name in names:
+        source = make_data_source(name)
+        if source.ingest is None:  # pragma: no cover - `active_ingest_source_names` filters these
+            continue
+        total += _validate_source(source.ingest, name)
     if total:
         print(f"\n{total} problem(s) found")
         return 1

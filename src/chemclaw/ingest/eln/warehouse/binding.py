@@ -377,6 +377,8 @@ class IngestBinding(BaseModel):
         if "reaction_id" not in self.reaction:
             raise BindingError("reaction must map 'reaction_id' — it is the note's identity")
 
+        _refuse_derived_hypothesis(self.reaction.get("hypothesis"))
+
         row_blocks: list[ComponentBinding | ImpurityBinding] = [*self.components, *self.impurities]
         for block in row_blocks:
             if block.source not in names:
@@ -387,6 +389,73 @@ class IngestBinding(BaseModel):
         for path in template_paths(self.provenance):
             validate_path(path)
         return self
+
+
+def _refuse_derived_hypothesis(field: FieldBinding | None) -> None:
+    r"""A binding may name the column holding the run's intent; it may not carve one out of prose.
+
+    **The rule this enforces is already stated in Python and was reachable through YAML.**
+    `ingest.eln.json_adapter` reads `hypothesis` from the entry's own field and refuses to pattern-
+    match one out of the procedure, because "a hypothesis extracted by pattern-matching would be
+    indistinguishable, downstream, from one the chemist wrote". Nothing here disagreed with that —
+    and nothing here enforced it either. The vocabulary has a `regex` transform, so a site whose ELN
+    keeps its objective inside the protocol text could write
+
+        hypothesis: {path: root.PROTOCOL_TEXT, transform: [{regex: {pattern: "Aim:\s*(.+)"}}]}
+
+    which loads, validates, ingests, and renders a `Tested:` line that no reader downstream can tell
+    from a chemist's own words. One half of a codebase refusing what the other half permits is not a
+    rule; it is a rule plus whoever happens to review the manifest.
+
+    **Reading intent out of prose is not forbidden — misattributing it is.** `agent.condense` asks a
+    model for exactly this and is allowed to, because its row is stamped `digest_source: extracted`,
+    its column is headed "Tested (read)" and it quotes the sentence. That is the supported route for
+    a free-text ELN, and the error below names it rather than leaving an operator with a refusal and
+    no alternative.
+
+    **Only the transforms that can put text in the field which is not in the cell.** `regex` carves
+    a substring out of prose — the case this exists for; `value_map` substitutes one string for
+    another; `default` supplies one where the source had none. Whitespace and case normalisation
+    cannot misattribute anything, and refusing them was a real over-reach: an `OBJECTIVE` column
+    with `{strip: {}}` on it is the chemist's own field with its padding trimmed, which this
+    docstring called untouched while the code failed the worker at startup and accused the binding
+    of carving intent out of prose.
+    """
+    if field is None:
+        return
+    derived = sorted(
+        {
+            name
+            for binding in _chain(field)
+            for step in binding.transform
+            for name in step
+            if name in _FABRICATING_TRANSFORMS
+        }
+    )
+    if derived:
+        raise BindingError(
+            "reaction maps 'hypothesis' through "
+            f"{derived}, which would derive a run's "
+            "stated intent rather than read it. A hypothesis carved out of the protocol text is "
+            "indistinguishable downstream from one the chemist wrote, so it must not enter the "
+            "record. Map 'hypothesis' to the column that holds it and nothing else; if the intent "
+            "lives inside the free-text protocol, map that text to 'procedure_text' and let the "
+            "turn-time protocol digest read it, where it is marked as read and quoted."
+        )
+
+
+# The transforms that can put text in a field which the source cell does not contain. Normalising
+# ones (`strip`, `upper`, `lower`) and the numeric/date coercions are absent deliberately: they
+# cannot invent or relocate a statement of intent, which is the only thing this rule protects.
+_FABRICATING_TRANSFORMS = frozenset({"regex", "value_map", "default"})
+
+
+def _chain(field: FieldBinding) -> list[FieldBinding]:
+    """A field binding and every fallback behind it — a rule about one must cover all of them."""
+    chain = [field]
+    while (nxt := chain[-1].fallback) is not None:
+        chain.append(nxt)
+    return chain
 
 
 class ConnectionBinding(BaseModel):

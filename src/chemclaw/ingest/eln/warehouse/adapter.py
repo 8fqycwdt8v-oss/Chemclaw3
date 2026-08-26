@@ -173,11 +173,15 @@ class WarehouseElnAdapter:
         """
         binding = self._ingest
         # A field the source was silent about is *omitted*, not passed as `None`, so the model's own
-        # default applies. The two are not the same for every field: `outcome_class` is not optional
-        # and defaults to SUCCESS, so a NULL status column passed through as `None` would reject an
-        # otherwise-perfect reaction — a row rejected for the one thing the schema already has an
-        # answer for. Omission also keeps `reaction_id` honest: leaving it out raises "field
-        # required", which is the message that names the actual problem.
+        # default applies. That is what keeps `reaction_id` honest: leaving it out raises "field
+        # required", which is the message that names the actual problem, where an explicit `None`
+        # would raise a type error about a value the source never had.
+        #
+        # For the optional fields the two are now the same thing, `outcome_class` included: it used
+        # to be non-optional with a SUCCESS default, so a binding that mapped no status column
+        # produced a corpus asserting every run worked. It is optional now
+        # (`D-2026-08-26-silence-is-not-a-successful-run`), so a source with nothing to say leaves
+        # it unset and the record says nobody stated an outcome.
         fields = {
             name: value
             for name, field in sorted(binding.reaction.items())
