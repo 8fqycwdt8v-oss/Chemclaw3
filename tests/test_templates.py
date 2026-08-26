@@ -371,7 +371,7 @@ def test_a_shipped_template_whose_arguments_cannot_be_checked_says_so() -> None:
     noticing that a pinned procedure lost its argument check. This fails the moment that happens
     and the note stops matching what ships.
 
-    **The blind spot grew from one template to six**, and pinning the whole set rather than a
+    **The blind spot grew from one template to five**, and pinning the whole set rather than a
     count is what makes that legible. Every addition is a `chem` enumeration — the bundle whose
     capability is `Chemclaw3-mcp`'s — so the multi-step protocols of
     `D-2026-08-25-the-loop-is-a-composite-not-a-template` are name-checked here and
@@ -382,7 +382,6 @@ def test_a_shipped_template_whose_arguments_cannot_be_checked_says_so() -> None:
 
     assert unchecked_arguments() == {
         "bond-strength-survey": ["enumerate_bond_cleavages"],
-        "rotational-barrier": ["enumerate_torsions"],
         "degradant-triage": ["enumerate_degradants", "screen_hazards"],
         "hazard-briefing": ["screen_hazards"],
         "microspecies-profile": ["enumerate_protonation_states"],

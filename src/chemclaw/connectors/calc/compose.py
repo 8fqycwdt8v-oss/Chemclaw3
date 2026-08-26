@@ -32,7 +32,7 @@ import asyncio
 import math
 from collections import Counter
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from typing import Any, Literal, Protocol, TypeVar
+from typing import Any, Literal, NamedTuple, Protocol, TypeVar
 
 import numpy as np
 from rdkit import Chem
@@ -2038,6 +2038,12 @@ async def rotation_profile(
     """
     step = settings.xtb_rotation_step_degrees if step_degrees is None else step_degrees
     temperature = settings.xtb_thermo_temperature_k if temperature_k is None else temperature_k
+    if step >= torsion.period_degrees:
+        raise ValueError(
+            f"a {step:g} degree step cannot resolve a {torsion.period_degrees:g} degree period: "
+            "the profile would be one or two points and every well and barrier in it an artefact. "
+            "Lower step_degrees, or check the torsion's symmetry_order."
+        )
     structure = subject if subject is not None else await embed(smiles, run=run)
     atoms = _verified_torsion(structure, torsion)
 
@@ -2056,15 +2062,15 @@ async def rotation_profile(
     )
     profile = dict(sorted({**profile, **refined}.items()))
 
-    rotamers, warnings = await _released_wells(
+    wells, warnings = await _released_wells(
         store, structure, atoms, profile, torsion, solvent, temperature, level, progress, run
     )
-    barriers = await _barriers(
+    barriers, unresolved = await _barriers(
         store,
         structure,
         atoms,
         profile,
-        rotamers,
+        wells,
         torsion,
         solvent,
         temperature,
@@ -2072,6 +2078,7 @@ async def rotation_profile(
         progress,
         run,
     )
+    warnings.extend(unresolved)
     warnings.extend(_profile_warnings(profile, torsion, step))
     energies = list(profile.values())
     lowest = min(energies)
@@ -2095,10 +2102,13 @@ async def rotation_profile(
             )
             for value, energy in profile.items()
         ],
-        rotamers=rotamers,
+        rotamers=[well.rotamer for well in wells],
         barriers=barriers,
-        highest_barrier_kcal=round(
-            max((barrier.forward_kcal for barrier in barriers), default=0.0), 2
+        # `None` rather than 0.0 when nothing resolved. A zero here is indistinguishable from a
+        # freely-rotating bond, and `publish/project.py` writes it as a real `rotational_barrier`
+        # fact — so the absent case has to be absent rather than a number that reads as an answer.
+        highest_barrier_kcal=(
+            round(max(barrier.forward_kcal for barrier in barriers), 2) if barriers else None
         ),
         uncertainty_kcal=settings.xtb_reaction_uncertainty_kcal,
         warnings=warnings,
@@ -2157,7 +2167,58 @@ def _verified_torsion(structure: Structure, torsion: Torsion) -> tuple[int, int,
             "one carried from another compound, another way of writing this one, or another RDKit "
             "build will not resolve. Re-run enumerate_torsions on this molecule."
         )
-    first, begin, end, last = torsion.atoms
+    first, begin, end, last = _checked_dihedral(structure, mol, torsion)
+    return first, begin, end, last
+
+
+def _checked_dihedral(
+    structure: Structure, mol: Chem.Mol, torsion: Torsion
+) -> tuple[int, int, int, int]:
+    """The four atoms that will actually be driven, checked as carefully as the bond was.
+
+    **The handle only guards `bond`, and `atoms` is what the scan drives.** That gap let a torsion
+    whose handle was correct still name a nonsense dihedral: measured before this check,
+    `atoms=[-1, 1, 2, 3]` returned a full profile with a barrier and no error at all — Python's
+    negative indexing silently addressed the last atom — and `atoms=[0, 1, 2, 2]` returned another,
+    for a "dihedral" with a repeated atom. `atoms=[0, 1, 2, 99]` escaped as a bare numpy
+    `IndexError` from inside the geometry arithmetic, which is an error nobody can act on.
+
+    A profile of the wrong four atoms is precisely the silent-wrong-answer failure this whole
+    module exists to remove, so the check is the same shape as the bond's: the indices must address
+    this molecule, be four distinct atoms, be bonded in sequence, and carry the named bond in the
+    middle.
+    """
+    atoms = list(torsion.atoms)
+    heavy = mol.GetNumAtoms()
+    if [index for index in atoms if not 0 <= index < heavy]:
+        raise ValueError(
+            f"the dihedral {atoms} of {torsion.label!r} is not four atoms of "
+            f"{structure.smiles!r}, which has {heavy}. Take the torsion from enumerate_torsions "
+            "rather than working the indices out; a negative index in particular addresses a real "
+            "atom and would have driven a different dihedral silently."
+        )
+    if len(set(atoms)) != 4:
+        raise ValueError(
+            f"the dihedral {atoms} of {torsion.label!r} repeats an atom, so it does not define an "
+            "angle. Take the torsion from enumerate_torsions on this molecule."
+        )
+    if sorted(atoms[1:3]) != sorted(torsion.bond):
+        raise ValueError(
+            f"the dihedral {atoms} does not turn about the bond {torsion.bond} it is paired with — "
+            "the middle two atoms are the bond being rotated. Pass the enumerate_torsions entry "
+            "through unchanged rather than assembling one."
+        )
+    unbonded = [
+        (one, other)
+        for one, other in zip(atoms, atoms[1:], strict=False)
+        if mol.GetBondBetweenAtoms(one, other) is None
+    ]
+    if unbonded:
+        raise ValueError(
+            f"the dihedral {atoms} is not a bonded chain in {structure.smiles!r}: {unbonded} "
+            "are not bonded. A dihedral is defined by four atoms bonded in sequence."
+        )
+    first, begin, end, last = atoms
     return first, begin, end, last
 
 
@@ -2282,6 +2343,24 @@ async def _refined_maxima(
     return refined
 
 
+class _Well(NamedTuple):
+    """A released rotamer beside the absolute energies it was derived from.
+
+    **The absolute energies are the point.** A barrier is a difference between a pass and a well,
+    and the two were previously measured from different zeros — the profile's lowest *constrained*
+    scan point on one side and the lowest *released* minimum on the other — so every barrier was
+    understated by the lowest well's relaxation energy and could in principle come out negative.
+    Carrying the absolutes here lets `_barriers` subtract two numbers that mean the same thing.
+
+    Internal, and deliberately not fields on `Rotamer`: an absolute Hartree energy is not something
+    a chemist reads, and `RotationProfile` is a published record.
+    """
+
+    rotamer: Rotamer
+    energy_hartree: float
+    gibbs_hartree: float | None
+
+
 async def _released_wells(
     store: ResultStore,
     structure: Structure,
@@ -2293,7 +2372,7 @@ async def _released_wells(
     level: ReactionLevel,
     progress: Progress,
     run: RemoteRunner,
-) -> tuple[list[Rotamer], list[str]]:
+) -> tuple[list[_Well], list[str]]:
     """Turn each well of the profile into a real minimum, then rank and populate them.
 
     **Releasing the constraint is the point.** A scan point is optimized with the dihedral frozen,
@@ -2324,6 +2403,33 @@ async def _released_wells(
         )
         constrained = OptimizationResult.model_validate(await kept(point))
         relaxed, _ = await relax(store, constrained.structure, solvent, run=run)
+        gibbs = None
+        if level != "quick":
+            progress(f"free energy of the rotamer near {angle:g} degrees")
+            # **The refinement's own geometry is what the rotamer is**, not the one handed to it.
+            # `relax_to_minimum` may displace along an imaginary mode and re-optimize, so keeping
+            # the pre-refinement structure would have published a `structure_id`, a dihedral and an
+            # electronic energy describing one geometry beside a free energy describing another.
+            relaxed, thermo, _ = await relax_to_minimum(
+                store,
+                relaxed.structure,
+                solvent,
+                ThermoSettings(temperature_k=temperature),
+                run=run,
+            )
+            gibbs = thermo.gibbs_free_energy_hartree
+            if not thermo.is_minimum:
+                # The refinement gave up: `relax_to_minimum` is bounded by
+                # `xtb_minimum_refinement_attempts` and returns what it has. A free energy at a
+                # geometry that is still a saddle is not a free energy, and this is the "a well
+                # that would not settle" the result model promises to report.
+                warnings.append(
+                    f"the rotamer near {angle:g} degrees is still a saddle point after "
+                    f"refinement ({thermo.imaginary_frequencies_cm} cm^-1), so its free energy "
+                    "and any barrier measured from it describe a geometry that is not a minimum"
+                )
+        # Read the angle off the geometry that is actually being kept, and merge on *that* — so a
+        # refinement that walked a well into its neighbour is caught rather than recorded twice.
         settled = _dihedral_of(relaxed.structure, atoms) % torsion.period_degrees
         if any(
             _angular_distance(settled, other, torsion.period_degrees)
@@ -2335,17 +2441,6 @@ async def _released_wells(
                 f"{settled:.0f} degrees — the coarse profile saw a feature that is not there"
             )
             continue
-        gibbs = None
-        if level != "quick":
-            progress(f"free energy of the rotamer at {settled:.0f} degrees")
-            _, thermo, _ = await relax_to_minimum(
-                store,
-                relaxed.structure,
-                solvent,
-                ThermoSettings(temperature_k=temperature),
-                run=run,
-            )
-            gibbs = thermo.gibbs_free_energy_hartree
         found.append((settled, relaxed, gibbs))
     if not found:
         warnings.append(
@@ -2361,7 +2456,7 @@ def _ranked(
     torsion: Torsion,
     temperature: float,
     level: ReactionLevel,
-) -> list[Rotamer]:
+) -> list[_Well]:
     """Relative energies and populations over the released minima, lowest first.
 
     **Degeneracy is `symmetry_order`, and it is not bookkeeping.** The profile covers one period of
@@ -2385,20 +2480,24 @@ def _ranked(
         if by_free_energy
         else boltzmann_populations(relative, degeneracies, temperature)
     )
-    rotamers = [
-        Rotamer(
-            dihedral_degrees=round(angle, 1),
-            structure_id=relaxed.structure.structure_id,
-            relative_kcal=round(shift, 2),
-            population=round(population, 4),
-            degeneracy=torsion.symmetry_order,
-            relative_g_kcal=None if shift_g is None else round(shift_g, 2),
+    wells = [
+        _Well(
+            rotamer=Rotamer(
+                dihedral_degrees=round(angle, 1),
+                structure_id=relaxed.structure.structure_id,
+                relative_kcal=round(shift, 2),
+                population=round(population, 4),
+                degeneracy=torsion.symmetry_order,
+                relative_g_kcal=None if shift_g is None else round(shift_g, 2),
+            ),
+            energy_hartree=relaxed.energy_hartree,
+            gibbs_hartree=absolute_g,
         )
-        for (angle, relaxed, _), shift, shift_g, population in zip(
+        for (angle, relaxed, absolute_g), shift, shift_g, population in zip(
             found, relative, relative_g, populations, strict=True
         )
     ]
-    return sorted(rotamers, key=lambda rotamer: -rotamer.population)
+    return sorted(wells, key=lambda well: -well.rotamer.population)
 
 
 def _dihedral_of(structure: Structure, atoms: tuple[int, ...]) -> float:
@@ -2431,14 +2530,14 @@ async def _barriers(
     structure: Structure,
     atoms: tuple[int, ...],
     profile: dict[float, float],
-    rotamers: Sequence[Rotamer],
+    wells: Sequence[_Well],
     torsion: Torsion,
     solvent: str | None,
     temperature: float,
     level: ReactionLevel,
     progress: Progress,
     run: RemoteRunner,
-) -> list[RotationBarrier]:
+) -> tuple[list[RotationBarrier], list[str]]:
     """The pass between each adjacent pair of rotamers, in both directions, with its half-life.
 
     **Both directions, because a barrier has one.** Out of the populated well and back into it are
@@ -2446,32 +2545,88 @@ async def _barriers(
     can be separated is the barrier out of the populated one. Reporting a single height for an
     unequal pair is reporting the wrong number half the time.
 
+    **Every energy here is absolute.** The pass comes from the profile in Hartree and each well
+    carries its own Hartree energy, so a barrier is one subtraction between two numbers measured
+    the same way. The previous version mixed two zeros — the profile's lowest *constrained* point
+    against the lowest *released* minimum — which understated every barrier by the lowest well's
+    relaxation energy (measured on n-butane at 0.118 kcal/mol) and could in principle have produced
+    a negative one.
+
     At `thorough` the pass gets its own Hessian and the barrier becomes a free energy: one imaginary
     mode along the driven coordinate is exactly what a first-order saddle has, and `_vibrational`
     already skips it. More than one means the geometry is not a saddle in any useful sense, so that
     barrier stays electronic and says so.
     """
-    if not rotamers:
-        return []
-    by_angle = sorted(range(len(rotamers)), key=lambda index: rotamers[index].dihedral_degrees)
+    warnings: list[str] = []
+    if not wells:
+        return [], warnings
+    by_angle = sorted(range(len(wells)), key=lambda index: wells[index].rotamer.dihedral_degrees)
     barriers: list[RotationBarrier] = []
     for position, index in enumerate(by_angle):
         following = by_angle[(position + 1) % len(by_angle)]
-        peak, height = _highest_between(
+        peak, top = _highest_between(
             profile,
-            rotamers[index].dihedral_degrees,
-            rotamers[following].dihedral_degrees,
+            wells[index].rotamer.dihedral_degrees,
+            wells[following].rotamer.dihedral_degrees,
             torsion.period_degrees,
         )
         if peak is None:
+            # Not "no barrier": no *resolved* one. Saying so is the difference between a profile
+            # too coarse to see a pass and a bond that turns freely.
+            warnings.append(
+                f"no scanned point lies between the rotamers at "
+                f"{wells[index].rotamer.dihedral_degrees:.0f} and "
+                f"{wells[following].rotamer.dihedral_degrees:.0f} degrees, so the barrier between "
+                "them is unresolved rather than absent — a smaller step_degrees would settle it"
+            )
             continue
-        forward, reverse = _directional(height, rotamers, index, following)
-        basis: Literal["E", "G"] = "E"
+        forward, reverse, basis = _pass_energies(wells[index], wells[following], top)
         if level == "thorough":
             progress(f"free energy of the pass at {peak:g} degrees")
-            forward, reverse, basis = await _free_energy_barrier(
-                store, structure, atoms, peak, solvent, temperature, forward, reverse, run
+            gibbs_forward, gibbs_reverse, gibbs_basis, saddle_modes = await _free_energy_barrier(
+                store,
+                structure,
+                atoms,
+                peak,
+                solvent,
+                temperature,
+                wells[index],
+                wells[following],
+                forward,
+                reverse,
+                run,
             )
+            if gibbs_basis == "E":
+                warnings.append(
+                    f"the pass at {peak:g} degrees has {saddle_modes} imaginary mode(s) rather "
+                    "than the one a first-order saddle has, so its free energy is not a barrier's; "
+                    "the electronic barrier is reported instead"
+                )
+            elif min(gibbs_forward, gibbs_reverse) <= 0.0:
+                # **Keep the electronic barrier rather than dropping the pass.** A saddle's RRHO
+                # free energy is missing its imaginary mode's zero-point term, and where the
+                # electronic barrier is small that single mode can outweigh it and invert the sign.
+                # Reporting nothing would be the defect this module was just fixed for; reporting a
+                # negative barrier would be a rate of 10^12 for a real compound. So the answer is
+                # the electronic barrier, labelled `E`, and a warning saying why.
+                warnings.append(
+                    f"the free-energy barrier at {peak:g} degrees came out non-positive "
+                    f"({gibbs_forward:+.2f} forward, {gibbs_reverse:+.2f} reverse kcal/mol), "
+                    "which happens when the pass's missing imaginary mode outweighs a small "
+                    "electronic barrier; the electronic barrier is reported instead"
+                )
+            else:
+                forward, reverse, basis = gibbs_forward, gibbs_reverse, gibbs_basis
+        if min(forward, reverse) <= 0.0:
+            # A pass below the well it separates is not a barrier, and turning it into a rate would
+            # report a femtosecond half-life for a real compound. It means the profile's maximum
+            # and the released minima disagree — usually a well that relaxed out of its own basin.
+            warnings.append(
+                f"the pass at {peak:g} degrees is not above both rotamers it separates "
+                f"({forward:+.2f} and {reverse:+.2f} kcal/mol), so no barrier is reported for it: "
+                "a released minimum has probably left the basin its scan point was in"
+            )
+            continue
         barriers.append(
             RotationBarrier(
                 from_rotamer=index,
@@ -2483,22 +2638,23 @@ async def _barriers(
                 interconversion=half_life_from_barrier(forward, temperature),
             )
         )
-    return barriers
+    return barriers, warnings
 
 
-def _directional(
-    height: float, rotamers: Sequence[Rotamer], index: int, following: int
-) -> tuple[float, float]:
+def _pass_energies(
+    one: _Well, other: _Well, top_hartree: float
+) -> tuple[float, float, Literal["E", "G"]]:
     """The pass height measured from each of the two wells it separates, in kcal/mol.
 
     Measured from the *released* rotamer energies rather than from the constrained scan points
     beneath them, so the barrier is the one a rate depends on: from the minimum the molecule is
-    actually in. The two differ — releasing the constraint lowers a well — and using the scan
-    point would systematically overstate the barrier by that difference.
+    actually in. Both sides are absolute Hartree energies, so the subtraction has one zero.
     """
-    lowest = min(rotamer.relative_kcal for rotamer in rotamers)
-    top = height + lowest
-    return top - rotamers[index].relative_kcal, top - rotamers[following].relative_kcal
+    return (
+        (top_hartree - one.energy_hartree) * HARTREE_TO_KCAL,
+        (top_hartree - other.energy_hartree) * HARTREE_TO_KCAL,
+        "E",
+    )
 
 
 def _highest_between(
@@ -2506,11 +2662,10 @@ def _highest_between(
 ) -> tuple[float | None, float]:
     """The highest scanned point strictly between two angles, going the short way round the ring.
 
-    Returns `(angle, height in kcal/mol above the profile's own minimum)`, or `(None, 0)` when no
-    point lies between them — which happens when two wells are adjacent scan points and means there
-    is no resolved pass to report rather than that the barrier is zero.
+    Returns `(angle, its absolute energy in Hartree)`, or `(None, 0.0)` when no point lies between
+    them — which happens when two wells are adjacent scan points and means there is no *resolved*
+    pass, not that the barrier is zero. The caller warns rather than publishing a zero.
     """
-    lowest = min(profile.values())
     span = [
         (angle, energy)
         for angle, energy in profile.items()
@@ -2518,8 +2673,7 @@ def _highest_between(
     ]
     if not span:
         return None, 0.0
-    angle, energy = max(span, key=lambda point: point[1])
-    return angle, (energy - lowest) * HARTREE_TO_KCAL
+    return max(span, key=lambda point: point[1])
 
 
 def _between(angle: float, one: float, other: float, period_degrees: float) -> bool:
@@ -2545,16 +2699,26 @@ async def _free_energy_barrier(
     peak: float,
     solvent: str | None,
     temperature: float,
+    one: _Well,
+    other: _Well,
     forward: float,
     reverse: float,
     run: RemoteRunner,
-) -> tuple[float, float, Literal["E", "G"]]:
-    """Add the thermal correction at the pass, or leave the barrier electronic and say which.
+) -> tuple[float, float, Literal["E", "G"], int]:
+    """The barrier as a free energy — `G(pass) - G(well)` — or the electronic one, saying which.
 
-    The correction is applied to both directions equally — it is the difference between the pass's
-    free energy and its electronic energy, and the wells' own corrections are already inside the
-    rotamer energies the barrier was measured from.
+    **Both sides must be free energies.** An earlier version added the pass's *absolute* thermal
+    correction (`G - E`, tens of kcal/mol for any molecule) to an *electronic* barrier whose well
+    had no correction subtracted, which is not a free-energy barrier but a barrier plus a molecule's
+    entire thermal term: measured on n-butane, 69.9 kcal/mol where the electronic barrier is 1.9,
+    and a half-life of 1e38 s. Nothing caught it because no test ran a non-`quick` level.
+
+    So this falls back to the electronic barrier — and says so through the returned basis — unless
+    *both* wells carry their own free energy and the pass is a first-order saddle. Absent stays
+    absent; a `G` label on an `E` number is the failure this whole module is about.
     """
+    if one.gibbs_hartree is None or other.gibbs_hartree is None:
+        return forward, reverse, "E", 0
     point, _ = await run(
         cached_remote(
             store,
@@ -2576,12 +2740,16 @@ async def _free_energy_barrier(
         top.structure,
         matrix,
     )
-    if len(thermo.imaginary_frequencies_cm) != 1:
-        return forward, reverse, "E"
-    correction = (
-        thermo.gibbs_free_energy_hartree - thermo.electronic_energy_hartree
-    ) * HARTREE_TO_KCAL
-    return forward + correction, reverse + correction, "G"
+    modes = len(thermo.imaginary_frequencies_cm)
+    if modes != 1:
+        return forward, reverse, "E", modes
+    gibbs = thermo.gibbs_free_energy_hartree
+    return (
+        (gibbs - one.gibbs_hartree) * HARTREE_TO_KCAL,
+        (gibbs - other.gibbs_hartree) * HARTREE_TO_KCAL,
+        "G",
+        modes,
+    )
 
 
 def _profile_warnings(profile: dict[float, float], torsion: Torsion, step: float) -> list[str]:
@@ -2592,25 +2760,33 @@ def _profile_warnings(profile: dict[float, float], torsion: Torsion, step: float
     `D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution` makes about controls that
     exist only in prose.
     """
+    del step
     warnings: list[str] = []
     ring = _wrapped(profile, torsion.period_degrees)
+    # Each jump carries the interval it spans, read off the ring rather than assumed to be one
+    # coarse step: the profile also holds refinement points, spaced `2*step/(refine+1)`, so naming
+    # `angle - step` pointed at an angle that is usually not in the profile at all.
     jumps = [
-        (ring[index][0], (ring[index][1] - ring[index - 1][1]) * HARTREE_TO_KCAL)
+        (
+            ring[index - 1][0] % torsion.period_degrees,
+            ring[index][0] % torsion.period_degrees,
+            (ring[index][1] - ring[index - 1][1]) * HARTREE_TO_KCAL,
+        )
         for index in range(1, len(ring))
     ]
-    sizes = sorted(abs(jump) for _, jump in jumps)
+    sizes = sorted(abs(jump) for _, _, jump in jumps)
     typical = sizes[len(sizes) // 2]
-    biggest = max(jumps, key=lambda jump: abs(jump[1]))
+    lower, upper, biggest = max(jumps, key=lambda jump: abs(jump[2]))
     if (
         typical > 0.0
-        and abs(biggest[1]) > settings.xtb_rotation_discontinuity_ratio * typical
-        and abs(biggest[1]) > settings.xtb_reaction_uncertainty_kcal
+        and abs(biggest) > settings.xtb_rotation_discontinuity_ratio * typical
+        and abs(biggest) > settings.xtb_reaction_uncertainty_kcal
     ):
         warnings.append(
-            f"the profile steps {biggest[1]:+.1f} kcal/mol between {biggest[0] - step:g} and "
-            f"{biggest[0]:g} degrees, against a typical step of {typical:.1f} — a step that far "
-            "out of line usually means a point relaxed into a different basin than its neighbours, "
-            "and it is worth looking at rather than smoothing over"
+            f"the profile steps {biggest:+.1f} kcal/mol between {lower:g} and {upper:g} degrees, "
+            f"against a typical step of {typical:.1f} — a step that far out of line usually means "
+            "a point relaxed into a different basin than its neighbours, and it is worth looking "
+            "at rather than smoothing over"
         )
     if len(profile) < 4:
         warnings.append(
