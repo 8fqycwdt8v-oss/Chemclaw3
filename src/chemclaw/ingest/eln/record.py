@@ -25,7 +25,7 @@ a relation would let an ELN write an edge into the graph that cites it.
 """
 
 import re
-from typing import Literal
+from typing import Literal, assert_never
 
 from chemclaw.ingest.eln.ord import (
     Component,
@@ -116,15 +116,37 @@ def record_from_ord_reaction(reaction: OrdReaction) -> ReactionRecord:
     )
 
 
-# The outcome classes worth writing down, spelled rather than derived from `.value`. `SUCCESS` is
-# absent on purpose — the field defaults to it on every record and every source that does not report
-# one, so writing it would turn "the ELN did not say" into an assertion that the run worked. Written
-# out because the frontmatter type is a `Literal`: a fourth `OutcomeClass` member does not silently
-# become a new frontmatter value, it fails to type-check here, which is where the decision belongs.
-_NON_DEFAULT_OUTCOMES: dict[OutcomeClass, Literal["failure", "inconclusive"]] = {
-    OutcomeClass.FAILURE: "failure",
-    OutcomeClass.INCONCLUSIVE: "inconclusive",
-}
+def _stated_outcome(
+    outcome: OutcomeClass | None,
+) -> Literal["success", "failure", "inconclusive"] | None:
+    """The frontmatter spelling of an outcome a source stated, or `None` when it stated none.
+
+    **A `match` rather than a dict lookup, so the exhaustiveness claim is one mypy actually makes.**
+    The frontmatter type is a `Literal` and this mapping is where a new `OutcomeClass` member has to
+    be given a spelling. Written as a `dict[OutcomeClass, Literal[...]]` that intent was a comment
+    and nothing more: mypy does not exhaustiveness-check a dict literal's keys, so a fourth member
+    would have type-checked clean and raised `KeyError` here at runtime — inside
+    `record_from_ord_reaction`, outside the `ElnMappingError` path that rejects one entry and
+    continues, so it would have aborted the whole sync rather than one row. `assert_never` moves
+    that back to where the comment always claimed it was.
+
+    **`SUCCESS` is spelled here now**, where it used to be omitted so a record would not assert a
+    success the ELN never claimed. That was necessary while the field defaulted to SUCCESS, and it
+    cost the distinction between a run the chemist recorded as successful and one nobody assessed.
+    With `outcome_class` optional (`D-2026-08-26-silence-is-not-a-successful-run`) silence is
+    carried by `None`, and a stated success can be written as what it is.
+    """
+    match outcome:
+        case None:
+            return None
+        case OutcomeClass.SUCCESS:
+            return "success"
+        case OutcomeClass.FAILURE:
+            return "failure"
+        case OutcomeClass.INCONCLUSIVE:
+            return "inconclusive"
+        case _:
+            assert_never(outcome)
 
 
 def _conditions(reaction: OrdReaction) -> ProcessConditions | None:
@@ -135,9 +157,9 @@ def _conditions(reaction: OrdReaction) -> ProcessConditions | None:
     about a run with recorded conditions at all. Same rule as `_quality_columns` dropping a column
     nothing filled.
 
-    `outcome_class` is written only when it is *not* the default. The field defaults to success on
-    every record and every source that does not report it, so writing it unconditionally would turn
-    "the ELN did not say" into an assertion that the run worked.
+    `outcome` is written when the source stated one and left `None` when it did not — the same
+    "absent means nobody wrote it down" rule as every other field here, now that `outcome_class`
+    can say that (`D-2026-08-26-silence-is-not-a-successful-run`).
     """
     impurity = reaction.major_impurity()
     conditions = ProcessConditions(
@@ -145,7 +167,7 @@ def _conditions(reaction: OrdReaction) -> ProcessConditions | None:
         time_h=reaction.time_h,
         yield_percent=reaction.yield_percent,
         purity_percent=reaction.purity_percent,
-        outcome=_NON_DEFAULT_OUTCOMES.get(reaction.outcome_class),
+        outcome=_stated_outcome(reaction.outcome_class),
         major_impurity=(impurity.name or impurity.smiles) if impurity else None,
         impurity_area_percent=impurity.area_percent if impurity else None,
     )
@@ -200,9 +222,12 @@ def _conditions_block(reaction: OrdReaction) -> str:
         conditions.append(f"purity: {reaction.purity_percent}%")
     if reaction.performed_at is not None:
         conditions.append(f"performed: {reaction.performed_at.isoformat()}")
-    if reaction.outcome_class is not OutcomeClass.SUCCESS:
+    if reaction.outcome_class in (OutcomeClass.FAILURE, OutcomeClass.INCONCLUSIVE):
         # Stated first-class in the body, not implied by a missing yield: a reader (and retrieval)
         # must be able to tell "this did not work" from "nobody recorded the number" (gap KNW-3).
+        # A stated success is deliberately not written here — the body lists what a chemist would
+        # read as notable, and the frontmatter carries the value for anything comparing runs. An
+        # *unstated* outcome writes nothing at all, exactly like an unrecorded temperature.
         outcome = f"outcome: {reaction.outcome_class.value}"
         if reaction.failure_reason:
             outcome += f" — {reaction.failure_reason}"

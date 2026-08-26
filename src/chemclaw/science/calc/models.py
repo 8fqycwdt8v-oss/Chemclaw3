@@ -298,11 +298,20 @@ class LogdResult(BaseModel):
 
 
 class AtomCharge(BaseModel):
-    """One atom's Mulliken partial charge, with the index a chemist can locate."""
+    """One atom's Mulliken partial charge and Wiberg valence, with the index a chemist can locate.
+
+    `free_valence` is the classical Coulson radical index — the element's normal valence minus the
+    bond order the atom actually uses — and is None for an element with more than one normal
+    valence. Sulfur is the case that decided it: the calculation server measured a sulfone's sulfur
+    at a free valence of -2.94 against a "default" valence of 2, a number that reads as a strongly
+    saturated atom and means nothing.
+    """
 
     index: int
     element: str
     charge: float
+    wiberg_valence: float
+    free_valence: float | None = None
 
 
 class BondOrder(BaseModel):
@@ -335,6 +344,70 @@ class ElectronicProperties(BaseModel):
     bond_orders: list[BondOrder]
 
 
+class AtomicDescriptor(BaseModel):
+    """One atom's polarisability, dispersion and multipole descriptors, in atomic units.
+
+    Produced only by the `xtb` binary: measured against tblite 0.7.0, the in-process library exposes
+    no atomic multipoles and no polarisability at all, so there is no fallback that could fill these
+    in. `dipole_norm_au` is the magnitude of the atom's *own* dipole — the anisotropy a partial
+    charge cannot carry, and what a halogen bond or a close contact actually turns on.
+
+    Unlike Fukui indices these are **not** normalised per molecule, so they do compare across
+    molecules: an iodine's polarisability is larger than a fluorine's wherever it sits.
+    """
+
+    index: int
+    element: str
+    coordination_number: float
+    charge: float
+    c6_au: float
+    polarisability_au: float
+    dipole_norm_au: float | None = None
+    quadrupole_norm_au: float | None = None
+
+
+class SurfacePotential(BaseModel):
+    """Extrema of the molecular electrostatic potential on a surface grid, in kcal/mol.
+
+    `maximum` is where a sigma-hole shows up; `minimum` marks the most electron-rich patch.
+    """
+
+    minimum_kcal_per_mol: float
+    maximum_kcal_per_mol: float
+    grid_points: int
+
+
+class AtomicDescriptorResult(BaseModel):
+    """The binary-only per-atom panel for one geometry.
+
+    Atom indices match `ElectronicProperties` and `SiteReactivityResult` for the same structure, so
+    the three panels join on index.
+    """
+
+    smiles: str | None
+    structure_id: str
+    method: str
+    solvent: str | None
+    total_energy_hartree: float
+    atoms: list[AtomicDescriptor]
+
+
+class SurfacePotentialResult(BaseModel):
+    """The electrostatic-potential extrema on a molecular surface, for one geometry.
+
+    **A separate calculation from the atomic panel, with its own cache entry.** An `--esp` run is a
+    second single point and cannot also produce the atomic multipoles, so folding it into the panel
+    as a flag made one key stand for two payloads — and a `surface=True` request was then served the
+    panel-only row it found, with no surface and nothing run.
+    """
+
+    smiles: str | None
+    structure_id: str
+    method: str
+    solvent: str | None
+    surface: SurfacePotential
+
+
 class FukuiSite(BaseModel):
     """Condensed Fukui indices for one atom.
 
@@ -347,6 +420,35 @@ class FukuiSite(BaseModel):
     f_minus: float = Field(description="electrophilic attack (site donates electrons)")
     f_plus: float = Field(description="nucleophilic attack (site accepts electrons)")
     f_zero: float = Field(description="radical attack (the mean of the other two)")
+    dual: float = Field(description="f_plus - f_minus; positive marks an electrophilic site")
+    local_softness_minus: float = Field(description="S * f_minus, in 1/eV")
+    local_softness_plus: float = Field(description="S * f_plus, in 1/eV")
+    local_electrophilicity_ev: float = Field(
+        description=(
+            "omega * f_plus, in eV. The one index here carrying a global scale factor, so the only "
+            "one with any chance of ranking sites across molecules — a claim the calibration "
+            "ledger is meant to settle, not this docstring."
+        )
+    )
+
+
+class GlobalDescriptors(BaseModel):
+    """Conceptual-DFT global reactivity descriptors for one molecule, in eV.
+
+    Vertical Delta-SCF, from the three single points the Fukui calculation already runs — the
+    calculation server used to read only their charges and discard their energies.
+
+    **These rank a series; they do not measure an ionization potential.** Measured, GFN2 puts
+    phenol's IP at 13.5 eV against an experimental 8.5. Order related molecules with them, register
+    them with the calibration ledger, and never quote one as a measurement.
+    """
+
+    ionization_potential_ev: float
+    electron_affinity_ev: float
+    chemical_potential_ev: float
+    hardness_ev: float
+    softness_per_ev: float
+    electrophilicity_ev: float
 
 
 class SiteReactivityResult(BaseModel):
@@ -366,6 +468,7 @@ class SiteReactivityResult(BaseModel):
     mode: FukuiMode
     ranked_by: str
     total_atoms: int
+    descriptors: GlobalDescriptors
     sites: list[FukuiSite]
 
     def ranked_for(self, mode: FukuiMode) -> "SiteReactivityResult":

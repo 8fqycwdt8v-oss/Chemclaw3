@@ -44,6 +44,7 @@ from pydantic import BaseModel
 
 from chemclaw.core.ids import stable_hash
 from chemclaw.science.calc.models import (
+    AtomicDescriptorResult,
     DescriptorProfile,
     ElectronicProperties,
     EnsemblePayload,
@@ -52,6 +53,7 @@ from chemclaw.science.calc.models import (
     PkaResult,
     SiteReactivityResult,
     SolubilityResult,
+    SurfacePotentialResult,
     XtbResult,
 )
 from chemclaw.science.calc.uncertainty import Estimate
@@ -86,12 +88,14 @@ def shape_digest(model: type[BaseModel]) -> str:
 # file exists to leave behind.
 PAYLOAD_MODELS: tuple[type[BaseModel], ...] = (
     DescriptorProfile,
+    AtomicDescriptorResult,
     ElectronicProperties,
     EnsemblePayload,
     HessianPayload,
     OptimizationResult,
     PkaResult,
     SiteReactivityResult,
+    SurfacePotentialResult,
     SolubilityResult,
     XtbResult,
 )
@@ -101,7 +105,9 @@ PAYLOAD_MODELS: tuple[type[BaseModel], ...] = (
 # `calc.store.CALCULATION_EPOCH` if they are.
 RECORDED_SHAPES: dict[str, str] = {
     "DescriptorProfile": "81370985b8bb84c0",
-    "ElectronicProperties": "61f42bbba754c322",
+    "AtomicDescriptorResult": "152cad7e5280aee5",
+    "SurfacePotentialResult": "4e94bc470fa52bfe",
+    "ElectronicProperties": "5c549d172443ea4c",
     # New with the split: the wire shape a `compute_hessian` row holds, base64 `.npy` and all. It
     # replaces `HessianResult`, whose content addresses pointed into an artifact store this
     # repository no longer writes to.
@@ -114,7 +120,7 @@ RECORDED_SHAPES: dict[str, str] = {
     "HessianPayload": "8495e40479a746f1",
     "OptimizationResult": "3d934a3b36e47f11",
     "PkaResult": "f4928a91c06fc746",
-    "SiteReactivityResult": "0378ea844edafd37",
+    "SiteReactivityResult": "ddeb1c374840d99f",
     # Changed when `Estimate.method` dropped its unreachable `"conformal"` member: nothing ever
     # produced that value (the function behind it had no caller and was deleted), so every row on
     # disk carries `"reported"` and still validates and still means what it said. A narrowing that

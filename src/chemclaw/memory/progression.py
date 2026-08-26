@@ -26,7 +26,7 @@ from pydantic import BaseModel
 
 from chemclaw.core.chem import standard_smiles
 from chemclaw.core.reagents import display_name, resolve_compound_name
-from chemclaw.ingest.eln.ord import Component, OrdReaction, Role
+from chemclaw.ingest.eln.ord import Component, DateSource, OrdReaction, Role
 
 # The roles whose species set is worth diffing between consecutive runs. `product` is excluded: a
 # changed product is a different transformation, which is the grouping layer's business, not a
@@ -62,6 +62,11 @@ class ProgressionStep(BaseModel):
 
     reaction_id: str
     performed_at: date | None
+    # Carried through from `OrdReaction.date_source` so `ordering_caveat` can weaken its sentence
+    # for a series dated from entry timestamps rather than from stated experiment dates. A step that
+    # dropped it would make the caveat's three cases four, with the fourth silently reading as the
+    # strongest one.
+    date_source: DateSource = "stated"
     changes: list[ConditionChange]
 
 
@@ -82,6 +87,19 @@ class Progression(BaseModel):
     def undated(self) -> list[str]:
         """The ids with no `performed_at`, in listing order — the runs with no place in time."""
         return [step.reaction_id for step in self.steps if step.performed_at is None]
+
+    def entry_dated(self) -> list[str]:
+        """The ids whose date is the entry's write time rather than a stated experiment date.
+
+        `is_timeline()` is true for these — they are ordered, and the order is the best available —
+        but the ordering is of when the records were *written*. A batch transcribed in one sitting
+        orders by nothing at all, and the reader has to be told which kind of timeline this is.
+        """
+        return [
+            step.reaction_id
+            for step in self.steps
+            if step.performed_at is not None and step.date_source == "entry"
+        ]
 
 
 def order_chronologically(reactions: list[OrdReaction]) -> list[OrdReaction]:
@@ -110,6 +128,7 @@ def progression(reactions: list[OrdReaction]) -> Progression:
             ProgressionStep(
                 reaction_id=run.reaction_id,
                 performed_at=run.performed_at,
+                date_source=run.date_source,
                 changes=[] if previous is None else changes_between(previous, run),
             )
             for previous, run in zip([None, *ordered], ordered, strict=False)

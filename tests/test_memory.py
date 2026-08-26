@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from chemclaw.core.config import settings
-from chemclaw.ingest.eln.ord import Component, OrdReaction, Role
+from chemclaw.ingest.eln.ord import Component, OrdReaction, OutcomeClass, Role
 from chemclaw.kg.note import Note
 from chemclaw.kg.pr_gate import propose_note
 from chemclaw.kg.render import render_note
@@ -35,15 +35,27 @@ from tests.conftest import FakeSubmitter
 
 
 def _reaction(
-    rid: str, reactants: list[str], products: list[str], project: str | None = None
+    rid: str,
+    reactants: list[str],
+    products: list[str],
+    project: str | None = None,
+    outcome_class: OutcomeClass | None = OutcomeClass.SUCCESS,
 ) -> OrdReaction:
-    """A minimal reaction from reactant/product SMILES lists."""
+    """A minimal reaction from reactant/product SMILES lists.
+
+    Successful unless a test says otherwise, and *explicitly* so: since
+    `D-2026-08-26-silence-is-not-a-successful-run` an unstated outcome is no longer read as a
+    success, and `find_playbook_candidates` distils only from stated ones — so a fixture that leaves
+    this unset is a fixture no playbook can be built from, which is the correct rule and would make
+    every distillation test here vacuous.
+    """
     return OrdReaction(
         reaction_id=rid,
         inputs=[Component(smiles=s, role=Role.REACTANT) for s in reactants],
         outcomes=[Component(smiles=s, role=Role.PRODUCT) for s in products],
         provenance="test",
         project=project,
+        outcome_class=outcome_class,
     )
 
 

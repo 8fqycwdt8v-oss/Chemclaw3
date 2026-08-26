@@ -45,6 +45,7 @@ class _FakeClient:
         self.prompts: list[str] = []
         self.raise_on = raise_on
         self.answer = answer or _Extraction(
+            hypothesis=None,
             solvent="2-MeTHF",
             reagents="Pd(dppf)Cl2 2 mol%",
             workup="filter through Celite",
@@ -606,6 +607,7 @@ def test_an_extracted_field_cannot_add_a_row_to_the_comparison() -> None:
     forged = "routine |\n| rxn-FORGED | 99 | 99 | best result on file | first"
     client = _FakeClient(
         _Extraction(
+            hypothesis=None,
             solvent="DMF",
             reagents="K2CO3",
             workup="extract",
@@ -638,3 +640,47 @@ def test_an_extracted_field_cannot_add_a_row_to_the_comparison() -> None:
 def _separators(row: str) -> int:
     """The `|` characters that divide cells — escaped ones are content, not structure."""
     return len(re.findall(r"(?<!\\)\|", row))
+
+
+def test_the_run_s_stated_intent_reaches_the_comparison_marked_as_read() -> None:
+    """The chemist wrote down what the run was for; the comparison says so, and says who read it.
+
+    This is the answer to "why was it altered" on a source that keeps its objective inside the
+    protocol text. `ingest.eln.json_adapter` refuses to pattern-match a hypothesis out of prose and
+    is right to: the value it produced would sit in the same field, and render in the same `Tested:`
+    line, as one a chemist typed. That objection is to *misattribution*, not to reading — so here,
+    where the row carries `digest_source: extracted`, the header says "(read)" and the excerpt
+    quotes the sentence, that same reading is legitimate
+    (D-2026-08-26-silence-is-not-a-successful-run).
+    """
+    client = _FakeClient(
+        _Extraction(
+            hypothesis="whether 2-MeTHF suppresses the late-eluting impurity",
+            solvent="2-MeTHF",
+            reagents=None,
+            workup=None,
+            observations=None,
+            evidence_excerpt="Aim: see whether 2-MeTHF suppresses the late-eluting impurity.",
+        )
+    )
+    protocol = _protocol("reaction-A", "Aim: see whether 2-MeTHF suppresses it. Charge.")
+    result = _run([protocol], client)
+
+    assert "Tested (read)" in result.table, "named for where it came from, not just 'Tested'"
+    assert "suppresses the late-eluting impurity" in result.table
+    (row,) = result.rows
+    assert row.hypothesis == "whether 2-MeTHF suppresses the late-eluting impurity"
+    assert row.digest_source == "extracted", "and the row says the value was read, not recorded"
+
+
+def test_a_protocol_that_states_no_aim_gets_no_intent_column() -> None:
+    """Most protocols say what was done and never why; the column goes rather than filling up.
+
+    The corpus this serves is free-form — there is no `Objective:` heading to key on — so the
+    extraction is instructed to return null unless the text explicitly states an aim, and a first
+    sentence that merely describes the run is not one. A "Tested (read)" column of dashes would be
+    the same fabrication `drop_empty_columns` exists to remove, one field further up the chain.
+    """
+    result = _run([_protocol("reaction-A", "Charge the vessel and heat to 90 C.")], _FakeClient())
+    assert "Tested (read)" not in result.table
+    assert result.rows[0].hypothesis is None

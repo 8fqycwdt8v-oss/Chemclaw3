@@ -54,7 +54,14 @@ def mine_corpus(reactions: list[OrdReaction]) -> list[Observation]:
 
     Deterministic: same corpus in, same observations out, ordered by cluster anchor.
     """
-    unsuccessful = [r for r in reactions if r.outcome_class is not OutcomeClass.SUCCESS]
+    # The two outcomes a source actually *stated*, never `is not SUCCESS`. With `outcome_class`
+    # optional (`D-2026-08-26-silence-is-not-a-successful-run`), a negated test sweeps every run
+    # nobody has assessed into "unsuccessful" — and this function's whole output is a sentence
+    # counting how often a transformation failed. It would have read an unread corpus as a corpus
+    # of failures, which is the same defect as the old default with its sign flipped.
+    unsuccessful = [
+        r for r in reactions if r.outcome_class in (OutcomeClass.FAILURE, OutcomeClass.INCONCLUSIVE)
+    ]
     projected = [r for r in unsuccessful if r.project]
     fingerprints = reaction_fingerprints(projected)
     project_of = {r.reaction_id: r.project for r in projected if r.reaction_id in fingerprints}

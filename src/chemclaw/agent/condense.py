@@ -103,6 +103,11 @@ class ProtocolDigest(BaseModel):
     digest_source: DigestSource = "recorded"
     # Read from the prose. Every one optional: absent means the procedure did not say, which is a
     # different fact from zero and renders as `MISSING` rather than as a number.
+    #
+    # `hypothesis` is what the run was *for* rather than what was done to it, which is why it leads:
+    # every column after it is an answer and this is the question. It is the only intent this system
+    # has on a source that keeps its objective in prose, and it is marked as read wherever it shows.
+    hypothesis: str | None = None
     solvent: str | None = None
     reagents: str | None = None
     workup: str | None = None
@@ -233,6 +238,29 @@ class _Extraction(BaseModel):
     passed at the call site for the same reason.
     """
 
+    # **The one field here that is an *intent* rather than a condition, and the reason it is
+    # legitimate to read it from prose at all.** `ingest.eln.json_adapter` refuses to derive
+    # `hypothesis` from a procedure, and the refusal is right for the layer it is in: the value it
+    # produced would sit in the same field, and render in the same `Tested:` line, as one a chemist
+    # typed — "indistinguishable, downstream, from one the chemist wrote". Nothing about that
+    # objects to *reading* prose; it objects to producing a value that lies about where it came
+    # from. Here it cannot: the row carries `digest_source: extracted`, the table says so in the
+    # column header, and `evidence_excerpt` quotes the sentence it came from.
+    #
+    # The description is deliberately narrow because the corpus this serves is free-form: there is
+    # no `Objective:` convention to key on, so anything short of an explicit statement of purpose
+    # must come back null. A first sentence that merely *describes* the run is not a hypothesis, and
+    # inferring one from the conditions that changed is the causal fabrication the whole design
+    # refuses (`memory.progression`: a date proves sequence, never response).
+    hypothesis: str | None = Field(
+        description=(
+            "What this run was set up to test or find out, ONLY if the text explicitly states an "
+            "aim, objective, hypothesis or question — quoted or closely paraphrased from it. "
+            "Return "
+            "null if the text merely describes what was done. Never infer a purpose from the "
+            "conditions or from what changed."
+        )
+    )
     solvent: str | None = Field(description="The reaction solvent(s) named, or null.")
     reagents: str | None = Field(
         description="Reagents and catalysts with equivalents or loadings as written, or null."
@@ -263,6 +291,8 @@ def _prompt(protocol: Protocol) -> str:
         "Extract only what the text actually states. Return null for anything it does not say — "
         "do not infer, do not complete a partial recipe, and never supply a number the text does "
         "not contain. Quote `evidence_excerpt` verbatim from the protocol.\n\n"
+        "This applies most strictly to `hypothesis`: a protocol that says what was done without "
+        "saying what it was for has no hypothesis, and null is the correct answer.\n\n"
         f"PROTOCOL {safe_id(protocol.ref)} ({defang(protocol.source) or 'no source recorded'}):\n"
         + frame_untrusted(protocol.text, note_id=protocol.ref)
     )
@@ -356,6 +386,7 @@ async def _read_prose(protocol: Protocol, client: Any) -> ProtocolDigest:
     return base.model_copy(
         update={
             "digest_source": "extracted",
+            "hypothesis": defang(response.hypothesis) if response.hypothesis else None,
             "solvent": defang(response.solvent) if response.solvent else None,
             "reagents": defang(response.reagents) if response.reagents else None,
             "workup": defang(response.workup) if response.workup else None,
@@ -505,6 +536,13 @@ def _table(protocols: list[Protocol], rows: list[ProtocolDigest]) -> str:
             ("Purity (%)", [cell(c.purity_percent) for c in conditions]),
             ("Major impurity", [c.major_impurity or MISSING for c in conditions]),
             ("Impurity area (%)", [cell(c.impurity_area_percent) for c in conditions]),
+            # Ahead of the conditions, and named for where it came from. "Tested (read)" rather
+            # than "Tested" because a reader scanning this column must not have to remember that
+            # one column on this table is a model's reading of a sentence while the rest are the
+            # record's own figures — `digest_source` says so per row, and the header says so at a
+            # glance. Dropped entirely when no protocol stated an aim, which on a corpus with no
+            # objective field is most of them.
+            ("Tested (read)", [row.hypothesis or MISSING for row in rows]),
             ("Outcome", [c.outcome or MISSING for c in conditions]),
             ("Solvent", [row.solvent or MISSING for row in rows]),
             ("Reagents", [row.reagents or MISSING for row in rows]),

@@ -166,9 +166,20 @@ def _reaction(**overrides: object) -> OrdReaction:
     return OrdReaction(**{**base, **overrides})  # type: ignore[arg-type]
 
 
-def test_silence_still_means_an_ordinary_run() -> None:
-    """Defaulting to success preserves the meaning of every record written before the field."""
-    assert _reaction().outcome_class is OutcomeClass.SUCCESS
+def test_silence_is_not_a_successful_run() -> None:
+    """A source that said nothing about how a run turned out has not said it worked.
+
+    This asserted the opposite until `D-2026-08-26-silence-is-not-a-successful-run`, on the
+    compatibility argument that silence had always meant an ordinary run. That argument covered a
+    status column that happened to be null; it did not cover a source with no status column at all,
+    where the default made every record in the corpus assert a success nobody claimed — silently,
+    on the one field whose purpose is that a failure must not read as an ordinary run.
+
+    `None` and not `INCONCLUSIVE`: that value means the run carries no evidence about the chemistry,
+    which is a statement somebody made. "Nobody has read the prose yet" is a different fact.
+    """
+    assert _reaction().outcome_class is None
+    assert _reaction(outcome_class=OutcomeClass.SUCCESS).outcome_class is OutcomeClass.SUCCESS
 
 
 def test_a_failure_must_say_why() -> None:
@@ -194,11 +205,22 @@ def test_a_recurring_failure_never_distils_into_a_playbook() -> None:
         _reaction(reaction_id="f2", project="p2", outcome_class="failure", failure_reason="tar"),
     ]
     assert find_playbook_candidates(failures) == []
+    # Stated successes, because since `D-2026-08-26-silence-is-not-a-successful-run` an unset
+    # outcome is not one — and the filter that drops failures drops unassessed runs by the same
+    # identity test. Asserted below so the third state is pinned here rather than only implied.
     successes = [
-        _reaction(reaction_id="s1", project="p1"),
-        _reaction(reaction_id="s2", project="p2"),
+        _reaction(reaction_id="s1", project="p1", outcome_class=OutcomeClass.SUCCESS),
+        _reaction(reaction_id="s2", project="p2", outcome_class=OutcomeClass.SUCCESS),
     ]
-    assert find_playbook_candidates(successes), "successes should still distil"
+    assert find_playbook_candidates(successes), "stated successes should still distil"
+    unassessed = [
+        _reaction(reaction_id="u1", project="p1"),
+        _reaction(reaction_id="u2", project="p2"),
+    ]
+    assert find_playbook_candidates(unassessed) == [], (
+        "a playbook says 'this works'; distilling one from runs nobody assessed is a claim "
+        "built on silence"
+    )
 
 
 # --- IDEA-5: source-tier weighting -----------------------------------------------------------

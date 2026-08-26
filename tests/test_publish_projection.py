@@ -29,6 +29,7 @@ from chemclaw.science.calc.models import (
     EnsembleMember,
     EnsemblePayload,
     FukuiSite,
+    GlobalDescriptors,
     InteractionResult,
     LogdResult,
     MicrostatePka,
@@ -397,7 +398,15 @@ def _cases() -> list[tuple[str, str, Any, dict[str, Any]]]:
                 lumo_ev=1.1,
                 gap_ev=11.3,
                 dipole_debye=1.7,
-                atom_charges=[AtomCharge(index=0, element="C", charge=-0.12)],
+                atom_charges=[
+                    AtomCharge(
+                        index=0,
+                        element="C",
+                        charge=-0.12,
+                        wiberg_valence=3.94,
+                        free_valence=0.06,
+                    )
+                ],
                 bond_orders=[BondOrder(atom_i=0, atom_j=1, order=0.98)],
             ),
         ),
@@ -412,7 +421,27 @@ def _cases() -> list[tuple[str, str, Any, dict[str, Any]]]:
                 mode="electrophilic",
                 ranked_by="f_minus",
                 total_atoms=12,
-                sites=[FukuiSite(index=0, element="C", f_minus=0.11, f_plus=0.09, f_zero=0.10)],
+                descriptors=GlobalDescriptors(
+                    ionization_potential_ev=13.5,
+                    electron_affinity_ev=3.0,
+                    chemical_potential_ev=-8.25,
+                    hardness_ev=10.5,
+                    softness_per_ev=0.0952,
+                    electrophilicity_ev=3.24,
+                ),
+                sites=[
+                    FukuiSite(
+                        index=0,
+                        element="C",
+                        f_minus=0.11,
+                        f_plus=0.09,
+                        f_zero=0.10,
+                        dual=-0.02,
+                        local_softness_minus=0.010472,
+                        local_softness_plus=0.008568,
+                        local_electrophilicity_ev=0.2916,
+                    )
+                ],
             ),
         ),
         (
