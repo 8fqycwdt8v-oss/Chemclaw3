@@ -7,6 +7,7 @@ that true rather than described.
 """
 
 import asyncio
+import re
 from datetime import date
 from typing import Any
 
@@ -622,11 +623,18 @@ def test_an_extracted_field_cannot_add_a_row_to_the_comparison() -> None:
 
     grid = [line for line in result.table.splitlines() if line.startswith("|")]
     header, rule, *body = grid
-    width = header.count("|")
-    assert rule.count("|") == width
+    # Separators only: an escaped `\|` is content, and counting it as structure would let a
+    # renderer that escaped nothing pass by accident.
+    width = _separators(header)
+    assert _separators(rule) == width
     assert len(body) == len(result.rows), (
         f"{len(body)} rows rendered for {len(result.rows)} protocols — a cell added structure"
     )
     for row in body:
-        assert row.count("|") == width, f"row {row!r} does not have the header's column count"
+        assert _separators(row) == width, f"row {row!r} does not have the header's column count"
     assert "rxn-FORGED" in result.table, "the text itself is evidence and must not be dropped"
+
+
+def _separators(row: str) -> int:
+    """The `|` characters that divide cells — escaped ones are content, not structure."""
+    return len(re.findall(r"(?<!\\)\|", row))
