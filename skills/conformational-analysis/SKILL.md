@@ -6,6 +6,8 @@ description: >-
   what a relaxed scan can and cannot see.
 tools:
   - sample_conformers
+  - enumerate_torsions
+  - profile_rotation
   - scan_coordinate
   - optimize_geometry
   - compute_thermochemistry
@@ -54,21 +56,46 @@ The honest phrasing is not "this may be inaccurate". It is: *this describes one 
 a molecule that has many, and the number could move by more than the effect you are
 looking for.*
 
+## Naming the bond before profiling it
+
+**`enumerate_torsions` first, always, and pass its entry through unchanged.** An atom index
+is not a name: the pair (4, 5) is the amide C–N of one way of writing acetanilide and an
+aromatic *ring* bond of another, both in range, both really bonded. A profile driven from a hand-assembled index converges and reports a plausible
+barrier for a bond nobody asked about. That is the one failure here that looks exactly like
+an answer.
+
+One match → proceed and name the bond back by its label. Several → ask. None → say so and
+list what the molecule has. Note also that the rotatable-bond *count* is a druglikeness
+descriptor: it reports zero for toluene and excludes acetanilide's amide, so "no rotatable
+bonds" from `describe_topology` is not "nothing to rotate".
+
 ## Reading a torsion profile
 
-`scan_coordinate` with four atoms drives a dihedral while everything else relaxes. What
-to take from it:
+`profile_rotation` is the tool when the barrier or the rotamer populations are the question:
+it covers one period rather than a full turn where the torsion is symmetric, resolves each
+maximum finely instead of stepping over it, **releases each well from its constraint** into
+a real rotamer with its own `structure_id`, and reports the barrier in both directions with
+the interconversion half-life. `scan_coordinate` with four atoms is the lower-level tool and
+still right when the profile itself is what you want.
+
+What to take from either:
 
 - **The minima are the populated rotamers**, and their relative energies say roughly how
   populated. A gap under ~1 kcal/mol means both are present in real amounts; above ~3,
   the lower one dominates.
 - **The maxima are barriers to interconversion**, and their height is what decides
   whether "conformers" or "isomers" is the right word — see `atropisomer-assessment`.
-- **Resolution matters.** A coarse scan can step straight over a minimum. If a profile
-  looks featureless, rescan the interesting range more finely before concluding anything.
+- **Resolution matters.** A coarse scan can step straight over a minimum, and it always
+  steps over a *maximum*. `profile_rotation` refines each maximum for you and warns when
+  the grid is too coarse to resolve a well; with a bare `scan_coordinate`, rescan the
+  interesting range yourself before concluding anything.
 - **Symmetry is a free check.** A profile that should be symmetric about 180° and is not
   means a point relaxed into a different basin, and that point is not comparable with its
-  neighbours.
+  neighbours. `profile_rotation` checks for that discontinuity and says so in `warnings`;
+  reading a bare scan, do it by eye.
+- **A scan point is not a minimum.** Every point is optimized with the dihedral frozen, so
+  the bottom of a well is the best *constrained* geometry rather than a real one. Carry a
+  rotamer's `structure_id` into a later calculation, not a scan point's.
 
 ## What a relaxed scan cannot do
 

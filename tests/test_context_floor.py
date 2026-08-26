@@ -72,7 +72,17 @@ load_profiles()
 #: cause is named, and `docs/planning/BACKLOG.md` carries the row for bringing it back down.
 #: **Lowering a ceiling is the commit that proves a reduction happened**; raising one belongs in a
 #: pull request description, not in a diff nobody reads.
-CEILINGS: dict[str, int] = {"__default__": 27_500}
+#
+#: **28,250 as of 2026-08-26**, raised from 27,500 by `profile_rotation`
+#: (`D-2026-08-26-a-torsion-is-named-not-indexed`). Raising it is what this file asks for — the
+#: cost of a new capability becomes visible in the pull request that creates it — and the number to
+#: judge is what the tool costs *after* being narrowed, not before. That one measured 1,499 tokens
+#: on arrival, over `MAX_SINGLE_TOOL_TOKENS` and second only to `start_optimization_campaign`;
+#: trimming its manifest prose and moving two model docstrings into comments took it to ~870, since
+#: pydantic publishes a model's docstring as its JSON-schema `description` and a nested pair of them
+#: is bound to the model on every turn. The ~230 tokens that remain are what one more tool costs,
+#: and that is the right thing to pay for it.
+CEILINGS: dict[str, int] = {"__default__": 28_250}
 
 #: How much of the floor one tool may be. A schema above this is not expensive, it is *badly
 #: shaped* — the fix is pagination, a narrower argument, or splitting a tool that does two things.

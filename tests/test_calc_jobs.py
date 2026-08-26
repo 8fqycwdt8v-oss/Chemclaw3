@@ -25,6 +25,7 @@ import asyncio
 from collections.abc import Iterator
 
 import pytest
+from rdkit import Chem
 from temporalio import activity
 
 from chemclaw.connectors.calc import activities
@@ -33,10 +34,13 @@ from chemclaw.connectors.calc.specs import (
     ComplexJobSpec,
     EnsembleJobSpec,
     ReactionJobSpec,
+    RotationJobSpec,
     ScanJobSpec,
     SolventScreenJobSpec,
+    TorsionSpec,
     XtbJobSpec,
 )
+from chemclaw.core.chem import torsion_handle
 from chemclaw.science.calc.store import InMemoryStore
 from tests.calc_server_fake import FakeCalcServer, install
 
@@ -63,9 +67,24 @@ def server(monkeypatch: pytest.MonkeyPatch, store: InMemoryStore) -> Iterator[Fa
     callback *and* used by the shared heartbeat timer, so this is what makes the real function
     callable at all from a test.
     """
+    yield _outside_temporal(monkeypatch, store, FakeCalcServer())
+
+
+@pytest.fixture
+def rotation_server(
+    monkeypatch: pytest.MonkeyPatch, store: InMemoryStore
+) -> Iterator[FakeCalcServer]:
+    """The same, over a server carrying a torsional potential — so a profile has wells to find."""
+    yield _outside_temporal(monkeypatch, store, FakeCalcServer(torsion=(0, 1, 2, 3)))
+
+
+def _outside_temporal(
+    monkeypatch: pytest.MonkeyPatch, store: InMemoryStore, server: FakeCalcServer
+) -> FakeCalcServer:
+    """The three patches that make a durable activity callable from a test, written once."""
     monkeypatch.setattr(activities, "default_store", lambda: store)
     monkeypatch.setattr(activity, "heartbeat", lambda *args: None)
-    yield install(monkeypatch, FakeCalcServer())
+    return install(monkeypatch, server)
 
 
 def _run(spec: XtbJobSpec) -> XtbJobResult:
@@ -195,3 +214,44 @@ def test_a_complex_job_names_the_pair_the_calculation_actually_ran_on(
     assert (result.interaction.smiles_a, result.interaction.smiles_b) == ("CO", "O")
     assert result.summary.startswith("CO + O:")
     assert server.count("search_binding_modes") == 1
+
+
+def test_a_rotation_job_names_the_bond_it_profiled_and_times_the_barrier(
+    rotation_server: FakeCalcServer,
+) -> None:
+    """The durable path end to end: spec in, envelope out, with the barrier as a lifetime.
+
+    The summary is what a completion push-back and a job listing show, so it has to carry the three
+    things a chemist would otherwise have to open the payload for: which bond, how high, and how
+    long that holds — the last one **as a range**, because a single half-life from a semiempirical
+    barrier reads exactly like a measurement.
+    """
+    torsion = TorsionSpec(
+        torsion_id=torsion_handle(Chem.MolFromSmiles("CCCC"), (1, 2)),
+        atoms=[0, 1, 2, 3],
+        bond=[1, 2],
+        label="the C1-C2 bond",
+    )
+    result = _run(RotationJobSpec(smiles="CCCC", torsion=torsion, solvent="water"))
+    assert result.rotation is not None
+    assert result.rotation.label == "the C1-C2 bond"
+    assert result.rotation.torsion_id == torsion.torsion_id
+    assert len(result.rotation.rotamers) == 3
+    assert all(args["solvent"] == "water" for args in rotation_server.arguments("scan_point"))
+    assert "the C1-C2 bond" in result.summary
+    assert "t1/2" in result.summary and " to " in result.summary
+
+
+def test_a_rotation_job_refuses_a_handle_that_is_not_this_molecule_s(
+    rotation_server: FakeCalcServer,
+) -> None:
+    """A wrong bond must be an error on the durable path too, not a profile of something else."""
+    torsion = TorsionSpec(
+        torsion_id=torsion_handle(Chem.MolFromSmiles("CCCCC"), (1, 2)),
+        atoms=[0, 1, 2, 3],
+        bond=[1, 2],
+        label="a bond of a different molecule",
+    )
+    with pytest.raises(ValueError, match="does not name a bond of"):
+        _run(RotationJobSpec(smiles="CCCC", torsion=torsion))
+    assert rotation_server.count("scan_point") == 0
