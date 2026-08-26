@@ -1,82 +1,4 @@
-# Remove every HPC-dependent workflow
-
-**Ask.** "Remove completely any hpc dependent workflow. For now all I want to have in this repo
-are semi empirical calculations using xtb tblite or crest. They will not run on a hpc but rather
-in a own pod on databricks or openshift."
-
-**Reading.** Exactly one capability in this family is HPC-dependent: the `qm` bundle
-(`compute_dft_energy`), whose whole dependency closure is the Nextflow/Seqera launcher, the HPC
-artifact store and a 24 h poll. The semiempirical tier — xTB/tblite via `servers/calc` in
-`Chemclaw3-mcp`, CREST conformer/complex searches, the D-011 cache and the calibration ledger —
-already runs as its own pod addressed over HTTP, so nothing there needs building; it needs the
-DFT tier taken out from under it and every knob, secret, queue and sentence that only existed to
-reach a cluster removed with it.
-
-## Chemclaw3 (core)
-
-- [x] Delete `src/chemclaw/connectors/qm/` whole (activities, cache, knowledge, specs, worker,
-      workflows, `hpc/nextflow.py`, `connector.yaml`, `skills/qm-job-submission/`).
-- [x] Delete `src/chemclaw/core/config/hpc.py`; rehome the one knob that is not about HPC
-      (`qm_activity_timeout_seconds`, read by three core workflows) onto `TemporalSettings` under
-      an honest name; delete every `hpc_*` field and both derived properties.
-- [x] Drop the `HpcSettings` mixin and the `_the_job_ceiling_covers_the_poll_it_bounds`
-      cross-section validator from `core/config/__init__.py`.
-- [x] `publish/project.py`: remove the `QMJobResult` projector.
-- [x] `agent/authz.py`: drop `compute_dft_energy` from the write-tool gates.
-- [x] `agent/chemclaw_agent.py` + `connectors/calc/connector.yaml`: remove the prose pointing at
-      the DFT escalation (prose-contract rules 1-2 would fail on a tool that no longer exists).
-- [x] Helm chart: the `connectors.qm` entry, `CHEMCLAW_HPC_*` env, the `hpcApiToken` secret row.
-- [x] `.env.example`, `README.md`, `deploy/README.md`, `SECURITY.md`, `ARCHITECTURE.md`,
-      `docs/guides/runbook.md`, `docs/guides/xtb-use-cases.md`, `docs/reference/architektur.md`,
-      `CLAUDE.md`, `docs/planning/{BACKLOG,DEFERRED}.md`.
-- [x] `infra/live/e2e-full-stack/`: drop the HPC launcher env and rename the mock process.
-- [x] Tests: delete `test_nextflow_adapter.py`, `test_qm_workflow.py`, `test_qm_persistence.py`;
-      fix every other test that names `qm`, `QMJob*`, `compute_dft_energy` or a `hpc_*` setting.
-- [x] ADR recording the removal and what re-adding one would cost.
-
-## Chemclaw3_mock
-
-- [x] Delete `app/hpc/` (the Nextflow-shaped launcher + artifact store), its router mount, its
-      five settings, its tests and its `start.sh` env.
-
-## Chemclaw3_ui
-
-- [x] Remove `compute_dft_energy` from the tool tables (`shared/events.ts`, `src/chem/provenance.ts`),
-      the `qm` capability-loss line, and the DFT step of the full-stack e2e.
-
-## Chemclaw3-mcp
-
-- [x] `CLAUDE.md`: the "DFT via Nextflow/HPC | `qm`" row of the never-duplicate table.
-
-## Verification
-
-- [x] `make lint type test` green in Chemclaw3 with Docker up (Postgres tests must not skip).
-- [x] `make check` in Chemclaw3-mcp; `pytest` in Chemclaw3_mock; `npm test` in Chemclaw3_ui.
-- [x] `grep -ri "hpc\|nextflow"` over `src/`, `deploy/`, `tests/`, live docs returns nothing live.
-
-## Review
-
-Done, across all four repos. Notes worth carrying:
-
-**Three things had to be kept rather than deleted with the tier, and each was a judgement call the
-grep did not make for me.**
-
-1. The `dft` **projector** stays (`publish/project.py`). `calculation_results` is never pruned, so a
-   deployment upgrading into this release still holds every `dft` row it wrote; the backfill path
-   resolves a row by `calc_type` prefix alone. That module already states the rule — "a retired
-   calculator keeps its projector" — and `xtb.scan` is the same shape from an earlier move. The
-   `PAYLOAD_PROJECTORS["QMJobResult"]` half *did* go, because it is keyed by a model name no live
-   payload can state. A test now asserts the retired-row case directly.
-2. The **parent-ceiling invariant** stays. `_the_job_ceiling_covers_the_poll_it_bounds` guarded a real
-   defect (a ceiling no larger than one child activity makes the retry budget unreachable and fails
-   with a message naming neither setting). Deleting it with the poll would have left `calc` exposed
-   to exactly that, since `xtb_job_timeout_seconds` (4 h) is the longest activity now. Rewritten as
-   `_the_job_ceiling_covers_the_activity_it_bounds`, with `connector_job_timeout_seconds` re-derived
-   from 90,000 (24 h DFT poll + 1 h) to 18,000 (4 h search + 1 h).
-3. `job-result` moves **back into core's `KNOWN_NOTE_TYPES`**. It sat in `qm`'s manifest under the
-   rule that a type a bundle *mints* belongs to that bundle. No bundle mints one now, so by that same
-   rule it is core's vocabulary again — and `knowledge/job-result/` holds three notes that would
-   otherwise fail `kg-validate`. `bo-candidate` stays with `bo`.
+# Rotational energies and rotamer barriers — implemented, then run for real — 2026-08-26
 
 **One control was rewritten rather than dropped, and it is the finding worth repeating.**
 `test_the_bundle_has_no_way_to_write_the_note_itself` asserted `not hasattr(qm_knowledge,
@@ -94,6 +16,59 @@ found five live claims left over — two skills still declaring `compute_dft_ene
 frontmatter, and three backticked paths naming deleted files. Worth running the whole validator set,
 not just `lint type test`.
 
-**Scope note.** `docs/reference/architektur.md` keeps its HPC/SLURM/Nextflow prose deliberately: it
-is a pre-implementation design document, not a description of the system, and CLAUDE.md already
-frames it that way. §6 carries a note saying which parts this change retracted.
+## What building it found
+
+1. **A stale atom index is not an error.** `(4, 5)` is the amide C–N of `c1ccc(NC(C)=O)cc1` and an
+   aromatic *ring* bond of `CC(=O)Nc1ccccc1`. `scan_profile` bounds-checks and nothing else.
+2. **The rotatable-bond descriptor is not a torsion list.** 0 for toluene, p-xylene and
+   *tert*-butylbenzene; 1 for acetanilide, and that one is not the amide.
+3. **Symmetry classes match automorphism orbits** on 21 molecules — 0 false merges. Shipped as a
+   test, not as a claim.
+4. **`skills/atropisomer-assessment`'s half-life anchors were wrong by two orders of magnitude.**
+   Its prose said "27 → about a day"; 27 kcal/mol is 80 days, and 30 is 35 years, not "a few".
+   The error was largest exactly at the ICH class boundary the skill exists to decide.
+5. **Every `calc` durable job was publishing nothing.** `CalcJobWorkflow` sends
+   `payload_kind=type(result).__name__` and its result is the `XtbJobResult` *envelope*, so
+   `projector_for("calc.compute_reaction_energy", "XtbJobResult")` was `None` — while
+   `tests/test_publish_reaches_the_hooks.py` was green asserting a `payload_kind` production has
+   never sent. Fixed at the projection boundary (`unwrap_envelope`), not by re-shaping what the
+   chat sees.
+
+## Review
+
+The three pieces, and why each is where it is:
+
+- **`enumerate_torsions` on `chem`** (so, `Chemclaw3-mcp`): a pure graph operation, the sixth in a
+  family of five, under the house rule *enumerate, then compute — and never the reverse*. It mints
+  a handle from the canonical symmetry classes plus the RDKit build, so a rewritten SMILES keeps the
+  name and a toolchain bump breaks it loudly.
+- **`profile_rotation` here**: its key would name the wells it settles on, so `D-2026-08-16` says
+  it is not shippable as a tool; it loops, so `D-2026-08-25-the-loop-is-a-composite-not-a-template`
+  says it is not a template. Every point it computes is a separately-keyed primitive.
+- **Eyring beside RRHO**: arithmetic over a result, not a calculation — the same rule that kept the
+  RRHO half here when the physics left.
+
+What is deliberately not done: 2D surfaces, transition-state claims, ring torsions, enumeration
+inside the compute job. And the two open ends, both needing the live lane rather than more code —
+no barrier has been computed against real xTB, and the conformer-dependence warning threshold is
+unset. Both are in the ADR.
+
+
+## Addendum — run against the real GFN2 server (same day)
+
+`tblite` is the GFN2 Hamiltonian as a PyPI wheel and was already installed, so "needs a cluster"
+was wrong. `servers/chem` on 8858 and `servers/calc` on 8860, the handle minted over MCP by the
+real chem server, the profile composed against the real calc server, Postgres in front.
+
+**The chemistry came out right** — n-butane 0.62 kcal/mol gauche gap and 59.1% anti (against this
+tree's own 59.14% CREST anchor), biphenyl twisted 41.8 degrees with a 1.51 kcal/mol perpendicular
+barrier, DMA's amide at 18.10 kcal/mol and a 2.1 s half-life. Released wells at 64.0/296.1 degrees,
+off the 30-degree grid, so the release stage moves a well on real physics.
+
+**Two defects the fake could not express**, both fixed with tests verified by reverting each fix:
+
+1. One well per period reported **no barrier at all** — a zero-length arc when a well's successor
+   is its own image a period away. That is the amide case, which is what the capability is for.
+2. The discontinuity check compared a step against 3 kcal/mol, so it fired on every barrier steep
+   enough to matter and stayed quiet on the freely-rotating ones. Now a ratio to the profile's own
+   typical step, calibrated on three measured smooth profiles.

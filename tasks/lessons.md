@@ -1075,3 +1075,22 @@ claims still in the tree — two skills declaring a deleted tool in frontmatter,
 paths naming deleted files. `make prose-validate` and `make skill-validate` found all five. A
 capability removal touches *declarations* more than it touches code, and the declaration checkers
 are a different make target.
+
+**I declared an environment limitation without checking it, and it was false.** I shipped the
+rotational profile saying no barrier had been computed against real xTB and that closing that
+"needs the live lane" — a cluster. `tblite` *is* the GFN2 Hamiltonian, ships as a PyPI wheel, and
+was **already installed** in the sibling repo's venv; only the `xtb`/`crest` binaries are conda-only,
+which the calc server's own `pyproject.toml` says costs speed and the conformer search rather than
+the physics. One `import tblite` would have settled it. Running it took twenty minutes and found
+two real defects, both on the flagship case: a torsion with one well per period reported **no
+barrier at all**, and the discontinuity warning fired on exactly the hindered rotations the feature
+exists for. This is the same failure as `CLAUDE.md`'s own "the sandbox is not offline" note, one
+level out: I inherited a belief about what the environment could not do from prose rather than from
+a probe.
+
+*Rule for myself: an "it needs X" in my own summary is a claim about the environment, and claims
+about the environment are cheap to test — check the import, the binary, the port, before writing it
+down. And a synthetic fixture can only express failures of the shape it was built in: the fake here
+had three wells because n-butane has three, so the one-well case — an amide, the whole point of the
+capability — was untestable by construction and passed. When a fake is shaped after one real case,
+name the shapes it cannot produce and go find a real instance of each.*
