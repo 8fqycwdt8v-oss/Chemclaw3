@@ -185,5 +185,6 @@ def _envelope(result: QMJobResult, calc_key: str) -> ConnectorJobResult:
             f"{qm_energy_estimate(result).render(fmt='.6f')}"
         ),
         data=result.model_dump(mode="json"),
+        payload_kind=type(result).__name__,
         note=note_from_qm_result(result, calc_key),
     )

@@ -73,14 +73,30 @@ async def _drain_one(manifest_name: str, sink: ResultSink, batch_size: int) -> S
     claimed = await outbox.claim(manifest_name, batch_size)
     if not claimed:
         return outcome
-    ids = [row_id for row_id, _, _ in claimed]
-    try:
-        records = [ResultRecord.model_validate(document) for _, _, document in claimed]
-    except Exception as exc:
-        # The row was projected by an older writer whose record shape this one cannot parse. That
-        # will not fix itself on a retry, so it spends an attempt rather than looping forever.
-        await outbox.mark_failed(ids, f"stored document is not a readable record: {exc}")
-        outcome.failed, outcome.reason = len(ids), str(exc)[:500]
+    # **Parsed per row, never per batch.** One row projected by an older writer whose record shape
+    # this release cannot read is one row's problem: validating the batch inside a single `try`
+    # meant a single unreadable document marked every id in the claim failed, retiring up to
+    # `batch_size - 1` perfectly deliverable rows once they had spent their attempts. A poison row
+    # must not take its neighbours with it, and which neighbours it took would depend only on the
+    # order `claim` happened to return.
+    ids: list[int] = []
+    records: list[ResultRecord] = []
+    unreadable: list[int] = []
+    for row_id, _, document in claimed:
+        try:
+            records.append(ResultRecord.model_validate(document))
+        except Exception as exc:
+            # Will not fix itself on a retry, so it spends an attempt rather than looping forever.
+            unreadable.append(row_id)
+            outcome.reason = str(exc)[:500]
+            continue
+        ids.append(row_id)
+    if unreadable:
+        await outbox.mark_failed(
+            unreadable, f"stored document is not a readable record: {outcome.reason}"
+        )
+        outcome.failed = len(unreadable)
+    if not records:
         return outcome
 
     try:
@@ -98,7 +114,8 @@ async def _drain_one(manifest_name: str, sink: ResultSink, batch_size: int) -> S
         # operator read a workflow failure to learn what `result_publications.last_error` says more
         # precisely.
         await outbox.mark_failed(ids, str(exc))
-        outcome.failed, outcome.reason = len(ids), str(exc)[:500]
+        outcome.failed += len(ids)
+        outcome.reason = str(exc)[:500]
         return outcome
 
     await outbox.mark_delivered(ids)
@@ -133,9 +150,18 @@ async def drain_result_publications() -> PublishOutcome:
         except ResultSinkError as exc:
             outcome.skipped.append(f"{manifest.name}: {exc}")
             continue
-        outcome.sinks.append(
-            await _drain_one(manifest.name, sink, settings.result_publish_batch_size)
-        )
+        try:
+            outcome.sinks.append(
+                await _drain_one(manifest.name, sink, settings.result_publish_batch_size)
+            )
+        finally:
+            # **Built per run means closed per run.** Building a sink each pass is deliberate (a
+            # rotated credential takes effect on the next run, not the next restart) and it is
+            # exactly what makes an unclosed connection unbounded: one leaked per pass, every
+            # `result_publish_schedule_minutes`, reaching a stock `max_connections` inside a day
+            # and then failing the whole worker rather than the publish. In a `finally`, because a
+            # sink that failed its batch is holding the same connection as one that succeeded.
+            await sink.aclose()
 
     # **No pending gauge, deliberately.** The backlog is
     # `chemclaw_results_queued_total - chemclaw_results_published_total`, which is already exact
@@ -171,6 +197,10 @@ class JobPublishInput(BaseModel):
 
     calc_ref: str
     calc_type: str
+    # The result model's own name. A composite's `calc_type` is `<connector>.<job>`, which no
+    # projector prefix matches, so this is the *only* thing that routes one — see
+    # `ConnectorJobResult.payload_kind`.
+    payload_kind: str = ""
     payload: dict[str, object] = Field(default_factory=dict)
     depends_on: list[str] = Field(default_factory=list)
     actor: str = ""
@@ -193,6 +223,7 @@ async def publish_job_result(request: JobPublishInput) -> int:
     return await outbox.enqueue_payload(
         calc_ref=request.calc_ref,
         calc_type=request.calc_type,
+        payload_kind=request.payload_kind,
         payload=dict(request.payload),
         depends_on=list(request.depends_on),
         publication=Publication(

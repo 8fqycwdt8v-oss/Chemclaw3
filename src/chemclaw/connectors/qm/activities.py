@@ -38,7 +38,7 @@ from chemclaw.core.config import settings
 from chemclaw.durable.registry import durable_activity
 from chemclaw.science.calc.postgres_store import default_store
 from chemclaw.science.calc.postgres_structures import default_structure_store
-from chemclaw.science.calc.store import StoredResult
+from chemclaw.science.calc.store import StoredResult, publish_stored_result
 from chemclaw.science.calc.structures import require_structure
 
 # Format the mock scheduler emits; parsed by `parse_qm_output`. Kept next to the
@@ -275,7 +275,10 @@ async def persist_qm_result(result: QMJobResult) -> str:
             basis_set=result.basis_set,
         )
     )
-    await default_store().put(
-        StoredResult(key=key, result=result.model_dump(mode="json")),
-    )
+    payload = result.model_dump(mode="json")
+    await default_store().put(StoredResult(key=key, result=payload))
+    # Paired with the write, not with `cached_compute`: this result came off a cluster rather than
+    # from a callable, so it never passes through the cache's compute-once path and its publish
+    # hook. Without this line DFT reached an external results store only via the backfill.
+    await publish_stored_result(key, payload, payload_kind=type(result).__name__)
     return key.as_str()

@@ -168,6 +168,21 @@ class ConnectorJobResult(BaseModel):
     # the same rule `SpeciesEnergy.method` follows. Empty means "this job recorded none", never
     # "it used none".
     calc_refs: list[str] = Field(default_factory=list)
+    # The name of the pydantic model `data` was dumped from — the one thing `data: dict[str, Any]`
+    # destroys and nothing downstream can recover. `chemclaw.publish` dispatches on it exactly
+    # (`PAYLOAD_PROJECTORS`), falling back to inferring a projector from a `calc_type` prefix; a
+    # composite has no cache key and therefore no `calc_type` to infer from, so without this field
+    # **every composite is silently dropped** — measured: all four shipped jobs resolved to no
+    # projector, which is the case the publish seam was built for.
+    #
+    # Set from `type(result).__name__` at the site that still holds the typed result, never guessed
+    # downstream from the connector and job names: those are a *route*, and two routes may return
+    # one shape while one route's return type may change without its name changing.
+    #
+    # Additive and defaulted for the same reason `calc_refs` above is: it crosses the Temporal wire
+    # and histories are in flight. Empty means "this job did not say", which is what every history
+    # written before this field existed will decode to, and which the projector treats as "infer".
+    payload_kind: str = ""
 
 
 def envelope_from_result(job_id: str, raw: Any) -> ConnectorJobResult:
@@ -260,6 +275,7 @@ def job_record_for(
         note_id=result.note.id if result.note is not None else "",
         calc_refs=result.calc_refs,
         runtime_seconds=runtime_seconds,
+        payload_kind=result.payload_kind,
     )
 
 
@@ -400,6 +416,7 @@ class ConnectorJobWorkflow:
                 JobPublishInput(
                     calc_ref=job_id,
                     calc_type=f"{job.connector}.{job.job}",
+                    payload_kind=result.payload_kind,
                     payload=result.data,
                     depends_on=list(result.calc_refs),
                     actor=job.requested_by,

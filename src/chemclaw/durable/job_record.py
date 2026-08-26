@@ -75,6 +75,11 @@ class JobRecord(BaseModel):
     # parallelism belongs to the launcher and none reports it back yet. Runtime is the factor
     # node-hours multiplies, and it is measurable today.
     runtime_seconds: float = Field(default=0.0, ge=0)
+    # The name of the model `result` was dumped from, off the envelope's own `payload_kind`. The
+    # backfill's only way to route a composite: `result` is a bare dict by the time it lands here,
+    # and `<connector>.<job>` is a route rather than a shape. Empty means the run did not say,
+    # which is every row written before this column and which the projector reads as "infer".
+    payload_kind: str = ""
     completed_at: datetime | None = None
 
 

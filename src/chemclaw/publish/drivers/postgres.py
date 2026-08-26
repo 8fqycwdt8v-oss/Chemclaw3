@@ -22,7 +22,11 @@ import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from chemclaw.ingest.eln.warehouse.driver import WarehouseCursor, WarehouseQueryError
+from chemclaw.ingest.eln.warehouse.driver import (
+    VectorDialect,
+    WarehouseCursor,
+    WarehouseQueryError,
+)
 
 
 class _PostgresCursor:
@@ -116,6 +120,22 @@ class PostgresWarehouse:
         """The psycopg parameter marker."""
         return "%s"
 
+    @property
+    def vector_dialect(self) -> VectorDialect | None:
+        """None: this driver writes results and never searches them.
+
+        Present because `Warehouse` is a `@runtime_checkable` Protocol and `SqlResultSink._connect`
+        checks against it — and a runtime Protocol check tests for the *presence of every member*,
+        so omitting this one made the sink reject the only driver this repository ships for it with
+        "did not build a Warehouse". Measured: `isinstance(PostgresWarehouse(...), Warehouse)` was
+        False, and every delivery failed at the connect.
+
+        `None` is the honest answer rather than a stub: `vector_dialect` exists so the *inbound*
+        seam's `sql.py` can spell a similarity search, and nothing in the publish path searches
+        anything. The Protocol's own reader treats None as "this driver does not do similarity".
+        """
+        return None
+
     async def _connection(self) -> psycopg.AsyncConnection[Any]:
         """The live connection, opened on first use and reopened if it was closed."""
         if self._conn is None or self._conn.closed:
@@ -128,6 +148,21 @@ class PostgresWarehouse:
                     options=self._options, row_factory=dict_row, autocommit=True, **self._parts
                 )
         return self._conn
+
+    async def aclose(self) -> None:
+        """Release the held connection. Safe to call twice, and on one never opened.
+
+        The connection is opened on first use and kept for the driver's life, which is right for a
+        batch of upserts and wrong for a process that builds a new driver every pass — and the drain
+        does exactly that, deliberately, so a rotated credential takes effect on the next run rather
+        than the next restart. Without this the two decisions multiplied: one leaked Postgres
+        connection per drain, every `result_publish_schedule_minutes` (default 15), which reaches a
+        stock `max_connections` of 100 inside a day and then fails the *whole* worker rather than
+        the publish.
+        """
+        if self._conn is not None and not self._conn.closed:
+            await self._conn.close()
+        self._conn = None
 
     @asynccontextmanager
     async def cursor(self) -> AsyncIterator[WarehouseCursor]:

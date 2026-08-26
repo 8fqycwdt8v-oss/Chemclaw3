@@ -105,6 +105,14 @@ class HttpResultSink:
             "records": [record.model_dump(mode="json") for record in records],
         }
 
+    async def aclose(self) -> None:
+        """Nothing to release: the client is scoped to a single delivery.
+
+        A no-op with a reason rather than an omission. `deliver` opens its `AsyncClient` inside an
+        `async with`, so the connection pool is already gone by the time the sink is discarded —
+        which is why this sink never had the leak the SQL one did.
+        """
+
     async def deliver(self, records: Sequence[ResultRecord]) -> None:
         """POST the batch, classifying the response into retryable and not.
 

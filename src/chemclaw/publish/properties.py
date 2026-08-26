@@ -457,6 +457,18 @@ _DEFINITIONS: tuple[PropertyDefinition, ...] = (
         "What a CREST search enumerated: conformers, tautomers, protomers or deprotomers.",
         kind="text",
     ),
+    _d(
+        "produced_structure",
+        "identifier",
+        "",
+        "The address of the geometry this calculation *produced* - an optimization's relaxed "
+        "structure, or the minimum along a relaxed scan. Distinct from the record's own "
+        "structure_id, which is the geometry it ran ON (migration 048's meaning) and answers a "
+        "different question. A property rather than a column because that is exactly the extension "
+        "this schema is built for: a new fact about a calculation is a registry row and an INSERT, "
+        "never an ALTER.",
+        kind="text",
+    ),
     # --- similarity and ranking -------------------------------------------------------------------
     _d(
         "tanimoto",

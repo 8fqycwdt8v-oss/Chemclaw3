@@ -117,18 +117,29 @@ def _species_members(reactants: list[str], products: list[str]) -> list[SubjectM
     return members
 
 
-def _member_for(members: list[SubjectMember], species: dict[str, Any]) -> int | None:
+def _member_for(
+    members: list[SubjectMember], species: dict[str, Any], claimed: set[int]
+) -> int | None:
     """The ordinal of the member a `SpeciesEnergy` describes, or None if it matches none.
 
     Matched on `(role, molecule)` rather than on list position -- see the caller for the corruption
-    that position-matching produced. A species appearing twice in the equation (two waters, listed
-    once per equivalent) matches the first member with that identity; both copies then carry the
-    same per-species numbers, which is what the equation says about them.
+    that position-matching produced.
+
+    **And the match is one-to-one**, which is what `claimed` is for. A species appearing twice in
+    the equation is two members, because listing a species once per equivalent is the tools' own
+    stoichiometric convention (`["O", "O"]` for two waters). Returning the *first* member with that
+    identity for both copies looked harmless and was not: member 1 received no facts at all, and
+    the two facts for member 0 collided on `value_id` -- which is a content hash over
+    `(calc_ref, scope, ordinal, property)` -- so the far end's `DO UPDATE` silently kept one and
+    discarded the other. Measured on `2 H2O`: 6 property rows carrying 5 distinct ids.
+
+    Handing each copy the next unclaimed member of that role restores the invariant the ordinals
+    exist for: one member, one set of per-species facts, one id.
     """
     identifier, canonical = _identify(species.get("smiles"))
     role = species.get("role")
     for member in members:
-        if member.role != role:
+        if member.role != role or member.ordinal in claimed:
             continue
         if member.compound_id and identifier and member.compound_id == identifier:
             return member.ordinal
@@ -279,8 +290,9 @@ def _reaction(payload: dict[str, Any]) -> tuple[Subject, Conditions, TheoryLevel
     # attaches a product's free energy to a reactant -- silently, since both are plausible numbers
     # in the same units -- which is a data corruption rather than a missing row. Measured: a
     # two-species breakdown over a three-member equation put cyclohexane's energy on butadiene.
+    claimed: set[int] = set()
     for species in payload.get("species") or []:
-        index = _member_for(subject.members, species)
+        index = _member_for(subject.members, species, claimed)
         if index is None:
             logger.warning(
                 "publish: species %r (%s) matches no member of %s; energies not published",
@@ -289,6 +301,7 @@ def _reaction(payload: dict[str, Any]) -> tuple[Subject, Conditions, TheoryLevel
                 subject.label,
             )
             continue
+        claimed.add(index)
         facts.extend(
             _kept(
                 _fact(
@@ -545,12 +558,13 @@ def _scan(payload: dict[str, Any]) -> tuple[Subject, Conditions, TheoryLevel, di
         _fact("scan_minimum_coordinate", payload.get("minimum_value"), ""),
         _text("scan_coordinate", x_label),
     )
-    extra: dict[str, Any] = {"properties": facts, "points": points}
     # The relaxed geometry at the minimum, as an address — the scan's output, in the same shape an
-    # optimization's is.
+    # optimization's is. A `produced_structure` fact rather than a field on the record: the
+    # record's own `structure_id` means the geometry the calculation ran ON, and overloading it
+    # would answer a different question than the one a chemist holding a conformer address asks.
     produced = (payload.get("minimum_structure") or {}).get("structure_id") or ""
-    if produced:
-        extra["produced_structure_id"] = produced
+    facts = [*facts, *_kept(_text("produced_structure", produced))]
+    extra: dict[str, Any] = {"properties": facts, "points": points}
     return subject, conditions, level, extra
 
 
@@ -753,11 +767,11 @@ def _optimization(
         _fact("displacement_rms", payload.get("displacement_rms_angstrom"), "angstrom"),
     )
     # The geometry the optimization *produced*, as an address. Not a subject member: the subject is
-    # what was asked about, and the relaxed structure is the answer.
+    # what was asked about, and the relaxed structure is the answer. Published as a fact for the
+    # same reason the scan's is — see `_scan`.
     produced = structure.get("structure_id") or payload.get("structure_id") or ""
+    facts = [*facts, *_kept(_text("produced_structure", produced))]
     extra: dict[str, Any] = {"properties": facts}
-    if produced:
-        extra["produced_structure_id"] = produced
     return subject, conditions, level, extra
 
 
@@ -1034,7 +1048,7 @@ def project(
 
 
 def records_from_solvent_screen(
-    *, calc_ref: str, payload: dict[str, Any], **common: Any
+    *, calc_ref: str, payload: dict[str, Any], depends_on: list[str] | None = None, **common: Any
 ) -> list[ResultRecord]:
     """A solvent screen as its comparison **plus** one record per solvent it compared.
 
@@ -1048,7 +1062,11 @@ def records_from_solvent_screen(
     to the numbers behind it.
     """
     comparison = project(
-        calc_ref=calc_ref, payload=payload, payload_kind="SolventComparisonResult", **common
+        calc_ref=calc_ref,
+        payload=payload,
+        payload_kind="SolventComparisonResult",
+        depends_on=list(depends_on or []),
+        **common,
     )
     records = [comparison]
     for index, effect in enumerate(payload.get("effects") or []):
@@ -1080,3 +1098,39 @@ def records_from_solvent_screen(
             )
         )
     return records
+
+
+# The payload kinds whose projection is more than one record. Keyed by model name rather than by
+# `calc_type` for the same reason the projector table is: a model name is exact, and a composite's
+# `calc_type` is a route (`<connector>.<job>`) that names no shape.
+# A multi-record emitter: same call shape as `project`, but returning the aggregate *and* its parts.
+_MultiProjector = Callable[..., list[ResultRecord]]
+
+_MULTI_RECORD_PROJECTORS: dict[str, _MultiProjector] = {
+    "SolventComparisonResult": records_from_solvent_screen,
+}
+
+
+def records_for(
+    *, calc_ref: str, calc_type: str, payload: dict[str, Any], payload_kind: str = "", **common: Any
+) -> list[ResultRecord]:
+    """Every record one stored payload becomes — usually one, sometimes an aggregate and its parts.
+
+    **The one place that decides one-versus-many**, so no caller has to know which shapes decompose.
+    Before this existed, `records_from_solvent_screen` was reachable only from tests: the three
+    production hooks all called `project()` directly and got the comparison alone, which meant the
+    rule that function's docstring states — never store an aggregate whose parts are not also
+    stored — held nowhere a chemist could observe it.
+    """
+    emitter = _MULTI_RECORD_PROJECTORS.get(payload_kind)
+    if emitter is not None:
+        return emitter(calc_ref=calc_ref, calc_type=calc_type, payload=payload, **common)
+    return [
+        project(
+            calc_ref=calc_ref,
+            calc_type=calc_type,
+            payload=payload,
+            payload_kind=payload_kind,
+            **common,
+        )
+    ]

@@ -271,3 +271,112 @@ def test_marking_failed_does_not_double_count_the_attempt(
         assert row is not None and row == (1, "pending")
 
     asyncio.run(_run())
+
+
+def test_one_unreadable_document_does_not_retire_its_whole_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A poison row is one row's problem, and which rows it took must not depend on claim order.
+
+    The drain validated the batch inside a single `try` and, on the first document it could not
+    parse, marked **every** claimed id failed. One row written by a future writer whose record shape
+    this release cannot read therefore retired up to `batch_size - 1` perfectly deliverable rows
+    once they had spent their attempts — silently, since a retired row is kept rather than deleted
+    and nothing counts it as lost.
+    """
+    from chemclaw.durable import publish_results
+
+    delivered: list[str] = []
+
+    class _Sink:
+        async def deliver(self, records: Any) -> None:
+            delivered.extend(record.calc_ref for record in records)
+
+        async def aclose(self) -> None:
+            """Holds nothing; present because `ResultSink` requires it of every sink."""
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        _with_sink(monkeypatch, "alpha")
+        async with outbox._connect() as conn:
+            await _reset(conn)
+
+        assert await outbox.enqueue([_record("good-1"), _record("good-2")]) == 2
+        # A row this release cannot parse, written straight into the queue beside them.
+        async with outbox._connect() as conn:
+            await conn.execute(
+                "INSERT INTO result_publications (sink, calc_ref, document, schema_version) "
+                "VALUES ('alpha', 'poison', '{\"calc_ref\": \"poison\"}'::jsonb, '1')"
+            )
+            await conn.commit()
+
+        outcome = await publish_results._drain_one("alpha", _Sink(), 10)
+        assert sorted(delivered) == ["good-1", "good-2"], (
+            "the readable rows must still be delivered when a neighbour cannot be parsed"
+        )
+        assert outcome.delivered == 2
+        assert outcome.failed == 1, "exactly the unreadable row is charged an attempt"
+
+        async with outbox._connect() as conn:
+            cursor = await conn.execute(
+                "SELECT calc_ref, state, attempts FROM result_publications ORDER BY calc_ref"
+            )
+            rows = {row[0]: (row[1], row[2]) for row in await cursor.fetchall()}
+        assert rows["good-1"][0] == "delivered"
+        assert rows["good-2"][0] == "delivered"
+        assert rows["poison"][0] == "pending", "one failed attempt, not yet retired"
+
+    asyncio.run(_run())
+
+
+def test_the_drain_closes_every_sink_it_builds(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Built per run means closed per run, or a scheduled job leaks a connection per pass.
+
+    `drain_result_publications` builds a sink each run deliberately, so a rotated credential takes
+    effect on the next pass rather than the next restart. `SqlResultSink` opens its connection
+    lazily and holds it for the sink's life. Neither decision is wrong; together, and with nothing
+    closing the sink, they leaked one Postgres connection every `result_publish_schedule_minutes`
+    — reaching a stock `max_connections` of 100 inside a day and then failing the whole worker.
+
+    Asserted on a failing batch too, because a sink that could not deliver is holding exactly the
+    same connection as one that could.
+    """
+    from chemclaw.durable import publish_results
+    from chemclaw.publish.manifest import ResultSinkManifest
+
+    closed: list[str] = []
+
+    class _Sink:
+        def __init__(self, name: str, fail: bool) -> None:
+            self._name, self._fail = name, fail
+
+        async def deliver(self, records: Any) -> None:
+            if self._fail:
+                raise ConnectionError("destination down")
+
+        async def aclose(self) -> None:
+            closed.append(self._name)
+
+    manifests = [
+        ResultSinkManifest(name="alpha", description="x", driver="m:c"),
+        ResultSinkManifest(name="beta", description="x", driver="m:c"),
+    ]
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        _with_sink(monkeypatch, "alpha", "beta")
+        async with outbox._connect() as conn:
+            await _reset(conn)
+        await outbox.enqueue([_record("shared")])
+
+        monkeypatch.setattr(publish_results, "enabled", lambda: manifests)
+        monkeypatch.setattr(
+            publish_results, "build", lambda m: _Sink(m.name, fail=m.name == "beta")
+        )
+        outcome = await publish_results.drain_result_publications()
+        assert outcome.delivered == 1, "alpha delivers; beta is down"
+        assert sorted(closed) == ["alpha", "beta"], (
+            f"every sink built must be closed, including the one that failed; closed={closed}"
+        )
+
+    asyncio.run(_run())
