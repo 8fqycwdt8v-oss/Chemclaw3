@@ -20,8 +20,15 @@ from typing import Any
 
 import pytest
 
+from chemclaw.connectors.calc.results import XtbJobResult
 from chemclaw.durable.connector_job import ConnectorJobResult, job_record_for
-from chemclaw.publish.project import PAYLOAD_PROJECTORS, projector_for, records_for
+from chemclaw.publish.project import (
+    PAYLOAD_PROJECTORS,
+    ProjectionError,
+    project,
+    projector_for,
+    records_for,
+)
 from chemclaw.science.calc.models import (
     Conformer,
     ConformerEnsemble,
@@ -37,10 +44,18 @@ from chemclaw.science.calc.models import (
 # The four connector jobs this repository ships, each with the model its workflow returns. The
 # `calc_type` is what the hook builds — `<connector>.<job>` — and is deliberately included so the
 # assertion below is about the pair, which is what `projector_for` actually receives.
+# **What each shipped job actually puts on the envelope**, read off its workflow rather than off
+# the shape its activity computed. The distinction is the whole point of this table and it was
+# wrong here: `CalcJobWorkflow` reports `type(result).__name__` where `result` is `XtbJobResult` —
+# the nine-optional-field envelope — so this file asserted `ReactionEnergyResult` for a route
+# production has never sent, and every `calc` job still published nothing while the test was green.
+# `project.py::_calc_job` unwraps the envelope; these pairs are now the pairs that travel.
 _SHIPPED_JOBS: tuple[tuple[str, str], ...] = (
-    ("calc.compute_reaction_energy", "ReactionEnergyResult"),
-    ("calc.compare_solvents", "SolventComparisonResult"),
-    ("calc.compute_thermochemistry", "ThermochemistryResult"),
+    ("calc.compute_reaction_energy", "XtbJobResult"),
+    ("calc.compare_solvents", "XtbJobResult"),
+    ("calc.scan_coordinate", "XtbJobResult"),
+    ("calc.profile_rotation", "XtbJobResult"),
+    ("calc.sample_conformers", "XtbJobResult"),
     ("qm.compute_dft_energy", "QMJobResult"),
 )
 
@@ -422,3 +437,40 @@ def test_the_shipped_driver_satisfies_the_shipped_sink() -> None:
         "the shipped Postgres driver fails the shipped sink's own runtime check; "
         f"missing: {sorted(set(dir(Warehouse)) - set(dir(driver)) - {'_is_runtime_protocol'})}"
     )
+
+
+def test_a_calc_job_envelope_publishes_the_result_inside_it() -> None:
+    """The assertion whose absence let all nine `calc` jobs publish nothing while CI was green.
+
+    `CalcJobWorkflow` sends `payload_kind=type(result).__name__`, and its result is the
+    nine-optional-field `XtbJobResult` envelope — so the name identifies the *wrapper*, not the
+    shape. Measured before the fix: `projector_for("calc.compute_reaction_energy", "XtbJobResult")`
+    was `None`, and every composite this bundle computed was dropped at the enqueue with a debug
+    line.
+
+    This drives the real envelope through the real projector, so the route and the shape are checked
+    together rather than each against a table.
+    """
+    envelope = XtbJobResult(kind="reaction", summary="a reaction", reaction=_reaction())
+    record = project(
+        calc_ref="job-1",
+        calc_type="calc.compute_reaction_energy",
+        payload=envelope.model_dump(mode="json", exclude_none=True, exclude={"calc_refs"}),
+        payload_kind=type(envelope).__name__,
+    )
+    published = {fact.property for fact in record.properties}
+    assert "reaction_delta_g" in published, (
+        f"the envelope published {sorted(published)}, none of which is the reaction's own energy"
+    )
+
+
+def test_an_envelope_with_no_result_is_refused_rather_than_published_empty() -> None:
+    """A payload nobody can read is an error, not a record with no facts in it."""
+    empty = XtbJobResult(kind="reaction", summary="nothing ran")
+    with pytest.raises(ProjectionError, match="no readable result"):
+        project(
+            calc_ref="job-2",
+            calc_type="calc.compute_reaction_energy",
+            payload=empty.model_dump(mode="json", exclude_none=True, exclude={"calc_refs"}),
+            payload_kind="XtbJobResult",
+        )

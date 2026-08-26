@@ -51,6 +51,7 @@ from chemclaw.connectors.calc.specs import (
     EnsemblePropertyJobSpec,
     ReactionJobSpec,
     RefinedEnsembleJobSpec,
+    RotationJobSpec,
     ScanJobSpec,
     SolventScreenJobSpec,
     SpeciesRankingJobSpec,
@@ -61,7 +62,7 @@ from chemclaw.core.chem import require_canonical_smiles
 from chemclaw.core.config import settings
 from chemclaw.durable.heartbeat import beating
 from chemclaw.durable.registry import durable_activity
-from chemclaw.science.calc.models import Structure
+from chemclaw.science.calc.models import RotationProfile, Structure, Torsion
 from chemclaw.science.calc.postgres_store import default_store
 from chemclaw.science.calc.postgres_structures import default_structure_store
 from chemclaw.science.calc.structures import require_structure
@@ -199,6 +200,35 @@ async def _dispatch(spec: XtbJobSpec) -> XtbJobResult:
                 f"{scan.maximum_relative_kcal:.1f} kcal/mol above it"
             ),
             scan=scan,
+        )
+    if isinstance(spec, RotationJobSpec):
+        rotation = await compose.rotation_profile(
+            store,
+            spec.smiles,
+            Torsion(
+                torsion_id=spec.torsion.torsion_id,
+                atoms=spec.torsion.atoms,
+                bond=spec.torsion.bond,
+                label=spec.torsion.label,
+                symmetry_order=spec.torsion.symmetry_order,
+                period_degrees=spec.torsion.period_degrees,
+            ),
+            subject=await _subject(spec.structure_id, spec.smiles),
+            solvent=spec.solvent,
+            temperature_k=spec.temperature_k,
+            step_degrees=spec.step_degrees,
+            level=spec.level,
+            progress=activity.heartbeat,
+            run=_beating,
+        )
+        return XtbJobResult(
+            kind=spec.kind,
+            # The barrier and the lifetime it implies, in the one line a completion push-back and a
+            # job listing show. The band is in it rather than only in the payload for the reason
+            # `refine_ensemble` puts its coverage there: it is exactly the qualifier a reader would
+            # otherwise never see, and here a single half-life reads like a measurement.
+            summary=_rotation_summary(rotation),
+            rotation=rotation,
         )
     if isinstance(spec, EnsembleJobSpec):
         ensemble, _ = await compose.conformer_ensemble(
@@ -341,3 +371,45 @@ async def _dispatch(spec: XtbJobSpec) -> XtbJobResult:
             bonds=survey,
         )
     raise ValueError(f"unsupported xTB job kind: {spec!r}")
+
+
+def _rotation_summary(rotation: RotationProfile) -> str:
+    """One readable line: which bond, how many rotamers, how high the pass and how long it holds."""
+    if not rotation.barriers:
+        return (
+            f"{rotation.smiles}: {rotation.label} has {len(rotation.rotamers)} rotamer(s) and no "
+            "resolved barrier between them"
+        )
+    highest = max(rotation.barriers, key=lambda barrier: barrier.forward_kcal)
+    lifetime = highest.interconversion
+    span = (
+        ""
+        if lifetime is None
+        else (
+            f", t1/2 {_readable(lifetime.half_life_seconds)} "
+            f"({_readable(lifetime.half_life_seconds_fastest)} to "
+            f"{_readable(lifetime.half_life_seconds_slowest)} at "
+            f"±{lifetime.uncertainty_kcal:.0f} kcal/mol)"
+        )
+    )
+    return (
+        f"{rotation.smiles}: {rotation.label}, {len(rotation.rotamers)} rotamers, highest barrier "
+        f"{highest.forward_kcal:.1f} kcal/mol ({highest.basis}){span}"
+    )
+
+
+def _readable(seconds: float) -> str:
+    """A duration in the unit a chemist would say it in — seconds to years, one significant step.
+
+    A half-life from a barrier spans twenty orders of magnitude across the range this job covers, so
+    `4.36e+04 s` is technically the answer and "12 hours" is the one somebody can act on.
+    """
+    for limit, divisor, unit in (
+        (90.0, 1.0, "s"),
+        (5400.0, 60.0, "min"),
+        (172800.0, 3600.0, "h"),
+        (63072000.0, 86400.0, "days"),
+    ):
+        if seconds < limit:
+            return f"{seconds / divisor:.3g} {unit}"
+    return f"{seconds / 31557600.0:.3g} years"

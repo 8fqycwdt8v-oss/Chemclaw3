@@ -66,6 +66,45 @@ class BondCleavageSpec(BaseModel):
     fragments: list[str] = Field(min_length=2, max_length=2)
 
 
+class TorsionSpec(BaseModel):
+    """The bond to rotate, as `chem`'s `enumerate_torsions` reported it.
+
+    A model rather than four bare indices, for the reason `BondCleavageSpec` states and one more.
+    The stated one: a positional payload is one field-order change away from computing a different
+    bond than the caller named. The additional one is measured — an atom index is not a name at
+    all. `(4, 5)` is the amide C-N of `c1ccc(NC(C)=O)cc1` and an aromatic *ring* bond of
+    `CC(=O)Nc1ccccc1`, the same compound rewritten, really bonded, in range. A scan driven from a
+    stale index therefore runs and reports a plausible barrier for a question nobody asked.
+
+    `torsion_id` is what closes that: a handle derived from the molecule rather than from the order
+    its atoms happen to appear in. The job recomputes it from the structure it is about to
+    calculate and refuses a mismatch, so the handle is a checksum on the indices rather than
+    decoration. Carry the whole entry from the enumeration; do not assemble one by hand.
+
+    `science/calc/models.py::Torsion` is the same shape inside the calculation. Two files by rule:
+    this module is a leaf the chat service imports on every agent build and may not import
+    `science` (D-118).
+    """
+
+    torsion_id: str = Field(
+        min_length=1,
+        description=(
+            "The `tor_...` handle from enumerate_torsions on this molecule. Checked against the "
+            "structure, so one carried from another compound or another RDKit build is refused "
+            "rather than silently scanned."
+        ),
+    )
+    atoms: list[int] = Field(
+        min_length=4,
+        max_length=4,
+        description="The four atom indices of the dihedral, exactly as the enumeration gave them.",
+    )
+    bond: list[int] = Field(min_length=2, max_length=2)
+    label: str = Field(min_length=1)
+    symmetry_order: int = Field(default=1, ge=1)
+    period_degrees: float = Field(default=360.0, gt=0.0, le=360.0)
+
+
 class ReactionJobSpec(BaseModel):
     """A durable reaction-energy request (xTB plan X4)."""
 
@@ -109,6 +148,35 @@ class ScanJobSpec(BaseModel):
     atoms: list[int] = Field(min_length=2, max_length=4)
     values: list[float] = Field(min_length=2)
     solvent: str | None = None
+    structure_id: str | None = Field(default=None, description=_STRUCTURE_ID_DESCRIPTION)
+
+
+class RotationJobSpec(BaseModel):
+    """A durable rotational profile about one named bond.
+
+    Distinct from `ScanJobSpec`, which drives any internal coordinate and reports points. This one
+    is about a torsion specifically, and everything it adds follows from that: the bond is named
+    rather than indexed, the scan covers one *period* rather than always 360 degrees, the wells are
+    released from their constraint into real rotamers, and the barriers between them are directional
+    and carry a half-life.
+    """
+
+    kind: Literal["rotation"] = "rotation"
+    smiles: str = Field(min_length=1)
+    torsion: TorsionSpec
+    solvent: str | None = None
+    temperature_k: float | None = None
+    step_degrees: float | None = Field(
+        default=None,
+        gt=0.0,
+        le=120.0,
+        description=(
+            "The coarse step in degrees; 30 by default. Every point is a constrained optimization, "
+            "so halving this doubles the cost — and the maxima are refined finely regardless, so a "
+            "smaller step buys resolution of the *wells* rather than of the barrier."
+        ),
+    )
+    level: Literal["quick", "standard", "thorough"] = "quick"
     structure_id: str | None = Field(default=None, description=_STRUCTURE_ID_DESCRIPTION)
 
 
@@ -268,6 +336,7 @@ XtbJobSpec = Annotated[
     ReactionJobSpec
     | SolventScreenJobSpec
     | ScanJobSpec
+    | RotationJobSpec
     | EnsembleJobSpec
     | ComplexJobSpec
     | RefinedEnsembleJobSpec

@@ -568,6 +568,99 @@ def _scan(payload: dict[str, Any]) -> tuple[Subject, Conditions, TheoryLevel, di
     return subject, conditions, level, extra
 
 
+def _rotation(
+    payload: dict[str, Any],
+) -> tuple[Subject, Conditions, TheoryLevel, dict[str, Any]]:
+    """A rotational profile: points as a series, rotamers as conformers, the barrier as a fact.
+
+    Three shapes because the result genuinely has three, and each already exists here: the profile
+    is a `PointFact` series exactly as a scan's is, a rotamer is a geometry with a degeneracy —
+    which is what `ConformerFact` is for — and the barrier plus the lifetime it implies are
+    per-compound numbers a site will query.
+
+    **The barrier is published, and the *count* of rotatable bonds already was.** That asymmetry is
+    what `D-2026-08-25-a-cache-is-not-a-record` built this seam to remove: `rotatable_bonds` is a
+    descriptor and `rotational_barrier` is the science.
+    """
+    smiles = payload.get("smiles")
+    subject = Subject(
+        kind="geometry",
+        members=[_molecule(smiles, payload.get("input_structure_id") or "")],
+        label=smiles or "",
+    )
+    conditions = Conditions(
+        solvent=canonical_solvent(payload.get("solvent")),
+        solvent_model="alpb" if payload.get("solvent") else "",
+        temperature_k=payload.get("temperature_k"),
+    )
+    level = TheoryLevel(
+        method=payload.get("method") or "unknown", family="semiempirical", engine="xtb"
+    )
+    atoms = payload.get("atoms") or []
+    x_label = f"dihedral({','.join(str(atom) for atom in atoms)})"
+    points = [
+        PointFact(
+            series="rotation",
+            ordinal=index,
+            property="point_relative_energy",
+            value=float(point["relative_kcal"]),
+            x_value=point.get("value"),
+            x_unit="degree",
+            x_label=x_label,
+        )
+        for index, point in enumerate(payload.get("points") or [])
+    ]
+    conformers = [
+        ConformerFact(
+            ordinal=index,
+            structure_id=rotamer.get("structure_id") or "",
+            relative_kcal=float(rotamer["relative_kcal"]),
+            population=rotamer.get("population"),
+            degeneracy=int(rotamer.get("degeneracy", 1)),
+        )
+        for index, rotamer in enumerate(payload.get("rotamers") or [])
+        if rotamer.get("relative_kcal") is not None
+    ]
+    barriers = payload.get("barriers") or []
+    # The barrier out of the *most populated* well, which is the one that decides configurational
+    # stability — not the highest point of the profile, and not an average over directions.
+    highest = max(barriers, key=lambda barrier: barrier["forward_kcal"], default=None)
+    lifetime = (highest or {}).get("interconversion") or {}
+    uncertainty = payload.get("uncertainty_kcal")
+    facts = _kept(
+        # The barrier carries the method's uncertainty as the record's own uncertainty, exactly as
+        # a reaction energy does — it is the number a reader has to hold this one against, and the
+        # half-life below is exponential in it.
+        _fact(
+            "rotational_barrier",
+            payload.get("highest_barrier_kcal"),
+            "kcal/mol",
+            uncertainty=uncertainty,
+            uncertainty_kind="reported",
+        ),
+        _fact("interconversion_half_life", lifetime.get("half_life_seconds"), "s"),
+        _fact("rotamer_count", len(conformers), ""),
+        _fact("torsion_symmetry_order", payload.get("symmetry_order"), ""),
+        _fact("torsion_period", payload.get("period_degrees"), "degree"),
+        _text("torsion_label", payload.get("label") or ""),
+        _text("torsion_id", payload.get("torsion_id") or ""),
+        _text("reaction_level", payload.get("level")),
+        # Which energy the barrier is: electronic, or a free energy from a Hessian at the pass. A
+        # reader must never have to infer this from the level.
+        _text("barrier_basis", (highest or {}).get("basis") or ""),
+    )
+    return (
+        subject,
+        conditions,
+        level,
+        {
+            "properties": facts,
+            "points": points,
+            "conformers": conformers,
+        },
+    )
+
+
 def _thermochemistry(
     payload: dict[str, Any],
 ) -> tuple[Subject, Conditions, TheoryLevel, dict[str, Any]]:
@@ -930,6 +1023,25 @@ def _dft(payload: dict[str, Any]) -> tuple[Subject, Conditions, TheoryLevel, dic
 # what a payload means.
 _Projector = Callable[[dict[str, Any]], tuple[Subject, Conditions, TheoryLevel, dict[str, Any]]]
 
+
+def _calc_job(
+    payload: dict[str, Any],
+) -> tuple[Subject, Conditions, TheoryLevel, dict[str, Any]]:
+    """Project the one result a `calc` envelope carries, by delegating to that shape's projector.
+
+    Raises:
+        ProjectionError: the envelope carries no result shape this module can read, which is a
+            payload nobody can publish rather than one to guess at.
+    """
+    unwrapped = unwrap_envelope(payload)
+    if unwrapped is None:
+        raise ProjectionError(
+            f"a calc job envelope carrying no readable result: fields {sorted(payload)}"
+        )
+    inner, kind = unwrapped
+    return PAYLOAD_PROJECTORS[kind](inner)
+
+
 PAYLOAD_PROJECTORS: dict[str, _Projector] = {
     "ReactionEnergyResult": _reaction,
     "SolventComparisonResult": _solvent_screen,
@@ -937,6 +1049,7 @@ PAYLOAD_PROJECTORS: dict[str, _Projector] = {
     "EnsemblePayload": _ensemble,
     "InteractionResult": _interaction,
     "ScanResult": _scan,
+    "RotationProfile": _rotation,
     "ThermochemistryResult": _thermochemistry,
     "ElectronicProperties": _electronic_properties,
     "SiteReactivityResult": _site_reactivity,
@@ -971,6 +1084,44 @@ _CALC_TYPE_PROJECTORS: tuple[tuple[str, _Projector], ...] = (
 )
 
 
+# Which field of `connectors/calc/results.py::XtbJobResult` carries which shape. That envelope has
+# nine optional result fields and populates exactly one, so its *own* name identifies nothing — and
+# `CalcJobWorkflow` reports `type(result).__name__`, which is the envelope's name. Measured:
+# `projector_for("calc.compute_reaction_energy", "XtbJobResult")` was `None`, so every one of that
+# bundle's nine durable jobs published nothing at all. This is the same defect
+# `D-2026-08-26-a-route-is-not-a-shape` named — a route is not a shape — surviving in the one
+# bundle whose workflow returns an envelope rather than its result.
+#
+# Unwrapping here rather than changing what the workflow sends, deliberately: `data` is also what
+# `get_durable_job_status` shows the model and what the inline wait returns, and re-shaping that to
+# suit the publish seam would trade a silent publishing bug for a visible chat one.
+_ENVELOPE_FIELDS: tuple[tuple[str, str], ...] = (
+    ("reaction", "ReactionEnergyResult"),
+    ("solvents", "SolventComparisonResult"),
+    ("scan", "ScanResult"),
+    ("rotation", "RotationProfile"),
+    ("ensemble", "ConformerEnsemble"),
+    ("interaction", "InteractionResult"),
+    ("refined", "RefinedEnsemble"),
+    ("averaged", "EnsembleProperty"),
+    ("distribution", "SpeciesDistribution"),
+    ("bonds", "BondDissociationSurvey"),
+)
+
+
+def unwrap_envelope(payload: dict[str, Any]) -> tuple[dict[str, Any], str] | None:
+    """The one populated result inside a `calc` job envelope, and the shape it is.
+
+    Returns None when the payload is not such an envelope, or carries no result this module can
+    read — a `quick`-level job whose only field is a summary, say.
+    """
+    for field, kind in _ENVELOPE_FIELDS:
+        inner = payload.get(field)
+        if isinstance(inner, dict) and inner:
+            return inner, kind
+    return None
+
+
 def projector_for(calc_type: str, payload_kind: str = "") -> _Projector | None:
     """The projector for a stored row, or None when nothing here can read it.
 
@@ -981,6 +1132,8 @@ def projector_for(calc_type: str, payload_kind: str = "") -> _Projector | None:
     """
     if payload_kind and payload_kind in PAYLOAD_PROJECTORS:
         return PAYLOAD_PROJECTORS[payload_kind]
+    if payload_kind == "XtbJobResult":
+        return _calc_job
     for prefix, projector in _CALC_TYPE_PROJECTORS:
         if calc_type.startswith(prefix):
             return projector

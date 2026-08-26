@@ -1,8 +1,8 @@
 # D-2026-08-26-a-torsion-is-named-not-indexed — Rotational profiles: the bond is chosen by enumeration, the barrier is a composite
 
-**Status:** proposed · **Date:** 2026-08-26 · Concept. Nothing here is built; this is the design
-and the measurements it rests on, so that the work is a diff rather than a discussion. The ADR that
-*accepts* it is written when it lands and supersedes this one. Sits under
+**Status:** accepted · **Date:** 2026-08-26 · Written as a concept and implemented in the same
+change; *What the implementation measured* at the end records what building it changed and the
+defect it uncovered. Sits under
 `D-2026-08-16-the-physics-leaves-the-cache-stays` (what may be a server), under
 `D-2026-08-25-the-loop-is-a-composite-not-a-template` (what may be a template), and under
 `D-2026-08-21-a-geometry-is-an-address-not-a-payload` (what crosses a wire).
@@ -169,11 +169,17 @@ every writing while the indices are not:
 
 | writing | bond atoms | handle |
 |---|---|---|
-| `CC(=O)Nc1ccccc1` | `(1, 3)` | `tor_5cd4f521f8351222` |
-| `O=C(C)Nc1ccccc1` | `(1, 3)` | `tor_5cd4f521f8351222` |
-| `c1ccc(NC(C)=O)cc1` | `(4, 5)` | `tor_5cd4f521f8351222` |
-| `Cc1ccccc1-c1ccccc1` | `(6, 7)` | `tor_f2ee74a5db2df1bc` |
-| `c1ccc(-c2ccccc2C)cc1` | `(3, 4)` | `tor_f2ee74a5db2df1bc` |
+| `CC(=O)Nc1ccccc1` | `(1, 3)` | `tor_d139107cd84f9333` |
+| `O=C(C)Nc1ccccc1` | `(1, 3)` | `tor_d139107cd84f9333` |
+| `c1ccc(NC(C)=O)cc1` | `(4, 5)` | `tor_d139107cd84f9333` |
+| `Cc1ccc(C)cc1` | `(0, 1)` | `tor_7b6b88fe5991e188` |
+| `Cc1ccc(C)cc1` | `(4, 5)` | `tor_7b6b88fe5991e188` |
+
+The last two are one molecule's two methyls: symmetry-equivalent bonds share a handle, so p-xylene
+is one question rather than two. These literals are the cross-repository contract —
+`tests/test_torsion_handle.py` here and `servers/chem/tests/test_torsion_handle_contract.py` there
+assert the same table, so whichever side moves first turns red instead of the two quietly
+disagreeing.
 
 What follows, each clause being a defect it prevents:
 
@@ -181,7 +187,7 @@ What follows, each clause being a defect it prevents:
   turn 6. Indices are not, and the failure is silent.
 - **It is resolved back to indices against the structure being computed**, not carried across a
   wire as integers whose meaning depends on an embedding.
-- **The handle carries the RDKit build**, as a short prefix digest, because the canonical ranking
+- **The handle carries the RDKit build**, in the hashed payload, because the canonical ranking
   is a function of that build. This is `D-2026-08-16`'s `calc_version` lesson applied one level
   down: a handle presented after a toolchain bump must **fail to resolve loudly** rather than
   resolve to a different bond quietly. A handle is a within-answer address; it is never a cache key
@@ -305,25 +311,72 @@ three times over four hours.
 - **The barrier is not a measurement.** Unchanged from the skill: VT-NMR, chiral HPLC and
   racemization kinetics settle it; the calculation says whether they are worth running.
 
-## Risks, and what must be measured before this ships
+## What the implementation measured
 
-Stated as checks with numbers attached, not as things to bear in mind:
+Written as a concept and built in the same change, so the section that would have been "what to
+check before this ships" is what checking it found.
 
-1. **Does refinement change the answer?** Barrier from the coarse 30° profile against the refined
-   one, on biphenyl and on N,N-dimethylacetamide. If it moves by less than the reported
-   uncertainty, stage 3 is not worth its cost and should not ship.
-2. **Does the cache actually make a finer re-run cheap?** Cold against repeat at a halved step, in
-   the table form `D-2026-08-16` used. The per-point keying says it should; that is a prediction,
-   not a result.
-3. **Populations with and against degeneracy** on n-butane, against the 59.2% the tree already
-   anchors on.
-4. **A conformer-dependence probe.** A barrier measured in a poor conformer is a poor barrier. The
-   default is a fresh embedding, which is the cheap answer; measure on a flexible case how far the
-   number moves when the profile is driven from `sample_conformers`' lowest member instead, and set
-   the warning threshold from that rather than from taste.
-5. **The handle across an RDKit bump.** Assert that a handle minted under one build fails to
-   resolve under another, rather than resolving elsewhere. This is the one failure mode that would
-   be silent, so it gets a test that fails loudly.
+**The symmetry-class equivalence is sound, and is checked rather than assumed.** Vertex orbits do
+not determine edge orbits in general, so a handle built from a canonical *symmetry class* pair
+could in principle merge two chemically different bonds. Measured over 21 molecules — fused,
+symmetric, polysubstituted — against the real thing, the automorphism group of each molecule:
+**zero false merges**. That comparison ships as a test rather than as this paragraph, so a
+counterexample turns red.
+
+**The candidate set had to be defined from scratch, and the numbers say why.** RDKit's
+`CalcNumRotatableBonds` reports **0** for toluene, p-xylene and *tert*-butylbenzene and **1** for
+acetanilide, and the one it excludes there is the amide C–N. Both exclusions are by definition
+(`!D1` for terminal tops, an explicit amide clause), and both are exactly what a barrier question
+is about — so `enumerate_torsions` enumerates every acyclic single bond between two heavy atoms
+instead, and reports the tops it cannot give a heavy-atom dihedral for rather than dropping them.
+
+**The symmetry order is worth its arithmetic.** Biphenyl and DMF come out 2-fold (a 180° period),
+toluene's methyl 6-fold (60°) — measured against the shipped enumerator, and each halving or
+sixfolding is that many constrained optimizations not run. The test counts a full turn against a
+half turn rather than asserting it.
+
+**The Eyring anchors in `skills/atropisomer-assessment` were wrong by up to two orders of
+magnitude.** Its prose table read "27 → about a day" and "30 → a few years"; computed at 298.15 K
+with a transmission coefficient of 1, 27 kcal/mol is **80 days** and 30 is **35 years**. That is
+the strongest argument in this ADR for putting the arithmetic in code: the table sat in the one
+skill whose whole purpose is mapping a barrier onto a regulatory class, and the error was largest
+right at the class boundary. The four anchors are now pinned as literals in
+`tests/test_calc_rotation.py`.
+
+**The refinement earns its cost, and the release earns more.** On the test surface a coarse 30°
+grid reads the barrier as a lower bound; refined, the height matches the analytic barrier to within
+0.35 kcal/mol. And on a 45° grid the profile's own minima sit at 45, 180 and 315 while the released
+rotamers sit at 60, 180 and 300 — so a composite that reported its scan points as rotamers would
+hand back three geometries that are not minima. That is the claim releasing the constraint exists to
+make, and the test is built on a grid where the two answers differ.
+
+**And it found a defect in the seam it publishes through.** `CalcJobWorkflow` sends
+`payload_kind=type(result).__name__`, and its result is `XtbJobResult` — a nine-optional-field
+*envelope*. Measured: `projector_for("calc.compute_reaction_energy", "XtbJobResult")` returned
+`None`, so **every one of that bundle's durable jobs published nothing at all**, and
+`tests/test_publish_reaches_the_hooks.py` was green because its table asserted
+`ReactionEnergyResult` — a `payload_kind` production has never sent. This is
+`D-2026-08-26-a-route-is-not-a-shape`'s own finding surviving in the one bundle whose workflow
+returns an envelope rather than a result. `publish/project.py::unwrap_envelope` reads the one
+populated field; the table now carries the pairs that actually travel; and a test drives the real
+envelope through the real projector, which is what the old one did not do.
+
+## Risks, and what is still open
+
+Two things this change does **not** settle, each stated with what would settle it:
+
+1. **Every number above is against a synthetic surface, not against xTB.** The suite drives the
+   real composite through the real cache against `tests/calc_server_fake.py`, whose torsional
+   potential is n-butane-shaped — which proves the wiring, the caching, the well-finding and the
+   arithmetic, and proves nothing about the chemistry. What is missing is a run against
+   `Chemclaw3-mcp`'s `calc` server on biphenyl (~2 kcal/mol) and N,N-dimethylacetamide (~15–18):
+   the live lane, not a unit test. Until then no barrier from this job should be quoted as a
+   number about a real compound.
+2. **How far a barrier moves with the conformer it is measured in.** `structure_id` carries a
+   chosen conformer in, and the default is a fresh embedding — the cheap answer, and the right
+   default. What is not known is the size of the error that default costs on a flexible molecule,
+   which is what a warning threshold should be set from rather than from taste. It needs the same
+   live lane.
 
 ## Consequences
 

@@ -25,6 +25,7 @@ from chemclaw.science.calc.models import (
     InteractionResult,
     ReactionEnergyResult,
     RefinedEnsemble,
+    RotationProfile,
     ScanResult,
     SolventComparisonResult,
     SpeciesDistribution,
@@ -48,6 +49,10 @@ class XtbJobResult(BaseModel):
     reaction: ReactionEnergyResult | None = None
     solvents: SolventComparisonResult | None = None
     scan: ScanResult | None = None
+    # The rotational profile (D-2026-08-26-a-torsion-is-named-not-indexed). Additive and defaulted
+    # like the four below, and for the same reason: this crosses the Temporal wire and histories are
+    # in flight, so a result decoded from an older one simply has none.
+    rotation: RotationProfile | None = None
     ensemble: ConformerEnsemble | None = None
     interaction: InteractionResult | None = None
     # The four multi-step results. Additive and defaulted like `calc_refs` above and for the same
