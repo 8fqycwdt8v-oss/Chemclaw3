@@ -40,7 +40,16 @@ class LabelSettings(BaseModel):
     # How many reactions one drain attempt sends in a single call. Bounds the remote payload and
     # the window it has to fit in; the `document_reembed_batch_size` twin. The failure it prevents
     # is one over-large attempt that can never complete against a multi-million-row backlog.
-    label_batch_size: int = Field(default=200, ge=1)
+    #
+    # **The upper bound is the server's, not a taste.** `rxnlabel` refuses a request above
+    # `MAX_BATCH = 500` — a worded `ValueError`, so it arrives classified as bad data rather than
+    # as an outage to retry — which means an operator raising this past 500 gets *every* drain
+    # attempt refused, forever, with the corpus never labelled. A limit worth writing down is worth
+    # failing on at startup rather than on the first batch of a nightly run
+    # (`core/config/__init__.py` makes the same argument for the settings its startup validator
+    # guards). Stated as a bound on the field rather than as a validator there, because the
+    # relationship is to a constant in another repository rather than to another field here.
+    label_batch_size: int = Field(default=200, ge=1, le=500)
     # How many batches one workflow run drains before `continue_as_new`. Event history is bounded,
     # and a 13M-row corpus at 200 a batch is 65,000 batches — far past what one run may hold.
     label_sync_max_iterations: int = Field(default=100, ge=1)
