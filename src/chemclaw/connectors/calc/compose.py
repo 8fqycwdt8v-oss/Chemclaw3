@@ -1115,8 +1115,8 @@ async def refined_ensemble(
         total_found=ensemble.total_found,
         refined_count=len(members),
         refined_population_covered=round(covered, 4),
-        conformational_entropy_cal_per_mol_k=round(entropy, 3),
-        ensemble_correction_kcal=round(-temperature * entropy / 1000.0, 3),
+        refined_conformational_entropy_cal_per_mol_k=round(entropy, 3),
+        refined_ensemble_correction_kcal=round(-temperature * entropy / 1000.0, 3),
         warnings=warnings,
     )
 

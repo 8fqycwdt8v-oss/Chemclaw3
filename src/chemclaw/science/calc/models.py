@@ -848,8 +848,16 @@ class RefinedEnsemble(BaseModel):
     total_found: int
     refined_count: int
     refined_population_covered: float
-    conformational_entropy_cal_per_mol_k: float
-    ensemble_correction_kcal: float
+    # **Named for the subset, because that is what they describe.** `ConformerEnsemble` carries
+    # fields with the first of these names and they mean something else: `ensemble_from_members`
+    # computes them over *all* members and deliberately refuses to truncate them, arguing that
+    # doing so "would turn 'here are the 10 that matter out of 47' into a quietly wrong claim that
+    # there were 10". Here the populations are renormalised over the refined top N, so the entropy
+    # is over N states and the correction is systematically too small. Shipping that under the
+    # ensemble-wide name put two meanings one model apart; `refined_` says which one this is, and
+    # `refined_population_covered` beside it says how much of the ensemble that N accounts for.
+    refined_conformational_entropy_cal_per_mol_k: float
+    refined_ensemble_correction_kcal: float
     sampled: Literal[True] = True
     treatment: Literal["free-energy-weighted-top-n"] = "free-energy-weighted-top-n"
     warnings: list[str] = Field(default_factory=list)
