@@ -357,9 +357,14 @@ make, and the test is built on a grid where the two answers differ.
 `tests/test_publish_reaches_the_hooks.py` was green because its table asserted
 `ReactionEnergyResult` — a `payload_kind` production has never sent. This is
 `D-2026-08-26-a-route-is-not-a-shape`'s own finding surviving in the one bundle whose workflow
-returns an envelope rather than a result. `publish/project.py::unwrap_envelope` reads the one
-populated field; the table now carries the pairs that actually travel; and a test drives the real
-envelope through the real projector, which is what the old one did not do.
+returns an envelope rather than a result.
+
+**Found independently and fixed better on `main` while this was in flight** (#225): rather than
+unwrapping at the projection boundary, which is what this branch first did,
+`CalcJobWorkflow` now publishes the *member* — `XtbJobResult.outcome()` picks it out by type, so a
+tenth result shape is one field on that envelope and nothing else. `RotationProfile` is that tenth
+field and needed no edit anywhere else, which is the property worth having. This branch's own
+unwrapping was deleted on the merge; what is recorded here is the measurement, not the fix.
 
 ## Risks, and what is still open
 

@@ -1,7 +1,9 @@
 -- The reaction-label index: the derived, queryable view every faceted precedent question is asked
 -- of (`chemclaw.science.labels`). NOT the record of truth — for an ELN reaction that is the
--- PR-gated note in git, for a patent corpus the source table. Both tables here are rebuildable
--- from those, and the only thing a rebuild costs is time.
+-- `reaction_records` row (`052`, written the same day: a deterministic transcription is data
+-- rather than a claim, so it is no longer a PR-gated note in git), for a patent corpus the
+-- source table. Both tables here are rebuildable from those, and the only thing a rebuild
+-- costs is time.
 --
 -- Written in two phases, and that split is the design rather than an implementation detail. The
 -- *record* phase is written by whoever ingested the reaction, from the canonical record in hand —

@@ -246,6 +246,54 @@ it happens.
 
 ## 3 — Work that is lost, dropped or invisible
 
+- [ ] **Four multi-step result shapes reach the publish hook and route to no projector** — [M],
+      and it is the second half of a fix rather than a new finding. `RefinedEnsemble`,
+      `EnsembleProperty`, `SpeciesDistribution` and `BondDissociationSurvey` are what the seven
+      jobs `D-2026-08-25-the-loop-is-a-composite-not-a-template` added actually return, and
+      `PAYLOAD_PROJECTORS` has an entry for none of them — so those jobs run, cost real compute,
+      and publish nothing. Declared out loud in
+      `tests/test_publish_reaches_the_hooks.py::_NOT_YET_PUBLISHED` rather than quietly omitted,
+      and that set is the definition of done: each projector deletes its own entry, and a shape
+      *not* named there must route, so a tenth member field on `XtbJobResult` fails immediately.
+      Each is the `_ensemble` shape — a SMILES subject, solvent/temperature conditions, a method,
+      and a per-conformer or per-bond fact list — and `publish/properties.py` already registers
+      the quantities, so this is bounded work rather than a design question.
+
+- [ ] **A Hessian is cached and never published, and neither is the thermochemistry built from
+      it** — [M], and the two halves are one question. `xtb.hess` is a `calc_type` the server
+      stamps and `_CALC_TYPE_PROJECTORS` has no prefix for it, so vibrational frequencies never
+      reach a results store; `ThermochemistryResult`, which is where a Hessian's scientific value
+      is actually realised, has a projector but **no hook at all** — it is a *tool* composite, so
+      it is neither written to the cache (composites are not cached, D-011) nor returned by a job
+      envelope. Publishing frequencies therefore needs a third hook, not a projector, which is why
+      this is a decision rather than a one-line addition. Named in
+      `tests/test_publish_reaches_the_hooks.py::_PRIMITIVES_NOT_PUBLISHED` so the gap is declared
+      and not merely absent.
+
+- [ ] **Decide whether a BO campaign is a scientific record** — [S].
+      `connectors/bo/workflows.py` sets `payload_kind` from `CampaignResult`, which implies it
+      should publish, and no projector exists — so it is currently in the same silent-drop state
+      the calc jobs were, but possibly *correctly*: a campaign is an optimization outcome rather
+      than a computed value, and `schema/result-store/` is molecule/reaction/ensemble-shaped.
+      Either write the projector or say in `publish/README.md` that a campaign deliberately does
+      not publish. What is not acceptable is the current state, where the two readings are
+      indistinguishable from the code.
+
+- [ ] **The `results` bundle's worker is not started by the live lane** — [S].
+      `deploy/helm/chemclaw/values.yaml` gives it `worker: true` and the chart renders the
+      Deployment, but `infra/live/processes.sh` starts four workers (background, calc, bo, qm) and
+      not this one, so `republish_calculations` cannot run there. Low urgency because publishing
+      is off until `CHEMCLAW_RESULT_SINKS` names a sink, and a backfill has a CLI route that needs
+      no worker — but the lane exists to make the deployed shape testable, and it currently
+      diverges from it.
+
+- [ ] **`label_batch_size` is unguarded against the labelling server's batch limit** — [S].
+      The default is 200 and `Chemclaw3-mcp`'s `rxnlabel` refuses above `MAX_BATCH = 500`, so an
+      operator raising the setting past 500 gets every drain attempt refused as bad data. The
+      house rule is that a rule worth writing down is worth failing on
+      (`core/config/__init__.py::_guards_that_the_comments_already_demand`), and the limit is not
+      written down on this side at all.
+
 - [ ] **A decided approval hold can be reopened** — [M]. `agent/interaction_tools.py::start_approval`
       passes no `id_reuse_policy`, so temporalio's default lets a decided hold be started again under
       the same id. `REJECT_DUPLICATE` is **not** the fix and the archive records why: expiry is not
@@ -316,6 +364,35 @@ it happens.
       `_the_job_ceiling_covers_the_poll_it_bounds` untouched.
 
 ## 4 — Operating it
+
+- [ ] **Settle `pytest-xdist` on a real runner** — [S].
+      The `check` job is 87% one step: `make lint type cov` was **12m06s of a 13m56s job** on
+      `d8c312a`, of which lint is 1s and type 68s (measured), so ~11 min is the suite itself.
+      `D-2026-08-26-a-cancelled-run-on-main-is-a-missing-answer-not-a-superseded-one` took the free
+      half — lint and type now run in parallel in `static` — and deliberately left this one open,
+      because the evidence for it is a *reading* rather than a measurement.
+      **What the reading says**: the suite looks parallel-safe already. `tests/pg.py` suffixes its
+      `TEST_SCHEMA` with `os.getpid()` at import time, so an xdist worker gets its own
+      Postgres schema with no change at all, and the two files that use Temporal go through
+      `start_time_skipping()`, which binds an ephemeral port per environment. `pytest-cov` combines
+      across workers natively, so the 84% floor survives.
+      **Why it is not done**: "looks safe" is not a number, and the sandbox this was reviewed in ran
+      the suite far slower than a GitHub runner does, so a local figure would say nothing about CI.
+      The unknowns worth checking are tests that write into the repo tree rather than `tmp_path`,
+      and whether four workers on a 4-core runner contend on the single Postgres service container.
+      Closing this is one experiment: add `pytest-xdist`, run `-n auto` on a branch, compare the
+      job's wall time and its failure set against the serial run on the same commit. If it is not
+      a clear win, say so and delete this row.
+
+- [ ] **Turn the image scan back on, with its contradiction resolved** — [M].
+      Carried forward unchanged from the SBOM work and re-confirmed by the 2026-08-26 CI review:
+      `image.yml` now emits an SBOM and pins/verifies both binaries it downloads, but there is
+      still no scan of the built image. It ran once, found three real classes of problem now fixed
+      in `deploy/Containerfile`, and then reported two packages the build's own exhaustive
+      filesystem listing says are not present. A gate whose last word contradicts the artifact it
+      scanned makes every future red build ambiguous, so it goes back on with its own change rather
+      than riding along on someone else's. The SBOM is now `main`-only, so a scan reading it is
+      `main`-only too.
 
 - [ ] **`read_corpus` re-reads the entire ELN from `datetime.min` on every call** — [M].
       `durable/memory_jobs.py:63` calls `fetch_new_entries(datetime.min)` on every ingest half, so
@@ -694,17 +771,61 @@ run dir (and one lane learns to adopt the other's processes), or the fleet bundl
 probably right — `processes.sh` grew them for a single-repo live test that the e2e lane supersedes
 — but it changes what `make live-up` alone can exercise, which wants measuring first.
 
-## Backfill the ORD corpus on the four-repo lane's first bring-up
+## Recover the flow-Suzuki screen, or decide it stays out
 
-`infra/live/e2e-full-stack/up.sh` seeds `CHEMCLAW_DATA_SOURCES=graph,eln-json,eln-ord` and points
-`CHEMCLAW_ORD_EXPORT_DIR` at `Chemclaw3_mock`'s 10,011 ORD exports, and then never syncs them from
-an early enough cursor. All 10,011 share one mtime — the moment the repo was cloned — and carry
-older payload timestamps, so once the sync cursor passes that instant none of them can ever
-qualify again. Chemclaw3 handles this correctly and loudly (`adapter.py::warn_late_arrivals`, one
-aggregated WARNING naming the remedy); the gap is that the harness never takes the remedy. A first
-bring-up should run `ElnSyncWorkflow` with an explicit early `since` before anything advances the
-cursor, so the ORD half of the mock's data is actually reachable in an end-to-end pass. Found by
-the 2026-08-17 full-stack run — see `tasks/live-test/full-stack-e2e-2026-08-17.md`.
+`Chemclaw3_mock` seeds 10,011 ORD records and **5,760 of them — 57% — cannot be ingested at all**.
+Every refusal is the Perera flow-Suzuki set (*Science* 2018, 359, 429), whose second coupling
+partner the source spreadsheet publishes only as its own shorthand (`2a, Boronic Acid`).
+`ord_adapter._smiles` refuses rather than inventing a structure, which is right and is pinned by
+`test_ord_compound_with_no_resolvable_identifier_is_still_refused` — but that docstring's own words
+are "57% of a real corpus lost, including the yield data on components that *were* resolvable",
+and the widening it documents (INCHI, then NAME through `resolve_compound_name`) moved the number
+from 5,761 refused to 5,760.
+
+The open question is whether a reaction with one structure-less participant is worth keeping as
+*evidence*: its yield, ligand, base and halide are all real, and questions like "which base wins on
+this halide" need none of the missing structure. The two candidate shapes are (a) a `Component`
+that may carry a name instead of SMILES, with the reaction excluded from every fingerprint index,
+and (b) a separate lower-tier record type that retrieval can cite but similarity cannot reach.
+Both change what a `Component` is, so this wants its own ADR and its own measurement of what a
+partially-structured reaction does to retrieval — not a patch to `_smiles`. Measured and declared
+by `make live-data`; see `D-2026-08-18-a-corpus-is-not-reachable-because-it-is-on-disk`.
+
+## Make an ingest rejection answerable instead of only logged
+
+A record refused on ingest leaves a WARNING and nothing queryable. The seeded corpus has exactly
+one such record — `santanilla-orgsyn-boronate-well-Y36`, at 119.43%, refused because `OrdReaction`
+bounds a yield at 100 — and a chemist who asks about it can be told only "I have no such record".
+The better answer exists and is unreachable: *"that well was rejected on ingest because a yield
+cannot exceed 100%; the value is what an uncalibrated relative-UPLC readout does."* A durable
+rejection ledger (entry id, source, reason, first and last seen) would make data-quality questions
+answerable and would give `warn_late_arrivals`' aggregate a place to live besides a log line.
+`gr-08` is written against the absence today and says in its own comment what it becomes if this
+lands. Found by the 2026-08-18 corpus-fidelity pass.
+
+## The PR-gate costs 1.81 s per proposed note, and a backfill is one note per record
+
+Measured over the ORD backfill: 103 records per 3.1 minutes, steady, with the cost in the PR-gate's
+git branch-and-commit cycle rather than in mapping (the whole 10,011-record corpus maps in 0.3 s).
+That is a little over two hours for the mock's 4,251 ingestible records and 4,251 branches in the
+note repository. A real deployment's first sync is a decade of records, where this is days and a
+repository nobody can list. Nothing is broken — every proposal genuinely is a reviewable unit — but
+a backfill and an incremental sync arguably want different submission shapes (one branch per batch,
+or a bulk proposal a reviewer expands). Found by the 2026-08-18 corpus-fidelity pass.
+
+## A revoked credential fails the two live prompt-caching tests opaquely
+
+`tests/test_prompt_caching.py` guards its two live tests on `"API-KEY" in os.environ` — that the
+variable is *set*, not that it *works*. With a revoked key both fail several frames deep inside the
+Anthropic client with a raw `AuthenticationError`, so `make test` goes red in a way that reads as a
+prompt-caching regression. Observed 2026-08-18: the environment's key is well-formed, present, and
+answered `401` by the API.
+
+Skipping on an auth error is the wrong fix — it would hide a real outage, and these tests exist
+because a belief about caching was measurably wrong once. The right one is a message that names the
+cause, so a reader learns the credential is dead rather than that the cache broke. Same distinction
+`D-2026-08-17-a-harness-that-starts-two-of-five-servers-is-a-harness-that-tests-two` draws about
+`/readyz`: holding a credential is not the same as holding one the other side accepts.
 
 ## Surface `invalid_tool_calls` — an unparseable tool call is currently a silent no-op
 

@@ -20,10 +20,10 @@ from chemclaw.agent.repeat_guard import begin_call_watch, count_call, end_call_w
 from chemclaw.api.runner import _job_results_message
 from chemclaw.connectors.calc.results import XtbJobResult
 from chemclaw.connectors.calc.specs import ComplexJobSpec, EnsembleJobSpec, ScanJobSpec
+from chemclaw.connectors.calc.workflows import job_envelope
 from chemclaw.connectors.qm.specs import QmJobSpec, require_geometry_supported
 from chemclaw.core.config import settings
 from chemclaw.durable.connector_job import ConnectorJobResult
-from chemclaw.science.calc.geometry import without_geometry
 from chemclaw.science.calc.models import (
     Conformer,
     ConformerEnsemble,
@@ -70,15 +70,21 @@ def test_the_job_envelope_carries_addresses_and_not_coordinates() -> None:
     the workflow applies it in workflow code, where a replay must produce byte-identical output
     from an activity result already in history.
     """
-    result = XtbJobResult(kind="ensemble", summary="conformers of CCO", ensemble=_ensemble())
-    data = without_geometry(result.model_dump(mode="json", exclude_none=True))
+    envelope = job_envelope(
+        XtbJobResult(kind="ensemble", summary="conformers of CCO", ensemble=_ensemble())
+    )
+    data = envelope.data
 
-    members = data["ensemble"]["conformers"]
+    members = data["conformers"]
     assert [member["structure"]["geometry_omitted"] for member in members] == [True, True]
     # The populations, the degeneracies and the entropy are the answer and survive whole.
     assert [member["population"] for member in members] == [0.7, 0.3]
-    assert data["ensemble"]["total_found"] == 47
-    assert data["ensemble"]["conformational_entropy_cal_per_mol_k"] == 1.2
+    assert data["total_found"] == 47
+    assert data["conformational_entropy_cal_per_mol_k"] == 1.2
+    # `data` is the ensemble itself, not a wrapper around it: the bookkeeping fields the envelope
+    # used to nest under stay on `ConnectorJobResult`, where core already reads them, and the shape
+    # the result store needs is what `payload_kind` can then name.
+    assert "ensemble" not in data and envelope.payload_kind == "ConformerEnsemble"
 
 
 def test_the_envelope_carries_the_calculations_a_note_would_cite() -> None:
@@ -400,8 +406,6 @@ def test_the_shipped_refinement_template_carries_an_address_between_its_steps() 
 
     import yaml
 
-    from chemclaw.science.calc.geometry import without_geometry
-
     template = Template.model_validate(
         {
             "name": "conformer-refinement",
@@ -417,9 +421,11 @@ def test_the_shipped_refinement_template_carries_an_address_between_its_steps() 
     assert isinstance(refine, ToolStep | JobStep)
 
     ensemble = _ensemble()
-    envelope = ConnectorJobResult(
-        summary="conformers of CCO",
-        data=without_geometry({"kind": "ensemble", "ensemble": ensemble.model_dump(mode="json")}),
+    # Built by the function the workflow itself calls, not assembled here to look like one. The
+    # shipped template's reference is resolved against the envelope production actually produces,
+    # so a change to that shape breaks this test rather than being discovered in the live lane.
+    envelope = job_envelope(
+        XtbJobResult(kind="ensemble", summary="conformers of CCO", ensemble=ensemble)
     )
     # Narrowed because `Template.steps` is a union and only the two capability steps carry
     # arguments; without it mypy reads `refine` as possibly an `AgentStep`.

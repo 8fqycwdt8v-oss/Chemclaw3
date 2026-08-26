@@ -1024,24 +1024,6 @@ def _dft(payload: dict[str, Any]) -> tuple[Subject, Conditions, TheoryLevel, dic
 _Projector = Callable[[dict[str, Any]], tuple[Subject, Conditions, TheoryLevel, dict[str, Any]]]
 
 
-def _calc_job(
-    payload: dict[str, Any],
-) -> tuple[Subject, Conditions, TheoryLevel, dict[str, Any]]:
-    """Project the one result a `calc` envelope carries, by delegating to that shape's projector.
-
-    Raises:
-        ProjectionError: the envelope carries no result shape this module can read, which is a
-            payload nobody can publish rather than one to guess at.
-    """
-    unwrapped = unwrap_envelope(payload)
-    if unwrapped is None:
-        raise ProjectionError(
-            f"a calc job envelope carrying no readable result: fields {sorted(payload)}"
-        )
-    inner, kind = unwrapped
-    return PAYLOAD_PROJECTORS[kind](inner)
-
-
 PAYLOAD_PROJECTORS: dict[str, _Projector] = {
     "ReactionEnergyResult": _reaction,
     "SolventComparisonResult": _solvent_screen,
@@ -1064,62 +1046,35 @@ PAYLOAD_PROJECTORS: dict[str, _Projector] = {
 }
 
 # Longest prefix wins, so `xtb.properties` reaches `_electronic_properties` rather than being
-# swallowed by a shorter `xtb.` entry. The families are the ones `STRUCTURE_KEYED_PREFIXES` and the
-# calc server's own tool set produce.
+# swallowed by a shorter `xtb.` entry.
+#
+# **An entry here is a `calc_type` something has actually stamped** — today's server, or a release
+# whose rows a deployment still holds. Four entries met neither test and were deleted:
+# `descriptors`, `logd`, `xtb.thermo` and `xtb.energy` name spellings that no version of this
+# system ever wrote (checked against `XtbTask` and each engine's `CALC_TYPE` before and after
+# `D-2026-08-16-the-physics-leaves-the-cache-stays`; the descriptor panel has always stamped
+# `developability`, and logD has never had a cache row at all). The cost was not the dead rows —
+# it was that `descriptors` *looked* like the descriptor panel's route, so every
+# `predict_developability_profile` result was dropped by `enqueue_payload` with a debug line while
+# `test_publish_projection.py` exercised the dead spelling and never the live one.
+#
+# `xtb.scan` stays and is the reason the rule is not simply "what the server stamps now": `scan`
+# was an `XtbTask` before the move and is not one today, and `calculation_results` is never
+# pruned, so those rows are still there for the backfill to find. A retired calculator keeps its
+# projector; a spelling that never existed does not get one.
 _CALC_TYPE_PROJECTORS: tuple[tuple[str, _Projector], ...] = (
     ("xtb.properties", _electronic_properties),
     ("xtb.conformers", _ensemble),
     ("xtb.complex", _interaction),
-    ("xtb.thermo", _thermochemistry),
     ("xtb.fukui", _site_reactivity),
     ("xtb.scan", _scan),
     ("xtb.opt", _optimization),
-    ("xtb.energy", _single_point),
     ("xtb.sp", _single_point),
     ("solubility", _solubility),
-    ("descriptors", _descriptors),
-    ("logd", _logd),
+    ("developability", _descriptors),
     ("pka", _pka),
     ("dft", _dft),
 )
-
-
-# Which field of `connectors/calc/results.py::XtbJobResult` carries which shape. That envelope has
-# nine optional result fields and populates exactly one, so its *own* name identifies nothing — and
-# `CalcJobWorkflow` reports `type(result).__name__`, which is the envelope's name. Measured:
-# `projector_for("calc.compute_reaction_energy", "XtbJobResult")` was `None`, so every one of that
-# bundle's nine durable jobs published nothing at all. This is the same defect
-# `D-2026-08-26-a-route-is-not-a-shape` named — a route is not a shape — surviving in the one
-# bundle whose workflow returns an envelope rather than its result.
-#
-# Unwrapping here rather than changing what the workflow sends, deliberately: `data` is also what
-# `get_durable_job_status` shows the model and what the inline wait returns, and re-shaping that to
-# suit the publish seam would trade a silent publishing bug for a visible chat one.
-_ENVELOPE_FIELDS: tuple[tuple[str, str], ...] = (
-    ("reaction", "ReactionEnergyResult"),
-    ("solvents", "SolventComparisonResult"),
-    ("scan", "ScanResult"),
-    ("rotation", "RotationProfile"),
-    ("ensemble", "ConformerEnsemble"),
-    ("interaction", "InteractionResult"),
-    ("refined", "RefinedEnsemble"),
-    ("averaged", "EnsembleProperty"),
-    ("distribution", "SpeciesDistribution"),
-    ("bonds", "BondDissociationSurvey"),
-)
-
-
-def unwrap_envelope(payload: dict[str, Any]) -> tuple[dict[str, Any], str] | None:
-    """The one populated result inside a `calc` job envelope, and the shape it is.
-
-    Returns None when the payload is not such an envelope, or carries no result this module can
-    read — a `quick`-level job whose only field is a summary, say.
-    """
-    for field, kind in _ENVELOPE_FIELDS:
-        inner = payload.get(field)
-        if isinstance(inner, dict) and inner:
-            return inner, kind
-    return None
 
 
 def projector_for(calc_type: str, payload_kind: str = "") -> _Projector | None:
@@ -1132,8 +1087,6 @@ def projector_for(calc_type: str, payload_kind: str = "") -> _Projector | None:
     """
     if payload_kind and payload_kind in PAYLOAD_PROJECTORS:
         return PAYLOAD_PROJECTORS[payload_kind]
-    if payload_kind == "XtbJobResult":
-        return _calc_job
     for prefix, projector in _CALC_TYPE_PROJECTORS:
         if calc_type.startswith(prefix):
             return projector

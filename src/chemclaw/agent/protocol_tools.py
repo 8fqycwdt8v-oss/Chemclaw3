@@ -38,7 +38,7 @@ logger = logging.getLogger(__name__)
 def _procedure(note: Note) -> str:
     """The recipe out of a note body, or the whole body when it has no procedure section.
 
-    `note_from_ord_reaction` renders the recipe under `## Procedure`, so for an ELN-ingested
+    `record_from_ord_reaction` renders the recipe under `## Procedure`, so for an ELN-ingested
     reaction that heading is exactly the prose worth reading — the conditions and outcomes above it
     are already structured in `conditions` and re-reading them with a model would be a second,
     weaker answer to a question the frontmatter has answered.

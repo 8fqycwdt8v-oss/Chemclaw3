@@ -7,7 +7,7 @@
 -- still exactly one place a run's figures live.
 --
 -- **A separate migration rather than an edit to `052`, and that is the whole reason this file
--- exists.** The column belongs in `050` by every aesthetic measure — it is one table, added the
+-- exists.** The column belongs in `052` by every aesthetic measure — it is one table, added the
 -- same day, by the same change. But the runner keys each file by a checksum of its statements, so
 -- editing an applied migration breaks `make db-migrate` on every database that already ran it.
 -- Measured the hard way: editing it in place did exactly that to this repo's own dev database,
