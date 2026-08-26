@@ -42,8 +42,14 @@ from chemclaw.ingest.documents.index import (
     DocumentHit,
     FileRecord,
     PostgresDocumentIndex,
+    StaleChunk,
 )
-from chemclaw.retrieval.vectors.base import VectorMatch, VectorPoint, VectorStore
+from chemclaw.retrieval.vectors.base import (
+    VectorMatch,
+    VectorPoint,
+    VectorStore,
+    stored_embedding_key,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -163,6 +169,27 @@ class ExternalVectorDocumentIndex(PostgresDocumentIndex):
                 [point_id(doc, chunking, ordinal) for doc, chunking, ordinal in keys],
             )
 
+    def _stored_key(self, key: str) -> str:
+        """The `embedding_key` a `document_chunks` row carries while its vector is in the store.
+
+        The same rule the note index follows, and it was missing here first — this is the larger
+        corpus, so the silent-empty search it prevents is the more expensive one.
+        `chemclaw.retrieval.vectors.base.stored_embedding_key` states it and its residual.
+        """
+        return stored_embedding_key(key, settings.vector_store_provider, self._collection)
+
+    async def known_documents(self, doc_ids: set[str], key: str, chunking_key: str) -> set[str]:
+        """Which documents have chunks under this embedding *in this store*.
+
+        `fingerprints` needs no override beside this one: it diffs a file's `mtime_ns:size`, which
+        says nothing about vectors. Every method that compares an *embedding* key does.
+        """
+        return await super().known_documents(doc_ids, self._stored_key(key), chunking_key)
+
+    async def stale_chunks(self, key: str, limit: int, chunkings: set[str]) -> list[StaleChunk]:
+        """Chunks whose vector was made by another configuration *or* left in another store."""
+        return await super().stale_chunks(self._stored_key(key), limit, chunkings)
+
     async def upsert(self, files: list[FileRecord], chunks: list[ChunkRecord], key: str) -> None:
         """Send the vectors, then commit the catalogue — in that order, always.
 
@@ -173,7 +200,7 @@ class ExternalVectorDocumentIndex(PostgresDocumentIndex):
         """
         if chunks:
             await self._store.upsert(self._collection, _points_for(chunks))
-        await super().upsert(files, chunks, key)
+        await super().upsert(files, chunks, self._stored_key(key))
 
     async def store_embeddings(self, chunks: list[ChunkRecord], key: str) -> None:
         """Replace the vectors in the store, and only the `embedding_key` in the catalogue.
@@ -191,7 +218,7 @@ class ExternalVectorDocumentIndex(PostgresDocumentIndex):
                     "UPDATE document_chunks SET embedding_key = %(key)s "
                     "WHERE doc_id = %(doc)s AND chunking_key = %(ck)s AND ordinal = %(ord)s",
                     {
-                        "key": key,
+                        "key": self._stored_key(key),
                         "doc": chunk.doc_id,
                         "ck": chunk.chunking_key,
                         "ord": chunk.ordinal,

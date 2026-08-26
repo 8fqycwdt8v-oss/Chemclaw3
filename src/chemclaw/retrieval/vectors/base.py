@@ -43,6 +43,32 @@ from pydantic import BaseModel, Field
 from chemclaw.core.errors import ChemclawError, SubsystemUnavailableError
 
 
+def stored_embedding_key(embedding_key: str, provider: str, collection: str) -> str:
+    """The `embedding_key` a catalogue row carries when its vector lives in an external store.
+
+    `chemclaw.core.embeddings.embedding_config_key` answers *is this vector still valid* — which
+    model, which endpoint, which width. It cannot answer *is this vector reachable*, and the two
+    came apart the moment a second backend existed. A deployment that moves a corpus from one store
+    to another leaves every catalogue row carrying a key that still matches, so the fingerprint diff
+    finds nothing to do, nothing is re-embedded, and the search answers from an empty collection —
+    no hits, no error. That is `infra/sql/039`'s defect with the *location* as the thing that moved
+    instead of the model.
+
+    So a row written against a store records both. The provider is in the key and not only the
+    collection, because both indexes default to a collection name that does not mention the vendor:
+    a Qdrant-to-Databricks move with the shipped defaults produces the *same* collection string, and
+    namespacing on that alone would have missed the commonest switch there is.
+
+    **What this does not catch, stated rather than implied:** a move that keeps the provider and the
+    collection name — repointing `vector_store_url` at a different server, or dropping and
+    recreating the collection in place. Both are operator actions on the store itself rather than a
+    configuration change this system sees, and the answer to them is `--full`. Putting the URL in
+    the key was considered and rejected: a hostname change that renames the same server would then
+    re-embed the whole corpus for nothing.
+    """
+    return f"{embedding_key}@{provider}:{collection}"
+
+
 class VectorStoreError(SubsystemUnavailableError):
     """The vector store could not be reached, so the search never ran.
 

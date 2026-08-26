@@ -243,15 +243,15 @@ class WarehouseVectorRetriever:
         *before* its top-k. Filter afterwards and a narrow tag over a wide corpus returns nothing at
         all, since the k nearest vectors all belonged to something else.
 
-        **What counts as "filtered" is the predicate list, not the query's keys.** It used to be the
-        latter, and that silently dropped the binding's own `where:` on every query that carried no
-        mapped filter: the same binding restricted the corpus when the model happened to pass a date
-        and did not when it did not. `where:` is the binding author's statement about which rows are
-        *ever* eligible, so asking `sql` what it would actually emit is the only reading that makes
-        the two paths agree — the scanned one has always applied it unconditionally.
+        **A scope is the query's narrow filters, and only those.** The binding's own `where:` is
+        broad by nature — "these rows are eligible at all" — and on a corpus large enough to need an
+        index it selects far more rows than a filter payload can carry. Counting it as "filtered"
+        here was a first attempt at making `where:` unconditional, and it was worse than the bug it
+        fixed: measured against the repo's own fake, a binding with `where:` and a cap it exceeded
+        returned **nothing at all** for every query, where before only the `where:` was ignored.
+        `resolve_statement` enforces it instead, on a query already keyed to `top_k` rows.
         """
-        predicates, _ = sql.vector_predicates(self._vector, "?", filters)
-        if not predicates:
+        if not any(key in filters for key in self._vector.filter_columns):
             return None
         cap = settings.vector_store_max_scope_keys
         warehouse = self._connection()
@@ -264,9 +264,10 @@ class WarehouseVectorRetriever:
             # reads as a thin corpus, and the operator's lever (a narrower filter, or a higher cap)
             # only exists if they are told.
             message = (
-                f"{self.name}: the filter matches more than {cap} rows, which is more eligibility "
-                "than an index filter can carry. Narrow the query's filters, or raise "
-                "CHEMCLAW_VECTOR_STORE_MAX_SCOPE_KEYS if the index can take it"
+                f"{self.name}: this query's filters match more than {cap} rows, which is more "
+                "eligibility than an index filter can carry. Narrow them, raise "
+                "CHEMCLAW_VECTOR_STORE_MAX_SCOPE_KEYS if the index can take it, or move the "
+                "restriction into the binding's `where:`, which is enforced without enumerating"
             )
             # Logged here as well as raised, because `retrieve` catches this alongside every other
             # warehouse failure and logs a generic "search failed" at WARNING with the real message
