@@ -655,7 +655,11 @@ class EnsembleMember(BaseModel):
     """
 
     energy_hartree: float
-    degeneracy: int = 1
+    # `ge=1`, because `boltzmann_populations` divides by the sum of the weights and a
+    # payload whose degeneracies were all zero would raise ZeroDivisionError from inside
+    # the arithmetic rather than at the boundary. `ThermoSettings.symmetry_number` next
+    # door already carries the same constraint for the same reason.
+    degeneracy: int = Field(default=1, ge=1)
     structure: Structure
 
 
@@ -819,7 +823,11 @@ class RefinedConformer(BaseModel):
     structure: Structure
     relative_kcal: float
     population: float
-    degeneracy: int = 1
+    # `ge=1`, because `boltzmann_populations` divides by the sum of the weights and a
+    # payload whose degeneracies were all zero would raise ZeroDivisionError from inside
+    # the arithmetic rather than at the boundary. `ThermoSettings.symmetry_number` next
+    # door already carries the same constraint for the same reason.
+    degeneracy: int = Field(default=1, ge=1)
     gibbs_free_energy_hartree: float
     electronic_energy_hartree: float
     is_minimum: bool
