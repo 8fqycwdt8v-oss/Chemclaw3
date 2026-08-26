@@ -620,3 +620,38 @@ def test_a_pydantic_tool_return_still_reaches_the_model_as_repr() -> None:
         "`exclude=True` now survives tool-result stringification; the comment on "
         "`Condensation.rows` saying it does not is stale"
     )
+
+
+def test_the_mcp_adapter_still_puts_structured_content_under_that_artifact_key() -> None:
+    """A tool step reads `structuredContent` out of upstream's artifact, by key, and by shape.
+
+    `template_activities._structured` is what makes `${steps.<id>.result.<field>}` work on a `tool`
+    step at all: the content blocks are joined into a string by the time `_mcp_text` is done, so the
+    only route to a walkable value is the artifact `langchain_mcp_adapters` attaches. Three things
+    it depends on and upstream promises none of: that tools are built with
+    `response_format="content_and_artifact"`, that the artifact is a `dict` (an `MCPToolArtifact`
+    `TypedDict`, so `.get` works), and that the server's structured payload sits under
+    `structured_content`.
+
+    Pinned here rather than trusted because the failure is silent and expensive: if any of the three
+    changes, `_structured` returns `None`, the step falls back to the joined string, and four
+    shipped templates go back to raising `UnresolvedReference` *after* the launch — which is exactly
+    how they shipped in the first place.
+    """
+    import inspect
+
+    import langchain_mcp_adapters.tools as adapter
+
+    source = inspect.getsource(adapter)
+    assert 'response_format="content_and_artifact"' in source, (
+        "the adapter no longer builds tools with an artifact; "
+        "chemclaw.durable.template_activities._structured has nothing to read"
+    )
+    assert "structured_content" in adapter.MCPToolArtifact.__annotations__, (
+        "MCPToolArtifact no longer carries `structured_content`; "
+        "chemclaw.durable.template_activities._structured reads that key by name"
+    )
+    assert issubclass(adapter.MCPToolArtifact, dict), (
+        "MCPToolArtifact is no longer a TypedDict; "
+        "_structured's `isinstance(artifact, dict)` guard would reject every real artifact"
+    )
