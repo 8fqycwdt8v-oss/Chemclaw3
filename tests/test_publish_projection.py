@@ -33,6 +33,9 @@ from chemclaw.science.calc.models import (
     OptimizationSummary,
     PkaResult,
     ReactionEnergyResult,
+    Rotamer,
+    RotationBarrier,
+    RotationProfile,
     ScanPoint,
     ScanResult,
     SiteReactivityResult,
@@ -45,6 +48,7 @@ from chemclaw.science.calc.models import (
     VibrationalMode,
     XtbResult,
 )
+from chemclaw.science.calc.thermo import half_life_from_barrier
 
 
 def _structure(z: float = 1.0, smiles: str = "CCO") -> Structure:
@@ -159,6 +163,54 @@ def _cases() -> list[tuple[str, str, Any, dict[str, Any]]]:
         minimum_value=0.0,
         maximum_relative_kcal=2.8,
         minimum_structure=_structure(),
+    )
+    rotation = RotationProfile(
+        smiles="CCCC",
+        input_structure_id=_structure().structure_id,
+        method="GFN2-xTB",
+        solvent=None,
+        temperature_k=298.15,
+        level="quick",
+        torsion_id="tor_6b25409b2bd410a6",
+        atoms=[0, 1, 2, 3],
+        label="the C1-C2 bond",
+        symmetry_order=1,
+        period_degrees=360.0,
+        points=[
+            ScanPoint(value=60.0, energy_hartree=-158.0, relative_kcal=0.75),
+            ScanPoint(value=120.0, energy_hartree=-157.996, relative_kcal=2.76),
+            ScanPoint(value=180.0, energy_hartree=-158.001, relative_kcal=0.0),
+        ],
+        rotamers=[
+            Rotamer(
+                dihedral_degrees=180.0,
+                structure_id=_structure().structure_id,
+                relative_kcal=0.0,
+                population=0.59,
+                degeneracy=1,
+            ),
+            Rotamer(
+                dihedral_degrees=60.0,
+                structure_id=_structure().structure_id,
+                relative_kcal=0.75,
+                population=0.41,
+                degeneracy=1,
+            ),
+        ],
+        barriers=[
+            RotationBarrier(
+                from_rotamer=0,
+                to_rotamer=1,
+                at_degrees=120.0,
+                forward_kcal=2.76,
+                reverse_kcal=2.01,
+                basis="E",
+                interconversion=half_life_from_barrier(2.76, 298.15),
+            )
+        ],
+        highest_barrier_kcal=2.76,
+        uncertainty_kcal=3.0,
+        warnings=[],
     )
     scan_payload = scan.model_dump(mode="json")
     scan_payload["minimum_structure"]["structure_id"] = scan.minimum_structure.structure_id
@@ -342,6 +394,9 @@ def _cases() -> list[tuple[str, str, Any, dict[str, Any]]]:
         )
     )
     cases.append(("ScanResult", "xtb.scan", scan, scan_payload))
+    cases.append(
+        ("RotationProfile", "calc.profile_rotation", rotation, rotation.model_dump(mode="json"))
+    )
     cases.append(("InteractionResult", "xtb.complex", interaction, interaction_payload))
     return cases
 
@@ -556,6 +611,15 @@ _DELIBERATELY_UNREAD: dict[str, dict[str, str]] = {
     },
     "OptimizationSummary": {},
     "ScanResult": {},
+    "RotationProfile": {
+        "warnings": (
+            "advice to a reader about this profile's own resolution, not a property of the "
+            "molecule — the same treatment every other result's warnings get here"
+        ),
+        "input_structure_id": "read as the subject member's structure_id, like every other shape",
+        "uncertainty_kcal": "published as the barrier fact's own uncertainty, not as a fact",
+        "atoms": "folded into the point series' x_label, exactly as a scan's are",
+    },
     "InteractionResult": {
         "sampled": "a Literal[True] marker; constant, so it carries no information",
     },

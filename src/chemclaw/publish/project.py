@@ -905,6 +905,99 @@ def _scan(payload: dict[str, Any]) -> tuple[Subject, Conditions, TheoryLevel, di
     return subject, conditions, level, extra
 
 
+def _rotation(
+    payload: dict[str, Any],
+) -> tuple[Subject, Conditions, TheoryLevel, dict[str, Any]]:
+    """A rotational profile: points as a series, rotamers as conformers, the barrier as a fact.
+
+    Three shapes because the result genuinely has three, and each already exists here: the profile
+    is a `PointFact` series exactly as a scan's is, a rotamer is a geometry with a degeneracy —
+    which is what `ConformerFact` is for — and the barrier plus the lifetime it implies are
+    per-compound numbers a site will query.
+
+    **The barrier is published, and the *count* of rotatable bonds already was.** That asymmetry is
+    what `D-2026-08-25-a-cache-is-not-a-record` built this seam to remove: `rotatable_bonds` is a
+    descriptor and `rotational_barrier` is the science.
+    """
+    smiles = payload.get("smiles")
+    subject = Subject(
+        kind="geometry",
+        members=[_molecule(smiles, payload.get("input_structure_id") or "")],
+        label=smiles or "",
+    )
+    conditions = Conditions(
+        solvent=canonical_solvent(payload.get("solvent")),
+        solvent_model="alpb" if payload.get("solvent") else "",
+        temperature_k=payload.get("temperature_k"),
+    )
+    level = TheoryLevel(
+        method=payload.get("method") or "unknown", family="semiempirical", engine="xtb"
+    )
+    atoms = payload.get("atoms") or []
+    x_label = f"dihedral({','.join(str(atom) for atom in atoms)})"
+    points = [
+        PointFact(
+            series="rotation",
+            ordinal=index,
+            property="point_relative_energy",
+            value=float(point["relative_kcal"]),
+            x_value=point.get("value"),
+            x_unit="degree",
+            x_label=x_label,
+        )
+        for index, point in enumerate(payload.get("points") or [])
+    ]
+    conformers = [
+        ConformerFact(
+            ordinal=index,
+            structure_id=rotamer.get("structure_id") or "",
+            relative_kcal=float(rotamer["relative_kcal"]),
+            population=rotamer.get("population"),
+            degeneracy=int(rotamer.get("degeneracy", 1)),
+        )
+        for index, rotamer in enumerate(payload.get("rotamers") or [])
+        if rotamer.get("relative_kcal") is not None
+    ]
+    barriers = payload.get("barriers") or []
+    # The barrier out of the *most populated* well, which is the one that decides configurational
+    # stability — not the highest point of the profile, and not an average over directions.
+    highest = max(barriers, key=lambda barrier: barrier["forward_kcal"], default=None)
+    lifetime = (highest or {}).get("interconversion") or {}
+    uncertainty = payload.get("uncertainty_kcal")
+    facts = _kept(
+        # The barrier carries the method's uncertainty as the record's own uncertainty, exactly as
+        # a reaction energy does — it is the number a reader has to hold this one against, and the
+        # half-life below is exponential in it.
+        _fact(
+            "rotational_barrier",
+            payload.get("highest_barrier_kcal"),
+            "kcal/mol",
+            uncertainty=uncertainty,
+            uncertainty_kind="reported",
+        ),
+        _fact("interconversion_half_life", lifetime.get("half_life_seconds"), "s"),
+        _fact("rotamer_count", len(conformers), ""),
+        _fact("torsion_symmetry_order", payload.get("symmetry_order"), ""),
+        _fact("torsion_period", payload.get("period_degrees"), "degree"),
+        _text("torsion_label", payload.get("label") or ""),
+        _text("torsion_id", payload.get("torsion_id") or ""),
+        _text("reaction_level", payload.get("level")),
+        # Which energy the barrier is: electronic, or a free energy from a Hessian at the pass. A
+        # reader must never have to infer this from the level.
+        _text("barrier_basis", (highest or {}).get("basis") or ""),
+    )
+    return (
+        subject,
+        conditions,
+        level,
+        {
+            "properties": facts,
+            "points": points,
+            "conformers": conformers,
+        },
+    )
+
+
 def _thermochemistry(
     payload: dict[str, Any],
 ) -> tuple[Subject, Conditions, TheoryLevel, dict[str, Any]]:
@@ -1267,6 +1360,7 @@ def _dft(payload: dict[str, Any]) -> tuple[Subject, Conditions, TheoryLevel, dic
 # what a payload means.
 _Projector = Callable[[dict[str, Any]], tuple[Subject, Conditions, TheoryLevel, dict[str, Any]]]
 
+
 PAYLOAD_PROJECTORS: dict[str, _Projector] = {
     "ReactionEnergyResult": _reaction,
     "SolventComparisonResult": _solvent_screen,
@@ -1278,6 +1372,7 @@ PAYLOAD_PROJECTORS: dict[str, _Projector] = {
     "EnsemblePayload": _ensemble,
     "InteractionResult": _interaction,
     "ScanResult": _scan,
+    "RotationProfile": _rotation,
     "ThermochemistryResult": _thermochemistry,
     "ElectronicProperties": _electronic_properties,
     "SiteReactivityResult": _site_reactivity,

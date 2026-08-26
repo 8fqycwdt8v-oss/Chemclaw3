@@ -243,6 +243,7 @@ while designing the label index, which uses a composite `(source, reaction_id)` 
 inherit it — so the fix is to give the fingerprint tables the same key, and it is a migration plus
 `note_id_for_reaction`. Not urgent while one ELN is enabled anywhere; not detectable at all when
 it happens.
+
 ## 3 — Work that is lost, dropped or invisible
 
 - [ ] **A Hessian is cached and never published, and neither is the thermochemistry built from
@@ -369,6 +370,18 @@ it happens.
       Closing this is one experiment: add `pytest-xdist`, run `-n auto` on a branch, compare the
       job's wall time and its failure set against the serial run on the same commit. If it is not
       a clear win, say so and delete this row.
+
+- [ ] **Two of the four deployables have no chart, so a release changes their bytes and nothing
+      else** — [M]. `D-2026-08-26-a-release-is-a-descriptor-and-a-target` deploys `Chemclaw3_ui`
+      and each `Chemclaw3-mcp` server with `oc set image` against a Deployment an operator created
+      by hand, because neither repository describes itself deployably: the fleet has seven
+      `Containerfile`s and a per-server `networkpolicy.yaml`, the UI has a `Dockerfile` and a
+      compose file for local work. That is the honest minimum — it changes the image and claims
+      nothing else — and it means a release cannot move a port, a probe, a resource limit or an
+      env var for either, and cannot create either from nothing. A chart per repository (or one
+      chart for the fleet, whose seven servers differ only in name, port and token env) closes it.
+      Not written from here, because doing so would be inventing somebody's Service, Route and
+      limits; it wants one real namespace to be written against.
 
 - [ ] **Turn the image scan back on, with its contradiction resolved** — [M].
       Carried forward unchanged from the SBOM work and re-confirmed by the 2026-08-26 CI review:
