@@ -170,13 +170,13 @@ def cancel_on_timeout(session: ClientSession) -> None:
     That second half is the one worth stating, because getting it wrong is much worse than the
     defect this fixes. `open_session` calls this *before* it marks the connection established, so
     anything raised here is classified as `McpConnectFailed` — "the calculation service is not
-    answering". This function reaches into two upstream privates, so an SDK bump that renames either
-    would have turned a lost *cancellation* into a total *outage*, with `tests/test_upstream_surface.py`
-    going red beside it and every calc job failing regardless. Degrading to today's behaviour — no
-    cancellation, the call abandoned locally — is the only acceptable failure mode for an
-    enhancement to an otherwise working session. Found by the fake `ClientSession` in
-    `tests/test_calc_remote.py`, which implements exactly what `open_session` uses and no more; the
-    test fake was right and this function was not.
+    answering". This function reaches into two upstream privates, so an SDK bump renaming either
+    would have turned a lost *cancellation* into a total *outage*, with
+    `tests/test_upstream_surface.py` going red beside it and every calc job failing regardless.
+    Degrading to today's behaviour — no cancellation, the call abandoned locally — is the only
+    acceptable failure mode for an enhancement to an otherwise working session. Found by the fake
+    `ClientSession` in `tests/test_calc_remote.py`, which implements exactly what `open_session`
+    uses and no more; the test fake was right and this function was not.
 
     Args:
         session: A live `ClientSession`, wrapped in place. Called once per session, right after

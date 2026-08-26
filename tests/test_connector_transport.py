@@ -53,8 +53,8 @@ from chemclaw.connectors.registry import (
 )
 from chemclaw.connectors.server import connector_app
 from chemclaw.connectors.transport import SERVED_BY, ConnectorSpec, _stamped
-from chemclaw.core.mcp_session import cancel_on_timeout
 from chemclaw.core.identity_context import reset_current_identity, set_current_identity
+from chemclaw.core.mcp_session import cancel_on_timeout
 from chemclaw.core.session_context import reset_current_session_id, set_current_session_id
 from tests.conftest import _free_port
 
@@ -664,8 +664,8 @@ def test_a_session_that_cannot_be_wrapped_is_left_alone_rather_than_refused() ->
 
     The right failure mode for an enhancement to an otherwise working session is to degrade to the
     behaviour it improves on. This pins that, against a session exposing neither attribute — which
-    is both the upstream-rename case and the shape of the minimal fake in `tests/test_calc_remote.py`
-    that found it.
+    is both the upstream-rename case and the shape of the minimal fake in
+    `tests/test_calc_remote.py` that found it.
     """
 
     class _Bare:
