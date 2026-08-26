@@ -6,6 +6,8 @@ description: >-
   compound falls in, and being clear that a computed barrier informs that call without
   settling it.
 tools:
+  - enumerate_torsions
+  - profile_rotation
   - scan_coordinate
   - compute_thermochemistry
   - find_notes
@@ -25,10 +27,17 @@ A rotational barrier ΔG‡ implies a rate, and the rate implies a half-life:
 
     k = (kB·T/h) · exp(−ΔG‡ / RT)      t½ = ln2 / k
 
-At 25 °C the useful anchors are roughly: **20 kcal/mol → seconds**, **24 → minutes to
-an hour**, **27 → about a day**, **30 → a few years**. Note how steep this is — one
-kcal/mol is a factor of ~5 in half-life, and the method's uncertainty is larger than one
-kcal/mol. That is the central limitation and it belongs in the answer.
+At 25 °C the anchors are: **20 kcal/mol → 51 s**, **24 → 12 hours**, **27 → 80 days**,
+**30 → 35 years**. Note how steep this is — one kcal/mol is a factor of ~5 in half-life,
+and the method's uncertainty is larger than one kcal/mol. That is the central limitation
+and it belongs in the answer.
+
+**Those four numbers are computed, not remembered.** `profile_rotation` does this
+arithmetic — Eyring, in the calculation layer rather than in prose — and reports the
+half-life with the band the uncertainty implies. The table above replaced a prose one that read
+"27 → about a day" and "30 → a few years" — wrong by nearly two orders of magnitude at
+the top of exactly the range where the classification boundary sits. Do not work a
+half-life out by hand; read it off the result.
 
 The conventional classification (ICH M1/Q6-style reasoning, and the widely used LaPlante
 scheme) sorts compounds by that half-life: **freely rotating** (barrier below ~20
@@ -53,10 +62,12 @@ barriers, and `conformational-analysis` says why.
 
 ## The honesty this skill exists to enforce
 
-- **The method's error is bigger than the decision boundary.** A computed 26 kcal/mol
-  with a few kcal/mol of uncertainty spans "hours" to "years" and therefore spans two
-  classes. Give the number, give the range it implies, and say which classifications
-  remain live. Never present a class as determined by the calculation.
+- **The method's error is bigger than the decision boundary.** A computed 26 kcal/mol at
+  ±3 spans **2.2 hours to 6.4 years** — two classes — and the result carries both ends as
+  `half_life_seconds_fastest` and `half_life_seconds_slowest`. Quote the range and say
+  which classifications remain live. Never present a class as determined by the
+  calculation, and never quote the middle value alone: on its own it reads exactly like a
+  measurement.
 - **A computed barrier is not a measurement.** Variable-temperature NMR, chiral HPLC with
   interconversion studies, and racemization kinetics are what establish this. The
   calculation says whether those experiments are worth running and roughly what to
@@ -67,7 +78,10 @@ barriers, and `conformational-analysis` says why.
   matters for whether the compound racemizes during manufacture — and a compound can be
   configurationally stable on the shelf and completely labile at reflux.
 - **One conformer, one coordinate.** A molecule with a second hindered axis, or one where
-  rotation is coupled to a ring flip, is not described by a single torsion scan.
+  rotation is coupled to a ring flip, is not described by a single torsion profile — and
+  the result says so in its `warnings` when another rotatable torsion sits next to the one
+  driven. Pass a `structure_id` from `sample_conformers` when which conformer the barrier
+  is measured in could matter.
 
 ## Presenting it
 

@@ -53,7 +53,12 @@ steps:
       # through `conformers[0]` would need list indexing, which the resolver deliberately does not
       # have (`templates/resolve.py` — a dotted attribute path is addressing, an index is the first
       # step toward an expression language).
-      structure_id: "${steps.search.result.data.ensemble.lowest_structure_id}"
+      #
+      # `data` *is* the ensemble, with no wrapper key in between: a `calc` job's envelope carries
+      # the result model itself, so that `chemclaw.publish` can name the shape it is publishing
+      # (`connectors/calc/workflows.py::job_envelope`). This reference lost a `.ensemble` when that
+      # landed.
+      structure_id: "${steps.search.result.data.lowest_structure_id}"
 
   - id: report
     kind: agent

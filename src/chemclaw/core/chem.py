@@ -67,7 +67,9 @@ each name says which question it answers.
 """
 
 from functools import lru_cache
+from hashlib import sha256
 
+import rdkit
 from rdkit import Chem
 from rdkit.Chem.MolStandardize import rdMolStandardize
 
@@ -382,3 +384,41 @@ def compound_id(smiles: str) -> str:
     graph needed to derive it, only to confirm the note has been merged.
     """
     return f"compound-{stable_hash(require_standard_smiles(smiles), chars=12)}"
+
+
+def torsion_handle(mol: Chem.Mol, bond: tuple[int, int]) -> str:
+    """A content-addressed name for one rotatable bond — the *verifying* half of the handle.
+
+    `Chemclaw3-mcp`'s `servers/chem` mints these; this repository checks them. Both need the same
+    function, and neither may import the other, so this is a deliberate second copy under exactly
+    the arrangement `require_canonical_smiles` already has with that server
+    (`Chemclaw3-mcp:servers/chem/src/chemclaw_mcp_chem/engine/chem.py`): the definition is written
+    twice and pinned by a table of literal handles
+    that both suites assert, so whichever side moves first turns a test red instead of quietly
+    answering differently.
+
+    **Why a handle at all.** A torsion used to be named by four atom indices, and
+    `connectors/calc/compose.py::scan_profile` checked only that they were in range. Measured:
+    `(4, 5)` is the amide C-N of `c1ccc(NC(C)=O)cc1` and an aromatic *ring* bond of
+    `CC(=O)Nc1ccccc1` — the same compound rewritten, really bonded, no error anywhere. So a
+    mis-indexed request came back as a well-formed profile and a plausible barrier for a question
+    nobody asked. The two atoms are named here by their canonical symmetry class instead, which is
+    a property of the molecule rather than of the order it was written in.
+
+    **The RDKit build is in the payload on purpose.** A canonical ranking is a function of that
+    build, so a handle minted under one and presented under another must fail to resolve — failing
+    loudly beats resolving to a different bond, which is the whole failure being removed here. This
+    is `D-2026-08-16`'s `calc_version` rule one level down: a well-formed identifier that matches
+    the wrong thing is worse than one that matches nothing.
+
+    Args:
+        mol: The molecule the bond belongs to.
+        bond: The bond's two atom indices, in either order.
+
+    Returns:
+        `tor_` followed by sixteen hex characters.
+    """
+    ranks = list(Chem.CanonicalRankAtoms(mol, breakTies=False))
+    low, high = sorted((ranks[bond[0]], ranks[bond[1]]))
+    payload = f"{rdkit.__version__}|{Chem.MolToSmiles(mol)}|{low}-{high}"
+    return f"tor_{sha256(payload.encode()).hexdigest()[:16]}"

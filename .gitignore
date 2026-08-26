@@ -16,8 +16,13 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
-lib64/
+# Anchored, unlike the rest of this block: these name setuptools' build artifacts at the
+# repository root. Unanchored, `lib/` matches a directory of that name *anywhere*, and it
+# silently swallowed `deploy/jenkins/lib/` — `git add -A` skipped two committed-looking
+# scripts, the pipelines that call them referenced files no clone had, and the local suite
+# passed because the files were on disk. CI is what noticed.
+/lib/
+/lib64/
 parts/
 sdist/
 var/
