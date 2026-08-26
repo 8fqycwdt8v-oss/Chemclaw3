@@ -725,6 +725,11 @@ class RotationBarrier(BaseModel):
     the time.
     """
 
+    # **`from_rotamer == to_rotamer` is a real and important case, not a bug.** A torsion with one
+    # populated form per period rotates into its own symmetry image over the pass between them —
+    # which is exactly what an amide or a hindered biaryl with a single minimum does, and is the
+    # barrier variable-temperature NMR measures. Reported with equal forward and reverse energies,
+    # because by symmetry it is the same well on both sides.
     from_rotamer: int
     to_rotamer: int
     at_degrees: float

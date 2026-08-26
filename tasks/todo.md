@@ -1,4 +1,4 @@
-# Rotational energies and rotamer barriers — implemented — 2026-08-26
+# Rotational energies and rotamer barriers — implemented, then run for real — 2026-08-26
 
 ## Task
 "Get rotational energies and the barrier energy between rotamers for individual compounds —
@@ -58,3 +58,23 @@ What is deliberately not done: 2D surfaces, transition-state claims, ring torsio
 inside the compute job. And the two open ends, both needing the live lane rather than more code —
 no barrier has been computed against real xTB, and the conformer-dependence warning threshold is
 unset. Both are in the ADR.
+
+
+## Addendum — run against the real GFN2 server (same day)
+
+`tblite` is the GFN2 Hamiltonian as a PyPI wheel and was already installed, so "needs a cluster"
+was wrong. `servers/chem` on 8858 and `servers/calc` on 8860, the handle minted over MCP by the
+real chem server, the profile composed against the real calc server, Postgres in front.
+
+**The chemistry came out right** — n-butane 0.62 kcal/mol gauche gap and 59.1% anti (against this
+tree's own 59.14% CREST anchor), biphenyl twisted 41.8 degrees with a 1.51 kcal/mol perpendicular
+barrier, DMA's amide at 18.10 kcal/mol and a 2.1 s half-life. Released wells at 64.0/296.1 degrees,
+off the 30-degree grid, so the release stage moves a well on real physics.
+
+**Two defects the fake could not express**, both fixed with tests verified by reverting each fix:
+
+1. One well per period reported **no barrier at all** — a zero-length arc when a well's successor
+   is its own image a period away. That is the amide case, which is what the capability is for.
+2. The discontinuity check compared a step against 3 kcal/mol, so it fired on every barrier steep
+   enough to matter and stayed quiet on the freely-rotating ones. Now a ratio to the profile's own
+   typical step, calibrated on three measured smooth profiles.

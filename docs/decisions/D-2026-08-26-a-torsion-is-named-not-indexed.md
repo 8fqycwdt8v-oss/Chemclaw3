@@ -1,8 +1,9 @@
 # D-2026-08-26-a-torsion-is-named-not-indexed — Rotational profiles: the bond is chosen by enumeration, the barrier is a composite
 
-**Status:** accepted · **Date:** 2026-08-26 · Written as a concept and implemented in the same
-change; *What the implementation measured* at the end records what building it changed and the
-defect it uncovered. Sits under
+**Status:** accepted · **Date:** 2026-08-26 · Written as a concept, implemented in the same change,
+then **run against the real GFN2 server**, which found two defects a synthetic surface could not
+express — see *What the live server said* near the end, which also corrects this ADR's own claim
+that doing so needed a cluster. Sits under
 `D-2026-08-16-the-physics-leaves-the-cache-stays` (what may be a server), under
 `D-2026-08-25-the-loop-is-a-composite-not-a-template` (what may be a template), and under
 `D-2026-08-21-a-geometry-is-an-address-not-a-payload` (what crosses a wire).
@@ -368,20 +369,58 @@ unwrapping was deleted on the merge; what is recorded here is the measurement, n
 
 ## Risks, and what is still open
 
-Two things this change does **not** settle, each stated with what would settle it:
+One thing this change does **not** settle. **How far a barrier moves with the conformer it is
+measured in.** `structure_id` carries a chosen conformer in, and the default is a fresh embedding —
+the cheap answer, and the right default. What is not known is the size of the error that default
+costs on a flexible molecule, which is what a warning threshold should be set from rather than from
+taste. It needs a CREST conformer search, and `crest` is a conda-only binary the fleet's image
+cannot carry (`servers/calc/pyproject.toml` states why); so this one waits on a cluster rather than
+on a decision.
 
-1. **Every number above is against a synthetic surface, not against xTB.** The suite drives the
-   real composite through the real cache against `tests/calc_server_fake.py`, whose torsional
-   potential is n-butane-shaped — which proves the wiring, the caching, the well-finding and the
-   arithmetic, and proves nothing about the chemistry. What is missing is a run against
-   `Chemclaw3-mcp`'s `calc` server on biphenyl (~2 kcal/mol) and N,N-dimethylacetamide (~15–18):
-   the live lane, not a unit test. Until then no barrier from this job should be quoted as a
-   number about a real compound.
-2. **How far a barrier moves with the conformer it is measured in.** `structure_id` carries a
-   chosen conformer in, and the default is a fresh embedding — the cheap answer, and the right
-   default. What is not known is the size of the error that default costs on a flexible molecule,
-   which is what a warning threshold should be set from rather than from taste. It needs the same
-   live lane.
+## What the live server said — and the two defects it found
+
+The item that stood here first — *"every number above is against a synthetic surface, not against
+xTB"* — was **wrong about what this environment can do**, and correcting it is the most useful
+thing in this ADR. `tblite` *is* the GFN2 Hamiltonian and ships as a PyPI wheel; only the `xtb` and
+`crest` binaries are conda-only, which costs speed and the conformer search rather than the physics.
+So the run happened: `servers/chem` on 8858 and `servers/calc` on 8860, the handle minted by the
+real chem server over MCP, the profile composed against the real calc server, the Postgres cache in
+front of it.
+
+| | computed | independently known | |
+|---|---|---|---|
+| n-butane, gauche above anti | **0.62 / 0.63** kcal/mol | 0.6–0.9 | ✓ |
+| n-butane, anti population | **59.1 %** | 59.14 % (this tree's own CREST anchor) | ✓ |
+| n-butane, syn barrier at 0° | **5.03** kcal/mol | ~4.5–5.0 | ✓ |
+| n-butane, anti↔gauche barrier | 2.53 | ~3.3–3.6 | GFN2 low |
+| biphenyl, twist angle | **41.8°** | ~44° | ✓ |
+| biphenyl, perpendicular barrier | **1.51** kcal/mol | ~1.6 | ✓ |
+| biphenyl, planar barrier | 2.27 | ~1.4–2.0 | slightly high |
+| DMA, amide rotation | **18.10** kcal/mol, t½ 2.1 s | ΔG‡ ~15–18 | ✓ |
+
+The released wells landed at 64.0° and 296.1°, off the 30° grid the scan used — so releasing the
+constraint measurably moves a well on real physics, which is what that stage exists for and what no
+synthetic test can establish. Biphenyl used its 180° period and cost 14 points instead of 28.
+
+**Two defects the synthetic surface could not express, both fixed here:**
+
+- **A torsion with one well per period reported no barrier at all.** DMA's profile rises to
+  18.1 kcal/mol at 96° and returns to its own symmetry image — one planar amide per 180° — and
+  `barriers` came back **empty**: pairing adjacent wells around a ring produces a zero-length arc
+  when there is only one of them, so the number was computed and then dropped. That is the shape
+  the whole capability exists for, and the fake had three wells and never showed it. A zero-length
+  forward arc now means the whole period, and `from_rotamer == to_rotamer` is a documented, real
+  case rather than a bug.
+- **The discontinuity check fired on exactly the molecules the feature is for.** It compared a step
+  against `xtb_reaction_uncertainty_kcal` (3.0), and any barrier steep enough to matter steps
+  further than that: DMA was warned that a point had "relaxed into a different basin" while it was
+  climbing an ordinary amide barrier. A discontinuity is a step *out of line with its neighbours*,
+  not a large step, so the rule is now a ratio to the profile's own typical step
+  (`xtb_rotation_discontinuity_ratio`), calibrated against three measured smooth profiles whose
+  largest steps were 3.5x, 2.7x and 2.5x their own median.
+
+Both are pinned by tests that fail against the previous behaviour — verified by reverting each fix
+in place and watching the new assertions go red.
 
 ## Consequences
 
