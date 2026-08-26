@@ -756,6 +756,12 @@ _DELIBERATELY_UNREAD: dict[str, dict[str, str]] = {
         ),
         "input_structure_id": "read as the subject member's structure_id, like every other shape",
         "uncertainty_kcal": "published as the barrier fact's own uncertainty, not as a fact",
+        "highest_barrier_kcal": (
+            "a summary of `barriers` for a reader, and deliberately not what is published: the "
+            "`rotational_barrier` fact is the barrier *out of the most populated well*, which is "
+            "what decides configurational stability, and on n-butane that is a different pass "
+            "from the profile's highest"
+        ),
         "atoms": "folded into the point series' x_label, exactly as a scan's are",
     },
     "InteractionResult": {

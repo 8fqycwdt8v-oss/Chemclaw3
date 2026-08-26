@@ -391,12 +391,22 @@ front of it.
 |---|---|---|---|
 | n-butane, gauche above anti | **0.62 / 0.63** kcal/mol | 0.6–0.9 | ✓ |
 | n-butane, anti population | **59.1 %** | 59.14 % (this tree's own CREST anchor) | ✓ |
-| n-butane, syn barrier at 0° | **5.03** kcal/mol | ~4.5–5.0 | ✓ |
-| n-butane, anti↔gauche barrier | 2.53 | ~3.3–3.6 | GFN2 low |
+| n-butane, syn barrier at 0° | **5.15** kcal/mol | ~4.5–5.0 | ✓ |
+| n-butane, anti↔gauche barrier | 2.65 | ~3.3–3.6 | GFN2 low |
 | biphenyl, twist angle | **41.8°** | ~44° | ✓ |
-| biphenyl, perpendicular barrier | **1.51** kcal/mol | ~1.6 | ✓ |
-| biphenyl, planar barrier | 2.27 | ~1.4–2.0 | slightly high |
-| DMA, amide rotation | **18.10** kcal/mol, t½ 2.1 s | ΔG‡ ~15–18 | ✓ |
+| biphenyl, perpendicular barrier | **2.00** kcal/mol | ~1.6 | ✓ |
+| biphenyl, planar barrier | 2.76 | ~1.4–2.0 | slightly high |
+| DMA, amide rotation | **19.91** kcal/mol (ΔE‡), t½ 44 s | ΔG‡ ~15–18 | ✓ |
+
+**Every barrier in that table was re-measured after
+`D-2026-08-26-a-barrier-is-a-difference-between-two-numbers-measured-the-same-way`.** The values
+first recorded here — 5.03, 2.53, 1.51, 2.27, 18.10 — were each understated by the lowest well's
+relaxation energy, because the pass was measured from the profile's lowest *constrained* point and
+the wells from the lowest *released* one. The correction is 0.12 kcal/mol on n-butane and
+1.8 on DMA. The well depths, populations and the twist angle are unaffected: they never involved
+the pass. **The conclusion that GFN2 runs low on n-butane's anti↔gauche barrier survives it** —
+2.65 against 3.3–3.6 is still the method, not the arithmetic, and that was checked rather than
+assumed.
 
 The released wells landed at 64.0° and 296.1°, off the 30° grid the scan used — so releasing the
 constraint measurably moves a well on real physics, which is what that stage exists for and what no

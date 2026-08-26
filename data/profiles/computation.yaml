@@ -82,7 +82,6 @@ tool_names:
   - run_stereoisomer_ranking
   - run_degradant_triage
   - run_conformer_refinement
-  - run_rotational_barrier
   - calculator_trust
   - calculator_outliers
   - report_measurement

@@ -200,7 +200,7 @@ probes:
       This biaryl keeps showing two peaks on chiral HPLC and I need to know whether they are two
       compounds or one. Cc1ccccc1-c1ccccc1C(=O)N(C)C — how hindered is the rotation about the
       bond between the two rings, and would they survive a workup at 60 degrees?
-    expects_tools: [enumerate_torsions, profile_rotation, run_rotational_barrier]
+    expects_tools: [enumerate_torsions, profile_rotation]
     expects_job: true
     forbids_claims:
       - "a barrier, a half-life or an atropisomer class the job did not return"
