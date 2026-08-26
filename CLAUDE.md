@@ -27,11 +27,17 @@ offline**, each phase ADR'd (D-039…D-050) and green under `make lint type test
   declares and `tests/test_helm_chart.py` pins, Temporal self-hosted.
 - **F7** the generic `DataSource` seam (`chemclaw.ingest.sources`) — ELN re-hosted unchanged; a new source is one
   `ingest/sources/<name>/datasource.yaml` folder plus its name in `CHEMCLAW_DATA_SOURCES`, with **zero**
-  core edits (D-120). The first live connector — a Snowflake ELN — went one step further
+  core edits (D-120). The first live connector — a warehouse ELN — went one step further
   (D-2026-08-04-the-schema-is-a-file): `chemclaw.ingest.eln.warehouse` is a generic engine naming no
   table and no column, and the site's schema is a *binding* in the manifest, because a schema nobody
   can see yet cannot be written into Python. Both halves ship, proven against a fake driver; only the
-  tenant is missing. The same argument then carried a **mounted SMB/CIFS file share**
+  tenant is missing. **The database it attaches to is as free as the schema**
+  (D-2026-08-26-the-driver-s-signature-is-the-schema): a `connection:` block is the driver's *own*
+  keyword arguments, checked against its signature offline, so a lakehouse, a Postgres, a DuckDB
+  export and a vector database need no shared model to be their union — the Snowflake driver that
+  model was shaped around never had a tenant and is deleted, the first integration is **Pistachio on
+  Databricks**, and `vector_store_provider` takes a `module:callable` on the same terms.
+  The same argument then carried a **mounted SMB/CIFS file share**
   (`chemclaw.ingest.documents`, D-2026-08-06): the share's folder tree is a binding, the share is
   *mounted* rather than called (no client, no credential, no egress), its documents are indexed as
   cited evidence rather than PR-gated notes, and its AD group becomes an entitlement in the one role

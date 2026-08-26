@@ -24,6 +24,17 @@ rule has been written twice the two copies have disagreed silently. `db` holds t
 the same story: `apply_vector_recall_settings` is the pgvector recall parameters *both* dense
 searches run under.
 
+`connect` is the one way to attach a database this system does **not** own, and it is here for the
+`fulltext` reason rather than the `db` one: three seams reach somebody else's database — the
+warehouse ELN inbound (`ingest`), the result store outbound (`publish`), and the dense half of
+retrieval (`retrieval.vectors`) — `core` is the only package all three already depend on, and each
+time that logic was written separately the copies diverged. It resolves a `module:callable` driver
+late, reads every `*_env` key from the environment at connect time and registers the name for log
+redaction first. **It enumerates no vendor's connection fields**: the driver's signature is the
+schema (`D-2026-08-26-the-driver-s-signature-is-the-schema`), which is what keeps a lakehouse, a
+Postgres and a vector database from having to share one model. It takes the exception class as a
+parameter because Temporal matches non-retryable errors by class *name*, so each seam keeps its own.
+
 `metrics` is the process-wide Prometheus registry, here for the same reason: a scrape targets a
 *process*, and every process in the system has something to count. **It is not the eval layer's
 metrics.** `evals/metric.py` is the `@metric` decorator and registry for scored eval criteria and

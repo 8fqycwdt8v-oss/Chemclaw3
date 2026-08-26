@@ -1,6 +1,6 @@
 """Qdrant as a `VectorStore`, with the vendor client late-bound and never a hard dependency.
 
-The same construction `chemclaw.ingest.eln.warehouse.snowflake` uses, for the same reasons: the
+The same construction `chemclaw.ingest.eln.warehouse.databricks` uses, for the same reasons: the
 client package is imported the moment a connection is first needed rather than at import time, so a
 deployment that never points at Qdrant never loads it, an image that does not carry it still starts,
 and the whole adapter is exercised in CI against a fake client injected through the same seam. The

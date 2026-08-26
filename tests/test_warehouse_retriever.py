@@ -17,6 +17,7 @@ from chemclaw.core.config import settings
 from chemclaw.core.embeddings import embed_texts
 from chemclaw.ingest.eln.records import InMemoryReactionRecordStore, ReactionRecord
 from chemclaw.ingest.eln.warehouse.binding import BindingError
+from chemclaw.ingest.eln.warehouse.databricks import DatabricksVectorDialect
 from chemclaw.ingest.eln.warehouse.retriever import WarehouseVectorRetriever
 from tests import warehouse_fake
 
@@ -101,11 +102,37 @@ def test_the_warehouse_ranks_and_truncates_rather_than_this_process() -> None:
     _retrieve(_binding(), _hits())
     statement, params = _primed().executed[0]
 
-    assert "VECTOR_COSINE_SIMILARITY(REACTION_VECTOR, ?::VECTOR(FLOAT," in statement
+    assert "FAKE_COSINE_SIMILARITY(REACTION_VECTOR, ?) AS CHEMCLAW_SCORE" in statement
     assert "ORDER BY CHEMCLAW_SCORE DESC" in statement
     assert statement.rstrip().endswith("LIMIT ?")
     assert params[-1] == settings.retrieval_top_k
     assert isinstance(params[0], list), "the query embedding is bound, never inlined"
+
+
+def test_the_shipped_driver_s_own_spelling_reaches_the_statement() -> None:
+    """The dialect and the statement builder meet, with the vendor's real function name.
+
+    Every other assertion in this file goes through `FakeVectorDialect`, deliberately: `sql.py`
+    claims to contribute structure and no vendor's words, and a fake dialect is what can prove that.
+    This one closes the other half — that the *shipped* driver's spelling and its parameter
+    encoding survive the trip — so neither claim rests on the other's fixture.
+
+    Databricks binds the query vector as one JSON scalar, because there is no array parameter type;
+    the assertion on `params[0]` is what would catch a regression to a bound list, which fails only
+    at the server.
+    """
+    warehouse_fake.prime(**_hits())
+    assert warehouse_fake.NEXT is not None
+    warehouse_fake.NEXT._vector_dialect = DatabricksVectorDialect()
+    retriever = WarehouseVectorRetriever(binding=_binding(), name="eln-warehouse")
+    asyncio.run(retriever.retrieve("ester formation", {}))
+    statement, params = _primed().executed[0]
+
+    assert "vector_cosine_similarity(REACTION_VECTOR, from_json(?, 'ARRAY<FLOAT>'))" in statement
+    assert "ORDER BY CHEMCLAW_SCORE DESC" in statement
+    assert isinstance(params[0], str) and params[0].startswith("["), (
+        "the vector is bound as a JSON scalar, not inlined and not bound as a list"
+    )
 
 
 def test_a_distance_metric_sorts_the_other_way() -> None:
@@ -113,7 +140,7 @@ def test_a_distance_metric_sorts_the_other_way() -> None:
     _retrieve(_binding(metric="l2"), _hits())
     statement, _ = _primed().executed[0]
 
-    assert "VECTOR_L2_DISTANCE(" in statement
+    assert "FAKE_L2_DISTANCE(" in statement
     assert "ORDER BY CHEMCLAW_SCORE ASC" in statement
 
 
@@ -203,13 +230,13 @@ def test_server_side_embedding_binds_the_query_text_instead_of_a_vector() -> Non
     """When the warehouse owns the model, the text goes over and the vector never does."""
     binding = _binding(
         embedding="server",
-        server_embed_function="SNOWFLAKE.CORTEX.EMBED_TEXT_768",
+        server_embed_function="ai_query",
         server_embed_model="e5-base-v2",
     )
     _retrieve(binding, _hits())
     statement, params = _primed().executed[0]
 
-    assert "SNOWFLAKE.CORTEX.EMBED_TEXT_768(?, ?)" in statement
+    assert "ai_query(?, ?)" in statement
     assert params[0] == "e5-base-v2"
     assert params[1] == "ester formation"
     assert not any(isinstance(p, list) for p in params), "no local embedding was computed"

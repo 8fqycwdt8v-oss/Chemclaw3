@@ -1,4 +1,4 @@
-# `chemclaw.ingest.eln.warehouse` — an ELN whose schema is a file
+# `chemclaw.ingest.eln.warehouse` — an ELN whose schema is a file, on any database
 
 Every other adapter here names its source's fields in Python. `json_adapter` knows a payload has
 `reaction_smiles`; `ord_adapter` knows ORD's shape. That works because both formats were fixed
@@ -20,14 +20,31 @@ ingest: chemclaw.ingest.eln.warehouse.adapter:WarehouseElnAdapter
 retrieve: chemclaw.ingest.eln.warehouse.retriever:WarehouseVectorRetriever
 config:
   binding:
-    connection: {driver: ..., account_env: ..., database: ..., schema: ...}
+    connection: {driver: <module:callable>, <that driver's own keyword arguments>}
     ingest: {entry: ..., related: [...], reaction: {...}, components: [...], provenance: ...}
     vector: {relation: ..., vector_column: ..., content_columns: [...]}
 ```
 
-`src/chemclaw/ingest/sources/eln-snowflake/datasource.yaml` is a complete worked example, exercised
+`src/chemclaw/ingest/sources/eln-databricks/datasource.yaml` is a complete worked example, exercised
 against a fixture row by `tests/test_warehouse_binding.py` so it cannot rot into something that only
 looks right. Copy it, replace every name in it, and enable the source.
+
+## The connection block is the driver's signature
+
+Everything under `connection:` except `driver:` is a keyword argument of the callable `driver:`
+names, in that database's own words — `server_hostname`/`warehouse_id`/`catalog` for a lakehouse,
+`host`/`port`/`sslmode` for a Postgres, `uri`/`collection` for a vector database. There is no shared
+model enumerating them, deliberately: those vocabularies have no union worth writing, and the one
+that was written here (Snowflake's) made the *second* driver redefine three of its fields and refuse
+two more (`D-2026-08-26-the-driver-s-signature-is-the-schema`).
+
+A key ending `_env` holds the **name** of an environment variable, read at connect time. That is the
+only convention the block keeps, because it is a rule about secrets rather than about a vendor.
+
+What checks a key is real is the callable itself: `make datasource-validate` resolves the driver and
+binds the block against its signature, offline, before anything connects. So attaching a database
+this repository ships no driver for is a module exposing a `Warehouse` — see `driver.py` for the
+three methods — plus a manifest naming it, and no edit anywhere in this package.
 
 **Put your copy in your own folder.** `CHEMCLAW_DATA_SOURCES_DIR` is an OS-pathsep search path where
 the earlier entry wins, so a deployment mounts a directory holding its own manifest and never edits
@@ -38,28 +55,27 @@ halves and so validates the binding itself rather than just its keyword name.
 
 | Module | What it holds |
 |---|---|
-| `binding.py` | The document's schema. `extra="forbid"`, validated when a half is built. |
+| `binding.py` | The document's schema. `extra="forbid"` everywhere but `connection:`, which is the driver's. Validated when a half is built. |
 | `expr.py` | Paths (`root.COL`, `charges[0].COL`) and the closed transform vocabulary. |
 | `sql.py` | Statement construction. Checked identifiers written, every value bound. |
 | `driver.py` | The `Warehouse`/`WarehouseCursor`/`VectorDialect` Protocols. No third-party import. |
-| `connect.py` | Late-binds the driver, reads credentials from the named variables. |
+| `connect.py` | The `Warehouse` contract over `chemclaw.core.connect`, under this seam's error. |
 | `adapter.py` | The ingest half — an `ElnAdapter`. |
 | `retriever.py` | The retrieve half — a `SourceRetriever`. |
-| `snowflake.py` | One of the two modules that know a vendor exists. |
-| `databricks.py` | The other: Databricks SQL over Unity Catalog. |
+| `databricks.py` | The one module that knows a vendor exists: Databricks SQL over Unity Catalog. |
 
 ## The similarity search is the driver's, not the engine's
 
 `placeholder` was always on the connection, because parameter style is a dialect fact. The
-similarity *call* is one too, and until D-2026-08-25 it was not treated as one:
-`VECTOR_COSINE_SIMILARITY` and `?::VECTOR(FLOAT, n)` are Snowflake's, and they sat in `sql.py`. Both
-now come from `Warehouse.vector_dialect`, and a driver that offers none cannot serve a `vector:`
-block — it says so, naming itself, rather than emitting SQL another server will reject.
+similarity *call* is one too, and until D-2026-08-25 it was not treated as one: one vendor's
+function names and its `?::VECTOR(FLOAT, n)` cast sat in `sql.py`. Both now come from
+`Warehouse.vector_dialect`, and a driver that offers none cannot serve a `vector:` block — it says
+so, naming itself, rather than emitting SQL another server will reject.
 
-The sharper half is how a query vector is *bound*, not what the function is called. Snowflake has a
-native `VECTOR` type and binds the list. Databricks has no array parameter type at all, so the
-vector goes as one JSON scalar that `from_json(?, 'ARRAY<FLOAT>')` parses server-side — still a
-bound value, which is the invariant `sql.py` exists to hold.
+The sharper half is how a query vector is *bound*, not what the function is called. A warehouse with
+a native vector type binds the list against a cast. Databricks has no array parameter type at all,
+so the vector goes as one JSON scalar that `from_json(?, 'ARRAY<FLOAT>')` parses server-side — still
+a bound value, which is the invariant `sql.py` exists to hold.
 
 ## Two ways to rank, and the corpus size decides
 
@@ -117,9 +133,11 @@ warehouse rows for the rest, and never both for the same reaction.
 `driver.py` is Protocols and nothing else, which is what lets `tests/warehouse_fake.py` exist. It
 serves canned rows and records the exact statement it was sent, so the cursor predicate, the
 child-table fan-out, unit conversion, vocabulary mapping, attribute bounding and similarity ordering
-are all asserted with no tenant, no credentials and no client installed.
+are all asserted with no tenant, no credentials and no client installed. Its dialect is the fake's
+own, so those assertions carry no vendor's spelling; the shipped driver's real one is pinned in
+`tests/test_databricks_warehouse.py` and end to end in `tests/test_warehouse_retriever.py`.
 
-That last point is why `snowflake.py` imports its client inside a function rather than at module
+That last point is why `databricks.py` imports its client inside a function rather than at module
 scope — the one place in this package that departs from the seam's "import whatever you need at the
 top" rule. That rule is about which *process* pays for an import; this is about a package that is
 not installed in any of them.

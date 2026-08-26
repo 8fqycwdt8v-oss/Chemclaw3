@@ -22,31 +22,14 @@ from chemclaw.ingest.eln.warehouse.binding import BindingError, load_binding
 from chemclaw.ingest.eln.warehouse.expr import TransformError, apply_transforms, resolve_path
 
 _SOURCES = Path(__file__).resolve().parents[1] / "src" / "chemclaw" / "ingest" / "sources"
-_MANIFEST = _SOURCES / "eln-snowflake" / "datasource.yaml"
+_MANIFEST = _SOURCES / "eln-databricks" / "datasource.yaml"
 
-# Every shipped warehouse manifest, with a row shaped the way that site's schema is. Both are worked
-# examples a binding author copies, so both are held to the same two checks below rather than only
-# the first — and the *casing* is the point of having two fixtures rather than one: Snowflake
-# upper-cases unquoted identifiers in its result metadata while Spark returns the schema's own case,
-# and every path here is an exact-case lookup on the returned row.
+# Every shipped warehouse manifest, with a row shaped the way that site's schema is. A worked
+# example a binding author copies is held to the same two checks as a hand-written one, and the
+# *casing* matters, because every path here is an exact-case lookup on the row the driver
+# returned: Spark gives back the schema's own case, while a warehouse that folds unquoted
+# identifiers up wants the binding written in capitals.
 _SHIPPED_WAREHOUSES: list[tuple[str, dict[str, Any]]] = [
-    (
-        "eln-snowflake",
-        {
-            "REACTION_ID": "RX-1",
-            "PROJECT_CODE": "PRJ-7",
-            "OBJECTIVE": "drop to 60 C",
-            "PROTOCOL_TEXT": "charge, reflux, work up",
-            "EXPERIMENT_DATE": "2026-05-01",
-            "TEMP_C": "60",
-            "DURATION_MIN": "90",
-            "YIELD_PCT": "82.5",
-            "ASSAY_PCT": "99.1",
-            "RESULT_FLAG": "OK",
-            "FAILURE_NOTE": "",
-            "OPERATOR": "a.chemist",
-        },
-    ),
     (
         "eln-databricks",
         {
@@ -259,12 +242,101 @@ def test_every_path_in_the_shipped_manifest_resolves_against_a_realistic_row(
     assert unresolved == [], f"shipped example paths that resolve to nothing: {unresolved}"
 
 
-def test_the_snowflake_source_is_discovered_but_not_enabled() -> None:
+def test_a_connection_block_may_name_any_driver_s_own_keywords() -> None:
+    """The model declares `driver:` and nothing else, so a vendor's words are the driver's business.
+
+    This used to be a model enumerating one warehouse's connection fields, which meant the *second*
+    driver had to redefine three of them and refuse two more, and the result-sink seam refused to
+    reuse the model at all. Three databases with three unrelated vocabularies load here — that is
+    the whole claim of `D-2026-08-26-the-driver-s-signature-is-the-schema`, and what checks a key is
+    real is the driver's own signature, bound offline by `make datasource-validate`.
+    """
+    for connection in (
+        {"driver": "acme.pg:Postgres", "host": "db", "port": 5432, "sslmode": "require"},
+        {"driver": "acme.lake:Lakehouse", "server_hostname_env": "HOST", "warehouse_id": "w"},
+        {"driver": "acme.vec:Milvus", "uri": "acme://v:9000", "api_key_env": "K", "dim": 1536},
+    ):
+        binding = _ingest()
+        binding["connection"] = connection
+        assert load_binding(binding).connection.driver == connection["driver"]
+
+
+def test_a_pasted_secret_in_an_env_key_is_refused_whatever_the_key_is_called() -> None:
+    """The realistic mistake, caught for a keyword this repository has never seen.
+
+    A `*_env` key holds the NAME of an environment variable. The check cannot be a list of known
+    credential fields — the whole point is that the credential words are the driver's — so it is the
+    suffix that triggers it, and a driver inventing `service_account_key_env` is covered on the day
+    it is written.
+    """
+    binding = _ingest()
+    binding["connection"] = {"driver": "acme.vec:Milvus", "service_account_key_env": "sk-live-1"}
+
+    with pytest.raises(BindingError, match="NAME of an environment variable"):
+        load_binding(binding)
+
+
+def test_a_connection_key_the_driver_will_not_take_is_caught_offline() -> None:
+    """The gate that replaced `extra="forbid"`: bound against the callable, with nothing connected.
+
+    `ConnectionBinding` cannot reject an unknown key, because it does not know what any driver
+    accepts. `make datasource-validate` does know — it resolves the driver and binds the block
+    against its signature — so a `role:` copied over from another vendor's manifest fails in CI
+    rather than as a `TypeError` in a worker on the first sync.
+    """
+    from chemclaw.cli.validate_datasources import _check_connection
+    from chemclaw.ingest.sources.manifest import DataSourceManifest
+
+    manifest = DataSourceManifest(
+        name="eln-elsewhere",
+        description="a warehouse ELN whose binding was copied from another vendor's",
+        ingest="chemclaw.ingest.eln.warehouse.adapter:WarehouseElnAdapter",
+        config={
+            "binding": {
+                "connection": {
+                    "driver": "chemclaw.ingest.eln.warehouse.databricks:DatabricksWarehouse",
+                    "server_hostname_env": "HOST",
+                    "access_token_env": "TOKEN",
+                    "warehouse_id": "w",
+                    "role": "CHEMCLAW_READER",
+                }
+            }
+        },
+    )
+    problems = _check_connection("eln-elsewhere", manifest)
+    assert problems and "role" in problems[0], problems
+
+
+def test_a_key_the_driver_will_not_take_fails_as_this_seams_error_at_connect_time() -> None:
+    """The gate sees the manifests this repository ships; a deployment mounts its own.
+
+    So the signature check runs again where the driver is actually built. The error class is the
+    point rather than the message: `BindingError` is a `ChemclawError`, which `durable/publish`
+    lists as non-retryable *by exact class name*, while the bare `TypeError` a constructor raises is
+    not on that list — a permanently broken mounted manifest would have been retried by every job
+    that touched it. The model this block replaced failed such a key as a `ValidationError`, so
+    keeping it non-retryable is what makes the trade like-for-like.
+    """
+    from chemclaw.core.connect import open_connection
+
+    block = {
+        "driver": "chemclaw.ingest.eln.warehouse.databricks:DatabricksWarehouse",
+        "server_hostname": "adb.example.net",
+        "access_token": "dapi-token",
+        "warehouse_id": "abc123",
+        "role": "CHEMCLAW_READER",
+    }
+    with pytest.raises(BindingError, match="role"):
+        open_connection(block, error=BindingError, what="warehouse connection")
+
+
+@pytest.mark.parametrize("source", ["eln-databricks", "pistachio"])
+def test_a_warehouse_source_is_discovered_but_not_enabled(source: str) -> None:
     """Shipping a source is not attaching it: a deployment enables what it has validated (D-018)."""
     from chemclaw.ingest.sources.registry import discovered
 
-    assert "eln-snowflake" in discovered()
-    assert "eln-snowflake" not in settings.data_source_list
+    assert source in discovered()
+    assert source not in settings.data_source_list
 
 
 def test_construct_validation_catches_a_binding_that_binding_alone_cannot(
@@ -424,6 +496,6 @@ def test_the_server_embed_function_is_checked_like_every_other_interpolated_name
     with pytest.raises(BindingError, match="server embed function"):
         load_binding(_with("CAST(1 AS INT))=1 OR (1"))
 
-    assert load_binding(_with("SNOWFLAKE.CORTEX.EMBED_TEXT_768")).vector is not None, (
+    assert load_binding(_with("main.ml.embed_text")).vector is not None, (
         "a qualified function name is still accepted"
     )

@@ -10,7 +10,7 @@ without any caller knowing. Decision record:
 | `memory.py` | the in-memory reference — exact cosine, what the tests measure against | no |
 | `qdrant.py` | the Qdrant adapter; the vendor client is late-bound | only when called |
 | `databricks.py` | the Mosaic AI Vector Search adapter; same late binding | only when called |
-| `registry.py` | `vector_store_provider` → an implementation, imported inside its own branch | no |
+| `registry.py` | `vector_store_provider` → an implementation: a shipped name or a `module:callable`, resolved on first use | no |
 
 That last column is the layout, not an accident — the same rule
 `ingest/documents/retriever.py` follows about document parsers, and the same construction
@@ -90,8 +90,17 @@ hang a `source` payload on).
 
 ## Adding another store
 
-One module implementing three methods, one name in `registry.py`, one value in the
-`vector_store_provider` literal. No core edit, and nothing else in the tree learns the name.
+**Inside this repository:** one module implementing three methods, one row in `registry.py`'s
+`SHIPPED`, one word in `core.config.store._SHIPPED_VECTOR_STORES`. (Two declarations because `core`
+imports no sibling; `tests/test_vector_store.py` holds them in step.)
+
+**From outside it — a site's own Milvus, Weaviate, LanceDB, pgvector server:** one module, and
+`CHEMCLAW_VECTOR_STORE_PROVIDER=acme.vectors:MilvusVectorStore`. **No edit here at all.** A vector
+database is a database this system does not own, so it attaches the way the warehouse ELN and the
+result store do — late-bound through `chemclaw.core.connect`, so selecting one never imports its
+client anywhere else (`D-2026-08-26-the-driver-s-signature-is-the-schema`). The adapter takes no
+constructor arguments and reads `vector_store_url`, `vector_store_api_key`, the collection names and
+the timeout from `settings`, exactly as the shipped two do.
 
 Two things a second adapter is easy to get wrong, both silent: **the score must be the cosine this
 seam's contract promises**, whatever the vendor ranks by — check the vendor's own definition rather

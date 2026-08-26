@@ -6,15 +6,19 @@ cross-section validators; fields, env names and defaults are exactly as they wer
 sections shared a single module (D-072 mixins, split per D-156).
 """
 
-from typing import Literal
-
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings
 
 # Qdrant's own default, and the value `vector_store_url` ships with. Named because the
 # addressability validator has to compare against it: the field is non-empty by default, so
 # "is it set" cannot be an emptiness test for any provider that is not Qdrant.
 _QDRANT_DEFAULT_URL = "http://localhost:6333"
+
+# The vector databases this repository ships an adapter for. Names rather than references, because
+# `core` imports no sibling and the mapping onto `module:callable` belongs beside the adapters, in
+# `retrieval.vectors.registry`. `tests/test_vector_store.py` holds the two declarations in step — a
+# name this setting accepts and the registry cannot resolve would fail at the first search.
+_SHIPPED_VECTOR_STORES = ("qdrant", "databricks")
 
 
 class StoreSettings(BaseSettings):
@@ -145,7 +149,13 @@ class StoreSettings(BaseSettings):
     #
     # Adding a provider is an adapter module plus a name here — the shape `embedding_provider` and
     # `llm_provider` already have.
-    vector_store_provider: Literal["pgvector", "qdrant", "databricks"] = "pgvector"
+    # **A shipped name, or `module:callable` naming any other adapter.** Attaching a vector
+    # database this repository has never heard of — Milvus, Weaviate, LanceDB, pgvector on somebody
+    # else's server — is one module implementing `retrieval.vectors.base.VectorStore` plus this
+    # string, with no branch added to any registry and no core edit. That is the same rule the
+    # database seam runs on (`D-2026-08-26-the-driver-s-signature-is-the-schema`): a vector database
+    # is a database this system does not own, attached the same way as any other.
+    vector_store_provider: str = "pgvector"
     # Where the external store is. Unused by `pgvector`, which reads `postgres_dsn` like every
     # other store here.
     vector_store_url: str = _QDRANT_DEFAULT_URL
@@ -178,6 +188,26 @@ class StoreSettings(BaseSettings):
     # eligibility set is a wrong answer that reads as a thin corpus.
     vector_store_max_scope_keys: int = Field(default=10_000, gt=0)
 
+    @field_validator("vector_store_provider")
+    @classmethod
+    def _vector_store_is_resolvable(cls, value: str) -> str:
+        """A shipped name, or a `module:callable` — never a name nothing can resolve.
+
+        The field used to be a `Literal`, which caught a typo and also made a fourth vector database
+        a change to this file. What replaced it still catches the typo: a bare word that is not one
+        of the shipped adapters cannot name anything, because a custom adapter is addressed by its
+        import path. The path itself is resolved when the store is first built, by the same
+        late-binding `core.connect` gives every other database driver, so selecting a provider still
+        does not import its client.
+        """
+        if value == "pgvector" or value in _SHIPPED_VECTOR_STORES or ":" in value:
+            return value
+        raise ValueError(
+            f"vector_store_provider={value!r} names neither a shipped adapter "
+            f"('pgvector', {', '.join(repr(n) for n in _SHIPPED_VECTOR_STORES)}) nor a "
+            "'module:callable' building one (e.g. 'acme.vectors:MilvusVectorStore')"
+        )
+
     @model_validator(mode="after")
     def _external_vector_store_is_addressable(self) -> "StoreSettings":
         """An external provider with no URL would fail on the first search, not at startup.
@@ -190,17 +220,24 @@ class StoreSettings(BaseSettings):
         if self.vector_store_provider != "pgvector" and not self.vector_store_url:
             raise ValueError(
                 f"vector_store_provider={self.vector_store_provider!r} needs `vector_store_url` "
-                "to point at the store; only 'pgvector' reads `postgres_dsn` instead"
+                "to point at the store; only 'pgvector' reads `postgres_dsn` instead. A custom "
+                "adapter is held to the same rule: this is the one address the seam exposes, and a "
+                "store selected without it fails on the first search rather than at startup"
             )
         if (
-            self.vector_store_provider == "databricks"
+            self.vector_store_provider not in ("pgvector", "qdrant")
             and self.vector_store_url == _QDRANT_DEFAULT_URL
         ):
+            # **Every provider but Qdrant's own, not just the shipped second one.** The emptiness
+            # check above cannot catch this: the field has a non-empty default, so a deployment that
+            # selected another store and forgot its address passes startup and fails inside a
+            # worker. This used to name `databricks` literally, which reopened the same hole the
+            # moment the provider became any `module:callable` — a site's own adapter would have
+            # inherited Qdrant's localhost default and validated clean.
             raise ValueError(
-                "vector_store_provider='databricks' still has the shipped default "
-                f"vector_store_url={_QDRANT_DEFAULT_URL!r}, which is Qdrant's. The emptiness check "
-                "above cannot catch this, because the field has a non-empty default; set the "
-                "workspace URL"
+                f"vector_store_provider={self.vector_store_provider!r} still has the shipped "
+                f"default vector_store_url={_QDRANT_DEFAULT_URL!r}, which is Qdrant's; set the "
+                "address of the store you selected"
             )
         if self.vector_store_provider == "databricks" and not self.vector_store_endpoint_name:
             raise ValueError(

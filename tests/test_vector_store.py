@@ -1,7 +1,7 @@
 """The vector-store seam: the reference store, the Qdrant adapter, and provider selection.
 
 No database and no Qdrant server. The adapter is exercised against a fake client injected through
-its own seam — the construction `tests/test_warehouse_retriever.py` uses for Snowflake, and the
+its own seam — the construction `tests/test_warehouse_retriever.py` uses for a warehouse, and the
 reason `qdrant-client` is not a dependency of this repository.
 
 What is *not* covered here, stated rather than implied: nothing has run against a real Qdrant. The
@@ -34,6 +34,15 @@ from chemclaw.retrieval.vectors.base import (
 from chemclaw.retrieval.vectors.memory import InMemoryVectorStore
 from chemclaw.retrieval.vectors.qdrant import QdrantVectorStore
 from chemclaw.retrieval.vectors.registry import default_vector_store
+
+
+class _StubVectorStore(InMemoryVectorStore):
+    """A vector database this repository ships no adapter for, standing in for a site's own.
+
+    Deliberately nothing but a name in a module the registry has never heard of: what makes it
+    reachable is `vector_store_provider` naming it, and nothing else anywhere.
+    """
+
 
 COLLECTION = "chunks"
 
@@ -414,6 +423,22 @@ def test_databricks_will_not_accept_the_shipped_qdrant_url(
         StoreSettings(vector_store_provider="databricks", vector_store_endpoint_name="ep")
 
 
+def test_no_provider_but_qdrant_may_keep_qdrants_default_url() -> None:
+    """The check above cannot be keyed to one vendor's name once any adapter can be selected.
+
+    It was, and opening the provider to a `module:callable` reopened exactly the hole it exists to
+    close: a site's own store selected without `vector_store_url` inherits Qdrant's
+    `http://localhost:6333`, validates clean, and answers every search from a server it was never
+    pointed at.
+    """
+    from chemclaw.core.config.store import StoreSettings
+
+    with pytest.raises(ValueError, match="shipped default"):
+        StoreSettings(vector_store_provider="acme.vectors:MilvusVectorStore")
+    # Qdrant is the one provider that default belongs to, so it stays legitimate there.
+    assert StoreSettings(vector_store_provider="qdrant").vector_store_url
+
+
 def test_databricks_needs_the_endpoint_that_serves_its_index(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -431,6 +456,59 @@ def test_databricks_needs_the_endpoint_that_serves_its_index(
             vector_store_url="https://example.cloud.databricks.com",
             vector_store_endpoint_name="",
         )
+
+
+def test_a_vector_database_this_repository_never_heard_of_attaches_with_no_core_edit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The generality claim, exercised: `module:callable` is a provider too.
+
+    A vector database is a database this system does not own, so it attaches the way the warehouse
+    ELN and the result store do — late-bound through `chemclaw.core.connect`
+    (`D-2026-08-26-the-driver-s-signature-is-the-schema`). Before this, the provider was a closed
+    `Literal` and an `if`-chain, so a fourth store — Milvus, Weaviate, LanceDB, somebody else's
+    pgvector server — was two edits inside `core` before a line of adapter existed.
+
+    The adapter below is this test's own module attribute, which is exactly what a site's would be
+    to this repository: a name it has never seen.
+    """
+    from chemclaw.core.config.store import StoreSettings
+
+    reference = f"{__name__}:_StubVectorStore"
+    # Validated as a setting first: the config must accept the reference without resolving it,
+    # because resolving at startup would import a client in every process that reads settings.
+    assert (
+        StoreSettings(
+            vector_store_provider=reference, vector_store_url="acme://vectors:9000"
+        ).vector_store_provider
+        == reference
+    )
+    monkeypatch.setattr(settings, "vector_store_provider", reference)
+    assert isinstance(default_vector_store(), _StubVectorStore)
+
+
+def test_a_provider_that_is_neither_shipped_nor_a_reference_is_refused() -> None:
+    """Dropping the `Literal` must not drop the typo check that came with it."""
+    from chemclaw.core.config.store import StoreSettings
+
+    with pytest.raises(ValueError, match="module:callable"):
+        StoreSettings(vector_store_provider="qdrnat", vector_store_url="http://localhost:6333")
+
+
+def test_every_shipped_provider_name_resolves(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Two declarations, held in step: `core` names the words, `retrieval` maps them.
+
+    `core.config.store` accepts the shipped names without knowing what they resolve to, because
+    `core` imports no sibling. A name accepted there and missing from the registry would fail at the
+    first search — in a worker, on a question, rather than here.
+    """
+    from chemclaw.core.config.store import _SHIPPED_VECTOR_STORES
+    from chemclaw.retrieval.vectors.registry import SHIPPED
+
+    assert set(_SHIPPED_VECTOR_STORES) == set(SHIPPED)
+    for name, reference in SHIPPED.items():
+        monkeypatch.setattr(settings, "vector_store_provider", name)
+        assert isinstance(default_vector_store(), VectorStore), reference
 
 
 def test_the_pgvector_width_check_is_inert_for_an_external_store(
