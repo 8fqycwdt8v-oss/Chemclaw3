@@ -177,31 +177,21 @@ jobs:
     inline_wait_seconds: 20
     summary: Rotational profile about one named bond — its rotamers, and the barriers between them.
     description: >-
-      The question behind "which rotamer is it in, and can the two be separated?". Drives one
-      torsion through a full period, releases each well from its constraint into a real rotamer with
-      its own structure_id, resolves each maximum finely, and reports the barrier between each
-      adjacent pair **in both directions** with the half-life it implies.
+      Answers "which rotamer is it in, and can the two be separated?". Drives one torsion through a
+      full period, releases each well into a real rotamer with its own structure_id, resolves each
+      maximum finely, and reports the barrier between each adjacent pair in both directions with the
+      half-life it implies.
 
-      **Name the bond with `chem`'s enumerate_torsions first, and pass its entry through
-      unchanged.** Do not work the atom indices out. An index is not a name: (4, 5) is the amide C-N
-      of `c1ccc(NC(C)=O)cc1` and an aromatic *ring* bond of `CC(=O)Nc1ccccc1` — the same compound
-      written two ways — so a hand-assembled torsion returns a well-formed profile and a plausible
-      barrier for a different bond. The handle is checked against the molecule here and a mismatch
-      is refused, which is the only reason that failure is loud.
+      **Take `torsion` from `chem`'s enumerate_torsions and pass the entry through unchanged; never
+      work the atom indices out.** An index is not a name — the same pair names an amide C-N in one
+      way of writing a compound and a ring bond in another — so a hand-assembled torsion answers
+      about a different bond. Say back which one you chose, by its label, before spending anything;
+      if the chemist's words match several, ask.
 
-      If the chemist named a bond in words and exactly one enumerated torsion matches, say back
-      which one you chose by its label before spending anything. If several match, ask. A guessed
-      torsion is the one failure here that looks exactly like an answer.
-
-      `level="quick"` ranks the rotamers by electronic energy; `standard` gives each a Hessian, so
-      the populations are free-energy weighted; `thorough` also takes one at each pass, turning the
-      barrier into a ΔG‡. Every barrier carries its half-life **as a range**, because Eyring is
-      exponential: ±3 kcal/mol is about five orders of magnitude in lifetime, which spans two
-      atropisomer classes. Quote the range, not the middle.
-
-      Pass a `structure_id` to profile a conformer a search already found — a barrier depends on
-      which conformer it is measured in. Ring bonds are refused: driving one is a ring pucker, and
-      that question is `sample_conformers`.
+      `quick` ranks rotamers by electronic energy, `standard` by free energy (a Hessian each),
+      `thorough` adds one at each pass for a ΔG‡. Quote the half-life as the **range** the result
+      carries, never its middle: Eyring is exponential, so the uncertainty spans two atropisomer
+      classes. Ring bonds are refused — that question is sample_conformers.
     params_model: chemclaw.connectors.calc.specs:RotationJobSpec
     precondition: chemclaw.science.calc.solvents:require_supported_solvents
 

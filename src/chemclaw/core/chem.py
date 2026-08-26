@@ -392,7 +392,8 @@ def torsion_handle(mol: Chem.Mol, bond: tuple[int, int]) -> str:
     `Chemclaw3-mcp`'s `servers/chem` mints these; this repository checks them. Both need the same
     function, and neither may import the other, so this is a deliberate second copy under exactly
     the arrangement `require_canonical_smiles` already has with that server
-    (`engine/chem.py`): the definition is written twice and pinned by a table of literal handles
+    (`Chemclaw3-mcp:servers/chem/src/chemclaw_mcp_chem/engine/chem.py`): the definition is written
+    twice and pinned by a table of literal handles
     that both suites assert, so whichever side moves first turns a test red instead of quietly
     answering differently.
 

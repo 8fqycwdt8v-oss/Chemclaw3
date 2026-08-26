@@ -972,3 +972,23 @@ log lines and reporting success. Two protections that look like one, where the s
 turns the other off. **When strengthening a type, grep for every `isinstance` on the old one before
 touching anything** — the places that check a type are exactly the places that will stop seeing the
 value.
+
+**Adding an agent-callable tool touches six declarations, and none of them is in the code you
+wrote.** A rotational-profile job passed its own tests, `mypy`, `ruff` and four validators, and the
+full suite then failed **eight** ways — every one a guard on a declaration rather than on behaviour:
+`.env.example` mirrors every setting, `test_context_floor` caps the static prompt prefix *and*
+refuses a single tool over 900 tokens, `test_probe_coverage` wants an eval probe per agent-callable
+tool, `test_solvents` pins the count of solvent-taking jobs, `test_templates` pins which templates
+cannot be argument-checked, `test_docstring_paths` resolves every backticked path, and a profile's
+`tool_names` is an **allow-list** — so the job was reachable and unusable until it was named there.
+Two of those were load-bearing: the tool arrived at 1,499 tokens because pydantic publishes a
+model's docstring as its JSON-schema `description`, so a nested pair of well-documented specs is
+bound to the model on every turn; and the allow-list would have shipped a capability nothing could
+call.
+
+*Rule for myself: the moment a new tool, job or template exists, run the declaration guards by name
+— `pytest tests/test_context_floor.py tests/test_probe_coverage.py tests/test_solvents.py
+tests/test_templates.py tests/test_config.py tests/test_docstring_paths.py` — and grep
+`data/profiles/` for the allow-list. Do not wait for the ten-minute sweep to find them, and never
+call a change verified on a targeted run: in this tree the interesting tests are the ones guarding
+what a change **declares**, not what it computes.*

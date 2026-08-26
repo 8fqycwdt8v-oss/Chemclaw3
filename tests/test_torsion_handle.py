@@ -2,7 +2,7 @@
 
 `servers/chem` mints handles; this repository checks them, and neither may import the other. So the
 definition is written twice, and this table is what makes a divergence *detectable*: the same
-literals are asserted in `servers/chem/tests/test_torsion_handle_contract.py` there, so whichever
+literals are asserted in that repository's own `test_torsion_handle_contract.py`, so whichever
 side moves first — an RDKit bump, a change to how the class pair is built — turns a test red
 instead of quietly answering differently. It is the arrangement `require_canonical_smiles` already
 has with that server, applied to the one other value that crosses between them.
