@@ -316,8 +316,9 @@ def validate_connectors() -> list[str]:
     problems.extend(_connector_urls_problems(discovered_names))
     try:
         # Two properties of the enabled *set*, not of any one manifest: `connectors_enabled` naming
-        # a bundle that exists (rule 1), and no two enabled connectors claiming one job name (rule
-        # 4).
+        # a bundle that exists (rule 1), and no two enabled connectors claiming one tool name (rule
+        # 4) — a job against another job, or against another bundle's *endpoint* tool, which is the
+        # pairing that let `props`' `compare_solvents` and `calc`'s silently absorb each other.
         names = [manifest.name for manifest in enabled()]
         job_tools()
     except ChemclawError as exc:

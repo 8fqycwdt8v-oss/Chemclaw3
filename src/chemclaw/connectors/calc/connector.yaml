@@ -333,6 +333,32 @@ jobs:
     precondition: chemclaw.science.calc.solvents:require_supported_solvents
     expensive: true
 
+  - name: rank_species_across_solvents
+    workflow: CalcJobWorkflow
+    inline_wait_seconds: 20
+    summary: Rank the same tautomers, microstates or stereoisomers in several solvents at once.
+    description: >-
+      `rank_species` answers in one medium, so "which tautomer dominates in water against toluene"
+      was a job per solvent and a comparison assembled by hand. This runs the ranking in each
+      solvent plus the gas phase and reports how it moves — the shift, rather than absolute
+      distributions each carrying the method's full error. It is what implicit solvation is best at:
+      every medium ranks the same species, so the continuum model's systematic error largely
+      cancels in the relative energies.
+
+      **Lead with `dominance_changes`.** A ranking that reorders between media is a different claim
+      from one that merely shifts: a pKa, a Fukui ranking and a dipole all describe whichever form
+      was drawn, so a solvent that changes the major form changes what all of them are about. Read
+      `largest_swing_kcal` against `uncertainty_kcal` — inside it, the media were not distinguished.
+      In `responses`, read the energy swing rather than the population swing, which looks large near
+      50% and small at the ends however far the energy moved.
+
+      **Enumerate first; this does not** — use `chem`'s enumerate_tautomers,
+      enumerate_protonation_states or enumerate_stereoisomers. A form not in `species` was not
+      ranked in any medium. Cost is species x media, checked before the first calculation.
+    params_model: chemclaw.connectors.calc.specs:SpeciesSolventScreenJobSpec
+    precondition: chemclaw.science.calc.solvents:require_supported_solvents
+    expensive: true
+
   - name: survey_bond_strengths
     workflow: CalcJobWorkflow
     inline_wait_seconds: 20

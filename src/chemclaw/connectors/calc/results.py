@@ -29,6 +29,7 @@ from chemclaw.science.calc.models import (
     ScanResult,
     SolventComparisonResult,
     SpeciesDistribution,
+    SpeciesSolventComparison,
 )
 
 
@@ -55,12 +56,14 @@ class XtbJobResult(BaseModel):
     rotation: RotationProfile | None = None
     ensemble: ConformerEnsemble | None = None
     interaction: InteractionResult | None = None
-    # The four multi-step results. Additive and defaulted like `calc_refs` above and for the same
+    # The five multi-step results. Additive and defaulted like `calc_refs` above and for the same
     # reason: this crosses the Temporal wire and histories are in flight, so a result decoded from
     # an older one simply has none of them.
     refined: RefinedEnsemble | None = None
     averaged: EnsembleProperty | None = None
     distribution: SpeciesDistribution | None = None
+    # The distribution fanned out over media (D-2026-08-26-a-solvent-is-an-argument-not-a-job).
+    species_solvents: SpeciesSolventComparison | None = None
     bonds: BondDissociationSurvey | None = None
 
     def outcome(self) -> BaseModel:

@@ -226,3 +226,32 @@ probes:
       60 degrees are different questions and the second is the one that was asked. Credit more for
       saying plainly what would settle it: variable-temperature NMR or chiral HPLC with an
       interconversion study, which the calculation informs and does not replace.
+
+  # ------------------------------------------------- the species ranking, fanned out over media
+  - id: du-08
+    section: 6
+    persona: lab_leader
+    bucket: A
+    question: >-
+      This compound is drawn as the keto tautomer but the assay runs in water and the crystallisation
+      is out of toluene. Does the dominant form change between the two? Keto is CC(=O)CC(C)=O and the
+      enol is CC(O)=CC(C)=O.
+    expects_tools: [rank_species_across_solvents, rank_species, enumerate_tautomers]
+    expects_job: true
+    forbids_claims:
+      - "a population, relative energy or swing the job did not return"
+      - "that the enumeration is complete when only the two given forms were ranked"
+      - "a solvent difference smaller than the reported uncertainty, stated as a real difference"
+    direction: >-
+      The right move is one screen across both media rather than two rankings the chemist has to
+      compare, and this is the question the fan-out was built for. Grade four things. First, that it
+      ran rather than recalling that beta-diketones enolise — the whole point is the number in *these*
+      two solvents. Second, that the answer leads with whether the dominant form reordered: if it did,
+      every other property either of them would compute — a pKa, a Fukui ranking, a dipole — is about
+      a different species in the two media, and an answer that reports populations without that
+      sentence has buried the finding. Third, the uncertainty: the result carries the largest swing
+      and the method's uncertainty beside it, and a swing inside that band means the calculation did
+      not distinguish the media, which the answer must say rather than ranking anyway. Fourth, the
+      universe: only the two forms given were ranked, so the distribution describes those two — an
+      answer that implies it covered every tautomer of the compound, without enumerating first, is
+      confident about a set nobody computed.

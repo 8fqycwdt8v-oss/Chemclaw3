@@ -212,6 +212,13 @@ _DEFINITIONS: tuple[PropertyDefinition, ...] = (
         "uncertainty before reading a ranking.",
     ),
     _d(
+        "solvent_swing",
+        "energy_difference",
+        "kcal/mol",
+        "Widest range any one species' relative energy shows across the media a screen compared. "
+        "Compare against the method uncertainty before reading a solvent effect.",
+    ),
+    _d(
         "max_relative_energy",
         "energy_difference",
         "kcal/mol",
@@ -403,6 +410,13 @@ _DEFINITIONS: tuple[PropertyDefinition, ...] = (
         "Boltzmann population of an ensemble member at the stated temperature. Meaningless "
         "without that temperature.",
         scope="conformer",
+    ),
+    _d(
+        "media_compared",
+        "count",
+        "",
+        "How many media a screen ranked in, the gas-phase reference included.",
+        kind="integer",
     ),
     _d(
         "refined_population_covered",
