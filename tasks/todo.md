@@ -1,74 +1,77 @@
-# Rotational energies and rotamer barriers — implemented, then run for real — 2026-08-26
+# Task: integrate CREST fully (pKa on ensembles, and every other workflow it earns)
 
-**One control was rewritten rather than dropped, and it is the finding worth repeating.**
-`test_the_bundle_has_no_way_to_write_the_note_itself` asserted `not hasattr(qm_knowledge,
-"write_knowledge_node")` — a guard named after a single module, which would have gone *dark* the
-moment that module was deleted while still reading, in review, as a control. That is the
-`map_to_hpc_identity` shape this repo already has a name for. It is now an AST walk over every
-bundle asserting none imports `kg.pr_gate` or names `propose_note`: strictly stronger, and it does
-not depend on which bundles exist.
+Measured starting point (crest 3.0.2 + xtb installed from conda-forge in this session, driven
+through the shipped code):
 
-**Two pieces of genuinely dead code fell out of the removal**, both kept alive only by tests that
-called them directly: `Structure.as_xyz` (its one caller was the launcher) and its test.
+- `search_conformer_ensemble(search="deprotomers")` **crashes** — `_from_xyz` reuses the template's
+  13 elements for a 12-atom anion.
+- `search_conformer_ensemble(search="protomers")` **finds no file** — CREST writes `protonated.xyz`,
+  the code looks for `protomers.xyz`.
+- both would carry the **neutral charge** on a charged species, so any downstream relax runs the
+  wrong electron count.
+- `tautomers` works but every member is labelled with the *input* SMILES.
 
-**What the validators caught that grep did not**: `make prose-validate` and `make skill-validate`
-found five live claims left over — two skills still declaring `compute_dft_energy` in their
-frontmatter, and three backticked paths naming deleted files. Worth running the whole validator set,
-not just `lint type test`.
+So "CREST is integrated" was true of `conformers`/`complex` only, and untestable while the binary
+was absent from both images.
 
-## What building it found
+## Chemclaw3-mcp (`servers/calc`) — primitives
 
-1. **A stale atom index is not an error.** `(4, 5)` is the amide C–N of `c1ccc(NC(C)=O)cc1` and an
-   aromatic *ring* bond of `CC(=O)Nc1ccccc1`. `scan_profile` bounds-checks and nothing else.
-2. **The rotatable-bond descriptor is not a torsion list.** 0 for toluene, p-xylene and
-   *tert*-butylbenzene; 1 for acetanilide, and that one is not the amide.
-3. **Symmetry classes match automorphism orbits** on 21 molecules — 0 false merges. Shipped as a
-   test, not as a claim.
-4. **`skills/atropisomer-assessment`'s half-life anchors were wrong by two orders of magnitude.**
-   Its prose said "27 → about a day"; 27 kcal/mol is 80 days, and 30 is 35 years, not "a few".
-   The error was largest exactly at the ICH class boundary the skill exists to decide.
-5. **Every `calc` durable job was publishing nothing.** `CalcJobWorkflow` sends
-   `payload_kind=type(result).__name__` and its result is the `XtbJobResult` *envelope*, so
-   `projector_for("calc.compute_reaction_energy", "XtbJobResult")` was `None` — while
-   `tests/test_publish_reaches_the_hooks.py` was green asserting a `payload_kind` production has
-   never sent. Fixed at the projection boundary (`unwrap_envelope`), not by re-shaping what the
-   chat sees.
+- [x] A1 `crest_cli`: parse elements from the ensemble file (CREST presorts H to the end and
+      changes the atom count), `protonated.xyz`, per-search charge shift (+1/-1), drop the
+      template SMILES on constitution-changing searches.
+- [x] A2 perceive each member's SMILES from its geometry (`rdDetermineBonds`), best-effort — a
+      deprotomer ensemble is only useful if you can see *which site* came off. Never invent: on
+      failure the member carries no SMILES.
+- [x] A3 tests: fixture-driven parse tests (no binary) + a crest-gated end-to-end test.
+- [x] A4 ship `crest`+`xtb` in the image (micromamba/conda-forge), so the tools stop refusing.
+- [x] A5 ADR + README + MODULES + manifest.
+
+## Chemclaw3 — the composite
+
+- [x] B1 `compose.microstate_pka`: CREST deprotomer/protomer ensemble + conformer ensembles,
+      Boltzmann-weighted ΔG, calibrated → pKa. Reuses `conformer_ensemble` / `relax_to_minimum`.
+- [x] B2 new `PkaEnsembleJobSpec` + dispatch + `EnsemblePkaResult` + `predict_pka_ensemble` job.
+- [ ] B3 **fit the calibration here** over a reference set and report Spearman/R²/RMSE. A new
+      `calc_version`, so the existing `predict_pka` ledger is untouched.
+- [x] B4 ADR + BACKLOG/DEFERRED + connector.yaml.
+
+## Explicitly not doing (no caller — Rule of Three)
+
+QCG explicit solvation, `--msreact`, `--entropy` as a runtype, `--mecp`. DEFERRED rows with triggers.
 
 ## Review
 
-The three pieces, and why each is where it is:
+**What shipped, and what it cost.**
 
-- **`enumerate_torsions` on `chem`** (so, `Chemclaw3-mcp`): a pure graph operation, the sixth in a
-  family of five, under the house rule *enumerate, then compute — and never the reverse*. It mints
-  a handle from the canonical symmetry classes plus the RDKit build, so a rewritten SMILES keeps the
-  name and a toolchain bump breaks it loudly.
-- **`profile_rotation` here**: its key would name the wells it settles on, so `D-2026-08-16` says
-  it is not shippable as a tool; it loops, so `D-2026-08-25-the-loop-is-a-composite-not-a-template`
-  says it is not a template. Every point it computes is a separately-keyed primitive.
-- **Eyring beside RRHO**: arithmetic over a result, not a calculation — the same rule that kept the
-  RRHO half here when the physics left.
+`Chemclaw3-mcp` — `crest_cli` parses elements from the ensemble file, shifts the charge per search,
+names one output file per search with no fallback, and perceives each member's SMILES from its
+geometry for the three constitution-changing searches. `chem.perceive_smiles` and
+`chem.atomic_numbers` are new; `crest_perceive_max_atoms` bounds the first. The `Containerfile`
+gains a `sampling` stage installing pinned crest 3.0.2 + xtb 6.7.1 from conda-forge, and sets
+`CHEMCLAW_CREST_THREADS=4` because the scrubbed child environment does not inherit the image's
+`OMP_NUM_THREADS=1` and CREST would otherwise size itself to the node.
 
-What is deliberately not done: 2D surfaces, transition-state claims, ring torsions, enumeration
-inside the compute job. And the two open ends, both needing the live lane rather than more code —
-no barrier has been computed against real xTB, and the conformer-dependence warning threshold is
-unset. Both are in the ADR.
+`Chemclaw3` — `microstate_pka` composes two cached searches into a macrostate pKa;
+`macrostate_free_energy_kcal` and `rt_kcal` are new in `thermo.py`; `searched_members` was factored
+out of `conformer_ensemble` because a `ConformerEnsemble` reports energies *relative to its own
+lowest member* and two macrostates cannot be compared that way. `MicrostatePkaJobSpec` →
+`predict_pka_ensemble`, `expensive: true`, with the selection skill updated.
 
+**Two things found on the way that are not this task's:**
 
-## Addendum — run against the real GFN2 server (same day)
+- Every `calc` composite is dropped by the publish seam — `payload_kind` is the envelope's class
+  name, which no projector matches. Queued in `BACKLOG.md` §3 rather than fixed here: it changes
+  what nine job types publish to an external store.
+- `tests/test_calc_ensembles.py::test_refining_the_same_ensemble_twice_pays_nothing` fails with
+  Postgres down, because the artifact offload silently fails and the Hessians recompute. Not a code
+  defect; it is `CLAUDE.md`'s "the sandbox is not offline" warning arriving in person.
 
-`tblite` is the GFN2 Hamiltonian as a PyPI wheel and was already installed, so "needs a cluster"
-was wrong. `servers/chem` on 8858 and `servers/calc` on 8860, the handle minted over MCP by the
-real chem server, the profile composed against the real calc server, Postgres in front.
+**Two of my own, corrected before shipping:** the near-degenerate microstate window was a constant
+0.5925 kcal/mol (RT at 298 K) while the caller can set the temperature — now `rt_kcal(temperature)`;
+and the calibration now records the search depth it was fitted at, because a deeper search moves the
+free-energy difference the slope was fitted against.
 
-**The chemistry came out right** — n-butane 0.62 kcal/mol gauche gap and 59.1% anti (against this
-tree's own 59.14% CREST anchor), biphenyl twisted 41.8 degrees with a 1.51 kcal/mol perpendicular
-barrier, DMA's amide at 18.10 kcal/mol and a 2.1 s half-life. Released wells at 64.0/296.1 degrees,
-off the 30-degree grid, so the release stage moves a well on real physics.
-
-**Two defects the fake could not express**, both fixed with tests verified by reverting each fix:
-
-1. One well per period reported **no barrier at all** — a zero-length arc when a well's successor
-   is its own image a period away. That is the amide case, which is what the capability is for.
-2. The discontinuity check compared a step against 3 kcal/mol, so it fired on every barrier steep
-   enough to matter and stayed quiet on the freely-rotating ones. Now a ratio to the profile's own
-   typical step, calibrated on three measured smooth profiles.
+**The `auto` branch rule changed once, against a measurement of my own reasoning rather than of
+code:** "a proton on N, O or S means ask the acid question" sends ethylamine down the acid branch,
+where the answer is its N-H acidity at ~36 rather than the 10.7 anybody means. Acid is now O-H/S-H
+only; anything else with nitrogen is a base.

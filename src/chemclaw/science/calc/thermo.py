@@ -430,6 +430,18 @@ def displaced_along(structure: Structure, direction: list[list[float]]) -> Struc
     )
 
 
+def rt_kcal(temperature_k: float) -> float:
+    """`RT` in kcal/mol — the energy scale every Boltzmann question here is asked in.
+
+    One function because three call sites need the same number and two of them had already written
+    the same expression: a populations weight, a macrostate sum, and "how many microstates are close
+    enough to matter". The third is the reason it is public — `connectors/calc/compose.py` counted
+    near-degenerate microstates against a *constant* 0.5925, which is RT at 298.15 K and silently
+    wrong at any other temperature the caller asks for.
+    """
+    return _GAS_CONSTANT_CAL * temperature_k / 1000.0
+
+
 def rate_from_barrier(barrier_kcal: float, temperature_k: float) -> float:
     """The Eyring rate constant, in s^-1, for a free-energy barrier in kcal/mol.
 
@@ -512,7 +524,7 @@ def boltzmann_populations(
     n-butane, ignoring it puts the anti conformer at 73% against CREST's own reported 59.1%; with
     it, 59.2%.
     """
-    rt = _GAS_CONSTANT_CAL * temperature_k / 1000.0  # kcal/mol
+    rt = rt_kcal(temperature_k)
     smallest = min(relative_kcal)
     weights = [
         degeneracy * math.exp(-(value - smallest) / rt)
@@ -534,6 +546,43 @@ def ensemble_entropy(populations: Sequence[float], degeneracies: Sequence[int]) 
         for population, degeneracy in zip(populations, degeneracies, strict=True)
         if population > 0
     )
+
+
+def macrostate_free_energy_kcal(
+    relative_kcal: Sequence[float], degeneracies: Sequence[int], temperature_k: float
+) -> float:
+    """The ensemble's free energy relative to its lowest member: `-RT ln sum_i g_i exp(-dE_i/RT)`.
+
+    Always <= 0 — a macrostate is never less stable than its best microstate — and it is an
+    *identity* rather than a correction: the free energy of a state made of interconverting
+    microstates is exactly this, and an equilibrium constant between two such states is the ratio of
+    their partition functions. That is why a pKa is computed through this and not through
+    `ConformerEnsemble.ensemble_correction_kcal`, which sits beside it and answers a different
+    question.
+
+    **How the two differ, stated once so nobody "unifies" them.** `ensemble_correction_kcal` is
+    `-T*S_conf` over the same populations, which is the entropy term added to the *lowest* member's
+    free energy — the standard thermochemical treatment, and what `thermochemistry` reports. This
+    one also carries the Boltzmann-averaged energy above that member, so the two agree only when one
+    conformer holds the whole population. For a thermochemistry result either is defensible; for an
+    acid/base equilibrium the sum over microstates is not optional, because the deprotonated
+    macrostate genuinely *is* the sum of every site that carries population — two sites within RT of
+    each other make the conjugate base more stable than the better of them by up to RT ln 2, and
+    that shift is a real 0.5 pKa unit at 298 K.
+
+    Takes energies relative to the lowest member, in kcal/mol, exactly as `boltzmann_populations`
+    does — the same convention by construction, so the two cannot drift apart on degeneracy or on
+    which member is the reference. Where the microstate energies are Gibbs free energies rather than
+    electronic ones, the formula is unchanged and the result is a free energy of free energies,
+    which is what it should be.
+    """
+    rt = rt_kcal(temperature_k)
+    smallest = min(relative_kcal)
+    partition = sum(
+        degeneracy * math.exp(-(value - smallest) / rt)
+        for value, degeneracy in zip(relative_kcal, degeneracies, strict=True)
+    )
+    return smallest - rt * math.log(partition)
 
 
 def free_energy_populations(

@@ -88,7 +88,10 @@ def _session(monkeypatch: pytest.MonkeyPatch, fake: _FakeSession) -> None:
     from contextlib import asynccontextmanager
 
     @asynccontextmanager
-    async def _fake_session() -> Any:
+    async def _fake_session(timeout_seconds: float | None = None) -> Any:
+        # Accepted and unused: the read bound is the caller's, and a sampling call passes a longer
+        # one than a Hessian's (`calc_sampling_timeout_seconds`). Nothing here depends on which.
+        del timeout_seconds
         yield fake
 
     monkeypatch.setattr("chemclaw.connectors.calc.remote.calc_session", _fake_session)

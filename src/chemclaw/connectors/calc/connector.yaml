@@ -223,6 +223,30 @@ jobs:
     # gate's set from these declarations.
     expensive: true
 
+  - name: predict_pka_ensemble
+    workflow: CalcJobWorkflow
+    inline_wait_seconds: 20
+    summary: pKa from sampled conformers and every protonation microstate (CREST + GFN2-xTB).
+    description: >-
+      A different calculation from `predict_pka`, not a more accurate one. CREST removes (or adds)
+      every proton in turn and ranks the products, so the site is decided by energy rather than by
+      a structural rule, and both macrostates are summed over their populated microstates. Minutes
+      to hours; expect a job id.
+
+      **Measured over the same 31 reference compounds it is level with `predict_pka` on error and
+      ranks slightly worse**, for two metadynamics searches against a cached millisecond lookup.
+      Choose it when the *site* is the question — a polyfunctional molecule, a proton no rule
+      offers (imide, sulfonamide, C-H), or where the number of populated microstates is the
+      finding. For a value, or to rank analogues, use `predict_pka`.
+
+      Reports `site_smiles` and how many microstates lie within RT. Read `warnings` first: the
+      aliphatic-amine limit is unchanged (it is the solvent model, not the enumeration) and this
+      job warns where `predict_pka` refuses. Load `ionization-and-partitioning` before using it.
+    params_model: chemclaw.connectors.calc.specs:MicrostatePkaJobSpec
+    precondition: chemclaw.science.calc.solvents:require_supported_solvents
+    # Two CREST searches, so the same unbounded-cost gate the other two sampling jobs carry.
+    expensive: true
+
   - name: compute_interaction_energy
     workflow: CalcJobWorkflow
     inline_wait_seconds: 20
