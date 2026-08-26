@@ -1,9 +1,5 @@
 """Shared pytest fixtures and test fakes.
 
-`fast_mock` shrinks the mock-HPC sleep durations so server-backed workflow tests
-finish in milliseconds; it is autouse but harmless to tests that don't touch
-those settings, and it reverts cleanly via monkeypatch after each test.
-
 `FakeSubmitter` is the one PR-gate test double: every test that exercises a
 "propose a note" path imports it (`from tests.conftest import FakeSubmitter`)
 instead of redefining an identical fake per file (DRY).
@@ -92,14 +88,6 @@ def isolated_postgres_schema() -> Iterator[None]:
     finally:
         patch.undo()
         asyncio.run(drop_test_schema(base_dsn))
-
-
-@pytest.fixture(autouse=True)
-def fast_mock(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Make the mock HPC job complete near-instantly for tests."""
-    monkeypatch.setattr(settings, "hpc_mock_submit_seconds", 0.0)
-    monkeypatch.setattr(settings, "hpc_mock_run_seconds", 0.02)
-    monkeypatch.setattr(settings, "hpc_poll_interval_seconds", 0.01)
 
 
 @pytest.fixture(autouse=True)

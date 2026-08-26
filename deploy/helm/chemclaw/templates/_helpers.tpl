@@ -480,9 +480,9 @@ readOnlyRootFilesystem: {{ .Values.securityContext.readOnlyRootFilesystem }}
        **`enabled: false` used to remove a bundle's pods and leave its tools on the agent's
        surface.** `values.yaml` said this key was "in `config` below"; it was in none of the 33
        entries there, and `connectors_enabled` empty means *every discovered bundle* — "discovery is
-       enablement until you say otherwise". So a disabled `qm` still advertised its jobs, the
-       launcher still started the wrapper on the polled queue and its child on `connector-qm`, which
-       nobody polls, and the chemist was told "running" until the 25 h ceiling.
+       enablement until you say otherwise". So a disabled `calc` still advertised its jobs, the
+       launcher still started the wrapper on the polled queue and its child on `connector-calc`,
+       which nobody polls, and the chemist was told "running" until the job ceiling.
 
        Pathsep-joined (`:`), which is what `Settings.connectors_enabled_list` splits on, and in the
        map's key order — Helm ranges a map sorted by key and `registry.discovered()` sorts by name,

@@ -1,6 +1,7 @@
 """Crosslinking the calculation store and the knowledge graph, in both directions (STO-7).
 
-The gap: `connectors/qm/knowledge.py` documented that it *could not* wikilink the compound its
+The gap: the removed DFT bundle's note builder documented that it *could not* wikilink the
+compound its
 result was about, because a dangling link fails `kg-validate` on the very PR that adds the note.
 The consequence was that the two halves of the system's memory — what we computed and what we know
 — were disjoint stores with no reference between them in either direction.
@@ -147,7 +148,7 @@ def test_a_note_and_the_compound_it_links_land_in_one_submission() -> None:
 def test_that_submission_passes_kg_validate(tmp_path: Path) -> None:
     """The claim the old comment doubted, checked against the validator itself.
 
-    `connectors/qm/knowledge.py` avoided the link because it would fail validation. Write both
+    That bundle's note builder avoided the link because it would fail validation. Write both
     files of the submission to disk and run the real validator over them: no dangling link.
     """
 

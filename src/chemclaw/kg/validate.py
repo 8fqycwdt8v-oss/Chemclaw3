@@ -76,10 +76,10 @@ def validate(notes_dir: Path) -> list[str]:
     # at the PR-gate — while a typo, which would make the note or the edge unfindable by every
     # filter keyed on it, cannot reach the graph. `kg-validate` runs on that same PR.
     #
-    # The vocabulary is core's own set **plus what the enabled bundles declare**: `job-result` and
-    # `bo-candidate` are minted by connectors, so a deployment's vocabulary is a property of which
-    # bundles it runs, not of this package alone. Both accessors resolve that union; the message
-    # names both places a reader can add a name.
+    # The vocabulary is core's own set **plus what the enabled bundles declare**: `bo-candidate` is
+    # minted by a connector, so a deployment's vocabulary is a property of which bundles it runs,
+    # not of this package alone. Both accessors resolve that union; the message names both places a
+    # reader can add a name.
     problems.extend(
         _registry_problems(
             ((note, path, note.type) for note, path in located),

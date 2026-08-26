@@ -10,7 +10,7 @@ default autonomy is `plan_only`.
 
 The property that matters for the dry run is that it is **ambient, not a tool argument**: the model
 must be able to neither set it (turning a real request into a no-op) nor clear it (turning a
-requested dry run into a real HPC submission).
+requested dry run into a real job submission).
 """
 
 import asyncio

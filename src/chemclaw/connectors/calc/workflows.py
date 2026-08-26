@@ -57,7 +57,7 @@ def job_envelope(result: XtbJobResult) -> ConnectorJobResult:
       `kind` and `summary` — and both already ride on `ConnectorJobResult` in their own right.
       Sending the wrapper put the science one level down (`data.ensemble.…`) and made
       `payload_kind` read `XtbJobResult` for every job, which matches no projector. Publishing the
-      member is what `qm` has always done, and it is the only fix available on this side:
+      member is what the removed DFT bundle always did, and it is the only fix available here:
       `publish` may not import `connectors` (`tests/test_layering.py` allows that edge one way
       only), so the unwrapping cannot live on the far side.
     - **`calc_refs` rides on the envelope's own field**, not inside `data`: it is a cross-cutting

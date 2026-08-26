@@ -1,6 +1,6 @@
 # Republishing computed results to the external results store, as a durable job.
 #
-# **A jobs-only bundle** — the `qm` shape, no `endpoint:` — because the capability it exposes is a
+# **A jobs-only bundle** — no `endpoint:` — because the capability it exposes is a
 # *write*, and this system's agent-facing tool surface is read/compute only by rule
 # (`cli/validate_connectors.py` refuses a `write_`/`submit_`/`update_`-prefixed tool outright). A
 # job is the sanctioned shape for a mutating capability, and it inherits what that rule exists to

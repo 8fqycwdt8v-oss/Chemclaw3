@@ -8,8 +8,9 @@ activity is retried on another worker after its start-to-close timeout expires) 
 not free:
 
 - A long activity is re-run from the beginning, so an ELN sync or a report is paid for twice.
-- The retry does not begin until the timeout elapses, which for `qm` is the HPC poll budget. A
-  deploy therefore stalls a job by up to that timeout for no reason other than how it was killed.
+- The retry does not begin until the timeout elapses, which for `calc` is a CREST search's whole
+  budget. A deploy therefore stalls a job by up to that timeout for no reason other than how it
+  was killed.
 - The pod's own cleanup never runs: `db.pooling()`'s connections are dropped rather than closed, and
   a git checkout the PR-gate submitter was mid-way through is abandoned in place.
 
@@ -49,7 +50,8 @@ async def serve_worker(worker: Worker, *, component: str) -> None:
         worker: An already-built Temporal worker. Built by the caller, not here, because what a
             worker *serves* is the one thing that genuinely differs between them — and because
             `graceful_shutdown_timeout` belongs at the constructor where a reader looks for it.
-        component: What this process is (`background-worker`, `connector-worker-qm`), for the health
+        component: What this process is (`background-worker`, `connector-worker-calc`), for the
+            health
             payloads and the log line.
 
     A worker fatal error propagates rather than being swallowed by the drain: it is the one case

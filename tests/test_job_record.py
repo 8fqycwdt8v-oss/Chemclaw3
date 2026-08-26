@@ -119,7 +119,7 @@ def test_the_footer_adds_no_wikilink() -> None:
     """
     stamped = note_with_run_provenance(
         Note(id="n-1", type="job-result", created_by="agent", body="Body."),
-        job_record_for("qm-compute_dft_energy-99", _INPUT, _RESULT),
+        job_record_for("calc-sample_conformers-99", _INPUT, _RESULT),
     )
     assert stamped.outgoing_links() == []
 

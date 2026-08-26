@@ -168,33 +168,6 @@ class Structure(BaseModel):
         """Return (atomic numbers, positions in Angstrom) — what the RRHO arithmetic reads."""
         return np.array(self.elements), np.array(self.positions)
 
-    def as_xyz(self, comment: str = "") -> str:
-        """This geometry as an XYZ block — the one interchange format every QM program reads.
-
-        For crossing a boundary that is not this system's: the HPC pipeline consumes a starting
-        geometry as a file, not as a pydantic model (D-2026-08-21). Everything inside this
-        repository passes the `Structure` itself, so this has exactly one caller and is deliberately
-        not a general serialization — `model_dump` is that.
-
-        Coordinates are written at the precision they are hashed at, so the block a pipeline
-        receives is the geometry `structure_id` names rather than a rounded neighbour of it.
-
-        Args:
-            comment: The second line, which XYZ reserves for free text; conventionally the
-                molecule's identity.
-
-        Returns:
-            The atom count, the comment, then one `<symbol> <x> <y> <z>` line per atom,
-            newline-terminated.
-        """
-        lines = [str(len(self.elements)), comment]
-        lines.extend(
-            f"{symbol} {x:.{_GEOMETRY_DECIMALS}f} {y:.{_GEOMETRY_DECIMALS}f} "
-            f"{z:.{_GEOMETRY_DECIMALS}f}"
-            for symbol, (x, y, z) in zip(self.symbols, self.positions, strict=True)
-        )
-        return "\n".join(lines) + "\n"
-
 
 class XtbInput(BaseModel):
     """A single-point xTB request: a molecule and its charge.

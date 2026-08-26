@@ -43,7 +43,7 @@ def test_nothing_this_job_deletes_is_a_calculation_result() -> None:
 
     D-011 ("never compute twice") and `durable/retention.py`'s standing refusal to prune the
     calculation cache both remain literally true *only* because eviction targets blobs alone. A
-    statement that reached `calculation_results` would quietly convert a cache hit into an HPC run
+    statement that reached `calculation_results` would quietly convert a cache hit into a re-run
     and make two written decisions false at once.
     """
     for statement in _STATEMENTS:
@@ -258,7 +258,7 @@ def test_an_evicted_blob_takes_its_link_row_and_leaves_the_answer(
     """The load-bearing property, asserted on rows rather than on the absence of a substring.
 
     Two halves, and each fails differently. `calculation_results` must survive: evicting an answer
-    turns a D-011 cache hit into an HPC re-run, and `retention.py`'s standing refusal to prune the
+    turns a D-011 cache hit into a full re-run, and `retention.py`'s standing refusal to prune the
     cache is only true because this job cannot reach it. And the link row must *not* survive: the
     `ON DELETE CASCADE` in migration 019 is what stops `list_for` handing back a ref whose bytes
     are gone, and a test that only asserts the job contains no `DELETE FROM calculation_artifacts`

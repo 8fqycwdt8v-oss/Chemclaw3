@@ -32,7 +32,7 @@ class NoteSubmission(BaseModel):
     one `content`, and that single field was a structural constraint on the whole knowledge graph:
     a note could never link to another note that did not already exist on the base branch, because
     a dangling `[[wikilink]]` fails `kg-validate` on the very PR being opened.
-    `connectors/qm/knowledge.py` documented that as the reason it emitted no link at all, which is
+    the `qm` bundle's note builder documented that as the reason it emitted no link at all, which is
     why computed results and the knowledge graph were disjoint stores (STO-7).
 
     A submission is properly a *reviewable unit*, and the unit is "this note and the notes it needs

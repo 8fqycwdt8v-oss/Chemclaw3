@@ -62,13 +62,21 @@ class ConnectorSettings(BaseSettings):
     # to grant itself unlimited runtime — that is a deployment's call.
     #
     # It is a ceiling over the *whole* child, so it must exceed the longest activity that child
-    # runs — the QM poll, budgeted by `hpc_run_timeout_seconds`/`hpc_mock_run_seconds` — plus the
-    # activities around it. `_the_job_ceiling_covers_the_poll_it_bounds` enforces that; raise this
-    # whenever you raise the poll budget. The default is the 24h `hpc_run_timeout_seconds` plus an
-    # hour, rather than equal to it: the shipped chart selects `hpc_launch_interface="nextflow"`,
-    # and two equal defaults made the ceiling the tighter of the two on the path the deployment
-    # actually runs.
-    connector_job_timeout_seconds: float = Field(default=90_000.0, gt=0)
+    # runs. `_the_job_ceiling_covers_the_activity_it_bounds` enforces that; raise this whenever you
+    # raise that activity's budget.
+    #
+    # **The number is derived from the longest job this system runs, and that job changed.** It was
+    # 90_000 — the 24 h DFT poll (`hpc_run_timeout_seconds`) plus an hour — and the DFT tier is gone
+    # (`D-2026-08-26-semiempirical-is-the-whole-tier`). The longest child activity is now
+    # `run_xtb_calculation`, a CREST search at `xtb_job_timeout_seconds` (4 h), so the default is
+    # that plus an hour on the same reasoning: an hour of headroom rather than equality, because two
+    # equal defaults make the ceiling the tighter of the two on the path the deployment runs.
+    #
+    # It covers **one attempt**, not `activity_max_attempts` of them — as the DFT-sized number did
+    # not either. A job that exhausts its whole budget and is retried is bounded by this ceiling,
+    # so the retry is cut short; a deployment that wants the retry budget to be reachable raises
+    # this above `activity_max_attempts * xtb_job_timeout_seconds`.
+    connector_job_timeout_seconds: float = Field(default=18_000.0, gt=0)
 
     # Hard ceiling on a connector's request body, refused with 413 before anything reads it
     # (`connectors.server.connector_app`, `core.asgi.BodySizeLimit`). A connector's own setting

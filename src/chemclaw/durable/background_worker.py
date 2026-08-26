@@ -2,13 +2,12 @@
 
 Hosts light, long-running background jobs: ELN sync, note re-indexing, reports, memory
 synthesis, the generic connector-job wrapper and template runs. Run it with
-`python -m chemclaw.durable.background_worker` (after `make up`). This is core's only worker —
-the heavy `hpc-jobs` fleet existed for one workflow, and that workflow is a connector
-job now (D-118). D-006's heavy/light split is intact one level down: one core queue,
-plus one per bundle, each sized for its own work.
+`python -m chemclaw.durable.background_worker` (after `make up`). This is core's only
+worker, and D-006's heavy/light split is intact one level down: one core queue, plus one
+per bundle, each sized for its own work.
 
 A *connector's* own workflows are not here: they run on the bundle's own worker and
-queue (`connectors/qm/worker.py` on `connector-qm`), which is the point of the seam —
+queue (`connectors/calc/worker.py` on `connector-calc`), which is the point of the seam —
 this worker never imports a capability's dependency closure.
 """
 

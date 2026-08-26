@@ -72,8 +72,8 @@ service:
     maxReplicas: 6
     targetCPUUtilizationPercentage: 70
 
-# Core's own Temporal worker. Only one left: `hpc` went with the QM/DFT job into the `qm`
-# connector bundle below, which is sized for HPC work on its own queue (D-118).
+# Core's own Temporal worker. Only one: every expensive workflow belongs to a connector bundle
+# below, each sized for its own work on its own queue (D-118).
 workers:
   background:
     # Keep at 1. Light work (sync / re-index / reports), but this worker also submits PR-gate
@@ -252,28 +252,6 @@ connectors:
     server: false
     replicas: 1
     worker: true
-  qm:
-    enabled: true
-    # The first jobs-only bundle: it declares no `endpoint:`, so `server: false` and it gets no app
-    # pod and no Service — there is no sub-second QM tool to serve. `replicas` therefore sizes the
-    # worker fleet, at the two core's `hpc` worker used to run.
-    server: false
-    replicas: 2
-    worker: true
-    # The one bundle whose activities are long *waits* rather than work, so the fleet-wide
-    # CHEMCLAW_WORKER_MAX_CONCURRENT_ACTIVITIES — sized to the connection pool — is the wrong bound
-    # here: a QM activity touches Postgres twice (a cache lookup, a result write) across as much as
-    # 24 hours of Nextflow polling, so what limits it is the memory below, not connections.
-    # 32 against `limits.memory: 4Gi`, i.e. how many concurrent HPC waits one pod can hold.
-    maxConcurrentActivities: 32
-    # HPC-sized, and "heavy" here means *long-lived*, not CPU-hungry: the DFT run is on the
-    # cluster, while this pod holds one activity slot per in-flight job with an open Nextflow poll
-    # for up to `hpc_run_timeout_seconds` (24h). So it needs memory headroom for many concurrent
-    # waits and little CPU — the opposite shape from `resources.worker`, which is why it overrides
-    # it here rather than sharing it.
-    resources:
-      requests: { cpu: "250m", memory: "1Gi" }
-      limits: { cpu: "1", memory: "4Gi" }
 
 # The port every connector container listens on (its own Service maps it 1:1). One value rather than
 # per-connector: they are separate Services, so there is no port to deconflict, and a single number
@@ -380,7 +358,7 @@ config:
   # connections converts a shortage into retry churn rather than backpressure
   # (D-2026-08-05-a-worker-may-not-outrun-its-pool). Stated here rather than left implicit for the
   # same reason the pool is: the two numbers only mean anything together, and a reader changing one
-  # has to see the other. The `qm` bundle overrides it in its own entry.
+  # has to see the other. A bundle whose activities are long waits overrides it in its own entry.
   CHEMCLAW_WORKER_MAX_CONCURRENT_ACTIVITIES: "8"
   # Stated rather than left to the code default, because the chart *derives* the publish target from
   # it: the knowledge-sync containers write to `knowledge.noteRepoPath` + this, which is exactly how
@@ -389,11 +367,6 @@ config:
   CHEMCLAW_KNOWLEDGE_DIR: "knowledge"
   CHEMCLAW_TEMPORAL_ADDRESS: "chemclaw-temporal-frontend.temporal.svc:7233"
   CHEMCLAW_TEMPORAL_NAMESPACE: "chemclaw"
-  CHEMCLAW_HPC_LAUNCH_INTERFACE: "nextflow"
-  CHEMCLAW_HPC_API_BASE_URL: "https://tower.internal/api"
-  CHEMCLAW_HPC_PIPELINE_NAME: "chemclaw-qm"
-  CHEMCLAW_HPC_PIPELINE_VERSION: "1.0.0"
-  CHEMCLAW_HPC_ARTIFACT_STORE_URL: "https://artifacts.internal/chemclaw"
   # Where the calc physics server lives (`Chemclaw3-mcp`'s `servers/calc`,
   # D-2026-08-16-the-physics-leaves-the-cache-stays). `calc_server_url` is a `CalculatorSettings`
   # field `connectors/calc/remote.py::calc_session` dials directly for EVERY calculation — every
@@ -414,12 +387,13 @@ config:
   CHEMCLAW_ENTRA_AUDIENCE: "api://chemclaw"
   # ⚠ EMPTY ON PURPOSE, AND EMPTY MEANS CLOSED. Until an operator sets this to their own Entra app
   # role(s), **every job a connector manifest declares `expensive: true` is refused for everyone**:
-  # `compute_dft_energy`, `compute_interaction_energy`, `sample_conformers` and
-  # `start_optimization_campaign`. The trigger gate fails closed on an empty role set rather than
-  # open (`agent/authz.authorize_trigger`), which is the safe direction and a silent one — the pod
-  # boots, the probes pass, reads work, and a chemist asking for a DFT run is told they lack a
-  # privileged role. Set it to a comma list of the Entra app roles your chemists actually hold
-  # (`"my-org-dft-users,my-org-platform-admins"` in shape, not in content) and the jobs open.
+  # `sample_conformers`, `compute_interaction_energy`, `refine_ensemble` and the rest of `calc`'s
+  # expensive set, plus `start_optimization_campaign`. The trigger gate fails closed on an empty
+  # role set rather than open (`agent/authz.authorize_trigger`), which is the safe direction and a
+  # silent one — the pod boots, the probes pass, reads work, and a chemist asking for a conformer
+  # search is told they lack a privileged role. Set it to a comma list of the Entra app roles your
+  # chemists actually hold (`"my-org-calc-users,my-org-platform-admins"` in shape, not in content)
+  # and the jobs open.
   #
   # **The key is written out, rather than left to the code default, exactly so the emptiness is
   # visible.** An absent key shows up in nothing — not `helm show values`, not the rendered
@@ -518,7 +492,6 @@ secrets:
   name: "chemclaw-secrets"
   keys:
     llmApiKey: "CHEMCLAW_LLM_API_KEY"
-    hpcApiToken: "CHEMCLAW_HPC_API_TOKEN"
     postgresDsn: "CHEMCLAW_POSTGRES_DSN"
     # Push credential for the knowledge repo (gap DEP-2). Without it the PR-gate cannot open a
     # branch for any agent-authored note, so every knowledge write fails at push in-cluster.
@@ -561,7 +534,7 @@ secrets:
     calcToken: "CHEMCLAW_CALC_TOKEN"
     # The four bundles **we** host, each authenticating its own `/mcp` (D-2026-08-20). Until they
     # declared a credential the NetworkPolicy was the only thing between any pod in the namespace
-    # and a tool that starts durable HPC work — and a NetworkPolicy selects peers, not paths.
+    # and a tool that starts durable expensive work — and a NetworkPolicy selects peers, not paths.
     #
     # Both ends read the same variable: `connectors/server.py`'s `BearerAuthMiddleware` on the
     # serving pod, `connectors/identity.py`'s `_EnvBearerAuth` on core and the workers. Because

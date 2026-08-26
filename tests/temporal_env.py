@@ -6,32 +6,10 @@ skip (the tests run fully in CI). Kept in one place so every workflow/tool test
 uses the same server bootstrap and pydantic-configured client (DRY).
 """
 
-from collections.abc import Callable, Sequence
-from typing import Any
-
 import pytest
 from temporalio.client import Client
 from temporalio.contrib.pydantic import pydantic_data_converter
 from temporalio.testing import WorkflowEnvironment
-
-from chemclaw.connectors.qm.activities import (
-    lookup_qm_result,
-    parse_qm_output,
-    persist_qm_result,
-    poll_hpc_status,
-    prepare_input,
-    submit_to_hpc,
-)
-
-# The full activity set the QM workflow needs, registered on every test worker.
-QM_ACTIVITIES: Sequence[Callable[..., Any]] = [
-    prepare_input,
-    submit_to_hpc,
-    poll_hpc_status,
-    parse_qm_output,
-    lookup_qm_result,
-    persist_qm_result,
-]
 
 
 async def start_env_or_skip() -> WorkflowEnvironment:

@@ -13,11 +13,12 @@ core owns the obligations that must never vary per capability:
   `chemclaw.connectors.jobs`, with `ALLOW_DUPLICATE_FAILED_ONLY`, so re-asking joins the existing
   run and
   only a failed one re-executes (D-011: a stored result is never recomputed).
-- **Attribution** — the requesting actor travels in the payload (F4-T3), exactly as `QMJobInput`
+- **Attribution** — the requesting actor travels in the payload (F4-T3), exactly as the removed
+  `QMJobInput`
   carries `requested_by`, so an audit can always name the user behind a durable run. It is handed
   down to the child on its **memo**, not in its argument, so a bundle whose backend runs under a
-  shared service identity (the HPC cluster) can still name the user without the actor becoming a
-  field the model could author.
+  shared service identity (a calculation backend) can still name the user without the actor
+  becoming a field the model could author.
 - **The PR-gate** — a job that produces knowledge returns a `Note` and core publishes it through
   `chemclaw.kg.pr_gate` (via the existing `publish_memory_note_activity`). A connector never writes
   to the
@@ -359,7 +360,8 @@ class ConnectorJobWorkflow:
             task_queue=job.task_queue,
             result_type=ConnectorJobResult,
             # The actor, carried as per-execution metadata rather than in the argument. A bundle
-            # whose backend runs under a *shared* service identity — the HPC cluster is the one we
+            # whose backend runs under a *shared* service identity — a calculation backend is the
+            # one we
             # have — must still be able to name the user behind a run, and `payload` is exactly the
             # model-authored arguments, so putting the actor there would make it a field the LLM
             # could fill in. A memo is beside the argument, readable with `workflow.memo_value`,
@@ -380,7 +382,7 @@ class ConnectorJobWorkflow:
             # through its own activity surfaces as `ActivityFailure` — a name deliberately absent
             # from `_BAD_DATA_TYPES`, since that list names the errors themselves. Measured: the
             # identical `ValueError` costs 1 attempt at an activity boundary and **5 child
-            # executions** here, 15.4 s of backoff, six executions under one parent id. On `qm`
+            # executions** here, 15.4 s of backoff, six executions under one parent id. On a
             # that is five DFT submissions for one unparameterised basis set, and the D-011 cache
             # cannot help because a failed run stores nothing.
             #

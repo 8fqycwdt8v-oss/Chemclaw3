@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Bring up the four-repo ChemClaw3 stack for a full end-to-end pass: this backend, the
-# Chemclaw3-mcp tool fleet (props, rxnpredict, chem, safety, calc), Chemclaw3_mock (the HPC/Nextflow mock, the
+# Chemclaw3-mcp tool fleet (props, rxnpredict, chem, safety, calc), Chemclaw3_mock (the
 # eln-json/eln-ord data sources, the mock-vendor MCP tool), and Chemclaw3_ui.
 #
 # Deliberately does not reimplement readiness polling for pieces that already have it:
@@ -26,7 +26,7 @@ readonly UI_REPO="${CHEMCLAW_UI_REPO:-/workspace/8fqycwdt8v-oss/chemclaw3_ui}"
 
 # stderr, not stdout: `mock_venv_bin()` returns a path via stdout command substitution, and a
 # log() that shared stdout corrupted it with ANSI-coded log text — the exact bug that made
-# mock-hpc-eln's exec target unparseable. die() already had this right; log() did not.
+# mock-eln's exec target unparseable. die() already had this right; log() did not.
 log() { printf '\033[35m[e2e]\033[0m %s\n' "$*" >&2; }
 die() { printf '\033[31m[e2e] %s\033[0m\n' "$*" >&2; exit 1; }
 
@@ -188,20 +188,17 @@ mock_venv_bin() {
   echo "$MOCK_REPO/.venv/bin/python"
 }
 
-start_mock_hpc_eln() {
+start_mock_eln() {
   local python="$1"
   # bash -c ... exec, not a bare invocation: app/eln's real-dataset loader reads its CSVs by a
   # path relative to cwd (the same reason start.sh itself does `cd "$SCRIPT_DIR"` first), and
   # `exec` replaces the shell in place so the pid `start()` records is still the real process.
   MOCK_ELN_EXPORT_DIR="$MOCK_REPO/data/eln/exports" \
     MOCK_ORD_EXPORT_DIR="$MOCK_REPO/data/eln/exports/ord" \
-    MOCK_HPC_API_TOKEN="${CHEMCLAW_HPC_API_TOKEN:-mock-hpc-token}" \
-    MOCK_HPC_ENFORCE_AUTH=true \
-    MOCK_HPC_POLLS_UNTIL_DONE="${MOCK_HPC_POLLS_UNTIL_DONE:-2}" \
     MOCK_ELN_SEED_ON_STARTUP=true \
-    start mock-hpc-eln bash -c \
+    start mock-eln bash -c \
       "cd '$MOCK_REPO' && exec '$python' -m uvicorn app.main:app --host 0.0.0.0 --port 8090"
-  wait_for mock-hpc-eln "http://127.0.0.1:8090/healthz"
+  wait_for mock-eln "http://127.0.0.1:8090/healthz"
 }
 
 start_mock_vendor() {
@@ -274,12 +271,6 @@ up() {
   export CHEMCLAW_DATA_SOURCES="graph,eln-json,eln-ord"
   export CHEMCLAW_ELN_EXPORT_DIR="$MOCK_REPO/data/eln/exports"
   export CHEMCLAW_ORD_EXPORT_DIR="$MOCK_REPO/data/eln/exports/ord"
-  export CHEMCLAW_HPC_LAUNCH_INTERFACE=nextflow
-  export CHEMCLAW_HPC_API_BASE_URL="http://localhost:8090"
-  export CHEMCLAW_HPC_API_TOKEN="${CHEMCLAW_HPC_API_TOKEN:-mock-hpc-token}"
-  export CHEMCLAW_HPC_ARTIFACT_STORE_URL="http://localhost:8090/artifacts"
-  export CHEMCLAW_HPC_PIPELINE_NAME="qm-pipeline"
-  export CHEMCLAW_HPC_PIPELINE_VERSION="mock-1"
   # Both halves of each token matter and they are set in two different places: the `start_*`
   # function gives the *server* the value it verifies, and this export gives the *front door* the
   # value it sends. Setting only the first is a specific and quiet failure — `/healthz` is
@@ -301,9 +292,9 @@ up() {
   start_safety "$mcp_python"
   start_calc "$mcp_python"
 
-  log "starting Chemclaw3_mock (HPC/ELN mock + mock-vendor MCP tool)"
+  log "starting Chemclaw3_mock (ELN mock + mock-vendor MCP tool)"
   local mock_python; mock_python="$(mock_venv_bin)"
-  start_mock_hpc_eln "$mock_python"
+  start_mock_eln "$mock_python"
   start_mock_vendor "$mock_python"
 
   log "starting this repo's connectors, workers and front door"
@@ -379,7 +370,7 @@ status() {
 }
 
 # Stop one named external process and bring it back — the shape the chaos round needs. Only
-# covers the processes this script owns (props, rxnpredict, chem, safety, calc, mock-hpc-eln,
+# covers the processes this script owns (props, rxnpredict, chem, safety, calc, mock-eln,
 # mock-vendor, ui-bff);
 # restarting a piece of this repo's own stack is infra/live/processes.sh's `restart` verb.
 restart() {
@@ -396,7 +387,7 @@ restart() {
     chem) start_chem "$(mcp_python_bin)" ;;
     safety) start_safety "$(mcp_python_bin)" ;;
     calc) start_calc "$(mcp_python_bin)" ;;
-    mock-hpc-eln) start_mock_hpc_eln "$(mock_venv_bin)" ;;
+    mock-eln) start_mock_eln "$(mock_venv_bin)" ;;
     mock-vendor) start_mock_vendor "$(mock_venv_bin)" ;;
     ui-bff) start_ui ;;
     *) die "restart: unknown process '$name'" ;;

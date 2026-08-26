@@ -17,7 +17,7 @@ pre-Phase-6 "no auth" world. For the design rationale see `docs/reference/archit
   trigger with no authenticated user** before any durable work starts. The `oid` is stamped into the
   workflow payload (`requested_by`), never inferred later.
 - **One authorization gate for expensive actions.** `agent/authz.py::authorize_trigger(action)` is
-  the single place a costly HPC/BO trigger is checked: a job a connector manifest declares
+  the single place a costly calculation or BO trigger is checked: a job a connector manifest declares
   `expensive: true`, or an action named in `entra_expensive_actions`, runs only for a caller holding
   one of `entra_privileged_roles` — and an empty role set refuses everyone rather than admitting
   them. The manifest declaration is the source; `entra_expensive_actions` adds to it for anything
@@ -37,7 +37,7 @@ pre-Phase-6 "no auth" world. For the design rationale see `docs/reference/archit
   truth; it cannot *merge* it — the agent proposes, a human decides.
 - **Transport identity (non-Entra bridges).** Identity rides *inside* the workflow payload, so the
   transports are authenticated separately: Temporal by mTLS (`temporal_tls_*`) or a Cloud API key,
-  and the HPC launcher by a bridged/mounted token (F4-T6). No backend component mints an outbound
+  and every MCP endpoint by a mounted bearer token (F4-T6). No backend component mints an outbound
   Entra token of its own: the workload-identity-federation and On-Behalf-Of exchanges written for
   F4-T2/F4-T4 were deleted, having never acquired a caller. What that guarantee rested on holds
   anyway and more simply — there is no client secret at rest because there is no outbound token

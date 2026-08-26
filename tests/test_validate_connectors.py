@@ -116,7 +116,7 @@ def test_connector_urls_keys_that_name_real_bundles_are_accepted() -> None:
     """The passing case: all configured URLs name discovered bundles."""
     discovered_names = {"calc", "qm", "bo"}
     with mock.patch("chemclaw.cli.validate_connectors.settings") as mock_settings:
-        mock_settings.connector_urls = {"calc": "http://override:8000", "qm": "http://hpc:9999"}
+        mock_settings.connector_urls = {"calc": "http://override:8000", "bo": "http://bo:9999"}
         problems = _connector_urls_problems(discovered_names)
     assert problems == []
 

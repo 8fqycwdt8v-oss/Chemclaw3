@@ -567,8 +567,6 @@ _SECRET_SETTINGS = (
     # second endpoint can hold a *different* key, so matching the primary's value would not have
     # caught it.
     "llm_fallback_api_key",
-    "hpc_api_token",
-    "hpc_artifact_store_token",
     "temporal_api_key",
     "postgres_dsn",
     "postgres_migration_dsn",
