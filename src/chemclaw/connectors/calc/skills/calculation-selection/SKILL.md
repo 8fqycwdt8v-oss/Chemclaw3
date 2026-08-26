@@ -107,16 +107,16 @@ all of them is in **`ensemble-workflows`** — load it before using any of them,
 that a single-structure answer is good enough.
 
 - **Which form is this molecule actually in?** → `rank_species` over `enumerate_tautomers`, or the
-  fixed sequence `run_tautomer-resolution`. Ask this *first* on anything with a mobile proton
+  fixed sequence `run_tautomer_resolution`. Ask this *first* on anything with a mobile proton
   between heteroatoms: every other number here describes whichever tautomer was drawn.
 - **What is charged, at which pH?** → `enumerate_protonation_states` then `rank_species`, or
-  `run_microspecies-profile`. This is the amphoteric and polyprotic case `predict_pka` and
+  `run_microspecies_profile`. This is the amphoteric and polyprotic case `predict_pka` and
   `predict_logd` refuse; it is not a substitute for them on a single site, where they are calibrated
   and this is not.
 - **Is this property a real number for a floppy molecule?** → `compute_ensemble_property`. Returns
   a mean *and a spread*, and the spread is the finding as often as the mean is.
 - **Which bond breaks first?** → `enumerate_bond_cleavages` then `survey_bond_strengths`, or
-  `run_bond-strength-survey`.
+  `run_bond_strength_survey`.
 - **How much of the folded form is there?** → `refine_ensemble`, which re-weights by free energy
   instead of electronic energy. A different treatment, not a better one, and it costs a Hessian per
   member — reach for it when a *population* is the answer, not when a geometry is.

@@ -116,7 +116,22 @@ class TemplateWorkflow:
             # run came from. Empty off the service path, exactly as it is here.
             session_id=run.session_id,
         )
-        scope: dict[str, Any] = {f"inputs.{key}": value for key, value in run.inputs.items()}
+        # **Every *declared* input is in scope, not only every supplied one.** `registry.py` dumps
+        # the params with `exclude_none=True`, so an optional argument the caller omitted simply
+        # was not there — and a template that references it unconditionally died on its first step
+        # with `UnresolvedReference: 'inputs.solvent' ... have: ['inputs.smiles']`. Every template
+        # in the tree references its optional `solvent` that way, `conformer-refinement` since the
+        # day it shipped, so "run this without naming a solvent" — the gas-phase default, and the
+        # commonest call there is — never worked for any of them.
+        #
+        # Seeding the declared names with `None` is the fix rather than editing eight YAML files,
+        # because the templates are not wrong: an optional input that was not given *is* `None`,
+        # which is precisely what the calc specs default to and what
+        # `solvents.require_supported_solvents` reads as gas phase. A missing name still raises —
+        # `manifest.py` already refuses a reference to an *undeclared* input at load time, so the
+        # only thing this stops being an error is the one case that should never have been one.
+        scope: dict[str, Any] = {f"inputs.{item.name}": None for item in run.template.inputs}
+        scope.update({f"inputs.{key}": value for key, value in run.inputs.items()})
         results: dict[str, Any] = {}
 
         for step in run.template.steps:

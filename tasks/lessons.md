@@ -911,3 +911,26 @@ The corollary, from the same pass: `Field(exclude=True)`, a budget in the wrong 
 renderer that "only places" cells are all the same mistake as a homogeneous fixture — an assumption
 about a mechanism, never crossed with the case that would disprove it. The check is cheap and I keep
 not running it: **construct the input that would break the belief, and look at the output.**
+
+
+## 2026-08-25 — A companion-repo change that cannot be pushed is not a deliverable
+
+**What happened.** The GFN multi-step work spanned two repositories by design: the primitives
+belong on `Chemclaw3-mcp` under `D-2026-08-16-the-physics-leaves-the-cache-stays`, the composition
+belongs here. I built and verified both halves, then discovered at push time that the session's
+GitHub scope covered only this repository and `add_repo` with push access needed an approval that
+never came. `main` now declares eight tools that no running server answers.
+
+**The rule for next time: check write access to every repository a task spans, before writing code
+in any of them.** One `git push --dry-run` at the start would have cost seconds and changed the
+plan — the enumerations could have been argued into this tree, or the templates held back until the
+companion PR existed. Discovering it after the work is done leaves only bad options.
+
+**A second, smaller one from the same session: `git push --delete` is 403 through the agent proxy**
+even where `git push` succeeds. Do not claim a branch was deleted without reading the push output;
+`mcp__github__list_branches` is what confirms it.
+
+**And a third: verify mergeability early, not at merge time.** `main` moved three times during this
+task's CI runs, each lap costing ~16 minutes, because I only fetched when the merge API refused.
+Fetching `origin/main` before opening the PR — and again before each long wait — turns a race into
+one rebase.

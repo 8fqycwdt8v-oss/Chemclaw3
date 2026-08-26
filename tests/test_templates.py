@@ -14,6 +14,7 @@ here; everything above it is sandbox-safe and always runs.
 """
 
 import asyncio
+import json
 import subprocess
 import sys
 from datetime import timedelta
@@ -755,3 +756,55 @@ def test_a_structured_tool_result_is_not_mistaken_for_mcp_content() -> None:
 
     notes = [NoteRef(id="reaction-1", type="reaction", source="eln", confidence=0.9)]
     assert _mcp_text(notes) is notes, "a structured result was flattened into a string"
+
+
+def test_a_tool_steps_structured_content_reaches_the_next_step_as_a_model() -> None:
+    """The defect that made four shipped templates die on their second step, pinned end to end.
+
+    `run_tautomer-resolution` and three siblings hand one tool's field to the next step
+    (`species: "${steps.forms.result.smiles}"`). That reference raised `UnresolvedReference` at
+    *run* time — after the launch, inside the workflow — because `_mcp_text` had already joined the
+    content blocks into a string, so `smiles` was being asked of a `str`. CI was green throughout:
+    `make template-validate` checks that the step ids resolve backwards and that the tool exists,
+    never that the result has the shape the reference walks.
+
+    This asserts the whole path rather than `_structured` alone, because the bug lived in the seam
+    between two correct functions: `_mcp_text` flattens content, which is right for text, and
+    `ainvoke(args)` returns content only, which is right for a chat turn. Only the composition was
+    wrong, so only a test over the composition can hold it.
+    """
+    from langchain_core.tools import StructuredTool
+
+    from chemclaw.durable.template_activities import (
+        StepIdentity,
+        ToolStepInput,
+        _call_governed,
+    )
+    from chemclaw.templates.resolve import resolve
+
+    payload = {"smiles": ["CC(=O)CC(C)=O", "CC(O)=CC(C)=O"], "count": 2}
+
+    def _enumerate(smiles: str) -> tuple[list[dict[str, str]], dict[str, object]]:
+        # The shape `langchain_mcp_adapters` produces: content blocks, plus the server's
+        # `structuredContent` under the artifact's own key.
+        return [{"type": "text", "text": json.dumps(payload)}], {"structured_content": payload}
+
+    tool = StructuredTool.from_function(
+        func=_enumerate,
+        name="enumerate_tautomers",
+        description="enumerate tautomers",
+        response_format="content_and_artifact",
+    )
+    step = ToolStepInput(
+        arguments={"smiles": "CC(=O)CC(C)=O"},
+        identity=StepIdentity(actor="chemist@example.com", roles=[], correlation_id="c-1"),
+        tool="enumerate_tautomers",
+    )
+
+    result = asyncio.run(_call_governed(tool, step))
+
+    assert result == payload, "the structured content the server sent was discarded"
+    # The reference the templates actually carry, against the value the step actually leaves.
+    assert (
+        resolve("${steps.forms.result.smiles}", {"steps.forms.result": result}) == payload["smiles"]
+    )

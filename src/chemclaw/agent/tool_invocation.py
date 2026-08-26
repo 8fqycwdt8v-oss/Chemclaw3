@@ -86,6 +86,7 @@ async def invoke_governed(
     actor: str,
     profile: AgentProfile,
     sink: AuditSink | None = None,
+    want_message: bool = False,
 ) -> Any:
     """Call `tool` through the same chain a chat turn applies, and return what it produced.
 
@@ -97,9 +98,17 @@ async def invoke_governed(
         profile: The step's profile, which decides whether the plan gate is in the chain — the
             same question `build_langgraph_agent` asks, asked the same way.
         sink: The audit sink; `None` takes the configured default.
+        want_message: Return the whole `ToolMessage` instead of just its content, so a caller can
+            reach `.artifact`. **Off by default, and the default is the load-bearing half.**
+            LangChain coerces a `ToolMessage`'s content to text for a non-block return, so the
+            `job` step — whose tool returns a dict — gets `'{"subject": "benzene"}'` and
+            `ResolvedJob` rejects it; three tests in `test_template_job_step.py` pin that. Only the
+            `tool` step opts in, because only it needs the structured payload
+            (`template_activities._call_governed`), and an MCP tool's content is a *list of blocks*
+            rather than a dict, so it survives the wrap intact.
 
     Returns:
-        Whatever the tool returned.
+        Whatever the tool returned, or the `ToolMessage` carrying it when `want_message`.
 
     Raises:
         AuthorizationError, PlanNotApprovedError, DryRunRefusal, ChemclawError: whatever the chain
@@ -150,6 +159,8 @@ async def invoke_governed(
         turn uses, and there the handler is exactly right.
         """
         tool = cast(Any, request.tool).model_copy(update={"handle_tool_error": False})
+        if want_message:
+            return await tool.ainvoke(request.tool_call)
         return await tool.ainvoke(request.tool_call["args"])
 
     handler: Callable[[ToolCallRequest], Any] = _call
@@ -186,6 +197,8 @@ async def invoke_governed(
     # same question is asked of a returned one before it is unwrapped.
     if (failed := returned_failure(result)) is not None:
         raise ToolReturnedFailure(returned_failure_detail(failed))
+    if want_message:
+        return result
     return result.content if isinstance(result, ToolMessage) else result
 
 

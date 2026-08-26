@@ -29,7 +29,7 @@ inputs:
     description: The molecule to resolve, as SMILES.
   - name: solvent
     type: string
-    description: Implicit solvent name (e.g. "water", "thf"), or an empty string for gas phase.
+    description: Implicit solvent name (e.g. "water", "thf"). Omit it for gas phase.
     required: false
 
 steps:

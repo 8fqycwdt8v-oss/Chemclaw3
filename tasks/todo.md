@@ -1,83 +1,106 @@
-# Review of #210, and the fourteen defects it found
+# ELN records become queryable data, not knowledge-graph notes (D-2026-08-25)
 
-## Context
-
-`D-2026-08-25-a-cache-is-not-a-record` merged as `4373b72`. A review of the merged range
-(`4d1ae72...4373b72`, 66 files, 7,899 insertions) found twelve defects, **each confirmed by running
-the code rather than by reading it**. Nine share one cause. Assembling the whole path to verify the
-fix then found **two more**, both of which made the seam unusable and neither of which any unit test
-could see. All fourteen are recorded in `D-2026-08-26-a-route-is-not-a-shape`.
+## Task
+Remove the PR-gate from ELN ingestion. Keep the ELN queryable ("similar reaction", "same
+product") with full content. Nothing extracts knowledge automatically without a user asking.
 
 ## Done
-
-- [x] **P1 — the composite path published nothing.** `calc_type = f"{connector}.{job}"` is a route
-      and matched no projector; all four shipped jobs resolved to `None`. `ConnectorJobResult` now
-      carries `payload_kind`, set from `type(result).__name__` at the three envelope sites that hold
-      a typed result; threaded through `JobPublishInput` → `enqueue_payload` → `project`.
-      Migration 055 puts the same column on `job_records` so the backfill can route too.
-- [x] **P1 — 17 `PAYLOAD_PROJECTORS` were unreachable.** Same fix: nothing set the key they are
-      keyed on.
-- [x] **P1 — the solvent screen's decomposition was test-only.** New `records_for()` is the single
-      entry point that decides one-record-versus-many; `enqueue_payload` goes through it.
-- [x] **P1 — DFT bypassed the hook.** `publish_stored_result` is now public and called beside
-      `default_store().put(...)` in `persist_qm_result`, which cannot use `cached_compute`.
-- [x] **P2 — repeated species collided.** `2 H2O` gave member 1 no facts and produced two facts
-      sharing a `value_id` (6 rows, 5 ids). `_member_for` is now one-to-one.
-- [x] **P2 — a blank overwrote a known `origin_calc_ref`.** `PRESERVE_ON_BLANK` in `dialect.py`;
-      verified against Postgres in both write orderings.
-- [x] **P3 — `enqueue_payload` could raise.** Four projectors raise `KeyError` on a missing
-      *list-element* field; the guard caught only `(ProjectionError, ValueError)`. Now
-      `except Exception`.
-- [x] **P3 — one poison row retired its whole batch.** The drain parses per row.
-- [x] **P4 — `required_roles` deleted** (declared, read by nothing).
-- [x] **P4 — the Snowflake claim corrected**, and the `information_schema` probe made
-      case-insensitive so it works on all three engines.
-- [x] **P4 — `schema/` ships in the image**, pinned by `tests/test_deploy_chart.py`. The SQL sink's
-      own error told operators to run a command that could not run there.
-- [x] **P4 — `produced_structure_id` published** as a `produced_structure` fact rather than written
-      into a dict nobody read.
-- [x] **P5 — the shipped driver failed the shipped sink's own check.** `Warehouse` is
-      `@runtime_checkable`, so the check tests for every member; `PostgresWarehouse` had no
-      `vector_dialect` and every delivery died at the connect with "did not build a Warehouse".
-      Found by building a sink and a driver together for the first time.
-- [x] **P5 — every drain pass leaked a Postgres connection.** The drain builds a sink per run
-      (deliberately) and `SqlResultSink` holds its connection for the sink's life (also
-      deliberately) and nothing closed it — four connections an hour against a stock
-      `max_connections` of 100. `aclose()` is now on the `ResultSink` Protocol, so mypy requires it
-      of every sink, and the drain calls it in a `finally`.
-
-## Verification
-
-- `tests/test_publish_end_to_end.py` — new; the only test that assembles projector, outbox, drain,
-  driver and the shipped DDL. A composite queued the way a finished job queues one reaches a second
-  Postgres schema and answers "what was ΔG in THF" for a run submitted as `tetrahydrofuran`. This is
-  the file that would have failed on the seam as merged, and it is what found the last two defects.
-- `tests/test_publish_reaches_the_hooks.py` — new; every test starts at a production call site.
-  Twelve tests: the four shipped jobs route, the envelope and the durable record carry the shape,
-  the screen decomposes, repeated species keep distinct ids, and a mutation sweep over two shapes
-  (~40 single-field deletions, including nested) asserts the enqueue absorbs all of them.
-- **Every regression test was confirmed to fail against the code it replaces** before being kept:
-  narrowing the guard back to `(ValueError,)` fails the mutation sweep; stashing the per-row parse
-  fails the batch test; stashing the `finally` fails the sink-close test.
-- `ruff`, `ruff format`, `mypy --strict` (680 files) clean. Declaration gates green:
-  `test_decision_log`, `test_docstring_paths`, `test_schema_inventory`, `test_repo_map`,
-  `test_layering`, `test_database_privileges`, `test_deploy_chart`, `test_config`.
+- [x] Measure the gate before changing it (202 ms/note serialized git; 425 µs/note corpus scan;
+      zero LLM calls in ingest; refs *not* the bottleneck — disconfirmed)
+- [x] Migration `052_reaction_records.sql` + grants + `infra/sql/README.md` inventory row
+- [x] `ingest/eln/records.py` — Protocol + InMemory + Postgres, shaped like `fingerprints/store.py`
+- [x] `ingest/eln/note.py` → `record.py`; `note_from_ord_reaction` → `record_from_ord_reaction`
+- [x] `ingest.py` drops `propose_note`; fingerprint indexing untouched
+- [x] `sync.py` drops `_merged_note_bodies` (the O(corpus) scan) and `awaiting_merge`
+- [x] `dangling_links` external-id namespace + `cli/validate_kg.py` citation-existence check
+- [x] `expand_note` falls back to the store (graph still wins — `reaction-` is a prefix, not a
+      reservation); D-018's dangling-citation failure class removed
+- [x] Retriever filter resolves against the store
+- [x] No Schedule opens a PR: 3 memory schedules removed, observation promotion split out
+- [x] Layering: removed both new edges by injecting one-method Protocols, not by declaring them
+- [x] Slug validation kept (`require_note_slug` extracted, not copied) — caught by a test, not review
+- [x] `tests/test_reaction_records.py` — the 4 claims the change would be wrong without
+- [x] ADR + ledger + CLAUDE.md + ARCHITECTURE.md + DEFERRED row
 
 ## Review
+The elegant version was not the first one. Two things forced it:
 
-The interesting finding is not any single defect — it is that a green suite of 72 tests said nothing
-about the claim the feature was built on. Every test entered at `project()`, which is the function
-I wrote; nothing entered at the hook, which is what production calls. `tasks/lessons.md` carries the
-rule I drew from it, and the rule is narrower and more useful than "test more": *a test of a seam
-starts at the outermost thing production calls, and if I cannot name the production caller of the
-function my test invokes first, I have tested my own intentions.*
+1. **The layering test.** Putting the store in `ingest` inverted `ingest → kg` and
+   `ingest → retrieval`. The file's own rule ("move the code rather than excuse the edge") gave
+   the answer: each consumer declares a one-method Protocol, the caller injects the store, and the
+   edge disappears instead of being allowlisted. `FingerprintReactionRetriever`'s `records` is
+   required rather than defaulted for the same reason.
+2. **A dropped guard.** `ReactionRecord` initially had no slug validation, because a Postgres PK
+   does not need one. An existing test failed and was right: the id still becomes the
+   `reaction-<id>` citation a campaign note carries into git.
 
-Two of the four P4 items are the same species of error in prose: a manifest field documented as an
-access control with no reader, and a docstring naming two SQL dialects the emitter does not speak.
-Both read as claims. Neither was a lie anyone told deliberately.
+One hazard I introduced and then removed: routing on the `reaction-` prefix *before* the graph made
+any human-authored note under that name silently unreachable. Graph first, store second.
 
-The two found last are the sharpest version of the whole point. Fixing the nine did not prove
-anything; *assembling the path* did, and it failed twice before it passed — on a driver that could
-not satisfy its own sink, and on a connection leak that would have killed the worker in a day.
-Neither is subtle. Both were invisible to 72 green tests because no test ever put two real pieces
-together.
+## Merge with main (main moved mid-flight)
+- [x] Base was `bed7d69`, whose own CI run **failed**; `50cb06f` on main fixed the two mypy errors
+      that had kept main red since 2026-08-22. Merged main in rather than waiting.
+- [x] Main added `ProcessConditions` frontmatter, read by `condense.py` and `protocol_tools.py`.
+      Both sides changed the same mapping, so it is carried rather than picked: the record gains a
+      `conditions` JSONB column, and `condense_protocols` gains a record fallback — without it
+      every reaction reference would read as `missing`, silently breaking a feature main had just
+      shipped.
+- [x] Verified the exact CI command: `mypy src examples tests` → clean.
+
+## Not done, deliberately
+The chemist's actual insight is still not captured — see the `DEFERRED.md` row. This change makes
+the ELN queryable; it does not make it teach.
+
+---
+
+# Review: fixing what the review of the GFN work found (2026-08-26)
+
+#211 merged green — `make lint type cov`, seven validators, `eval-strict`, the Helm render, the
+image build — and an adversarial review of the merged diff then found the feature did not work.
+
+## What was actually broken
+
+- [x] **Four of seven templates died on step 2.** A `tool` step's result reaches the resolver as a
+      **string**: `_mcp_text` joins content blocks and `invoke_governed` returned the content.
+      `${steps.forms.result.smiles}` asked for a field of a `str`. Reproduced, then fixed by taking
+      the MCP adapter's structured artifact — the payload was on the wire all along.
+- [x] **All eight templates died on step 1 when `solvent` was omitted.** `exclude_none=True` drops
+      an unset optional input, and every template references it unconditionally.
+      `conformer-refinement.yaml` had this since it shipped, so gas phase — the commonest call —
+      never worked for any of them. Declared inputs now seed the scope as `None`.
+- [x] **The agent could not select any of them.** The real names use underscores
+      (`run_tautomer_resolution`); both skills wrote the file stem with dashes, twelve times. And
+      `computation.yaml` advertised **zero** `run_*` names against `default`'s nine.
+- [x] **Ensemble-averaged Fukui combined different atoms.** `_averaged` paired conformers by list
+      position while `sites` is ranked by susceptibility and truncated. Now keyed by atom index.
+- [x] The budget fence ran *after* the CREST search in two composites, and could not fire at all
+      under defaults; the cost ladder said `thorough` adds a Hessian when it adds a search.
+- [x] `bond_dissociation_survey` published `settings.xtb_method`, the exact bug `reaction_energy`
+      documents having fixed. The truncation warning printed a negative count.
+- [x] `species_ranking` fabricated σ=1, bypassing the disclosure machinery, on the one composite
+      that ranks by the free energy σ shifts.
+- [x] `RankedSpecies.conformers_found` hardcoded 0 beside `sampled=True`; `structure_id` never
+      populated; `EnsembleProperty.refined` had no writer and no `warnings` field.
+- [x] `RefinedEnsemble`'s entropy carried the ensemble-wide field names while describing the
+      refined subset.
+
+## Why CI was green through all of it
+
+Every defect was invisible to a *different* gate, which is the finding worth keeping. The sharpest:
+**the test fake was blind three separate ways at once**, and any one alone would have hidden the
+Fukui bug — it discarded the geometry, returned sites in atom-index order and un-truncated (the one
+shape in which position-pairing is accidentally correct), and made `f_zero` a constant `0.5` when
+`f_zero` is the field being averaged. The same change had already fixed one instance of this class
+and made the *dipole* geometry-dependent; Fukui, whose entire justification is that it moves with
+geometry, was left constant.
+
+## What was deliberately not done
+
+- **No `CALCULATION_EPOCH` bump** — `ge=1` on `degeneracy` changed a persisted digest, but it
+  tightens validation and rewrites no data, so nothing stored becomes wrong.
+- **No ranking step for `run_degradant_triage`** — the prose was wrong, not the steps. Degradants
+  do not interconvert, so an equilibrium distribution across them has no referent.
+- **`_BARE` was not widened** — the skill-name hole is closed by a targeted test rather than by
+  changing what every other skill is checked against.
+
+Recorded in `D-2026-08-26-a-tool-result-is-not-a-model-on-the-wire`.

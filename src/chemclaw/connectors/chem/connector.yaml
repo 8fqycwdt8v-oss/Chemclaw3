@@ -60,7 +60,8 @@ endpoint:
     - transform_structure
     - describe_topology
   # Pure functions of their input plus a vendored-dataset lookup: nothing here spends real compute
-  # or writes, so an agent can use all four to build the plan a human is asked to approve.
+  # or writes, so an agent can use every one of them to build the plan a human is asked to
+  # approve. A count is not written here: it said "four" while the list held eleven.
   #
   # The seven enumerations are reads for the same reason, and the classification matters more for
   # them. Each is a map from one SMILES to a set of SMILES — no SCF, no `calc_version`, nothing
