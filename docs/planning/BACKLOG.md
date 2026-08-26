@@ -245,6 +245,54 @@ inherit it — so the fix is to give the fingerprint tables the same key, and it
 it happens.
 ## 3 — Work that is lost, dropped or invisible
 
+- [ ] **Four multi-step result shapes reach the publish hook and route to no projector** — [M],
+      and it is the second half of a fix rather than a new finding. `RefinedEnsemble`,
+      `EnsembleProperty`, `SpeciesDistribution` and `BondDissociationSurvey` are what the seven
+      jobs `D-2026-08-25-the-loop-is-a-composite-not-a-template` added actually return, and
+      `PAYLOAD_PROJECTORS` has an entry for none of them — so those jobs run, cost real compute,
+      and publish nothing. Declared out loud in
+      `tests/test_publish_reaches_the_hooks.py::_NOT_YET_PUBLISHED` rather than quietly omitted,
+      and that set is the definition of done: each projector deletes its own entry, and a shape
+      *not* named there must route, so a tenth member field on `XtbJobResult` fails immediately.
+      Each is the `_ensemble` shape — a SMILES subject, solvent/temperature conditions, a method,
+      and a per-conformer or per-bond fact list — and `publish/properties.py` already registers
+      the quantities, so this is bounded work rather than a design question.
+
+- [ ] **A Hessian is cached and never published, and neither is the thermochemistry built from
+      it** — [M], and the two halves are one question. `xtb.hess` is a `calc_type` the server
+      stamps and `_CALC_TYPE_PROJECTORS` has no prefix for it, so vibrational frequencies never
+      reach a results store; `ThermochemistryResult`, which is where a Hessian's scientific value
+      is actually realised, has a projector but **no hook at all** — it is a *tool* composite, so
+      it is neither written to the cache (composites are not cached, D-011) nor returned by a job
+      envelope. Publishing frequencies therefore needs a third hook, not a projector, which is why
+      this is a decision rather than a one-line addition. Named in
+      `tests/test_publish_reaches_the_hooks.py::_PRIMITIVES_NOT_PUBLISHED` so the gap is declared
+      and not merely absent.
+
+- [ ] **Decide whether a BO campaign is a scientific record** — [S].
+      `connectors/bo/workflows.py` sets `payload_kind` from `CampaignResult`, which implies it
+      should publish, and no projector exists — so it is currently in the same silent-drop state
+      the calc jobs were, but possibly *correctly*: a campaign is an optimization outcome rather
+      than a computed value, and `schema/result-store/` is molecule/reaction/ensemble-shaped.
+      Either write the projector or say in `publish/README.md` that a campaign deliberately does
+      not publish. What is not acceptable is the current state, where the two readings are
+      indistinguishable from the code.
+
+- [ ] **The `results` bundle's worker is not started by the live lane** — [S].
+      `deploy/helm/chemclaw/values.yaml` gives it `worker: true` and the chart renders the
+      Deployment, but `infra/live/processes.sh` starts four workers (background, calc, bo, qm) and
+      not this one, so `republish_calculations` cannot run there. Low urgency because publishing
+      is off until `CHEMCLAW_RESULT_SINKS` names a sink, and a backfill has a CLI route that needs
+      no worker — but the lane exists to make the deployed shape testable, and it currently
+      diverges from it.
+
+- [ ] **`label_batch_size` is unguarded against the labelling server's batch limit** — [S].
+      The default is 200 and `Chemclaw3-mcp`'s `rxnlabel` refuses above `MAX_BATCH = 500`, so an
+      operator raising the setting past 500 gets every drain attempt refused as bad data. The
+      house rule is that a rule worth writing down is worth failing on
+      (`core/config/__init__.py::_guards_that_the_comments_already_demand`), and the limit is not
+      written down on this side at all.
+
 - [ ] **A decided approval hold can be reopened** — [M]. `agent/interaction_tools.py::start_approval`
       passes no `id_reuse_policy`, so temporalio's default lets a decided hold be started again under
       the same id. `REJECT_DUPLICATE` is **not** the fix and the archive records why: expiry is not

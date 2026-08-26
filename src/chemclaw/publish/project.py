@@ -951,21 +951,32 @@ PAYLOAD_PROJECTORS: dict[str, _Projector] = {
 }
 
 # Longest prefix wins, so `xtb.properties` reaches `_electronic_properties` rather than being
-# swallowed by a shorter `xtb.` entry. The families are the ones `STRUCTURE_KEYED_PREFIXES` and the
-# calc server's own tool set produce.
+# swallowed by a shorter `xtb.` entry.
+#
+# **An entry here is a `calc_type` something has actually stamped** — today's server, or a release
+# whose rows a deployment still holds. Four entries met neither test and were deleted:
+# `descriptors`, `logd`, `xtb.thermo` and `xtb.energy` name spellings that no version of this
+# system ever wrote (checked against `XtbTask` and each engine's `CALC_TYPE` before and after
+# `D-2026-08-16-the-physics-leaves-the-cache-stays`; the descriptor panel has always stamped
+# `developability`, and logD has never had a cache row at all). The cost was not the dead rows —
+# it was that `descriptors` *looked* like the descriptor panel's route, so every
+# `predict_developability_profile` result was dropped by `enqueue_payload` with a debug line while
+# `test_publish_projection.py` exercised the dead spelling and never the live one.
+#
+# `xtb.scan` stays and is the reason the rule is not simply "what the server stamps now": `scan`
+# was an `XtbTask` before the move and is not one today, and `calculation_results` is never
+# pruned, so those rows are still there for the backfill to find. A retired calculator keeps its
+# projector; a spelling that never existed does not get one.
 _CALC_TYPE_PROJECTORS: tuple[tuple[str, _Projector], ...] = (
     ("xtb.properties", _electronic_properties),
     ("xtb.conformers", _ensemble),
     ("xtb.complex", _interaction),
-    ("xtb.thermo", _thermochemistry),
     ("xtb.fukui", _site_reactivity),
     ("xtb.scan", _scan),
     ("xtb.opt", _optimization),
-    ("xtb.energy", _single_point),
     ("xtb.sp", _single_point),
     ("solubility", _solubility),
-    ("descriptors", _descriptors),
-    ("logd", _logd),
+    ("developability", _descriptors),
     ("pka", _pka),
     ("dft", _dft),
 )

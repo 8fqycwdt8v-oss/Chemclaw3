@@ -386,7 +386,7 @@ class Relation(TemporalWindow):
 class ProcessConditions(BaseModel):
     """The setpoints and outcomes a run recorded, as numbers rather than as prose.
 
-    **Why this is frontmatter and not left in the body.** `note_from_ord_reaction` renders these
+    **Why this is frontmatter and not left in the body.** `record_from_ord_reaction` renders these
     into readable bullets and the structure is then gone: `OrdReaction` is never persisted — it
     exists only transiently inside `durable.memory_jobs.read_corpus`, which re-reads and re-maps the
     entire ELN from the beginning of time on every call, on the background worker, behind an ingest
