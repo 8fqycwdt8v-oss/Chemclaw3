@@ -58,3 +58,62 @@ What is deliberately not done: 2D surfaces, transition-state claims, ring torsio
 inside the compute job. And the two open ends, both needing the live lane rather than more code —
 no barrier has been computed against real xTB, and the conformer-dependence warning threshold is
 unset. Both are in the ADR.
+
+---
+
+**What is deliberately not fixed**, each with a BACKLOG row rather than a silent omission: the
+four multi-step GFN shapes (PR 2 — declared in `_NOT_YET_PUBLISHED`, so a tenth member field still
+fails), `xtb.hess` and `ThermochemistryResult` (needs a third hook, not a projector), and the BO
+campaign question (write the projector or say it deliberately does not publish).
+
+## Result, measured the same way as before
+
+| | before | after |
+| --- | --- | --- |
+| primitive calculators publishing | 8 of 10 | 9 of 10 (`xtb.hess` declared) |
+| durable jobs publishing | 1 of 11 | 6 of 11 (4 declared, 1 undecided) |
+
+`make lint type test`: 4699 passed, 3 skipped (the migration-history checks needing
+`fetch-depth: 0`), lint and `mypy --strict` clean. Five validators re-run green. End to end against
+Postgres, a reaction-energy job and a descriptor panel each queue 1 row where both queued 0.
+
+
+---
+
+# PR 2 — a projector for every shape the GFN loop produces
+
+## Task
+Empty `_NOT_YET_PUBLISHED`: the four multi-step results the seven new jobs return had no
+projector, so those jobs reached the publish path (after PR 1) and were dropped.
+
+## Done
+- [x] `_refined_ensemble`, `_ensemble_property`, `_species_distribution`, `_bond_survey`
+- [x] 13 registry rows; an unmappable average raises rather than storing an unregistered name
+- [x] `_NOT_YET_PUBLISHED` emptied and **kept** — an empty exclusion is what makes the next
+      unroutable shape fail loudly
+- [x] 7 tests driving each shape through `job_envelope`, not through `project()`
+- [x] ADR + ledger (inserted in sorted position — the ledger is ascending, not append-order)
+- [x] BACKLOG row deleted in this commit, per the register's rule
+
+## Review
+Four choices worth recording, each of which could have gone the other way:
+
+1. **A refined ensemble's `energy_hartree` is the electronic energy**, though the ranking is by G.
+   One absolute-energy column, and the electronic one means the same thing in both ensemble
+   shapes — so E-weighted and G-weighted stay comparable. `treatment` disambiguates the relatives.
+2. **`refined_*` property names are kept apart** from the ensemble-wide ones, carrying the model's
+   own argument across the boundary instead of undoing it there.
+3. **An averaged property lands on the plain registered name** (`dipole`, not `dipole_averaged`) —
+   the alternative is the registry split a test already exists to catch.
+4. **A ranked species set is `candidates`, not members.** `CandidateFact` shipped with the schema
+   and had no producer at all; this is its first.
+
+The spread of an averaged property is deliberately not published: min/max/spread are each in the
+averaged property's own unit, so one `property_spread` has no canonical unit and a name per
+property is registry bloat.
+
+Verified by deleting one projector: three assertions turn red — routing, envelope, and that
+shape's own. `make lint type test`: 4744 passed, 3 skipped. Three validators green.
+
+Publishing now: 9/10 primitives, **10 of 11 jobs**. The eleventh is `bo`, which is a question
+rather than a gap and keeps its row.
