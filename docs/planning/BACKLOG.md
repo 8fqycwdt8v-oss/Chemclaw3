@@ -243,6 +243,23 @@ while designing the label index, which uses a composite `(source, reaction_id)` 
 inherit it — so the fix is to give the fingerprint tables the same key, and it is a migration plus
 `note_id_for_reaction`. Not urgent while one ELN is enabled anywhere; not detectable at all when
 it happens.
+
+- [ ] **A torsion can only be named by atom index, and the wrong index is not an error** — [L],
+      concept written as `D-2026-08-26-a-torsion-is-named-not-indexed` (proposed, nothing built).
+      `src/chemclaw/connectors/calc/specs.py::ScanJobSpec` takes `atoms` as 0-based RDKit indices
+      and `connectors/calc/compose.py::scan_profile` checks only that they are in range — a bounds
+      check, not an identity check. Measured on RDKit 2026.3.5: `(4, 5)` is the amide C–N of
+      `c1ccc(NC(C)=O)cc1` and an aromatic *ring* bond of `CC(=O)Nc1ccccc1`, the same compound
+      rewritten, really bonded, no error anywhere — so a mis-indexed request returns a well-formed
+      profile and a plausible barrier for a different question. No chemist has those indices, which
+      means in practice the model supplies them.
+      The ADR's design is a free `enumerate_torsions` on `chem` returning a content-addressed
+      handle, a chemist-readable label and a symmetry order, plus a `profile_rotation` composite
+      here that releases the wells from their constraint, reports directional barriers and does the
+      Eyring arithmetic with its uncertainty band instead of leaving it to
+      `skills/atropisomer-assessment`'s prose. Its `chem` half lands behind the row above — those
+      enumerations are declared here and served nowhere yet.
+
 ## 3 — Work that is lost, dropped or invisible
 
 - [ ] **A decided approval hold can be reopened** — [M]. `agent/interaction_tools.py::start_approval`
