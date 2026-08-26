@@ -2,7 +2,7 @@
 
 Brings up this backend together with the three companion repos so a chemist's turn actually
 crosses every boundary the architecture claims it can: a real browser, a real LangGraph turn
-against a real Anthropic model, a real MCP connector fleet, a mocked HPC/Nextflow launcher, and
+against a real Anthropic model, a real MCP connector fleet, and
 mocked ELN/ORD data sources. Nothing here runs in `make ci` — like the rest of `infra/live/`, it
 is a manual lane run against a checkout, not a diff.
 
@@ -20,7 +20,7 @@ Closes the gap `tasks/todo.md` used to name: *"the cross-repo sequence `Chemclaw
 | `chem` (RDKit: resolve, stoichiometry, green metrics, render) | Chemclaw3-mcp | 8858 | this script |
 | `safety` (structural hazard / genotoxicity screen, ICH limits) | Chemclaw3-mcp | 8859 | this script |
 | `calc` (the physics behind this repo's calculator tools — *not* a connector) | Chemclaw3-mcp | 8860 | this script |
-| `mock-hpc-eln` (Nextflow-shaped HPC launcher + ELN/ORD data) | Chemclaw3_mock | 8090 | this script |
+| `mock-eln` (ELN/ORD data) | Chemclaw3_mock | 8090 | this script |
 | `mock-vendor` (building-block search/pricing MCP tool) | Chemclaw3_mock | 8091 | this script |
 | connectors, 4 Temporal workers, front door | this repo | 8810+, 9000-9003, 8000 | `infra/live/processes.sh` |
 | BFF + SPA | Chemclaw3_ui | 8787, 5173 | this script |
@@ -50,7 +50,7 @@ make live-e2e-full-stack-down
 ```
 
 Or drive it directly: `infra/live/e2e-full-stack/up.sh [up|down|status|restart <name>]`.
-`restart <name>` (`props`, `rxnpredict`, `chem`, `safety`, `calc`, `mock-hpc-eln`, `mock-vendor`,
+`restart <name>` (`props`, `rxnpredict`, `chem`, `safety`, `calc`, `mock-eln`, `mock-vendor`,
 or `ui-bff`) kills and
 restarts one external process in place — the primitive the chaos round uses. Restarting a piece of
 this repo's own stack (a connector, a worker) is `infra/live/processes.sh restart <name>` instead.

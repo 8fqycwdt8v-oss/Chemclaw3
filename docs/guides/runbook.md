@@ -445,9 +445,9 @@ costs its tools for that turn, not the turn itself; set `CHEMCLAW_CONNECTORS_REQ
 startup instead. Verify a bundle standalone with `uvicorn chemclaw.connectors.<name>.server.app:app` and check
 `/healthz`; tool *discovery* needs no database, but *invoking* a search does.
 
-**What ships today.** The bundles are `molfp` and `rxnfp` (fingerprint search), `calc` (the fast
-calculators and the calibration ledger), `bo` (Bayesian optimization), `qm` (the durable QM/DFT
-run behind the Nextflow launcher) and `results` (re-queueing stored calculations for an external
+**What ships today.** The bundles are `molfp` and `rxnfp` (fingerprint search), `calc` (the
+semiempirical calculators, their durable searches and the calibration ledger), `bo` (Bayesian
+optimization) and `results` (re-queueing stored calculations for an external
 results store, §(xvi)) — plus `chem` (bench chemistry over RDKit) and `safety` (the
 hazard screen), which this release **declares but does not run**: both are served by
 `Chemclaw3-mcp`, so each needs its host in `networkPolicy.egressDestinations` and its bearer
@@ -460,9 +460,9 @@ even though the `calc` bundle's own tools, cache and durable jobs stay in this r
 the address in `connectors.chem.url` instead (D-2026-08-09). Two things that are the operator's,
 because the chart cannot do them: add the host to `networkPolicy.egressDestinations`, and provide
 `CHEMCLAW_CHEM_TOKEN` — that server enforces a bearer on `/mcp` itself, so a missing credential is
-a refused call rather than an open one. `calc`, `bo`, `qm` and `results` each declare `jobs:` and therefore own
+a refused call rather than an open one. `calc`, `bo` and `results` each declare `jobs:` and therefore own
 durable work, so each runs a second Deployment for its own Temporal worker; set `worker: true` on a
-bundle in the chart to get one. `results` is the second jobs-only bundle after `qm` — it declares no
+bundle in the chart to get one. `results` is the one jobs-only bundle — it declares no
 `endpoint:`, so `server: false` and it renders no app pod; its one job re-queues stored
 calculations for an external results store, and is inert until `CHEMCLAW_RESULT_SINKS` names one
 (§(xvi)). `tests/test_repo_map.py` derives both sets from the `connector.yaml` files on
@@ -484,10 +484,10 @@ set so adding to it is a reviewed edit:
   in core with it.
 - **The development report** — its closure (retrievers, embedding index) is what core keeps for
   `gather_evidence` anyway, so a bundle would isolate nothing (D-115). It still returns the
-  connector envelope, so `get_durable_job_status` collects it like any other job. The QM/DFT run
-  used to be listed here beside it, on the reasoning that it needs the HPC identity bridge; that
-  turned out to be a property of the *bundle's worker*, not of core, and it is `connectors/qm/`
-  now (D-118).
+  connector envelope, so `get_durable_job_status` collects it like any other job. The DFT run used
+  to be listed here beside it, on the reasoning that it needs the HPC identity bridge; that turned
+  out to be a property of the *bundle's worker* rather than of core (D-118), and the whole tier has
+  since been removed (`D-2026-08-26-semiempirical-is-the-whole-tier`).
 
 ## (iv-b) Add a specialized agent (a **profile**)
 
@@ -963,9 +963,8 @@ The chart deploys none of these. It states what it requires of whoever does.
 | **Postgres** | the audit trail, sessions, the calculation cache, the note index, job records | the audit trail is the only part that cannot be regenerated from anything; the cache is regenerable by definition (D-011) and the note index is rebuilt by `make reindex` |
 | **Temporal** | in-flight workflow history | running jobs die; finished results survive in `job_records` (D-157) and the calculation store |
 | **Knowledge git repo** | every merged note | the corpus. It is a git repo, so any clone is a backup — including each pod's sidecar checkout |
-| **HPC artifact store** | job outputs | regenerable at the cost of re-running the cluster job |
 
-Only one of the four needs a *point-in-time* story rather than a recent-snapshot one, and it is the
+Only one of the three needs a *point-in-time* story rather than a recent-snapshot one, and it is the
 audit trail — because it is the only store where "we lost the last hour" means the answer to "who
 ran that?" is gone for good, rather than merely inconvenient.
 
@@ -979,9 +978,8 @@ ran that?" is gone for good, rather than merely inconvenient.
 4. Re-run `make db-grants` if the deployment splits the database principal (see *Splitting the
    database principal*, above) — a restore can bring back a role grant state that predates it.
 
-The other three stores need no procedure here: Temporal's in-flight history is lost by definition,
-the knowledge repo is a git repo (any clone is a backup), and the HPC artifact store is regenerable
-at the cost of re-running the job.
+The other two stores need no procedure here: Temporal's in-flight history is lost by definition, and
+the knowledge repo is a git repo (any clone is a backup).
 
 ## (xiv) Cut a release: pin the image to bytes
 

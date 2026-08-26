@@ -7,6 +7,7 @@ tools:
   - refine_ensemble
   - compute_ensemble_property
   - rank_species
+  - rank_species_across_solvents
   - survey_bond_strengths
   - enumerate_tautomers
   - enumerate_protonation_states
@@ -16,6 +17,7 @@ tools:
   - compute_electronic_properties
   - predict_site_reactivity
   - predict_pka
+  - predict_pka_ensemble
   - predict_solubility
   - optimize_geometry
   - compute_thermochemistry
@@ -64,6 +66,19 @@ calculation; this skill assumes that decision is already made.
   returning a pKa. Load
   `ionization-and-partitioning` before using the value for anything — an acid site wins
   silently over a basic one, and individual predictions miss by up to two units.
+- **Which proton is the pKa about?** → `predict_pka_ensemble` (two CREST searches, minutes
+  to hours, so expect a job id). Not a slower setting of `predict_pka` and **not a more
+  accurate one**: measured over the same 31 reference compounds it scores RMSE 1.31 (acids)
+  and 1.05 (bases) against `predict_pka`'s 1.34 and 1.16, and ranks them slightly worse. What
+  it does differently is enumerate nothing by rule — CREST removes or adds *every* proton in
+  turn, optimises each product and ranks them — so it reports **which** site won, considers
+  sites no rule offers (an imide, a sulfonamide, a C-H acid), and says how many microstates
+  are populated. Choose it when that is the question; choose `predict_pka` when a value is.
+  It reports **which** proton (`site_smiles`, perceived from the winning geometry) and how
+  many microstates lie within RT of the best: more than one means the molecule has no
+  single conjugate base, and a site-resolved pKa is then a different question. The same two
+  domains apply, and the same aliphatic-amine limit — CREST fixes the enumeration, not the
+  continuum solvent — but it *warns* rather than refusing, so read the warnings.
 - **Which atom reacts (regioselectivity)** → `predict_site_reactivity` (condensed
   Fukui indices; three fast single points). Load the `reactivity-descriptors` skill
   before interpreting the ranking — it ranks sites *within* one molecule only. It now
@@ -102,13 +117,28 @@ them.
 
 ## When the question is about a *set*, not a structure
 
-Everything above answers about one structure. Four jobs answer about a set, and the judgment for
+Everything above answers about one structure. Five jobs answer about a set, and the judgment for
 all of them is in **`ensemble-workflows`** — load it before using any of them, and before deciding
 that a single-structure answer is good enough.
 
 - **Which form is this molecule actually in?** → `rank_species` over `enumerate_tautomers`, or the
   fixed sequence `run_tautomer_resolution`. Ask this *first* on anything with a mobile proton
   between heteroatoms: every other number here describes whichever tautomer was drawn.
+  A second route exists where the rules are the doubt rather than the cost: `sample_conformers`
+  with `search="tautomers"` (or `"protomers"`/`"deprotomers"`) has CREST shuffle the protons and
+  rank what it finds by GFN2 energy, and each member now comes back with the SMILES *perceived from
+  its own geometry* — so the forms it found can be handed straight to `rank_species`. Use it when
+  the enumeration itself is in question (an unusual heterocycle, a form no SMARTS rule offers);
+  stay with `enumerate_tautomers` otherwise, since it is free and this is a metadynamics search.
+  Two cautions on the perceived SMILES: a delocalised anion comes back as *one valid resonance
+  structure* rather than the canonical drawing, and a member whose bonding could not be read
+  carries no SMILES at all rather than a guess.
+- **Does the form change with the solvent?** → `rank_species_across_solvents`, the same ranking
+  in each medium plus the gas phase. Reach for it whenever the question spans two solvents — an
+  assay in water and a crystallisation out of toluene — rather than running `rank_species` twice
+  and comparing: the ranking is sorted by energy, so two payloads are not a diff, and the result's
+  `dominance_changes` is the finding. If it is true, no single-structure number above is a number
+  about "the compound" without naming the medium.
 - **What is charged, at which pH?** → `enumerate_protonation_states` then `rank_species`, or
   `run_microspecies_profile`. This is the amphoteric and polyprotic case `predict_pka` and
   `predict_logd` refuse; it is not a substitute for them on a single site, where they are calibrated
@@ -174,8 +204,9 @@ electronic energies is needed; it skips every Hessian.
 - Every result is cached, so exploring many related structures is cheap — do the
   comparison rather than reasoning from one number.
 - If a property predictor reports an uncertainty, state it; if the question needs
-  higher accuracy than a fast method gives, say so rather than over-claiming (the
-  heavier QM/DFT path is deferred and would be the escalation).
+  higher accuracy than a fast method gives, say so rather than over-claiming. There is
+  **no** heavier tier to escalate to — semiempirical is all of it — so the honest move
+  is to name the limit and propose the experiment that would settle it.
 - The **fast** calculators (single point, properties, Fukui, pKa) run on a force-field
   geometry, not a GFN2-optimized one. Fine for ranking and for comparing related
   structures; when the question is about a specific conformation or needs a real

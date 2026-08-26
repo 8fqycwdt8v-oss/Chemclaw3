@@ -19,6 +19,8 @@ import pytest
 from chemclaw.connectors.calc import compose
 from chemclaw.core.config import settings as calc_settings
 from chemclaw.science.calc.store import InMemoryStore
+from chemclaw.science.calc.thermo import macrostate_free_energy_kcal
+from chemclaw.science.calc.uncertainty import CalculationDomainError
 from tests.calc_server_fake import FakeCalcServer, install
 
 
@@ -440,3 +442,354 @@ def test_a_published_survey_names_the_method_the_server_ran(
     assert survey.method == "GFN2-xTB", (
         f"the survey published {survey.method!r} rather than what the server ran"
     )
+
+
+# --- species distributions across media ---------------------------------------------------------
+
+
+def test_a_species_screen_ranks_every_form_in_every_medium_and_includes_the_gas_phase(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The fan-out's contract: N species x (M solvents + 1 reference), each relaxed once.
+
+    The gas phase is prepended rather than asked for, for the reason `solvent_comparison` prepends
+    it: "the medium barely matters here" is a real answer and is invisible without a reference
+    point. So two tautomers in two solvents is six relaxations, not four.
+    """
+    server = install(monkeypatch, FakeCalcServer())
+    store = InMemoryStore()
+
+    comparison = _run(
+        compose.species_solvent_comparison(
+            store,
+            [("CC(=O)CC(C)=O", "keto"), ("CC(O)=CC(C)=O", "enol")],
+            ["water", "toluene"],
+            kind="tautomers",
+        )
+    )
+
+    assert server.count("relax_structure") == 6, "2 species x (2 solvents + gas phase)"
+    assert [d.solvent for d in comparison.distributions] == [None, "water", "toluene"]
+    assert comparison.kind == "tautomers"
+    # Every species appears in every medium's standings, in media order.
+    assert {response.label for response in comparison.responses} == {"keto", "enol"}
+    for response in comparison.responses:
+        assert [standing.solvent for standing in response.standings] == [None, "water", "toluene"]
+
+
+def test_a_screen_that_reorders_the_ranking_says_so_rather_than_only_shifting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`dominance_changes` is the finding, and it has to survive the sort.
+
+    `species_ranking` returns its species sorted by relative energy, so the same index is a
+    different form in two media exactly when the ranking reorders — which is why the transpose is
+    keyed by SMILES. Here the enol is stabilised in water enough to overtake the keto form, and the
+    result must report a changed dominant rather than two distributions a reader has to diff.
+    """
+    # Keyed on the **canonical** SMILES, which is what reaches the server:
+    # `require_canonical_smiles` rewrites the enol `CC(O)=CC(C)=O` to `CC(=O)C=C(C)O` before
+    # any structure is embedded.
+    keto, enol = "CC(=O)CC(C)=O", "CC(=O)C=C(C)O"
+    server = install(
+        monkeypatch,
+        FakeCalcServer(
+            solvent_shifts={
+                # Keto 2 kcal/mol lower in the gas phase, enol 3 kcal/mol lower again in water:
+                # the ordering is unambiguous in both media rather than resting on a tie-break.
+                (keto, ""): -0.0032,
+                (enol, "water"): -0.0080,
+            }
+        ),
+    )
+
+    comparison = _run(
+        compose.species_solvent_comparison(
+            InMemoryStore(),
+            [(keto, "keto"), (enol, "enol")],
+            ["water"],
+            kind="tautomers",
+            level="quick",
+        )
+    )
+
+    assert server.count("relax_structure") == 4
+    assert comparison.dominance_changes is True
+    assert comparison.distributions[0].dominant.label == "keto", "gas phase"
+    assert comparison.distributions[1].dominant.label == "enol", "water"
+    assert comparison.largest_swing_kcal > 1.0
+    assert any("dominant form is not the same" in warning for warning in comparison.warnings)
+
+
+def test_a_screen_the_method_cannot_resolve_refuses_to_report_a_difference(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A continuum model resolving tenths of a kcal/mol between media is reading its own noise.
+
+    The fake's energy is a function of atom count, so with no shift every medium is identical and
+    the swing is exactly zero — the strongest form of the case this warning exists for.
+    """
+    install(monkeypatch, FakeCalcServer())
+
+    comparison = _run(
+        compose.species_solvent_comparison(
+            InMemoryStore(),
+            [("CCO", "a"), ("COC", "b")],
+            ["water", "thf"],
+            level="quick",
+        )
+    )
+
+    assert comparison.largest_swing_kcal == 0.0
+    assert comparison.dominance_changes is False
+    assert any("does not distinguish them" in warning for warning in comparison.warnings)
+
+
+def test_screening_the_same_species_in_a_medium_already_computed_pays_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every part is keyed on its solvent, so a screen that adds a medium reuses the rest.
+
+    This is the D-011 property the whole split turns on, at the shape where it pays most: a chemist
+    who ranked tautomers in water and then asks for toluene should pay for toluene alone.
+    """
+    server = install(monkeypatch, FakeCalcServer())
+    store = InMemoryStore()
+    species = [("CCO", "a"), ("COC", "b")]
+
+    _run(compose.species_solvent_comparison(store, species, ["water"], level="quick"))
+    first = server.count("relax_structure")
+    _run(compose.species_solvent_comparison(store, species, ["water", "toluene"], level="quick"))
+
+    assert first == 4, "2 species x (water + gas phase)"
+    assert server.count("relax_structure") == first + 2, "only toluene is new"
+
+
+def test_a_screen_counts_its_whole_fan_out_against_the_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`species x media` is the number that surprises, so it is the number the fence checks.
+
+    Counting one medium would let five solvents through a ceiling sized for one, which is the
+    direction a preflight must never be wrong in.
+    """
+    install(monkeypatch, FakeCalcServer())
+    monkeypatch.setattr(calc_settings, "calc_max_primitive_calls", 10)
+
+    with pytest.raises(ValueError, match="would run 16 calculations"):
+        _run(
+            compose.species_solvent_comparison(
+                InMemoryStore(),
+                [("CCO", "a"), ("COC", "b")],
+                ["water", "toluene", "thf"],
+                level="quick",
+            )
+        )
+
+
+# --- pKa from macrostates ---------------------------------------------------------------------
+
+
+def test_a_pka_is_two_searches_and_a_subtraction(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The whole composite: the neutral's conformers, its deprotomers, one difference.
+
+    Two searches and no third — the count is what says this is a *composition* of cached primitives
+    rather than a calculation of its own. A third would be a conformer search of the anion, which is
+    a different pipeline and would need its own calibration.
+    """
+    server = install(monkeypatch, FakeCalcServer())
+    store = InMemoryStore()
+
+    result = _run(compose.microstate_pka(store, "Oc1ccccc1"))
+
+    assert server.count("search_conformer_ensemble") == 2
+    assert result.branch == "acid"
+    assert result.site_smiles == "[O-]c1ccccc1", "which proton came off is half the answer"
+    assert result.neutral.search == "conformers" and result.ionised.search == "deprotomers"
+
+
+def test_the_ionised_side_is_computed_as_the_anion(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The defect this whole change exists for, asserted from the composite's own side.
+
+    A deprotomer ensemble whose members carry the neutral's charge is not a slightly wrong label: it
+    is a converged energy for a species that does not exist, and every pKa built on it would be a
+    confident number about nothing. The ensembles this composite reports are the evidence for its
+    pKa, so the charge has to be visible in them.
+    """
+    install(monkeypatch, FakeCalcServer())
+    store = InMemoryStore()
+
+    result = _run(compose.microstate_pka(store, "Oc1ccccc1"))
+
+    assert all(member.structure.charge == -1 for member in result.ionised.conformers)
+    assert all(member.structure.charge == 0 for member in result.neutral.conformers)
+
+
+def test_asking_twice_pays_for_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Both halves are keyed primitives, so the second pKa is arithmetic over rows that exist.
+
+    This is the economy the split is for: a CREST search is the most expensive single call in the
+    system, and a composite that re-ran one per question would make the careful pKa unaffordable
+    exactly where it is worth having.
+    """
+    server = install(monkeypatch, FakeCalcServer())
+    store = InMemoryStore()
+
+    first = _run(compose.microstate_pka(store, "Oc1ccccc1"))
+    second = _run(compose.microstate_pka(store, "Oc1ccccc1"))
+
+    assert server.count("search_conformer_ensemble") == 2, "two searches in total, not four"
+    assert first.pka == second.pka
+
+
+def test_a_second_temperature_is_free(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Populations depend on a temperature the search never saw, so re-weighting is arithmetic.
+
+    The same property `conformer_ensemble` has, and it has to survive composition: a pKa at 310 K
+    after one at 298 K must not be a second pair of searches.
+    """
+    server = install(monkeypatch, FakeCalcServer())
+    store = InMemoryStore()
+
+    _run(compose.microstate_pka(store, "Oc1ccccc1"))
+    warmer = _run(compose.microstate_pka(store, "Oc1ccccc1", temperature_k=310.0))
+
+    assert server.count("search_conformer_ensemble") == 2
+    assert warmer.temperature_k == 310.0
+
+
+def test_a_base_is_the_other_search_and_the_other_calibration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pyridine has no proton to lose, so `auto` asks the protonation question instead.
+
+    And the number it reports is the *conjugate acid's* pKa — what is tabulated for amines and what
+    an extraction pH is set against — which is why the branch travels on the result rather than
+    being inferred by a reader from the molecule.
+    """
+    install(monkeypatch, FakeCalcServer())
+    store = InMemoryStore()
+
+    result = _run(compose.microstate_pka(store, "c1ccncc1"))
+
+    assert result.branch == "base"
+    assert result.ionised.search == "protomers"
+    assert all(member.structure.charge == 1 for member in result.ionised.conformers)
+
+
+def test_a_molecule_with_no_equilibrium_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Benzene has no proton on a heteroatom and no nitrogen, so there is nothing to answer.
+
+    Refused rather than computed: CREST would rank benzene's C-H deprotomers happily, and the
+    calibration would turn that into a confident aqueous pKa for an equilibrium that does not exist
+    in water. Two CREST searches is also an expensive way to produce a meaningless number.
+    """
+    install(monkeypatch, FakeCalcServer())
+    store = InMemoryStore()
+
+    with pytest.raises(CalculationDomainError, match="no acid/base equilibrium"):
+        _run(compose.microstate_pka(store, "c1ccccc1"))
+
+
+def test_an_aliphatic_amine_is_warned_about_rather_than_quietly_reported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The one limit CREST does not remove, because it is the solvent model rather than the search.
+
+    Over 13 reference amines the computed basicity correlates with the measured pKa at Spearman
+    -0.17. The sampling is not what fails — ALPB is — so a better ensemble produces a better-sampled
+    number with no ranking information, which is worse than a bad number that looks bad.
+    """
+    install(monkeypatch, FakeCalcServer())
+    store = InMemoryStore()
+
+    result = _run(compose.microstate_pka(store, "CCN"))
+
+    assert result.branch == "base"
+    assert any("aliphatic nitrogen" in warning for warning in result.warnings)
+
+
+def test_a_macrostate_is_more_stable_than_its_best_microstate() -> None:
+    """The arithmetic the whole composite turns on, checked without a server.
+
+    Two microstates within RT of each other make the macrostate more stable than either — by
+    RT ln 2 when they are degenerate, which is 0.41 kcal/mol at 298 K and about 0.3 pKa units
+    through a fitted slope. Taking the minimum instead of the sum silently loses exactly that.
+    """
+    degenerate = macrostate_free_energy_kcal([0.0, 0.0], [1, 1], 298.15)
+    single = macrostate_free_energy_kcal([0.0], [1], 298.15)
+    far_apart = macrostate_free_energy_kcal([0.0, 10.0], [1, 1], 298.15)
+
+    assert single == 0.0
+    assert abs(degenerate - (-0.4113)) < 1e-3, "RT ln 2 at 298 K"
+    assert abs(far_apart) < 1e-6, "a microstate 10 kcal/mol up carries no population"
+
+
+def test_a_deeper_search_than_the_calibration_says_so(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Paying for a better ensemble does not buy a calibration fitted on one.
+
+    A deeper search finds lower members on *both* sides, so it moves the free-energy difference the
+    slope was fitted against. The ensembles are genuinely better and the mapping is still the quick
+    search's — which is a thing the reader has to be told, not a thing to quietly average over.
+    """
+    install(monkeypatch, FakeCalcServer())
+    store = InMemoryStore()
+
+    result = _run(compose.microstate_pka(store, "Oc1ccccc1", effort="extensive"))
+
+    assert any("calibration was fitted at 'quick'" in warning for warning in result.warnings)
+
+
+def test_a_solvent_the_calibration_was_not_fitted_in_says_so(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The free energy is for the medium asked for; the pKa mapping is not.
+
+    Both calibrations are fitted in water, and a pKa is an aqueous quantity by definition — so a
+    number computed in acetonitrile is a real free energy wearing the wrong units.
+    """
+    install(monkeypatch, FakeCalcServer())
+    store = InMemoryStore()
+
+    result = _run(compose.microstate_pka(store, "Oc1ccccc1", solvent="acetonitrile"))
+
+    assert any("fitted in water" in warning for warning in result.warnings)
+
+
+def test_a_deprotonation_off_the_fitted_domain_says_so(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An N-H acid is a real winner and an extrapolation, and the result has to say which.
+
+    The reference set is O-H and S-H only. CREST ranks every site, so an imide or a sulfonamide can
+    legitimately come back with the proton off nitrogen — a correct answer to "which proton" and an
+    unfitted one to "what is the pKa". Quoting the number without the warning is how a calibration
+    silently acquires a domain nobody measured.
+    """
+    install(monkeypatch, FakeCalcServer())
+    store = InMemoryStore()
+
+    result = _run(compose.microstate_pka(store, "O=C(N)c1ccccc1", branch="acid"))
+
+    assert result.site_smiles is not None
+    assert any("came off nitrogen" in warning for warning in result.warnings)
+
+
+def test_a_search_is_given_the_samplers_budget_not_a_hessians(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The client may not abandon a calculation the server is still running.
+
+    Unreachable until the binary shipped, because every search refused in milliseconds. It is
+    reachable now, and the numbers did not fit: this repository's own measurement of a 33-atom
+    conformer search is 1142 s against a 900 s default read bound, while the server allows one
+    14400 s. A client bound shorter than the server's saves nothing — the server computes to
+    completion, the answer is discarded, and the chemist is told the service timed out.
+    """
+    server = install(monkeypatch, FakeCalcServer())
+    store = InMemoryStore()
+
+    _run(compose.conformer_ensemble(store, "CCO"))
+
+    # Two sessions: the embed takes the default, the search takes the sampler's. Both halves are
+    # the point — widening the bound for *every* call would drop the one that catches a mute host.
+    assert server.timeouts == [None, calc_settings.calc_sampling_timeout_seconds]
+    assert calc_settings.calc_sampling_timeout_seconds > calc_settings.calc_server_timeout_seconds

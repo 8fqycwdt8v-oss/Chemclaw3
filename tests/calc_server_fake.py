@@ -120,6 +120,65 @@ def embed(smiles: str, multiplicity: int = 1) -> dict[str, Any]:
     }
 
 
+def ionised(structure: dict[str, Any], search: str) -> dict[str, Any]:
+    """What a protonation search returns: a *different species* from the one it was given.
+
+    Reproduced here because getting it wrong is what shipped. Driven against crest 3.0.2, a
+    `--deprotonate` run returns one atom fewer at charge -1 and a `--protonate` run one atom more at
+    charge +1 — and the parser that fed them into this repository reused the input's element list
+    and the input's charge, so the deprotomer search had never once returned an ensemble and the
+    protomer search would have relaxed a cation at charge 0. A fake that hands back the neutral
+    molecule for every search cannot see either.
+
+    The electron count is untouched by both, because a proton is a nucleus without electrons — which
+    is why the multiplicity carries over and `Structure` accepts the result.
+
+    The label is *derived* from the input SMILES here, where the real server perceives it from the
+    returned geometry. The composite depends on a label and a shifted charge arriving, not on how
+    they were obtained, and perceiving bond orders from a nudged ETKDG geometry with an atom taken
+    out of it would be testing RDKit rather than this repository.
+    """
+    if search not in ("protomers", "deprotomers"):
+        return structure
+    elements = list(structure["elements"])
+    positions = [list(row) for row in structure["positions"]]
+    if search == "deprotomers":
+        index = len(elements) - 1 - elements[::-1].index(1)
+        elements.pop(index)
+        positions.pop(index)
+        shift = -1
+    else:
+        elements.append(1)
+        positions.append([value + 1.0 for value in positions[0]])
+        shift = 1
+    return {
+        **structure,
+        "elements": elements,
+        "positions": positions,
+        "charge": structure["charge"] + shift,
+        "smiles": _ionised_smiles(structure.get("smiles"), shift),
+    }
+
+
+def _ionised_smiles(smiles: str | None, shift: int) -> str | None:
+    """The SMILES of the ionised form, or None when this molecule has no obvious site."""
+    if smiles is None:
+        return None
+    mol = Chem.RWMol(Chem.MolFromSmiles(smiles))
+    for atom in mol.GetAtoms():
+        if shift < 0 and atom.GetAtomicNum() in (7, 8, 16) and atom.GetTotalNumHs() > 0:
+            atom.SetNumExplicitHs(atom.GetTotalNumHs() - 1)
+            atom.SetNoImplicit(True)
+            atom.SetFormalCharge(-1)
+            return str(Chem.MolToSmiles(mol))
+        if shift > 0 and atom.GetAtomicNum() == 7 and atom.GetTotalNumHs() + atom.GetDegree() < 4:
+            atom.SetNumExplicitHs(atom.GetTotalNumHs() + 1)
+            atom.SetNoImplicit(True)
+            atom.SetFormalCharge(1)
+            return str(Chem.MolToSmiles(mol))
+    return None
+
+
 def harmonic_hessian(structure: dict[str, Any], *, imaginary: bool = False) -> dict[str, Any]:
     """A well-formed Hessian payload for `structure`, optionally carrying one negative eigenvalue.
 
@@ -135,6 +194,10 @@ def harmonic_hessian(structure: dict[str, Any], *, imaginary: bool = False) -> d
     size = 3 * len(structure["elements"])
     diagonal = np.full(size, 0.5)
     if imaginary:
+        # One negative eigenvalue, the same magnitude as the rest: it comes out at about
+        # -64 cm^-1, which is above `xtb_imaginary_threshold_cm` and so counts as a real imaginary
+        # mode. Its zero-point term is ~0.09 kcal/mol, small enough that dropping it from the RRHO
+        # sum does not by itself invert a barrier.
         diagonal[0] = -0.5
     matrix = np.diag(diagonal)
 
@@ -182,6 +245,11 @@ _BARRIER_HARTREE = 0.004
 _GAUCHE_HARTREE = 0.0016
 _WELLS = (60.0, 180.0, 300.0)
 
+# What releasing a constrained geometry buys, in Hartree — about 0.13 kcal/mol, the order the live
+# server gives on n-butane. Small on purpose: a barrier measured from the wrong zero is wrong by
+# exactly this, and a test that needed a large number to see it would not be testing the real case.
+_RELAXATION_HARTREE = 2.0e-4
+
 
 def torsional_energy(degrees: float) -> float:
     """The synthetic torsional potential at one dihedral, in Hartree above its own minimum."""
@@ -189,6 +257,33 @@ def torsional_energy(degrees: float) -> float:
     threefold = _BARRIER_HARTREE * (1.0 + math.cos(3.0 * radians)) / 2.0
     onefold = _GAUCHE_HARTREE * (1.0 + math.cos(radians)) / 2.0
     return threefold + onefold
+
+
+def torsional_surface_energy(
+    structure: dict[str, Any], atoms: tuple[int, int, int, int], shift: float = 0.0
+) -> float:
+    """This surface's energy for a geometry, in Hartree — the one definition all three tools use.
+
+    `scan_point`, `relax_structure` and `compute_hessian` must agree about what a geometry is worth,
+    or a composite that compares two of them compares two different surfaces. They did not: the
+    Hessian payload reported `-1.0 * atom_count` for *every* geometry, so a free-energy barrier
+    computed as `G(pass) - G(well)` lost its electronic term entirely and came out negative — an
+    artefact of this fake that looked exactly like a defect in the composite.
+
+    `shift` is the caller's `solvent_shifts` entry, passed in rather than looked up here so this
+    stays a pure function of the surface. Omitting it made the agreement hold only in the gas
+    phase, which is the kind of "true except when configured" invariant that is worse than none.
+    """
+    angle = dihedral_of(structure, atoms)
+    relaxed = _RELAXATION_HARTREE if _near_a_well(angle) else 0.0
+    return -1.0 * len(structure["elements"]) + shift + torsional_energy(angle) - relaxed
+
+
+def _near_a_well(degrees: float, tolerance: float = 20.0) -> bool:
+    """Is this geometry close enough to a minimum of the synthetic potential to be one?"""
+    return any(
+        min(abs(degrees - well), 360.0 - abs(degrees - well)) <= tolerance for well in _WELLS
+    )
 
 
 def _nearest_well(degrees: float) -> float:
@@ -250,7 +345,11 @@ class FakeCalcServer:
     """One MCP session's worth of calculation server, counting every tool call it answers."""
 
     def __init__(
-        self, *, saddle_first: bool = False, torsion: tuple[int, int, int, int] | None = None
+        self,
+        *,
+        saddle_first: bool = False,
+        torsion: tuple[int, int, int, int] | None = None,
+        solvent_shifts: dict[tuple[str, str], float] | None = None,
     ) -> None:
         """Start with no calls recorded.
 
@@ -263,13 +362,25 @@ class FakeCalcServer:
         here models a potential energy surface at all, and this one does for a reason rather than
         for realism — the rotational profile's whole claim is that releasing a scan point's
         constraint moves it to a different geometry with a different energy. A fake whose relaxation
-        returns its input unchanged cannot express that claim being false, and a fake that cannot
-        express the failure is not evidence
+        returns its input unchanged cannot express that claim being false.
+
+        `solvent_shifts` maps `(smiles, solvent)` to a shift in Hartree added to that species'
+        relaxed energy in that medium, so a fan-out over solvents can be made to *reorder* rather
+        than only to shift. Without it every medium returns the same energy — the fake's energy is
+        a function of atom count alone — and `dominance_changes`, the one finding a solvent screen
+        over species exists to report, could never be observed.
+
+        The two arrived on branches that did not know about each other and reach the same
+        conclusion: a fake that cannot express the failure is not evidence
         (`D-2026-08-26-a-tool-result-is-not-a-model-on-the-wire`).
         """
         self.calls: list[tuple[str, dict[str, Any]]] = []
+        # The read bound each session was opened with, in order — `None` where the caller took the
+        # default. See `install`.
+        self.timeouts: list[float | None] = []
         self._saddle_first = saddle_first
         self._torsion = torsion
+        self._solvent_shifts = dict(solvent_shifts or {})
         self.overrides: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {}
         # Where the composites' geometries land once `install` has wired it in. On the fake rather
         # than built by `install`, so a test can read it back — resolving an id a result reported
@@ -366,7 +477,12 @@ class FakeCalcServer:
             settled = _nearest_well(dihedral_of(structure, self._torsion))
             structure = with_dihedral(structure, self._torsion, settled)
             result = self._optimization(structure, arguments.get("solvent"))
-            result["energy_hartree"] += torsional_energy(settled)
+            # **A released well sits below the constrained point it came from**, by more than the
+            # torsional term alone: letting go of the dihedral lets every *other* coordinate relax
+            # too. Without this the fake's release lowered nothing, so the composite's barrier
+            # arithmetic could mix the constrained and released energy zeros and no test could see
+            # it — measured on the live GFN2 server as 0.118 kcal/mol on n-butane.
+            result["energy_hartree"] += torsional_energy(settled) - _RELAXATION_HARTREE
             return result
         return self._optimization(structure, arguments.get("solvent"))
 
@@ -385,6 +501,7 @@ class FakeCalcServer:
         return result
 
     def _optimization(self, structure: dict[str, Any], solvent: str | None) -> dict[str, Any]:
+        shift = self._solvent_shifts.get((structure.get("smiles") or "", solvent or ""), 0.0)
         return {
             "calc_version": FAKE_VERSION,
             "calc_key": f"xtb.opt@{FAKE_VERSION}:{_structure_id(structure)}:0",
@@ -394,8 +511,8 @@ class FakeCalcServer:
             "method": "GFN2-xTB",
             "engine": "tblite",
             "solvent": solvent,
-            "initial_energy_hartree": -1.0 * len(structure["elements"]) + 0.01,
-            "energy_hartree": -1.0 * len(structure["elements"]),
+            "initial_energy_hartree": -1.0 * len(structure["elements"]) + shift + 0.01,
+            "energy_hartree": -1.0 * len(structure["elements"]) + shift,
             "relaxation_kcal": 6.3,
             "steps": 4,
             "max_gradient": 1e-5,
@@ -405,6 +522,27 @@ class FakeCalcServer:
 
     def _compute_hessian(self, arguments: dict[str, Any]) -> dict[str, Any]:
         saddle = self._saddle_first and self.count("compute_hessian") == 1
+        if self._torsion is not None and not saddle:
+            # **A geometry at a torsional maximum really is a first-order saddle**, so when this
+            # server is modelling a torsional surface it says so. Without this the pass Hessian
+            # reported zero imaginary modes, `_free_energy_barrier` took its "not a saddle" exit on
+            # every call, and the whole `thorough` free-energy path was unreachable from the suite
+            # — which is how it came to add a molecule's entire absolute thermal correction to an
+            # electronic barrier and report 70 kcal/mol with nothing red.
+            saddle = not _near_a_well(dihedral_of(arguments["structure"], self._torsion))
+            payload = harmonic_hessian(arguments["structure"], imaginary=saddle)
+            # The energy *this surface* gives that geometry, so a free energy computed from this
+            # Hessian is comparable with the scan point and the relaxation beside it.
+            payload["electronic_energy_hartree"] = torsional_surface_energy(
+                arguments["structure"],
+                self._torsion,
+                self._solvent_shifts.get(
+                    (arguments["structure"].get("smiles") or "", arguments.get("solvent") or ""),
+                    0.0,
+                ),
+            )
+            payload["solvent"] = arguments.get("solvent")
+            return payload
         payload = harmonic_hessian(arguments["structure"], imaginary=saddle)
         payload["solvent"] = arguments.get("solvent")
         return payload
@@ -416,7 +554,7 @@ class FakeCalcServer:
         return self._ensemble(arguments, search="complex")
 
     def _ensemble(self, arguments: dict[str, Any], *, search: str) -> dict[str, Any]:
-        structure = arguments["structure"]
+        structure = ionised(arguments["structure"], search)
         return {
             "calc_version": FAKE_VERSION,
             "calc_key": None,
@@ -683,7 +821,11 @@ def install(monkeypatch: pytest.MonkeyPatch, server: FakeCalcServer) -> FakeCalc
     """
 
     @asynccontextmanager
-    async def _session() -> AsyncIterator[FakeCalcServer]:
+    async def _session(timeout_seconds: float | None = None) -> AsyncIterator[FakeCalcServer]:
+        # Recorded rather than ignored: the read bound is a *property of the call*, and a sampling
+        # call that inherits a Hessian's bound is abandoned by the client while the server runs it
+        # to completion. A fake that dropped the argument could not see that.
+        server.timeouts.append(timeout_seconds)
         yield server
 
     monkeypatch.setattr("chemclaw.connectors.calc.remote.calc_session", _session)

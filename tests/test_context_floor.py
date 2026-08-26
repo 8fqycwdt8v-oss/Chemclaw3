@@ -82,7 +82,36 @@ load_profiles()
 #: pydantic publishes a model's docstring as its JSON-schema `description` and a nested pair of them
 #: is bound to the model on every turn. The ~230 tokens that remain are what one more tool costs,
 #: and that is the right thing to pay for it.
-CEILINGS: dict[str, int] = {"__default__": 28_250}
+#:
+#: **29,000 as of 2026-08-26**, raised from 28,250 by `rank_species_across_solvents`
+#: (`D-2026-08-26-a-solvent-is-an-argument-not-a-job`), which measured 28,586 with it. The step is
+#: the same size as the one above it and for the same reason, but the *cause* is worth recording
+#: because it is not one tool: `profile_rotation` and this one were built on branches that did not
+#: know about each other, each stayed under `MAX_SINGLE_TOOL_TOKENS` on its own, and the ceiling was
+#: crossed only where they met. A per-tool bound cannot see that, which is exactly why this
+#: whole-prefix ratchet exists beside it.
+#:
+#: This one arrived at 1,011 tokens — over `MAX_SINGLE_TOOL_TOKENS`, and that test refused it until
+#: the manifest description and the spec's field descriptions were cut to what a model needs to
+#: choose and call it, which took it to 857. The ~340 that remain are what one more durable job
+#: costs on every turn.
+#: **29,500 as of 2026-08-26**, raised from 29,000 by `predict_pka_ensemble`
+#: (`D-2026-08-26-a-pka-is-a-macrostate-not-a-microstate`), which measured 29,225 with it — so this
+#: is the third tool in a row to cross the ratchet where its branch met the ones before it, exactly
+#: as the paragraph above predicted.
+#:
+#: It arrived at 926 tokens, over `MAX_SINGLE_TOOL_TOKENS`, and that test refused it twice. What
+#: took it to 639: the manifest description cut to what decides a *choice* between this and
+#: `predict_pka` — the detail moved to the `calculation-selection` skill, which is loaded on demand
+#: — and the `structure_id` argument **removed rather than shortened**. Every other geometry-taking
+#: spec here accepts one so a caller can carry a chosen conformer forward; this job's first act is
+#: a metadynamics conformer search, which re-samples whatever it is handed, so the argument
+#: advertised a control that controlled nothing and cost its explanation on every turn.
+#:
+#: The ~640 that remain are what a second pKa calculator costs, and the pull request says why the
+#: turn is worth it: it answers a question the fast one cannot (which proton), rather than the same
+#: question better — measured, the two are level on error.
+CEILINGS: dict[str, int] = {"__default__": 29_500}
 
 #: How much of the floor one tool may be. A schema above this is not expensive, it is *badly
 #: shaped* — the fix is pagination, a narrower argument, or splitting a tool that does two things.

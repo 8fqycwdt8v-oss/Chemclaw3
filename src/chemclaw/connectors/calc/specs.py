@@ -187,6 +187,37 @@ class EnsembleJobSpec(BaseModel):
     structure_id: str | None = Field(default=None, description=_STRUCTURE_ID_DESCRIPTION)
 
 
+class MicrostatePkaJobSpec(BaseModel):
+    """A durable pKa from two CREST searches (`microstate_pka`).
+
+    Its own job rather than a level on the existing `predict_pka` tool, because the cost class is
+    different by three orders of magnitude: that tool is a cached sub-second lookup and this is two
+    metadynamics searches, minutes to hours. A knob that turns a fast tool into an expensive one is
+    the shape that gets set by accident.
+    """
+
+    kind: Literal["microstate_pka"] = "microstate_pka"
+    smiles: str = Field(min_length=1)
+    branch: Literal["auto", "acid", "base"] = Field(
+        default="auto",
+        description=(
+            "`auto` asks the acid question of an O-H/S-H molecule and the base question of a "
+            "nitrogen one. Name it for a molecule that is both: an aminophenol has an acid pKa "
+            "and a conjugate-acid pKaH, and they are different numbers."
+        ),
+    )
+    solvent: str | None = None
+    temperature_k: float | None = None
+    effort: Literal["quick", "normal", "extensive"] = "quick"
+
+    # **No `structure_id`, and its absence is the point.** Every other geometry-taking spec here
+    # accepts one so a caller can carry a chosen conformer forward; this job's *first* act is a
+    # metadynamics conformer search, which re-samples whatever it is handed. A starting geometry
+    # therefore survives into nothing the answer depends on, and offering the argument would
+    # advertise a control that does not control anything — while costing every turn the
+    # description that explains it.
+
+
 class ComplexJobSpec(BaseModel):
     """A durable non-covalent complex search over two molecules (xTB plan X11)."""
 
@@ -301,6 +332,53 @@ class SpeciesRankingJobSpec(BaseModel):
         return self
 
 
+class SpeciesSolventScreenJobSpec(BaseModel):
+    """A durable ranking of one species set in each of several media.
+
+    `SpeciesRankingJobSpec` with `solvent` replaced by `solvents`, and its rule about the set being
+    the answer's universe applies unchanged — this fans a ranking out over media, it enumerates no
+    more than that one does.
+    """
+
+    kind: Literal["species_solvents"] = "species_solvents"
+    species: list[str] = Field(
+        min_length=1,
+        description="The SMILES to rank against each other, in every medium. Enumerate first.",
+    )
+    labels: list[str] | None = Field(
+        default=None,
+        description="An optional name per species, in the same order and the same length.",
+    )
+    ranking: Literal["tautomers", "microstates", "stereoisomers", "custom"] = "custom"
+    solvents: list[str] = Field(
+        min_length=1,
+        description="ALPB solvent names. The gas phase is always added and need not be listed.",
+    )
+    temperature_k: float | None = None
+    level: Literal["quick", "standard", "thorough"] = "standard"
+    # One map covers the whole screen: the same species appear in every medium, and a rotational
+    # symmetry number is a property of the molecule rather than of what surrounds it. It does not
+    # cancel across the media either, since every medium ranks the same set.
+    symmetry_numbers: dict[str, int] | None = Field(
+        default=None,
+        description=(
+            "Rotational symmetry number per species, keyed by its exact SMILES: 1 = none, "
+            "2 = a C2 axis, 6 = ethane, 12 = benzene. One left out is ranked at sigma=1 and "
+            "warned about; the error is R*ln(sigma), 0.41 kcal/mol per factor of two."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _labels_match_species(self) -> "SpeciesSolventScreenJobSpec":
+        """Refuse a mismatched label list rather than silently pairing the wrong names to forms."""
+        if self.labels is not None and len(self.labels) != len(self.species):
+            raise ValueError(
+                f"{len(self.labels)} labels for {len(self.species)} species: give one label per "
+                "species in the same order, or none at all"
+            )
+        return self
+
+
 class BondSurveyJobSpec(BaseModel):
     """A durable bond-dissociation survey over every breakable bond of one molecule.
 
@@ -334,10 +412,12 @@ XtbJobSpec = Annotated[
     | ScanJobSpec
     | RotationJobSpec
     | EnsembleJobSpec
+    | MicrostatePkaJobSpec
     | ComplexJobSpec
     | RefinedEnsembleJobSpec
     | EnsemblePropertyJobSpec
     | SpeciesRankingJobSpec
+    | SpeciesSolventScreenJobSpec
     | BondSurveyJobSpec,
     Field(discriminator="kind"),
 ]

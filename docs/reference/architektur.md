@@ -169,9 +169,18 @@ Chemiker: *"Wie ist die zu erwartende Regioselektivität für die späte C–H-F
 ## 6. Deployment-Übersicht
 
 > **Umgesetzt in Phase F5/F6** (siehe `deploy/`, ADR **D-048**/**D-049**). Der Ziel-Stack ist
-> **OpenShift + HPC/Nextflow + ein internes OpenAI-kompatibles LLM** – nicht Azure AI Foundry/SLURM/
-> Anthropic. §7/§8 (Entra durchgängig) bleiben gültig; einzige Anpassung: Managed Identity →
+> **OpenShift + ein internes OpenAI-kompatibles LLM** – nicht Azure AI Foundry/SLURM/Anthropic.
+> §7/§8 (Entra durchgängig) bleiben gültig; einzige Anpassung: Managed Identity →
 > **Entra Workload Identity Federation**.
+>
+> **Die HPC-Hälfte ist entfallen.** Jede Erwähnung von HPC, SLURM, Nextflow oder einer
+> DFT-Eskalation in diesem Dokument beschreibt einen Entwurf, den
+> [`D-2026-08-26-semiempirical-is-the-whole-tier`](../decisions/D-2026-08-26-semiempirical-is-the-whole-tier.md)
+> vollständig zurückgenommen hat: es gibt keine Cluster-Anbindung mehr und keinen `qm`-Bundle. Die
+> Rechnung ist durchgehend semiempirisch (GFN2-xTB über tblite, CREST) und läuft in einem eigenen
+> Pod auf OpenShift bzw. Databricks. Was von §2 gültig bleibt, ist die *Form*: ein teurer Lauf ist
+> ein durabler Temporal-Job mit Heartbeat und Push-Back — nur ist der teure Lauf heute eine
+> Konformerensuche und kein Cluster-Auftrag.
 
 - **Ein einziges, rootless Multi-Target-Image** (`deploy/Containerfile`, UBI9, UID 1001,
   arbitrary-UID-fähig für die OpenShift-SCC). Alle Rollen teilen dieselben Bits; `deploy/
@@ -190,10 +199,10 @@ Chemiker: *"Wie ist die zu erwartende Regioselektivität für die späte C–H-F
   openai_compatible`). Der Provider ist die *einzige* Stelle, die eine Client-Klasse importiert; ein
   Provider-Wechsel ist eine Config-Änderung. Das LLM nutzt **eine generische API-Credential** (nicht
   Entra) – die eine dokumentierte Ausnahme von der Entra-Durchgängigkeit.
-- **HPC/Nextflow**: der QM-Job läuft real über den Seqera-Platform/Tower-REST-Launcher
-  (`src/chemclaw/connectors/qm/hpc/nextflow.py`, ADR **D-048** (Teilentscheidung D-A5a)); nur `src/chemclaw/connectors/qm/activities.py` dispatcht auf
-  `hpc_launch_interface` (`mock` für CI/lokal, `nextflow` produktiv). Der `hpc-jobs`-Worker läuft
-  dort, wo er den Launcher erreicht.
+- ~~**HPC/Nextflow**~~: hier stand der Seqera-Platform/Tower-REST-Launcher hinter dem QM-Job (ADR
+  **D-048**, Teilentscheidung D-A5a). **Entfallen** — Bundle, Launcher und alle `hpc_*`-Einstellungen
+  sind gelöscht (`D-2026-08-26-semiempirical-is-the-whole-tier`). Die Rechnung läuft semiempirisch in
+  einem eigenen Pod (`Chemclaw3-mcp`s `servers/calc`, adressiert über `CHEMCLAW_CALC_SERVER_URL`).
 - **Temporal: self-hosted im Cluster** (ADR **D-049** (Teilentscheidung D-A6a)), nicht Temporal Cloud – hält den durablen
   Kern innerhalb derselben OIDC-Vertrauensgrenze und vermeidet den Egress von Workflow-Payloads (die
   den Entra-`oid` tragen, D-044). Cloud bleibt ein Values-Swap (`temporal_api_key` statt mTLS-Trio).

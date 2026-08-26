@@ -44,7 +44,13 @@ import inspect
 from collections.abc import Sequence
 
 from chemclaw.core.config import settings
-from chemclaw.ingest.eln.warehouse.binding import CorpusBinding, load_binding
+from chemclaw.core.connect import resolve_driver, signature_mismatch
+from chemclaw.ingest.eln.warehouse.binding import (
+    BindingError,
+    ConnectionBinding,
+    CorpusBinding,
+    load_binding,
+)
 from chemclaw.ingest.sources.manifest import DataSourceManifest
 from chemclaw.ingest.sources.registry import (
     DataSourceError,
@@ -88,6 +94,39 @@ def _check_construction(name: str) -> list[str]:
         make_data_source(name)
     except (DataSourceError, ValueError) as exc:
         return [f"{name}: will not build: {exc}"]
+    return []
+
+
+def _check_connection(name: str, manifest: DataSourceManifest) -> list[str]:
+    """Bind a `connection:` block against its driver's signature, with nothing connected.
+
+    This is the offline half of "the driver's signature is the schema"
+    (`D-2026-08-26-the-driver-s-signature-is-the-schema`), and it is what replaced a model that
+    enumerated one vendor's connection fields. `ConnectionBinding` is `extra="allow"` precisely
+    because a Postgres, a lakehouse and a vector database share no vocabulary — so the check that a
+    key is real cannot live in a model, and lives here instead, against the callable that owns the
+    words. Every `*_env` key is bound under its stem, because that is the keyword the driver will
+    actually be built with once the variable is read.
+
+    The driver is *resolved*, not called: resolution imports the vendor client, which is the same
+    eager import this gate already makes for every half, and construction would need credentials.
+    """
+    raw = manifest.config.get("binding")
+    if not isinstance(raw, dict):
+        return []
+    block = raw.get("connection")
+    if not isinstance(block, dict):
+        return []
+    try:
+        connection = ConnectionBinding.model_validate(block)
+    except ValueError as exc:
+        return [f"{name}: connection: {exc}"]
+    try:
+        driver = resolve_driver(connection.driver, error=BindingError, what="connection driver")
+    except BindingError as exc:
+        return [f"{name}: connection: {exc}"]
+    if problem := signature_mismatch(driver, connection.options):
+        return [f"{name}: connection driver {connection.driver!r} {problem}"]
     return []
 
 
@@ -160,6 +199,7 @@ def validate_datasources(construct: bool = False) -> list[str]:
             if reference is not None:
                 resolved += _check_half(name, field, reference, manifest.config)
         problems += resolved
+        problems += _check_connection(name, manifest)
         problems += _check_labels(name, manifest)
         # Only when the references themselves are sound — building a source whose half does not
         # resolve would report the same typo twice, in two different vocabularies.

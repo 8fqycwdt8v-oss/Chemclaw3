@@ -121,5 +121,7 @@ rule above. Do not report one as if a calculator had decided it.
 For a ring-substitution answer, pass the winning class's `atoms` to `render_structure`'s
 `highlight_atoms` so the chemist can check the position at a glance.
 
-If the decision needs more than an ordering, say what would settle it: an experiment, or the heavier
-QM path (`compute_dft_energy`).
+If the decision needs more than an ordering, say what would settle it — which, **since semiempirical
+is the whole ladder here, means an experiment rather than a heavier calculation.** There is no tier
+to escalate to, so a difference inside GFN2-xTB's error bar is a difference to propose a measurement
+for, not one to compute harder at.

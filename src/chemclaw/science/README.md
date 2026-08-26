@@ -54,7 +54,8 @@ were `calc/` and `connectors/calc/`, where the distinction existed but was invis
 `tests/test_third_party_layering.py` declares what `science` may reach for and no row grants the
 physics stack, so re-adding an in-process engine here turns it red.
 
-Not every bundle has an engine here (`chem` is thin enough to sit on `core.chem`; `qm` dispatches
-to HPC), and not every engine has exactly one bundle. The invariant is the other direction:
+Not every bundle has an engine here (`chem` is thin enough to sit on `core.chem`; `calc`'s physics
+answers from `Chemclaw3-mcp`), and not every engine has exactly one bundle. The invariant is the
+other direction:
 **capability code lives in a bundle or in `science/`, nowhere else** — true without exception since
 D-156 moved `fingerprints` out of the old `chemclaw.mcp`.

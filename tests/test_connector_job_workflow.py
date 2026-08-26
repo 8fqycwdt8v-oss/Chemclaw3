@@ -257,7 +257,8 @@ def test_a_connector_job_runs_its_own_workflow_and_core_does_the_rest(
     assert result.summary == "fixture job ran on benzene"
     assert result.data["subject"] == "benzene" and result.data["ran"] is True
     # And the requesting actor reached the connector's own workflow — on the run's memo, so it
-    # never became a payload field the model could author. This is the route the HPC job depends
+    # never became a payload field the model could author. This is the route every durable job
+    # depends
     # on: its cluster submission runs under a shared service identity, and `requested_by` is the
     # only thing that makes it attributable (F4-T3, D-118).
     assert result.data["requested_by"] == _ACTOR

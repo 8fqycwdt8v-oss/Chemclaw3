@@ -124,11 +124,11 @@ def test_a_typo_in_a_note_type_fails_the_gate(tmp_path: Path) -> None:
 def test_every_type_the_code_mints_is_registered() -> None:
     """The registry must cover what the system actually writes, or the gate cries wolf.
 
-    Against the *effective* vocabulary, because two of these are minted by bundles rather than by
-    core: `job-result` by the `qm` connector and `bo-candidate` by `bo`, each declared in its own
-    `connector.yaml`. That is the point of the union — what this deployment can write is core's set
-    plus its enabled bundles' — and checking core's frozenset alone would assert that a bundle's
-    note type is registered in a file that deliberately no longer names it.
+    Against the *effective* vocabulary, because one of these is minted by a bundle rather than by
+    core: `bo-candidate` by `bo`, declared in its own `connector.yaml`. That is the point of the
+    union — what this deployment can write is core's set plus its enabled bundles' — and checking
+    core's frozenset alone would assert that a bundle's note type is registered in a file that
+    deliberately does not name it.
     """
     minted = {
         "reaction",

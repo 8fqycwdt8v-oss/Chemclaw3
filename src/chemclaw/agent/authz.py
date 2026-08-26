@@ -2,7 +2,7 @@
 
 Two gates, one home, so authorization is never scattered across tools and layers:
 
-- `authorize_trigger` — the coarse gate for **expensive triggers** (a costly HPC/BO job): a
+- `authorize_trigger` — the coarse gate for **expensive triggers** (a costly search or BO job): a
   job-launching tool calls it with the action name before starting the durable work, so an
   autonomously-planned todo cannot start an expensive path outside the requesting user's
   entitlements. What it protects is `expensive_actions()` — every job a manifest declares
@@ -86,7 +86,6 @@ CORE_EXPENSIVE_ACTIONS: frozenset[str] = frozenset(
 # nothing validates these names against the live tool surface.
 DEFAULT_WRITE_TOOL_GATES: frozenset[str] = frozenset(
     {
-        "compute_dft_energy",  # launches a durable HPC/DFT run
         "propose_knowledge_note",  # pushes a branch to the knowledge repo
         "record_confirmed_answer",  # pushes a branch to the knowledge repo
         "record_failure",  # pushes a branch to the knowledge repo, and retires a merged claim
@@ -132,9 +131,9 @@ STATE_CHANGING_TOOLS: frozenset[str] = (
 # every run.
 #
 # The check runs over the registry, not over the union: `STATE_CHANGING_TOOLS` also names tools
-# that are not in-process at all (`compute_dft_energy` is a connector job, `index_*` are MCP tools
-# behind an `allowed_tools` boundary), inherited from `DEFAULT_WRITE_TOOL_GATES`. Those are correct
-# entries and correctly absent from the registry.
+# that are not in-process at all (`index_*` are MCP tools behind an `allowed_tools` boundary),
+# inherited from `DEFAULT_WRITE_TOOL_GATES`. Those are correct entries and correctly absent from
+# the registry.
 READ_ONLY_TOOLS: frozenset[str] = frozenset(
     {
         "ask_clarifying_question",
@@ -265,10 +264,10 @@ def expensive_actions() -> frozenset[str]:
     `authorize_trigger(job.name)` for it, and `authorize_trigger` then returned immediately unless
     an operator had *separately* named that job in `entra_expensive_actions`. So the manifest flag
     was decoration: under `entra_required=True` with a role-less actor, `sample_conformers`,
-    `compute_interaction_energy` and `start_optimization_campaign` all ran, and only
-    `compute_dft_energy` was refused — by `DEFAULT_WRITE_TOOL_GATES` membership, a different gate
-    that happens to name it. The shipped chart is precisely that shape: `entra_required=true` with
-    both role settings left empty.
+    `compute_interaction_energy` and `start_optimization_campaign` all ran, and the only job then
+    refused was refused by `DEFAULT_WRITE_TOOL_GATES` membership — a different gate that happened
+    to name it. The shipped chart is precisely that shape: `entra_required=true` with both role
+    settings left empty.
 
     Deriving the set instead is the same move `side_effecting_tools()` makes, for the same reason:
     the bundle owns the fact, so a capability added next year is gated the day it is enabled rather
@@ -328,7 +327,7 @@ def authorize_tool(tool: str) -> None:
     docstring, not in a message a chemist reads.
 
     Args:
-        tool: The tool's registered name (e.g. `"compute_dft_energy"`, `"gather_evidence"`).
+        tool: The tool's registered name (e.g. `"propose_knowledge_note"`, `"gather_evidence"`).
 
     Raises:
         AuthorizationError: When enforcement is on and the user is not permitted to call `tool` —
@@ -369,7 +368,7 @@ def authorize_trigger(action: str) -> None:
     """Authorize the current turn's user to trigger `action`, or raise `AuthorizationError`.
 
     Args:
-        action: The trigger's name (e.g. `"compute_dft_energy"`). If it is not in
+        action: The trigger's name (e.g. `"sample_conformers"`). If it is not in
             `expensive_actions()`, the call is always allowed.
 
     Raises:

@@ -5,9 +5,8 @@ cleanly, their lists have no duplicate registrations, and each worker registers 
 activities it is responsible for — so adding a workflow without registering its activity (or vice
 versa) is caught here rather than at runtime on a live queue.
 
-Core has one worker now. The heavy `hpc-jobs` fleet existed for a single workflow, `QMJobWorkflow`,
-and that is a declared connector job on `connector-qm` as of D-118 — so the two bundle cases below
-are not extras, they are where the heavy work moved to.
+Core has one worker now: every expensive workflow is a declared connector job on its own bundle's
+queue as of D-118 — so the bundle case below is not an extra, it is where the heavy work moved to.
 """
 
 from collections.abc import Iterable
@@ -57,41 +56,6 @@ def test_the_calc_connectors_worker_serves_every_expensive_xtb_task() -> None:
     _, manifest = discovered()["calc"]
     jobs = manifest.jobs
     assert jobs and {job.workflow for job in jobs} == {"CalcJobWorkflow"}
-
-
-def test_the_qm_connectors_worker_serves_the_hpc_job_and_all_its_activities() -> None:
-    """The HPC/DFT job reaches a worker — the assertion core's `hpc-jobs` worker used to carry.
-
-    Importing `chemclaw.connectors.qm.worker` is the whole registration, exactly as for `calc`: no
-    `_WORKFLOWS`/`_ACTIVITIES` list to fall out of step with what the modules define. A workflow
-    registered without all of its activities would poll forever on the first one it reached — which
-    is why this is an exact set and not a subset check. The two cache activities joined the spine
-    with D-158; `tests/temporal_env.py::QM_ACTIVITIES` is the same list for the test workers and
-    has to move with it.
-    """
-    import chemclaw.connectors.qm.worker  # noqa: F401 — importing it is what registers the bundle
-    from chemclaw.connectors.qm.workflows import QMJobWorkflow
-    from chemclaw.connectors.queues import bundle_queue
-    from chemclaw.connectors.registry import discovered
-    from chemclaw.durable.registry import registered_activities, registered_workflows
-
-    queue = bundle_queue("qm")
-    assert QMJobWorkflow in registered_workflows(queue)
-    assert {
-        "prepare_input",
-        "submit_to_hpc",
-        "poll_hpc_status",
-        "parse_qm_output",
-        "lookup_qm_result",
-        "persist_qm_result",
-    } == set(_names(registered_activities(queue)))
-    _, manifest = discovered()["qm"]
-    jobs = manifest.jobs
-    # The Temporal *type name* is what binds the manifest to the class, and renaming that class
-    # would be a different command in any recorded history (`docs/guides/workflow-versioning.md`),
-    # so the string is pinned here rather than derived. The queue is the opposite case: derived,
-    # never declared (D-150).
-    assert jobs and {job.workflow for job in jobs} == {"QMJobWorkflow"}
 
 
 def test_registration_lists_have_no_duplicates() -> None:

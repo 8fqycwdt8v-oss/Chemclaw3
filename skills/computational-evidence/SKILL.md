@@ -15,7 +15,6 @@ tools:
   - compute_xtb_energy
   - compute_electronic_properties
   - predict_site_reactivity
-  - compute_dft_energy
   - propose_knowledge_note
   - find_calculations
   - list_artifacts
@@ -51,7 +50,7 @@ computing to look thorough.
 3. **To fill a genuine gap.** Nothing on file, nothing analogous, and the answer changes
    what gets run.
 4. **To triage before something expensive.** A fast screen ahead of a lab campaign, a BO
-   campaign, or a DFT job.
+   campaign, or a conformer search.
 
 If the request does not fit one of these, the calculation is decoration. Not computing —
 and saying what evidence *would* settle the question — is a legitimate answer.
@@ -145,13 +144,14 @@ value was used to decide, so the next reader can judge whether it still applies.
 record routine exploratory calculations; the calculation cache already keeps them, and a
 graph full of unremarkable numbers makes the remarkable ones harder to find.
 
-## Escalating
+## The ceiling
 
-The fast tier is the bottom of a ladder. Escalate to the heavier QM path
-(`compute_dft_energy`, with `qm-job-submission` for the judgment) when the decision turns on a
-difference smaller than the fast method's error bar, or when the question needs something
-semiempirical methods do not provide. Say which it is.
+**Every method here is semiempirical, and there is nothing above it.** There is no DFT tier and
+no cluster to send a calculation to. So when the decision turns on a difference smaller than the
+method's error bar, or on something semiempirical methods do not provide, the answer is to say
+so — not to quote the number anyway and not to promise an escalation that does not exist.
 
-Escalating is not automatic: a DFT job is slow and expensive, and "the fast answer is
-good enough for this decision" is the right conclusion far more often than it is reached.
-State the error bar, state the decision margin, and let the comparison decide.
+What to do instead, in order: check whether a cheaper part of the ladder here still settles it (a
+conformer search where one rigid geometry was the real limit, a thermochemistry composite where a
+single point was), and if none does, say what evidence *would* settle it — usually an experiment —
+and propose it. State the error bar, state the decision margin, and let the comparison decide.

@@ -1036,3 +1036,61 @@ tests/test_templates.py tests/test_config.py tests/test_docstring_paths.py` — 
 `data/profiles/` for the allow-list. Do not wait for the ten-minute sweep to find them, and never
 call a change verified on a targeted run: in this tree the interesting tests are the ones guarding
 what a change **declares**, not what it computes.*
+
+---
+
+## 2026-08-26 — Deleting a capability: what to keep, and the guard that goes dark
+
+Removing the HPC/DFT tier (`D-2026-08-26-semiempirical-is-the-whole-tier`) was mostly mechanical.
+The three parts that were not are the parts worth a rule.
+
+**A guard named after the thing it guards disappears with it, silently.** The `qm` bundle's
+"a bundle cannot publish a note itself" test read `assert not hasattr(qm_knowledge,
+"write_knowledge_node")`. Delete the module and the assertion becomes vacuously true — no failure,
+no signal, and a control that still *reads* like one in review. This is exactly the
+`map_to_hpc_identity` shape CLAUDE.md already records, reached from the other direction.
+
+> **Rule.** When deleting a module, grep the suite for tests that name it and ask of each: *would
+> this still fail if the invariant were violated by something else?* If not, rewrite it over the
+> whole set (an AST walk, a registry scan) before deleting — never delete it with the module, and
+> never leave it asserting an absence that nothing can restore.
+
+**An invariant usually outlives the thing it was written against.** The parent-ceiling validator was
+phrased against the DFT poll's 24 h budget. The poll is gone; the *rule* — a workflow's execution
+timeout must exceed the longest activity under it, or the retry budget is unreachable and the error
+names neither setting — applies verbatim to the CREST search that is longest now.
+
+> **Rule.** Before deleting a validator with its subject, restate the rule without naming the
+> subject. If it still says something true, it is not the subject's validator — rewrite it. The same
+> question re-derived a *default*: `connector_job_timeout_seconds` was 90,000 s because of the DFT
+> poll, and every other job had silently inherited a ceiling sized for a tier that never ran.
+
+**A cache outlives the code that filled it.** `calculation_results` is never pruned, so the `dft`
+projector had to stay even though nothing can write a `dft` row again — while the `QMJobResult`
+entry beside it, keyed by a model name, had to go. "Delete the calculator, keep the reader" is the
+rule the module already stated; I nearly deleted both because they sit four lines apart.
+
+**And: run the validators, not just the gate.** `make lint type test` was green with five live false
+claims still in the tree — two skills declaring a deleted tool in frontmatter, three backticked
+paths naming deleted files. `make prose-validate` and `make skill-validate` found all five. A
+capability removal touches *declarations* more than it touches code, and the declaration checkers
+are a different make target.
+
+**I declared an environment limitation without checking it, and it was false.** I shipped the
+rotational profile saying no barrier had been computed against real xTB and that closing that
+"needs the live lane" — a cluster. `tblite` *is* the GFN2 Hamiltonian, ships as a PyPI wheel, and
+was **already installed** in the sibling repo's venv; only the `xtb`/`crest` binaries are conda-only,
+which the calc server's own `pyproject.toml` says costs speed and the conformer search rather than
+the physics. One `import tblite` would have settled it. Running it took twenty minutes and found
+two real defects, both on the flagship case: a torsion with one well per period reported **no
+barrier at all**, and the discontinuity warning fired on exactly the hindered rotations the feature
+exists for. This is the same failure as `CLAUDE.md`'s own "the sandbox is not offline" note, one
+level out: I inherited a belief about what the environment could not do from prose rather than from
+a probe.
+
+*Rule for myself: an "it needs X" in my own summary is a claim about the environment, and claims
+about the environment are cheap to test — check the import, the binary, the port, before writing it
+down. And a synthetic fixture can only express failures of the shape it was built in: the fake here
+had three wells because n-butane has three, so the one-well case — an amide, the whole point of the
+capability — was untestable by construction and passed. When a fake is shaped after one real case,
+name the shapes it cannot produce and go find a real instance of each.*

@@ -3,7 +3,7 @@
 The whole point of `chemclaw.ingest.eln.warehouse.driver` being Protocols with no vendor import is
 that this file can exist: every behaviour of the binding engine — the watermark predicate, the
 child-table fan-out, unit conversion, vocabulary mapping, attribute bounding, similarity ordering —
-is asserted here with no Snowflake tenant, no credentials and no client installed.
+is asserted here with no tenant, no credentials and no vendor client installed.
 
 It records `executed` so a test can assert the *exact statement* the engine would send. That matters
 more than it looks: a bug in the cursor predicate does not surface as an exception, it surfaces as
@@ -14,7 +14,42 @@ from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from typing import Any
 
-from chemclaw.ingest.eln.warehouse.snowflake import SnowflakeVectorDialect
+from chemclaw.ingest.eln.warehouse.driver import WarehouseQueryError
+
+
+class FakeVectorDialect:
+    """A `VectorDialect` serving all three metrics, so `sql.py` can be tested for being neutral.
+
+    A dialect belongs to a driver (D-2026-08-25), and the fake stands in for a driver — so it brings
+    its own rather than borrowing a shipped one. That is the opposite of what this file used to do,
+    and the reason it changed is worth stating: while there was exactly one real driver, borrowing
+    its dialect meant the engine tests pinned a string something actually sends. With the vendor
+    vocabulary now the *driver's* (`D-2026-08-26-the-driver-s-signature-is-the-schema`), borrowing
+    one would instead pin one vendor's spelling into every test of a module whose whole claim is
+    that it has none — and it would make a metric no single vendor serves untestable here.
+
+    So the names below are deliberately not any vendor's, and what they prove is what `sql.py`
+    contributes: the driver's function name reaches the statement, and its sort direction with it.
+    The real spellings are pinned against the real dialect in `tests/test_databricks_warehouse.py`,
+    and the two meet end to end in `test_warehouse_retriever.py`.
+    """
+
+    _METRICS: dict[str, tuple[str, str]] = {
+        "cosine": ("FAKE_COSINE_SIMILARITY", "DESC"),
+        "inner": ("FAKE_INNER_PRODUCT", "DESC"),
+        "l2": ("FAKE_L2_DISTANCE", "ASC"),
+    }
+
+    def similarity(self, metric: str) -> tuple[str, str]:
+        """The fake's function for `metric`, and the direction it sorts."""
+        try:
+            return self._METRICS[metric]
+        except KeyError:
+            raise WarehouseQueryError(f"no fake similarity function for {metric!r}") from None
+
+    def query_vector(self, placeholder: str, vector: Sequence[float], dim: int) -> tuple[str, Any]:
+        """Bind the list straight into the placeholder — the simplest of the real encodings."""
+        return placeholder, list(vector)
 
 
 class FakeCursor:
@@ -54,7 +89,7 @@ class FakeWarehouse:
         self.fail_with: Exception | None = None
         self.connect_options: dict[str, Any] = {}
         self._placeholder = placeholder
-        self._vector_dialect: Any = SnowflakeVectorDialect()
+        self._vector_dialect: Any = FakeVectorDialect()
 
     @property
     def placeholder(self) -> str:
@@ -63,12 +98,11 @@ class FakeWarehouse:
 
     @property
     def vector_dialect(self) -> Any:
-        """Snowflake's dialect, so the exact statements the engine has always emitted are asserted.
+        """`FakeVectorDialect`, so what the engine contributes is asserted without a vendor's words.
 
         The fake stands in for a driver, and the driver is where a dialect lives (D-2026-08-25).
-        Reusing Snowflake's here rather than inventing a fake one is deliberate: these tests exist
-        to pin the *statement text*, and a made-up dialect would pin a string nothing ever sends.
-        A test that wants the no-dialect case sets this to `None` on the instance.
+        A test that wants the no-dialect case sets this to `None` on the instance; one that wants a
+        real vendor's spelling sets a real dialect.
         """
         return self._vector_dialect
 

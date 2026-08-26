@@ -28,14 +28,14 @@ from tests.surface import surface
 
 def _privileged_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "entra_required", True)
-    monkeypatch.setattr(settings, "entra_expensive_actions", "compute_dft_energy")
+    monkeypatch.setattr(settings, "entra_expensive_actions", "sample_conformers")
     monkeypatch.setattr(settings, "entra_privileged_roles", "compute")
 
 
 def test_dev_mode_gate_is_open(monkeypatch: pytest.MonkeyPatch) -> None:
     """With enforcement off, every trigger is allowed (local dev, no tenant)."""
     monkeypatch.setattr(settings, "entra_required", False)
-    authorize_trigger("compute_dft_energy")  # does not raise
+    authorize_trigger("sample_conformers")  # does not raise
 
 
 def test_non_expensive_action_always_allowed(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -49,7 +49,7 @@ def test_privileged_role_authorizes(monkeypatch: pytest.MonkeyPatch) -> None:
     _privileged_env(monkeypatch)
     token = set_current_identity("u-1", frozenset({"compute"}))
     try:
-        authorize_trigger("compute_dft_energy")  # does not raise
+        authorize_trigger("sample_conformers")  # does not raise
     finally:
         reset_current_identity(token)
 
@@ -67,7 +67,7 @@ def test_missing_role_is_forbidden(monkeypatch: pytest.MonkeyPatch) -> None:
     token = set_current_identity("u-2", frozenset({"reader"}))
     try:
         with pytest.raises(AuthorizationError, match="user u-2 lacks a privileged role"):
-            authorize_trigger("compute_dft_energy")
+            authorize_trigger("sample_conformers")
     finally:
         reset_current_identity(token)
 
@@ -82,7 +82,7 @@ def test_no_user_is_forbidden(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     _privileged_env(monkeypatch)
     with pytest.raises(AuthorizationError, match="requires an authenticated user"):
-        authorize_trigger("compute_dft_energy")
+        authorize_trigger("sample_conformers")
 
 
 def test_require_actor_returns_the_ambient_user(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -168,8 +168,8 @@ def test_a_declared_expensive_job_is_allowed_with_a_privileged_role(
     """
     monkeypatch.setattr(settings, "entra_required", True)
     monkeypatch.setattr(settings, "entra_expensive_actions", "")
-    monkeypatch.setattr(settings, "entra_privileged_roles", "hpc-operator")
-    token = set_current_identity("u-4", frozenset({"hpc-operator"}))
+    monkeypatch.setattr(settings, "entra_privileged_roles", "calc-operator")
+    token = set_current_identity("u-4", frozenset({"calc-operator"}))
     try:
         for job in sorted(_declared_expensive_jobs()):
             authorize_trigger(job)  # does not raise

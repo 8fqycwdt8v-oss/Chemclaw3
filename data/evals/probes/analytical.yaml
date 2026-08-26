@@ -812,3 +812,27 @@ probes:
       reported as what the search returned, not padded. Pulls any knowledge-graph notes on the
       class. For the second half, registers the watch through the tool that does it and says
       what will trigger and where the notification lands, rather than promising to remember.
+
+  - id: an-34
+    section: 7
+    persona: lab_technician
+    bucket: A
+    question: >-
+      For the buffer on this prep purification I need to know which proton actually comes off
+      first: Oc1ccc(cc1)CC(=O)O. Both sites are ionisable and the two pKa values are close enough
+      that I do not trust drawing it.
+    expects_tools: [predict_pka_ensemble, predict_pka]
+    forbids_claims:
+      - "a single pKa quoted without saying which proton it belongs to"
+      - "the two sites' individual (microscopic) pKa values given as computed numbers"
+      - "a buffer pH presented as validated rather than as a starting point to measure"
+    direction: >-
+      The question is the *site*, not the value, which is the one thing `predict_pka_ensemble`
+      does that `predict_pka` cannot: it ranks every deprotonation CREST finds and reports the
+      winner as `site_smiles`. A good answer names the carboxylic acid as the first proton off
+      and says so from the computed ranking rather than from chemical intuition alone. Two
+      honest limits belong in it: the number carries ~1.3 pKa units of uncertainty, which is
+      wider than the gap between many such pairs, and where the result reports more than one
+      microstate within RT there is no single conjugate base — the macroscopic pKa is then the
+      only meaningful one and a per-site value is a different question the tool did not answer.
+      Recommending the value be measured before a buffer is fixed is correct, not hedging.

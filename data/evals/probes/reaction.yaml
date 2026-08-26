@@ -6,7 +6,7 @@
 #
 # Two standing facts this file is written against:
 #   1. The durable job launchers (compute_reaction_energy, compare_solvents, sample_conformers,
-#      compute_interaction_energy, scan_coordinate, compute_dft_energy, start_optimization_campaign)
+#      compute_interaction_energy, scan_coordinate, start_optimization_campaign)
 #      run on Temporal, and whether a broker and its workers are up depends on how the lane was
 #      started (`make live-up` starts them; a bare front door has none). A probe that triggers one
 #      is testing whether the answer's account of the job matches what became of it — not the

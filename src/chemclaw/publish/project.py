@@ -388,6 +388,86 @@ def _solvent_screen(
     )
 
 
+def _species_solvent_screen(
+    payload: dict[str, Any],
+) -> tuple[Subject, Conditions, TheoryLevel, dict[str, Any]]:
+    """One species set ranked across media — the aggregate; each medium publishes its own record.
+
+    Same rule as `_solvent_screen`: never store an aggregate whose parts are not also stored. The
+    per-medium distributions are published as ordinary `SpeciesDistribution` records at their own
+    `Conditions`, so "which tautomer dominates in DMSO" answers over media that were never screened
+    together — and this record carries only what is about the *comparison*: the largest swing, and
+    whether the dominant form reordered.
+
+    `dominance_changes` is a flag rather than a property, and at `warning` severity, because it is
+    not a measurement: it says every other number describing "the compound" is about a different
+    species depending on the medium, which is a caveat a reader must meet without asking for it.
+
+    The subject is a `system` and the vocabulary is `_species_distribution`'s, deliberately: this is
+    that projector's aggregate, and a comparison whose subject kind or `distribution_kind` differed
+    from its own parts' would not join to them.
+    """
+    distributions = list(payload.get("distributions") or [])
+    first = distributions[0] if distributions else {}
+    species = list(first.get("species") or [])
+    subject = Subject(
+        kind="system",
+        members=[
+            SubjectMember(
+                ordinal=index,
+                role="subject",
+                compound_id=_identify(entry.get("smiles"))[0],
+                smiles=_identify(entry.get("smiles"))[1],
+            )
+            for index, entry in enumerate(species)
+        ],
+        label=f"{payload.get('kind') or 'custom'} across {len(distributions)} media",
+    )
+    # No solvent on the comparison itself: it is *about* the media rather than run in one — the
+    # same reason `_solvent_screen` leaves it off.
+    conditions = Conditions(temperature_k=payload.get("temperature_k"))
+    level = TheoryLevel(
+        method=payload.get("method") or "unknown",
+        family="semiempirical",
+        engine="xtb",
+        treatment=payload.get("level") or "",
+    )
+    facts = _kept(
+        _fact(
+            "solvent_swing",
+            payload.get("largest_swing_kcal"),
+            "kcal/mol",
+            uncertainty=payload.get("uncertainty_kcal"),
+            uncertainty_kind="reported",
+        ),
+        _fact("media_compared", float(len(distributions)) if distributions else None, ""),
+        _text("distribution_kind", payload.get("kind")),
+        _text("reaction_level", payload.get("level")),
+    )
+    flags = _warnings(list(payload.get("warnings") or []))
+    if payload.get("dominance_changes"):
+        flags.append(
+            FlagFact(
+                ordinal=len(flags),
+                flag="dominance_changes_with_medium",
+                severity="warning",
+                message=(
+                    "the most populated species is not the same in every medium, so any property "
+                    "computed for 'the compound' describes a different form depending on solvent"
+                ),
+            )
+        )
+    return (
+        subject,
+        conditions,
+        level,
+        {
+            "properties": facts,
+            "flags": flags,
+        },
+    )
+
+
 def _ensemble(payload: dict[str, Any]) -> tuple[Subject, Conditions, TheoryLevel, dict[str, Any]]:
     """A conformer ensemble: one subject, N conformer rows.
 
@@ -959,9 +1039,14 @@ def _rotation(
         if rotamer.get("relative_kcal") is not None
     ]
     barriers = payload.get("barriers") or []
-    # The barrier out of the *most populated* well, which is the one that decides configurational
-    # stability — not the highest point of the profile, and not an average over directions.
-    highest = max(barriers, key=lambda barrier: barrier["forward_kcal"], default=None)
+    # **The barrier out of the most populated well**, which is what decides configurational
+    # stability — not the highest point of the profile and not an average over directions. The
+    # rotamers arrive most-populated first, so that well is ordinal 0, and its barrier is the one
+    # leaving it. The comment used to say this while the code took `max(forward_kcal)`; on
+    # n-butane those are different barriers, and the one described here is the one a record about
+    # configurational stability wants.
+    leaving = [barrier for barrier in barriers if barrier.get("from_rotamer") == 0]
+    highest = max(leaving or barriers, key=lambda barrier: barrier["forward_kcal"], default=None)
     lifetime = (highest or {}).get("interconversion") or {}
     uncertainty = payload.get("uncertainty_kcal")
     facts = _kept(
@@ -970,7 +1055,7 @@ def _rotation(
         # half-life below is exponential in it.
         _fact(
             "rotational_barrier",
-            payload.get("highest_barrier_kcal"),
+            (highest or {}).get("forward_kcal"),
             "kcal/mol",
             uncertainty=uncertainty,
             uncertainty_kind="reported",
@@ -1263,6 +1348,65 @@ def _pka(payload: dict[str, Any]) -> tuple[Subject, Conditions, TheoryLevel, dic
     )
 
 
+def _microstate_pka(
+    payload: dict[str, Any],
+) -> tuple[Subject, Conditions, TheoryLevel, dict[str, Any]]:
+    """A pKa computed from two sampled macrostates — the same property as `_pka`, differently made.
+
+    It is a *separate* projector rather than a reuse of `_pka`, and the reason is the record rather
+    than the shapes: the two pipelines carry separate calibrations and separate ledger histories
+    (`D-2026-08-26-a-pka-is-a-macrostate-not-a-microstate`), so a query that could not tell them
+    apart would average a rule-enumerated single conformer against a sampled macrostate and call the
+    result "the computed pKa". The `method` string is what keeps them distinguishable in the store,
+    and it names the sampler.
+
+    Three facts beyond the number, each answering something the value alone cannot:
+
+    - `pka_site` is the winning microstate's *perceived* constitution — which proton this is about.
+      Absent when perception declined, which is a real state and not a missing value.
+    - `microstates_within_rt` is why the number is a macrostate's: more than one and the molecule
+      has no single conjugate base, so a site-resolved pKa is a different question.
+    - `deprotonation_free_energy` is the quantity actually computed; the pKa is a linear map of it,
+      and a refit changes the second without changing the first.
+
+    The solvent and the temperature are **conditions**, not properties: an aqueous pKa at 298 K and
+    the same free energy in acetonitrile are different rows of one table, and `_pka`'s own subject
+    shape (one molecule) is right here too — the ensembles are how it was computed, not what it is
+    about.
+    """
+    return (
+        Subject(
+            kind="molecule",
+            members=[_molecule(payload.get("smiles"))],
+            label=payload.get("smiles") or "",
+        ),
+        Conditions(
+            solvent=payload.get("solvent"),
+            temperature_k=payload.get("temperature_k"),
+        ),
+        TheoryLevel(
+            method=payload.get("method") or "unknown",
+            family="semiempirical",
+            engine="crest",
+        ),
+        {
+            "properties": _kept(
+                _fact(
+                    "pka",
+                    payload.get("pka"),
+                    "",
+                    uncertainty=payload.get("uncertainty"),
+                    uncertainty_kind="reported",
+                ),
+                _fact("deprotonation_free_energy", payload.get("delta_g_kcal"), "kcal/mol"),
+                _fact("microstates_within_rt", payload.get("microstates_within_rt"), ""),
+                _text("pka_site", payload.get("site_smiles")),
+                _text("pka_branch", payload.get("branch")),
+            )
+        },
+    )
+
+
 def _solubility(payload: dict[str, Any]) -> tuple[Subject, Conditions, TheoryLevel, dict[str, Any]]:
     """A predicted aqueous solubility, carrying its applicability-domain flag.
 
@@ -1348,7 +1492,16 @@ def _single_point(
 
 
 def _dft(payload: dict[str, Any]) -> tuple[Subject, Conditions, TheoryLevel, dict[str, Any]]:
-    """A DFT energy from the HPC tier. The basis set is part of the level, not a condition."""
+    """A stored DFT energy. The basis set is part of the level, not a condition.
+
+    **Backfill-only, and kept deliberately.** The `qm` bundle that stamped `dft` rows is gone
+    (`D-2026-08-26-semiempirical-is-the-whole-tier`), so nothing can write one again — but
+    `calculation_results` is never pruned, so a deployment upgrading into this release still holds
+    every row it ever wrote. That is exactly the `xtb.scan` case the `_CALC_TYPE_PROJECTORS` note
+    below states the rule for: a retired calculator keeps its projector. What did *not* survive is
+    the `PAYLOAD_PROJECTORS` entry beside it, because that half is keyed by a pydantic model name
+    and `QMJobResult` no longer exists to be stated.
+    """
     smiles = payload.get("molecule_smiles")
     subject = Subject(kind="molecule", members=[_molecule(smiles)], label=smiles or "")
     return (
@@ -1459,6 +1612,8 @@ _Projector = Callable[[dict[str, Any]], tuple[Subject, Conditions, TheoryLevel, 
 PAYLOAD_PROJECTORS: dict[str, _Projector] = {
     "ReactionEnergyResult": _reaction,
     "SolventComparisonResult": _solvent_screen,
+    # The aggregate over `SpeciesDistribution`, which is registered below with its siblings.
+    "SpeciesSolventComparison": _species_solvent_screen,
     "ConformerEnsemble": _ensemble,
     "RefinedEnsemble": _refined_ensemble,
     "EnsembleProperty": _ensemble_property,
@@ -1476,11 +1631,11 @@ PAYLOAD_PROJECTORS: dict[str, _Projector] = {
     "OptimizationResult": _optimization,
     "OptimizationSummary": _optimization,
     "PkaResult": _pka,
+    "MicrostatePka": _microstate_pka,
     "SolubilityResult": _solubility,
     "LogdResult": _logd,
     "DescriptorProfile": _descriptors,
     "XtbResult": _single_point,
-    "QMJobResult": _dft,
 }
 
 # Longest prefix wins, so `xtb.properties` reaches `_electronic_properties` rather than being
@@ -1646,6 +1801,46 @@ def records_from_solvent_screen(
     return records
 
 
+def records_from_species_solvent_screen(
+    *, calc_ref: str, payload: dict[str, Any], depends_on: list[str] | None = None, **common: Any
+) -> list[ResultRecord]:
+    """A species screen as its comparison **plus** one distribution record per medium.
+
+    The same rule and the same shape as `records_from_solvent_screen`: an aggregate whose parts are
+    not also stored makes "which tautomer dominates in DMSO" answerable only over screens that
+    happened to include DMSO, and unanswerable for the medium computed on its own. Each part is a
+    full `SpeciesDistribution` — the payload the single-solvent job publishes — so both routes to
+    that question land on one shape.
+
+    The parts are the distributions verbatim rather than reconstructed, because this composite
+    already holds them whole; the reaction screen has to rebuild its parts only because a
+    `SolventEffect` is narrower than the `ReactionEnergyResult` it came from.
+    """
+    comparison = project(
+        calc_ref=calc_ref,
+        payload=payload,
+        payload_kind="SpeciesSolventComparison",
+        depends_on=list(depends_on or []),
+        **common,
+    )
+    records = [comparison]
+    part_common = {key: value for key, value in common.items() if key != "calc_type"}
+    part_common["calc_type"] = "species_ranking.solvent_screen_part"
+    for index, distribution in enumerate(payload.get("distributions") or []):
+        records.append(
+            project(
+                # A derived ref, so a part is addressable and idempotent without colliding with a
+                # standalone `rank_species` run of the same set in the same medium.
+                calc_ref=f"{calc_ref}#medium{index}",
+                payload=distribution,
+                payload_kind="SpeciesDistribution",
+                depends_on=[calc_ref],
+                **part_common,
+            )
+        )
+    return records
+
+
 # The payload kinds whose projection is more than one record. Keyed by model name rather than by
 # `calc_type` for the same reason the projector table is: a model name is exact, and a composite's
 # `calc_type` is a route (`<connector>.<job>`) that names no shape.
@@ -1654,6 +1849,7 @@ _MultiProjector = Callable[..., list[ResultRecord]]
 
 _MULTI_RECORD_PROJECTORS: dict[str, _MultiProjector] = {
     "SolventComparisonResult": records_from_solvent_screen,
+    "SpeciesSolventComparison": records_from_species_solvent_screen,
 }
 
 

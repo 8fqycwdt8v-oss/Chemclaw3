@@ -48,17 +48,28 @@ consequences differ by class, so this is a decision worth getting right.
 
 ## How to compute it
 
-1. **Identify the bond.** Usually the biaryl axis or the amide C–N. Get the four atom
-   indices that define the dihedral across it.
-2. **Scan the torsion** with `scan_coordinate`, covering the full rotation. Two things to
-   check: that the profile is smooth, and that the maximum is resolved rather than
-   stepped over — rescan the barrier region finely.
-3. **Read the barrier** as the highest point relative to the populated minimum.
-4. **Convert to a half-life** with the relation above, and report the class it implies.
+1. **Name the bond with `enumerate_torsions`** — usually the biaryl axis or the amide C–N.
+   Pass its entry through unchanged. **Never work the atom indices out yourself.** An
+   index is not a name: the same pair names an amide C–N in one way of writing a compound
+   and an aromatic *ring* bond in another, both in range, both really bonded — so a
+   hand-assembled torsion returns a plausible barrier for a different bond.
+2. **Say back which bond you chose**, by its label, before spending anything. If the
+   chemist's words match more than one entry, ask rather than picking. `render_structure`
+   with the torsion's `atoms` draws it, which is the one form a human can check at a
+   glance.
+3. **Run `profile_rotation`.** It covers one period rather than a full turn where the
+   torsion is symmetric, resolves each maximum instead of stepping over it, releases each
+   well from its constraint into a real rotamer, and reports the barrier out of each well
+   with the half-life and its band already computed.
+4. **Report the class range** from that band, never from the middle value.
 
-A relaxed scan is a reasonable route to a torsional barrier — this is the case where the
-reaction coordinate genuinely *is* the one angle being driven. That is not true of most
-barriers, and `conformational-analysis` says why.
+A relaxed profile is a reasonable route to a torsional barrier — this is the case where
+the reaction coordinate genuinely *is* the one angle being driven. That is not true of
+most barriers, and `conformational-analysis` says why.
+
+`scan_coordinate` still drives any internal coordinate and is right when the *profile* is
+the question. `profile_rotation` is right when the *barrier* is: everything in steps 3
+and 4 is what it adds.
 
 ## The honesty this skill exists to enforce
 
@@ -78,10 +89,11 @@ barriers, and `conformational-analysis` says why.
   matters for whether the compound racemizes during manufacture — and a compound can be
   configurationally stable on the shelf and completely labile at reflux.
 - **One conformer, one coordinate.** A molecule with a second hindered axis, or one where
-  rotation is coupled to a ring flip, is not described by a single torsion profile — and
-  the result says so in its `warnings` when another rotatable torsion sits next to the one
-  driven. Pass a `structure_id` from `sample_conformers` when which conformer the barrier
-  is measured in could matter.
+  rotation is coupled to a ring flip, is not described by a single torsion profile, and
+  **nothing checks that for you** — `enumerate_torsions` lists the other rotatable bonds,
+  so look at what it returned before treating one profile as the answer. Pass a
+  `structure_id` from `sample_conformers` when which conformer the barrier is measured in
+  could matter.
 
 ## Presenting it
 

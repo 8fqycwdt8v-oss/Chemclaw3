@@ -273,7 +273,8 @@ def prepare_job_launch(connector: str, job: JobSpec, params: Any) -> dict[str, A
 
     **It is one function because it was two, and one of them was empty** (D-168). The template's
     `ResolvedJob` carried the connector, workflow and queue and dropped `expensive` and
-    `precondition` on the floor, so a template naming an HPC job started it for anyone entitled to
+    `precondition` on the floor, so a template naming an expensive job started it for anyone
+    entitled to
     run the *template*, and a job's own domain guard — the one `JobSpec.precondition` documents as
     having no other replay-safe home — never ran on that path at all. Duplicating the four steps
     would have fixed today's instance and left the next launcher to rediscover it.

@@ -207,9 +207,9 @@ def _bundles_owning_durable_work() -> set[str]:
 def test_the_runbook_names_the_bundles_that_actually_ship() -> None:
     """The runbook describes the bundle set, so the set has to be checked rather than remembered.
 
-    It said "Six bundles" and listed six, omitting `qm` entirely — while the same document, twenty
-    lines later, explained that the QM run lives in `connectors/qm/` now. A count in prose goes
-    stale silently; this is the same claim in a form that fails loudly
+    It said "Six bundles" and listed six, omitting one entirely — while the same document, twenty
+    lines later, explained where that bundle's job lived. A count in prose goes stale silently;
+    this is the same claim in a form that fails loudly
     (D-2026-08-01-the-count-lives-in-the-test-not-in-the-prose).
     """
     runbook = (_ROOT / "docs" / "guides" / "runbook.md").read_text(encoding="utf-8")
@@ -228,13 +228,17 @@ def test_the_runbook_names_the_bundles_that_actually_ship() -> None:
 def test_the_runbook_names_every_bundle_that_owns_durable_work() -> None:
     """Calling `bo` "the one that also owns durable work" was wrong, in a way one grep settles.
 
-    `calc`, `bo`, `qm` and `results` each declare `jobs:`, so each runs a second Deployment for its
-    own Temporal worker. The runbook said only `bo`, nine lines after calling `calc` "the worked
+    `calc`, `bo` and `results` each declare `jobs:`, so each runs a second Deployment for its own
+    Temporal worker. The runbook said only `bo`, nine lines after calling `calc` "the worked
     example (five jobs, one workflow, one queue, its own worker)" — a document disagreeing with
     itself, which is what an unchecked claim looks like once someone edits half of it.
+
+    `qm` was the fourth until `D-2026-08-26-semiempirical-is-the-whole-tier` removed the HPC/DFT
+    tier, and this test is what caught the runbook paragraph still naming it — which is the whole
+    point of pinning the set rather than trusting the prose.
     """
     durable = _bundles_owning_durable_work()
-    assert durable == {"bo", "calc", "qm", "results"}, (
+    assert durable == {"bo", "calc", "results"}, (
         f"the set of bundles owning durable work changed to {sorted(durable)}; update the runbook "
         "paragraph that names them, which is the claim this test exists to keep honest"
     )

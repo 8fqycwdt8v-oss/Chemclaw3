@@ -282,14 +282,14 @@ module = [
     "drfp",
     "openpyxl",
     "linear_operator.*",
-    # The Snowflake client is not a dependency of this repository: the warehouse driver module is
-    # imported only where a binding names it, on a deployment that installed the client (see
+    # The Databricks SQL client is not a dependency of this repository: the warehouse driver module
+    # is imported only where a binding names it, on a deployment that installed the client (see
     # `chemclaw/ingest/eln/warehouse/README.md`). Listed so `mypy --strict` checks that module's own
-    # code rather than failing on an import it is designed not to have.
-    "snowflake.*",
-    # The Databricks SQL client, for the same reason and on the same terms as Snowflake above. Its
-    # sibling `databricks-vectorsearch` needs no entry: `retrieval/vectors/databricks.py` reaches it
-    # through `importlib.import_module`, which mypy does not resolve and so does not complain about.
+    # code rather than failing on an import it is designed not to have. The same entry serves any
+    # further driver written against a client this repository does not depend on — one line per
+    # client root, beside its module. Its sibling `databricks-vectorsearch` needs none:
+    # `retrieval/vectors/databricks.py` reaches it through `importlib.import_module`, which mypy
+    # does not resolve and so does not complain about.
     "databricks.*",
 ]
 follow_imports = "skip"

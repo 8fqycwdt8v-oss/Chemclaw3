@@ -32,7 +32,7 @@ from typing import Any
 
 from chemclaw.ingest.eln.adapter import ElnMappingError, parse_iso_utc
 
-# One path segment: a column or block name, optionally indexed. `$` is legal in a Snowflake
+# One path segment: a column or block name, optionally indexed. `$` is legal in a warehouse
 # identifier and shows up in generated views, so it is allowed in a name but never as its first
 # character.
 _SEGMENT = re.compile(r"^([A-Za-z_][A-Za-z0-9_$]*)(?:\[(\d+)\])?$")

@@ -23,12 +23,14 @@ from chemclaw.science.calc.models import (
     ConformerEnsemble,
     EnsembleProperty,
     InteractionResult,
+    MicrostatePka,
     ReactionEnergyResult,
     RefinedEnsemble,
     RotationProfile,
     ScanResult,
     SolventComparisonResult,
     SpeciesDistribution,
+    SpeciesSolventComparison,
 )
 
 
@@ -55,12 +57,15 @@ class XtbJobResult(BaseModel):
     rotation: RotationProfile | None = None
     ensemble: ConformerEnsemble | None = None
     interaction: InteractionResult | None = None
-    # The four multi-step results. Additive and defaulted like `calc_refs` above and for the same
+    pka: MicrostatePka | None = None
+    # The six multi-step results. Additive and defaulted like `calc_refs` above and for the same
     # reason: this crosses the Temporal wire and histories are in flight, so a result decoded from
     # an older one simply has none of them.
     refined: RefinedEnsemble | None = None
     averaged: EnsembleProperty | None = None
     distribution: SpeciesDistribution | None = None
+    # The distribution fanned out over media (D-2026-08-26-a-solvent-is-an-argument-not-a-job).
+    species_solvents: SpeciesSolventComparison | None = None
     bonds: BondDissociationSurvey | None = None
 
     def outcome(self) -> BaseModel:
@@ -71,7 +76,8 @@ class XtbJobResult(BaseModel):
         science wants the member. `type(envelope).__name__` is therefore never the answer to "what
         shape is this" — it is always `XtbJobResult` — and answering it that way is what left the
         whole composite half of `chemclaw.publish` dropping its input with a debug line while every
-        test passed (`D-2026-08-25-a-cache-is-not-a-record`'s headline claim). `qm` has no wrapper
+        test passed (`D-2026-08-25-a-cache-is-not-a-record`'s headline claim). The DFT bundle had
+        no wrapper
         and is the one bundle that published; this is how `calc` stops being the exception.
 
         **Members are recognised by type, not by a name list.** A member is a `BaseModel`; the

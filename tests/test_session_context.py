@@ -27,10 +27,10 @@ from tests.fakes_turn import Piece, ScriptedTurn
 
 _SPEC = JobSpec.model_validate(
     {
-        "name": "compute_dft_energy",
-        "workflow": "QMJobWorkflow",
-        "summary": "Run a durable DFT calculation.",
-        "params_model": "chemclaw.connectors.qm.specs:QmJobSpec",
+        "name": "sample_conformers",
+        "workflow": "CalcJobWorkflow",
+        "summary": "Search a molecule's conformers.",
+        "params_model": "chemclaw.connectors.calc.specs:EnsembleJobSpec",
     }
 )
 
@@ -42,9 +42,9 @@ def test_session_id_does_not_affect_the_job_id() -> None:
     session is ambient and never enters it. So two chemists asking the same question in two chats
     join one run, and each still gets woken (the wrapper carries the session beside the payload).
     """
-    payload = {"molecule_smiles": "CCO", "method": "B3LYP", "basis_set": "def2-SVP"}
-    assert job_workflow_id("qm", "compute_dft_energy", payload) == job_workflow_id(
-        "qm", "compute_dft_energy", dict(payload)
+    payload = {"smiles": "CCO", "kind": "conformers"}
+    assert job_workflow_id("calc", "sample_conformers", payload) == job_workflow_id(
+        "calc", "sample_conformers", dict(payload)
     )
 
 
@@ -85,14 +85,14 @@ def test_a_durable_launch_stamps_the_current_session(monkeypatch) -> None:  # ty
         return client
 
     monkeypatch.setattr(connector_jobs, "connect", _fake_connect)
-    tool = build_job_tool("qm", _SPEC)
+    tool = build_job_tool("calc", _SPEC)
     params = tool.__annotations__["params"]
 
     async def _run() -> None:
         token = set_current_session_id("sess-42")
         try:
             await tool(
-                params(molecule_smiles="CCO", method="B3LYP", basis_set="def2-SVP"),
+                params(smiles="CCO", search="conformers"),
                 "confirm the barrier before proposing the route",
             )
         finally:

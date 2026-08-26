@@ -166,7 +166,8 @@ class BoCampaignWorkflow:
         # so a durably-run campaign reported "no such campaign" about hours of evaluation.
         #
         # The actor comes off the run's **memo**, which core sets on every connector job for exactly
-        # this (`durable/connector_job.py`, D-118) — the same read `connectors/qm/workflows.py` has
+        # this (`durable/connector_job.py`, D-118) — the same read
+        # `connectors/calc/workflows.py` has
         # made since F5. Nothing is threaded through the payload, and nothing is fabricated: the
         # fallback is the configured service identity, which is what `require_actor` falls back to
         # for a run started outside the wrapper (a test, a manual re-drive).

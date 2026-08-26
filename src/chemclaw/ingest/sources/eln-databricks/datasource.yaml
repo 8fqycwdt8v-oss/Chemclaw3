@@ -8,10 +8,12 @@
 # folder first in `CHEMCLAW_DATA_SOURCES_DIR`, so the deployment's schema is not a change to this
 # repository at all.
 #
-# The sibling of `eln-snowflake`, and deliberately the *same* engine: only `connection.driver`
-# differs, because the second warehouse was the thing D-2026-08-04 built the seam for. What that
-# second driver did expose is that the similarity search was never dialect-neutral — see the
-# `vector:` block at the bottom and `ingest/eln/warehouse/driver.py`.
+# The engine below this file is generic: `connection.driver` names the module that knows a vendor
+# exists, and everything else in `connection:` is that driver's own keyword arguments. Attaching a
+# second database — another lakehouse, a Postgres, a DuckDB export — is a driver module plus a
+# manifest, with no field added to anything shared. What the second driver did expose is that the
+# similarity search was never dialect-neutral — see the `vector:` block at the bottom and
+# `ingest/eln/warehouse/driver.py`.
 #
 # The values here describe a plausible ELN and are exercised against a fixture row by
 # `tests/test_warehouse_binding.py`. They are not anyone's real schema and are meant to be replaced
@@ -28,37 +30,34 @@ retrieve: chemclaw.ingest.eln.warehouse.retriever:WarehouseVectorRetriever
 config:
   binding:
     connection:
+      # **This block is the driver's constructor signature, not a shared connection model.** Every
+      # key here is a keyword argument of
+      # `chemclaw.ingest.eln.warehouse.databricks:DatabricksWarehouse`, in Databricks' own words —
+      # so attaching a different database is a different driver with its own keys and nothing here
+      # to widen (`D-2026-08-26-the-driver-s-signature-is-the-schema`). `make datasource-validate`
+      # binds this block against that signature, so a key the driver does not take fails offline.
       driver: chemclaw.ingest.eln.warehouse.databricks:DatabricksWarehouse
-      # Environment variable NAMES. No credential is ever written into a manifest; the value is read
-      # at connect time, so a rotated token is picked up by the next connection. Unprefixed because
-      # these are the client's credentials, not settings of this application.
-      #
-      # **Three of these fields mean something different here than they do for Snowflake**, because
-      # the seam names concepts and each vendor has its own word for them:
-      #
-      #   account_env  -> the workspace hostname   (adb-1234567890.11.azuredatabricks.net)
-      #   password_env -> a personal access token  (dapi...)
-      #   warehouse    -> the SQL warehouse id, or its full /sql/1.0/warehouses/<id> path
-      #   database     -> the Unity Catalog *catalog*
-      #   schema       -> the schema within it
-      #
-      # `private_key_env` and `role` have no analogue and are *refused* rather than ignored: access
-      # is governed by Unity Catalog grants on the token's principal, and a `role:` copied over from
-      # a Snowflake binding would otherwise read as a restriction that is not in force.
-      account_env: DATABRICKS_HOST
-      password_env: DATABRICKS_TOKEN
-      warehouse: 0123456789abcdef
-      database: eln_prod
+      # A key ending `_env` holds the NAME of an environment variable. No credential is ever written
+      # into a manifest; the value is read at connect time, so a rotated token is picked up by the
+      # next connection. Unprefixed because these are the client's credentials, not settings of this
+      # application.
+      server_hostname_env: DATABRICKS_HOST
+      access_token_env: DATABRICKS_TOKEN
+      # The SQL warehouse id the Databricks UI shows. `http_path:` takes its full
+      # `/sql/1.0/warehouses/...` path instead; naming both is refused rather than resolved.
+      warehouse_id: 0123456789abcdef
+      # Unity Catalog: the catalog, and the schema within it.
+      catalog: eln_prod
       schema: reactions
       query_timeout_seconds: 60
 
     ingest:
-      # **Column names are matched exactly, and Databricks is not Snowflake about case.** Snowflake
-      # upper-cases unquoted identifiers in its result metadata, so a binding written in capitals
-      # matches whatever the site typed. Spark returns the *schema's own* casing, and every path
-      # below is an exact-case lookup on the returned row — so a binding saying `REACTION_ID`
-      # against a column declared `reaction_id` resolves to nothing, and a row that resolves to
-      # nothing is skipped rather than reported. Copy the casing from `DESCRIBE TABLE`.
+      # **Column names are matched exactly, and the warehouse decides the casing.** Spark returns
+      # the *schema's own* casing, and every path below is an exact-case lookup on the returned row
+      # — so a binding saying `REACTION_ID` against a column declared `reaction_id` resolves to
+      # nothing, and a row that resolves to nothing is skipped rather than reported. Copy the casing
+      # from `DESCRIBE TABLE`. (A warehouse that upper-cases unquoted identifiers in its result
+      # metadata, as some do, wants the binding written in capitals for the same reason.)
       entry:
         relation: v_reaction
         key: reaction_id

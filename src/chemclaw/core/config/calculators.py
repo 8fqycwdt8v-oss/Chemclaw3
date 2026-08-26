@@ -18,8 +18,41 @@ makes that checkable rather than remembered.
 
 from typing import Literal
 
-from pydantic import Field
+from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings
+
+
+class PkaCalibration(BaseModel):
+    """The linear map from a computed deprotonation free energy to a pKa, and its fitted domain.
+
+    **One model rather than five flat fields, because these five numbers are one measurement.** A
+    slope moved without its intercept is a different calibration silently claiming to be this one,
+    and an uncertainty or a domain left behind describes a fit that no longer exists. Overridden
+    together as JSON (`CHEMCLAW_PKA_ENSEMBLE_ACID='{"slope": ..., "intercept": ...}'`) or not at
+    all.
+
+    Unlike the calculator knobs this module refuses to hold, this one is genuinely **this**
+    repository's: `connectors/calc/compose.py::microstate_pka` is the composite that reads it, and
+    the pKa it produces is arithmetic performed here over ensembles the server sampled. Nothing on
+    `Chemclaw3-mcp` can see it, and its own `predict_pka` calibration — a different pipeline, fitted
+    separately — is unaffected by anything set here.
+    """
+
+    slope: float
+    intercept: float
+    # One standard error of the fit, reported beside every prediction. A semiempirical pKa is for
+    # ranking related compounds; the number without its spread invites a decision it cannot carry.
+    uncertainty: float
+    # The experimental pKa span the fit was made over. A prediction outside it is extrapolation and
+    # says so — the map is linear and the physics behind it is not, so the residual off the end of
+    # the reference set is unknown rather than merely larger.
+    fitted_from: float
+    fitted_to: float
+    # The CREST search depth the reference set was measured at. It belongs to the fit for the same
+    # reason the solvent does: a deeper search finds lower members on both sides of the equilibrium,
+    # so it moves the free-energy difference the slope was fitted against. A caller who pays for a
+    # better ensemble gets the better ensemble and a warning that the *mapping* is the quick one's.
+    fitted_effort: Literal["quick", "normal", "extensive"] = "quick"
 
 
 class CalculatorSettings(BaseSettings):
@@ -57,6 +90,28 @@ class CalculatorSettings(BaseSettings):
     # ~19 minutes and there were 13 members, so refining all of them is the search again several
     # times over. The result carries `refined_population_covered` so a truncation says so.
     ensemble_refine_top_n: int = Field(default=5, ge=1)
+    # The solvent every CREST search behind a `microstate_pka` runs in. Water, because the pKa a
+    # chemist means is the aqueous one and both calibrations below were fitted there; a caller may
+    # ask for another medium and gets the ensembles and the free energy, with the calibration
+    # warned about rather than silently reapplied.
+    pka_ensemble_solvent: str = "water"
+    # **The two calibrations, each fitted through the exact pipeline that reads it** — a CREST
+    # conformer search of the neutral, a CREST `--deprotonate`/`--protonate` microstate search, and
+    # the macrostate free energy of each side. Refitting is a measurement, not a tuning: see
+    # `docs/decisions/D-2026-08-26-a-pka-is-a-macrostate-not-a-microstate.md` for the reference set
+    # and the statistics these numbers came from.
+    #
+    # Acid: 19 neutral O-H/S-H acids spanning pKa 0.66-15.9. R^2 0.911, RMSE 1.31, Spearman 0.940,
+    # worst residual 2.54 (2,2,2-trifluoroethanol).
+    pka_ensemble_acid: PkaCalibration = PkaCalibration(
+        slope=0.31221, intercept=-32.98637, uncertainty=1.31, fitted_from=0.66, fitted_to=15.9
+    )
+    # Base: 12 aromatic/aryl nitrogen bases spanning pKaH 0.72-9.11. R^2 0.798, RMSE 1.05,
+    # Spearman 0.888, worst residual 2.47 (2-chloropyridine, where the ortho chlorine's steric and
+    # inductive effect on the cation is what a continuum sees least well).
+    pka_ensemble_base: PkaCalibration = PkaCalibration(
+        slope=0.32316, intercept=-31.71601, uncertainty=1.05, fitted_from=0.72, fitted_to=9.11
+    )
     # How many distinct species one ranking may cover — tautomers, microstates, stereoisomers.
     # RDKit will happily enumerate twenty tautomers of a purine; each one is a separate CREST
     # search, so this is the difference between a question and a project.
@@ -122,6 +177,18 @@ class CalculatorSettings(BaseSettings):
     # real separation between torsional minima (60 degrees for a three-fold rotor) and well above
     # the spread of an optimizer settling into one basin from two neighbouring start points.
     xtb_rotation_merge_degrees: float = Field(default=15.0, gt=0.0, lt=60.0)
+    # How far out of line one step of a torsion profile has to be, as a multiple of that profile's
+    # own typical step, before it is reported as a point that relaxed into a different basin.
+    #
+    # **A ratio and not a kcal/mol threshold, because measurement said so.** This was
+    # `xtb_reaction_uncertainty_kcal` (3.0), which fires on any barrier steep enough to matter: on
+    # the live GFN2 server N,N-dimethylacetamide steps 8.8 kcal/mol between two 30-degree points
+    # while climbing an ordinary 18 kcal/mol amide barrier, and was warned about — so the check
+    # fired on precisely the hindered rotations the capability exists for and stayed quiet on the
+    # freely-rotating ones. A discontinuity is a step *out of line with its neighbours*, not a
+    # large step. Calibrated against three measured smooth profiles, whose largest step was 3.5x,
+    # 2.7x and 2.5x their own median; 4.0 clears all three.
+    xtb_rotation_discontinuity_ratio: float = Field(default=4.0, gt=1.0)
     # How many times a geometry that lands on a saddle point may be displaced along its
     # imaginary mode and re-optimized, and how far (Angstrom, the largest atom's motion).
     # One attempt clears the ordinary case — a force field's eclipsed methyl held by
@@ -195,6 +262,16 @@ class CalculatorSettings(BaseSettings):
     # guidance now says duration is not the property it promises. A durable job's activity bounds
     # the same wait again with its own timeout and heartbeat.
     calc_server_timeout_seconds: float = Field(default=900.0, gt=0)
+    # **The same bound for a CREST search, which is a different order of cost.** 900 s was
+    # unreachable while the binary shipped in no image: every sampling call refused in
+    # milliseconds. It ships now (`D-2026-08-26-a-sampler-nobody-ships-is-a-refusal-with-a-manual`)
+    # and the numbers no longer fit — this repository's own measurement of a 33-atom conformer
+    # search is **1142 s**, past the bound above, while the server allows one 14400 s
+    # (`CHEMCLAW_CREST_TIMEOUT_SECONDS`). A client bound shorter than the server's does not save
+    # anything: the server keeps computing, the answer is discarded, and the caller is told the
+    # service timed out. Matched to the server's own ceiling so the *server* is what bounds a
+    # search, with `crest_timeout_seconds` the one number to change.
+    calc_sampling_timeout_seconds: float = Field(default=14400.0, gt=0)
     # The molecule `connectors/calc/remote.py::remote_version` derives a key *for* when it asks the
     # server what version a calculator is on. `calculation_key` answers an identity, and an identity
     # is of something — but the `calc_version` it reports is a property of the programs and the

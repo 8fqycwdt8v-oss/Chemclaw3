@@ -18,8 +18,8 @@ many light workers (sync, re-index, reports, the connector-job wrapper). Each co
 adds one of its own, `connector-<name>` (`chemclaw.connectors.queues.bundle_queue`), sized for that
 capability alone. Which one a workflow belongs on follows from what it does, so it belongs with
 the code that does it — see D-006. The set is open rather than the original two because D-006's
-heavy/light split moved down one level: core's `hpc` queue existed for the single QM/DFT
-workflow, and that is a bundle now (D-118).
+heavy/light split moved down one level: every expensive workflow belongs to the bundle whose
+dependency closure it needs (D-118).
 
 **The isolation comes from the import boundary, not from the decorator.** A bundle's heavy
 dependencies stay out of core's worker because core's worker never imports the bundle's

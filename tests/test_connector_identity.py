@@ -593,7 +593,8 @@ def test_every_bundle_this_repository_hosts_authenticates_its_own_mcp() -> None:
 
     Four of the six endpoint-serving bundles shipped `auth: mode: none` (`bo`, `calc`, `molfp`,
     `rxnfp`). The NetworkPolicy was the only thing between any pod in the namespace and a tool that
-    starts durable HPC work, and a NetworkPolicy selects peers rather than paths — so a compromised
+    starts durable expensive work, and a NetworkPolicy selects peers rather than paths — so a
+    compromised
     or merely curious neighbour in the same namespace could launch one.
 
     Written as a sweep over the enabled set rather than a list of four names, because the failure

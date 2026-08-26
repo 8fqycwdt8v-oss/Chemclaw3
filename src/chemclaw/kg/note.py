@@ -265,10 +265,15 @@ KNOWN_NOTE_TYPES: frozenset[str] = frozenset(
         "playbook",  # a transferable rule distilled across projects (memory/playbook.py)
         "interaction",  # a chemist-confirmed answer (memory/interaction.py)
         "report",  # a drafted development report (report/harness.py)
-        # `job-result` and `bo-candidate` used to sit here. They are minted by the `qm` and `bo`
-        # bundles, so they now live in those bundles' `connector.yaml` `note_types:` and reach the
-        # vocabulary through `known_note_types()` — a bundle's contribution should not require a
-        # line in core, which is the whole claim of the connector seam.
+        # A calculation written up as a graph citizen. It sat in `connectors/qm/connector.yaml`
+        # while the `qm` bundle's `publish_to_graph` job was the thing that minted it; with that
+        # bundle removed (`D-2026-08-26-semiempirical-is-the-whole-tier`) no bundle mints one, and
+        # the rule that put it there says where it goes instead. A type a bundle *mints* belongs to
+        # that bundle; this one is now written only through core's own PR-gate
+        # (`propose_knowledge_note`), about results the corpus in `knowledge/job-result/` already
+        # holds — so it is core's vocabulary again. `bo-candidate` stays in `connectors/bo/`,
+        # because `bo` still mints it.
+        "job-result",
         # The agent's reasoned proposal for the next run in a series, argued from the record
         # rather than from a surrogate model (D-162) — the non-BO sibling of `bo-candidate`.
         "experiment-proposal",
@@ -280,12 +285,11 @@ KNOWN_NOTE_TYPES: frozenset[str] = frozenset(
 def known_note_types() -> frozenset[str]:
     """Core's note types plus those the enabled connector bundles declare.
 
-    **The vocabulary belongs to the deployment, not to this file.** Two of the types above are
-    minted by bundles rather than by core — `job-result` by `connectors/qm/` and `bo-candidate` by
-    `connectors/bo/` — and were added to the frozenset by hand. That made "contribute a note type"
-    the one connector contribution that required editing core, inside the seam whose whole claim is
-    that a capability is a folder and nothing else (D-118). A bundle now declares `note_types:` in
-    its manifest and this unions them in.
+    **The vocabulary belongs to the deployment, not to this file.** `bo-candidate` is minted by
+    `connectors/bo/` rather than by core, and used to be added to the frozenset above by hand. That
+    made "contribute a note type" the one connector contribution that required editing core, inside
+    the seam whose whole claim is that a capability is a folder and nothing else (D-118). A bundle
+    now declares `note_types:` in its manifest and this unions them in.
 
     The set stays *closed*, which is the property worth keeping: a name no manifest and no core
     entry declares still fails `make kg-validate`, so a typo cannot reach the graph and make a note

@@ -118,7 +118,7 @@ Job noch läuft.
 
 **Lösung: die Buchhaltung steht gar nicht erst im Plan.** Ein Schritt, der einen Temporal-Job
 auslöst, hinterlässt die `job_id` als `job_records`-Zeile und als `session_events`-Push-Back —
-*nicht* im Plan. Der Agent formuliert den Zwischenstand („DFT-Validierung gestartet, ID qm-8f2a"),
+*nicht* im Plan. Der Agent formuliert den Zwischenstand („Konformerensuche gestartet, ID calc-8f2a"),
 der Turn gibt die Kontrolle ab, und der zurückgemeldete Abschluss bringt die Folgeschritte wieder in
 Gang.
 
@@ -146,13 +146,13 @@ Beschreibungsfeld mehr, in das die Konvention zurückkriechen könnte.
 **(a) Mehrstufige Untersuchung (der Leitfaden-Testfall, §5).** Der Agent plant selbst:
 ```
 Plan:  1. Graph nach Verbindung X + ähnlichen Substraten durchsuchen  [find_notes/expand_note]
-       2. Schnellen xTB/ML-Screen der Regioselektivität rechnen        [compute_xtb_energy]
-       3. NUR bei niedriger Konfidenz DFT eskalieren                    [durable QM-Job → awaiting]
+       2. Schnellen xTB-Screen der Regioselektivität rechnen           [compute_xtb_energy]
+       3. NUR bei enger Energiedifferenz das Konformerensemble suchen   [durable calc-Job → awaiting]
        4. Ergebnis als Note vorschlagen                                 [propose_knowledge_note → PR]
 ```
 Schritt 3 ist *bedingt und agenten-entschieden* — genau die Dynamik, die ein vorverdrahteter Fluss
-nicht ausdrückt. Das Tiering-Prinzip (§2: schnell zuerst, DFT nur bei Bedarf) wird damit vom
-Skill-Urteil zur **sichtbaren, überprüfbaren Plan-Entscheidung**.
+nicht ausdrückt. Das Tiering-Prinzip (§2: erst der Einzelpunkt, die teure Suche nur bei Bedarf)
+wird damit vom Skill-Urteil zur **sichtbaren, überprüfbaren Plan-Entscheidung**.
 
 **(b) BO-Kampagnen-Supervision.** Eine mehrrundige Optimierung als Todo-Sequenz („propose →
 evaluate → tell → prüfe Konvergenz → wiederhole oder stoppe"), wobei die eigentliche durable

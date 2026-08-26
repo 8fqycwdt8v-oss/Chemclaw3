@@ -14,7 +14,7 @@ for the *retrieve* sources, which under the default config yields exactly one so
 loaded all five ELN *ingest* modules and 836 modules in total. Nothing was wrong with any one of
 those imports; the coupling was in the registry's shape, and it grows with every source added.
 That matters here more than it would elsewhere: a data source's dependency is a *driver* — a
-database client, a vendor SDK — and the deferred Snowflake ELN connector would have put its driver
+database client, a vendor SDK — and a warehouse ELN connector would otherwise have put its driver
 in the chat pod, which will never ingest anything.
 
 A manifest fixes it by making the one fact you need in order to *skip* a source available as

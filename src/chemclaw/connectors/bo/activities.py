@@ -149,7 +149,7 @@ async def record_campaign_run(
     identity can still name the user behind a run (D-118). The backlog recorded this as blocked on
     a choice between threading identity through a seam built to keep it out and writing a
     fabricated actor into an audited column; it was neither, because the seam already carries it —
-    `connectors/qm/workflows.py` has read the same memo in production since F5.
+    `connectors/calc/workflows.py` has read the same memo in production since D-114.
 
     Args:
         problem: The decision space, which is also the campaign's identity.

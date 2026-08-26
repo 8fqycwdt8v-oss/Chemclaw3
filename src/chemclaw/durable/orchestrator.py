@@ -135,7 +135,7 @@ async def fan_out(
         limit = await workflow.execute_local_activity(
             resolve_fan_out_limit,
             # The generic short-activity budget (same knob the notify seam uses for its write).
-            start_to_close_timeout=timedelta(seconds=settings.qm_activity_timeout_seconds),
+            start_to_close_timeout=timedelta(seconds=settings.activity_timeout_seconds),
             retry_policy=BAD_DATA_RETRY,
         )
     if limit < 1:

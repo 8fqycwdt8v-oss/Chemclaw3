@@ -168,33 +168,6 @@ class Structure(BaseModel):
         """Return (atomic numbers, positions in Angstrom) — what the RRHO arithmetic reads."""
         return np.array(self.elements), np.array(self.positions)
 
-    def as_xyz(self, comment: str = "") -> str:
-        """This geometry as an XYZ block — the one interchange format every QM program reads.
-
-        For crossing a boundary that is not this system's: the HPC pipeline consumes a starting
-        geometry as a file, not as a pydantic model (D-2026-08-21). Everything inside this
-        repository passes the `Structure` itself, so this has exactly one caller and is deliberately
-        not a general serialization — `model_dump` is that.
-
-        Coordinates are written at the precision they are hashed at, so the block a pipeline
-        receives is the geometry `structure_id` names rather than a rounded neighbour of it.
-
-        Args:
-            comment: The second line, which XYZ reserves for free text; conventionally the
-                molecule's identity.
-
-        Returns:
-            The atom count, the comment, then one `<symbol> <x> <y> <z>` line per atom,
-            newline-terminated.
-        """
-        lines = [str(len(self.elements)), comment]
-        lines.extend(
-            f"{symbol} {x:.{_GEOMETRY_DECIMALS}f} {y:.{_GEOMETRY_DECIMALS}f} "
-            f"{z:.{_GEOMETRY_DECIMALS}f}"
-            for symbol, (x, y, z) in zip(self.symbols, self.positions, strict=True)
-        )
-        return "\n".join(lines) + "\n"
-
 
 class XtbInput(BaseModel):
     """A single-point xTB request: a molecule and its charge.
@@ -828,6 +801,11 @@ class RotationBarrier(BaseModel):
     the time.
     """
 
+    # **`from_rotamer == to_rotamer` is a real and important case, not a bug.** A torsion with one
+    # populated form per period rotates into its own symmetry image over the pass between them —
+    # which is exactly what an amide or a hindered biaryl with a single minimum does, and is the
+    # barrier variable-temperature NMR measures. Reported with equal forward and reverse energies,
+    # because by symmetry it is the same well on both sides.
     from_rotamer: int
     to_rotamer: int
     at_degrees: float
@@ -871,7 +849,9 @@ class RotationProfile(BaseModel):
     points: list[ScanPoint]
     rotamers: list[Rotamer]
     barriers: list[RotationBarrier]
-    highest_barrier_kcal: float
+    # `None` when no barrier was resolved — a profile too coarse to place a pass between two
+    # wells, or one whose wells left their basins. Zero would be a claim of free rotation.
+    highest_barrier_kcal: float | None = None
     uncertainty_kcal: float
     # What the profile itself says about how far to trust it: a step that may have driven over a
     # maximum, a point that relaxed into another basin, a well that would not settle. The three
@@ -990,6 +970,57 @@ class ConformerEnsemble(BaseModel):
         and a second copy of that fact is a second thing that can disagree with it.
         """
         return self.conformers[0].structure.structure_id
+
+
+class MicrostatePka(BaseModel):
+    """A pKa computed from two sampled *macrostates* rather than from one drawn microspecies.
+
+    What the number is: the neutral molecule's conformer ensemble and its deprotonated (or
+    protonated) microstate ensemble are each reduced to a macrostate free energy — the sum over
+    every site and conformer that carries population — and the difference is mapped to a pKa by a
+    linear calibration fitted through this exact pipeline.
+
+    **Why it is a different answer from `predict_pka`'s, and not merely a better-converged one.**
+    That predictor enumerates candidate sites with hand-written SMARTS-shaped rules over O-H/S-H
+    protons and lone-pair-bearing nitrogens, and evaluates one embedded conformer of each. This one
+    enumerates nothing: CREST removes (or adds) every proton in turn, optimises each product and
+    ranks them, so the site is decided by energy — which is how phenol's most stable protomer comes
+    back as the ring-protonated arenium ion rather than the O-protonated form a rule would have
+    produced. The two therefore keep separate calibrations and separate ledger histories, and a
+    disagreement between them is information rather than a defect.
+
+    `site_smiles` is *perceived from the winning geometry*, not asserted: bond orders come from
+    interatomic distances plus the known charge, and where that cannot be read the field is `None`
+    rather than a guess. It is the answer to "which proton?", which is the half of a pKa that a
+    bare number does not carry.
+    """
+
+    smiles: str
+    # Which equilibrium was computed. "acid" is HA -> A- + H+ and reports that molecule's own pKa;
+    # "base" is BH+ -> B + H+ and reports the *conjugate acid's* pKa (pKaH), which is what is
+    # tabulated for amines and what an extraction pH is set against.
+    branch: Literal["acid", "base"]
+    pka: float
+    uncertainty: float
+    # Macrostate free-energy difference in kcal/mol, always deprotonated minus protonated, so one
+    # sign convention covers both branches.
+    delta_g_kcal: float
+    # The perceived constitution of the lowest ionised microstate — which proton came off, or where
+    # one went on. `None` when the geometry could not be read as a single molecule.
+    site_smiles: str | None
+    method: str
+    solvent: str | None
+    temperature_k: float
+    # The evidence, in full: what was sampled on each side of the equilibrium.
+    neutral: ConformerEnsemble
+    ionised: ConformerEnsemble
+    # How many distinct ionised microstates the search found, and how many of them are within RT of
+    # the best. The second number is why this is a macrostate calculation: two sites within RT both
+    # carry population, and treating either alone as "the" conjugate base is wrong by up to
+    # RT ln 2 — half a pKa unit at 298 K.
+    microstates_found: int
+    microstates_within_rt: int
+    warnings: list[str] = Field(default_factory=list)
 
 
 class WeightedValue(BaseModel):
@@ -1159,6 +1190,69 @@ class SpeciesDistribution(BaseModel):
     def dominant(self) -> RankedSpecies:
         """The most populated species — the form every other number should be about."""
         return max(self.species, key=lambda candidate: candidate.population)
+
+
+class SpeciesStanding(BaseModel):
+    """Where one species stands in one medium. `solvent=None` is the gas phase."""
+
+    solvent: str | None
+    relative_kcal: float
+    population: float
+
+
+class SpeciesSolventResponse(BaseModel):
+    """How one species responds to the medium, across every medium the screen ran.
+
+    The transpose of the per-medium distributions, and it earns its place rather than making the
+    reader do it: the question a solvent screen over tautomers is asked is "how much of form B do I
+    get in DMSO against toluene", which is one row here and a scan across N payloads otherwise.
+
+    `population_swing` and `relative_swing_kcal` are the ranges over `standings`. The energy swing
+    is the one to compare against the method's uncertainty — a population swing looks large whenever
+    the species sits near 50%, because the Boltzmann factor is steepest there, and looks small at
+    the ends however far the energy moved.
+    """
+
+    smiles: str
+    label: str = ""
+    standings: list[SpeciesStanding]
+    population_swing: float
+    relative_swing_kcal: float
+
+
+class SpeciesSolventComparison(BaseModel):
+    """One species set ranked in each of several media — which form dominates, and where.
+
+    The distribution job answered in one solvent, so "which tautomer dominates in water against
+    toluene" was N jobs and a comparison nobody had a shape for. This is that comparison, and the
+    gas phase is always included for the same reason `SolventComparisonResult` includes it: "the
+    medium barely matters here" is a real answer and is invisible without a reference point.
+
+    **`dominance_changes` is the headline.** A ranking that reorders between two media is a
+    qualitatively different claim from one that merely shifts — every downstream number that
+    describes "the compound" (a pKa, a Fukui ranking, a dipole, a reaction free energy) describes
+    whichever form was drawn, so a solvent that changes which form is major changes what all of them
+    are about.
+
+    `largest_swing_kcal` is the widest relative-energy range any species shows. When it is not
+    larger than `uncertainty_kcal`, the calculation has **not** distinguished the media, and
+    `warnings` says so — an implicit continuum resolving a few tenths of a kcal/mol between two
+    solvents is reading its own noise.
+    """
+
+    kind: Literal["tautomers", "microstates", "stereoisomers", "custom"]
+    method: str
+    temperature_k: float
+    level: ReactionLevel
+    # One per medium, gas phase first, then the solvents in the order they were asked for. Kept
+    # whole rather than reduced to the responses: each carries its own warnings, its structure ids
+    # and its conformer counts, and a caller that wants "the answer in DMSO" wants that payload.
+    distributions: list[SpeciesDistribution]
+    responses: list[SpeciesSolventResponse]
+    dominance_changes: bool
+    largest_swing_kcal: float
+    uncertainty_kcal: float
+    warnings: list[str] = Field(default_factory=list)
 
 
 class DissociatedBond(BaseModel):

@@ -1,17 +1,17 @@
 """A `Warehouse` over psycopg, so a Postgres results store needs no vendor client.
 
-The most likely target a site actually runs, and until this existed the SQL sink could only reach
-one: `ingest/eln/warehouse/snowflake.py` is the only shipped `Warehouse`, and it is a Snowflake
-client. This is the same Protocol over `psycopg`, which this repository already depends on.
+The most likely target a site actually runs, and until this existed the SQL sink could only reach a
+warehouse whose vendor client a deployment had installed. This is the same Protocol over `psycopg`,
+which this repository already depends on.
 
-**It lives here rather than beside the Snowflake driver, and the reason is direction.** That module
-exists to *read* a site's ELN; this one exists to *write* this system's own results. They implement
-one Protocol because a connection is a connection — that is the reuse the Protocol was for — but a
+**It lives here rather than beside the inbound drivers, and the reason is direction.** Those exist
+to *read* a site's ELN; this one exists to *write* this system's own results. They implement one
+Protocol because a connection is a connection — that is the reuse the Protocol was for — but a
 reader looking for "how does publishing reach Postgres" should find it in the publishing package.
 
-Credentials come from the binding's named environment variables, exactly as the Snowflake driver's
-do, so the two are configured the same way and a deployment moving between them changes a manifest
-rather than a mechanism.
+Credentials come from the binding's named environment variables, exactly as an inbound driver's do,
+so both directions are configured the same way and a deployment moving between them changes a
+manifest rather than a mechanism.
 """
 
 from collections.abc import AsyncIterator, Sequence
@@ -27,6 +27,7 @@ from chemclaw.ingest.eln.warehouse.driver import (
     WarehouseCursor,
     WarehouseQueryError,
 )
+from chemclaw.publish.connect import SinkConnectionError
 
 
 class _PostgresCursor:
@@ -43,7 +44,7 @@ class _PostgresCursor:
         `placeholder` is a property of the connection: how a document is bound is a dialect fact.
         psycopg rejects a bare `dict` — it adapts one only through its `Jsonb` wrapper, and a
         mapping reaching it unwrapped fails with "cannot adapt type 'dict'" rather than being
-        silently stringified. A Snowflake driver wants a JSON *string* for the same column, so a
+        silently stringified. A warehouse driver may want a JSON *string* for the same column, so a
         row builder that wrapped for one would break the other.
 
         A programming error from the server — an undefined column, a type mismatch — is re-raised
@@ -97,6 +98,16 @@ class PostgresWarehouse:
         to decompose it. `schema` becomes a `search_path` option rather than a qualified table name
         in every statement, which is what keeps the SQL generator free of site-specific identifiers.
         """
+        if not 1 <= query_timeout_seconds <= 3600:
+            # `statement_timeout=0` is Postgres' spelling of *no* timeout, so an out-of-range value
+            # here disables the one bound on a runaway publish rather than tightening it. Checked in
+            # the driver because this is the driver's own keyword: a sink's `connection:` block is
+            # its constructor signature (`D-2026-08-26-the-driver-s-signature-is-the-schema`), and
+            # no shared model is left to hold a range for it.
+            raise SinkConnectionError(
+                "`query_timeout_seconds` must be between 1 and 3600; "
+                f"got {query_timeout_seconds}, and 0 means no statement timeout at all"
+            )
         options = [f"-c statement_timeout={int(query_timeout_seconds * 1000)}"]
         if schema:
             options.append(f"-c search_path={schema}")

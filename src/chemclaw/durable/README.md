@@ -30,16 +30,12 @@ still required is that the defining module be *imported* — the same
 side-effect-import contract `chemclaw.agent.chemclaw_agent` has for tools, and why
 the worker begins with a block of `# noqa: F401` imports.
 
-**Heavy work is not here at all any more.** `hpc-jobs` held one workflow,
-`QMJobWorkflow`, and it is a declared connector job now: the class kept its Temporal
-type name (a rename would be a different command in a recorded history — see
-`docs/guides/workflow-versioning.md`) and moved to
-`chemclaw/connectors/qm/workflows.py`, on the bundle's own `connector-qm` queue.
-The xTB tasks went the same way earlier, as `CalcJobWorkflow` on `connector-calc`
-(D-114). So a capability that carries a dependency closure — the HPC bridge,
-`tblite`, `bofire` — carries it into its own bundle and its own worker, and core's
-image holds none of it (D-118). D-006's heavy/light split is intact: one core
-queue plus one per bundle, each sized for its own work.
+**Heavy work is not here at all any more.** The xTB/CREST tasks are `CalcJobWorkflow`
+on `connector-calc` (D-114) and BO is `BoCampaignWorkflow` on `connector-bo`. So a
+capability that carries a dependency closure — `tblite`, `bofire` — carries it into its
+own bundle and its own worker, and core's image holds none of it (D-118). D-006's
+heavy/light split is intact: one core queue plus one per bundle, each sized for its own
+work.
 
 **Event history is not an archive** (`job_record.py`, D-157). A closed workflow's
 history — and with it the result it returned — expires on the namespace's retention

@@ -151,26 +151,18 @@ topic).
       payloads be JSON, or should each tool render its own boundary as `condense_protocols` now does
       — deserves deciding rather than defaulting.
 
-- [ ] **Seven `chem` enumerations and `compute_fukui_at` are declared here and served nowhere** —
-      [S], and it is a live gap rather than a plan. `src/chemclaw/connectors/chem/connector.yaml`
-      names `enumerate_tautomers`, `enumerate_protonation_states`, `enumerate_stereoisomers`,
-      `enumerate_bond_cleavages`, `enumerate_degradants`, `transform_structure` and
-      `describe_topology`; six of the seven templates added by
-      `D-2026-08-25-the-loop-is-a-composite-not-a-template` call one of them, and
-      `connectors/calc/compose.py::ensemble_property` calls `compute_fukui_at` for its `fukui`
-      field. All eight are implemented in `Chemclaw3-mcp` (`servers/chem/.../engine/species.py`,
-      `servers/calc/.../tools.py`) on branch `claude/chemclaw-gfn-workflows-5eie2t` **which was
-      never pushed** — that repository was outside the session's GitHub scope and `add_repo` with
-      push access was never approved, so the work exists only in that session's container and is
-      lost with it.
-      **What this costs until it lands:** `make template-validate` passes, because `chem` is a
-      bundle this repository declares and does not run, so those tools are name-checked and
-      argument-unchecked — the count it reports rose from 1 to 6 for exactly this reason. `make
-      connector-validate` against a running server is what would catch it, and the live lane is
-      where it will surface. Re-implementing is the fallback and the ADR's "What was measured
-      rather than assumed" section is the specification: it records the per-search `xtb` binary
-      requirement, the `protonated.xyz`/`protomers.xyz` filename, and the element-list defect that
-      only appears once a search changes the atom count.
+- [ ] **The `chem` enumerations and `compute_fukui_at` are served, pending that PR's merge** —
+      [S], and what is left is a version bump rather than an implementation.
+      `Chemclaw3-mcp#18` adds the six enumerations this repository's `chem` manifest declares plus
+      the `compute_fukui_at` that `connectors/calc/compose.py::ensemble_property` calls, so the six
+      templates `D-2026-08-25-the-loop-is-a-composite-not-a-template` added can complete. Delete
+      this row once that PR is merged **and the live lane has run one of those templates end to
+      end** — `make template-validate` cannot see the difference (`chem` is a bundle this
+      repository declares and does not run, so its tools are name-checked and argument-unchecked),
+      and `make connector-validate` against a running server is what would.
+      **`transform_structure` was the seventh name and is now gone from the manifest** rather than
+      implemented: it had no caller, no template, no skill reference and no documented signature in
+      either repository, so serving it would have meant inventing its contract.
 
 - [ ] **A solvate collapses onto whichever fragment is larger** — [M], and worse than filed: it is
       not only the cache key, it is the **knowledge-graph note id**. Measured,
@@ -235,7 +227,7 @@ topic).
 
 **`reaction_fingerprints` keys on a bare reaction id, so two sources collide on one row.**
 `science/fingerprints/store.py` writes `reaction_fingerprints.id = reaction.reaction_id` with no
-source column, while `ingest/sources/eln-snowflake/datasource.yaml` puts the source name into
+source column, while `ingest/sources/eln-databricks/datasource.yaml` puts the source name into
 `provenance` precisely "so two ELNs with colliding entry ids stay distinguishable in the graph".
 Two sources using one entry id therefore share a fingerprint row and a `reaction-<id>` note id:
 the second ingest overwrites the first, silently, and a similarity hit cites the wrong run. Found
@@ -256,30 +248,6 @@ it happens.
       this is a decision rather than a one-line addition. Named in
       `tests/test_publish_reaches_the_hooks.py::_PRIMITIVES_NOT_PUBLISHED` so the gap is declared
       and not merely absent.
-
-- [ ] **Decide whether a BO campaign is a scientific record** — [S].
-      `connectors/bo/workflows.py` sets `payload_kind` from `CampaignResult`, which implies it
-      should publish, and no projector exists — so it is currently in the same silent-drop state
-      the calc jobs were, but possibly *correctly*: a campaign is an optimization outcome rather
-      than a computed value, and `schema/result-store/` is molecule/reaction/ensemble-shaped.
-      Either write the projector or say in `publish/README.md` that a campaign deliberately does
-      not publish. What is not acceptable is the current state, where the two readings are
-      indistinguishable from the code.
-
-- [ ] **The `results` bundle's worker is not started by the live lane** — [S].
-      `deploy/helm/chemclaw/values.yaml` gives it `worker: true` and the chart renders the
-      Deployment, but `infra/live/processes.sh` starts four workers (background, calc, bo, qm) and
-      not this one, so `republish_calculations` cannot run there. Low urgency because publishing
-      is off until `CHEMCLAW_RESULT_SINKS` names a sink, and a backfill has a CLI route that needs
-      no worker — but the lane exists to make the deployed shape testable, and it currently
-      diverges from it.
-
-- [ ] **`label_batch_size` is unguarded against the labelling server's batch limit** — [S].
-      The default is 200 and `Chemclaw3-mcp`'s `rxnlabel` refuses above `MAX_BATCH = 500`, so an
-      operator raising the setting past 500 gets every drain attempt refused as bad data. The
-      house rule is that a rule worth writing down is worth failing on
-      (`core/config/__init__.py::_guards_that_the_comments_already_demand`), and the limit is not
-      written down on this side at all.
 
 - [ ] **A decided approval hold can be reopened** — [M]. `agent/interaction_tools.py::start_approval`
       passes no `id_reuse_policy`, so temporalio's default lets a decided hold be started again under
@@ -398,7 +366,7 @@ it happens.
       each of the three memory jobs (`build_campaign_notes_activity`,
       `build_playbook_notes_activity`, `build_optimization_notes_activity`) walks the whole record
       from the beginning of time, and `all_reactions()` is called once per activity. On the two
-      file-drop exports this costs nothing; against a real Snowflake ELN it is a full table scan
+      file-drop exports this costs nothing; against a real warehouse ELN it is a full table scan
       per activity per scheduled run. `ElnAdapter` (`ingest/eln/adapter.py:128`) has exactly two
       methods and neither is a fetch-by-id, so there is no cheaper read to reach for — closing this
       means either a fetch-by-id on the adapter protocol (every source pays) or a derived store of
@@ -477,22 +445,21 @@ it happens.
       needs a warning mechanism that section does not have — and a decision about whether the
       combination is an error at all.
 
-- [ ] **Three credentials cannot be set through the chart at all** — [S], and the half of the
+- [ ] **Two credentials cannot be set through the chart at all** — [S], and the half of the
       settings-secret row that did **not** close with
-      `D-2026-08-26-a-credential-is-a-type-not-a-convention`. `hpc_artifact_store_token`,
-      `llm_fallback_api_key` and `temporal_api_key` are `SecretStr` fields with readers
-      (`connectors/qm/hpc/nextflow.py:73`, `agent/llm_provider.py:251`, `core/temporal_client.py:74`)
-      and no entry under `secrets.keys` or `secrets.optionalKeys` in
-      `deploy/helm/chemclaw/values.yaml:519`, so `chemclaw.env` renders no `secretKeyRef` and a
-      deployment has no supported way to provide them. The consequence differs per credential and
-      that is what makes it a judgement rather than three identical additions:
-      `hpc_artifact_store_token` unset means a *cross-origin* artifact store is fetched
-      unauthenticated (`_artifact_headers` falls through to `{}`), which is the one with a live
-      security shape; `llm_fallback_api_key` unset silently reuses the primary's key, which is
-      correct for the common case (a second replica of one deployment) and wrong for a second
-      vendor; `temporal_api_key` is Temporal Cloud only and the chart ships self-hosted with mTLS,
-      so it may be right that it has no key — but nothing says so. All three go under
+      `D-2026-08-26-a-credential-is-a-type-not-a-convention`. `llm_fallback_api_key` and
+      `temporal_api_key` are `SecretStr` fields with readers
+      (`agent/llm_provider.py:251`, `core/temporal_client.py:74`) and no entry under
+      `secrets.keys` or `secrets.optionalKeys` in `deploy/helm/chemclaw/values.yaml`, so
+      `chemclaw.env` renders no `secretKeyRef` and a deployment has no supported way to provide
+      them. The consequence differs per credential and that is what makes it a judgement rather
+      than two identical additions: `llm_fallback_api_key` unset silently reuses the primary's
+      key, which is correct for the common case (a second replica of one deployment) and wrong for
+      a second vendor; `temporal_api_key` is Temporal Cloud only and the chart ships self-hosted
+      with mTLS, so it may be right that it has no key — but nothing says so. Both go under
       `optionalKeys`, for the upgrade reason `framingEnvelopeSecret` already records.
+      (`hpc_artifact_store_token` was the third and is gone with the tier that read it,
+      `D-2026-08-26-semiempirical-is-the-whole-tier`.)
 
 - [ ] **No session pagination and no per-session delete** — [M], **corrected**. This row claimed a
       data-subject erasure request "has no route across the seven tables". It does:
@@ -528,7 +495,7 @@ it happens.
 
 - [ ] **A jobs-only bundle has no reachability signal at all** — [M]. `connectors/health.py:81-99`
       derives its target from `health_url(manifest)`, which is `None` for a bundle with no
-      `endpoint:` — so `qm` reports `unprobed` whether its worker fleet is at two replicas or zero,
+      `endpoint:` — so `results` reports `unprobed` whether its worker fleet is at two replicas or zero,
       `chemclaw_connectors_unhealthy` counts only `unreachable`, and `check_connectors_at_startup`
       raises only on `unreachable`. The fail-fast posture an operator opts into is structurally
       blind to the failure with the largest blast radius. `describe_task_queue(bundle_queue(name))`
@@ -741,7 +708,7 @@ above when it becomes the next thing worth doing, and delete it from here when i
 The large multi-item programmes that used to be tracked here as sections are records now, not
 plans: the F0–F9 foundation build, the F10 parity pass, the F11 gap closure, the BO capability
 roadmap and the xTB/QM (X-series) roadmap. Their remaining live edges — real Temporal broker, real
-cluster, real HPC, real Snowflake — are in
+cluster, a real Databricks workspace — are in
 [`DEFERRED.md`](DEFERRED.md), each with the trigger that would revisit it, which is the register
 those belong in.
 

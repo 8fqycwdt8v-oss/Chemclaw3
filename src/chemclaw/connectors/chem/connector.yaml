@@ -57,7 +57,6 @@ endpoint:
     - enumerate_stereoisomers
     - enumerate_bond_cleavages
     - enumerate_degradants
-    - transform_structure
     - describe_topology
     - describe_sites
     - enumerate_torsions
@@ -65,7 +64,7 @@ endpoint:
   # or writes, so an agent can use every one of them to build the plan a human is asked to
   # approve. A count is not written here: it said "four" while the list held eleven.
   #
-  # The seven enumerations are reads for the same reason, and the classification matters more for
+  # The six enumerations are reads for the same reason, and the classification matters more for
   # them. Each is a map from one SMILES to a set of SMILES — no SCF, no `calc_version`, nothing
   # cached — and what it produces is the *species set* an expensive protocol then runs over, once
   # per member. Gating an enumeration would put the human in front of the question rather than in
@@ -81,7 +80,6 @@ endpoint:
     - enumerate_stereoisomers
     - enumerate_bond_cleavages
     - enumerate_degradants
-    - transform_structure
     - describe_topology
     - describe_sites
     # Which bonds of a molecule can be rotated, each under a handle that survives a rewritten

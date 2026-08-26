@@ -238,7 +238,7 @@ def test_launching_works_when_the_argument_arrives_as_the_raw_json_object(
 
     Every other launch test in this file hands the tool a constructed model, which is why all of
     them passed while every declared job — `compute_reaction_energy`, `compare_solvents`,
-    `start_optimization_campaign`, `compute_dft_energy` — failed on its first real use with
+    `start_optimization_campaign`, `sample_conformers` — failed on its first real use with
     `'dict' object has no attribute 'model_dump'`. The parameter's annotation is a pydantic model
     and its JSON schema is published, but the body is handed the decoded JSON object; nothing
     between the wire and the tool builds the model.
@@ -506,7 +506,7 @@ def test_an_expensive_job_is_authorized_before_any_durable_work(
     tool = build_job_tool("calc", expensive)
     monkeypatch.setattr("chemclaw.core.config.settings.entra_required", True)
     monkeypatch.setattr("chemclaw.core.config.settings.entra_expensive_actions", "run_calculation")
-    monkeypatch.setattr("chemclaw.core.config.settings.entra_privileged_roles", "hpc-operator")
+    monkeypatch.setattr("chemclaw.core.config.settings.entra_privileged_roles", "calc-operator")
     identity = set_current_identity("user-1", frozenset({"process-chemist"}))
     try:
         with pytest.raises(AuthorizationError):

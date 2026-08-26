@@ -9,7 +9,7 @@ constraint; nothing enforced it.
 
 **What "external" means here, precisely.** Not "no URLs" — the codebase legitimately holds the
 addresses of things it is deployed alongside: the LLM endpoint, Temporal, Postgres, the Entra
-token endpoint, the Nextflow/Tower API, the git remote for the knowledge repo. Those are
+token endpoint, the git remote for the knowledge repo. Those are
 *infrastructure the operator runs or contracts for*, configured per deployment and pointed at
 internal hosts. What is banned is a **hardcoded third-party data source** — a literature API, a
 structure lookup, a vendor catalogue — where the address of somebody else's service is baked into
@@ -113,21 +113,19 @@ def test_the_source_registry_offers_no_external_source() -> None:
         # exempted: it is the one sanctioned escalation of D-089's scope, and it earns its place
         # by being *local* — the two tests below hold it to that.
         "vendored",
-        # The corporate ELN in a SQL warehouse: the first source that reaches a remote host this
-        # repository does not control, and the reason this assertion is written by hand. It is
-        # sanctioned because it is *the deployment's own system* — an internal ELN behind the same
-        # identity boundary as everything else here — not a third-party corpus, which is what D-089
-        # was about. Two things hold it there: the address and credentials arrive entirely from
+        # The corporate ELN in a lakehouse: the source that reaches a remote host this repository
+        # does not control, and the reason this assertion is written by hand. It is sanctioned
+        # because it is *the deployment's own system* — an internal ELN behind the same identity
+        # boundary as everything else here — not a third-party corpus, which is what D-089 was
+        # about. Two things hold it there: the address and credentials arrive entirely from
         # configuration (the test above forbids a host literal anywhere in first-party code), and
         # the source ships disabled, so a cluster reaches a warehouse only by naming it in
         # `CHEMCLAW_DATA_SOURCES`.
-        "eln-snowflake",
-        # The same corporate ELN in a lakehouse instead, and sanctioned by the same argument rather
-        # than by a new one: it is *the deployment's own system* behind the same identity boundary,
-        # its address and credentials arrive entirely from configuration, and it ships disabled. It
-        # is here as a second entry rather than folded into the row above because the two are
-        # different manifests naming different drivers — the seam working as designed (D-120), and
-        # the second warehouse D-2026-08-04 built it for.
+        #
+        # **One manifest, not one per vendor.** A second SQL warehouse is the same argument with a
+        # different `connection.driver:`, so it would arrive here as another row saying nothing new
+        # — which is exactly what the deleted `eln-snowflake` row was. What this assertion is for is
+        # a new *kind* of external source, and that is what a reviewer should have to argue for.
         "eln-databricks",
         # The one third-party *corpus* in this list, and the only row here that needs an argument
         # rather than a restatement of an existing one. D-089's subject is a runtime dependency on

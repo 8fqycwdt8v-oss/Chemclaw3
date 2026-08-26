@@ -43,15 +43,17 @@ labels:
 config:
   binding:
     connection:
+      # **The driver's constructor signature is this block's schema** — every key below is a keyword
+      # argument of the Databricks driver, in Databricks' own words, and `make datasource-validate`
+      # binds the block against it offline. Pointing this corpus at a different database later is a
+      # different `driver:` with its own keys, not a change to anything shared.
       driver: chemclaw.ingest.eln.warehouse.databricks:DatabricksWarehouse
-      # See `eln-databricks/datasource.yaml` for what each of these means on Databricks — the words
-      # are this seam's, and three of them name a different thing here than they do on Snowflake.
       # A separate token from the ELN's is worth having: this corpus is licensed, its grants are
       # different, and one credential per corpus is what makes revoking one of them possible.
-      account_env: DATABRICKS_HOST
-      password_env: PISTACHIO_DATABRICKS_TOKEN
-      warehouse: 0123456789abcdef
-      database: pistachio
+      server_hostname_env: DATABRICKS_HOST
+      access_token_env: PISTACHIO_DATABRICKS_TOKEN
+      warehouse_id: 0123456789abcdef
+      catalog: pistachio
       schema: public
       query_timeout_seconds: 60
 

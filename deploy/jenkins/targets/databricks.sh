@@ -12,7 +12,7 @@
 #                                  two credentials the binding reads by name.
 #   2. The LLM endpoint          — Mosaic AI Model Serving is OpenAI-compatible, which is what the
 #                                  F0 provider seam expects. Same deal: preflight, not deploy.
-#   3. Heavy compute             — Databricks Jobs beside (or instead of) the Nextflow/HPC launcher.
+#   3. Heavy compute             — Databricks Jobs running the semiempirical calculation server.
 #                                  A bundle deploys these.
 #   4. Workspace assets          — bundles, apps, jobs. This is the half that is a deployment.
 #

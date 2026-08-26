@@ -46,7 +46,6 @@ tool_names:
   - compute_thermochemistry
   - compute_reaction_energy
   - compute_interaction_energy
-  - compute_dft_energy
   - optimize_geometry
   - predict_pka
   - predict_solubility
@@ -83,7 +82,6 @@ tool_names:
   - run_stereoisomer_ranking
   - run_degradant_triage
   - run_conformer_refinement
-  - run_rotational_barrier
   - calculator_trust
   - calculator_outliers
   - report_measurement

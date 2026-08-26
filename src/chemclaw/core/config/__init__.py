@@ -60,7 +60,6 @@ from chemclaw.core.config.eln import ElnSettings
 from chemclaw.core.config.entra import EntraSettings
 from chemclaw.core.config.evals import EvalSettings
 from chemclaw.core.config.fingerprints import FingerprintSettings
-from chemclaw.core.config.hpc import HpcSettings
 from chemclaw.core.config.kg import KgSettings
 from chemclaw.core.config.labels import LabelSettings
 from chemclaw.core.config.llm import LlmSettings
@@ -94,7 +93,6 @@ __all__ = [
     "EntraSettings",
     "EvalSettings",
     "FingerprintSettings",
-    "HpcSettings",
     "KgSettings",
     "LabelSettings",
     "LlmSettings",
@@ -116,7 +114,6 @@ class Settings(
     ObservabilitySettings,
     TemporalSettings,
     StoreSettings,
-    HpcSettings,
     CalculatorSettings,
     BoSettings,
     LlmSettings,
@@ -336,48 +333,38 @@ class Settings(
         return self
 
     @model_validator(mode="after")
-    def _the_job_ceiling_covers_the_poll_it_bounds(self) -> Self:
+    def _the_job_ceiling_covers_the_activity_it_bounds(self) -> Self:
         """A parent ceiling no larger than its child's longest activity is not a ceiling.
 
-        `ConnectorJobWorkflow` gives its child `connector_job_timeout_seconds` as an
-        **execution** timeout (`durable/connector_job.py`), and the longest thing inside that child
-        on the QM path is the HPC poll, whose single-attempt `start_to_close` budget is
-        `hpc_run_timeout_seconds` under `nextflow` (`connectors/qm/workflows.py`). Both default to
-        86400, so the shipped `nextflow` configuration gives the parent *less* room than the one
-        activity it has to contain.
+        `ConnectorJobWorkflow` gives its child `connector_job_timeout_seconds` as an **execution**
+        timeout (`durable/connector_job.py`), and the longest thing inside any child is
+        `run_xtb_calculation` — a CREST conformer search budgeted by `xtb_job_timeout_seconds`
+        (`connectors/calc/workflows.py`). Set the ceiling at or below that and two things break,
+        neither of which says so: the activity's `BAD_DATA_RETRY` is dead, because a single attempt
+        already exhausts the parent's whole budget, so `activity_max_attempts` is a number that can
+        never be reached; and an operator who raises `xtb_job_timeout_seconds` for a large molecule
+        observes no change whatsoever and gets a bare `WorkflowExecutionTimedOut` naming neither
+        setting.
 
-        Two things break, and neither says so. The poll's `BAD_DATA_RETRY` is dead — a single
-        attempt already exhausts the parent's whole budget, so `activity_max_attempts` is a number
-        that can never be reached. And an operator following `hpc_run_timeout_seconds`'s own
-        comment ("it must cover the whole run") raises it, observes no change whatsoever, and gets
-        a bare `WorkflowExecutionTimedOut` naming neither setting. A rule that two comments already
-        imply and nothing enforces is the shape this file's other guard was written for.
+        This is the same rule that used to be written against the DFT poll's 24 h budget. The tier
+        it guarded is gone (`D-2026-08-26-semiempirical-is-the-whole-tier`) and the rule is not: the
+        ceiling still has to cover the longest activity under it, and that activity is now a CREST
+        search. The allowance is one short activity's worth of the child's own overhead, and it is
+        strictly greater rather than at least, because equality is the defect.
 
-        Checked on the *selected* backend, mirroring the workflow's own branch, so the mock path is
-        validated as the mock path rather than against a budget it does not use. The allowance is
-        the rest of that workflow: five activities around the poll — prepare, the cache lookup and
-        submit before it, parse and persist after — each capped at `qm_activity_timeout_seconds`.
-        Strictly greater rather than at least, because equality is the defect.
-
-        Scoped to `Settings` and not to `HpcSettings` because it is the one rule here that spans
-        two sections: the ceiling is a connector-wide deployment choice and the poll budget is the
-        QM path's, and neither section can see the other.
+        Scoped to `Settings` and not to either section because it is one of the rules here that
+        spans two: the ceiling is a connector-wide deployment choice and the search budget is the
+        calculators' own, and neither section can see the other.
         """
-        if self.hpc_launch_interface == "nextflow":
-            poll_budget = self.hpc_run_timeout_seconds
-            budget_name = "hpc_run_timeout_seconds"
-        else:
-            poll_budget = self.hpc_mock_run_seconds + self.qm_activity_timeout_seconds
-            budget_name = "hpc_mock_run_seconds + qm_activity_timeout_seconds"
-        needed = poll_budget + 5 * self.qm_activity_timeout_seconds
+        needed = self.xtb_job_timeout_seconds + self.activity_timeout_seconds
         if self.connector_job_timeout_seconds <= needed:
             raise ValueError(
                 f"connector_job_timeout_seconds={self.connector_job_timeout_seconds} does not "
-                f"cover the QM job it bounds: the poll alone may take {poll_budget}s "
-                f"({budget_name}, hpc_launch_interface={self.hpc_launch_interface!r}) and the five "
-                f"activities around it up to {5 * self.qm_activity_timeout_seconds}s more "
-                f"(qm_activity_timeout_seconds). Raise connector_job_timeout_seconds above "
-                f"{needed}, or lower the poll budget — raising the poll budget alone changes "
+                f"cover the calculation job it bounds: one attempt at the expensive activity may "
+                f"take {self.xtb_job_timeout_seconds}s (xtb_job_timeout_seconds) and the child's "
+                f"own overhead up to {self.activity_timeout_seconds}s more "
+                f"(activity_timeout_seconds). Raise connector_job_timeout_seconds above {needed}, "
+                "or lower xtb_job_timeout_seconds — raising the activity budget alone changes "
                 "nothing, because the parent's ceiling fires first."
             )
         return self
