@@ -254,8 +254,8 @@ def test_no_tracked_text_file_carries_an_unresolved_conflict_marker() -> None:
     because that file checks what the rows *say* and a marker line is not a row.
 
     The lesson is the scope, not the file, so this asks git for every tracked text file and reads
-    the lines rather than the shapes. It is the cheapest possible check and the one that generalises:
-    a conflict marker is never correct in any of them.
+    the lines rather than the shapes. It is the cheapest check available and the one that
+    generalises: a conflict marker is never correct in any of them.
     """
     root = Path(__file__).resolve().parent.parent
     tracked = subprocess.run(
