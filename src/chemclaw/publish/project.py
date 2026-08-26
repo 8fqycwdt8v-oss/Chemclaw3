@@ -387,6 +387,173 @@ def _solvent_screen(
     )
 
 
+def _species_distribution(
+    payload: dict[str, Any],
+) -> tuple[Subject, Conditions, TheoryLevel, dict[str, Any]]:
+    """A ranking over distinct species — which tautomer, microstate or stereoisomer dominates.
+
+    **The subject is the species set**, not one molecule: the number this record carries is a
+    population, and a population is only defined against the set it was computed over. So every
+    form is a member, in the order the ranking returned them, and each one's relative energy and
+    population is a fact addressed to its member.
+
+    `enumerated` travels as a fact rather than as prose because it is the caveat that decides
+    whether the distribution can be read at all: a set that was cut below what the enumeration
+    produced describes the wrong universe, and a reader querying these rows a year later has no
+    other way to see it.
+
+    This projector was missing, and with it `rank_species` published nothing at all — the same
+    shape as `D-2026-08-26-a-route-is-not-a-shape`, since a composite's `calc_type` is
+    `<connector>.<job>` and matches no prefix. Three sibling protocol results are still unprojected;
+    see `docs/planning/BACKLOG.md`.
+    """
+    species = list(payload.get("species") or [])
+    members = [
+        SubjectMember(
+            ordinal=index,
+            role="subject",
+            compound_id=_identify(entry.get("smiles"))[0],
+            smiles=_identify(entry.get("smiles"))[1],
+            structure_id=entry.get("structure_id") or "",
+        )
+        for index, entry in enumerate(species)
+    ]
+    kind = payload.get("kind") or "custom"
+    subject = Subject(
+        kind="ensemble",
+        members=members,
+        label=f"{kind}: {'.'.join(entry.get('smiles') or '' for entry in species)}",
+    )
+    conditions = Conditions(
+        solvent=canonical_solvent(payload.get("solvent")),
+        solvent_model="alpb" if payload.get("solvent") else "",
+        temperature_k=payload.get("temperature_k"),
+    )
+    level = TheoryLevel(
+        method=payload.get("method") or "unknown",
+        family="semiempirical",
+        engine="xtb",
+        treatment=payload.get("level") or "",
+    )
+    facts = _kept(
+        *(
+            _fact(
+                "species_relative_energy",
+                entry.get("relative_kcal"),
+                "kcal/mol",
+                uncertainty=payload.get("uncertainty_kcal"),
+                uncertainty_kind="reported",
+                member=index,
+            )
+            for index, entry in enumerate(species)
+        ),
+        *(
+            _fact("species_population", entry.get("population"), "", member=index)
+            for index, entry in enumerate(species)
+        ),
+        *(
+            _text("species_label", entry.get("label"), member=index)
+            for index, entry in enumerate(species)
+        ),
+        *(
+            _fact("species_conformers_found", entry.get("conformers_found"), "", member=index)
+            for index, entry in enumerate(species)
+        ),
+        _fact("species_enumerated", payload.get("enumerated"), ""),
+        _fact("species_ranked", float(len(species)) if species else None, ""),
+        _text("ranking_kind", kind),
+        _text("reaction_level", payload.get("level")),
+        # Whether a conformer search ran under each species (`level="thorough"`). It changes what
+        # the relative energies mean — a ranking over one embedded geometry per form compares
+        # arbitrary conformers — so it is published rather than left to the treatment string.
+        _flag("conformers_sampled", payload.get("sampled")),
+    )
+    return (
+        subject,
+        conditions,
+        level,
+        {
+            "properties": facts,
+            "flags": _warnings(list(payload.get("warnings") or [])),
+        },
+    )
+
+
+def _species_solvent_screen(
+    payload: dict[str, Any],
+) -> tuple[Subject, Conditions, TheoryLevel, dict[str, Any]]:
+    """One species set ranked across media — the aggregate; each medium publishes its own record.
+
+    Same rule as `_solvent_screen`: never store an aggregate whose parts are not also stored. The
+    per-medium distributions are published as ordinary `SpeciesDistribution` records at their own
+    `Conditions`, so "which tautomer dominates in DMSO" answers over media that were never screened
+    together — and this record carries only what is about the *comparison*: the largest swing, and
+    whether the dominant form reordered.
+
+    `dominance_changes` is a flag rather than a property, and at `warning` severity, because it is
+    not a measurement: it says every other number describing "the compound" is about a different
+    species depending on the medium, which is a caveat a reader must meet without asking for it.
+    """
+    distributions = list(payload.get("distributions") or [])
+    first = distributions[0] if distributions else {}
+    species = list(first.get("species") or [])
+    subject = Subject(
+        kind="ensemble",
+        members=[
+            SubjectMember(
+                ordinal=index,
+                role="subject",
+                compound_id=_identify(entry.get("smiles"))[0],
+                smiles=_identify(entry.get("smiles"))[1],
+            )
+            for index, entry in enumerate(species)
+        ],
+        label=f"{payload.get('kind') or 'custom'} across {len(distributions)} media",
+    )
+    # No solvent on the comparison itself: it is *about* the media rather than run in one — the
+    # same reason `_solvent_screen` leaves it off.
+    conditions = Conditions(temperature_k=payload.get("temperature_k"))
+    level = TheoryLevel(
+        method=payload.get("method") or "unknown",
+        family="semiempirical",
+        engine="xtb",
+        treatment=payload.get("level") or "",
+    )
+    facts = _kept(
+        _fact(
+            "solvent_swing",
+            payload.get("largest_swing_kcal"),
+            "kcal/mol",
+            uncertainty=payload.get("uncertainty_kcal"),
+            uncertainty_kind="reported",
+        ),
+        _fact("media_compared", float(len(distributions)) if distributions else None, ""),
+        _text("ranking_kind", payload.get("kind")),
+    )
+    flags = _warnings(list(payload.get("warnings") or []))
+    if payload.get("dominance_changes"):
+        flags.append(
+            FlagFact(
+                ordinal=len(flags),
+                flag="dominance_changes_with_medium",
+                severity="warning",
+                message=(
+                    "the most populated species is not the same in every medium, so any property "
+                    "computed for 'the compound' describes a different form depending on solvent"
+                ),
+            )
+        )
+    return (
+        subject,
+        conditions,
+        level,
+        {
+            "properties": facts,
+            "flags": flags,
+        },
+    )
+
+
 def _ensemble(payload: dict[str, Any]) -> tuple[Subject, Conditions, TheoryLevel, dict[str, Any]]:
     """A conformer ensemble: one subject, N conformer rows.
 
@@ -933,6 +1100,10 @@ _Projector = Callable[[dict[str, Any]], tuple[Subject, Conditions, TheoryLevel, 
 PAYLOAD_PROJECTORS: dict[str, _Projector] = {
     "ReactionEnergyResult": _reaction,
     "SolventComparisonResult": _solvent_screen,
+    # Added with `rank_species_across_solvents`. `SpeciesDistribution` had no projector at all,
+    # so `rank_species` published nothing — see `_species_distribution`.
+    "SpeciesDistribution": _species_distribution,
+    "SpeciesSolventComparison": _species_solvent_screen,
     "ConformerEnsemble": _ensemble,
     "EnsemblePayload": _ensemble,
     "InteractionResult": _interaction,
@@ -1100,6 +1271,46 @@ def records_from_solvent_screen(
     return records
 
 
+def records_from_species_solvent_screen(
+    *, calc_ref: str, payload: dict[str, Any], depends_on: list[str] | None = None, **common: Any
+) -> list[ResultRecord]:
+    """A species screen as its comparison **plus** one distribution record per medium.
+
+    The same rule and the same shape as `records_from_solvent_screen`: an aggregate whose parts are
+    not also stored makes "which tautomer dominates in DMSO" answerable only over screens that
+    happened to include DMSO, and unanswerable for the medium computed on its own. Each part is a
+    full `SpeciesDistribution` — the payload the single-solvent job publishes — so both routes to
+    that question land on one shape.
+
+    The parts are the distributions verbatim rather than reconstructed, because this composite
+    already holds them whole; the reaction screen has to rebuild its parts only because a
+    `SolventEffect` is narrower than the `ReactionEnergyResult` it came from.
+    """
+    comparison = project(
+        calc_ref=calc_ref,
+        payload=payload,
+        payload_kind="SpeciesSolventComparison",
+        depends_on=list(depends_on or []),
+        **common,
+    )
+    records = [comparison]
+    part_common = {key: value for key, value in common.items() if key != "calc_type"}
+    part_common["calc_type"] = "species_ranking.solvent_screen_part"
+    for index, distribution in enumerate(payload.get("distributions") or []):
+        records.append(
+            project(
+                # A derived ref, so a part is addressable and idempotent without colliding with a
+                # standalone `rank_species` run of the same set in the same medium.
+                calc_ref=f"{calc_ref}#medium{index}",
+                payload=distribution,
+                payload_kind="SpeciesDistribution",
+                depends_on=[calc_ref],
+                **part_common,
+            )
+        )
+    return records
+
+
 # The payload kinds whose projection is more than one record. Keyed by model name rather than by
 # `calc_type` for the same reason the projector table is: a model name is exact, and a composite's
 # `calc_type` is a route (`<connector>.<job>`) that names no shape.
@@ -1108,6 +1319,7 @@ _MultiProjector = Callable[..., list[ResultRecord]]
 
 _MULTI_RECORD_PROJECTORS: dict[str, _MultiProjector] = {
     "SolventComparisonResult": records_from_solvent_screen,
+    "SpeciesSolventComparison": records_from_species_solvent_screen,
 }
 
 

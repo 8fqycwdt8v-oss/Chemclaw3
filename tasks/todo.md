@@ -27,12 +27,30 @@ three things worth changing.
       corpus size, asserted at the transport because `@server.tool()` returns the undecorated
       function and a direct call skips validation.
 
+- [x] **`rank_species` took one solvent**, so "tautomer ΔG in water vs toluene" was N jobs and a
+      manual diff — and not a diff either, since `species_ranking` sorts by energy, so the same
+      index is a different form whenever the ranking reorders.
+      - [x] `rank_species_across_solvents` + `SpeciesSolventScreenJobSpec` +
+            `compose.species_solvent_comparison`, `solvent_comparison`'s shape applied to a
+            distribution: gas phase prepended, same fan-out bound, budget counted over
+            `species x media`.
+      - [x] The result carries the per-medium distributions whole plus their transpose keyed by
+            SMILES, `dominance_changes` as the headline, and the swing checked against the method
+            uncertainty.
+      - [x] `tests/calc_server_fake.py` gained `solvent_shifts` — its energy was a function of atom
+            count alone, so no test could have observed a reordering.
+      - [x] ADR `D-2026-08-26-a-solvent-is-an-argument-not-a-job`.
+- [x] **Found while building it: `SpeciesDistribution` had no publish projector**, so `rank_species`
+      published nothing. Added `_species_distribution` and
+      `records_from_species_solvent_screen` (aggregate + one distribution per medium), eleven
+      property registrations, and the `_cases()`/`_DELIBERATELY_UNREAD` entries so both new shapes
+      are under the field-coverage test.
+
 ## Next
 
-- [ ] **`rank_species` takes one solvent, so "tautomer ΔG in water vs toluene" is N jobs and a
-      manual diff.** `compose.solvent_comparison` is already this shape for reactions (fan out over
-      solvents plus gas phase, rank, warn when `spread_kcal <= uncertainty_kcal`). A second instance
-      makes that warning the extraction point rather than a copy. Own ADR.
+- [ ] **Three sibling composites still publish nothing** — `RefinedEnsemble`, `EnsembleProperty`,
+      `BondDissociationSurvey`. Measured, `docs/planning/BACKLOG.md` row written, with the test that
+      would have caught all four proposed there.
 
 ## Not doing, and why
 

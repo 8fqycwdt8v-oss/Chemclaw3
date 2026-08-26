@@ -796,3 +796,29 @@ visible failure the model can also correct from. Do not jump from `after_model` 
 `D-2026-08-15-an-after-model-counter-is-a-counter-that-can-be-skipped`. Verify with
 `make live-storm`'s `f-malformed-json` check, which currently fails. Found by the 2026-08-17
 full-stack run — see `tasks/live-test/full-stack-e2e-2026-08-17.md`.
+
+## Three multi-step calc results still publish nothing
+
+`RefinedEnsemble`, `EnsembleProperty` and `BondDissociationSurvey` have no entry in
+`publish/project.py::PAYLOAD_PROJECTORS` and no `calc_type` prefix that reaches one, so
+`refine_ensemble`, `compute_ensemble_property` and `survey_bond_strengths` are skipped at
+`enqueue_payload` with a debug line — the same shape as
+`D-2026-08-26-a-route-is-not-a-shape`, since a composite's `calc_type` is `<connector>.<job>` and
+matches no prefix. Measured:
+
+```
+SpeciesDistribution        -> None      (fixed by D-2026-08-26-a-solvent-is-an-argument-not-a-job)
+RefinedEnsemble            -> None
+EnsembleProperty           -> None
+BondDissociationSurvey     -> None
+```
+
+It is silent by design — `enqueue_payload` never raises, and a deployment legitimately holds rows
+from calculators that no longer ship — so nothing distinguishes "this release cannot read that
+shape" from "that shape is not published yet". `D-2026-08-25-a-cache-is-not-a-record` says this
+seam "projects every result — primitive or composite"; for three of the nine calc jobs it does not.
+
+Each needs a projector, its property names registered in `publish/properties.py`, a `_cases()` entry
+and a `_DELIBERATELY_UNREAD` row so the field-coverage test covers it. `_species_distribution` is
+the worked example. Worth considering in the same change: a test asserting that every result model
+`XtbJobResult` can carry has a projector, so the next composite cannot ship unpublishable.

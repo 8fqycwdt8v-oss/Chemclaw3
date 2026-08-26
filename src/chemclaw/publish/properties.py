@@ -182,6 +182,21 @@ _DEFINITIONS: tuple[PropertyDefinition, ...] = (
         "uncertainty before reading a ranking.",
     ),
     _d(
+        "species_relative_energy",
+        "energy_difference",
+        "kcal/mol",
+        "Free energy of one species relative to the lowest of the set it was ranked against. "
+        "Meaningless outside that set — a species not enumerated was not ranked.",
+        scope="member",
+    ),
+    _d(
+        "solvent_swing",
+        "energy_difference",
+        "kcal/mol",
+        "Widest range any one species' relative energy shows across the media a screen compared. "
+        "Compare against the method uncertainty before reading a solvent effect.",
+    ),
+    _d(
         "max_relative_energy",
         "energy_difference",
         "kcal/mol",
@@ -334,6 +349,44 @@ _DEFINITIONS: tuple[PropertyDefinition, ...] = (
         "without that temperature.",
         scope="conformer",
     ),
+    _d(
+        "species_population",
+        "dimensionless",
+        "",
+        "Equilibrium population of one species within the set it was ranked against, at the "
+        "stated temperature. Meaningless without that temperature and that set.",
+        scope="member",
+    ),
+    _d(
+        "species_enumerated",
+        "count",
+        "",
+        "How many forms the enumeration produced before any cap. Read against species_ranked: a "
+        "distribution over a truncated set is confident about the wrong universe.",
+        kind="integer",
+    ),
+    _d(
+        "species_ranked",
+        "count",
+        "",
+        "How many forms were actually computed and ranked.",
+        kind="integer",
+    ),
+    _d(
+        "species_conformers_found",
+        "count",
+        "",
+        "Conformers found for one species, when the ranking searched them.",
+        kind="integer",
+        scope="member",
+    ),
+    _d(
+        "media_compared",
+        "count",
+        "",
+        "How many media a screen ranked in, the gas-phase reference included.",
+        kind="integer",
+    ),
     _d("hydrogen_bond_donors", "count", "", "Lipinski hydrogen-bond donor count.", kind="integer"),
     _d(
         "hydrogen_bond_acceptors",
@@ -416,6 +469,31 @@ _DEFINITIONS: tuple[PropertyDefinition, ...] = (
         "The solvent a screen ranked first. Read with solvent_spread: a spread inside the method "
         "uncertainty is not a ranking.",
         kind="text",
+    ),
+    _d(
+        "ranking_kind",
+        "category",
+        "",
+        "What a species ranking was asked about: tautomers, microstates, stereoisomers or custom. "
+        "The number means something different in each.",
+        kind="text",
+    ),
+    _d(
+        "species_label",
+        "category",
+        "",
+        "The caller's own name for one ranked form ('keto', 'enol'). A word for this run rather "
+        "than an identity of the compound, which is what compound_id is.",
+        kind="text",
+        scope="member",
+    ),
+    _d(
+        "conformers_sampled",
+        "flag",
+        "",
+        "Whether a conformer search ran under each species of a ranking. Without it the relative "
+        "energies compare one arbitrary embedded geometry per form.",
+        kind="boolean",
     ),
     _d("fukui_mode", "category", "", "Which Fukui index the sites were ranked by.", kind="text"),
     _d(

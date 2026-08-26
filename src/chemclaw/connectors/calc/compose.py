@@ -70,6 +70,9 @@ from chemclaw.science.calc.models import (
     SolventEffect,
     SpeciesDistribution,
     SpeciesEnergy,
+    SpeciesSolventComparison,
+    SpeciesSolventResponse,
+    SpeciesStanding,
     Structure,
     ThermochemistryResult,
     WeightedAtom,
@@ -1419,6 +1422,130 @@ async def species_ranking(
         enumerated=len(species),
         uncertainty_kcal=settings.xtb_reaction_uncertainty_kcal,
         sampled=level == "thorough",
+        warnings=warnings,
+    )
+
+
+async def species_solvent_comparison(
+    store: ResultStore,
+    species: Sequence[tuple[str, str]],
+    solvents: list[str],
+    *,
+    kind: SpeciesKind = "custom",
+    temperature_k: float | None = None,
+    level: ReactionLevel = "standard",
+    symmetry_numbers: Mapping[str, int] | None = None,
+    progress: Progress = no_progress,
+    run: RemoteRunner = plain,
+) -> SpeciesSolventComparison:
+    """Rank one species set in each of several media, and report how the ranking moves.
+
+    `species_ranking` answers in one medium, so "which tautomer dominates in water against toluene"
+    was one job per solvent and a comparison the caller assembled by hand. This is the fan-out, and
+    it is `solvent_comparison`'s shape applied to a distribution rather than to a reaction: the gas
+    phase is prepended as a reference, the media run under the same bound, and the spread is
+    checked against the method's uncertainty before any of it is reported as a difference.
+
+    **This is the calculation implicit solvation is best at.** Every medium ranks the *same*
+    species — same formula, same atoms, same level — so the systematic error of the continuum model
+    largely cancels in the relative energies, which is not true of an absolute solvation energy.
+    Report the ordering and the swing; do not quote one medium's number on its own.
+
+    The budget is counted over the whole fan-out rather than per medium, because that is what the
+    caller is about to spend: `species x media` is the shape that surprises, and eight tautomers in
+    five solvents at `standard` is 120 remote primitives from a request that looks like one call.
+    """
+    if not solvents:
+        raise ValueError("give at least one solvent to compare")
+    considered = list(species)
+    media: list[str | None] = [None, *solvents]
+    require_within_budget(
+        estimate_units(len(considered[: settings.species_ranking_max]), level=level) * len(media),
+        f"ranking {len(considered)} species in {len(media)} media",
+    )
+    limit = asyncio.Semaphore(settings.calc_screen_max_parallel)
+
+    async def one(solvent: str | None) -> SpeciesDistribution:
+        """One medium, under the fan-out bound, with its progress attributed to its own branch."""
+        label = solvent or "gas phase"
+
+        def relay(line: str) -> None:
+            progress(f"{label}: {line}")
+
+        async with limit:
+            return await species_ranking(
+                store,
+                considered,
+                kind=kind,
+                solvent=solvent,
+                temperature_k=temperature_k,
+                level=level,
+                symmetry_numbers=symmetry_numbers,
+                progress=relay,
+                run=run,
+            )
+
+    # `gather` preserves argument order, so the gas-phase reference stays first and every
+    # `standings` list is in the order the caller can read against `media`.
+    distributions = list(await asyncio.gather(*(one(solvent) for solvent in media)))
+
+    # Keyed by SMILES rather than by position: `species_ranking` sorts its output by relative
+    # energy, so the same index is a different species in two media whenever the ranking reorders —
+    # which is the case this whole composite exists to detect.
+    responses: list[SpeciesSolventResponse] = []
+    for smiles, label in considered[: len(distributions[0].species)]:
+        standings = [
+            SpeciesStanding(
+                solvent=distribution.solvent,
+                relative_kcal=ranked.relative_kcal,
+                population=ranked.population,
+            )
+            for distribution in distributions
+            for ranked in distribution.species
+            if ranked.smiles == smiles
+        ]
+        if not standings:
+            continue
+        relatives = [standing.relative_kcal for standing in standings]
+        populations = [standing.population for standing in standings]
+        responses.append(
+            SpeciesSolventResponse(
+                smiles=smiles,
+                label=label,
+                standings=standings,
+                population_swing=round(max(populations) - min(populations), 4),
+                relative_swing_kcal=round(max(relatives) - min(relatives), 3),
+            )
+        )
+
+    dominant = [distribution.dominant.smiles for distribution in distributions]
+    largest = max((response.relative_swing_kcal for response in responses), default=0.0)
+    uncertainty = settings.xtb_reaction_uncertainty_kcal
+    warnings = list(
+        dict.fromkeys(
+            warning for distribution in distributions for warning in distribution.warnings
+        )
+    )
+    if largest <= uncertainty:
+        warnings.append(
+            f"no species moves by more than {largest:.1f} kcal/mol across these media, within the "
+            f"method's ±{uncertainty:.1f}: this calculation does not distinguish them"
+        )
+    if len(set(dominant)) > 1:
+        warnings.append(
+            "the dominant form is not the same in every medium, so any property computed for "
+            "'the compound' in one of them is a property of a different species in another"
+        )
+    return SpeciesSolventComparison(
+        kind=kind,
+        method=distributions[0].method,
+        temperature_k=distributions[0].temperature_k,
+        level=level,
+        distributions=distributions,
+        responses=responses,
+        dominance_changes=len(set(dominant)) > 1,
+        largest_swing_kcal=largest,
+        uncertainty_kcal=uncertainty,
         warnings=warnings,
     )
 
