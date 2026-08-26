@@ -238,19 +238,6 @@ it happens.
 
 ## 3 — Work that is lost, dropped or invisible
 
-- [ ] **Four multi-step result shapes reach the publish hook and route to no projector** — [M],
-      and it is the second half of a fix rather than a new finding. `RefinedEnsemble`,
-      `EnsembleProperty`, `SpeciesDistribution` and `BondDissociationSurvey` are what the seven
-      jobs `D-2026-08-25-the-loop-is-a-composite-not-a-template` added actually return, and
-      `PAYLOAD_PROJECTORS` has an entry for none of them — so those jobs run, cost real compute,
-      and publish nothing. Declared out loud in
-      `tests/test_publish_reaches_the_hooks.py::_NOT_YET_PUBLISHED` rather than quietly omitted,
-      and that set is the definition of done: each projector deletes its own entry, and a shape
-      *not* named there must route, so a tenth member field on `XtbJobResult` fails immediately.
-      Each is the `_ensemble` shape — a SMILES subject, solvent/temperature conditions, a method,
-      and a per-conformer or per-bond fact list — and `publish/properties.py` already registers
-      the quantities, so this is bounded work rather than a design question.
-
 - [ ] **A Hessian is cached and never published, and neither is the thermochemistry built from
       it** — [M], and the two halves are one question. `xtb.hess` is a `calc_type` the server
       stamps and `_CALC_TYPE_PROJECTORS` has no prefix for it, so vibrational frequencies never
