@@ -173,10 +173,20 @@ half-written.
 
 ## Network & probes
 
-- **NetworkPolicy** (`templates/networkpolicy.yaml`): default-deny egress with an allow-list — DNS,
-  Postgres (5432), Temporal (7233), HTTPS (443, for the internal LLM + HPC launcher + Entra). Nothing
-  else leaves a pod. Ingress rules bound which *peers* may open a connection to the front door, the
-  connectors and the workers' probe port.
+- **NetworkPolicy** (`templates/networkpolicy.yaml`): egress is allowed on a fixed **port** list —
+  DNS, Postgres (5432), Temporal (7233), HTTPS (443, for the internal LLM + HPC launcher + Entra),
+  OTLP (4317), and the connector ports — to the **destinations you name**. Ingress rules bound which
+  *peers* may open a connection to the front door, the connectors and the workers' probe port.
+- **The destinations are yours to state, and the chart will not render until you do.** This section
+  used to say "nothing else leaves a pod", which was false in the way that matters: an empty
+  `networkPolicy.egressDestinations` renders `to: []`, and in a NetworkPolicy that means *any*
+  destination on those ports — so TCP/443 to the whole internet was permitted from every pod behind
+  an object that read as a restriction. The chart cannot invent your CIDRs, so it now refuses to
+  render unless exactly one of two things is stated: `networkPolicy.egressDestinations` (a list of
+  NetworkPolicyPeer objects), or `networkPolicy.allowAnyDestination: true` — the deliberate,
+  greppable statement that the old default was what you wanted. `helm template` on the shipped
+  defaults therefore takes `--set networkPolicy.allowAnyDestination=true`, which is what the two
+  renders in the `Makefile` pass (`D-2026-08-26-a-knob-that-renders-nothing-is-not-a-knob`).
 - **`/metrics` is on the public host, and the NetworkPolicy is not what bounds it.** The Route
   declares no `spec.path`, and neither a Route nor a NetworkPolicy filters by path — the ingress
   rule must allow the router, and the router publishes every path. What makes an unauthenticated

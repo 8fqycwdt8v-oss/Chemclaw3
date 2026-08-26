@@ -8,7 +8,7 @@ sections shared a single module (D-072 mixins, split per D-156).
 
 from typing import Literal, Self
 
-from pydantic import Field, model_validator
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings
 
 
@@ -46,7 +46,14 @@ class HpcSettings(BaseSettings):
     # version under `nextflow` — see it for why that is a cache rule and not a connectivity one.
     hpc_launch_interface: Literal["mock", "nextflow"] = "mock"
     hpc_api_base_url: str = ""
-    hpc_api_token: str = ""
+    # A `SecretStr`, like every other credential on this object
+    # (`D-2026-08-26-a-credential-is-a-type-not-a-convention`): its `repr` is `**********`, so the
+    # value cannot reach a log line, a `model_dump()` or a pydantic error message through a route
+    # `core/logging.py`'s exact-match redaction has not been taught about. That filter stays and is
+    # still the control; this is the type making the same guarantee where the filter is not looking.
+    # Read it with `.get_secret_value()` — and note that an f-string does *not*, so a formatted
+    # credential renders as asterisks and fails as a 401 rather than leaking.
+    hpc_api_token: SecretStr = SecretStr("")
     hpc_pipeline_name: str = ""
     hpc_pipeline_version: str = ""
     hpc_artifact_store_url: str = ""
@@ -73,7 +80,8 @@ class HpcSettings(BaseSettings):
     # the launcher token must never be sent to a third host (F4 three-secret model). Empty means
     # the artifact fetch is unauthenticated — unless the store shares the launcher's origin, in
     # which case the launcher token still applies.
-    hpc_artifact_store_token: str = ""
+    # A `SecretStr`, for the reason `hpc_api_token` above states.
+    hpc_artifact_store_token: SecretStr = SecretStr("")
     # Persist a finished QM result in the shared calculation store (D-158). On by default, which
     # is the *un*usual choice for a new flag here and deliberate: D-011 already says every result
     # is persisted once and never recomputed, and `qm` was the one capability not doing it — so
@@ -187,7 +195,7 @@ class HpcSettings(BaseSettings):
                 # token was said to arrive "via the HPC bridge"; that bridge was deleted with
                 # workload-identity federation (D-2026-08-15), so a mounted secret is the only path
                 # and nothing else checks it.
-                ("hpc_api_token", self.hpc_api_token),
+                ("hpc_api_token", self.hpc_api_token.get_secret_value()),
             )
             missing = [name for name, value in required if not value]
             if missing:

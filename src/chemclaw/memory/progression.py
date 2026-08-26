@@ -117,13 +117,58 @@ def progression(reactions: list[OrdReaction]) -> Progression:
     )
 
 
+# What this rule can be asked about: an optional scalar, where `None` means "nobody wrote it down".
+# Deliberately *not* `frozenset[str]` — a species set is derived from a components list that is
+# present either way, so "empty" is an answer rather than a gap, and mypy rejecting the call is what
+# keeps that distinction from being erased by someone tidying two similar-looking guards into one.
+Recorded = float | str | None
+
+
+def both_recorded(before: Recorded, after: Recorded) -> bool:
+    """Whether a field was recorded on *both* sides, which is the precondition for diffing it.
+
+    **The one rule, defined once.** A field present on one side and absent on the other differs in
+    what was *recorded*, never in what was done — and the two are indistinguishable to a reader once
+    they are in the same column. So a diff against absent is a change nobody made, rendered exactly
+    like one they did.
+
+    It lived in `agent/condense._changes` first, where an arbitrary set of protocols made the
+    fabrication constant: three runs with identical conditions and one failed extraction rendered
+    `solvent 2-MeTHF → —` then `solvent — → 2-MeTHF`, two swaps that never happened. It belongs
+    here, because `changes_between` has the same hole for the same reason — bounded rather than
+    absent, since a campaign's members are all `OrdReaction`s from one DRFP cluster and usually
+    record the same fields. Two rules for one question is how the bounded half stayed open.
+
+    Absent is `None`, the empty string or whitespace. `0.0` is a recorded temperature and passes.
+
+    **It applies to optional scalars and to nothing else** — the two setpoints and the solvent the
+    condenser reads out of prose. `_species_change` is deliberately outside it: a role's species set
+    is derived from a components list that is present either way, so an empty `reagent` set is the
+    record stating that the run used no reagent, not a gap in it. `BACKLOG.md` asked for the rule
+    over the species sets too; measured against `_components`, that would have erased the most
+    common real change a run-to-run series carries — a reagent added mid-procedure — to suppress a
+    fabrication that needs a *partially transcribed* source to happen at all.
+    """
+    return all(_recorded(value) for value in (before, after))
+
+
+def _recorded(value: Recorded) -> bool:
+    """Whether one side carries a value at all — `None` and blank text do not; `0.0` does."""
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    return True
+
+
 def changes_between(previous: OrdReaction, current: OrdReaction) -> list[ConditionChange]:
     """The recorded conditions that differ between two runs, in a stable order.
 
     Covers what an ELN reliably records and a chemist reliably turns: the two headline setpoints
     and the species set of each non-product role. Amounts (equivalents, loading) are deliberately
     out: they are optional on `Component` and frequently absent, so diffing them would report a
-    change every time one run happened to record a mass and its neighbour did not.
+    change every time one run happened to record a mass and its neighbour did not — which is
+    `both_recorded`'s rule, stated here about amounts before it was applied to anything.
     """
     changes = [
         change
@@ -150,8 +195,10 @@ def number_change(
     it has numbers but not the `OrdReaction` species sets `changes_between` also walks. One rule for
     "did this setpoint move, and how is that written" — two copies would render `90 °C -> 70 °C` in
     the campaign note and something subtly different in the comparison a chemist reads beside it.
+
+    A setpoint one side did not record is not a move: see `both_recorded`.
     """
-    if before == after:
+    if not both_recorded(before, after) or before == after:
         return None
     return ConditionChange(
         variable=variable,
@@ -168,7 +215,11 @@ def text_change(variable: str, before: str | None, after: str | None) -> Conditi
     case- and whitespace-insensitively, because "2-MeTHF" and "2-methf " are one solvent written
     twice and reporting a swap between them would be noise in the one column a reader scans for
     real changes. What is *displayed* is what was written.
+
+    A side that recorded no words at all is not a swap either: see `both_recorded`.
     """
+    if not both_recorded(before, after):
+        return None
     if " ".join((before or "").split()).casefold() == " ".join((after or "").split()).casefold():
         return None
     return ConditionChange(variable=variable, before=before or "—", after=after or "—")
@@ -183,6 +234,14 @@ def _species_change(
     swaps one of four reactants should read `reactant A → B`, not two four-item lists a reader
     has to diff by eye. Identity is structural (canonical SMILES), so a source spelling the same
     molecule differently cannot fabricate a change.
+
+    **`both_recorded` deliberately does not apply here**, and that asymmetry is the whole point of
+    where the rule is drawn. A setpoint is an optional scalar, so `None` means *nobody wrote it
+    down*. A role's species set is derived from a components list that is present either way — so an
+    empty `reagent` set beside a full one is the record saying "this run used no reagent", which is
+    a real change a chemist made and the most common one a series is built out of
+    (`test_a_reagent_added_mid_procedure_is_diffed_too`). Suppressing it would trade a rare
+    fabrication for a routine erasure.
     """
     before = _species(previous, role)
     after = _species(current, role)

@@ -11,9 +11,27 @@
 
        `egressDestinations` is how an operator states where these pods may actually talk. It is
        empty by default because the addresses are deployment-specific and this chart must not
-       invent someone's Postgres CIDR — but empty is now a *visible* choice with a named knob and a
-       documented consequence, rather than an unremarked `to: []`. Set it and egress narrows to
-       those destinations on those ports; the residual gap is tracked in BACKLOG. */ -}}
+       invent someone's Postgres CIDR.
+
+       **A named knob and a comment were not enough, and that is what this `fail` is.** Empty
+       rendered `to: []` — every destination on the allowed ports — while the object in the
+       cluster read as "egress is restricted", and the only thing saying otherwise was a comment
+       in a file nobody re-reads after the first install. So the choice is now unavoidable rather
+       than merely documented: exactly one of `egressDestinations` (where these pods may talk) or
+       `allowAnyDestination: true` (the deliberate, greppable statement that they may talk
+       anywhere on those ports) must be set, and a release that states neither — or both — does
+       not render.
+
+       It fails at `helm install`, which is the loudest place available and the only one an
+       operator cannot skip. The cost is that `helm template` on the shipped defaults needs one
+       `--set`; the Makefile's two renders, the runbook and `deploy/README.md` all pass it, and
+       that visible flag in an operator's own values file is the whole point. */ -}}
+{{- /* `empty` on both sides, so the test reads as "these two say the same thing", which is
+       exactly the contradiction: neither stated (silent allow-all) or both stated (a destination
+       list that the flag beside it makes meaningless). */ -}}
+{{- if eq (empty .Values.networkPolicy.egressDestinations) (empty .Values.networkPolicy.allowAnyDestination) }}
+{{- fail "networkPolicy: set exactly one of `egressDestinations` (a list of NetworkPolicyPeer objects saying where these pods may talk) or `allowAnyDestination: true` (any destination on egressPorts, which is not a safe end state but is now a stated one). Neither is set, or both are." }}
+{{- end }}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -37,6 +55,8 @@ spec:
         - protocol: TCP
           port: 53
     - to:
+        {{- /* `[]` here means *anywhere*, which is only reachable via `allowAnyDestination: true`:
+               the guard above refuses the render otherwise. */}}
         {{- if .Values.networkPolicy.egressDestinations }}
         {{- toYaml .Values.networkPolicy.egressDestinations | nindent 8 }}
         {{- else }}

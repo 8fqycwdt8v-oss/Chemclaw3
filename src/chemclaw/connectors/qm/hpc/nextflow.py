@@ -50,7 +50,11 @@ _STATE_BY_LAUNCHER_STATUS = {
 
 def _auth_headers() -> dict[str, str]:
     """Bearer auth for the launcher (token arrives via the HPC bridge / a mounted secret, F4-T6)."""
-    return {"Authorization": f"Bearer {settings.hpc_api_token}"} if settings.hpc_api_token else {}
+    # `.get_secret_value()`, and an f-string over the `SecretStr` would not: it renders
+    # `Bearer **********`, which the launcher answers with a 401 rather than a leak — the failure
+    # direction that type is chosen for, and still a failure.
+    token = settings.hpc_api_token.get_secret_value()
+    return {"Authorization": f"Bearer {token}"} if token else {}
 
 
 def _same_origin(url_a: str, url_b: str) -> bool:
@@ -70,8 +74,8 @@ def _artifact_headers() -> dict[str, str]:
     artifacts). A cross-origin store with no token of its own is fetched unauthenticated, so the
     Seqera credential — which can launch and cancel pipelines — is never handed to a third host.
     """
-    if settings.hpc_artifact_store_token:
-        return {"Authorization": f"Bearer {settings.hpc_artifact_store_token}"}
+    if store_token := settings.hpc_artifact_store_token.get_secret_value():
+        return {"Authorization": f"Bearer {store_token}"}
     if _same_origin(settings.hpc_artifact_store_url, settings.hpc_api_base_url):
         return _auth_headers()
     return {}

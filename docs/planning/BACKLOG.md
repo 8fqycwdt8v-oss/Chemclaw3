@@ -16,11 +16,12 @@ row this queue has ever carried. 223 of its rows are open
 (`grep -c '^- \[ \]' docs/archive/findings-2026-08.md`; the header here said "~185" until
 2026-08-17). That is not "223 *further*" and the two counts do not subtract: promoting a row
 **restates** it, so a queued row is still open there under its original wording, and matching the
-two sets by title matched only 7 of the 30 rows this queue held when that was measured (it holds 41
-now; §5 is the first thing here that is not a defect this repository found in itself, and none of
-its rows is in the archive at all). The overlap is real and
-unmeasurable by `grep`, which is why the number here is the archive's own and not a difference. When
-a queued row needs its full measurement history, that file has it under the review that found it.
+two sets by title matched only 7 of the 30 rows this queue held when that was measured; it holds 41
+now, after the 2026-08-26 sweep closed seven, deleted an eighth that `#221` had already closed
+without removing it, and queued two. §5 is the first thing here that is not a defect this repository
+found in itself, and none of its rows is in the archive at all. The overlap is real and unmeasurable
+by `grep`, which is why the number here is the archive's own and not a difference. When a queued row
+needs its full measurement history, that file has it under the review that found it.
 
 **A row must name an anchor in the tree** — a module, a line, a manifest key — so any row can be
 checked with one `grep` instead of an argument. A row that cannot name one is not ready to be
@@ -117,17 +118,6 @@ topic).
       guarantee nothing in the lane states. Either the manifest stops forbidding it or the lane
       stops relying on the order.
 
-- [ ] **The audit trail's `agent` column can never be non-empty** — [S]. `agent/audit.py:350` reads
-      `get_current_specialist()`; `set_current_specialist` has **zero callers in `src/`** and
-      `core/turn_signals.record_handoff` has none anywhere, tests included. `tests/test_audit.py`
-      keeps the contextvar alive by setting it directly — the `map_to_hpc_identity` shape
-      `D-2026-08-15-a-capability-that-ships-off-is-not-a-capability` names, which that ADR deleted
-      three other controls for. **The answer is deletion, not wiring**: there is no specialist to
-      name, and re-adding subagents is a new decision. Keep `HandoffEvent` (removing a union member
-      is a coordinated three-repo change) and the SQL column (a merged migration is never edited);
-      delete the contextvar trio, `record_handoff`, `HandoffSignal` and the audit write. ~120 lines
-      out. That ADR simply did not sweep these.
-
 - [ ] **`CalculationKey`'s primary key is an unescaped concatenation of caller-shaped strings** —
       [M]. `science/calc/store.py:122` (`CalculationKey.as_str`) builds the literal
       `calculation_results` primary key as `f"{calc_type}@{calc_version}:{input_hash}:{params_hash}"`
@@ -181,20 +171,6 @@ topic).
       rather than assumed" section is the specification: it records the per-search `xtb` binary
       requirement, the `protonated.xyz`/`protomers.xyz` filename, and the element-list defect that
       only appears once a search changes the atom count.
-
-- [ ] **`changes_between` diffs against *absent* and can report a change nobody made** — [S].
-      `memory/progression.py::number_change` and `_species_change` treat a missing value as a value:
-      a run recording no temperature beside one that does yields `temperature 90 °C → —`, which
-      renders in `optimization_campaign_note`'s "Changed vs previous" column as a change. That
-      function's own docstring identifies the hazard and excludes equivalents and loadings for it —
-      it just does not apply the same rule to the two setpoints and the species sets it *does* diff.
-      Bounded in practice, which is why this is [S] and not larger: a campaign's members are all
-      `OrdReaction`s from one DRFP cluster, so both sides usually record the same fields.
-      **The turn-time condenser hit the unbounded version of this** and fixed it in `_changes`
-      (`agent/condense.py`) rather than in the shared helper, because changing the helper alters
-      merged campaign-note output and `tests/test_optimization.py`. Closing this means moving the
-      "both sides recorded it" rule into `progression` and accepting that diff — one rule instead of
-      two, which is the right end state.
 
 - [ ] **A solvate collapses onto whichever fragment is larger** — [M], and worse than filed: it is
       not only the cache key, it is the **knowledge-graph note id**. Measured,
@@ -370,16 +346,6 @@ it happens.
       one exists, `digest_enabled` should plan no Schedule, since shipping the ack without the
       reader loses matches permanently rather than merely not delivering them.
 
-- [ ] **A rejoined durable run never reaches the second chemist** — [M].
-      `connectors/jobs.py:386-403`: on `WorkflowAlreadyStartedError` the launcher returns the id and
-      deliberately emits no `record_job_started`, and the running workflow's `session_id` belongs to
-      the *first* launcher. So chemist B gets no turn-stream `job_started`, no `job_completed`, and
-      `agent/job_results.py` cannot wait on it either — they are told "in progress" and must poll by
-      hand forever. The comment justifies the silence with "it may already be finished";
-      `handle.describe()` answers exactly that question, so the ~3-line fix is to describe once on
-      the rejoin path and announce it when the status is RUNNING. Full push-back to a second session
-      is the larger change behind it.
-
 - [ ] **The sixteen periodic workflows can still hang instead of failing** — [M]. The job path now
       declares `failure_exception_types` and `tests/test_workflow_registry.py` holds it
       (`D-2026-08-16-a-job-that-cannot-fail-is-a-job-that-hangs`), scoped deliberately: for a run
@@ -468,25 +434,36 @@ it happens.
       never was, and the cross-reference defeated the rule that a row must name a real anchor. The
       lock is buildable here: a Postgres advisory lock on the pool that already exists, ~60 lines.
 
-- [ ] **Egress is still port-scoped by default** — [S]. `networkPolicy.egressDestinations` is
-      declarable and empty, which renders `to: []` — any destination on the allowed ports, as the
-      template's own comment says. The chart cannot invent a site's CIDR, so the sound fix is to
-      make empty **fail** when the policy is enabled, with an explicit `allowAnyDestination: true`
-      escape hatch. ~15 lines plus tests, fully offline (the chart tests parse YAML).
+- [ ] **A durable deployment with no `framing_envelope_secret` silently loses the injection
+      marking on its oldest content, and nothing says so** — [S]. `agent/framing.py::_envelope_nonce`
+      falls back to `secrets.token_hex(8)` per process when the setting is empty, and the agent
+      instructions say only an envelope carrying *exactly* the current tag marks retrieved content
+      as data. With `session_store_dsn` set, a replayed thread carries envelopes written under a
+      previous process's nonce: they no longer match, and that content is read as ordinary prose.
+      `framing.py` claimed `Settings` warned about the pairing until 2026-08-26; it does not —
+      `grep -rl framing_envelope src/` returns three files and none of them is a validator. The
+      guard belongs in `core/config/__init__.py::_guards_that_the_comments_already_demand`, which
+      is the right place and the reason this is not a two-line fix: every guard there *raises*, and
+      raising would take down every existing durable deployment that has not set the value. So it
+      needs a warning mechanism that section does not have — and a decision about whether the
+      combination is an error at all.
 
-- [ ] **Three credentials are plain `str` on the settings object** — [S], **corrected**. The hazard
-      this row stated is already closed: `core/logging.py:972` (`SecretRedactingFilter._redact`)
-      redacts all nine `_SECRET_SETTINGS` values by exact match across `msg`, `args`, `exc_text` and
-      `stack_info`, and the module docstring (`core/logging.py:23`) names "a `repr` of a config
-      object" as a covered route — so `logger.debug("%s", settings)` is safe today, and as of
-      2026-08-17 so is logging's own `handleError` path. What is left is defence in depth on
-      `llm_api_key`, `hpc_api_token` and `temporal_api_key` — **5 read sites in 4 modules**
-      (`agent/llm_provider.py:251`, `core/embeddings.py:232`, `connectors/qm/hpc/nextflow.py:53`,
-      `core/temporal_client.py:74` and `:75`), ~20 lines. The three DSNs are explicitly *not* in scope:
-      **34 lines** read one (`grep -rno "settings\.\(postgres_dsn\|postgres_migration_dsn\|session_store_dsn\)" src/ --include=*.py | sed 's/:settings.*//' | sort -u | wc -l`
-      — 41 occurrences over 27 modules; the row said 43 and never said what it was counting), all
-      feeding psycopg conninfo, which needs the plain string straight back. Rotation is a separate
-      concern with no anchor and is dropped.
+- [ ] **Three credentials cannot be set through the chart at all** — [S], and the half of the
+      settings-secret row that did **not** close with
+      `D-2026-08-26-a-credential-is-a-type-not-a-convention`. `hpc_artifact_store_token`,
+      `llm_fallback_api_key` and `temporal_api_key` are `SecretStr` fields with readers
+      (`connectors/qm/hpc/nextflow.py:73`, `agent/llm_provider.py:251`, `core/temporal_client.py:74`)
+      and no entry under `secrets.keys` or `secrets.optionalKeys` in
+      `deploy/helm/chemclaw/values.yaml:519`, so `chemclaw.env` renders no `secretKeyRef` and a
+      deployment has no supported way to provide them. The consequence differs per credential and
+      that is what makes it a judgement rather than three identical additions:
+      `hpc_artifact_store_token` unset means a *cross-origin* artifact store is fetched
+      unauthenticated (`_artifact_headers` falls through to `{}`), which is the one with a live
+      security shape; `llm_fallback_api_key` unset silently reuses the primary's key, which is
+      correct for the common case (a second replica of one deployment) and wrong for a second
+      vendor; `temporal_api_key` is Temporal Cloud only and the chart ships self-hosted with mTLS,
+      so it may be right that it has no key — but nothing says so. All three go under
+      `optionalKeys`, for the upgrade reason `framingEnvelopeSecret` already records.
 
 - [ ] **No session pagination and no per-session delete** — [M], **corrected**. This row claimed a
       data-subject erasure request "has no route across the seven tables". It does:
@@ -520,17 +497,6 @@ it happens.
       product call — the migration's stated rationale and the code that ships disagree about what the
       "newest and most-evidenced first" bucket actually orders by.
 
-- [ ] **`connectors.<name>.enabled` in the chart never reaches the agent** — [M].
-      `values.yaml:135` says "CHEMCLAW_CONNECTORS_ENABLED in `config` below decides which bundles
-      the agent loads at all" — and that key is in none of the 33 `config` entries. The chart derives
-      `CHEMCLAW_CONNECTOR_URLS`, `SERVICE_FLEET_REPLICAS` and `PG_FLEET_POOLED_PROCESSES` from
-      `.Values.connectors` and not the enable list, so `enabled: false` removes the pods and leaves
-      the tool on the agent's surface: the launcher starts the wrapper on the polled queue and its
-      child on `connector-qm`, which nobody polls, and the chemist is told "running" until the 25 h
-      ceiling. Latent today (all seven shipped entries are `enabled: true`); it fires the first time
-      someone uses the switch the file documents. Fix is a `chemclaw.connectorsEnabled` helper
-      mirroring `connectorUrls`, plus deleting the sentence that points at the absent key.
-
 - [ ] **A jobs-only bundle has no reachability signal at all** — [M]. `connectors/health.py:81-99`
       derives its target from `health_url(manifest)`, which is `None` for a bundle with no
       `endpoint:` — so `qm` reports `unprobed` whether its worker fleet is at two replicas or zero,
@@ -539,35 +505,6 @@ it happens.
       blind to the failure with the largest blast radius. `describe_task_queue(bundle_queue(name))`
       in the same sweep, reported as `unpolled` and counted like `unreachable`, is the runtime twin
       of the manifest check `connector-validate` now does — and it catches the row above too.
-
-- [ ] **One `replicas` knob drives two differently-shaped Deployments** — [S].
-      `templates/deployment-connectors.yaml:35` and `:98` both read `$cfg.replicas`, so scaling
-      `calc`'s MCP server to 4 also scales its Temporal worker to 4, and `pooledProcesses` counts it
-      twice against the `pg_fleet_max_connections` startup ceiling. Worse, the guard requires
-      `replicas` only when there is no `url`, while the worker block is deliberately not conditioned
-      on `url` — so a `url:` bundle that owns durable work renders an empty `replicas` (Kubernetes
-      defaults to 1) and contributes `nil | int` = 0 to the declared fleet. Split into
-      `serverReplicas`/`workerReplicas` defaulting to `replicas`, and extend the chart test to
-      require it whenever `worker` is set.
-
-
-- [ ] **Two tests guard on a credential being *present*, not on it working, and a stale one turns a
-      skip into a red suite** — [S]. `tests/test_prompt_caching.py:304` is
-      `@pytest.mark.skipif("API-KEY" not in os.environ, ...)` and
-      `test_which_shipped_profiles_clear_the_cache_floor` reads `os.environ["API-KEY"]` directly.
-      Measured on a Claude Code Remote box for this repo on 2026-08-25: the variable is set, the
-      value is rejected — `anthropic.AuthenticationError: 401 ... 'API key is invalid.'` — so both
-      tests **ran and failed** where the intent was plainly to skip, and `make test` came back
-      `3 failed, 4251 passed, 3 skipped` on an unmodified tree. `CLAUDE.md` already warns that the
-      credential "may not exist in every environment"; what it does not cover is the worse case,
-      present-and-stale, which reads as a defect in prompt caching rather than as an absent
-      credential. Guard on reachability (a `count_tokens` probe, which is unbilled and is what the
-      second test already uses) and skip with the reason, rather than on the key being non-empty.
-
-      Beside it, and *not* a defect worth a row of its own: `tests/test_reizman.py::test_bo_campaign_finds_high_yield`
-      also failed in that run, on the 180 s `pytest-timeout`, and **passes in 49 s in isolation** —
-      it was competing with four other pytest processes. Recorded here so the next person to see it
-      red under load does not go looking for a BoFire regression.
 
 ---
 
@@ -779,17 +716,86 @@ cluster, real HPC, real Snowflake — are in
 [`DEFERRED.md`](DEFERRED.md), each with the trigger that would revisit it, which is the register
 those belong in.
 
-## Backfill the ORD corpus on the four-repo lane's first bring-up
+## `turn_cost_ratio` scores a fixture, not the system
 
-`infra/live/e2e-full-stack/up.sh` seeds `CHEMCLAW_DATA_SOURCES=graph,eln-json,eln-ord` and points
-`CHEMCLAW_ORD_EXPORT_DIR` at `Chemclaw3_mock`'s 10,011 ORD exports, and then never syncs them from
-an early enough cursor. All 10,011 share one mtime — the moment the repo was cloned — and carry
-older payload timestamps, so once the sync cursor passes that instant none of them can ever
-qualify again. Chemclaw3 handles this correctly and loudly (`adapter.py::warn_late_arrivals`, one
-aggregated WARNING naming the remedy); the gap is that the harness never takes the remedy. A first
-bring-up should run `ElnSyncWorkflow` with an explicit early `since` before anything advances the
-cursor, so the ORD half of the mock's data is actually reachable in an end-to-end pass. Found by
-the 2026-08-17 full-stack run — see `tasks/live-test/full-stack-e2e-2026-08-17.md`.
+`data/evals/cases/autonomy-turn-cost.md` carries literal turn records, so the metric returns
+0.9845458333333333 whatever changes in the agent — the 32% static-prefix growth that
+`tests/test_context_floor.py` caught would leave its `baseline.json` row untouched. The metric's
+arithmetic is right and tested; what is missing is a case fed from real recorded `TurnCost` rows.
+
+Blocked on the same thing the memory-distillation row is: a deployment with turns in it. This
+system has 12 session messages and 0 recorded turns, so there is nothing to build the case from
+yet. Trigger: the first live lane run that persists a session's worth of turns.
+
+## The live lane and the four-repo lane fight over `chem` and `safety`
+
+`infra/live/processes.sh` uses `RUN_DIR=$LIVE_DIR/run` and `infra/live/e2e-full-stack/up.sh` uses
+`$LIVE_DIR/e2e/run`, and both now start `chem` and `safety`. Run them together and the second
+lane's pidfile guard cannot see the first's processes, so two uvicorns die on a bound port while
+`wait_for` passes off the servers that are already up — leaving dead pidfiles that make
+`processes.sh status` report both DOWN while the lane works fine.
+
+Not fixed here because the fix is a decision rather than an edit: either the two lanes share one
+run dir (and one lane learns to adopt the other's processes), or the fleet bundles move out of
+`processes.sh` and the four-repo lane becomes the only thing that starts them. The second is
+probably right — `processes.sh` grew them for a single-repo live test that the e2e lane supersedes
+— but it changes what `make live-up` alone can exercise, which wants measuring first.
+
+## Recover the flow-Suzuki screen, or decide it stays out
+
+`Chemclaw3_mock` seeds 10,011 ORD records and **5,760 of them — 57% — cannot be ingested at all**.
+Every refusal is the Perera flow-Suzuki set (*Science* 2018, 359, 429), whose second coupling
+partner the source spreadsheet publishes only as its own shorthand (`2a, Boronic Acid`).
+`ord_adapter._smiles` refuses rather than inventing a structure, which is right and is pinned by
+`test_ord_compound_with_no_resolvable_identifier_is_still_refused` — but that docstring's own words
+are "57% of a real corpus lost, including the yield data on components that *were* resolvable",
+and the widening it documents (INCHI, then NAME through `resolve_compound_name`) moved the number
+from 5,761 refused to 5,760.
+
+The open question is whether a reaction with one structure-less participant is worth keeping as
+*evidence*: its yield, ligand, base and halide are all real, and questions like "which base wins on
+this halide" need none of the missing structure. The two candidate shapes are (a) a `Component`
+that may carry a name instead of SMILES, with the reaction excluded from every fingerprint index,
+and (b) a separate lower-tier record type that retrieval can cite but similarity cannot reach.
+Both change what a `Component` is, so this wants its own ADR and its own measurement of what a
+partially-structured reaction does to retrieval — not a patch to `_smiles`. Measured and declared
+by `make live-data`; see `D-2026-08-18-a-corpus-is-not-reachable-because-it-is-on-disk`.
+
+## Make an ingest rejection answerable instead of only logged
+
+A record refused on ingest leaves a WARNING and nothing queryable. The seeded corpus has exactly
+one such record — `santanilla-orgsyn-boronate-well-Y36`, at 119.43%, refused because `OrdReaction`
+bounds a yield at 100 — and a chemist who asks about it can be told only "I have no such record".
+The better answer exists and is unreachable: *"that well was rejected on ingest because a yield
+cannot exceed 100%; the value is what an uncalibrated relative-UPLC readout does."* A durable
+rejection ledger (entry id, source, reason, first and last seen) would make data-quality questions
+answerable and would give `warn_late_arrivals`' aggregate a place to live besides a log line.
+`gr-08` is written against the absence today and says in its own comment what it becomes if this
+lands. Found by the 2026-08-18 corpus-fidelity pass.
+
+## The PR-gate costs 1.81 s per proposed note, and a backfill is one note per record
+
+Measured over the ORD backfill: 103 records per 3.1 minutes, steady, with the cost in the PR-gate's
+git branch-and-commit cycle rather than in mapping (the whole 10,011-record corpus maps in 0.3 s).
+That is a little over two hours for the mock's 4,251 ingestible records and 4,251 branches in the
+note repository. A real deployment's first sync is a decade of records, where this is days and a
+repository nobody can list. Nothing is broken — every proposal genuinely is a reviewable unit — but
+a backfill and an incremental sync arguably want different submission shapes (one branch per batch,
+or a bulk proposal a reviewer expands). Found by the 2026-08-18 corpus-fidelity pass.
+
+## A revoked credential fails the two live prompt-caching tests opaquely
+
+`tests/test_prompt_caching.py` guards its two live tests on `"API-KEY" in os.environ` — that the
+variable is *set*, not that it *works*. With a revoked key both fail several frames deep inside the
+Anthropic client with a raw `AuthenticationError`, so `make test` goes red in a way that reads as a
+prompt-caching regression. Observed 2026-08-18: the environment's key is well-formed, present, and
+answered `401` by the API.
+
+Skipping on an auth error is the wrong fix — it would hide a real outage, and these tests exist
+because a belief about caching was measurably wrong once. The right one is a message that names the
+cause, so a reader learns the credential is dead rather than that the cache broke. Same distinction
+`D-2026-08-17-a-harness-that-starts-two-of-five-servers-is-a-harness-that-tests-two` draws about
+`/readyz`: holding a credential is not the same as holding one the other side accepts.
 
 ## Surface `invalid_tool_calls` — an unparseable tool call is currently a silent no-op
 

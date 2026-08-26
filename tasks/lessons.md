@@ -519,6 +519,50 @@ it spends the whole retry budget proving the same thing.
 I also killed my own shell with `pkill -f` a second time, after writing the rule not to. Use
 `pgrep -f <pattern> | head -1` and kill the pid.
 
+## `x or default` erases a legitimate zero, and I shipped it into my own checker (2026-08-18)
+
+The first script written to verify the seeded corpus scored `abs((rx.yield_percent or -1) - want)`
+and reported 21 of 400 records as yield mismatches. There were none. `0.0 or -1` is `-1`, and 236
+of the 3,955 published Buchwald-Hartwig wells are exactly 0.00% — a *real* result meaning that
+combination failed, not a missing one.
+
+I nearly filed it as an adapter defect. What caught it was that 21/400 ≈ 5.3% matched the corpus's
+own 6% zero-yield rate too well to be a coincidence.
+
+**Rule:** never use `or` to default a numeric that can legitimately be zero — `is None`, always.
+And when a defect rate looks suspiciously close to some *proportion of the data*, suspect the
+measurement before the system. The lane now pins this invariant in a test, because the bug is one
+keystroke away and silent in both directions.
+
+## Measure the behaviour a fix depends on, even when the code reads clearly (2026-08-18)
+
+I re-targeted a probe (`gr-03`) from an unreachable dataset to a reachable one, on the assumption
+that *reachable* implies *findable*. Then I noticed the ingested notes were unmerged proposals — 39
+note files in the knowledge repo against 2,000+ ingested reactions — and that
+`FingerprintReactionRetriever._eligible` drops matches whose note is not on disk. That reads like
+the fix does not work.
+
+Running it showed **both** are true, depending on the path: an unfiltered `similar_reactions`
+returns 10 real wells, and the same search narrowed by `{"type": "reaction"}` returns 0. The probe
+names the unfiltered tool, so the re-target holds — but I only know that because I ran it, and the
+opposite conclusion was equally available from reading either function alone.
+
+**Rule:** a fix that depends on a system behaviour is not done until that behaviour is measured,
+however clearly the code reads. Two correct functions can compose into a consequence neither
+docstring states.
+
+## Read the bound; do not extrapolate the counter (2026-08-18)
+
+I estimated a corpus drain at ~43 chunks from `ingested=100` log lines and told the user so. The
+real number was ~108: `_BoundedIngest` caps a chunk at 100 *entries fetched*, not 100 ingested, so
+the drain walks all 10,011 exports rather than only the 4,251 that map. The counter I extrapolated
+from was reporting a different quantity than the one that governs the loop.
+
+Related, same session: I grepped a background log for an auth error, found none, and briefly
+concluded a test had failed for a different reason. The capture had been piped through `tail -12`
+and the traceback was cut. **Rule:** a conclusion from a truncated capture is not a measurement —
+re-run the specific thing.
+
 ## 2026-08-21 — a review is not finished until you have read the other side of the wire
 
 **The pattern.** I published a deep review of how information moves between agentic steps, and it
@@ -934,3 +978,41 @@ even where `git push` succeeds. Do not claim a branch was deleted without readin
 task's CI runs, each lap costing ~16 minutes, because I only fetched when the merge API refused.
 Fetching `origin/main` before opening the PR — and again before each long wait — turns a race into
 one rebase.
+
+## 2026-08-26 — a backlog row is a hypothesis, and two of seven were wrong
+
+Working seven queued rows in one pass, two of them turned out to specify the wrong change, and both
+failures were the same shape: **a rule stated correctly about one kind of value, then generalized to
+a kind it does not fit.**
+
+- `BACKLOG.md` asked for the "compare a field only when both sides recorded it" rule over the two
+  setpoints *and* the species sets. It fits a setpoint, where `None` means nobody wrote the number
+  down. It does not fit a species set, which is derived from a components list that is present
+  either way — so an empty `reagent` set is the record saying *this run used no reagent*, and
+  suppressing it erases the most common real change a run-to-run series carries. An existing test
+  said so within a minute of applying it.
+- The credentials row named three fields. The three were the ones somebody had grepped for; the
+  class is seven, and the two the row omitted were the interesting ones — `llm_fallback_api_key`,
+  which no redaction list contained *at all*, and `framing_envelope_secret`, which is not a
+  credential to anything and is the key an injected envelope would be forged with.
+
+The file's header already says a row is a claim about the code and claims go stale. What this pass
+adds is that a row can be *fresh and still wrong*: it is one person's design sketch, and the tree is
+what decides. Both corrections cost minutes because a test failed immediately; the cost of not
+noticing would have been a merged change that erases data and a redaction that reports success while
+matching asterisks.
+
+*Rule for myself: before implementing a queued row, restate its rule in my own words and name the
+kinds of value it will apply to. If any two of them differ in what "absent" means, the row is
+covering two rules and I am about to ship one of them wrongly. Then run the existing tests for the
+function before writing new ones — the test that disagrees with the row is the cheapest review
+there is.*
+
+**The corollary, from row 7 and worth more than the row was.** Hardening `llm_api_key` to
+`SecretStr` would have silently disabled the log redaction for every credential, because both
+readers in `core/logging.py` test `isinstance(value, str)` and a `SecretStr` is not one — and
+`str(SecretStr("k"))` is `"**********"`, so the filter would have gone on matching asterisks against
+log lines and reporting success. Two protections that look like one, where the stronger-looking one
+turns the other off. **When strengthening a type, grep for every `isinstance` on the old one before
+touching anything** — the places that check a type are exactly the places that will stop seeing the
+value.

@@ -47,7 +47,6 @@ from chemclaw.api.events import (
     ApprovalRequestEvent,
     Event,
     EvidenceSourceEvent,
-    HandoffEvent,
     JobStartedEvent,
     NoteProposedEvent,
     PlanEvent,
@@ -61,7 +60,6 @@ from chemclaw.api.schemas import message_text
 from chemclaw.core.turn_signals import _KEY as _SIGNAL_KEY
 from chemclaw.core.turn_signals import (
     ApprovalSignal,
-    HandoffSignal,
     JobSignal,
     QuestionSignal,
     Signal,
@@ -125,9 +123,6 @@ async def graph_events(
     # By call id rather than tool name, because a model may issue two calls to one tool in a single
     # batch and only one of them fail.
     failed_calls: set[str] = set()
-    # Who is currently answering, tracked across the stream by the handoff pair rather than
-    # inferred per event. `""` is the main agent, which is every turn without a team.
-    agent = ""
     async for namespace, mode, payload in graph.astream(
         turn_input(message), config, stream_mode=_MODES, subgraphs=True
     ):
@@ -141,40 +136,32 @@ async def graph_events(
             # agent's answer, interleaved with the supervisor's own text in whatever order the two
             # happened to produce it.
             #
-            # The *namespace* is what identifies a chunk as a specialist's — non-empty means "below
-            # the root" — while the *name* comes from the handoff pair above, because the namespace
-            # never held it (D-2026-08-11-the-specialists-name-is-not-in-the-namespace). Between a
-            # handoff and its hand back the two agree; a chunk from below the root with no handoff
-            # open still gets a non-empty marker rather than passing as the answer, which is the
+            # The *namespace* is the whole attribution: non-empty means "below the root". The
+            # specialist's *name* is not in it (D-2026-08-11-the-specialists-name-is-not-in-the-
+            # namespace) and there is no second carrier for it — the handoff pair that used to
+            # supply one was deleted with the producer
+            # (D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution). A chunk from
+            # below the root therefore arrives marked `"subagent"` rather than named, which is the
             # direction that fails safe.
             #
             # The usage is counted either way: a specialist's tokens cost the same money.
             if text:
-                yield TokenEvent(text=text, agent=agent or ("subagent" if namespace else ""))
+                yield TokenEvent(text=text, agent="subagent" if namespace else "")
         elif mode == "custom":
             if isinstance(signal := (payload or {}).get(_SIGNAL_KEY), ToolFailureSignal):
                 failed_calls.add(signal.call_id)
             event = _custom_event(payload, on_signal)
-            if isinstance(event, HandoffEvent):
-                # The enter names the specialist, the hand back clears it. Safe to read as state
-                # because the pair brackets the specialist's execution in stream order. Nothing
-                # raises this event today — the specialist team went in D-2026-08-15 — so this
-                # branch is reachable only once subagents return.
-                agent = event.to
             if event is not None:
                 yield event
         elif mode == "updates":
             # **A non-empty namespace means "below the root", and that is the only attribution
-            # available here.** `agent` is threaded from the handoff pair, which nothing raises
-            # since
-            # the specialist team went — so it is permanently `""`, and `events.py` states that `""`
-            # *means* the main agent. Without the namespace test, every helper the `task` tool runs
-            # had its tool calls, its results and its plan emitted as the supervisor's: its output
-            # joined `ToolCallTrace.outputs` and the parent session's fetchable `result_ref`
+            # available here.** `events.py` states that `""` *means* the main agent, and every turn
+            # this repository runs is one. Without the namespace test, every helper the `task` tool
+            # runs had its tool calls, its results and its plan emitted as the supervisor's: its
+            # output joined `ToolCallTrace.outputs` and the parent session's fetchable `result_ref`
             # indistinguishably, and its `write_todos` surfaced as a root `PlanEvent` that
-            # *replaced*
-            # the supervisor's — so under `plan_only` the checklist a chemist approved could be the
-            # helper's rather than the turn's.
+            # *replaced* the supervisor's — so under `plan_only` the checklist a chemist approved
+            # could be the helper's rather than the turn's.
             #
             # The same rule the token branch above already applies, for the same reason: the
             # specialist's *name* is not in the namespace under any dispatch that routes through the
@@ -188,7 +175,7 @@ async def graph_events(
             below_root = bool(namespace)
             async for event in _from_update(
                 payload,
-                agent or ("subagent" if below_root else ""),
+                "subagent" if below_root else "",
                 trace,
                 todos,
                 exchanges,
@@ -242,9 +229,10 @@ async def _from_update(
     rather than in the caller because this is where they exist as *messages*: the events carry no
     call id, so a projection rebuilt from them could not pair a result with the call it answers.
 
-    `agent` is the specialist currently running, tracked by the caller from the handoff pair, and
-    it becomes the `agent` attribution on every event that specialist raises (M9) — which is what
-    stops a team's trace from reading as though one actor did everything.
+    `agent` is the attribution the caller derived from the namespace's non-emptiness — `""` for the
+    turn's own agent, `"subagent"` for anything below the root — and it becomes the `agent` field on
+    every event that node raises (M9), which is what stops a team's trace from reading as though one
+    actor did everything.
 
     **It used to be derived from the subgraph namespace, and that was wrong on every real turn.**
     `_agent_of(namespace)` took the node name before the colon, on the assumption that a
@@ -262,10 +250,11 @@ async def _from_update(
     the repo's recurring failure of asserting against an invented shape.
 
     The handoff pair was the reader that *could* be right — it was raised with the name the
-    specialist was constructed with, rather than reconstructing one from a graph path. Nothing
-    raises it since the specialist team went (D-2026-08-15), so `agent` is empty on every real turn
-    and the caller marks work from below the root by the one fact the namespace does carry: that it
-    is non-empty.
+    specialist was constructed with, rather than reconstructing one from a graph path. Its producer
+    went with the specialist team (D-2026-08-15) and its plumbing went in
+    `D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution`, so no name reaches this
+    stream at all. The caller marks work from below the root by the one fact the namespace does
+    carry: that it is non-empty.
     """
     for node, update in (payload or {}).items():
         # **Whoever adds the first interrupt: this line drops it.** LangGraph delivers a suspended
@@ -435,9 +424,4 @@ def _signal_event(signal: Signal) -> Event:
             message=signal.message,
             reason=plan_gate_failure_reason(signal.message),
         )
-    if isinstance(signal, HandoffSignal):
-        # Was raised by `agent/team.running_specialist`, so the pair bracketed exactly the
-        # interval the audit trail attributed to the specialist. `to=""` is the hand back,
-        # not a missing field.
-        return HandoffEvent(to=signal.to, reason=signal.reason)
     return NoteProposedEvent(note_id=signal.note_id, reference=signal.reference)

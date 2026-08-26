@@ -25,12 +25,13 @@ would advertise "pass anything", which is precisely how a model calls a tool wro
 """
 
 import asyncio
+import logging
 from collections.abc import Callable
 from importlib import import_module
 from typing import Any
 
 from pydantic import BaseModel, Field, create_model
-from temporalio.client import WorkflowFailureError
+from temporalio.client import WorkflowExecutionStatus, WorkflowFailureError
 from temporalio.common import WorkflowIDReusePolicy
 from temporalio.exceptions import WorkflowAlreadyStartedError
 
@@ -53,6 +54,8 @@ from chemclaw.durable.connector_job import (
     envelope_from_result,
     failure_reason,
 )
+
+logger = logging.getLogger(__name__)
 
 # The declared parameter types, mapped to the annotations the generated model is built from.
 # Closed by design (see `JobParamType`): every entry is a type a JSON-schema-driven model can
@@ -388,18 +391,24 @@ def build_job_tool(connector: str, job: JobSpec) -> CapabilityTool:
             # succeeding. When the job answers inline, the *already finished* case is the common
             # one (a repeat of a cheap calculation) and rejoining it is what makes a re-ask feel
             # like a cache hit rather than a poll; a still-running one falls through to its id.
+            rejoined = client.get_workflow_handle(workflow_id, result_type=ConnectorJobResult)
             if job.inline_wait_seconds is not None:
                 existing = await _await_briefly(
-                    client.get_workflow_handle(workflow_id, result_type=ConnectorJobResult),
-                    job.inline_wait_seconds,
-                    job.name,
-                    workflow_id,
+                    rejoined, job.inline_wait_seconds, job.name, workflow_id
                 )
                 if existing is not None:
                     return existing
-            # Deliberately *not* announced as started — an already-finished run will never emit
-            # the matching `job_completed` event, and the surface would show a row that stays
-            # "running" forever.
+            # Announced only when the run is *still going*, which is a question the server can
+            # answer rather than one this branch has to guess at. It used to guess: the comment
+            # here said an announcement was withheld because the run "may already be finished" and
+            # a surface would draw a row that never clears — true, and it left the other case with
+            # nothing at all. A second chemist asking for a job the first started got no
+            # `job_started`, so no `job_completed` could be matched to it either, and
+            # `agent/job_results.py` had nothing to wait on: they were told "in progress" and had
+            # to poll by hand forever. `describe()` is exactly the distinction, one round trip on
+            # a path that has already given up on being fast.
+            if await _still_running(rejoined):
+                record_job_started(workflow_id, job.name)
             return workflow_id
         except Exception as exc:
             # `connect()` above already frames the broker being unreachable; this is the
@@ -450,6 +459,27 @@ def build_job_tool(connector: str, job: JobSpec) -> CapabilityTool:
     launch.__qualname__ = job.name
     launch.__doc__ = _docstring(job)
     return launch
+
+
+async def _still_running(handle: Any) -> bool:
+    """Whether a run this launcher rejoined is still executing, per the server.
+
+    Best-effort by construction: this is asked only to decide whether to *announce* a rejoined run,
+    so a describe that fails means the announcement is skipped and the caller still returns the id.
+    Raising here would turn a successful idempotent rejoin into a tool error over a question the
+    caller could live without an answer to.
+
+    `RUNNING` alone, not "not completed": a run that failed, was cancelled or timed out will never
+    emit the `job_completed` a surface needs to clear the row an announcement draws, which is the
+    hazard the silent branch was built around and is still right about.
+    """
+    try:
+        description = await handle.describe()
+    except Exception:
+        # See the docstring: an unanswered question here is not an error.
+        logger.debug("could not describe rejoined run %s; not announcing it", handle.id)
+        return False
+    return bool(description.status == WorkflowExecutionStatus.RUNNING)
 
 
 async def _await_briefly(

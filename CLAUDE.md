@@ -71,6 +71,14 @@ outlives all of this: deepagents builds a bare `SubAgent` dict with *only* `spec
 anything not compiled by `build_langgraph_agent` runs with no audit trail, no authz and no plan
 gate — silently.
 
+**That sweep missed one, and 2026-08-26 finished it**
+(`D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution`): `audit_events.agent` was
+empty on **every row that trail has ever written**, because `set_current_specialist` had no caller
+in `src/` and `record_handoff` had none anywhere — while three docstrings said in the present tense
+that the trail names the agent beside the human. The contextvar trio, `record_handoff` and
+`HandoffSignal` are gone; the column, `HandoffEvent` and the D-2026-08-10 rule stay, and an
+*absence* test now fails whoever re-adds the claim without a producer.
+
 An audit against LangChain's own **deep-agents** pillars (D-2026-08-11-a-policy-nobody-can-see…)
 then found five of six sound and each narrowing already argued for — and the sixth, *context
 management*, gone. D-025's compaction lived in the removed framework, and what survived it was the
@@ -133,7 +141,13 @@ the INSERT-only grant. What that leaves open in `docs/planning/BACKLOG.md` is th
 store, the `session_messages` read-model and `HumanInTheLoopMiddleware`. `RubricMiddleware` is **declined** (`D-2026-08-16-a-second-judge-is-a-second-answer-about-the-same-answer`) — it cannot reuse `score_answer`, and a failed grading returns the ungraded answer.
 
 **Live edges remain open** (need a real Temporal broker / OpenShift cluster): live cluster durability
-+ `helm`/`kubeconform` render. See `docs/planning/BACKLOG.md` for the exact list.
++ `helm`/`kubeconform` render. See `docs/planning/BACKLOG.md` for the exact list. Note that the
+render edge now has one more thing to catch: `D-2026-08-26-a-knob-that-renders-nothing-is-not-a-knob`
+makes the chart **refuse to render** until a release states its egress posture, so `helm template` on
+the shipped defaults takes `--set networkPolicy.allowAnyDestination=true` — as the Makefile's two
+renders, the runbook and `deploy/README.md` all now do. The same ADR derives
+`CHEMCLAW_CONNECTORS_ENABLED` from the `connectors` block (`enabled: false` used to take a bundle's
+pods and leave its tools advertised) and splits `replicas` into `serverReplicas`/`workerReplicas`.
 
 **Identity is no longer one of them** (D-2026-08-20-a-tenant-is-a-jwks-document-and-an-issuer-string).
 A tenant, to a resource server, is a JWKS document and an issuer string, so `Chemclaw3_mock`'s

@@ -19,6 +19,7 @@ from typing import Any
 
 import pytest
 from pydantic import BaseModel, ValidationError
+from temporalio.client import WorkflowExecutionStatus
 from temporalio.exceptions import WorkflowAlreadyStartedError
 
 from chemclaw.agent.authz import AuthorizationError, side_effecting_tools
@@ -58,18 +59,34 @@ _SPEC = JobSpec.model_validate(
 
 
 class _FakeHandle:
-    """A started-workflow handle, carrying just the id the tool returns."""
+    """A started-workflow handle, carrying the id the tool returns and the run's server status.
 
-    def __init__(self, workflow_id: str) -> None:
+    `describe()` is what the rejoin path asks before announcing a run it did not start; the status
+    is settable per test because the whole point of that branch is that a *running* rejoin and a
+    *finished* one must be treated differently.
+    """
+
+    def __init__(self, workflow_id: str, status: Any = WorkflowExecutionStatus.RUNNING) -> None:
         self.id = workflow_id
+        self.status = status
+        self.described = 0
+
+    async def describe(self) -> Any:
+        """The one server round trip the rejoin path takes, counted so a test can pin "once"."""
+        self.described += 1
+        if isinstance(self.status, BaseException):
+            raise self.status
+        return SimpleNamespace(status=self.status)
 
 
 class _FakeClient:
     """Records what `start_workflow` was called with, or raises a scripted error instead."""
 
-    def __init__(self, error: Exception | None = None) -> None:
+    def __init__(self, error: Exception | None = None, status: Any = None) -> None:
         self.error = error
+        self.status = WorkflowExecutionStatus.RUNNING if status is None else status
         self.calls: list[dict[str, Any]] = []
+        self.handles: list[_FakeHandle] = []
 
     async def start_workflow(self, _run: Any, arg: Any, **kwargs: Any) -> _FakeHandle:
         """Capture the call; raise the scripted error if one was set (the duplicate-submit case)."""
@@ -77,6 +94,12 @@ class _FakeClient:
         if self.error is not None:
             raise self.error
         return _FakeHandle(str(kwargs["id"]))
+
+    def get_workflow_handle(self, workflow_id: str, **_kwargs: Any) -> _FakeHandle:
+        """The rejoin path a duplicate submit takes (sync in the real client too)."""
+        handle = _FakeHandle(workflow_id, self.status)
+        self.handles.append(handle)
+        return handle
 
 
 @pytest.fixture
@@ -302,9 +325,72 @@ def test_a_duplicate_submit_returns_the_existing_id_rather_than_erroring(
     tool = build_job_tool("calc", _SPEC)
     job_id, signals = asyncio.run(collect_signals(lambda: _alaunch(tool, smiles="CCO")))
     assert job_id == job_workflow_id("calc", "run_calculation", {"smiles": "CCO"})
-    # Deliberately NOT announced as started: an already-finished run will never emit the
-    # matching `job_completed` event, so the surface would show a row that stays "running"
-    # forever.
+    # A *running* rejoin is announced, and that is the second chemist's only route to the run:
+    # see the two tests below for the pair this splits into.
+    assert signals == [JobSignal(job_id=job_id, kind="run_calculation")]
+
+
+def test_a_rejoined_run_that_is_still_going_is_announced_to_the_second_chemist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Chemist B asks for a job chemist A already started, and hears about it (BACKLOG §3).
+
+    The rejoin used to be silent in both directions, justified by "it may already be finished" —
+    true of one case and false of the other, and the cost fell entirely on the second asker: no
+    turn-stream `job_started`, therefore no `job_completed` a surface could match to it, and
+    nothing for `agent/job_results.py` to wait on. They were told "in progress" and had to poll by
+    hand forever. `describe()` answers the question the comment was guessing at.
+    """
+    fake = _FakeClient(
+        error=WorkflowAlreadyStartedError("already", "CalculationWorkflow", run_id=None),
+        status=WorkflowExecutionStatus.RUNNING,
+    )
+
+    async def _connect() -> _FakeClient:
+        return fake
+
+    monkeypatch.setattr("chemclaw.connectors.jobs.connect", _connect)
+    tool = build_job_tool("calc", _SPEC)
+    job_id, signals = asyncio.run(collect_signals(lambda: _alaunch(tool, smiles="CCO")))
+    assert signals == [JobSignal(job_id=job_id, kind="run_calculation")]
+    # One round trip, not one per branch: the describe is the *only* thing this path added.
+    assert [handle.described for handle in fake.handles] == [1]
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        WorkflowExecutionStatus.COMPLETED,
+        WorkflowExecutionStatus.FAILED,
+        WorkflowExecutionStatus.TERMINATED,
+        RuntimeError("the broker dropped the describe"),
+    ],
+)
+def test_a_rejoined_run_that_is_not_running_is_still_silent(
+    monkeypatch: pytest.MonkeyPatch, status: Any
+) -> None:
+    """The half the old silence was right about, kept — including when the server will not say.
+
+    A finished, failed or terminated run will never emit the `job_completed` that clears the row an
+    announcement draws, so announcing one is worse than saying nothing. A describe that *fails* is
+    the same case for a different reason: this is a best-effort question asked only to decide
+    whether to speak, so an unanswered one must not become a tool error on a successful rejoin.
+
+    Parametrized across all four because the previous version of this branch held one axis constant
+    — every rejoin finished — which is why the running case went unnoticed for as long as it did.
+    """
+    fake = _FakeClient(
+        error=WorkflowAlreadyStartedError("already", "CalculationWorkflow", run_id=None),
+        status=status,
+    )
+
+    async def _connect() -> _FakeClient:
+        return fake
+
+    monkeypatch.setattr("chemclaw.connectors.jobs.connect", _connect)
+    tool = build_job_tool("calc", _SPEC)
+    job_id, signals = asyncio.run(collect_signals(lambda: _alaunch(tool, smiles="CCO")))
+    assert job_id == job_workflow_id("calc", "run_calculation", {"smiles": "CCO"})
     assert signals == []
 
 
@@ -468,8 +554,10 @@ _INLINE_SPEC = JobSpec.model_validate(
 class _ResultHandle(_FakeHandle):
     """A handle whose `result()` resolves, hangs, or raises — the three outcomes of the wait."""
 
-    def __init__(self, workflow_id: str, outcome: Any) -> None:
-        super().__init__(workflow_id)
+    def __init__(
+        self, workflow_id: str, outcome: Any, status: Any = WorkflowExecutionStatus.RUNNING
+    ) -> None:
+        super().__init__(workflow_id, status)
         self.outcome = outcome
 
     async def result(self) -> Any:
@@ -484,8 +572,8 @@ class _ResultHandle(_FakeHandle):
 class _ResultClient(_FakeClient):
     """A client whose started (or existing) workflow has a scripted `result()`."""
 
-    def __init__(self, outcome: Any, error: Exception | None = None) -> None:
-        super().__init__(error)
+    def __init__(self, outcome: Any, error: Exception | None = None, status: Any = None) -> None:
+        super().__init__(error, status)
         self.outcome = outcome
         self.rejoined: list[str] = []
 
@@ -499,7 +587,9 @@ class _ResultClient(_FakeClient):
     def get_workflow_handle(self, workflow_id: str, **_kwargs: Any) -> _ResultHandle:
         """The rejoin path a duplicate submit takes (sync in the real client too)."""
         self.rejoined.append(workflow_id)
-        return _ResultHandle(workflow_id, self.outcome)
+        handle = _ResultHandle(workflow_id, self.outcome, self.status)
+        self.handles.append(handle)
+        return handle
 
 
 def _install(monkeypatch: pytest.MonkeyPatch, client: _ResultClient) -> _ResultClient:

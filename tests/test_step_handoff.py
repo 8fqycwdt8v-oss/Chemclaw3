@@ -296,6 +296,36 @@ def test_a_half_specified_complex_pair_is_refused() -> None:
 # --- context recovery --------------------------------------------------------------------------
 
 
+def _reduced_request(cleared: str, args: dict[str, Any]) -> Any:
+    """A request whose reduction cleared exactly one tool's result, as the middleware leaves it.
+
+    Real messages carrying upstream's own `context_editing.cleared` stamp, because that is what
+    `_cleared_calls` reads. A stub with an empty message list would say a reduction happened and
+    name nothing it cleared, which is the one thing that cannot occur in production.
+    """
+    from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+
+    call_id = "cleared-call"
+    messages = [
+        HumanMessage("go"),
+        AIMessage("", tool_calls=[{"name": cleared, "args": args, "id": call_id}]),
+        ToolMessage(
+            "[cleared]",
+            tool_call_id=call_id,
+            response_metadata={"context_editing": {"cleared": True, "strategy": "clear_tool_uses"}},
+        ),
+    ]
+
+    class _Request:
+        """The two fields `_record_reduction` reads, as `ModelRequest` presents them."""
+
+        state = {"messages": [*messages, HumanMessage("x " * 400)]}
+
+    request = _Request()
+    request.messages = messages  # type: ignore[attr-defined]
+    return request
+
+
 def test_a_compacted_turn_may_read_a_cleared_result_again() -> None:
     """The dead end both modules documented and neither closed.
 
@@ -304,22 +334,37 @@ def test_a_compacted_turn_may_read_a_cleared_result_again() -> None:
     `compaction.py` removed a "re-run the tool if you still need it" line from that placeholder
     *because* the guard would then deny it. After a reduction an identical call is a re-read.
     """
-
-    class _Request:
-        """The two fields `_record_reduction` reads, as `ModelRequest` presents them."""
-
-        state = {"messages": ["a", "b", "c", "d"]}
-        messages: list[str] = []
-
     token = begin_call_watch()
     try:
         for _ in range(settings.max_identical_tool_calls):
             assert count_call("gather_evidence", {"q": "x"}) is None
         assert count_call("gather_evidence", {"q": "x"}) is not None
 
-        _record_reduction(_Request())  # type: ignore[arg-type]
+        _record_reduction(_reduced_request("gather_evidence", {"q": "x"}))
 
         assert count_call("gather_evidence", {"q": "x"}) is None
+    finally:
+        end_call_watch(token)
+
+
+def test_a_reduction_forgives_only_the_calls_whose_results_it_cleared() -> None:
+    """Clearing keeps the newest results, so the model still holds some of its answers.
+
+    A blanket reset forgave those too, once per reduction — which made the guard's strength a
+    function of `agent_tool_result_clear_trigger`, a token threshold with no bearing on whether a
+    repeat is useful. Asserted at the handoff rather than only in `test_repeat_guard.py`, because
+    the defect lived in the seam between the two modules and not in either one.
+    """
+    token = begin_call_watch()
+    try:
+        for _ in range(settings.max_identical_tool_calls):
+            count_call("gather_evidence", {"q": "x"})
+            count_call("find_past_jobs", {"q": "kept"})
+
+        _record_reduction(_reduced_request("gather_evidence", {"q": "x"}))
+
+        assert count_call("gather_evidence", {"q": "x"}) is None
+        assert count_call("find_past_jobs", {"q": "kept"}) is not None
     finally:
         end_call_watch(token)
 
