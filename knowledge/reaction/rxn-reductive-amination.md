@@ -1,6 +1,9 @@
 ---
 artifact_refs: []
 calc_refs: []
+conditions:
+  time_h: 4.0
+  yield_percent: 89.0
 confidence: 0.85
 created_by: human
 id: rxn-reductive-amination

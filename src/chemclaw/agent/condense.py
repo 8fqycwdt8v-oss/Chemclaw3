@@ -131,6 +131,14 @@ class Condensation(BaseModel):
     # The refs that were not read, so a refusal is legible as a list and not only per row.
     oversized: list[str] = Field(default_factory=list)
     degraded: list[str] = Field(default_factory=list)
+    # **The refs that resolved to no protocol at all, which is not the same fact as either above.**
+    # An oversized or unreadable protocol *has a row*: it was found, its record is in the table, and
+    # only its prose is missing. One of these has no row anywhere. They were one list, and the
+    # rendered payload then told the model that a reference nobody could resolve had "recorded
+    # figures above" and that a comparison of two protocols covered the three it was handed. A
+    # reader's next move differs for each: open the document, trust the figures, or check the
+    # citation — so they are three fields and three sentences.
+    unresolved: list[str] = Field(default_factory=list)
 
     def render(self) -> str:
         """The comparison as the model receives it — the table, then what it is not.
@@ -150,6 +158,11 @@ class Condensation(BaseModel):
         read this as the full story" contract, and `complete`'s meaning cannot be recovered from a
         bare `True`: it says every reference *you passed* was read, never that you have seen every
         protocol on file.
+
+        **Three absences, three sentences, because each sends a reader somewhere different**: open
+        the document yourself, trust the figures in the row, or check the citation because there is
+        no row. Written as one list they came out as one sentence, and it said the unresolvable
+        references had figures in a table they are not in.
         """
         if not self.rows:
             return "No protocols were given to condense."
@@ -164,14 +177,37 @@ class Condensation(BaseModel):
                 f"\nProcedure not read for: {', '.join(self.degraded)}. Their recorded figures "
                 "above are unaffected."
             )
+        if self.unresolved:
+            # No `expand_note` suggestion here, deliberately: there is nothing to expand. The
+            # explanation is the one the tool's own refusal gives when *nothing* resolves, because
+            # it is the same situation at a different scale and the cause is usually the same.
+            lines.append(
+                f"\nNot compared, because these resolved to no protocol: "
+                f"{', '.join(self.unresolved)} — they are absent from the table above, not merely "
+                "unread. A note id that resolves to nothing is often a citation to a note whose "
+                "PR-gate submission has not been merged yet."
+            )
         lines.append(
-            f"\n{len(self.rows)} protocol(s) compared"
-            + ("." if self.complete else ", and the ones named above were not read.")
-            + " This is every protocol you asked for; it is not every protocol on file — whether"
-            " the search that produced these references was itself truncated is that search's own"
-            " answer to give."
+            f"\n{self._coverage()} It is not every protocol on file — whether the search that"
+            " produced these references was itself truncated is that search's own answer to give."
         )
         return "\n".join(lines)
+
+    def _coverage(self) -> str:
+        """How much of what the caller passed is actually in the table above.
+
+        The count alone was the claim "this is every protocol you asked for", which is true only
+        when every reference resolved — and it was stated unconditionally, so a caller who passed
+        three references and got two rows was told the two were the three.
+        """
+        asked = len(self.rows) + len(self.unresolved)
+        if self.unresolved:
+            return (
+                f"{len(self.rows)} of the {asked} references you passed are compared above; "
+                f"{len(self.unresolved)} resolved to no protocol."
+            )
+        read = "." if self.complete else ", and the ones named above were not read."
+        return f"{len(self.rows)} protocol(s) compared{read} This is every protocol you asked for."
 
 
 def _excerpt(text: str, limit: int) -> str:

@@ -1,6 +1,10 @@
 ---
 artifact_refs: []
 calc_refs: []
+conditions:
+  temperature_c: 100.0
+  time_h: 8.0
+  yield_percent: 71.0
 confidence: 0.8
 created_by: human
 id: rxn-buchwald-amination

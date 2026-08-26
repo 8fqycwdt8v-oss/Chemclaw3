@@ -7,6 +7,7 @@ git).
 """
 
 import asyncio
+import re
 
 from chemclaw.ingest.eln.ord import Component, Impurity, OrdReaction, Role
 from chemclaw.kg.pr_gate import propose_note
@@ -116,18 +117,25 @@ def test_clustering_drops_degenerate_reactions() -> None:
 # --- the outcome-quality columns ------------------------------------------------------
 
 
+def _cells(line: str) -> list[str]:
+    r"""Split a rendered row into cells the way a Markdown reader does.
+
+    On *unescaped* pipes only: `render_table` escapes a `|` inside a value, and a reader sees
+    `des-ethyl \| 99.9` as one cell. Splitting on every pipe would count an escaped one as a column
+    boundary, which is exactly the misreading the escaping exists to prevent.
+    """
+    return [cell.strip() for cell in re.split(r"(?<!\\)\|", line.strip("|"))]
+
+
 def _headers(body: str) -> list[str]:
     """The campaign table's column headers, as a reader of the rendered note would see them."""
-    header = next(line for line in body.splitlines() if line.startswith("| Run |"))
-    return [cell.strip() for cell in header.strip("|").split("|")]
+    return _cells(next(line for line in body.splitlines() if line.startswith("| Run |")))
 
 
 def _row(body: str, reaction_id: str) -> list[str]:
     """One run's rendered row cells."""
-    line = next(
-        line for line in body.splitlines() if line.startswith(f"| [[reaction-{reaction_id}]] |")
-    )
-    return [cell.strip() for cell in line.strip("|").split("|")]
+    start = f"| [[reaction-{reaction_id}]] |"
+    return _cells(next(line for line in body.splitlines() if line.startswith(start)))
 
 
 def _note(runs: list[OrdReaction]) -> str:
@@ -239,3 +247,36 @@ def test_several_unranked_impurities_name_no_major_one() -> None:
     assert _row(body, "run-1")[5] == "—"
     assert _row(body, "run-2")[5] == "des-ethyl"
     assert "Impurity area (%)" not in _headers(body)  # nobody recorded one
+
+
+def test_an_impurity_name_cannot_add_a_column_to_the_campaign_table() -> None:
+    """The campaign note reaches the shared renderer with ELN free text, exactly as the digest does.
+
+    An impurity name is whatever the source instrument or analyst typed, and it lands in a cell. A
+    `|` in it does not render badly — it renders as another column, silently shifting every value
+    after it under the wrong heading, which in this artifact means reading one run's impurity area
+    as another run's yield. The fix is in `memory.comparison.render_table` rather than at either
+    caller, and this is the second caller proving it.
+    """
+    runs = [
+        _ester("run-1", 80, 85).model_copy(
+            update={
+                "purity_percent": 91.0,
+                "impurities": [Impurity(name="des-ethyl | 99.9", area_percent=6.2)],
+            }
+        ),
+        _ester("run-2", 60, 78).model_copy(
+            update={
+                "purity_percent": 99.1,
+                "impurities": [Impurity(name="des-ethyl", area_percent=0.3)],
+            }
+        ),
+    ]
+    body = _note(runs)
+
+    assert len(_row(body, "run-1")) == len(_headers(body)), (
+        "the impurity name added a column, so every cell after it reads under the wrong heading"
+    )
+    assert _row(body, "run-1")[5:8] == ["91", r"des-ethyl \| 99.9", "6.2"], (
+        "the name is evidence and must survive, escaped rather than dropped"
+    )
