@@ -556,9 +556,18 @@ secrets:
     # retrieval source, and have their text read as instructions instead of as data.
     #
     # Optional rather than required: the setting defaults to `""` and the app starts either way, so
-    # a required key would only buy a mandatory Secret edit for every existing deployment. Unset,
-    # the envelope tag is derived from the empty string — predictable, which is the weakness this
-    # slot exists to let an operator close, not a new one it introduces.
+    # a required key would only buy a mandatory Secret edit for every existing deployment.
+    #
+    # **Unset is not "predictable", which is what this comment used to say and is the weaker
+    # failure.** `agent/framing.py::_envelope_nonce` falls back to `secrets.token_hex(8)` — a fresh
+    # random value *per process*. So the tag is unguessable and also unshared: two replicas frame
+    # with different tags, and a restart changes the tag under a durable session's stored history.
+    # The agent instructions say only an envelope carrying exactly the current tag marks retrieved
+    # content as data, so a thread replayed by another pod has its older retrieved material read as
+    # ordinary prose — the injection marking switches itself off for precisely the oldest content it
+    # exists to cover. Any deployment with `session_store="postgres"` or more than one replica
+    # should set this; `docs/planning/BACKLOG.md` carries the open question of whether the
+    # combination should be refused at startup.
     framingEnvelopeSecret: "CHEMCLAW_FRAMING_ENVELOPE_SECRET"
     # The `chem`, `safety` and `calc` bearer tokens `connectors/identity.py::_EnvBearerAuth` reads
     # per request (`connectors/chem/connector.yaml` and `connectors/safety/connector.yaml`'s

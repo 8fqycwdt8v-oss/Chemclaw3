@@ -121,21 +121,6 @@ topic).
       guarantee nothing in the lane states. Either the manifest stops forbidding it or the lane
       stops relying on the order.
 
-- [ ] **`CalculationKey`'s primary key is an unescaped concatenation of caller-shaped strings** —
-      [M]. `science/calc/store.py:122` (`CalculationKey.as_str`) builds the literal
-      `calculation_results` primary key as `f"{calc_type}@{calc_version}:{input_hash}:{params_hash}"`
-      (`infra/sql/001_calculation_results.sql:7`), and `calc_version` is not guaranteed free of `@`
-      or `:` — `docs/decisions/D-2026-08-16-the-physics-leaves-the-cache-stays.md` gives real
-      examples (`esol-delaney@2004`, `cal-0.28733:-29.3116`). Two different `(calc_type,
-      calc_version)` pairs can serialise to the identical string (`calc_type="a", calc_version="b@c"`
-      vs. `calc_type="a@b", calc_version="c"`); if the hash pair also matched, one calculator's
-      `ON CONFLICT (key) DO UPDATE` (`science/calc/postgres_store.py:32`) would silently overwrite
-      another calculator's cached row with a different `result`. The fix — deriving the key from
-      `stable_hash` over the four components as a mapping, the way `molecule_hash`/`input_hash`
-      already do — changes every existing row's key, which under D-011 ("never recomputed") is a
-      full-cache invalidation on deploy; that trade needs an ADR and a migration plan, not a quiet
-      change to `as_str`.
-
 ## 2 — Answers that are wrong without saying so
 
 - [ ] **Two `Chemclaw3-mcp` changes this repository's half already landed against** — [S] each,
@@ -453,22 +438,6 @@ it happens.
       raising would take down every existing durable deployment that has not set the value. So it
       needs a warning mechanism that section does not have — and a decision about whether the
       combination is an error at all.
-
-- [ ] **Two credentials cannot be set through the chart at all** — [S], and the half of the
-      settings-secret row that did **not** close with
-      `D-2026-08-26-a-credential-is-a-type-not-a-convention`. `llm_fallback_api_key` and
-      `temporal_api_key` are `SecretStr` fields with readers
-      (`agent/llm_provider.py:251`, `core/temporal_client.py:74`) and no entry under
-      `secrets.keys` or `secrets.optionalKeys` in `deploy/helm/chemclaw/values.yaml`, so
-      `chemclaw.env` renders no `secretKeyRef` and a deployment has no supported way to provide
-      them. The consequence differs per credential and that is what makes it a judgement rather
-      than two identical additions: `llm_fallback_api_key` unset silently reuses the primary's
-      key, which is correct for the common case (a second replica of one deployment) and wrong for
-      a second vendor; `temporal_api_key` is Temporal Cloud only and the chart ships self-hosted
-      with mTLS, so it may be right that it has no key — but nothing says so. Both go under
-      `optionalKeys`, for the upgrade reason `framingEnvelopeSecret` already records.
-      (`hpc_artifact_store_token` was the third and is gone with the tier that read it,
-      `D-2026-08-26-semiempirical-is-the-whole-tier`.)
 
 - [ ] **No session pagination and no per-session delete** — [M], **corrected**. This row claimed a
       data-subject erasure request "has no route across the seven tables". It does:

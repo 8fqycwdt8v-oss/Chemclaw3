@@ -42,24 +42,24 @@ Every fix below either makes the machine enforce the claim or deletes the claim.
 
 ### Enforcement
 
-- [ ] **BS-04 (high)** The control keeping `manifests-internal` (`mount: backend`) out of the
+- [x] **BS-04 (high)** The control keeping `manifests-internal` (`mount: backend`) out of the
       agent-facing connector surface is evidenced by a pasted error transcript in a docstring.
       Assert it: load the real manifest text and prove `ConnectorManifest` refuses it.
-- [ ] **BS-16 (medium)** `make mutants` is excluded from `ci` with no schedule, so the seven
+- [x] **BS-16 (medium)** `make mutants` is excluded from `ci` with no schedule, so the seven
       invariant-bearing modules have no automated mutation backstop. Add a scheduled job.
-- [ ] **BS-08 (low, core half)** Port registry: `bo` sits at 8816, outside the range Chemclaw3-mcp
+- [x] **BS-08 (low, core half)** Port registry: `bo` sits at 8816, outside the range Chemclaw3-mcp
       documents as core's. Make the boundary checkable rather than narrated.
 
 ### Documentation that has outlived its subject
 
-- [ ] **BS-13 (medium)** `values.yaml` calls the unset `framing_envelope_secret` fallback
+- [x] **BS-13 (medium)** `values.yaml` calls the unset `framing_envelope_secret` fallback
       "predictable"; it is `secrets.token_hex(8)` — per-process random. The real failure is silent
       envelope mismatch across restarts and replicas, which is worse than what the comment says.
-- [ ] **BS-11 (low)** BACKLOG row for the `CalculationKey` collision is stale — closed by Field
+- [x] **BS-11 (low)** BACKLOG row for the `CalculationKey` collision is stale — closed by Field
       patterns in #248, a lighter fix than the row proposes. Delete it (repo rule: same commit).
-- [ ] **BS-12 (low)** BACKLOG row for the two unreachable chart credentials is stale — both are in
+- [x] **BS-12 (low)** BACKLOG row for the two unreachable chart credentials is stale — both are in
       `secrets.optionalKeys` now. Delete it.
-- [ ] **BS-10 (low)** `connectors/README.md` uses "chem has only a server" as its example; chem's
+- [x] **BS-10 (low)** `connectors/README.md` uses "chem has only a server" as its example; chem's
       server moved to Chemclaw3-mcp and the bundle now has none.
 
 ---
@@ -177,3 +177,42 @@ unfixed tree first. Two ADRs:
   whose CPU this chart cannot see, and a number invented here would be a guess shaped like a
   statement. Settings live in `temporal.py`, not `calculators.py` — the calculation server reads
   that section's names under the same env prefix.
+
+**Chemclaw3, BS-04/16/08/13/11/12/10 (2026-08-27, claims and their checkability).** Six fixed, one
+premise disputed. One ADR: `D-2026-08-27-a-survivor-is-not-a-failing-build`.
+
+- **BS-04.** The control is real and now has a regression test that fails without it: a literal copy
+  of `manifests-internal/calc/connector.yaml`'s shape is loaded through the *loader*
+  (`registry.discovered`), not just the model, because the loader is what a deployment actually
+  runs, and the assertion is that the error names both the key and the file. Verified by relaxing
+  `ConnectorManifest`'s `extra="forbid"` to `"ignore"` — the test then reports DID NOT RAISE.
+  **The second half of the finding is disputed**: this repository's `CLAUDE.md` contains no pasted
+  error transcript, and neither does anything under `src/`, `docs/` or `tests/`. `grep -rn
+  'manifests-internal\|mount: backend\|Extra inputs are not permitted'` over the tree returns one
+  hit, in an archived audit table about an unrelated `.env` field. The transcript is in the *other*
+  repository's manifest comment, which is another lane's.
+- **BS-16.** The measurement is what shaped this, and it contradicted the obvious design twice. A
+  gate on `no_tests == 0` and `timeout == 0` was written first, from `D-2026-08-08`'s numbers — and
+  over all seven modules this checkout has **34 and 2**, so it would have failed on its first fire.
+  Then the same commit run twice gave 618 and 634 killed of 825 (74.9% / 76.8%): sixteen mutants
+  changed verdict with no edit between the runs, so the survivor set is not reproducible to better
+  than two points and the floor is sized against that spread rather than tucked under the best run.
+  The job is cheap (2m57s warm, 3m45s cold), needs **real Postgres** or it manufactures survivors in
+  two of the seven modules, and files a labelled issue on failure rather than trusting the
+  scheduled-workflow email.
+- **BS-08.** The real range is **8810–8819**: `molfp` 8811, `rxnfp` 8812, `calc` 8815, `bo` 8816,
+  and the `make connectors` composite on 8810. `chem` (8858) and `safety` (8859) are outside it on
+  purpose — their servers are `Chemclaw3-mcp`'s, so their addresses come from the fleet's registry.
+  `tests/test_connector_ports.py` derives the set from the shipped manifests and asserts both
+  directions of the disjointness; verified by moving `bo` to 8880 and `chem` to 8813, which fails
+  one test each.
+- **BS-13.** Both copies of the wrong claim corrected. The unset fallback is `secrets.token_hex(8)`,
+  per process — so the failure is envelopes that stop matching across a restart or between replicas,
+  not a guessable tag, and a durable session's oldest retrieved content is then read as prose.
+- **BS-11.** Deleted. The `Field` patterns from #248 make the flat form a bijection: `calc_type`
+  bars `@` and `:`, both hashes bar `:`, and `calc_version` is deliberately left free of both
+  (`esol-delaney@2004` needs the `@`). `tests/test_store.py` parses the flat form back to prove it.
+  The `stable_hash` rekeying the row proposed was considered and rejected in that commit.
+- **BS-12.** Deleted; both `llmFallbackApiKey` and `temporalApiKey` are under `secrets.optionalKeys`.
+- **BS-10.** `molfp` is the bundle that genuinely has only a server today; `chem` moved to the next
+  paragraph, which is where the "hosted elsewhere" shape already lives.
