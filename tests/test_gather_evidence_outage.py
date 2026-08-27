@@ -14,12 +14,14 @@ failure it can say out loud.
 import asyncio
 import hashlib
 import json
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from chemclaw.agent import research_tools
+from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.ingest.documents.index import InMemoryDocumentIndex
 from chemclaw.ingest.documents.retriever import ShareDocumentRetriever
@@ -30,6 +32,8 @@ from chemclaw.ingest.sources.vendored_dataset import (
 )
 from chemclaw.retrieval.evidence import EvidenceChunk, EvidenceSweep, SourceRetriever
 from chemclaw.retrieval.fanout import sweep_sources
+from chemclaw.retrieval.retrievers import FingerprintReactionRetriever
+from chemclaw.science.fingerprints.store import FingerprintRecord, InMemoryFingerprintStore
 from tests import warehouse_fake
 
 
@@ -41,6 +45,14 @@ class _Dead:
 
     async def retrieve(self, _query: str, _filters: dict[str, object]) -> list[EvidenceChunk]:
         raise ConnectionError(f"{self.name}: connection refused")
+
+
+class _NoMetadata:
+    """A `ReactionMetadata` nothing filters through — the unfiltered path this test exercises."""
+
+    async def eligible(self, reaction_ids: Sequence[str], filters: dict[str, Any]) -> set[str]:
+        """Every id passes; no filter is ever given here."""
+        return set(reaction_ids)
 
 
 class _Live:
@@ -221,4 +233,49 @@ def test_a_vendored_corpus_that_failed_to_load_is_retried_rather_than_remembered
     chunks = asyncio.run(retriever.retrieve("acetone", {}))
     assert [chunk.source_note_id for chunk in chunks] == ["vendored:reagents:0"], (
         "the next query must read the corpus again; a remembered empty is a permanent outage"
+    )
+
+
+def test_a_corrupt_fingerprint_index_is_a_failure_while_a_prose_anchor_is_an_answer() -> None:
+    """The last swallow of the same defect: `FingerprintError` names two unrelated facts.
+
+    `FingerprintReactionRetriever.retrieve` caught the type whole. One half of it is the caller's
+    own input — `gather_evidence` is asked with a prose question and no reaction anchor parses out
+    of it, which is a legitimate "this source has nothing for that query" and must stay `[]`, or
+    every text search would fail a structural leg it never meant to ask. The other half is the
+    index: `cannot compare fingerprints of different widths` says the stored bits and the query's
+    bits were built under different parameters, so this corpus cannot be searched at all. Reported
+    as `[]`, that reads to a chemist as "no similar reaction has ever been run here".
+
+    Both halves are asserted in one test because the fix is the *distinction*: narrowing the catch
+    without keeping the prose case empty would trade one wrong answer for another.
+    """
+    records = _NoMetadata()
+    anchor = "CC(=O)O.OCC>>CC(=O)OCC"
+
+    prose = FingerprintReactionRetriever(InMemoryFingerprintStore(), records)
+    ranked, failed = asyncio.run(
+        sweep_sources([("reaction-fingerprint", prose)], "how do we work up a nitration?", {})
+    )
+    assert [len(chunks) for chunks in ranked] == [0]
+    assert failed == [], (
+        "a query that is not a reaction SMILES is a question this source cannot answer, not an "
+        f"outage; the sweep reported sources_failed={failed}"
+    )
+
+    # A corpus indexed under a different fingerprint width — the real `find_similar` raise, not a
+    # fake: one deployment's index built at 1024 bits, queried by a DRFP built at the configured
+    # width. Nothing about it is a fact about the chemist's question.
+    corrupt = InMemoryFingerprintStore()
+    asyncio.run(
+        corrupt.add(
+            FingerprintRecord(id="rxn-1", label=anchor, bits="1" * (settings.drfp_bits // 2))
+        )
+    )
+    broken = FingerprintReactionRetriever(corrupt, records)
+    ranked, failed = asyncio.run(sweep_sources([("reaction-fingerprint", broken)], anchor, {}))
+    assert [len(chunks) for chunks in ranked] == [0]
+    assert failed == ["reaction-fingerprint"], (
+        "an index that cannot be compared with its own query is an outage; the sweep reported "
+        f"sources_failed={failed}, which `gather_evidence` renders as 'no prior art'"
     )

@@ -27,6 +27,7 @@ import asyncio
 import json
 import logging
 from collections import Counter
+from collections.abc import Sequence
 from pathlib import Path
 
 import httpx
@@ -217,9 +218,11 @@ def _client(base_url: str | None) -> httpx.AsyncClient:
     (`entra_required=false`) never reads the header, and an enforced one 401s every probe without
     it — so an empty token is "this lane is not enforcing identity", not "we forgot".
     """
+    # `.get_secret_value()`, because an f-string does not unwrap a `SecretStr`: formatting the
+    # field itself compiles, runs, and sends `**********` to a front door that answers 401.
     headers = (
-        {"Authorization": f"Bearer {settings.live_probe_token}"}
-        if settings.live_probe_token
+        {"Authorization": f"Bearer {settings.live_probe_token.get_secret_value()}"}
+        if settings.live_probe_token.get_secret_value()
         else {}
     )
     return httpx.AsyncClient(
@@ -388,11 +391,23 @@ async def _main(args: argparse.Namespace) -> int:
         return 0
 
     probes = load_probes(args.probe_dir)
+    loaded = len(probes)
     if args.only:
         wanted = set(args.only.split(","))
         probes = [p for p in probes if p.id in wanted or str(p.section) in wanted]
     if args.limit:
         probes = probes[: args.limit]
+    if not probes:
+        # Zero probes is not a clean run, it is a run that measured nothing — the convention the
+        # M12 suites in this same file already take (`0 if findings and all(...) else 1`). A
+        # renamed probe id would otherwise turn a scripted `--only` invocation into a permanent
+        # green line over an empty set.
+        logger.error(
+            "--only/--limit selected no probes out of %d loaded from %s",
+            loaded,
+            args.probe_dir or settings.live_probe_dir,
+        )
+        return 2
     logger.info(
         "running %d probes against %s", len(probes), args.base_url or settings.live_probe_base_url
     )
@@ -417,7 +432,32 @@ async def _main(args: argparse.Namespace) -> int:
     return 0
 
 
-def main() -> int:
+def _positive(value: str) -> int:
+    """A probe count argparse will not accept as zero or negative.
+
+    `probes[: args.limit]` is the slice this feeds. `--limit 0` selects nothing and `--limit -1`
+    silently drops the *last* probe — neither is a run anyone asked for, and both used to be
+    accepted.
+
+    The third copy of this shape in `cli/`, and copied on purpose: `leak_probe._positive` already
+    argued the case against a shared helper and it holds here too — what the three have in common
+    is `int(value) < 1` and an argparse exception type, which is smaller than the import that would
+    carry it, while the sentences they raise are about a pass size, a turn count and a probe count
+    respectively.
+    """
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be at least 1")
+    return parsed
+
+
+def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    """The probe lane's command line, split out of `main` so it can be exercised without running.
+
+    `main` built this inline and called `parse_args()` with no argument, so a caller could not
+    construct the options this module acts on without starting a probe run against a live front
+    door — which is why the empty-selection defect below had no test.
+    """
     """Parse arguments and run the selected suite."""
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     parser = argparse.ArgumentParser(
@@ -433,7 +473,9 @@ def main() -> int:
     parser.add_argument("--base-url", default=None, help="front door base URL")
     parser.add_argument("--transcript-dir", default=None, help="where transcripts are written")
     parser.add_argument("--only", default=None, help="comma-separated probe ids or section numbers")
-    parser.add_argument("--limit", type=int, default=0, help="run at most N probes")
+    parser.add_argument(
+        "--limit", type=_positive, default=0, help="run at most N probes (at least 1)"
+    )
     parser.add_argument(
         "--no-judge", action="store_true", help="skip grading (mechanical signals only)"
     )
@@ -442,7 +484,12 @@ def main() -> int:
         action="store_true",
         help="re-grade stored transcripts without re-running any probe",
     )
-    return asyncio.run(_main(parser.parse_args()))
+    return parser.parse_args(argv)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """Run the selected suite and return its exit code."""
+    return asyncio.run(_main(_parse_args(argv)))
 
 
 if __name__ == "__main__":

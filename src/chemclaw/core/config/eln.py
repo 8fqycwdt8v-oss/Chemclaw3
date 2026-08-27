@@ -40,6 +40,14 @@ class ElnSettings(BaseSettings):
     # window re-ingest idempotently and do not count against the bound. Sized so a full chunk of
     # per-entry PR-gate pushes fits comfortably inside `eln_sync_timeout_seconds`.
     eln_sync_batch_size: int = Field(default=100, ge=1)
+    # How many chunks one *run* of the drain may take before it hands the rest to a fresh run with
+    # `continue_as_new`. Nothing bounded this, and the ELN sync was the only drain in the package
+    # without it: each chunk emits two activities, measured at 12.2 history events, so a first
+    # backfill reached Temporal's 51,200-event ceiling at ~4,200 chunks — about 420,000 entries at
+    # the batch size above, against a warehouse ELN sized at ~700,000 — and was *terminated*, which
+    # is not a failure and so retries nothing and pushes nothing back. Same default and same
+    # reasoning as `label_sync_max_iterations` and `document_sync_max_iterations`.
+    eln_sync_max_iterations: int = Field(default=100, ge=1)
     # Dead-worker detection for the (long-running) sync activity: it heartbeats while it
     # ingests, so Temporal notices a dead worker within this window instead of waiting out the
     # whole `eln_sync_timeout_seconds` start-to-close before retrying elsewhere.

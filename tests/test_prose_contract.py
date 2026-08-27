@@ -423,3 +423,47 @@ def test_a_retired_metric_a_merged_adr_quotes_has_a_legal_remedy(
 def test_the_non_metric_allowlist_is_small_and_deliberate() -> None:
     """One entry, and it is a namespace collision rather than a pardoned mistake."""
     assert prose._NON_METRIC_NAMES == frozenset({"chemclaw_app"})
+
+
+def test_the_package_readmes_are_in_the_operator_corpus() -> None:
+    """Every `src/chemclaw/*/README.md` is scanned, because a reader navigates by them.
+
+    They were outside every gate until 2026-08-27. Scanning them for the first time found nine
+    unresolvable pointers, including `agent/README.md`'s `workflows/` — a directory that has never
+    existed under that package — beside a sentence advertising "the QM/DFT job" as a live connector
+    bundle three weeks after `D-2026-08-26-semiempirical-is-the-whole-tier` deleted the tier.
+
+    Asserted as a property of the corpus rather than only through `check_operator_prose() == []`,
+    so narrowing the corpus fails here instead of quietly passing the rule that reads it.
+    """
+    sources = prose._operator_sources()
+    readmes = sorted(
+        str(path.relative_to(prose._ROOT))
+        for path in (prose._ROOT / "src" / "chemclaw").rglob("README.md")
+    )
+    assert len(readmes) > 10, "no package READMEs found; the layout or the glob moved"
+    assert set(readmes) <= set(sources), sorted(set(readmes) - set(sources))
+
+
+def test_the_prose_gate_refuses_a_corpus_it_could_not_assemble(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Rules 5-9 filter out paths that do not exist, so a wrong `_ROOT` checks nothing and passes.
+
+    Every corpus here is built by dropping entries whose file is absent (`if path.is_file()`), so
+    an installed wheel, a vendored copy or a relocated package yields an empty corpus, zero ADR
+    stems, and a green line reading "every named tool, note type, path, ADR id, config key and
+    metric resolves" — over zero documents. The same silence applies one document at a time:
+    renaming `SECURITY.md` simply stops it being checked. This module's own docstring warns against
+    exactly that shape.
+
+    The refusal names the missing documents rather than only the empty set, because losing one of
+    `_OPERATOR_DOCS` is the realistic case and an aggregate count would not show it.
+    """
+    import chemclaw.cli.validate_prose_contract as module
+
+    monkeypatch.setattr(module, "_ROOT", tmp_path)
+    problems = module.check_corpus_is_assembled()
+    assert problems, "a corpus of zero documents reported nothing wrong"
+    assert any("README.md" in problem for problem in problems), problems
+    assert any("docs/decisions" in problem for problem in problems), problems

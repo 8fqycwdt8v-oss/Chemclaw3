@@ -737,8 +737,9 @@ def test_the_dev_runner_mints_a_credential_only_where_both_ends_are_ours(
     for env_var in bearer_token_envs().values():
         monkeypatch.delenv(env_var, raising=False)
 
-    minted = ensure_dev_tokens()
+    minted, preexisting = ensure_dev_tokens()
 
+    assert preexisting == frozenset()  # every one was unset above, so every one was minted
     assert set(minted) == set(bearer_token_envs().values())
     assert "CHEMCLAW_CHEM_TOKEN" not in minted
     assert "CHEMCLAW_SAFETY_TOKEN" not in minted
@@ -760,8 +761,9 @@ def test_an_operator_supplied_credential_is_kept_and_shell_quoted(
     env_var = bearer_token_envs()["molfp"]
     monkeypatch.setenv(env_var, "it's a token; echo pwned")
 
-    minted = ensure_dev_tokens()
+    minted, preexisting = ensure_dev_tokens()
     assert minted[env_var] == "it's a token; echo pwned"
+    assert env_var in preexisting
 
     line = next(line for line in _export_lines({}, minted) if line.startswith(f"export {env_var}="))
     # Round-trip through the shell's own parser rather than asserting on the escaping: what matters
@@ -793,3 +795,37 @@ def test_the_callers_entitlements_are_not_sent_to_a_connector() -> None:
     assert not [name for name in headers if "role" in name.lower()], (
         f"a connector request carries the caller's entitlements again: {sorted(headers)}"
     )
+
+
+def test_the_dev_banner_does_not_echo_a_credential_the_operator_already_exported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`--export-env` prints credentials because a caller `eval`s it. The banner is not that.
+
+    `ensure_dev_tokens` did not distinguish a token it minted from one already in the environment,
+    and the *serving* path printed the same lines as a human-readable banner — so a real
+    `CHEMCLAW_*_MCP_TOKEN` an operator had exported for a staging connector was echoed verbatim to
+    stdout, which in any wrapped or CI invocation is a log. A minted dev token is worth printing:
+    it is random, ephemeral, and the point of printing it is that a second process needs it. A
+    credential the operator already holds is one they do not need told back to them.
+    """
+    from chemclaw.cli.connectors_dev import _export_lines, bearer_token_envs, ensure_dev_tokens
+
+    envs = sorted(set(bearer_token_envs().values()))
+    assert envs, "no local bundle declares a bearer credential; this test would prove nothing"
+    supplied, *rest = envs
+    monkeypatch.setenv(supplied, "SUPER-SECRET-PROD-TOKEN")
+    for env_var in rest:
+        monkeypatch.delenv(env_var, raising=False)
+
+    tokens, preexisting = ensure_dev_tokens()
+    assert preexisting == frozenset({supplied})
+
+    banner = "\n".join(_export_lines({}, tokens, preexisting=preexisting))
+    assert "SUPER-SECRET-PROD-TOKEN" not in banner, banner
+    assert supplied in banner  # the operator still learns which variable is in play
+    # `--export-env` is `eval`ed by a caller that needs the real value, so it still carries it.
+    exported = "\n".join(_export_lines({}, tokens))
+    assert "SUPER-SECRET-PROD-TOKEN" in exported
+    for env_var in rest:  # a minted token is printed either way
+        assert tokens[env_var] in banner

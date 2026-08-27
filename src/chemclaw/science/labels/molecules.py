@@ -13,6 +13,7 @@ ELN corpus by four orders of magnitude and hand `similar_molecules` millions of 
 `compound_note_id` resolves to nothing.
 """
 
+import asyncio
 import logging
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
@@ -24,8 +25,13 @@ from chemclaw.core import db
 from chemclaw.core.chem import InvalidSmilesError
 from chemclaw.core.config import settings
 from chemclaw.science.fingerprints.molfp.fingerprint import ecfp_bitstring, molecule_definition
-from chemclaw.science.fingerprints.store import PostgresFingerprintStore
-from chemclaw.science.labels.pattern import contains, pattern_bit_indices, query_bit_indices
+from chemclaw.science.fingerprints.store import FingerprintError, PostgresFingerprintStore
+from chemclaw.science.labels.pattern import (
+    compile_query,
+    matching,
+    pattern_bit_indices,
+    query_bit_indices,
+)
 
 log = logging.getLogger(__name__)
 
@@ -116,11 +122,31 @@ class CorpusMolecules:
         """Structures that genuinely contain `smarts`, and whether the screen was truncated.
 
         Screen then verify: the GIN containment test admits every true hit and some false ones, and
-        `pattern.contains` decides. Truncation is reported rather than logged, because a caller that
+        `pattern.matching` decides. Truncation is reported rather than logged, because a caller that
         cannot tell a complete negative from a capped one will report "no precedent exists" for a
         corpus whose one match it never looked at.
+
+        **The verify runs off the event loop, under a wall-clock bound, over a bounded query** —
+        the three protections `molfp.find_substructure_matches` has always applied to the other
+        substructure surface and this one applied none of. It matters more here, not less: `smarts`
+        arrives from the model through `reactions_making_substructure`, a query that sets no pattern
+        bits takes the `_ALL` branch so the screen narrows nothing, and the cap is
+        `substructure_scan_max_records` rows. Measured on 300 rows before this, the in-line
+        comprehension froze the pod's one event loop for 465 ms — every other session's SSE stream,
+        every in-flight turn and every bearer-token validation with it.
+
+        Honest limit, the same one the sibling path states: the timeout releases the loop and the
+        caller, it cannot kill the RDKit thread, which holds one worker slot until the pattern
+        completes. That slot comes from the loop's *default* executor, which is also where
+        `api.auth` validates every bearer token — so this offload wants the bounded scan pool the
+        molfp path is growing, not a fourth unbounded `to_thread`.
+
+        Raises:
+            FingerprintError: The query is longer than `substructure_query_max_length`, is not
+                parseable SMARTS, or its verify outran `substructure_match_timeout_seconds`.
         """
-        bits = query_bit_indices(smarts)
+        query = compile_query(smarts)
+        bits = query_bit_indices(query)
         sql, params = (
             (self._SCREEN, {"bits": bits, "limit": limit})
             if bits
@@ -136,4 +162,15 @@ class CorpusMolecules:
                 smarts,
                 len(candidates),
             )
-        return [c for c in candidates if contains(c, smarts)], len(candidates) == limit
+        timeout = settings.substructure_match_timeout_seconds
+        try:
+            verified = await asyncio.wait_for(
+                asyncio.to_thread(matching, candidates, query), timeout=timeout
+            )
+        except TimeoutError as exc:
+            raise FingerprintError(
+                f"substructure verify for {smarts!r} exceeded {timeout}s over "
+                f"{len(candidates)} molecule(s); narrow the pattern "
+                "(or raise CHEMCLAW_SUBSTRUCTURE_MATCH_TIMEOUT_SECONDS)"
+            ) from exc
+        return verified, len(candidates) == limit

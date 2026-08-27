@@ -32,6 +32,8 @@ This is the `make skill-validate` gate: it exits non-zero listing the problems, 
 drift like `kg-validate` catches note drift. Read-only; touches nothing.
 """
 
+import argparse
+from collections.abc import Sequence
 from pathlib import Path
 
 import frontmatter
@@ -194,8 +196,21 @@ def _role_gate_problems(found_names: set[str]) -> list[str]:
     ]
 
 
-def main() -> int:
-    """Validate every skill; print problems and exit non-zero if any (the CI gate)."""
+def main(argv: Sequence[str] | None = None) -> int:
+    """Validate every skill; print problems and exit non-zero if any (the CI gate).
+
+    Parses even though it declares no option, because *not* parsing is not neutral: this
+    accepted a directory on the command line, ignored it, and printed the green line about
+    the configured corpus instead — the exact shape of failure the gate exists to prevent,
+    inside the gate. `CHEMCLAW_SKILLS_DIR` is the knob, and it is a `PATH`-style list, so
+    it stays the only spelling; argparse turns the wrong one into a refusal and gives an
+    operator `--help` for free.
+    """
+    argparse.ArgumentParser(
+        prog="python -m chemclaw.cli.validate_skills",
+        description="Validate every discovered SKILL.md. Set CHEMCLAW_SKILLS_DIR "
+        "(a PATH-style list) to point this at another tree.",
+    ).parse_args(argv)
     # The same dirs `build_langgraph_agent` discovers from: the configured tree plus every enabled
     # connector bundle's own `skills/`, so a bundled skill is validated exactly like a shipped one.
     problems = validate_skills([*settings.skills_dirs, *connector_skills_dirs()])

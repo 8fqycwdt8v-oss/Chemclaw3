@@ -1,7 +1,8 @@
 """Validate the result-sink manifests — `make sink-validate`.
 
-Four checks pydantic cannot make from a manifest alone, each guarding a declaration against the
-live surface:
+Three checks pydantic cannot make from a manifest alone, each guarding a declaration against the
+live surface. Rule 1 is a property of the enabled set; rules 2 and 3 run over every **discovered**
+manifest, because a sink that is broken while disabled is a sink nobody can enable:
 
 1. an **enabled** sink that no manifest declares — a deployment believing it publishes and not
    doing so is indistinguishable from one with nothing to publish, which is the whole failure this
@@ -92,12 +93,25 @@ def _driver_problems(manifest: ResultSinkManifest) -> list[str]:
 
 
 def problems() -> list[str]:
-    """Every finding across every discovered sink."""
+    """Every finding across every **discovered** sink, plus rule 1 over the enabled set.
+
+    Discovery, not enablement — the convention both sibling seams already state and this one did
+    not follow. `CHEMCLAW_RESULT_SINKS` is empty by default and empty in CI, and iterating it meant
+    rules 2 and 3 resolved zero drivers, bound zero config blocks and checked zero `*_env` names on
+    the shipped configuration: a gate that could only fail on rule 1, which by construction was
+    empty too. A rename in `publish/drivers/sql.py` would have stayed green through every release
+    and failed on the first deployment to enable publishing — in a worker, against a database a DBA
+    had already provisioned. `validate_connectors` and `validate_datasources` both give the reason
+    in the same words: a sink that is broken while disabled is a sink nobody can enable, and CI is
+    where that should surface rather than the day an operator turns it on.
+
+    Rule 1 stays a property of the enabled *set* rather than of any one manifest, which is why it
+    is computed separately and not folded into the loop.
+    """
     manifests = discovered()
     found = _enabled_problems(manifests)
-    for name in settings.result_sink_list:
-        if name in manifests:
-            found.extend(_driver_problems(manifests[name]))
+    for manifest in manifests.values():
+        found.extend(_driver_problems(manifest))
     return found
 
 

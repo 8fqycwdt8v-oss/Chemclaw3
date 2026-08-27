@@ -745,3 +745,45 @@ def test_the_refusal_lands_in_the_non_retryable_hierarchy() -> None:
     """What `durable/publish.py` actually matches on, asserted rather than assumed."""
     assert issubclass(CalcToolError, ChemclawError)
     assert not issubclass(CalcToolError, SubsystemUnavailableError)
+
+
+def test_the_two_epochs_compose_rather_than_having_to_match(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two constants named `CALCULATION_EPOCH`, one address, and no equality between them.
+
+    `Chemclaw3-mcp`'s `servers/calc` folds *its* epoch into the `params_hash` it returns, and
+    `remote_key` folds *this* one in on top. That composition is the whole relationship: the stored
+    address moves when either side bumps, and neither side can see the other's value — so requiring
+    them to be equal is a coupling the code does not have, and one that would fail on a legitimate
+    one-sided bump.
+
+    Asserted rather than argued, because the two numbers *look* like they must match and a reader
+    who assumes it will "fix" one of them. Both halves are checked here: this side's bump changes
+    the key while the server's answer is byte-identical, and the server's own digest survives
+    verbatim inside the composed one, which is what makes its bump reach the key too.
+    """
+    fake = _FakeSession(_KEY, {})
+    _session(monkeypatch, fake)
+
+    async def _key_now() -> str:
+        from chemclaw.connectors.calc.remote import calc_session
+
+        async with calc_session() as session:
+            keyed = await remote_key(session, "predict_solubility", {"smiles": "c1ccccc1"})
+        assert keyed is not None
+        return keyed.key.params_hash
+
+    served = _KEY["params_hash"]
+    at_epoch = asyncio.run(_key_now())
+    monkeypatch.setattr("chemclaw.connectors.calc.remote.CALCULATION_EPOCH", "an-unmerged-bump")
+    bumped = asyncio.run(_key_now())
+
+    # This side alone moved, and the address moved with it: the server answered both round trips
+    # from the same `_KEY`, so nothing about its own epoch changed between them.
+    assert fake.key_calls == 2
+    assert bumped != at_epoch
+    # ...and the server's own digest is carried whole, so its epoch reaches the address too: it is
+    # already inside `served`, and `served` is inside both keys above.
+    assert at_epoch == stable_hash({"epoch": CALCULATION_EPOCH, "remote_params": served})
+    assert bumped == stable_hash({"epoch": "an-unmerged-bump", "remote_params": served})

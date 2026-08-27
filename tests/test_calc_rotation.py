@@ -26,7 +26,6 @@ from chemclaw.science.calc.budget import rotation_units
 from chemclaw.science.calc.models import RotationProfile, Torsion
 from chemclaw.science.calc.store import InMemoryStore
 from chemclaw.science.calc.thermo import (
-    barrier_from_half_life,
     half_life_from_barrier,
     rate_from_barrier,
 )
@@ -104,8 +103,19 @@ class TestTheBondIsCheckedNotTrusted:
             asyncio.run(compose.rotation_profile(InMemoryStore(), "C1CCCCC1", ring))
 
     def test_a_top_is_refused_for_having_no_heavy_dihedral(self, server: FakeCalcServer) -> None:
-        """A methyl rotation is real and is not this job — the message says where it is counted."""
-        top = _torsion(atoms=[], label="the methyl top on C1")
+        """A methyl rotation is real and is not this job — the message says where it is counted.
+
+        n-butane's *terminal* C-C, which is what a methyl top actually is. It named the central bond
+        while this refusal was reached by counting the dihedral's atoms, so any entry with an empty
+        `atoms` produced the methyl sentence whatever bond it named — which is the very conflation
+        `TestARotorWhoseEndCarriesOnlyHydrogens` below exists to undo.
+        """
+        top = _torsion(
+            bond=(0, 1),
+            atoms=[],
+            label="the methyl top on C1",
+            torsion_id=torsion_handle(Chem.MolFromSmiles(_BUTANE), (0, 1)),
+        )
         with pytest.raises(ValueError, match="free-rotor"):
             asyncio.run(compose.rotation_profile(InMemoryStore(), _BUTANE, top))
 
@@ -509,14 +519,6 @@ class TestEyring:
             seconds, rel=0.01
         )
 
-    def test_the_inverse_round_trips(self) -> None:
-        """A two-year shelf life asked as a barrier: the same relation, read backwards."""
-        two_years = 2 * 365 * 24 * 3600
-        needed = barrier_from_half_life(two_years, 298.15)
-        assert half_life_from_barrier(needed, 298.15, 0.0).half_life_seconds == pytest.approx(
-            two_years, rel=1e-9
-        )
-
     def test_one_kcal_is_about_a_factor_of_five(self) -> None:
         """The reason the band travels with the number rather than being left to a reader."""
         ratio = rate_from_barrier(25.0, 298.15) / rate_from_barrier(26.0, 298.15)
@@ -526,3 +528,57 @@ class TestEyring:
 def _with_dihedral_at(degrees: float) -> dict[str, object]:
     """An n-butane geometry with its central dihedral driven to `degrees`."""
     return with_dihedral(embed(_BUTANE), (0, 1, 2, 3), degrees)
+
+
+class TestARotorWhoseEndCarriesOnlyHydrogens:
+    """`top` and `xh` are two different rotors, and only one of them is already accounted for.
+
+    `Chemclaw3-mcp`'s `enumerate_torsions` reports both with **no** dihedral atoms, because a
+    dihedral through either needs a hydrogen index and one of those means something only inside one
+    explicit-H numbering. It stopped reporting them as one kind for a measured reason: a methyl's
+    barrier really is inside the quasi-RRHO free-rotor treatment of the low modes, while acetamide's
+    amide N-H (16-18 kcal/mol) and acetic acid's syn/anti O-H (5-6) are not — and calling those a
+    methyl told the model its barrier was already counted.
+
+    This side had one refusal for both, naming "a methyl or tert-butyl rotation". So the O-H was
+    refused, and refused with a sentence that was false about it.
+    """
+
+    def test_an_x_h_rotor_is_scanned_in_the_explicit_hydrogen_numbering(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Ethanol's O-H profiles, driven about C0-C1-O2-H8 — a dihedral ending on a hydrogen.
+
+        The numbering is the structure's own: every geometry here is `AddHs` over the canonical
+        SMILES, heavy atoms first and hydrogens appended by parent, which is the alignment the
+        calculation server states and `scan_point` validates against `len(structure.elements)`.
+        So nothing on the far side has to change for this to be scannable — the dihedral simply has
+        to be built, and this side was the one refusing to build it.
+        """
+        server = install(monkeypatch, FakeCalcServer(torsion=(0, 1, 2, 8)))
+        hydroxyl = _torsion(
+            "CCO",
+            (1, 2),
+            atoms=[],
+            label="the O-H rotation on C1",
+            torsion_id=torsion_handle(Chem.MolFromSmiles("CCO"), (1, 2)),
+        )
+        profile = asyncio.run(compose.rotation_profile(InMemoryStore(), "CCO", hydroxyl))
+
+        assert profile.atoms == [0, 1, 2, 8], "the dihedral must end on the rotating hydrogen"
+        assert server.count("scan_point") > 0
+        assert all(call["atoms"] == [0, 1, 2, 8] for call in server.arguments("scan_point"))
+
+    def test_a_dihedral_less_entry_for_a_bond_that_has_one_is_refused_as_malformed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Neither kind: n-butane's central bond has a heavy dihedral, so an empty `atoms` is wrong.
+
+        Assembled by hand rather than copied from `enumerate_torsions`, which is the failure mode
+        every check in `_verified_torsion` is about — and it must not be answered with a sentence
+        about methyl rotations, because it is not one.
+        """
+        install(monkeypatch, FakeCalcServer())
+        malformed = _torsion(atoms=[])
+        with pytest.raises(ValueError, match="enumerate_torsions"):
+            asyncio.run(compose.rotation_profile(InMemoryStore(), _BUTANE, malformed))

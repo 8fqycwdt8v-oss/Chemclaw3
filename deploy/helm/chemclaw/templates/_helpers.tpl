@@ -185,8 +185,12 @@ livenessProbe:
        propagate and the Postgres pool to close, so the two cannot disagree — the failure being
        avoided is a setting that looks configured and is overridden by a kubelet timer nobody
        thought to move. */ -}}
+{{- /* `required` for the same reason `deployment-connectors.yaml`'s `replicas` carries one: `int
+       nil` is `0`, so an absent key does not fail here — it renders a 30 s grace period against a
+       120 s drain, which is the very SIGKILL this helper exists to prevent, wearing a number that
+       looks deliberate. A derived value has to refuse when what it derives from is gone. */ -}}
 {{- define "chemclaw.workerGracePeriod" -}}
-terminationGracePeriodSeconds: {{ add (int .Values.config.CHEMCLAW_WORKER_GRACEFUL_SHUTDOWN_SECONDS) 30 }}
+terminationGracePeriodSeconds: {{ add (int (required "config.CHEMCLAW_WORKER_GRACEFUL_SHUTDOWN_SECONDS must be set: the worker terminationGracePeriodSeconds is derived from it" .Values.config.CHEMCLAW_WORKER_GRACEFUL_SHUTDOWN_SECONDS)) 30 }}
 {{- end -}}
 
 {{- /* Spread a multi-replica workload across nodes.
@@ -258,8 +262,12 @@ checksum/config: {{ include (print $.Template.BasePath "/config.yaml") . | sha25
        that only has to *agree* with another path eventually does not, so this one is derived rather
        than declared, and `tests/test_helm_chart.py` asserts the render equals what `Settings`
        resolves. */ -}}
+{{- /* `required`, because the paragraph above is only true while both halves are present: an
+       absent `CHEMCLAW_KNOWLEDGE_DIR` renders `<noteRepoPath>/` and re-creates the identical
+       silent failure — the sync fills a directory nothing reads, `rglob` yields nothing and raises
+       nothing, and the agent answers with zero knowledge-graph evidence. */ -}}
 {{- define "chemclaw.knowledgePublishPath" -}}
-{{ .Values.knowledge.noteRepoPath }}/{{ .Values.config.CHEMCLAW_KNOWLEDGE_DIR }}
+{{ .Values.knowledge.noteRepoPath }}/{{ required "config.CHEMCLAW_KNOWLEDGE_DIR must be set: the knowledge publish path is derived from it, and an absent one publishes where no reader looks" .Values.config.CHEMCLAW_KNOWLEDGE_DIR }}
 {{- end -}}
 
 {{- /* Env the knowledge-sync init container and sidecar both need (DRY — they must agree). */ -}}
@@ -496,8 +504,15 @@ readOnlyRootFilesystem: {{ .Values.securityContext.readOnlyRootFilesystem }}
 {{- range $name, $cfg := .Values.connectors -}}
 {{- if $cfg.enabled -}}{{- $names = append $names $name -}}{{- end -}}
 {{- end -}}
-{{- if and .Values.connectors (not $names) -}}
-{{- fail "connectors: every bundle is disabled. CHEMCLAW_CONNECTORS_ENABLED cannot say \"none\" — empty means every bundle the image ships — so enable at least one, or remove the connectors block entirely if this release is meant to run without them." -}}
+{{- /* **Not conditioned on `.Values.connectors` being present**, and that was the whole defect:
+       the message used to offer "remove the connectors block entirely" as the connector-less
+       release's remedy, and taking it skipped this guard — rendering the empty string, which the
+       reader takes as *every* bundle, plus `CHEMCLAW_CONNECTOR_URLS: "{}"` so each one fell back
+       to its manifest's loopback dev address. That is the "pods gone, tools advertised" regression
+       this helper exists to close, reached through the door its own error message opened. There is
+       no way to say "no connectors" here because `Settings` has no way to hear it. */ -}}
+{{- if not $names -}}
+{{- fail "connectors: this release enables no bundle. CHEMCLAW_CONNECTORS_ENABLED cannot say \"none\" — the empty string means every bundle the image ships — so at least one bundle must have `enabled: true`. Removing the `connectors` block does not state a connector-less release either: it renders that same empty string, and every bundle then falls back to its manifest's loopback dev address." -}}
 {{- end -}}
 {{- join ":" $names -}}
 {{- end -}}

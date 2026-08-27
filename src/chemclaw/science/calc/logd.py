@@ -213,6 +213,14 @@ def logd_from_pka(pka_result: PkaResult, ph: float | None = None) -> LogdResult:
     Raises `CalculationDomainError` where a *single* Henderson-Hasselbalch term cannot describe the
     molecule at this pH (see `_require_a_single_equilibrium`). Never a guessed logD (gate G4).
 
+    **The reported uncertainty changed in both directions**
+    (`D-2026-08-27-a-free-energy-without-its-standard-state-is-not-a-quantity`): it is
+    now Crippen's reported RMSE combined in quadrature with the pKa residual scaled by the ionised
+    fraction, where it used to be the pKa residual alone. A barely-ionised base gets a *smaller*
+    bar (pyridine at pH 7.4: 0.680 against the 1.4 it used to publish, of which the pKa really
+    contributes 0.0094), and a fully ionised acid gets a *larger* one (benzoic acid at pH 7.4:
+    1.635 against 1.6, since both terms are then real).
+
     Synchronous and sub-millisecond: the SCF is already paid for by the time this is called, and
     both RDKit calls here are descriptor work on a molecule that has already been proven parseable.
     """
@@ -234,11 +242,21 @@ def logd_from_pka(pka_result: PkaResult, ph: float | None = None) -> LogdResult:
     # computed once so the number that is refused on is the number that would have been used.
     ionised_ratio = 10.0**exponent
     _require_a_single_equilibrium(pka_result, ph, ionised_ratio)
+    # **The error bar is a propagation, not a copy.** `logD = clogP - log10(1 + 10**(±(pH - pKa)))`,
+    # so `dlogD/dclogP` is 1 and `dlogD/dpKa` is the *ionised fraction* — between 0 and 1, and near
+    # zero for most of what this composition may serve, since `_require_a_single_equilibrium`
+    # refuses a polyprotic molecule above `logd_negligible_ionised_fraction`. Reporting the pKa's
+    # residual unscaled published +/-1.4 for pyridine at pH 7.4, of which the pKa contributes
+    # 0.0094, while omitting Crippen's ~0.68 — the term that actually dominates there. The two are
+    # independent, so they combine in quadrature.
+    ionised_fraction = ionised_ratio / (1.0 + ionised_ratio)
     return LogdResult(
         smiles=pka_result.smiles,
         ph=ph,
         clogp=clogp,
         pka=pka_result.pka,
         log_d=clogp - math.log10(1.0 + ionised_ratio),
-        uncertainty=pka_result.uncertainty,
+        uncertainty=math.hypot(
+            settings.crippen_logp_uncertainty, ionised_fraction * pka_result.uncertainty
+        ),
     )

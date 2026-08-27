@@ -89,6 +89,11 @@ spec:
           port: {{ .Values.networkPolicy.egressPorts.safety }}
         - protocol: TCP
           port: {{ .Values.networkPolicy.egressPorts.calc }}
+        {{- /* And the reaction labeller, which the `reaction-labels` Schedule dials from the
+               background worker whenever a data source provides reactions. Same rule, same trap:
+               a port entry that is never emitted here permits nothing. */}}
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.egressPorts.rxnlabel }}
 ---
 {{- /* The front door's own ingress, which did not exist. `policyTypes` listed only `Egress`, so any
        pod in any namespace could open a connection to `chemclaw-service:8080`. This is the rule

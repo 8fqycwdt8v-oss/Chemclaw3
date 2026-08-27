@@ -23,13 +23,12 @@ forgotten.
 
 The second half of this module (R3.2) is the resource-level gates the routes in
 `chemclaw/api/routes/` resolve before touching anything: session ownership (`CurrentSession`,
-which also rehydrates a durable session after a restart), approval-hold ownership, proposal
-visibility, and the reviewer check. The first two share one refusal — `_refuse_unless_owner`, the
-"same 404 for unknown and not-yours" rule — because they authorize the same way
-(`_owner_authorizes` against a stored owner). Proposal visibility deliberately does **not**: a
-reviewer may see *any* proposal, a privilege sessions and holds have no analogue for, and its
-dev-mode opening comes from `_is_reviewer` rather than `_owner_authorizes` — see
-`_visible_proposal` before you are tempted to unify it.
+which also rehydrates a durable session after a restart), proposal visibility, and the reviewer
+check. Both session paths share one refusal — `_refuse_unless_owner`, the "same 404 for unknown
+and not-yours" rule — because they authorize the same way (`_owner_authorizes` against a stored
+owner). Proposal visibility deliberately does **not**: a reviewer may see *any* proposal, a
+privilege a session has no analogue for, and its dev-mode opening comes from `_is_reviewer` rather
+than `_owner_authorizes` — see `_visible_proposal` before you are tempted to unify it.
 """
 
 from typing import Annotated
@@ -49,7 +48,7 @@ CurrentUser = Annotated[Principal, Depends(require_principal)]
 
 
 def _owner_authorizes(owner: str | None, principal: Principal) -> bool:
-    """Whether a stored owner (session, approval hold, ...) lets `principal` reach the row.
+    """Whether a stored owner (a session's, today) lets `principal` reach the row.
 
     Mirrors `_is_reviewer`'s dev/enforced split, applied to ownership rather than role: in dev
     (`entra_required` off) there is no real actor, so an owner-less row degrades open, exactly as
@@ -57,8 +56,8 @@ def _owner_authorizes(owner: str | None, principal: Principal) -> bool:
     longer "everyone's" — `entra_required` never mints a new owner-less row, so a `None`/empty
     owner surviving into enforcement is a leftover from a dev-mode write, and treating it as
     "anyone's" would let it be read, resumed or decided by every authenticated principal instead
-    of nobody. `owner` is falsy for both `None` (sessions) and `""` (the empty-string sentinel a
-    Temporal query returns for an approval hold's owner), so one check covers both call shapes.
+    of nobody. `owner` is falsy for both `None` and `""`, so a row written without one and a row
+    whose owner column holds the empty-string sentinel are refused the same way.
     """
     if not owner:
         return not settings.entra_required
@@ -68,8 +67,8 @@ def _owner_authorizes(owner: str | None, principal: Principal) -> bool:
 def _refuse_unless_owner(owner: str | None, principal: Principal, detail: str) -> None:
     """404 unless the stored owner authorizes `principal` — the shared no-existence-leak gate (S3).
 
-    One helper for exactly the two gates whose rule is identical (`_owner_authorizes` over a
-    stored owner): session resolution and approval-hold ownership. An unknown row and someone
+    One helper for the two session-resolution paths, whose rule is identical (`_owner_authorizes`
+    over a stored owner): the live entry and the rehydrated durable row. An unknown row and someone
     else's row are indistinguishable from outside, which is the entire point — a 403 would
     confirm the id exists. `detail` stays the resource's own wording so the split changed no
     response body.
@@ -159,34 +158,12 @@ async def resolve_session(request: Request, session_id: str, principal: CurrentU
 CurrentSession = Annotated[LiveSession, Depends(resolve_session)]
 
 
-async def owned_approval(approval_id: str, principal: CurrentUser) -> None:
-    """Authorize the caller against a hold's owner, or 404 (no existence leak either way).
-
-    Mirrors `resolve_session`: an unknown hold and someone else's hold are indistinguishable
-    from outside. The dev path (`entra_required` off) has no real actor, so an unowned hold
-    stays answerable — matching how every other route degrades in dev; under enforcement an
-    unowned hold is nobody's (`_owner_authorizes`), not everyone's.
-    """
-    # Read through the front-door module at call time, not imported here: the suite patches this
-    # collaborator on `chemclaw.api.app` (`monkeypatch.setattr("chemclaw.api.app.approval_owner",
-    # …)`), and that seam must keep working wherever the gate lives. Imported lazily to keep this
-    # module free of the app module at import time (the routes already import `app`, and a
-    # module-level import here would close a cycle whose resolution depends on import order).
-    from chemclaw.api import app as front_door
-
-    try:
-        owner = await front_door.approval_owner(approval_id)
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail="no such approval hold") from exc
-    _refuse_unless_owner(owner, principal, "no such approval hold")
-
-
 async def _visible_proposal(proposal_id: int, principal: Principal) -> NoteProposal:
-    """One proposal the caller may see, or 404 — no existence leak, as with sessions/holds.
+    """One proposal the caller may see, or 404 — no existence leak, as with a session.
 
-    **Deliberately not `_refuse_unless_owner`**, though it looks like the third copy of that
+    **Deliberately not `_refuse_unless_owner`**, though it looks like another copy of that
     gate. The rule here is different in both halves: a reviewer may see *any* proposal — a
-    privilege sessions and approval holds have no analogue for — and the dev-mode opening comes
+    privilege a session has no analogue for — and the dev-mode opening comes
     from `_is_reviewer` (role check), not from `_owner_authorizes` (owner check). Folding it into
     the shared helper would either grant reviewers session access or lose them proposal access.
     """

@@ -71,6 +71,13 @@ if [ "$CHEMCLAW_ENTRA_REQUIRED" = "true" ]; then
   # in this lane", it means every expensive job and every write tool is refused and the probe run
   # measures a permissions error instead of the system.
   export CHEMCLAW_ENTRA_PRIVILEGED_ROLES="${CHEMCLAW_ENTRA_PRIVILEGED_ROLES:-process-chemist}"
+  # `Settings` refuses `entra_required=true` while `harness_autonomy` still says `plan_only` and
+  # `harness_enabled` is off: the approval-first posture would be named in one setting and attached
+  # by neither. This lane is deliberately unsupervised — a probe run has no human to approve a plan
+  # — so it states that, which is what the setting is for. With the harness off the value changes
+  # no behaviour; it is the statement the refusal asks for, and it stays overridable so the lane can
+  # also run the chart's own posture (`CHEMCLAW_HARNESS_ENABLED=true`).
+  export CHEMCLAW_HARNESS_AUTONOMY="${CHEMCLAW_HARNESS_AUTONOMY:-execute}"
 fi
 
 # Mint the identity the probe runner presents, from the issuer the front door is validating

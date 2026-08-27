@@ -29,8 +29,20 @@ async def list_jobs(
     **Not owner-scoped**, and that is the deployment's existing position rather than an
     oversight: `find_past_jobs` — the agent tool over this same table — is unscoped for the
     cross-project learning D-004/KM-9 argues for, and a read that the agent can make on a
-    chemist's behalf is not one to withhold from the chemist. `requested_by` is on every row, so
-    a surface can filter by it; nothing here pretends the row is private.
+    chemist's behalf is not one to withhold from the chemist.
+
+    **And `requested_by` could not be the scope even if the policy changed**, which is the part
+    this docstring used to leave to the reader. `job_workflow_id` hashes `[connector, job, payload]`
+    and deliberately excludes the requester (D-011 — never compute twice), so two chemists asking
+    for the same calculation join one run and one row; `job_record_store`'s upsert then sets
+    `requested_by = EXCLUDED.requested_by` so the row does not contradict itself. The column names
+    who last asked, not an owner, and filtering on it would withhold a run's answer from a chemist
+    who requested that very run. `cancel_durable_job` below makes the same argument out loud.
+
+    The exposure this leaves — a `rationale` is free prose naming a programme, a compound code and
+    a reason, readable by every authenticated principal — is stated in `SECURITY.md` under
+    "Accepted exposures", because an accepted data-exposure decision belongs where a reviewer looks
+    for one rather than only in an API-design comment.
     """
     return await front_door.search_job_records(text=text, connector=connector)
 

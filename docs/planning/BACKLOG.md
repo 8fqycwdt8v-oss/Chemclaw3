@@ -12,16 +12,19 @@ had and D-154 fixed there with this one rule.
 **Rows are grouped by what they ask for, not by which review produced them.** A finding's date and
 its reviewing pass are provenance, and provenance belongs in
 [`docs/archive/findings-2026-08.md`](../archive/findings-2026-08.md) — the long-form record of every
-row this queue has ever carried. 223 of its rows are open
-(`grep -c '^- \[ \]' docs/archive/findings-2026-08.md`; the header here said "~185" until
-2026-08-17). That is not "223 *further*" and the two counts do not subtract: promoting a row
-**restates** it, so a queued row is still open there under its original wording, and matching the
-two sets by title matched only 7 of the 30 rows this queue held when that was measured; it holds 41
-now, after the 2026-08-26 sweep closed seven, deleted an eighth that `#221` had already closed
-without removing it, and queued two. §5 is the first thing here that is not a defect this repository
-found in itself, and none of its rows is in the archive at all. The overlap is real and unmeasurable
-by `grep`, which is why the number here is the archive's own and not a difference. When a queued row
-needs its full measurement history, that file has it under the review that found it.
+row this queue has ever carried. How many rows either file holds is a `grep`, not a sentence —
+`grep -c '^- \[ \]' docs/archive/findings-2026-08.md` and the same over this file — and the two
+counts do not subtract: promoting a row **restates** it, so a queued row is still open there under
+its original wording, and matching the two sets by title matched only 7 of the 30 this queue held
+when that was measured. §5 is the first thing here that is not a defect this repository found
+in itself, and none of its rows is in the archive at all. The overlap is real and unmeasurable by
+`grep`, which is why neither number is a difference. When a queued row needs its full measurement
+history, that file has it under the review that found it.
+
+Both counts *were* written here, and both were wrong — 223 against 221, and 41 against 45 — each
+printed beside the command that disproves it, which is the whole argument of
+`D-2026-08-01-the-count-lives-in-the-test-not-in-the-prose`. A number nobody re-derives is a claim
+about its author's afternoon; `tests/test_backlog_register.py` keeps one from coming back.
 
 **A row must name an anchor in the tree** — a module, a line, a manifest key — so any row can be
 checked with one `grep` instead of an argument. A row that cannot name one is not ready to be
@@ -135,6 +138,31 @@ topic).
 
 ## 2 — Answers that are wrong without saying so
 
+- [ ] **Two `Chemclaw3-mcp` changes this repository's half already landed against** — [S] each,
+      and neither is fixable from here.
+      `D-2026-08-27-a-gradient-is-the-evidence-a-frequency-set-cannot-carry` closed the Chemclaw3
+      half of both; these are the halves that live in the other tree.
+      1. `servers/calc/src/chemclaw_mcp_calc/engine/xtb_hessian.py::compute_hessian`'s size refusal
+         ends *"Submit it through Chemclaw3's durable QM job path instead"* — a route
+         `D-2026-08-26-semiempirical-is-the-whole-tier` deleted, and one that could not have helped
+         anyway, since every durable job here composes that same primitive under the same ceiling.
+         The same function's own docstring and the comment on `xtb_hessian_max_atoms` both say in
+         the present tense that the wording was changed *because* there is no such path; only the
+         message was not. It should state the server's own limit and stop naming a route — this side
+         now refuses first and names `level="quick"` and a truncated model system. Paired change:
+         `servers/calc/tests/test_engine.py::test_a_molecule_over_the_atom_limit_is_refused_and_says_where_to_go`
+         matches on `"durable QM job path"` and its docstring says the refusal "names Chemclaw3's
+         durable job path"; both have to change with it.
+      2. `servers/calc/tests/test_key_contract.py` pins `CHEMCLAW3_EPOCH = "2"` and asserts
+         `CALCULATION_EPOCH == CHEMCLAW3_EPOCH` under a docstring calling it "one constant with two
+         homes". It is not one constant: `connectors/calc/remote.py::remote_key` **composes** the
+         two — `H({"epoch": ours, "remote_params": <the server's params_hash, which already carries
+         theirs>})` — so either may move alone and neither addresses the other's rows. The assertion
+         is a coupling the code does not have and goes red on a legitimate one-sided bump; it should
+         become a statement about the composition, or be dropped. This side's
+         `tests/test_calc_remote.py::test_the_two_epochs_compose_rather_than_having_to_match` is the
+         relationship that does hold.
+
 - [ ] **Every structured tool result reaches the model as pydantic repr, not JSON** — [M].
       `langchain_core.tools.base._stringify` prefers `json.dumps(content)` and falls back to
       `str(content)`, which is what happens for every `BaseModel` this repo returns —
@@ -189,20 +217,6 @@ topic).
       keeps the tartrate on nicotine bitartrate, which is arguably a salt; consulting the existing
       solvent table (`science/calc/solvents.py:44`) is the stricter variant.
 
-- [ ] **On `openai_compatible`, one unsupported `response_format` degrades every judged answer for
-      the life of the deployment** — [S]. Measured against a real loopback server: a server that
-      rejects `response_format` with a 400, or ignores it and returns prose, lands in
-      `agent/verifier.py:372`'s bare `except` and degrades to the citation gate on *every* call. The
-      same contradicted-citation answer a working judge scores `confidence=0.0, unsupported=True`
-      comes back `confidence=1.0, unsupported=False`. `score_answer` catches it
-      (`agent/verifier.py:467` forces `review_required` whenever `verified_by != "judge"`), and
-      today it is the *only* caller of `verify_turn_answer` — so the danger is a future direct
-      reader, not a live path. Fix is a pre-flight capability probe when `verifier_enabled` turns
-      on, failing loudly at startup the way `_require_anthropic_key()`
-      (`agent/llm_provider.py:305`) does, at the seam `api/app.py:166`
-      (`check_connectors_at_startup`, inside `_lifespan`) already uses. Anthropic is unaffected.
-      Both failure modes are already covered by loopback tests.
-
 - [ ] **A retracted ELN entry stays current evidence** — [M]. A withdrawn entry that simply
       disappears from the export is invisible to a cursor-based sync, so the note it produced keeps
       answering as current. `RawEntry` has no tombstone and the `ElnAdapter` protocol's two methods
@@ -249,16 +263,6 @@ it happens.
       `tests/test_publish_reaches_the_hooks.py::_PRIMITIVES_NOT_PUBLISHED` so the gap is declared
       and not merely absent.
 
-- [ ] **A decided approval hold can be reopened** — [M]. `agent/interaction_tools.py::start_approval`
-      passes no `id_reuse_policy`, so temporalio's default lets a decided hold be started again under
-      the same id. `REJECT_DUPLICATE` is **not** the fix and the archive records why: expiry is not
-      a decision — the workflow deliberately *completes* with `status="expired"` to release the run,
-      and forbidding reuse would make that candidate unofferable forever while the button still
-      renders. `ALLOW_DUPLICATE_FAILED_ONLY` fails identically, because an expired hold completes.
-      The fix is to read the prior run's terminal outcome and refuse to restart only when it carries
-      an actual decision. **Its stated blocker is gone**: the Temporal test server runs here
-      (`tests/test_interaction_approval.py` is 3 passed, no skips), so both paths are exercisable.
-
 - [ ] **A pinned template's arguments go unchecked once its bundle stops being ours** — [S].
       `cli/validate_templates.py` reads signatures from `connectors/<name>/server/tools.py`, so a
       bundle we declare but do not run has none — `hazard-briefing` calls `screen_hazards` and is
@@ -277,15 +281,6 @@ it happens.
       (~150-250 lines). **The cheap, honest half is separable**: `ingest/documents/sync.py:204` calls
       `asyncio.to_thread` with no `wait_for` at all, so one pathological file can hold the sync
       activity indefinitely; giving it the bound the front door already has is ~10 lines.
-
-- [ ] **A surface cannot tell a waiting plan from a stalled one** — [M], **restated**. This row used
-      to say the LangGraph rebuild "did not carry" an `awaiting-job:` marker. It was deleted on
-      purpose, twice (`D-2026-08-11`, re-confirmed `D-2026-08-12`), and `agent/state.py:16-29` is
-      the docstring saying so. It cannot be cleanly restored either: `Todo` is upstream's TypedDict
-      written by a model-facing tool, and prefixing `content` would perturb `plan_identity`'s hash
-      so an approved plan revokes its own approval the moment it starts a job. What is genuinely
-      missing is any **link from a job to a plan step** — the surface gets `JobStartedEvent` and
-      `job_records` but nothing joins them to a todo. That is a design task.
 
 - [ ] **The digest is written to a mailbox with no reader, and the watermark advances anyway** —
       [L]. `durable/digest.py:146-166` writes to `session_events` under session id `digest-<owner>`
@@ -486,7 +481,7 @@ it happens.
       say so — not a code change made unilaterally.
 
 - [ ] **`observations_status_idx` does not cover the query it was built for** — [S].
-      `infra/sql/025_observations.sql:50` indexes `(status, last_seen DESC)`, with a comment saying
+      `infra/sql/025_observations.sql` indexes it `(status, last_seen DESC)`, with a comment saying
       "the retrieval bucket wants open observations newest-first" — but `memory/observations.py:122`
       (`_SELECT_OPEN`) actually sorts `ORDER BY cardinality(evidence_note_ids) DESC, last_seen DESC`,
       an expression the index does not cover. The index serves the `status='open'` filter only; every

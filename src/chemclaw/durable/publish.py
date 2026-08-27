@@ -48,6 +48,12 @@ _BAD_DATA_TYPES = [
     "ChemclawError",
     "InvalidSmilesError",
     "FingerprintError",
+    # The *argument* was not fingerprintable — a prose sentence where a reaction SMILES was
+    # expected, an OCR artefact in an impurity list (`science.fingerprints.store`). Listed beside
+    # its parent because Temporal matches by class *name*, so a subclass inherits nothing here, and
+    # `tests/test_publish.py` walks the hierarchy precisely so this cannot be forgotten. Retrying a
+    # string the parser has already refused finds the identical refusal.
+    "FingerprintInputError",
     "ElnMappingError",
     "ElnFormatError",
     "OrdFormatError",

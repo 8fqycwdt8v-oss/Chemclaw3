@@ -662,7 +662,8 @@ _DEFINITIONS: tuple[PropertyDefinition, ...] = (
         "is_minimum",
         "flag",
         "",
-        "Whether the geometry is a true minimum (no imaginary frequencies).",
+        "Whether the geometry is a true minimum: no imaginary frequencies, and a stationary "
+        "point wherever the calculation reported the gradient that decides it.",
         kind="boolean",
     ),
     _d(
@@ -753,6 +754,16 @@ _DEFINITIONS: tuple[PropertyDefinition, ...] = (
         "category",
         "",
         "The effort tier a reaction energy was run at: quick, standard or thorough.",
+        kind="text",
+    ),
+    _d(
+        "standard_state",
+        "category",
+        "",
+        "The reference state a free energy is quoted at: gas-1atm or solution-1M. Published "
+        "beside every ΔG because the two differ by 1.894 kcal/mol per mole of species at "
+        "298.15 K, so a reaction that changes the molecule count is a different number in each "
+        "and a record without this cannot be compared with anything.",
         kind="text",
     ),
     _d(

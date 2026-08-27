@@ -81,8 +81,28 @@ def validate_ord(reaction: OrdReaction) -> list[str]:
 
 
 def _validate_source(adapter: ElnAdapter, label: str) -> int:
-    """Map + validate every entry an adapter offers; print problems, return their count."""
+    """Map + validate every entry an adapter offers; print problems, return their count.
+
+    **A source that offers nothing counts as one problem.** The counter used to be the only signal,
+    so an empty source produced a success line — "OK: 0 entr(ies) ... are valid" — whose own text
+    was the tell nobody reads in CI, and a directory that does not exist read identically because
+    an adapter yields nothing rather than raising. A typo'd `export_dir`, or an ORD export missing
+    from the image, therefore reported OK while the structure and mass-balance gate on everything
+    entering the graph and the fingerprint index had quietly stopped running.
+
+    Zero is not legitimate here, and the difference from `main`'s empty *enabled set* is worth
+    stating: no sources enabled is a configuration a deployment chose and can read off
+    `CHEMCLAW_DATA_SOURCES`, so that is announced and exits 0. A source that is attached and
+    supplies nothing is a claim that failed — and nothing available here distinguishes a genuinely
+    empty ELN from a mis-mounted one, which is exactly why it must not pass quietly.
+    """
     entries = asyncio.run(adapter.fetch_new_entries(datetime.min.replace(tzinfo=UTC)))
+    if not entries:
+        print(
+            f"{label}: no entries found — this half of the gate did not run. Check the source's "
+            "configuration (its export directory or query) before reading this as a pass."
+        )
+        return 1
     problems = 0
     for raw in entries:
         try:

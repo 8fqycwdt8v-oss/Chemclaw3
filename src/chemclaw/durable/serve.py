@@ -33,6 +33,8 @@ import signal
 from temporalio.worker import Worker
 
 from chemclaw.core import db
+from chemclaw.core.config import settings
+from chemclaw.core.executor import install_default_executor
 from chemclaw.core.worker_http import worker_http
 
 logger = logging.getLogger(__name__)
@@ -59,6 +61,15 @@ async def serve_worker(worker: Worker, *, component: str) -> None:
     need not be invoked for it.
     """
     loop = asyncio.get_running_loop()
+    # Before the worker polls for its first task. Several activities offload blocking work — the
+    # note-corpus read, the RRHO arithmetic, the fingerprint scans — and they share one pool with
+    # whatever else this process threads. The loop's stock default is `min(32, cpu_count + 4)`,
+    # which on a 4-CPU pod is 8: exactly `worker_max_concurrent_activities`, so a full slate of
+    # activities could occupy every thread and anything else needing one would queue behind a
+    # corpus parse. See `core/executor.py`.
+    install_default_executor(
+        component=component, reserved=settings.worker_max_concurrent_activities
+    )
     stop = asyncio.Event()
     for sig in _STOP_SIGNALS:
         loop.add_signal_handler(sig, stop.set)
