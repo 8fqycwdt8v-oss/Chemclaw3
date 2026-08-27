@@ -477,7 +477,11 @@ async def _still_running(handle: Any) -> bool:
     try:
         description = await handle.describe()
     except Exception:
-        # See the docstring: an unanswered question here is not an error.
+        # See the docstring: an unanswered question here is not an error — but a broker that
+        # consistently fails `describe()` silently reverts the rejoin-announcement fix, and the
+        # DEBUG line above is invisible at the shipped log level. The counter is what makes a
+        # trend of these visible on the same dashboard as everything else.
+        record_metric(lambda m: m.increment("chemclaw_rejoin_describe_failed_total"))
         logger.debug("could not describe rejoined run %s; not announcing it", handle.id)
         return False
     return bool(description.status == WorkflowExecutionStatus.RUNNING)

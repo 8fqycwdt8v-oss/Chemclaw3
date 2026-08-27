@@ -102,10 +102,18 @@ _COUNTERS: dict[str, str] = {
     # firing was invisible to everything outside the process. A rising rate here is an agent that
     # keeps planning more work than a turn can close — a prompt or skill problem, not an outage.
     "chemclaw_turn_loop_caps_total": "Turns stopped by the harness loop's iteration cap.",
+    # The detach/stop split (D-2026-08-27-a-disconnect-is-a-detach-not-a-stop). A disconnect no
+    # longer cancels a turn, so these two are what tell an operator how often clients drop away
+    # mid-turn (the turn completed unwatched, billed whole) versus how often someone actually
+    # pressed Stop. A rising detach rate with a flat stop rate is a flaky network or a tab-closing
+    # habit, not dissatisfaction with answers.
+    "chemclaw_turns_detached_total": (
+        "Turns whose client disconnected mid-run and that continued to completion detached."
+    ),
+    "chemclaw_turns_stopped_total": "Turns cancelled by the explicit stop route.",
     # A plan that could not be read at all, as distinct from a session proposing none. Alertable
     # because it is the one state in which a one-shot approval is left unspent (`agent/plan_gate.py`
     # says what that would cost if it passed silently as "no plan").
-    "chemclaw_plan_unreadable_total": "Turns whose plan could not be read to spend its approval.",
     # Distinct from the cap above, and the distinction is the point: a capped turn *has* an answer
     # and is marked partial, while this one produced no prose at all. Counted because the shape is
     # invisible in every other signal — a live turn made 29 tool calls and emitted an empty answer
@@ -187,6 +195,19 @@ _COUNTERS: dict[str, str] = {
         "Protocols handed to the condenser, by outcome (extracted / degraded / oversized)."
     ),
     "chemclaw_jobs_started_total": "Durable jobs launched by an agent tool.",
+    # The job→session mailbox's failure signal. `notify_session_best_effort` swallows a failed
+    # push-back by design (the science is the result; the notification is not), which made a
+    # fleet-wide outage of the channel — a dead background queue, a full mailbox table —
+    # invisible: every job finished, nobody was ever told. This is the only aggregate that says so.
+    "chemclaw_pushback_dropped_total": (
+        "Job push-back notifications that could not be recorded and were dropped."
+    ),
+    # The rejoin path's quiet failure. An identical job launch rejoins the running workflow, and
+    # whether that rejoin is *announced* turns on one `describe()` call whose failure is a DEBUG
+    # line — a broker that consistently refuses it silently reverts the announcement fix.
+    "chemclaw_rejoin_describe_failed_total": (
+        "Rejoined durable runs whose describe() failed, so the rejoin went unannounced."
+    ),
     # The counter above counts *launches*, which on the most expensive thing this system does is the
     # least informative number available: a two-second xTB call and a six-hour DFT run increment it
     # identically. This is the consumption counterpart — accumulated seconds, so `rate()` reads as

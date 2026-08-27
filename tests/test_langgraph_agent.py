@@ -779,6 +779,87 @@ def test_a_capped_loop_is_a_recorded_fact_not_an_inference(
     assert not loop_capped(done), "a turn that answered within the cap was reported as capped"
 
 
+def test_the_loop_cap_holds_with_the_harness_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The runaway cap is a property of the model/tool loop, not of the plan/execute mode.
+
+    The cap used to be gated on `harness_enabled_for` beside the todo list, "matching MAF" — and
+    M13 deleted the engine that argument compared against. What the gate then cost was the shipped
+    default: `harness_enabled=False`, so a runaway classic turn had no graceful stop at all and
+    its only bound was `agent_recursion_limit`, whose expiry raises `GraphRecursionError` and
+    discards everything the turn produced.
+
+    The script loops harder than the cap allows, so on the old gate this turn does not stop at the
+    cap — it runs the script dry instead, which is what makes the assertion discriminate. The
+    harness-on twin above stays, because both arms of the conditional must attach the cap.
+    """
+    monkeypatch.setattr(settings, "entra_required", False)
+    monkeypatch.setattr(settings, "harness_enabled", False)
+    monkeypatch.setattr(settings, "harness_max_loop_iterations", 1)
+
+    calling = AIMessage(
+        content="",
+        tool_calls=[{"name": "list_skills", "args": {}, "id": "c1", "type": "tool_call"}],
+    )
+    graph = build_langgraph_agent(
+        model=ScriptedModel(messages=iter([calling] * 4)),
+        audit_sink=NullAuditSink(),
+        checkpointer=InMemorySaver(),
+    )
+    state = asyncio.run(
+        graph.ainvoke(turn_input("go"), config={"configurable": {"thread_id": "classic-cap"}})
+    )
+
+    assert loop_capped(state), "the classic agent ran past the cap; the graceful stop is gone"
+
+
+def test_a_parallel_tool_batch_is_bounded_by_turn_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`turn_config` carries the fan-out bound, and the bound holds on the compiled graph.
+
+    `ToolNode` gathers every call in an assistant message with no limit of its own — measured at a
+    peak of 8 concurrent bodies for an 8-call batch — so before `agent_max_parallel_tool_calls`
+    existed, one message could take a whole Postgres pool's worth of connections at once. The
+    assertion drives the production graph under the production config builder, because the bound is
+    a property of the *invocation config*, not of the graph: a test that asserted the dict key
+    alone would stay green if LangGraph stopped honouring it.
+    """
+    monkeypatch.setattr(settings, "entra_required", False)
+    monkeypatch.setattr(settings, "agent_max_parallel_tool_calls", 2)
+
+    peak = 0
+    current = 0
+
+    async def probe(n: int) -> str:
+        nonlocal peak, current
+        current += 1
+        peak = max(peak, current)
+        await asyncio.sleep(0.05)
+        current -= 1
+        return f"done {n}"
+
+    slow = StructuredTool.from_function(
+        coroutine=probe, name="slow_probe", description="Sleep briefly and report."
+    )
+    calls = [
+        {"name": "slow_probe", "args": {"n": i}, "id": f"c{i}", "type": "tool_call"}
+        for i in range(6)
+    ]
+    graph = build_langgraph_agent(
+        model=ScriptedModel(
+            messages=iter([AIMessage(content="", tool_calls=calls), AIMessage(content="done")])
+        ),
+        audit_sink=NullAuditSink(),
+        connectors=[slow],
+    )
+    asyncio.run(graph.ainvoke(turn_input("go"), config=turn_config()))
+
+    assert peak == 2, f"a 6-call batch ran {peak} bodies at once against a bound of 2"
+
+    # And the escape hatch: 0 means a deployment chose unbounded, spelled by the key's absence
+    # because that absence *is* upstream's unbounded default.
+    monkeypatch.setattr(settings, "agent_max_parallel_tool_calls", 0)
+    assert "max_concurrency" not in turn_config()
+
+
 def test_the_loop_cap_counts_the_turn_and_not_the_session() -> None:
     """The cap is per turn, and it is the *channel* that makes it so — not the call site.
 

@@ -186,6 +186,13 @@ half-written.
   greppable statement that the old default was what you wanted. `helm template` on the shipped
   defaults therefore takes `--set networkPolicy.allowAnyDestination=true`, which is what the two
   renders in the `Makefile` pass (`D-2026-08-26-a-knob-that-renders-nothing-is-not-a-knob`).
+- **The retention posture must be stated the same way.** Every `CHEMCLAW_RETENTION_*` window
+  defaults to disabled — a disposal policy is a deployment's decision, not a code default — and
+  what that silence shipped was durable tables that grow for the release's lifetime (the LangGraph
+  checkpoint tables re-serialize a session's whole thread roughly once per superstep). The chart
+  now refuses to render unless exactly one of `retention.windows` (the day windows, rendered into
+  the ConfigMap with `CHEMCLAW_RETENTION_ENABLED` derived) or
+  `retention.unboundedGrowthAccepted: true` is stated; the Makefile's renders pass the latter.
 - **`/metrics` is on the public host, and the NetworkPolicy is not what bounds it.** The Route
   declares no `spec.path`, and neither a Route nor a NetworkPolicy filters by path — the ingress
   rule must allow the router, and the router publishes every path. What makes an unauthenticated

@@ -10,6 +10,7 @@ interface with swappable backends (in-memory for tests, Postgres for real), and
 (DRY) — the one place that decides hit vs. miss and persists new results.
 """
 
+import asyncio
 import logging
 import time
 from collections.abc import Awaitable, Callable
@@ -328,6 +329,14 @@ def _matches(stored: StoredResult, query: CalculationQuery) -> bool:
     return True
 
 
+#: Computations currently in flight in this process, by key. The single-flight ledger: a second
+#: miss on a key someone is already computing awaits the first computation instead of starting a
+#: duplicate. `api/routes/ops._shared_probe` is the same shape for the readiness probes, and
+#: `docs/planning/DEFERRED.md` keeps the *cross-process* half of the dedup — an advisory lock or
+#: an in-flight row — which this deliberately does not attempt.
+_IN_FLIGHT: dict[str, "asyncio.Future[tuple[ResultPayload, bool]]"] = {}
+
+
 async def cached_compute(
     store: ResultStore,
     key: CalculationKey,
@@ -340,6 +349,19 @@ async def cached_compute(
     This is the single lookup-before-compute path (plan step 1b.4): every
     calculator goes through it, so caching behavior is defined in exactly one
     place. `compute` is called only when the store has no entry for `key`.
+
+    **Concurrent misses on one key in one process now share one computation.** The check-then-act
+    was measured at 8 concurrent misses → 8 computes, benign only while every compute was
+    milliseconds; a CREST search is 19 minutes of CPU, and two composites sharing a primitive — a
+    reaction-energy job and a solvent screen relaxing the same species — could each pay it. The
+    first miss computes under a future in `_IN_FLIGHT`; every later caller of the same key awaits
+    that future and reports `was_cached=True`, because from its side the answer arrived without a
+    computation being started. Cross-process misses still race — that half is deferred with its
+    own trigger (`docs/planning/DEFERRED.md`), and identical *jobs* were already collapsed by
+    Temporal's workflow-id reuse before either.
+
+    A failed computation fails every waiter with the same exception and clears the slot, so the
+    next attempt starts fresh rather than awaiting a corpse.
 
     Args:
         store: The backend to read from and write to.
@@ -360,19 +382,48 @@ async def cached_compute(
         # that answers the recurring troubleshooting question "why did this recompute?".
         logger.debug("calc cache hit: %s", key.as_str())
         return hit.result, True
-    logger.debug("calc cache miss, computing: %s", key.as_str())
-    # Monotonic, so a clock adjustment mid-calculation cannot record a negative or absurd cost.
-    started = time.perf_counter()
-    result = await compute()
-    elapsed = time.perf_counter() - started
-    await store.put(
-        StoredResult(key=key, result=result, compute_seconds=elapsed, structure_id=structure_id)
-    )
-    # On the miss branch only. A cache *hit* returns above without touching this, which keeps the
-    # write off the hottest read in the system — the same reason `calculation_results` deliberately
-    # carries no `last_access_at`. A repeat call costs exactly what it cost before this existed.
-    await publish_stored_result(key, result, compute_seconds=elapsed, structure_id=structure_id)
-    return result, False
+    slot = key.as_str()
+    waiting = _IN_FLIGHT.get(slot)
+    if waiting is not None:
+        logger.debug("calc cache miss already computing elsewhere, awaiting: %s", slot)
+        result, _ = await asyncio.shield(waiting)
+        return result, True
+    future: asyncio.Future[tuple[ResultPayload, bool]] = asyncio.get_running_loop().create_future()
+    _IN_FLIGHT[slot] = future
+    try:
+        logger.debug("calc cache miss, computing: %s", slot)
+        # Monotonic, so a clock adjustment mid-calculation cannot record a negative or absurd cost.
+        started = time.perf_counter()
+        result = await compute()
+        elapsed = time.perf_counter() - started
+        await store.put(
+            StoredResult(key=key, result=result, compute_seconds=elapsed, structure_id=structure_id)
+        )
+        # On the miss branch only. A cache *hit* returns above without touching this, which keeps
+        # the write off the hottest read in the system — the same reason `calculation_results`
+        # deliberately carries no `last_access_at`. A repeat call costs what it always cost.
+        await publish_stored_result(key, result, compute_seconds=elapsed, structure_id=structure_id)
+        future.set_result((result, False))
+        return result, False
+    except BaseException as exc:
+        # Cancellation included: a waiter must never hang on a future its computer abandoned.
+        if not future.done():
+            future.set_exception(exc if isinstance(exc, Exception) else _Abandoned(slot))
+            # A future nobody ends up awaiting must not warn on teardown.
+            future.exception()
+        raise
+    finally:
+        _IN_FLIGHT.pop(slot, None)
+
+
+class _Abandoned(Exception):
+    """The computing caller was cancelled, so this waiter's shared computation never finished."""
+
+    def __init__(self, slot: str) -> None:
+        super().__init__(
+            f"the in-flight computation for {slot} was cancelled by the caller running it; "
+            "retry to start a fresh one"
+        )
 
 
 async def publish_stored_result(

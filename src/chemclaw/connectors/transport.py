@@ -44,10 +44,35 @@ from types import TracebackType
 from langchain_core.tools import BaseTool
 from langchain_mcp_adapters.sessions import Connection, create_session
 from langchain_mcp_adapters.tools import load_mcp_tools
+from mcp.shared.exceptions import McpError
 
+from chemclaw.core.config import settings
 from chemclaw.core.mcp_session import cancel_on_timeout
 
 logger = logging.getLogger(__name__)
+
+
+def transport_failure(exc: BaseException) -> bool:
+    """Whether `exc` says the *wire* failed, rather than the tool behind it.
+
+    The one place that knows what the MCP transport's failures look like, exported so the policy
+    layer (`agent.tool_authz.surface_domain_errors`) can word them without importing the
+    transport's libraries — the same layering that keeps `mcp` and `httpx` out of `chemclaw.agent`.
+
+    The distinction matters because the two failures deserve opposite advice. A tool-level error
+    arrives as a *returned* `ToolMessage(status="error")` carrying the server's own words — the
+    adapter never raises for those — so anything the transport raises is a timeout, a reset, a
+    refused connection or a dead session: transient by nature, where "do not retry" (the generic
+    branch's wording) is exactly wrong. `anyio` is matched by module rather than imported, because
+    the stream/cancel-scope errors it raises out of the MCP client are transport failures and the
+    import would be a new third-party edge for one isinstance.
+    """
+    if isinstance(exc, BaseExceptionGroup):
+        return any(transport_failure(member) for member in exc.exceptions)
+    if isinstance(exc, (TimeoutError, ConnectionError, McpError)):
+        return True
+    module = type(exc).__module__ or ""
+    return module.startswith(("httpx", "anyio"))
 
 
 def absorb_connect_failure(connector: str, exc: BaseException) -> None:
@@ -156,10 +181,23 @@ class HeldConnectorSession:
         return self._failure is None and self._task is not None
 
     async def __aenter__(self) -> list[BaseTool]:
-        """Open the session on its own task and return the tools it advertises (`[]` if absent)."""
+        """Open the session on its own task and return the tools it advertises (`[]` if absent).
+
+        The wait is bounded by `connector_open_timeout_seconds`, and the bound is not redundant
+        with the 5 s connect timeout: that one covers the TCP dial only, while the handshake —
+        `initialize` plus `tools/list` — is bounded by the session's *read* timeout, which the
+        manifest sizes for the slowest tool call (600 s for `calc`). A connector that accepts the
+        socket and then never finishes its handshake used to hold every turn for that full read
+        bound before the first token; past this bound it is an ordinary unreachable connector.
+        """
         self._task = asyncio.create_task(self._hold(), name=f"connector:{self._spec.name}")
         try:
-            await self._opened.wait()
+            async with asyncio.timeout(settings.connector_open_timeout_seconds):
+                await self._opened.wait()
+        except TimeoutError as exc:
+            await self._shut_down()
+            absorb_connect_failure(self._spec.name, exc)
+            return []
         except BaseException:
             # The caller was cancelled while we were connecting. The holder task owns a live cancel
             # scope, so it must be told to unwind on its own task rather than abandoned — an
@@ -181,13 +219,20 @@ class HeldConnectorSession:
         return False
 
     async def _shut_down(self) -> None:
-        """Signal the holder task and await its unwind, whatever it raises on the way out."""
+        """Signal the holder task and await its unwind, bounded so teardown cannot wedge the turn.
+
+        The await used to be unbounded, which made the end of every turn hostage to the slowest
+        session close: a connector that would not finish unwinding held the `AsyncExitStack` until
+        the turn deadline cancelled everything. `wait_for` cancels the task at the bound and then
+        waits for that cancellation to land, so past it the holder is torn down rather than
+        abandoned — the same "signal it on its own task" rule, with a clock on it.
+        """
         self._stop.set()
         task = self._task
         self._task = None
         if task is not None:
             with contextlib.suppress(asyncio.CancelledError, Exception):
-                await task
+                await asyncio.wait_for(task, timeout=settings.connector_teardown_timeout_seconds)
 
     async def _hold(self) -> None:
         """Own the session end to end: open it, publish its tools, then wait to be told to stop.

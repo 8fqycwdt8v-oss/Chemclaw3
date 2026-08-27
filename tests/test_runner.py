@@ -559,9 +559,8 @@ class _CitingAgent(ScriptedTurn):
 
         script: list[Any] = [{"name": "recall_note", "args": {"query": "x"}}, self._answer]
         build_kwargs["connectors"] = [*(build_kwargs.get("connectors") or []), recall_note]
-        return build_langgraph_agent(
-            ScriptedChatModel(script), audit_sink=NullAuditSink(), **build_kwargs
-        )
+        build_kwargs["audit_sink"] = NullAuditSink()
+        return build_langgraph_agent(ScriptedChatModel(script), **build_kwargs)
 
 
 def _offline_verification(monkeypatch: pytest.MonkeyPatch) -> None:

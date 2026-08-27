@@ -210,6 +210,23 @@ def test_raising_only_the_activity_budget_is_refused_rather_than_silently_ignore
     )
 
 
+def test_the_activity_budget_stays_above_the_search_it_awaits() -> None:
+    """The same equality-is-the-defect rule one level down: activity vs the sampler's client bound.
+
+    The two shipped equal (14400 s each), so a sampling call that ran to its client bound
+    exhausted the activity's `start_to_close` at the same instant — the activity died as a bare
+    timeout instead of surfacing the sampler's error, and `activity_max_attempts` could never be
+    reached. Refused at startup with both numbers named, exactly as the parent ceiling above.
+    """
+    with pytest.raises(ValueError, match="xtb_job_timeout_seconds"):
+        Settings(  # type: ignore[call-arg]
+            _env_file=None,
+            xtb_job_timeout_seconds=14_400,
+            calc_sampling_timeout_seconds=14_400.0,
+            connector_job_timeout_seconds=18_000.0,
+        )
+
+
 def test_the_shipped_defaults_boot() -> None:
     """Enforcing a rule the repository's own shipped configuration violates is a crash loop.
 
@@ -219,6 +236,9 @@ def test_the_shipped_defaults_boot() -> None:
     """
     default = Settings(_env_file=None)  # type: ignore[call-arg]
     assert default.connector_job_timeout_seconds > default.xtb_job_timeout_seconds
+    assert default.xtb_job_timeout_seconds > (
+        default.calc_sampling_timeout_seconds + default.activity_timeout_seconds
+    )
 
 
 def test_openai_compatible_embeddings_require_endpoint_and_model() -> None:

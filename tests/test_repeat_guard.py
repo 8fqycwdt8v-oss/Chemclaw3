@@ -232,10 +232,38 @@ def test_a_call_whose_result_was_cleared_is_forgiven() -> None:
         # Third identical call, with the answers still in context: refused.
         assert isinstance(count_call("find_past_jobs", {"q": "suzuki"}), RepeatedCallRefusal)
 
-        forget_calls([("find_past_jobs", {"q": "suzuki"})])
+        forget_calls([("call-a", "find_past_jobs", {"q": "suzuki"})])
 
         # The answers are gone, so asking again is a re-read rather than a repeat.
         assert count_call("find_past_jobs", {"q": "suzuki"}) is None
+    finally:
+        end_call_watch(token)
+
+
+def test_a_cleared_result_forgives_exactly_once_per_turn() -> None:
+    """The same cleared result, re-sighted on every model call, must not keep resetting the guard.
+
+    The compaction edits are non-destructive, so the observer re-derives the *same* standing
+    reduction on every model call of the turn — and forgiving it each time popped the counter as
+    fast as repeats accumulated. Measured shape: past the 30k clearing trigger, the guard that was
+    built to stop a 7-8-identical-call loop never fired again for the rest of the turn. The call
+    id is what identifies "this exact cleared result", so the second sighting is a no-op and the
+    repeats accumulate to a refusal exactly as they would in an uncompacted turn.
+    """
+    from chemclaw.agent.repeat_guard import count_call, forget_calls
+
+    token = begin_call_watch()
+    try:
+        assert forget_calls([("call-a", "find_past_jobs", {"q": "suzuki"})]) == 1
+
+        assert count_call("find_past_jobs", {"q": "suzuki"}) is None
+        # The next model call re-derives the same cleared result. Sighted already: no forgiveness.
+        assert forget_calls([("call-a", "find_past_jobs", {"q": "suzuki"})]) == 0
+        assert count_call("find_past_jobs", {"q": "suzuki"}) is None
+        assert forget_calls([("call-a", "find_past_jobs", {"q": "suzuki"})]) == 0
+        assert isinstance(count_call("find_past_jobs", {"q": "suzuki"}), RepeatedCallRefusal), (
+            "re-sighting the same cleared result kept resetting the counter; the guard is disarmed"
+        )
     finally:
         end_call_watch(token)
 
@@ -258,7 +286,7 @@ def test_a_call_whose_result_survived_the_clearing_is_still_guarded() -> None:
             count_call("get_durable_job_status", {"id": "kept"})
 
         # Only the first tool's results were replaced by a placeholder.
-        forget_calls([("find_notes", {"q": "cleared"})])
+        forget_calls([("call-b", "find_notes", {"q": "cleared"})])
 
         assert count_call("find_notes", {"q": "cleared"}) is None
         assert isinstance(count_call("get_durable_job_status", {"id": "kept"}), RepeatedCallRefusal)
@@ -270,4 +298,4 @@ def test_forgetting_is_a_no_op_off_the_request_path() -> None:
     """Like every other function in the module — the CLI and the classic agent take this branch."""
     from chemclaw.agent.repeat_guard import forget_calls
 
-    forget_calls([("find_notes", {"q": "anything"})])
+    forget_calls([("call-c", "find_notes", {"q": "anything"})])

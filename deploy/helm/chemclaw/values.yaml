@@ -656,6 +656,34 @@ securityContext:
   # on once the deployment mounts an emptyDir over the process's temp directory.
   readOnlyRootFilesystem: false
 
+# What happens to the durable tables' history — a posture this chart refuses to leave unstated,
+# by the same rule as the egress block below (D-2026-08-26-a-knob-that-renders-nothing-is-not-a-knob):
+# every retention window in `Settings` defaults to 0, meaning *disabled*, because "keep for N days,
+# then dispose, provably" is a policy a deployment must state rather than inherit. What that
+# defaulting cost in practice was silence: the LangGraph checkpoint tables re-serialize a session's
+# whole thread roughly once per superstep (~125 rows for one capped turn), `session_messages` and
+# `tool_result_blobs` grow with every exchange, and on the shipped values nothing ever deleted any
+# of it while `agent/compaction.py` named age-based retention as the bound.
+#
+# **Set exactly one of `windows` or `unboundedGrowthAccepted`.** Neither, or both, and
+# `helm install` fails naming both ways out.
+retention:
+  # The windows, as the CHEMCLAW_RETENTION_* environment keys `core/config/memory.py` reads,
+  # rendered into the ConfigMap with CHEMCLAW_RETENTION_ENABLED derived `true` — so stating a
+  # window and forgetting the switch cannot happen. For example:
+  #   windows:
+  #     CHEMCLAW_RETENTION_CHECKPOINTS_DAYS: "30"
+  #     CHEMCLAW_RETENTION_SESSION_MESSAGES_DAYS: "365"
+  #     CHEMCLAW_RETENTION_SESSION_EVENTS_DAYS: "30"
+  #     CHEMCLAW_RETENTION_TOOL_RESULTS_DAYS: "30"
+  # A table whose key is absent keeps growing — `infra/sql/README.md`'s Disposal column says
+  # which ones exist and what each holds.
+  windows: {}
+  # The escape hatch, mirroring `networkPolicy.allowAnyDestination`: a deployment that genuinely
+  # wants no disposal says so here, in its own values file, where the next person greps for it.
+  # The tables then grow exactly as they always did — the posture is unchanged, the silence is not.
+  unboundedGrowthAccepted: false
+
 networkPolicy:
   enabled: true
   egressPorts:

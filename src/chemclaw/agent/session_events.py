@@ -14,11 +14,17 @@ statement (COR-4): marking a row consumed and reading it back are one atomic ste
 racing on the same session can never both deliver a row — the second's `SKIP LOCKED` select simply
 skips the rows the first already claimed. The tradeoff is at-most-once on a crash in the tiny window
 between claim-commit and the event reaching the client (versus the old at-least-once, which paid for
-that with the concurrent double-delivery this fixes); for a "wake the chat" notification whose
-durable result already lives in the graph/session, that is the right side of the trade.
+that with the concurrent double-delivery this fixes). That window used to span the whole
+claim-to-SSE-write gap, and the sentence justifying it — "the durable result already lives in the
+graph/session" — had quietly stopped covering the case that matters: for a job finishing while no
+turn is open, this row is the *only* thing that tells anyone. So the tailer now restores a row
+whose yield never completed (`restore_unconsumed`), shrinking the loss window to the transport
+itself, and the model reads the mailbox at turn start (`api/runner._with_pushed_job_results`)
+beside the browser's stream.
 """
 
 import asyncio
+import logging
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from functools import partial
 from typing import Any
@@ -28,6 +34,8 @@ from pydantic import BaseModel, Field
 
 from chemclaw.core import db
 from chemclaw.core.config import settings
+
+logger = logging.getLogger(__name__)
 
 # The insert is idempotent when the writer supplies a `dedupe_key`: the recording activity runs
 # at-least-once, so a retry after a committed-but-unacked insert would otherwise duplicate the
@@ -56,6 +64,11 @@ _CLAIM_KINDS = (
     "AND kind = ANY(%s) ORDER BY id FOR UPDATE SKIP LOCKED"
     ") RETURNING id, session_id, kind, payload"
 )
+# Put a claimed-but-undelivered row back. The claim is at-most-once by design, and for most of its
+# life the whole window was "claim-commit to SSE write" — a drop in it silently destroyed the one
+# signal that a chemist's long search had finished. The tailer now restores a row whose yield never
+# completed, which shrinks the loss window to the transport itself.
+_RESTORE = "UPDATE session_events SET consumed_at = NULL WHERE id = %s"
 
 
 class SessionEvent(BaseModel):
@@ -118,6 +131,25 @@ async def claim_unconsumed(
     ]
 
 
+async def restore_unconsumed(event_id: int, *, dsn: str | None = None) -> None:
+    """Un-claim one event, so the next poll — this tailer's or another's — delivers it again.
+
+    The compensating half of the claim, used only for a row whose delivery did not complete. A
+    restore can at worst turn at-most-once into at-least-once for that one row (the yield may have
+    reached the transport before the teardown landed), and a duplicated "your job finished" card
+    is the cheap side of that trade against a silently lost one.
+    """
+    try:
+        async with db.connection(_dsn(dsn)) as conn:
+            await conn.execute(_RESTORE, (event_id,))
+            await conn.commit()
+    except Exception:
+        # Never raises: it runs as an unawaited teardown task, where an escaping error surfaces
+        # only as an unattributed "Task exception was never retrieved" — and losing the restore
+        # merely returns this one row to the at-most-once behaviour the claim always had.
+        logger.warning("could not restore undelivered session event %d", event_id, exc_info=True)
+
+
 async def stream_new_events(
     session_id: str,
     *,
@@ -164,7 +196,26 @@ async def stream_new_events(
     polls = 0
     while max_polls is None or polls < max_polls:
         for event in await do_claim():
-            yield event
+            delivered = False
+            try:
+                yield event
+                delivered = True
+            finally:
+                if not delivered and event.event_id is not None:
+                    # The consumer went away between the claim and the yield completing — a
+                    # dropped SSE stream, a cancelled task. Restored on a task of its own because
+                    # this `finally` runs inside the teardown, where an `await` re-raises the
+                    # cancellation; the strong reference keeps the write alive until it lands.
+                    task = asyncio.get_running_loop().create_task(
+                        restore_unconsumed(event.event_id)
+                    )
+                    _PENDING_RESTORES.add(task)
+                    task.add_done_callback(_PENDING_RESTORES.discard)
         polls += 1
         if max_polls is None or polls < max_polls:
             await asyncio.sleep(interval)
+
+
+#: Strong references to in-flight restores — the `agent/turn_cost.py` `_PENDING` shape, because a
+#: bare `create_task` from a dying generator is garbage-collectable mid-write.
+_PENDING_RESTORES: set[asyncio.Task[None]] = set()

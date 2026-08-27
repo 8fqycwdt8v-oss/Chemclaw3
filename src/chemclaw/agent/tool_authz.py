@@ -29,6 +29,7 @@ from chemclaw.agent.authz import (
     side_effecting_tools,
 )
 from chemclaw.agent.turn_flags import is_dry_run
+from chemclaw.connectors.transport import transport_failure
 from chemclaw.core.errors import ChemclawError, SubsystemUnavailableError
 from chemclaw.core.turn_signals import record_tool_failure
 
@@ -193,6 +194,24 @@ def answered_failure(message: ToolMessage) -> ToolMessage:
     return message.model_copy(update={"status": "success"})
 
 
+def transport_error_result(name: str, exc: BaseException) -> str:
+    """What the model is told when the *wire* to a connector failed, not the tool behind it.
+
+    Split from `unexpected_error_result` because that one's advice — "do not retry it with the
+    same arguments" — is exactly wrong here. A tool-level failure never raises (the adapter
+    returns it with the server's own words), so a raised transport failure is a timeout, a reset
+    or a dead session: transient by nature, where one retry is the sensible next step and the
+    repeat guard already bounds how many the turn may spend. Only the exception's *type* is
+    named, never its text: transport errors carry internal addresses and none of it was worded
+    for a model.
+    """
+    return (
+        f"Error: the connector serving {name} did not answer ({type(exc).__name__}) — the call "
+        "failed in transport, not in the tool, and no result is known. One retry may succeed; if "
+        "it fails again, continue without it and say what is missing."
+    )
+
+
 def unexpected_error_result() -> str:
     """What the model is told when a tool raised something outside the two safe families.
 
@@ -330,7 +349,19 @@ async def surface_domain_errors(request: Any, handler: Callable[[Any], Any]) -> 
         # Left for `surface_authorization_denials`, which sits outside this one and words a refusal
         # differently from a fault. Catching it here would make every denial read as a crash.
         raise
-    except Exception:
+    except Exception as exc:
+        # A transport failure before a bug: "MCP tools never raise" is true of *tool-level* errors
+        # (those return as `status="error"` with the server's words), so what a connector call
+        # raises is the wire failing — a timeout, a reset, a dead session — and telling the model
+        # "do not retry" about a transient fault was this converter's one wrong sentence.
+        if transport_failure(exc):
+            logger.warning(
+                "tool %s failed in transport (%s: %s)",
+                request.tool_call["name"],
+                type(exc).__name__,
+                exc,
+            )
+            return _refusal_message(request, transport_error_result(request.tool_call["name"], exc))
         logger.exception("tool %s raised an unhandled error", request.tool_call["name"])
         return _refusal_message(request, unexpected_error_result())
     failed = returned_failure(result)

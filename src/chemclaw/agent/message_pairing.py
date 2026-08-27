@@ -18,7 +18,12 @@ checkpointer now (D-2026-08-10 §2), so what is left are the two jobs that were 
   `calls_without_adjacent_results` are what a test uses to prove code that deletes or assembles
   messages did not strand anything. None has a production caller, and none should acquire one:
   their value is that they refuse to fix what they find, so a bug that strands a pairing fails a
-  test instead of being cleaned up behind.
+  test instead of being cleaned up behind. The one healer that *does* exist is upstream's:
+  deepagents' `PatchToolCallsMiddleware` answers a dangling call in `before_agent` — which is what
+  keeps a crash between two checkpointed supersteps (an orphaned `tool_use` the provider would
+  reject on every later turn) from bricking the session — and
+  `tests/test_upstream_surface.py` pins that behaviour precisely because this repository declined
+  to write a second one.
 
   The third was briefly deleted as having no subject — the previous framework assembled and sent
   the wire payload it checked, and the graph builds its thread from the checkpointer instead. That
@@ -156,6 +161,12 @@ def calls_without_adjacent_results(messages: Sequence[BaseMessage]) -> set[str]:
     Use this to validate what is about to be sent. It is deliberately *not* the rule storage goes
     by — there a merely out-of-order pair is intact history and must not be deleted, which is what
     `droppable_rows` enforces.
+
+    "Immediately after" is read against the wire, not against one list slot: a parallel batch's
+    results are several consecutive `ToolMessage`s here, and they serialize into the single user
+    message the API requires — so the answering window is the *contiguous run* of tool messages
+    that follows the call, not only `messages[index + 1]`. The single-slot form flagged every
+    legitimate parallel batch past its first result.
     """
     missing: set[str] = set()
     for index, message in enumerate(messages):
@@ -166,9 +177,12 @@ def calls_without_adjacent_results(messages: Sequence[BaseMessage]) -> set[str]:
         }
         if not called:
             continue
-        following = messages[index + 1] if index + 1 < len(messages) else None
-        next_id = _answered_id(following) if following is not None else None
-        answered = {next_id} if next_id is not None else set[str]()
+        answered: set[str] = set()
+        for following in messages[index + 1 :]:
+            next_id = _answered_id(following)
+            if next_id is None:
+                break
+            answered.add(next_id)
         missing |= called - answered
     return missing
 

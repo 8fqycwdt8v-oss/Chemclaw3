@@ -212,9 +212,11 @@ def test_a_real_turn_reaches_a_real_connector_on_the_graph_engine(
         state: dict[str, Any] = {}
 
     def _factory(**kwargs: Any) -> Any:
+        # The runner passes its own `audit_sink` (the in-turn default); only fall back to the
+        # null sink if this factory is ever driven outside `run_turn`.
+        kwargs.setdefault("audit_sink", NullAuditSink())
         return build_langgraph_agent(
             ScriptedChatModel([{"name": "echo", "args": {"text": "hi"}}, "done"]),
-            audit_sink=NullAuditSink(),
             **kwargs,
         )
 

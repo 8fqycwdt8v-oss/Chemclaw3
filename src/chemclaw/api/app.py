@@ -51,6 +51,7 @@ from chemclaw.agent.profile_discovery import load_profiles
 from chemclaw.agent.scratchpad import close_memory_store
 from chemclaw.agent.session_events import stream_new_events
 from chemclaw.api.budget import BudgetTracker
+from chemclaw.api.detach import RunningTurns
 from chemclaw.api.middleware import (
     _add_body_size_limit,
     _add_cors,
@@ -280,6 +281,11 @@ def create_app(
     # the claim's atomicity, its identity and its expiry); this is also the pin set
     # `_turn_in_flight` above reads for the live cache's eviction.
     app.state.active_turns = {}
+    # The live turns themselves, beside the leases above: the lease answers "is a turn running"
+    # for admission, this answers "hand me the running turn" for the explicit stop route — a
+    # disconnect only detaches now, so stopping needs a handle rather than a closed socket
+    # (`chemclaw.api.detach`).
+    app.state.running_turns = RunningTurns()
     # The same gate at the width the deployment actually has (D-121). The map above is one
     # process's view, and the chart runs the front door at two replicas, so the second POST can
     # land on a process that has never heard of the first. A leased row in `session_turns` is what

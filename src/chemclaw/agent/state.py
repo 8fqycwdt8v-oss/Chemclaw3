@@ -200,7 +200,7 @@ def turn_input(message: str) -> dict[str, Any]:
 
 
 def turn_config(thread_id: str | None = None) -> dict[str, Any]:
-    """The invocation config one turn runs under: its thread, and the graph's step ceiling.
+    """The invocation config one turn runs under: its thread, step ceiling, and fan-out bound.
 
     **The ceiling is the point.** `create_agent` bakes `recursion_limit=9999`, `create_deep_agent`
     bakes a second one onto the graph it returns, and nothing in this
@@ -208,9 +208,9 @@ def turn_config(thread_id: str | None = None) -> dict[str, Any]:
     measured at 2 supersteps per call on the classic path and 4 with the harness, i.e. roughly 5,000
     and 2,500. Worse, reaching it raises `GraphRecursionError`, which discards whatever the turn had
     produced; `agent.loop_cap` states the opposite position explicitly, that a chemist is entitled
-    to see the work the last iteration managed. The cap is the graceful stop and this is the
-    backstop under it — and on the classic path, where the loop cap is not attached at all, it
-    is the only bound there is.
+    to see the work the last iteration managed. The cap is the graceful stop — attached on every
+    profile since the harness gate on it expired with the second engine — and this is the backstop
+    under it, sized so the cap always fires first.
 
     One function so the number is chosen once. `turn_input` is its sibling on the input side; the
     per-turn *state* reset that used to live there is now the channel's job (see `ChemclawState`),
@@ -224,6 +224,13 @@ def turn_config(thread_id: str | None = None) -> dict[str, Any]:
         The config to pass to `ainvoke`/`astream`.
     """
     config: dict[str, Any] = {"recursion_limit": settings.agent_recursion_limit}
+    # The fan-out bound beside the step ceiling: `ToolNode` gathers a whole parallel batch with no
+    # limit of its own, so this is the one knob that keeps a 40-call assistant message from taking
+    # 40 pool connections at once. LangGraph reads `max_concurrency` per superstep; 0 means a
+    # deployment chose unbounded, spelled by omission because the key's absence *is* upstream's
+    # unbounded default.
+    if settings.agent_max_parallel_tool_calls:
+        config["max_concurrency"] = settings.agent_max_parallel_tool_calls
     if thread_id is not None:
         config["configurable"] = {"thread_id": thread_id}
     return config

@@ -194,6 +194,14 @@ class ServiceSettings(BaseSettings):
     # catches nothing — and far above `service_sse_ping_seconds`, so an idle-but-healthy stream
     # is never cut.
     service_sse_send_timeout_seconds: float = Field(default=60.0, gt=0)
+    # Whether a client disconnect detaches from a running turn (the turn completes; its answer
+    # lands in the transcript; Stop is the explicit `POST /sessions/{id}/turn/stop`) or cancels it
+    # as every disconnect used to (`D-2026-08-27-a-disconnect-is-a-detach-not-a-stop`). On by
+    # default because losing a 10-minute multi-tool turn to a Wi-Fi handoff is the worse failure;
+    # the cost — an abandoned turn runs to completion and is billed whole — is bounded by the loop
+    # cap and `service_turn_timeout_seconds`, and a deployment that prefers cost over completion
+    # turns this off and gets the old posture exactly.
+    service_turn_survives_disconnect: bool = True
     # Turn/token budgets — the runaway-cost guard (service.budget). A single turn is already
     # iteration-capped (`harness_max_loop_iterations`), but nothing caps the *number*
     # of turns, so a client or an automated push-back loop could accumulate unbounded LLM spend.

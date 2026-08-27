@@ -402,3 +402,62 @@ def test_a_failed_job_is_reported_with_the_products_own_reason() -> None:
     assert collected["job-bad"]["summary"] == reason, (
         "the wrapper's generic sentence was reported instead of the product's own"
     )
+
+
+def test_a_waiting_mailbox_reaches_the_models_next_turn(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A job that finished while nobody was looking is told to the *model*, not only a browser.
+
+    `claim_unconsumed` had exactly one consumer — the SSE push-back stream — so with the tab
+    closed the completion reached nobody and the next turn's model still believed its job was
+    running: the flagship "compute then reason" exchange required the chemist to re-prompt and the
+    model to remember the job id. The mailbox is now read at turn start and appended to the
+    chemist's message as framed data, chemist's words first.
+    """
+    from chemclaw.agent.session_events import SessionEvent
+    from chemclaw.api import runner as runner_module
+
+    class _Recorder(ScriptedTurn):
+        def __init__(self) -> None:
+            self.messages: list[str] = []
+
+        async def stream(self, message: str) -> AsyncIterator[Piece]:
+            self.messages.append(message)
+            yield "noted"
+
+    claims: list[tuple[str, tuple[str, ...]]] = []
+
+    async def _claim(session_id: str, *, kinds: Any = None, dsn: Any = None) -> list[SessionEvent]:
+        claims.append((session_id, tuple(kinds or ())))
+        return [
+            SessionEvent(
+                event_id=1,
+                session_id=session_id,
+                kind="job_completed",
+                payload={"job_id": "calc-abc", "summary": "energy computed"},
+            )
+        ]
+
+    async def _run() -> list[str]:
+        await migrated_db_or_skip()
+        monkeypatch.setattr(settings, "session_store", "postgres")
+        monkeypatch.setattr(runner_module, "claim_unconsumed", _claim)
+        agent = _Recorder()
+        async for _event in run_turn(
+            TurnSession(session_id="s-mailbox"),
+            "and what came of it?",
+            connectors=[],
+            graph_factory=agent.graph_factory,
+        ):
+            pass
+        return agent.messages
+
+    messages = asyncio.run(_run())
+    assert claims and claims[0][1] == ("job_completed", "job_failed"), (
+        "the claim must be kind-scoped, or it destroys other consumers' events"
+    )
+    assert messages, "the model was never called"
+    first = messages[0]
+    assert first.startswith("and what came of it?"), "the chemist's words must lead"
+    assert "calc-abc" in first and "job_failed" in first, (
+        "the finished job never reached the model's input"
+    )

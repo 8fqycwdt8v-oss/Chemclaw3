@@ -21,6 +21,7 @@ two gates can never drift in how "does this user hold an allowed role?" is decid
 """
 
 from collections.abc import Mapping
+from functools import cache
 from typing import Any
 
 from chemclaw.core.config import settings
@@ -161,8 +162,15 @@ READ_ONLY_TOOLS: frozenset[str] = frozenset(
 )
 
 
+@cache
 def side_effecting_tools() -> frozenset[str]:
     """Every tool that changes something outside the turn — the one set the write gates share.
+
+    Cached for the process's life because both of its inputs already are (`connectors.registry`
+    and `templates.registry` are `@cache`d discovery), so an uncached union recomputed two lazy
+    imports, a pass over every enabled manifest and three frozenset unions on *every gated tool
+    call* to reproduce a value fixed at startup. `tests/conftest.py`'s discovery-cache fixture
+    clears this beside the registries it derives from, for the same reason it clears them.
 
     Three sources, each owned where its knowledge lives:
 

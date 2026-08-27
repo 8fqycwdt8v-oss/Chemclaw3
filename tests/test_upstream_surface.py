@@ -25,7 +25,8 @@ still the right one, and record the answer in an ADR if it changed. That is the 
 having them in one file: a bump becomes one conversation instead of six surprises.
 """
 
-from typing import get_type_hints
+import asyncio
+from typing import Any, get_type_hints
 
 import pytest
 
@@ -829,4 +830,98 @@ def test_a_streamed_tool_result_is_still_a_subclass_of_tool_message() -> None:
     chunk = ToolMessageChunk(content="Error: the instrument is offline", tool_call_id="c-1")
     assert (chunk.status, chunk.tool_call_id) == ("success", "c-1"), (
         "a chunk no longer carries the two fields both readers take off it"
+    )
+
+
+def test_a_dangling_tool_call_is_still_healed_before_the_model_reads_it() -> None:
+    """A crash mid-turn must not brick the session, and upstream's healer is what prevents it.
+
+    deepagents' `PatchToolCallsMiddleware` answers a dangling call, and this repository
+    deliberately declined to write a second healer.
+
+    The checkpointer commits per superstep, so a process killed between the model superstep and
+    the tool superstep leaves the thread's newest message an `AIMessage` whose `tool_calls`
+    nothing answered — and the provider rejects any thread replaying it ("tool_use ids were found
+    without tool_result blocks"), on every later turn, permanently. `create_deep_agent` composes
+    `PatchToolCallsMiddleware`, whose `before_agent` answers each dangling call (and each
+    `invalid_tool_call`) with a synthesized `ToolMessage`, which is the only reason that crash
+    window is survivable. Nothing in `src/` duplicates it, exactly as
+    `agent/message_pairing.py`'s docstring says — so if upstream drops or renames the middleware,
+    this is the assertion that turns red instead of sessions quietly bricking in production.
+
+    Driven through the *production builder* rather than upstream's class directly, because what
+    matters is that the graph a chemist's turn runs on carries the healer — a middleware upstream
+    ships but this build accidentally displaced would pass a class-level test.
+    """
+    from langchain_core.messages import AIMessage, HumanMessage
+
+    from chemclaw.agent.langgraph_agent import build_langgraph_agent
+    from chemclaw.agent.message_pairing import unmatched_call_ids
+    from tests.fakes import ScriptedModel
+
+    seen: list[list[Any]] = []
+
+    class _Recording(ScriptedModel):
+        def _generate(self, messages: Any, *args: Any, **kwargs: Any) -> Any:
+            seen.append(list(messages))
+            return super()._generate(messages, *args, **kwargs)
+
+    orphan = AIMessage(
+        content="",
+        tool_calls=[{"name": "predict_pka", "args": {"smiles": "CCO"}, "id": "c-crashed"}],
+    )
+    graph = build_langgraph_agent(model=_Recording(messages=iter([AIMessage(content="done")])))
+    asyncio.run(
+        graph.ainvoke({"messages": [HumanMessage("compute"), orphan, HumanMessage("and now?")]})
+    )
+
+    assert seen, "the model was never called"
+    assert unmatched_call_ids(seen[0]) == set(), (
+        "an orphaned tool_use reached the model request; deepagents' PatchToolCallsMiddleware "
+        "no longer heals dangling calls, and without a replacement every session that crashes "
+        "between two supersteps is permanently bricked"
+    )
+
+
+def test_astream_with_a_mode_list_and_subgraphs_still_yields_three_tuples() -> None:
+    """The front door's largest unpromised-shape coupling, pinned where the ADR said it was.
+
+    `api/graph_stream.py` unpacks `async for namespace, mode, payload in graph.astream(...,
+    stream_mode=list, subgraphs=True)` — an arity upstream never promised, verified against
+    `langgraph.pregel.main._output` and kept deliberately when the v3 move was reverted
+    (`D-2026-08-14` §6: v3 books 0 tokens for a turn abandoned mid-message, a free budget bypass).
+    That ADR says `tests/test_upstream_surface.py` keeps the coupling from rotting silently, and
+    until this test the file pinned only the v3 restart-condition seam — an upstream arity change
+    would have surfaced as a bare unpack `ValueError` deep in an unrelated stream test rather than
+    as a named diagnostic. Driven on a compiled graph because the arity is a property of the
+    *running* pregel loop, not of any signature.
+    """
+    from langchain_core.messages import AIMessage
+
+    from chemclaw.agent.langgraph_agent import build_langgraph_agent
+    from tests.fakes import ScriptedModel
+
+    graph = build_langgraph_agent(model=ScriptedModel(messages=iter([AIMessage(content="ok")])))
+
+    async def _drive() -> list[Any]:
+        chunks = []
+        async for chunk in graph.astream(
+            {"messages": [("user", "hi")]},
+            {"recursion_limit": 50},
+            stream_mode=["messages", "updates", "custom"],
+            subgraphs=True,
+        ):
+            chunks.append(chunk)
+        return chunks
+
+    chunks = asyncio.run(_drive())
+    assert chunks, "the stream yielded nothing; the driver below would too"
+    assert all(isinstance(chunk, tuple) and len(chunk) == 3 for chunk in chunks), (
+        "graph.astream(stream_mode=list, subgraphs=True) no longer yields "
+        "(namespace, mode, payload) 3-tuples; api/graph_stream.py unpacks exactly that shape "
+        "and every turn would die on the first chunk"
+    )
+    modes = {chunk[1] for chunk in chunks}
+    assert modes <= {"messages", "updates", "custom"}, (
+        f"the middle element is no longer the mode name: {modes}"
     )

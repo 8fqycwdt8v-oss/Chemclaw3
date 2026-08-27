@@ -85,7 +85,7 @@ def _no_connectors(_profile: str | None = None) -> list[Any]:
     return []
 
 
-def _app(agent: _FakeAgent | None = None, **kwargs: Any) -> FastAPI:
+def _app(agent: ScriptedTurn | None = None, **kwargs: Any) -> FastAPI:
     """The app under test, wired to one fake through the seam a turn is driven by.
 
     `graph_factory` is how the fake gets in (see `tests.fakes_turn.ScriptedTurn`), so a test never
@@ -1313,13 +1313,17 @@ def test_stalled_turn_times_out_and_frees_the_permit(monkeypatch) -> None:  # ty
     assert session_id not in app.state.active_turns
 
 
-def test_cancelled_admission_wait_does_not_brick_the_session(monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    """A request cancelled while waiting for a turn permit frees the session's turn slot.
+def test_a_client_cancelled_mid_admission_leaves_a_turn_that_finishes_itself(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """A disconnect during the admission wait detaches the client; the turn queues, runs, frees.
 
-    CancelledError is a BaseException: an `except Exception` cleanup missed it, so a client
-    disconnecting mid-admission leaked the active-turns entry — every later POST to that
-    session answered 409 until restart. The slot must be released on *any* pre-handoff exit,
-    and the session must accept a turn again once capacity exists.
+    This test used to pin the opposite: the cancellation freed the session's slot immediately,
+    because a disconnect *was* the stop. Under
+    `D-2026-08-27-a-disconnect-is-a-detach-not-a-stop` the turn belongs to the chemist's request
+    rather than to the socket that carried it — so the abandoned turn keeps its claim (a 409 for
+    a concurrent second tab is *correct*: the session is genuinely busy), takes its permit when
+    capacity returns, runs to completion unwatched, and only then frees the slot. What must not
+    happen is the old leak this test was born for: a slot held forever by a turn that no longer
+    exists. The turn existing and finishing is what prevents that now.
     """
     import contextlib
 
@@ -1341,14 +1345,20 @@ def test_cancelled_admission_wait_does_not_brick_the_session(monkeypatch) -> Non
             async with asyncio.timeout(5):
                 while session_id not in app.state.active_turns:  # parked mid-admission
                     await asyncio.sleep(0.01)
-            waiting.cancel()  # the client goes away between add and handoff
+            waiting.cancel()  # the client goes away; the turn does not
             with contextlib.suppress(asyncio.CancelledError, httpx.HTTPError):
                 await waiting
 
-            assert session_id not in app.state.active_turns  # the slot is freed, not leaked
+            # The detached turn still holds the session — queued, not leaked.
+            assert session_id in app.state.active_turns
             app.state.turn_semaphore.release()  # capacity returns...
+            # ...and the abandoned turn runs to completion unwatched, freeing the slot at its
+            # true end — the transcript, not this socket, is where its answer went.
+            async with asyncio.timeout(5):
+                while session_id in app.state.active_turns:
+                    await asyncio.sleep(0.01)
             res = await client.post(f"/sessions/{session_id}/messages", json={"message": "hi"})
-            assert res.status_code == 200  # ...and the session is usable, not 409-bricked
+            assert res.status_code == 200  # the session is usable, not 409-bricked
 
     asyncio.run(_run())
 
@@ -1579,6 +1589,11 @@ def test_every_session_scoped_route_is_ownership_gated() -> None:
         # is hung off a session at all: a ref is the SHA-256 of a result's own text, so it is
         # unguessable but not secret, and this gate — not the ref — is what says who may read it.
         ("/sessions/{session_id}/tool-results/{ref}", "GET"),
+        # The explicit stop (D-2026-08-27-a-disconnect-is-a-detach-not-a-stop). Owner-scoped
+        # because cancelling someone else's running turn is exactly the interference the
+        # ownership gate exists to refuse — and 404 either way, so a stranger cannot learn
+        # whether a session is mid-turn.
+        ("/sessions/{session_id}/turn/stop", "POST"),
     }, (
         "new session-scoped route detected — it MUST resolve ownership via _resolve_session, "
         "and this inventory + the non-owner sweep below must cover it"

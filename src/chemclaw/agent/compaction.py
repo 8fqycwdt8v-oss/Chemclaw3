@@ -88,7 +88,7 @@ from langchain.agents.middleware.context_editing import ContextEdit, TokenCounte
 from langchain_core.messages import AnyMessage, HumanMessage, ToolMessage
 from langchain_core.messages.utils import count_tokens_approximately, trim_messages
 
-from chemclaw.agent.repeat_guard import forget_calls
+from chemclaw.agent.repeat_guard import current_watch, forget_calls
 from chemclaw.core.config import settings
 from chemclaw.core.metrics_bridge import record_metric
 
@@ -323,27 +323,45 @@ def _record_reduction(request: ModelRequest[Any]) -> None:
     reclaimed = count_tokens_approximately(thread) - count_tokens_approximately(request.messages)
     if reclaimed <= 0:
         return
-    record_metric(lambda m: m.increment("chemclaw_context_compactions_total"))
-    record_metric(
-        lambda m: m.increment("chemclaw_context_reclaimed_tokens_total", float(reclaimed))
-    )
     # The one place the reduction is *known*, so the one place that can tell the repeat guard its
     # premise has expired. A cleared tool result leaves the model without the answer the guard
     # assumes it is holding, and the third identical call was then refused with advice — "answer
     # from what you already have" — about something it no longer had. See `repeat_guard`.
     #
     # The calls are named rather than the counters wiped: clearing keeps the newest results, so a
-    # blanket reset forgave repeats the model can still read.
+    # blanket reset forgave repeats the model can still read. And each is named by its *call id*,
+    # forgiven at most once per turn: the edits are non-destructive, so this observer re-derives
+    # the same standing reduction on every model call, and forgiving it every time reset the
+    # guard's counters as fast as repeats accumulated (`repeat_guard.TurnCallWatch`).
     forget_calls(_cleared_calls(request.messages))
+    # The metrics are high-water-marked on the turn's watch for the same re-derivation reason: a
+    # 30-step turn with one standing reduction is one compaction, not thirty, and a reclaimed
+    # token is reclaimed once. Off the request path there is no watch and each call reports
+    # itself, which is what a single-shot `graph.invoke` in a test observes.
+    watch = current_watch()
+    if watch is None:
+        record_metric(lambda m: m.increment("chemclaw_context_compactions_total"))
+        record_metric(
+            lambda m: m.increment("chemclaw_context_reclaimed_tokens_total", float(reclaimed))
+        )
+        return
+    if watch.peak_reclaimed == 0:
+        record_metric(lambda m: m.increment("chemclaw_context_compactions_total"))
+    delta = float(reclaimed) - watch.peak_reclaimed
+    if delta > 0:
+        record_metric(lambda m: m.increment("chemclaw_context_reclaimed_tokens_total", delta))
+        watch.peak_reclaimed = float(reclaimed)
 
 
-def _cleared_calls(messages: Sequence[AnyMessage]) -> list[tuple[str, Any]]:
-    """The `(tool name, arguments)` of every result this reduction replaced with a placeholder.
+def _cleared_calls(messages: Sequence[AnyMessage]) -> list[tuple[str, str, Any]]:
+    """`(call id, tool name, arguments)` per result this reduction replaced with a placeholder.
 
     Upstream stamps `response_metadata["context_editing"]["cleared"]` on a `ToolMessage` it clears,
     which is the only reliable marker — the placeholder text is first-party and a content match
     would break the moment it is reworded. The arguments come from the originating `AIMessage`'s
-    `tool_calls`, because the guard's identity is the call, not the tool.
+    `tool_calls`, because the guard's identity is the call, not the tool — and the call *id* rides
+    along because it is what lets the guard forgive each cleared result exactly once across the
+    many model calls that will all re-derive this same standing reduction.
 
     The metadata key is pinned in `tests/test_upstream_surface.py`.
     """
@@ -352,15 +370,16 @@ def _cleared_calls(messages: Sequence[AnyMessage]) -> list[tuple[str, Any]]:
         for call in getattr(message, "tool_calls", None) or ():
             if call.get("id"):
                 by_id[str(call["id"])] = (str(call.get("name", "")), call.get("args"))
-    cleared: list[tuple[str, Any]] = []
+    cleared: list[tuple[str, str, Any]] = []
     for message in messages:
         if not isinstance(message, ToolMessage):
             continue
         if not message.response_metadata.get("context_editing", {}).get("cleared"):
             continue
-        identity = by_id.get(str(message.tool_call_id))
+        call_id = str(message.tool_call_id)
+        identity = by_id.get(call_id)
         if identity is not None:
-            cleared.append(identity)
+            cleared.append((call_id, *identity))
     return cleared
 
 

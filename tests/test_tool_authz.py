@@ -359,6 +359,50 @@ def test_an_unclassified_failure_becomes_a_result_rather_than_ending_the_turn() 
     assert "failed unexpectedly" in str(ctx.result)
 
 
+def test_a_transport_failure_is_told_apart_from_a_bug_and_invites_one_retry() -> None:
+    """A raised timeout or reset is the *wire* failing, and "do not retry" is the wrong advice.
+
+    "MCP tools never raise" is true of tool-level errors — those return as
+    `ToolMessage(status="error")` with the server's own words — so what a connector call *raises*
+    is transport: an `McpError` timeout, an httpx reset, a dead session. The generic branch told
+    the model that was a permanent fault ("Do not retry it with the same arguments"), which turned
+    every transient blip into an abandoned capability for the rest of the turn. The repeat guard
+    already bounds how many retries a turn may spend, so inviting one is safe by construction.
+    """
+    from mcp.shared.exceptions import McpError
+    from mcp.types import ErrorData
+
+    ctx = _ctx("compute_xtb_energy")
+
+    async def _timed_out() -> None:
+        raise McpError(
+            ErrorData(code=-32001, message="Timed out while waiting for response. Waited 600s.")
+        )
+
+    _drive_domain_errors(ctx, _timed_out)
+
+    text = str(ctx.result)
+    assert "failed in transport" in text, text
+    assert "One retry may succeed" in text
+    assert "Do not retry" not in text
+    # Only the exception's *type* is named — transport errors carry internal addresses and their
+    # text was never worded for a model.
+    assert "Waited 600s" not in text
+
+    # An httpx-shaped failure lands in the same branch; a plain bug does not.
+    class _Reset(Exception):
+        pass
+
+    _Reset.__module__ = "httpx"
+    ctx2 = _ctx("compute_xtb_energy")
+
+    async def _reset() -> None:
+        raise _Reset("connection reset by peer")
+
+    _drive_domain_errors(ctx2, _reset)
+    assert "failed in transport" in str(ctx2.result)
+
+
 def test_a_cancellation_is_never_converted_into_a_tool_result() -> None:
     """`CancelledError` is how a disconnect and the turn deadline arrive.
 

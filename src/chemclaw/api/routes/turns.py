@@ -21,6 +21,7 @@ from starlette.types import Receive, Scope, Send
 
 from chemclaw.api.budget import BudgetExceeded
 from chemclaw.api.deps import CurrentSession, CurrentUser
+from chemclaw.api.detach import DetachableTurn
 from chemclaw.api.events import ErrorEvent, QueuedEvent
 from chemclaw.api.middleware import _AT_CAPACITY
 from chemclaw.api.runner import failure_event, run_turn
@@ -82,7 +83,8 @@ class _TurnStream(EventSourceResponse):
         except SendTimeoutError:
             METRICS.increment("chemclaw_turn_send_timeouts_total")
             logger.warning(
-                "the client of session %s stopped reading for %ss; the turn was torn down",
+                "the client of session %s stopped reading for %ss; the stream was closed and "
+                "the turn detached",
                 self._session_id,
                 settings.service_sse_send_timeout_seconds,
             )
@@ -318,8 +320,20 @@ async def post_message(
         # `finally` below no longer owns the cleanup and the slot needs an expiry of its own
         # (see `_start_turn_lease`).
         _start_turn_lease(active_turns, session_id, slot)
-        response = _TurnStream(
+        # The turn runs on a pump task of its own from this moment
+        # (`D-2026-08-27-a-disconnect-is-a-detach-not-a-stop`): the SSE response is a *view* of
+        # it, so a client disconnect detaches the view and the turn runs to completion — its
+        # answer lands in the transcript, its teardown releases the permit, the lease and the
+        # claim at the turn's true end. Stopping is the explicit route below, which cancels the
+        # pump and delivers the same `CancelledError` a disconnect used to.
+        turn = DetachableTurn(
             _turn_events(),
+            session_id=session_id,
+            survive_disconnect=settings.service_turn_survives_disconnect,
+        )
+        front.running_turns.register(session_id, turn)
+        response = _TurnStream(
+            turn.events(),
             session_id=session_id,
             ping=settings.service_sse_ping_seconds,
             send_timeout=settings.service_sse_send_timeout_seconds,
@@ -339,6 +353,35 @@ async def post_message(
                 await _release_turn_claim(claims, session_id)
 
 
+async def stop_turn(
+    request: Request,
+    session_id: str,
+    principal: CurrentUser,
+    live: CurrentSession,
+) -> dict[str, bool]:
+    """Stop the session's running turn — the explicit act a disconnect no longer performs.
+
+    Closing the SSE stream used to be how a turn was stopped, which made the Stop button and a
+    network blip the same event; now the stream only *detaches*
+    (`D-2026-08-27-a-disconnect-is-a-detach-not-a-stop`) and this is the one way to cancel work
+    in flight. Guarded by the same session-ownership dependency as the turn route itself, so
+    stopping a turn requires exactly the standing that starting one does.
+
+    404 when no turn is running rather than a silent 200: "there was nothing to stop" and
+    "stopped" are different facts, and a client that raced the turn's own completion should know
+    which happened. Only this process's turns are stoppable — the pump lives here — so on a
+    multi-replica deployment the client calls the same origin its stream was on, which it always
+    does, because the stream *is* how it knows a turn is running.
+    """
+    turn = state(request).running_turns.get(session_id)
+    if turn is None:
+        raise HTTPException(status_code=404, detail="no turn is running for this session")
+    await turn.stop()
+    METRICS.increment("chemclaw_turns_stopped_total")
+    logger.info("session %s's turn was stopped by request", session_id)
+    return {"stopped": True}
+
+
 def register(app: FastAPI) -> None:
     """Attach this module's route to `app` — called once, by `create_app` only.
 
@@ -352,3 +395,4 @@ def register(app: FastAPI) -> None:
     `create_app`.
     """
     app.post("/sessions/{session_id}/messages")(post_message)
+    app.post("/sessions/{session_id}/turn/stop")(stop_turn)

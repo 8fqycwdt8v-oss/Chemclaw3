@@ -463,11 +463,21 @@ class ReloadingSkillsMiddleware(SkillsMiddleware):
 
 
 def _harness_middleware(profile: AgentProfile) -> list[Any]:
-    """The plan/execute harness: the todo list the plan gate reads, and the runaway cap.
+    """The plan/execute harness's todo list, and the runaway cap every profile gets.
 
-    Both conditional on `harness_enabled_for`, matching MAF: the classic agent has no todo list and
-    no loop cap, so attaching either unconditionally would make this engine behave differently from
-    the other while both are live — a safer difference, but a difference.
+    **The cap is unconditional and the todo list is not, and they used to travel together.** Both
+    were gated on `harness_enabled_for`, "matching MAF: attaching either unconditionally would make
+    this engine behave differently from the other while both are live." M13 deleted the other
+    engine, so that reason expired — and what the gate then cost was that the shipped default
+    (`harness_enabled=False`) ran with **no graceful stop at all**: the only bound left was
+    `agent_recursion_limit`, whose expiry raises `GraphRecursionError` and discards everything the
+    turn produced, after up to the full turn deadline. That is precisely the failure
+    `agent/loop_cap.py` argues a chemist must not eat — end the run, let the partial answer out,
+    mark it. A runaway loop is a property of the model/tool cycle, not of the plan/execute mode,
+    which is the same argument that already attaches compaction unconditionally below.
+
+    The todo list stays harness-only: a classic turn has no plan for the gate to read, and
+    advertising `write_todos` there would be a capability the mode does not use.
 
     `enforce_loop_cap` both enforces the cap and records it, and `loop_cap.loop_capped` reads that
     record. One counter for one number — and it counts in `before_model` deliberately: see
@@ -475,7 +485,7 @@ def _harness_middleware(profile: AgentProfile) -> list[Any]:
     produced, the first of which is that an `after_model` counter is skippable by a jump.
     """
     if not harness_enabled_for(profile):
-        return []
+        return [enforce_loop_cap]
     return [TodoListMiddleware(), enforce_loop_cap]
 
 

@@ -185,8 +185,9 @@ class AgentSettings(BaseSettings):
     # nothing here ever chose otherwise, so a turn's real bound was thousands of model calls — and
     # it fails by raising `GraphRecursionError`, which discards whatever the turn had produced.
     # That is the opposite of the position `agent.loop_cap` takes deliberately: end the run, let the
-    # partial answer out, mark it. The loop cap above is the graceful stop; this is the backstop
-    # under it, and it also bounds the classic agent, which has no loop cap at all.
+    # partial answer out, mark it. The loop cap above is the graceful stop — on every profile, the
+    # classic agent included, since the harness gate on it expired with the second engine — and
+    # this is the backstop under it, sized so the cap always fires first.
     #
     # **A superstep is not a model call, which is why this is a multiplier.** One model/tool round
     # trip is several graph nodes — the model node, the tools node, and one per hook-bearing
@@ -211,6 +212,15 @@ class AgentSettings(BaseSettings):
     # Those are node updates, not supersteps; a ceiling derived from it would sit *below* what a
     # healthy 25-iteration turn needs and would have truncated good turns.
     agent_supersteps_per_model_call: int = Field(default=6, ge=2)
+
+    # How many tool calls from one assistant message may run at once. `ToolNode` gathers every
+    # call in the batch with no bound of its own, so before this existed a 40-call fan-out ran 40
+    # tool bodies, 40 audit rows and up to 40 plan-gate reads concurrently — against a Postgres
+    # pool of 16. Applied as LangGraph's `max_concurrency` in `agent.state.turn_config`, so it
+    # bounds a superstep's parallel work (subagent fan-outs included) rather than only tools.
+    # 8 matches the front door's own admission width (`service_max_concurrent_turns`) and the
+    # worker's activity slots, which are both sized to that pool; 0 removes the bound.
+    agent_max_parallel_tool_calls: int = Field(default=8, ge=0)
 
     # How many times one turn may call a tool with the *identical* arguments before the call is
     # refused (`agent.repeat_guard`). The loop cap above bounds the harness's iterations and says

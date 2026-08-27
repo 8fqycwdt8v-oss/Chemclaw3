@@ -35,7 +35,13 @@ class _Description:
 
 
 class _Handle:
-    """A workflow handle with a scripted status and result."""
+    """A workflow handle with a scripted status and result.
+
+    `result()` blocks forever while the scripted status is RUNNING, because that is what the real
+    SDK's long-poll does — a fake that resolved instantly for a running workflow handed the
+    status tool's bounded wait a result that does not exist yet, which is how a fake stops
+    testing what it claims to.
+    """
 
     def __init__(self, status: WorkflowExecutionStatus, result: Any) -> None:
         self._status = status
@@ -45,6 +51,8 @@ class _Handle:
         return _Description(self._status)
 
     async def result(self) -> Any:
+        if self._status == WorkflowExecutionStatus.RUNNING:
+            await asyncio.Event().wait()
         return self._result
 
 
@@ -102,15 +110,41 @@ def test_a_completed_job_that_is_not_the_envelope_is_a_hard_error(
 
 
 def test_a_running_job_reports_the_status_alone(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A job still running is never asked for a result — a DFT run holds one open for days."""
+    """A job still staying running answers `running` once the bounded wait expires."""
 
     async def _connect() -> _Client:
         return _Client(_Handle(WorkflowExecutionStatus.RUNNING, None))
 
     monkeypatch.setattr(durable_tools, "connect", _connect)
+    monkeypatch.setattr(settings, "job_status_wait_seconds", 0.05)
     status = asyncio.run(get_durable_job_status("calc-sample_conformers-abc"))
     assert status.status == "running"
     assert status.summary is None and status.result == {}
+
+
+def test_a_poll_moments_before_completion_returns_the_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The bounded long-poll: a job finishing inside the wait answers with its result now.
+
+    A poll from the model costs a whole conversation turn, so answering `running` for a job two
+    seconds from done used to spend another full turn — connector open, graph compile, model
+    call — learning what a short `handle.result()` wait delivers immediately.
+    """
+
+    class _FinishingHandle(_Handle):
+        async def result(self) -> Any:
+            await asyncio.sleep(0.02)
+            return {"summary": "GFN2-xTB on CCO: -154.75 Hartree", "data": {"converged": True}}
+
+    async def _connect() -> _Client:
+        return _Client(_FinishingHandle(WorkflowExecutionStatus.RUNNING, None))
+
+    monkeypatch.setattr(durable_tools, "connect", _connect)
+    monkeypatch.setattr(settings, "job_status_wait_seconds", 5.0)
+    status = asyncio.run(get_durable_job_status("calc-sample_conformers-abc"))
+    assert status.status == "completed", "the long-poll never consumed the finishing result"
+    assert status.result, "a completed poll must carry the result, not send the model back"
 
 
 class _ExpiredHandle:

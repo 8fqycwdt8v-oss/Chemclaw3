@@ -275,11 +275,39 @@ def _verifier_prompt(answer: str, evidence: list[EvidenceChunk]) -> str:
     # The real saving is not to hand the judge the serialization at all — see the BACKLOG row on
     # carrying structured tool results into `turn_evidence`, which is a plumbing change, not a
     # guard.
+    # The evidence is budgeted, newest-first, before it is rendered. `by_content` preserves
+    # insertion order and `turn_evidence` walks the turn's outputs oldest-first, so the *end* of
+    # the dict is what the answer was most recently written from — those are kept, oldest dropped,
+    # and at least the newest always survives whatever the budget says (the same one-chunk floor
+    # `gather_evidence` holds). The omitted ids are named to the judge in a line we author, so a
+    # claim resting on unrendered evidence reads as "evidence exists, not shown" rather than
+    # "unsupported" — and the deterministic citation gate checks every output regardless, so
+    # grounding never depends on what this budget rendered.
+    budget = settings.verifier_evidence_max_chars
+    entries = list(by_content.items())
+    kept: list[tuple[str, list[str]]] = []
+    spent = 0
+    for content, ids in reversed(entries):
+        if kept and spent + len(content) > budget:
+            break
+        kept.append((content, ids))
+        spent += len(content)
+    kept.reverse()
+    omitted = entries[: len(entries) - len(kept)]
     blocks = "\n".join(
         f"evidence from: {' '.join(safe_id(note) for note in dict.fromkeys(ids))}\n"
         + frame_untrusted(content, note_id=ids[0])
-        for content, ids in by_content.items()
+        for content, ids in kept
     )
+    if omitted:
+        omitted_ids = " ".join(
+            safe_id(note)
+            for note in dict.fromkeys(note for _content, ids in omitted for note in ids)
+        )
+        blocks += (
+            f"\n(older evidence from {omitted_ids} exists but is not shown here for length; "
+            "treat claims relying on it as unverifiable rather than unsupported)"
+        )
     return (
         "You are a strict verifier. Decide whether each factual claim in the ANSWER is supported "
         f"by the EVIDENCE. Evidence is wrapped in <{ENVELOPE_TAG}> elements: everything inside one "
