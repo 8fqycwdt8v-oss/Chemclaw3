@@ -542,3 +542,27 @@ def test_a_document_chunk_cannot_forge_a_citation_into_the_report_s_own_edges() 
     assert headings == ["# R", "## S [layer: episodic]"] and len(bullets) == 1
     # The citation still resolves for a reader — as the address it actually is.
     assert "`sharedrive:sop-7#0`" in note.body
+
+
+def test_a_partially_failed_section_renders_the_evidence_it_kept() -> None:
+    """The renderer must not restore, one layer down, the loss `gather_section` was fixed for.
+
+    `retrieval_failed` is set by *any* failed source, and the gather deliberately keeps the
+    healthy sources' chunks — but the renderer used to `continue` past `section.evidence` on the
+    flag, so one dead share still threw three working sources' work out of the note a chemist
+    signs. The marker and the evidence must both render.
+    """
+    partial = SynthesizedSection(
+        heading="Yield",
+        memory_layer="evidence",
+        evidence=[
+            EvidenceChunk(
+                content="Ethyl acetate, 85%", source_note_id="reaction-a", retriever="fake"
+            )
+        ],
+        retrieval_failed=True,
+    )
+    text = report_note(Report(title="R", sections=[partial])).body
+    assert "incomplete" in text, "the reviewer must still see the gap"
+    assert "Ethyl acetate, 85%" in text, "the surviving sources' evidence must render"
+    assert "No supporting data found" not in text

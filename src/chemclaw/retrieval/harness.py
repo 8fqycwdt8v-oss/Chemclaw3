@@ -287,12 +287,24 @@ def report_note(report: Report) -> Note:
     lines = [f"# {report.title}\n"]
     for section in report.sections:
         lines.append(f"## {section.heading} [layer: {section.memory_layer}]\n")
-        if section.retrieval_failed:
-            # A failed section is flagged distinctly from an empty one: the gap is visible to the
-            # reviewer (and re-runnable), never silently absent from the draft (F10-D2).
+        if section.retrieval_failed and section.evidence:
+            # A partially-failed section keeps what was retrieved. `retrieval_failed` is set by
+            # *any* failed source, and `gather_section` was changed specifically so a dead share
+            # no longer throws away three working sources' chunks — but this renderer used to
+            # `continue` past `section.evidence` on the flag, restoring the original defect one
+            # layer down: the rendered note the chemist signed was byte-identical to the pre-fix
+            # behaviour the gather docstring said was repaired. The marker stays (the reviewer
+            # must see the gap), and the evidence renders under it.
+            lines.append(
+                "_Some retrieval sources failed for this section; the evidence below is "
+                "incomplete — re-run required._\n"
+            )
+        elif section.retrieval_failed:
+            # Nothing was retrieved at all: flagged distinctly from an empty section, so the gap
+            # is visible to the reviewer (and re-runnable), never silently absent (F10-D2).
             lines.append("_Retrieval failed for this section; incomplete — re-run required._\n")
             continue
-        if not section.supported:
+        elif not section.supported:
             lines.append("_No supporting data found; section left unsupported._\n")
             continue
         for chunk in section.evidence:
