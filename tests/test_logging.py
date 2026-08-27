@@ -1166,38 +1166,55 @@ def test_configure_logging_twice_does_not_stack_filters(monkeypatch: pytest.Monk
         private.propagate = True
 
 
-def test_the_logger_sweep_survives_concurrent_getlogger() -> None:
-    """Snapshotting `loggerDict` under the logging lock, not iterating the live view.
+def test_the_logger_sweep_survives_a_logger_created_during_the_sweep() -> None:
+    """The sweep snapshots `loggerDict`; it does not iterate the live view.
 
     `configure_logging()` runs in the app factory while worker startup, a lazy connector import or
-    OTel's first use may be creating loggers on another thread. Iterating the live mapping raised
-    `RuntimeError: dictionary changed size during iteration` in 64 of 4000 measured attempts — and
-    the raise aborts configuration with filters attached to only some handlers, which is the worst
-    of the three outcomes.
+    OTel's first use may be creating loggers on another thread. Iterating the live mapping raises
+    `RuntimeError: dictionary changed size during iteration`, and the raise aborts configuration
+    with filters attached to only some handlers — the worst of the three outcomes, because it looks
+    like success.
+
+    **Deterministic, where this test used to be probabilistic, and the rewrite is the point.** It
+    ran four threads creating a *unique* logger per loop while the main thread swept 2,000 times,
+    so the sweep was quadratic against a dict growing without bound: 9,568 loggers at iteration 0,
+    563,217 by iteration 250, 1,027,003 by iteration 494, never reaching 2,000. It terminated only
+    in isolation, where `loggerDict` starts nearly empty, and once `conftest` had imported the tree
+    it hung — taking the whole session with it, because `pytest-timeout`'s signal method crashes
+    pytest's traceback renderer. Bounding the churn made it finish in half a second and **stop
+    catching the defect**: reintroducing the live-view iteration still passed, because the race
+    window had gone with the volume. Fast and vacuous is worse than slow and meaningful.
+
+    So the mutation is provoked from *inside* the iteration instead of from another thread. The
+    loop body reads `.propagate` on each entry, so an entry whose `propagate` inserts a key changes
+    the mapping's size at exactly the moment a live view would be mid-iteration — deterministically,
+    with no threads, no volume and no timing. Against the snapshot the sweep actually takes, the
+    insertion lands in a copy nobody is iterating and nothing happens.
     """
-    import threading
+    registry = logging.root.manager.loggerDict
+    planted = "chemclaw.test.sweep.trap"
+    created: list[str] = []
 
-    stop = threading.Event()
-    failures: list[BaseException] = []
+    class _CreatesALoggerWhenRead(logging.Logger):
+        """A real `Logger` (so the sweep's `isinstance` accepts it) that mutates when inspected."""
 
-    def churn(index: int) -> None:
-        counter = 0
-        while not stop.is_set():
-            logging.getLogger(f"chemclaw.test.churn{index}.mod{counter}")
-            counter += 1
+        @property  # type: ignore[override]
+        def propagate(self) -> bool:
+            """Insert a new entry, then answer as an ordinary propagating logger would."""
+            name = f"chemclaw.test.sweep.during{len(created)}"
+            created.append(name)
+            registry[name] = logging.PlaceHolder(logging.getLogger())  # type: ignore[arg-type]
+            return True
 
-    workers = [threading.Thread(target=churn, args=(i,), daemon=True) for i in range(4)]
-    for worker in workers:
-        worker.start()
+        @propagate.setter
+        def propagate(self, value: bool) -> None:
+            """`Logger.__init__` assigns it; the getter above is what this test is for."""
+
+    registry[planted] = _CreatesALoggerWhenRead(planted)
     try:
-        for _ in range(2_000):
-            try:
-                _handlers_that_reach_an_output_stream()
-            except RuntimeError as exc:  # pragma: no cover - the defect this pins
-                failures.append(exc)
-                break
+        _handlers_that_reach_an_output_stream()
     finally:
-        stop.set()
-        for worker in workers:
-            worker.join(timeout=5)
-    assert not failures, f"the sweep raced against getLogger(): {failures[0]}"
+        for name in [planted, *created]:
+            registry.pop(name, None)
+
+    assert created, "the trap was never inspected, so this test proved nothing about the sweep"
