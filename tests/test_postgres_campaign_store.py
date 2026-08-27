@@ -234,7 +234,8 @@ def test_a_retried_durable_write_hits_the_unique_index_instead_of_appending() ->
         assert len(await store.suggestions_for(campaign_id, limit=10)) == 1
 
         other_run = suggestion.model_copy(update={"job_id": "bo-start_optimization_campaign-cafe"})
-        assert await store.record(_campaign(campaign_id), other_run) != first
+        other_id, _ = await store.record(_campaign(campaign_id), other_run)
+        assert other_id != first
         assert len(await store.suggestions_for(campaign_id, limit=10)) == 2
 
     asyncio.run(_run())
