@@ -421,14 +421,16 @@ def test_a_corpus_note_in_the_external_namespace_is_not_reported_missing(tmp_pat
     A real note under that name must not be sent to the record store and reported as an absent
     ELN transcription.
     """
-    from chemclaw.kg.validate import external_citations, notes_in
+    from chemclaw.kg.validate import external_citations, validate_with_notes
 
     _write(tmp_path, Note(id="reaction-abc", type="reaction", body="a real note"))
     _write(
         tmp_path,
         Note(id="compound-q", type="compound", body="[[reaction-abc]] and [[reaction-missing]]"),
     )
-    assert external_citations(notes_in(tmp_path)) == [("compound-q", "reaction-missing")]
+    assert external_citations(validate_with_notes(tmp_path)[1]) == [
+        ("compound-q", "reaction-missing")
+    ]
 
 
 def test_a_surrogate_in_a_nested_conditions_field_is_refused_at_the_note() -> None:

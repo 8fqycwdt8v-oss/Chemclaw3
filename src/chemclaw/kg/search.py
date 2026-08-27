@@ -28,7 +28,9 @@ from chemclaw.kg.note import Note
 # Words that carry no retrieval signal but do carry the difference between "biaryl" (three hits)
 # and "the biaryl" (none) under a whole-phrase match. Deliberately tiny and English-only: this is
 # not stemming or a language model, it is the handful of words a chemist puts around the term they
-# actually mean. A longer list would start discarding real chemistry ("in situ", "on water").
+# actually mean. Terms are matched independently, so dropping `in` costs "in situ" nothing — the
+# note is still found by `situ` — and a longer list is resisted because each entry is one more
+# word a query can no longer *require*.
 _STOPWORDS = frozenset(
     {"a", "an", "and", "for", "from", "in", "is", "of", "on", "or", "our", "the", "to", "with"}
 )
@@ -37,13 +39,30 @@ _MIN_TERM_CHARS = 2
 
 
 def search_text(note: Note) -> str:
-    """The text a substring search sees for `note`: id, type, structure, tags and body.
+    """The text a substring search sees for `note`: its metadata, structured figures, and body.
 
     Also the text that is embedded and lexically indexed (`chemclaw.retrieval.vector_index`), so
     the dense vector, the tsvector and the substring sweep agree on what "the note's content"
     means — which is what the function it replaced claimed and did not do.
+
+    `conditions` and `source` are in the haystack because they were the fields all three search
+    legs could not see: `ProcessConditions` exists so "the figures a chemist compares reach the
+    note as frontmatter rather than only as sentences" — and this was the one function through
+    which none of those figures could be *found*, so an `outcome: failure` note was not findable
+    by the word "failure". Values only, not the field names: `temperature_c` as a token would
+    match every conditions-carrying note against a query about temperature.
+
+    Not memoized per note, deliberately: `Note` is frozen and shared out of the corpus cache, and
+    the two mechanisms that could attach a computed haystack to the instance (a private attribute,
+    a `__dict__` write) both make a cached note compare unequal to an identical uncached one —
+    measured against pydantic's own `__eq__`. ~30 ms per full sweep of a 10k-note corpus is the
+    accepted price of keeping equality honest.
     """
-    return " ".join([note.id, note.type, note.compound_smiles or "", *note.tags, note.body]).strip()
+    parts = [note.id, note.type, note.compound_smiles or "", *note.tags, note.source or ""]
+    if note.conditions is not None:
+        parts.extend(str(value) for value in note.conditions.model_dump(exclude_none=True).values())
+    parts.append(note.body)
+    return " ".join(part for part in parts if part)
 
 
 def query_terms(query: str) -> list[str]:
@@ -54,18 +73,27 @@ def query_terms(query: str) -> list[str]:
     holds. Falls back to the whole query when nothing survives filtering — a search for `the` is
     still a search, and returning "no terms, therefore everything" would be worse than literal.
 
+    The fallback honours `_MIN_TERM_CHARS`: it used to hand back exactly the sub-minimum term the
+    filter had just rejected (`"C"` → `['c']`), a single letter that sits in essentially every
+    haystack — which turned the narrowest possible query into the broadest possible match. A
+    one-character query now returns no terms, and the caller's "nothing matched" is the honest
+    answer; a chemist searching a one-atom SMILES wants the structure tools, not a substring.
+
     A blank query asks for nothing and gets nothing: no terms, so `term_coverage` is zero for every
     note. Not the same case as the fallback above — `""` is in every haystack, so treating an empty
     query as a term would return the entire corpus to a caller who typed nothing.
     """
-    if not query.strip():
+    stripped = query.strip()
+    if not stripped:
         return []
     terms = [
         term
         for term in re.split(r"[^0-9a-z]+", query.lower())
         if len(term) >= _MIN_TERM_CHARS and term not in _STOPWORDS
     ]
-    return terms or [query.lower()]
+    if terms:
+        return terms
+    return [stripped.lower()] if len(stripped) >= _MIN_TERM_CHARS else []
 
 
 def term_coverage(note: Note, terms: Sequence[str]) -> int:

@@ -7,12 +7,21 @@ form the graph stores, so the write path (PR-gate) and the read path share one s
 both measured by generating notes rather than assumed (`tests/test_properties_core.py`). The
 equation used to be written here unqualified and is not one:
 
-- `python-frontmatter` strips the content it parses, so a body of `" "` returns as `""`.
+- `python-frontmatter` runs `str.strip()` on the content it parses — so a body of `" "` returns
+  as `""`, and equally a leading tab or a blank line before a fenced block is gone on the way
+  back. The rule is the strip, not the empty-body special case it was first noticed as.
 - `Path.read_text` translates line endings, so a body containing `\r` returns with `\n`.
 
 Neither distinction survives Markdown rendering, so neither is worth defending — but a note whose
 body is *only* whitespace comes back empty, and a docstring that promised equality would have sent
 whoever hit that looking for a schema bug. Every frontmatter field round-trips exactly.
+
+**Empty-default fields are rendered, deliberately.** `render_note` dumps `exclude_none` but not
+`exclude_defaults`, so every note carries `calc_refs: []`, `tags: []`, `created_by: human` and so
+on. Byte-stability of the rendering is load-bearing: the PR-gate treats "renders byte-identically
+to the merged file" as "no diff, nothing to propose", so tightening the dump would make every
+re-proposal of every existing note a spurious diff. Changing the shape is a corpus migration, not
+a rendering tweak.
 """
 
 import frontmatter

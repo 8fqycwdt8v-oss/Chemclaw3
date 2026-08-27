@@ -25,7 +25,7 @@ from pathlib import Path
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.ingest.eln.records import default_record_store
-from chemclaw.kg.validate import external_citations, notes_in, unresolved_citations, validate
+from chemclaw.kg.validate import external_citations, unresolved_citations, validate_with_notes
 
 
 def main() -> int:
@@ -35,12 +35,14 @@ def main() -> int:
         print(f"notes directory does not exist: {notes_dir}")
         return 1
     try:
-        problems = validate(notes_dir)
+        # One parse for both halves: the citation checks read the same corpus `validate` just
+        # walked, and the second `read_note` loop this used to run doubled the gate's cost.
+        problems, notes = validate_with_notes(notes_dir)
     except ChemclawError as exc:
         print(f"cannot determine this deployment's note vocabulary: {exc}")
         return 1
 
-    citations = external_citations(notes_in(notes_dir))
+    citations = external_citations(notes)
     unchecked = 0
     if citations:
         try:

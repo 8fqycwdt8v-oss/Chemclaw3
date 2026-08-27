@@ -37,6 +37,17 @@ from chemclaw.kg.relations import RELATION_SIGNATURES, known_relations
 
 def validate(notes_dir: Path) -> list[str]:
     """Return a list of human-readable problems in `notes_dir` (empty if clean)."""
+    return validate_with_notes(notes_dir)[0]
+
+
+def validate_with_notes(notes_dir: Path) -> tuple[list[str], list[Note]]:
+    """The problems in `notes_dir`, plus the parseable notes the scan already read.
+
+    The notes come back so a caller that needs both — `cli.validate_kg`, which runs the citation
+    checks over the same corpus — parses the tree once instead of twice. `notes_in` used to be
+    that second parse: the CLI called `validate` and then `notes_in`, each with its own
+    `read_note` loop over every file, doubling the gate's cost for no additional information.
+    """
     problems: list[str] = []
     # Notes with the file each came from, so every message can name a path without a lookup that
     # can miss. It used to be a dict keyed by id, which the duplicate-id branch deliberately does
@@ -126,7 +137,7 @@ def validate(notes_dir: Path) -> list[str]:
     )
     problems.extend(_signature_problems(located))
     problems.extend(_malformed_targets(located))
-    return problems
+    return problems, notes
 
 
 def _signature_problems(located: list[tuple[Note, Path]]) -> list[str]:
@@ -289,19 +300,6 @@ def main() -> int:
         return 1
     print(f"OK: {notes_dir} is a valid knowledge graph")
     return 0
-
-
-def notes_in(notes_dir: Path) -> list[Note]:
-    """Every parseable note under `notes_dir` — the corpus the citation check reads."""
-    parsed: list[Note] = []
-    for path, _ in scan_notes_dir(notes_dir):
-        try:
-            note = read_note(path)
-        except NoteError:
-            continue  # already reported by `validate`
-        if note is not None:
-            parsed.append(note)
-    return parsed
 
 
 if __name__ == "__main__":

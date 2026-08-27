@@ -168,7 +168,13 @@ def cited_ids(text: str) -> list[str]:
 #
 # The three keys are enumerated rather than matched as a `*_id` suffix, because that would also
 # swallow `structure_id`, `calc_id`, `job_id` and `session_id` — none of which names a note, and
-# every one of which would make an answer look grounded in something it never saw.
+# every one of which would make an answer look grounded in something it never saw. The bare `id`
+# key is the residual over-capture the enumeration cannot close: any JSON object with a plain
+# `"id":` field matches, including a session or job dumped with one. The exposure is bounded by
+# what the check does with a capture — a grounding verdict only credits an id the *answer also
+# cites*, so a swallowed `sess-…` grounds nothing unless the model cites `[[sess-…]]` — but it is
+# an over-capture, not the "our own formats only" claim the paragraph above makes, and narrowing
+# it means renaming the `id` field in the note serializations, not tightening this pattern.
 #
 # The `\\?` before each quote is not defensive padding. A `gather_evidence` result is JSON whose
 # `content` field holds the `<retrieved-note ... id="X">` envelope as *text*, so on the wire the
