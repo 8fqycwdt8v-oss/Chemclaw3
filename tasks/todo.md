@@ -1,82 +1,128 @@
-# Agent engine deep audit → implementation pass (2026-08-27)
+# Blind-spot remediation — 22 findings across four repositories
 
-A four-agent investigation of the agent engine (tool-call path, long-turn state, durable delivery,
-decision record) produced 14 defects, ~20 risks and 12 opportunities; this pass implements the
-findings. Every declined/reverted approach in the decision record was honored — nothing here
-re-litigates stream_events v3, `ModelCallLimitMiddleware`, `RubricMiddleware`, summarization, the
-retry middlewares, LangSmith or the harness profile.
+Source: a 46-agent audit (4 repo maps → 10 dimension hunts → 30 adversarial verifications →
+synthesis). 31 candidates raised, 8 dropped as already tracked in an ADR/BACKLOG/DEFERRED, 1
+dropped on verification, **22 confirmed**. Findings are numbered BS-01…BS-22 in the report.
 
-## Plan (all done unless marked)
+Four pull requests, one per repository, each merged when its own CI is green.
 
-- [x] Baseline: Docker up, `make up`, `db-migrate`, full suite green with Postgres (4891 passed).
-- [x] **A — config/validators**: `agent_max_parallel_tool_calls` → `max_concurrency` (measured:
-      8-call batch bounded to 2 on the compiled graph); `xtb_job_timeout_seconds` 14400→15000 +
-      validator over `calc_sampling_timeout_seconds` (equality was the defect); calc manifest
-      `request_timeout` 60→600 (a 60 s bound cancelled real work the server was allowed 900 s
-      for, uncached); connector open (15 s) and teardown (5 s) bounds in `transport.py`.
-- [x] **B — middleware**: loop cap unconditional (ADR: the-cap-is-a-property-of-the-loop…);
-      transport failures worded transient via `connectors.transport.transport_failure` (layering:
-      the predicate lives where mcp/httpx are legal imports); audit rows batched off the
-      tool-call path in `PostgresAuditSink` + runner turn-end flush; `_truncate` bounded via
-      reprlib; `side_effecting_tools` `@cache`d (cleared beside the discovery caches);
-      repeat-guard forgiveness keyed by cleared *call id*, once per turn (it was re-fired every
-      model call past 30k tokens, disarming the guard); compaction metrics high-water-marked;
-      plan gate judges a batched call against the plan the batch writes; approval consumption
-      session-wide + on abandonment when the turn acted (ADR: the-approval-follows-the-turn…);
-      verifier evidence budget (`verifier_evidence_max_chars`, newest-first, omitted ids named).
-- [x] **B declined in-flight**: a first-party orphaned-`tool_use` repair — deepagents'
-      `PatchToolCallsMiddleware` already heals dangling and invalid calls in `before_agent`;
-      pinned in `test_upstream_surface.py` instead of duplicated. Found and fixed en route: the
-      parallel-batch false positive in `calls_without_adjacent_results`.
-- [x] **C — runner/durable**: Temporal probe gathered with the connector open;
-      `job_completed`/`job_failed` mailbox claimed at turn start and framed into the model's
-      input (ADR: the-mailbox-reaches-the-model…); tailer restores an undelivered claim;
-      `chemclaw_pushback_dropped_total` + `chemclaw_rejoin_describe_failed_total`;
-      `get_durable_job_status` long-polls `job_status_wait_seconds`; astream 3-tuple arity pinned
-      in `test_upstream_surface.py`; `cached_compute` in-process single-flight (8 misses → 1
-      compute; DEFERRED row narrowed to the cross-process half).
-- [x] **D — identity under parallel batches**: measured, not guarded — two concurrent
-      `tools/call`s on one MCP session each read their own caller on this SDK; pinned in both
-      repos (`tests/test_connector_identity.py` here, `tests/test_identity_contract.py` in the
-      fleet) rather than defended with dead code.
-- [x] **E — detach ≠ stop** (ADR: a-disconnect-is-a-detach-not-a-stop): `api/detach.py` pump +
-      registry, `POST /sessions/{id}/turn/stop` (owner-gated, in the session-route inventory),
-      `service_turn_survives_disconnect`; end-to-end tests over a real uvicorn socket (TestClient
-      and the ASGI transport buffer, so they cannot express a mid-stream drop — recorded in the
-      test's own docstring). UI: Stop posts the stop route then aborts; an accidental drop polls
-      the transcript back instead of a dead-end banner.
-- [x] **Chart**: retention posture must be stated to render (`retention.windows` xor
-      `retention.unboundedGrowthAccepted`), mirroring the egress refusal — the code defaults
-      stay 0/off deliberately (a disposal policy is a deployment's statement, per
-      `core/config/memory.py`'s own argument), so the chart is where the silence had to stop.
-- [x] Docs: four ADRs + ledger rows; DEFERRED rows narrowed/added; CLAUDE.md + ARCHITECTURE.md
-      race prose updated; `.env.example` for every new setting.
-- [x] Final gate: `make lint type test` + prose validators, then push all three repos.
+## The pattern the audit found
 
-## Deliberately not done, and why
+Controls asserted in prose, a docstring, or a one-time manual run, never mechanically re-checked.
+Every fix below either makes the machine enforce the claim or deletes the claim.
 
-- **Compaction estimator memoization / upstream's per-call deep copy**: [risk]-grade cost
-  (char/4 over ≤100k tokens per call, milliseconds); the behavioural harms that made it matter
-  (repeat-guard reset, metric inflation) are fixed. Re-open if a profile measures model-call
-  overhead worth it.
-- **Turn-scoped caching of the plan-gate's checkpoint fallback**: the fallback only fires inside
-  subagents/pre-first-write turns, and caching a plan across a batch is a race against
-  `write_todos` that a security gate should not run. The turn-end read is deleted outright
-  instead (consume_all needs no hash).
-- **Lazy compile of the `task` helper (61 ms/turn)**: upstream consumes the compiled runnable
-  directly; a lazy proxy is a coupling to how `SubAgentMiddleware` invokes it — measured cost
-  does not justify a new unpromised-shape dependency.
-- **`invalid_tool_calls` surfacing and the prompt-prefix ceiling rows**: pre-existing BACKLOG
-  rows with their own constraints (live-lane gates); not claimed here. Note upstream's
-  `PatchToolCallsMiddleware` now answers dangling invalid calls at the *next turn's* start,
-  which partially narrows the first row.
+---
+
+## Chemclaw3 (core) — 12 items
+
+### Runtime correctness
+
+- [ ] **BS-01 (high)** `execute_activity` bounds how long a job runs once started, never how long it
+      waits to start. 31 call sites in `durable/` set `start_to_close_timeout` and nothing else; a
+      queue nobody polls waits forever, and `ScheduleOverlapPolicy.SKIP` then silently skips every
+      later fire of that job family. `notify.py:102` already carries the fix and the measurement
+      (75 s against a 30 s timeout) — generalize it. Add `execution_timeout` to the Schedules.
+- [ ] **BS-02 (high)** `_acting_as` (`durable/template_activities.py:170`) binds actor and
+      session_id and drops `correlation_id`, which `StepIdentity` already carries as a required
+      field. Every durable-job log line books `correlation_id='-'`. Same bug class the function's
+      own docstring describes for session_id.
+- [ ] **BS-03 (high)** `core/mcp_session.open_session` sends only `Authorization`, so the calc
+      backend — the one server running minutes-to-hours CREST/xTB work — receives no actor,
+      session, correlation or `traceparent`. `connectors/identity.turn_headers()` already builds
+      exactly the right dict.
+
+### Resilience
+
+- [ ] **BS-18 (medium)** No circuit breaker: the per-turn connector connect path never consults the
+      readiness state `/readyz` already computes, so every turn pays the full connect timeout
+      against a connector known to be down.
+- [ ] **BS-07 (medium)** No admission control on the calc backend. Worker concurrency is capped per
+      worker; replica count multiplies it against one shared pod. The fleet-ceiling check already
+      exists for LLM turns and the Postgres pool — extend it, don't invent a new mechanism.
+
+### Enforcement
+
+- [ ] **BS-04 (high)** The control keeping `manifests-internal` (`mount: backend`) out of the
+      agent-facing connector surface is evidenced by a pasted error transcript in a docstring.
+      Assert it: load the real manifest text and prove `ConnectorManifest` refuses it.
+- [ ] **BS-16 (medium)** `make mutants` is excluded from `ci` with no schedule, so the seven
+      invariant-bearing modules have no automated mutation backstop. Add a scheduled job.
+- [ ] **BS-08 (low, core half)** Port registry: `bo` sits at 8816, outside the range Chemclaw3-mcp
+      documents as core's. Make the boundary checkable rather than narrated.
+
+### Documentation that has outlived its subject
+
+- [ ] **BS-13 (medium)** `values.yaml` calls the unset `framing_envelope_secret` fallback
+      "predictable"; it is `secrets.token_hex(8)` — per-process random. The real failure is silent
+      envelope mismatch across restarts and replicas, which is worse than what the comment says.
+- [ ] **BS-11 (low)** BACKLOG row for the `CalculationKey` collision is stale — closed by Field
+      patterns in #248, a lighter fix than the row proposes. Delete it (repo rule: same commit).
+- [ ] **BS-12 (low)** BACKLOG row for the two unreachable chart credentials is stale — both are in
+      `secrets.optionalKeys` now. Delete it.
+- [ ] **BS-10 (low)** `connectors/README.md` uses "chem has only a server" as its example; chem's
+      server moved to Chemclaw3-mcp and the bundle now has none.
+
+---
+
+## Chemclaw3-mcp — 5 items
+
+- [ ] **BS-05 (high)** No `pip-audit` step and no Dependabot. Core proved this pattern out after it
+      caught real CVEs.
+- [ ] **BS-14 (medium)** GitHub Actions on floating `@v4`/`@v5` tags. Core SHA-pins every action
+      with a `# vX.Y.Z` comment, and Dependabot keeps the pins current — adopt both halves.
+- [ ] **BS-17 (medium)** Zero OpenTelemetry instrumentation, so the `traceparent` core sends is
+      received and discarded. Either continue the trace in `mcp_server_kit.connector_app` or stop
+      claiming universal trace continuity. (Prefer continuing it — the header already arrives.)
+- [ ] **BS-07 (medium, fleet half)** `servers/calc` offloads every heavy primitive through a bare
+      `asyncio.to_thread` with no bound, so aggregate load is whatever the callers send.
+- [ ] **BS-08 (low, fleet half)** The documented port block is wrong about core's range and no test
+      checks it.
+
+---
+
+## Chemclaw3_ui — 8 items
+
+- [ ] **BS-06 (high impact)** `Composer.tsx:845` sends on Enter with no `isComposing` guard, so
+      committing a CJK candidate submits mid-composition. One-line fix, real user segment blocked.
+- [ ] **BS-19 (medium)** `errors.ts:92` maps every 429 to a terminal, non-retryable
+      `budget_exhausted`, and nothing reads `Retry-After` — collapsing a transient rate limit into
+      a permanent budget cap. The same conflation was already fixed for SSE events at `errors.ts:114`.
+- [ ] **BS-20 (medium)** `MAX_MESSAGE_CHARS` is a compile-time copy of an ENV-tunable backend
+      setting. The RuntimeConfig bridge that would carry it already exists for `authMode`.
+- [ ] **BS-21 (medium)** The structure sketcher has no accessible keyboard path and, unlike 19 other
+      a11y decisions in this codebase, the gap is nowhere acknowledged. Document the SMILES route as
+      the deliberate alternative and cover it.
+- [ ] **BS-22 (low)** Scientific values render through bare `.toLocaleString()`, so a pKa reads
+      `1,234.5` or `1.234,5` by browser locale. The CSV path already gets this right.
+- [ ] **BS-09 (medium)** README and `server/proxy.ts` still describe "disconnect cancels the turn",
+      superseded by `D-2026-08-27-a-disconnect-is-a-detach-not-a-stop`.
+- [ ] **BS-05 (high)** No `npm audit` gate and no Dependabot.
+- [ ] **BS-14 (medium)** Actions on floating tags.
+
+---
+
+## Chemclaw3_mock — 2 items
+
+- [ ] **BS-15 (medium)** The mock Entra tenant mints one key at import with no way to inject an
+      outage, a malformed body, or a rotation — while core's `test_entra_end_to_end.py` calls it
+      "the companion piece" for exactly those three behaviours. Add the fault injection, or correct
+      the claim. (Prefer adding it: the live lane is where those paths are otherwise never run.)
+- [ ] **BS-05 (high)** No dependency scanning of any kind.
+
+---
+
+## Verification bar
+
+Per repo, before its PR is opened:
+
+- `make lint type test` green in core (Docker up, so the ~216 Postgres-backed tests actually run —
+  a green run that skipped them is not evidence); `make check` in Chemclaw3-mcp; the repo's own
+  gate elsewhere. Report what was skipped, always.
+- Every behavioural fix carries a test that fails without it. A fix whose only evidence is that the
+  suite still passes has not been shown to do anything.
+- An ADR for each decision that is a design choice rather than a repair: BS-01, BS-03, BS-07,
+  BS-18, and the BS-15 posture call.
 
 ## Review
 
-The audit's ranked list is implemented 14/15 with one reshaped (orphan repair → upstream pin) and
-one consciously partial (per-request latency work under #15: probe gathered + handshake/teardown
-bounds + audit off-path; cross-turn MCP session pooling stays declined until the per-turn-session
-rationale is re-argued). Everything landed with a failing-first or mutation-checked test; the two
-measurement-first rules paid off twice — `max_concurrency` was verified against the installed
-LangGraph before the setting existed, and the caller re-binding "risk" dissolved under its own
-test and shipped as a pin instead of a guard.
+_(filled in per repo as each PR lands)_
