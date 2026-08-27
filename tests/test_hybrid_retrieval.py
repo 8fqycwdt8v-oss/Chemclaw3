@@ -136,11 +136,15 @@ def test_retriever_drops_a_stale_index_hit(tmp_path: Path, monkeypatch: pytest.M
 
     async def _run() -> None:
         _write_note(tmp_path, "note-001", "amide coupling epimerization")
+        # A second, unrelated note stays on disk: an *entirely* empty tree is a declared skip
+        # (`RetrieverSkip`), and this test is about a stale row over a live corpus.
+        _write_note(tmp_path, "note-002", "unrelated workup detail")
         index = await _index_for(tmp_path)
         # Delete the note from disk after indexing → the index row is now stale.
         (tmp_path / "note-001.md").unlink()
         retriever = VectorRetriever(index, notes_dir=str(tmp_path))
-        assert await retriever.retrieve("amide coupling epimerization", {}) == []
+        hits = await retriever.retrieve("amide coupling epimerization", {})
+        assert "note-001" not in {chunk.source_note_id for chunk in hits}
 
     asyncio.run(_run())
 

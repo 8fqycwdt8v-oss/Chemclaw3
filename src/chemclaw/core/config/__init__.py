@@ -150,6 +150,18 @@ class Settings(
         extra="forbid",
     )
 
+    @property
+    def note_reindex_effective(self) -> bool:
+        """Whether the note reindex schedule runs — derived from the source list unless overridden.
+
+        Lives on the composed class because the answer spans two mixins: the flag is
+        `RetrievalSettings`' and the source list is `SourcesSettings`'. The field's own comment
+        carries the why; this is only the join.
+        """
+        if self.note_reindex_enabled is not None:
+            return self.note_reindex_enabled
+        return bool(NOTE_INDEX_SOURCES & set(self.data_source_list))
+
     @model_validator(mode="after")
     def _guards_that_the_comments_already_demand(self) -> Self:
         """The combinations whose prose already forbids them, now enforced at startup.
@@ -268,7 +280,7 @@ class Settings(
                 "budget_enabled=true with every cap at 0 (unlimited) guards nothing; set at least "
                 "one budget_max_* cap or disable budgets"
             )
-        writes_note_index = self.note_reindex_enabled or bool(
+        writes_note_index = self.note_reindex_effective or bool(
             NOTE_INDEX_SOURCES & set(self.data_source_list)
         )
         # Inert wherever the note vectors do not live in that column, exactly as

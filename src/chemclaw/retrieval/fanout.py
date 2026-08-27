@@ -48,7 +48,7 @@ from typing_extensions import TypedDict
 
 from chemclaw.core.metrics_bridge import degraded, record_metric
 from chemclaw.core.turn_signals import stream_writer_or_none
-from chemclaw.retrieval.evidence import EvidenceChunk, SourceRetriever
+from chemclaw.retrieval.evidence import EvidenceChunk, RetrieverSkip, SourceRetriever
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +83,10 @@ class FanState(TypedDict):
 
     ranked: Annotated[list[tuple[int, list[EvidenceChunk]]], operator.add]
     failed: Annotated[list[str], operator.add]
+    # Sources that *declined* (`RetrieverSkip`), as `(name, reason)`. A third channel because it
+    # is a third fact: "asked, found nothing" (an empty ranked list), "could not ask" (`failed`),
+    # and "would not ask, and said why" are three answers with three different fixes.
+    skipped: Annotated[list[tuple[str, str]], operator.add]
 
 
 async def _sweep(state: BranchState, config: RunnableConfig) -> dict[str, Any]:
@@ -110,6 +114,15 @@ async def _sweep(state: BranchState, config: RunnableConfig) -> dict[str, Any]:
     name, retriever = sources[index]
     try:
         chunks = await retriever.retrieve(configurable[_QUERY], configurable[_FILTERS])
+    except RetrieverSkip as skip:
+        # A decline, not an outage: no failure counter, no degradation record — but never a bare
+        # zero either. The reason travels to the caller so the model can render "the share leg
+        # requires an entitled actor" instead of "nothing on file".
+        record_metric(
+            lambda m: m.increment("chemclaw_evidence_source_skips_total", 1, {"source": name})
+        )
+        _report(name, 0, failed=False, skipped=skip.reason)
+        return {"ranked": [(index, [])], "failed": [], "skipped": [(name, skip.reason)]}
     except Exception as exc:
         # Through `degraded()` rather than a bare `logger.exception` plus a private counter: this is
         # the repository's chokepoint for "we continued with less", and a swallow that does not go
@@ -134,12 +147,12 @@ async def _sweep(state: BranchState, config: RunnableConfig) -> dict[str, Any]:
             lambda m: m.increment("chemclaw_evidence_source_failures_total", 1, {"source": name})
         )
         _report(name, 0, failed=True)
-        return {"ranked": [(index, [])], "failed": [name]}
+        return {"ranked": [(index, [])], "failed": [name], "skipped": []}
     _report(name, len(chunks), failed=False)
-    return {"ranked": [(index, list(chunks))], "failed": []}
+    return {"ranked": [(index, list(chunks))], "failed": [], "skipped": []}
 
 
-def _report(name: str, found: int, *, failed: bool) -> None:
+def _report(name: str, found: int, *, failed: bool, skipped: str | None = None) -> None:
     """Publish one branch's contribution, to whoever is watching this turn.
 
     Two audiences, one fact. `get_stream_writer` reaches a surface watching the turn live, which is
@@ -174,7 +187,10 @@ def _report(name: str, found: int, *, failed: bool) -> None:
         # `failed` is on the event because without it this branch published
         # `{"evidence_source": "graph", "chunks": 0}` for a source that ran fine and matched
         # nothing *and* for a source whose database was unreachable — byte-identical.
-        writer({"evidence_source": name, "chunks": found, "failed": failed})
+        event: dict[str, Any] = {"evidence_source": name, "chunks": found, "failed": failed}
+        if skipped is not None:
+            event["skipped"] = skipped
+        writer(event)
 
 
 def _fan(state: FanState, config: RunnableConfig) -> list[Send]:
@@ -204,7 +220,7 @@ async def sweep_sources(
     sources: list[tuple[str, SourceRetriever]],
     query: str,
     filters: dict[str, Any],
-) -> tuple[list[list[EvidenceChunk]], list[str]]:
+) -> tuple[list[list[EvidenceChunk]], list[str], dict[str, str]]:
     """Ask every source the same question at once; return their hit-lists **and what failed**.
 
     Args:
@@ -216,9 +232,10 @@ async def sweep_sources(
         filters: The graph filters (type/tag/date window), applied by the sources that honour them.
 
     Returns:
-        `(ranked_lists, failed_names)`. One ranked list per source, **in the order `sources` was
-        given** — never in completion order; both merge modes downstream depend on that (see the
-        module docstring). `failed_names` holds the sources that raised.
+        `(ranked_lists, failed_names, skipped)`. One ranked list per source, **in the order
+        `sources` was given** — never in completion order; both merge modes downstream depend on
+        that (see the module docstring). `failed_names` holds the sources that raised; `skipped`
+        maps each source that declined (`RetrieverSkip`) to its stated reason.
 
     **Returning the failures is the whole reason this signature changed.** It used to return the
     hit-lists alone, so a source whose database was unreachable was indistinguishable from a source
@@ -229,9 +246,9 @@ async def sweep_sources(
     a source was down. A caller cannot make that distinction from a value that does not carry it.
     """
     if not sources:
-        return [], []
+        return [], [], {}
     state: FanState = await _FANOUT.ainvoke(
-        {"ranked": [], "failed": []},
+        {"ranked": [], "failed": [], "skipped": []},
         {
             "configurable": {
                 _SOURCES: sources,
@@ -241,4 +258,8 @@ async def sweep_sources(
         },
     )
     by_index = dict(state["ranked"])
-    return [by_index.get(index, []) for index in range(len(sources))], list(state["failed"])
+    return (
+        [by_index.get(index, []) for index in range(len(sources))],
+        list(state["failed"]),
+        dict(state["skipped"]),
+    )

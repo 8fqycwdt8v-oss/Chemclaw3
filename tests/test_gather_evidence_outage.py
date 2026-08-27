@@ -176,7 +176,7 @@ def test_the_shipped_retrieve_halves_report_a_failure_instead_of_an_empty_result
         ("eln-warehouse", warehouse),
         ("vendored", vendored),
     ]
-    ranked, failed = asyncio.run(sweep_sources(sources, "have we run this nitration", {}))
+    ranked, failed, _skipped = asyncio.run(sweep_sources(sources, "have we run this nitration", {}))
 
     assert [len(chunks) for chunks in ranked] == [0, 0, 0]
     assert sorted(failed) == ["eln-warehouse", "sharedrive", "vendored"], (

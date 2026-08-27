@@ -20,7 +20,7 @@ from chemclaw.kg.conflicts import NoteConflicts, conflict_index
 from chemclaw.kg.graph import load_notes
 from chemclaw.kg.note import Note, note_id_for_reaction, strip_links
 from chemclaw.kg.search import query_terms, term_coverage
-from chemclaw.retrieval.evidence import EvidenceChunk
+from chemclaw.retrieval.evidence import EvidenceChunk, RetrieverSkip
 from chemclaw.retrieval.vector_index import IndexHit, NoteIndex, default_note_index
 from chemclaw.science.fingerprints.rxnfp.search import find_similar_reactions
 from chemclaw.science.fingerprints.store import FingerprintError, FingerprintStore, Match
@@ -130,8 +130,18 @@ async def _eligible_notes(directory: Path, filters: dict[str, Any]) -> dict[str,
 
 
 def _load_if_present(directory: Path) -> list[Note]:
-    """Every note under `directory`, or none when it does not exist — both off the event loop."""
-    return load_notes(directory) if directory.exists() else []
+    """Every note under `directory`, raising `RetrieverSkip` when there are none at all.
+
+    A tree with zero parseable notes is a deployment fact, not a corpus answer: a mis-pointed
+    `knowledge_path` (or an unmounted volume) used to zero the graph, dense and lexical legs at
+    once with nothing anywhere saying so — three sources reporting "found nothing" about a corpus
+    they never saw. Filters that exclude everything are the legitimate empty answer and do not
+    come through here.
+    """
+    notes = load_notes(directory) if directory.exists() else []
+    if not notes:
+        raise RetrieverSkip(f"no notes found under {directory}")
+    return notes
 
 
 def _in_window(note: Note, since: date | None, until: date | None) -> bool:

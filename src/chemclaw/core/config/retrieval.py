@@ -238,10 +238,17 @@ class RetrievalSettings(BaseSettings):
     # on every merged PR, and RRF fusion is score-agnostic, so a stale dense/lexical entry would
     # rank confidently beside live graph hits with no staleness signal. `NoteReindexWorkflow`
     # runs on this cadence; the interval is therefore also the worst-case staleness of the
-    # derived legs. Only earns its Schedule when a hybrid leg is actually attached (registry
-    # membership, D-018), so `note_reindex_enabled` keeps a graph-only deployment from running
-    # an index it never reads.
-    note_reindex_enabled: bool = False
+    # derived legs.
+    #
+    # **Derived from the source list by default** (`None`), the move
+    # `D-2026-08-26-a-knob-that-renders-nothing-is-not-a-knob` made for connectors and for the
+    # same reason: as an independent switch defaulting to off, enabling `vector`/`lexical` in
+    # `CHEMCLAW_DATA_SOURCES` without also remembering this flag left both legs querying a
+    # never-built index forever — `chunks: 0, failed: false` on every sweep, and the deployment
+    # believed it ran hybrid retrieval. `note_reindex_effective` is what readers consult: an
+    # explicit True/False still wins (a deployment that rebuilds its index out of band may opt
+    # out), and unset means "reindex iff an index-backed note source is enabled".
+    note_reindex_enabled: bool | None = None
     note_reindex_schedule_minutes: float = Field(default=60.0, gt=0)
     note_reindex_timeout_seconds: float = Field(default=600.0, gt=0)
 

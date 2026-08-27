@@ -230,7 +230,7 @@ async def gather_evidence(
     # the round-robin interleaves in list order), so completion order would make one sweep's
     # evidence differ from the next for no visible reason.
     sources = _sources(reaction_smiles)
-    ranked_lists, failed = await sweep_sources(sources, query, filters)
+    ranked_lists, failed, skipped = await sweep_sources(sources, query, filters)
     if failed and len(failed) == len(sources):
         # **Every source was unreachable, so `[]` would be a lie.** This tool's docstring is the
         # model's contract and it says empty means "nothing on file, never invented" — so returning
@@ -242,9 +242,8 @@ async def gather_evidence(
         # Only when *all* of them failed. A single flaky source must still cost its own source and
         # not the turn — `fanout._sweep`'s docstring argues that and it is right. The partial case
         # is narrower and still imperfect: the model gets a real but incomplete hit-list with the
-        # degradation visible on the stream (`{"evidence_source": …, "failed": true}`) and not in
-        # the tool's return value. Closing that needs the return type to carry provenance, which is
-        # a contract change beyond this fix; it is recorded in the audit rather than left implied.
+        # degradation visible on the stream (`{"evidence_source": …, "failed": true}`) — and,
+        # since the sweep gained `sources`/`sources_skipped`, in the return value too.
         raise ChemclawError(
             f"evidence sources unavailable: {', '.join(sorted(failed))}. No source could be "
             f"queried, so this is not an answer about what the knowledge base contains."
@@ -299,6 +298,13 @@ async def gather_evidence(
         truncated_by=truncated_by,
         total_before_cap=len(framed),
         sources_failed=sorted(failed),
+        # Pre-merge counts, so a source out-competed at the cap still shows it was asked and what
+        # it found — the fan-out computed exactly this and used to drop it at the boundary. The
+        # reasons in `sources_skipped` are the retrievers' own words (`RetrieverSkip`), which is
+        # what lets the model say "the share requires an entitled actor" instead of "nothing on
+        # file".
+        sources={name: len(hits) for (name, _), hits in zip(sources, ranked_lists, strict=True)},
+        sources_skipped=skipped,
     )
 
 

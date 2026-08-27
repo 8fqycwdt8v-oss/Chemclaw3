@@ -40,7 +40,7 @@ from chemclaw.ingest.documents.index import (
     require_schema_vector_width,
 )
 from chemclaw.ingest.documents.reassemble import join_chunks
-from chemclaw.retrieval.evidence import EvidenceChunk
+from chemclaw.retrieval.evidence import EvidenceChunk, RetrieverSkip
 from chemclaw.retrieval.hybrid import reciprocal_rank_fusion
 
 logger = logging.getLogger(__name__)
@@ -144,17 +144,25 @@ class ShareDocumentRetriever:
         `sources_failed=[]`. The narrower logging is not lost either: `_sweep` names the exception
         type it caught, which is the part of it a chemist's answer never depended on.
 
-        What still returns `[]` is every case where this source *decided* it has nothing to
-        contribute — a blank query, an unentitled caller, a filter it cannot honestly honour. Those
-        are answers, not failures.
+        A case where this source *decides* it cannot contribute — an unentitled caller, a filter
+        it cannot honestly honour — is a **declared skip** (`RetrieverSkip`), not a bare `[]`:
+        the bare form made "the share declined" indistinguishable from "the share holds nothing
+        matching", and the tool's own contract tells the model empty means *nothing on file*. A
+        chemist whose turn carried no entitlement was told the share had no relevant documents,
+        confidently, with nothing anywhere saying the leg never looked. A blank query still
+        returns `[]` — asking nothing and finding nothing are the same answer.
         """
-        if not query.strip() or not self._entitled():
+        if not query.strip():
             return []
+        if not self._entitled():
+            raise RetrieverSkip(
+                f"the {self.name} share requires an entitled actor and this turn carries none"
+            )
         # `note_type` names a knowledge-graph note type. A report on a file share has no such type,
         # so a caller who asked for one is asking for something this source cannot honestly answer
         # — returning documents anyway would be ignoring the filter.
         if filters.get("type"):
-            return []
+            raise RetrieverSkip(f"the {self.name} share cannot serve a note-type filter")
         return await self._search(query, filters)
 
     async def read_document(self, doc_id: str) -> DocumentText | None:

@@ -98,8 +98,27 @@ def _ref(note: Note) -> NoteRef:
     )
 
 
+class NoteSearch(BaseModel):
+    """What `find_notes` found — and what a short list actually means.
+
+    The bare `list[NoteRef]` this replaced had both of `EvidenceSweep`'s silences: a capped list
+    was byte-identical to a small corpus (the warning went to a log no model reads — the exact
+    defect `truncated_by`/`total_before_cap` were introduced to fix in the sibling tool the
+    system prompt chains this one with), and a query no note fully matched returned `[]` even
+    when the sweep's graph leg would have widened to partial matches, so the two tools answered
+    one question differently.
+    """
+
+    matches: list[NoteRef] = Field(default_factory=list)
+    # How many notes matched before the cap; equal to `len(matches)` when nothing was cut.
+    total_matches: int = 0
+    # True when no note contained every term and the matches are partial-coverage hits instead,
+    # best coverage first — the same fallback `GraphRetriever` applies to the same corpus.
+    widened: bool = False
+
+
 @tool
-async def find_notes(text: str) -> list[NoteRef]:
+async def find_notes(text: str) -> NoteSearch:
     """Find notes whose id, tags, SMILES, or body contain every word of `text` (case-insensitive).
 
     Use this to locate an entry note before expanding its neighborhood.
@@ -111,9 +130,11 @@ async def find_notes(text: str) -> list[NoteRef]:
             position, not only one containing that exact run of text.
 
     Returns:
-        Matching note references (id + type + smiles + tags), body omitted. An empty result means
-        no current note contains every word — it does not mean the topic is absent from the
-        graph; a single differently-worded term (e.g. just "suzuki") may still find it.
+        The matching note references (id + type + smiles + tags, body omitted) with
+        `total_matches` saying how many there were before the cap, and `widened` marking a
+        result of partial-coverage hits when no current note contained every word. An empty
+        result means not even one term matched — it does not mean the topic is absent from the
+        graph; a differently-worded term may still find it.
     """
     # `load_notes`, not `build_graph`: this is a substring sweep over each note's own metadata and
     # body, and it never follows an edge. Assembling the graph made a cold call pay node and edge
@@ -125,30 +146,35 @@ async def find_notes(text: str) -> list[NoteRef]:
     # (`chemclaw.kg.search`), so a note this tool finds is one `gather_evidence` can also cite.
     # A bare `text.lower().split()` here made "the biaryl" require the literal word "the".
     terms = query_terms(text)
+    if not terms:
+        return NoteSearch()
     today = date.today()
-    # A broad needle matches most of the corpus, and the whole hit list goes into the model's
-    # context. Bound it like every other retrieval surface (`fingerprint_max_top_k`,
-    # `retrieval_top_k`), and warn on truncation so it is never a silent cap (D-066 #4).
-    cap = settings.graph_max_results
-    matches = []
-    # Id order, which is what the truncation warning below promises and what the graph's node
-    # iteration used to supply; `load_notes` yields path order.
+    scored: list[tuple[int, NoteRef]] = []
     for note in sorted(notes, key=lambda candidate: candidate.id):
         # Discovery serves current evidence only: a not-yet-valid or expired note is not surfaced
         # as current fact (KM-7). It stays in Git and remains reachable by explicit id.
         if not note.is_current(today):
             continue
-        if terms and term_coverage(note, terms) == len(terms):
-            matches.append(_ref(note))
-            if len(matches) == cap:
-                log.warning(
-                    "find_notes capped at %d matches (id order) for %r; "
-                    "narrow the query or raise CHEMCLAW_GRAPH_MAX_RESULTS",
-                    cap,
-                    text,
-                )
-                break
-    return matches
+        coverage = term_coverage(note, terms)
+        if coverage:
+            scored.append((coverage, _ref(note)))
+    complete = [pair for pair in scored if pair[0] == len(terms)]
+    widened = not complete and bool(scored)
+    # Widened results rank by coverage (a note matching three of four terms beats one matching
+    # one), complete ones stay in id order — coverage is identical across them, and a stable
+    # order is what makes two identical queries return identical lists.
+    chosen = sorted(scored, key=lambda pair: (-pair[0], pair[1].id)) if widened else complete
+    # A broad needle matches most of the corpus, and the whole hit list goes into the model's
+    # context. Bound it like every other retrieval surface (`fingerprint_max_top_k`,
+    # `retrieval_top_k`) — and the cut is *declared* in the return value, because the log line
+    # this used to warn into is one no model reads, and a capped list with no marker reads as the
+    # whole corpus (D-066 #4).
+    cap = settings.graph_max_results
+    return NoteSearch(
+        matches=[ref for _, ref in chosen[:cap]],
+        total_matches=len(chosen),
+        widened=widened,
+    )
 
 
 def _edge_relations(graph: nx.DiGraph, source: str, target: str) -> list[str]:

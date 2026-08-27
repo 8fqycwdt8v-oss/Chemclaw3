@@ -146,7 +146,9 @@ def planned_schedules() -> list[PlannedSchedule]:
         schedules.append(PlannedSchedule("eval-drift", EvalDriftWorkflow, drift_every))
     # The derived note index only earns a Schedule where a hybrid retrieval leg actually reads it
     # (gap SCH-2). A graph-only deployment would otherwise pay to rebuild an index nothing queries.
-    if settings.note_reindex_enabled:
+    # `note_reindex_effective` is derived from the source list unless a deployment overrides it —
+    # so enabling `vector`/`lexical` cannot leave both legs querying a never-built index.
+    if settings.note_reindex_effective:
         reindex_every = timedelta(minutes=settings.note_reindex_schedule_minutes)
         schedules.append(PlannedSchedule("note-reindex", NoteReindexWorkflow, reindex_every))
     # A document share earns a Schedule only where one is actually enabled. Asked of the manifests

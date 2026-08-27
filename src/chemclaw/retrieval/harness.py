@@ -180,17 +180,21 @@ async def gather_section(
     an incomplete sweep pass as a genuinely empty one — and it is strictly more informative than
     before, because the section is marked incomplete *and* keeps what was retrieved.
     """
-    ranked_lists, failed = await sweep_sources(
+    ranked_lists, failed, skipped = await sweep_sources(
         [(retriever.name, retriever) for retriever in retrievers],
         section.query,
         section.filters,
     )
     evidence = [chunk for chunks in ranked_lists for chunk in chunks]
+    # A skip counts as incompleteness here, deliberately: for the conversational sweep a declined
+    # source is an answer the model can relay, but a *report* is signed by a chemist, and a
+    # section swept without the share leg (an unentitled service actor, a filter the source
+    # cannot serve) is a section about less than the whole corpus, whatever the reason.
     return SynthesizedSection(
         heading=section.heading,
         memory_layer=section.memory_layer,
         evidence=evidence,
-        retrieval_failed=bool(failed),
+        retrieval_failed=bool(failed or skipped),
     )
 
 

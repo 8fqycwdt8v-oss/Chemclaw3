@@ -237,7 +237,7 @@ def test_an_unreachable_warehouse_costs_this_leg_and_no_other() -> None:
     with pytest.raises(ConnectionError):
         asyncio.run(retriever.retrieve("ester formation", {}))
 
-    ranked, failed = asyncio.run(
+    ranked, failed, _skipped = asyncio.run(
         sweep_sources([("graph", _Graph()), ("eln-warehouse", retriever)], "ester formation", {})
     )
     assert [len(chunks) for chunks in ranked] == [1, 0]
@@ -288,7 +288,9 @@ def test_a_misconfigured_source_costs_this_leg_and_no_other(
     with pytest.raises(BindingError):
         asyncio.run(retriever.retrieve("ester formation", {}))
 
-    _, failed = asyncio.run(sweep_sources([("eln-warehouse", retriever)], "ester formation", {}))
+    _, failed, _skipped = asyncio.run(
+        sweep_sources([("eln-warehouse", retriever)], "ester formation", {})
+    )
     assert failed == ["eln-warehouse"]
 
 
@@ -315,7 +317,9 @@ def test_an_embedding_provider_failure_costs_this_leg_and_no_other(
     with pytest.raises(_ProviderError):
         asyncio.run(retriever.retrieve("ester formation", {}))
 
-    _, failed = asyncio.run(sweep_sources([("eln-warehouse", retriever)], "ester formation", {}))
+    _, failed, _skipped = asyncio.run(
+        sweep_sources([("eln-warehouse", retriever)], "ester formation", {})
+    )
     assert failed == ["eln-warehouse"]
 
 

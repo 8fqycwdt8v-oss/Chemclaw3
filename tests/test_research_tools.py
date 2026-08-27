@@ -382,3 +382,23 @@ def test_the_budget_charges_the_whole_chunk_and_not_only_its_content(
         "growing a non-content field did not cost the budget anything, so the budget is measuring "
         f"content alone: {len(lean.chunks)} chunks before, {len(padded.chunks)} after"
     )
+
+
+def test_the_sweep_reports_what_each_source_contributed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`sources` carries the per-branch counts the fan-out used to drop at this boundary.
+
+    Without them the model could not tell "the share found nothing", "the share isn't
+    configured" and "the share declined" apart — three different answers rendered identically.
+    """
+    (tmp_path / "reaction").mkdir()
+    (tmp_path / "reaction" / "reaction-a.md").write_text(
+        "---\nid: reaction-a\ntype: reaction\n---\nyield noted.\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
+
+    sweep = asyncio.run(gather_evidence("yield"))
+
+    assert sweep.sources.get("graph") == 1
+    assert sweep.sources_skipped == {}
