@@ -93,6 +93,7 @@ from chemclaw.agent.compaction import context_compaction_middleware, disabled_su
 from chemclaw.agent.llm_provider import build_chat_model, prompt_caching_middleware
 from chemclaw.agent.loop_cap import enforce_loop_cap
 from chemclaw.agent.plan_gate import enforce_plan_approval, gate_applies, harness_enabled_for
+from chemclaw.agent.plan_link import stamp_plan_link
 from chemclaw.agent.profiles import AgentProfile, get_profile
 from chemclaw.agent.repeat_guard import refuse_repeated_calls
 from chemclaw.agent.scratchpad import (
@@ -653,6 +654,13 @@ def tool_governance_middleware(audit: Any, profile: AgentProfile) -> list[Any]:
         refuse_writes_on_dry_run,
         refuse_repeated_calls,
         *([enforce_plan_approval] if gate_applies(profile) else []),
+        # Innermost, and deliberately after the gate: it raises nothing and records nothing — it
+        # binds the current plan step and plan hash as ambient context so a launcher inside the
+        # tool body can stamp the job it starts (D-2026-08-27). Inside the gate so a refused call
+        # never binds a link at all. Attached whenever the harness runs, not only under
+        # `plan_only`: the todo list exists in `execute` autonomy too, and a job launched there
+        # deserves the same join.
+        *([stamp_plan_link] if harness_enabled_for(profile) else []),
     ]
 
 

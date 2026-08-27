@@ -1,7 +1,12 @@
-"""The turn-event contract cannot change silently — because two other repositories mirror it.
+"""The turn-event contract cannot change silently — because another repository mirrors it by hand.
 
-`api/events.py` is a contract three surfaces read: this service produces it, `Chemclaw3_ui` renders
-it, and `Chemclaw3_mock` stands in for it. Nothing mechanical connects them. The consequence is
+`api/events.py` is a contract two surfaces read: this service produces it and `Chemclaw3_ui`
+renders it. (`Chemclaw3_mock` stands in for external MCP tools, not for this front door — this
+docstring and the failure message below claimed it held "its copy of the same contract" until
+2026-08-27, when a grep of that tree found **zero** occurrences of any event name. A mirror that
+does not exist cannot be updated, and telling someone to update it sends them searching another
+repository for a file that was never there.) Nothing mechanical connects the mirrors that do
+exist. The consequence is
 recorded at length in the UI's own `shared/events.ts`, which has now been wrong **nine times** — six
 missing *members* (`capability_degraded`, `tool_failed`, `job_failed`, `evidence_source`, `handoff`,
 and one more before them) and three missing *fields* (`plan.plan_hash`, `tool_failed.reason`,
@@ -76,12 +81,10 @@ def test_the_wire_contract_matches_what_the_other_repositories_mirror() -> None:
     recorded = json.loads(_FIXTURE.read_text(encoding="utf-8"))
     assert current == recorded, (
         "the turn-event contract changed.\n\n"
-        "This shape is mirrored by hand in two other repositories, and a field that does not "
-        "reach them is DROPPED by their normalisers rather than merely ignored:\n"
-        "  - Chemclaw3_ui  -> shared/events.ts (the interface AND normalizeEvent, which rebuilds "
-        "every event field by field)\n"
-        "  - Chemclaw3_mock -> its copy of the same contract\n\n"
-        f"Update both, then regenerate this fixture:\n    {_UPDATE}=1 pytest {__file__}\n"
+        "This shape is mirrored by hand in Chemclaw3_ui's shared/events.ts — the interface AND "
+        "normalizeEvent, which rebuilds every event field by field — so a field that does not "
+        "reach it is DROPPED in transit rather than merely ignored.\n\n"
+        f"Update the mirror, then regenerate this fixture:\n    {_UPDATE}=1 pytest {__file__}\n"
     )
 
 

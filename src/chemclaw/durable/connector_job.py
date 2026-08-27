@@ -139,6 +139,13 @@ class ConnectorJobInput(BaseModel):
     # nothing about it, so a durable job was an island in the trail. Empty off the request path,
     # where there is no turn to correlate to.
     correlation_id: str = ""
+    # The plan step this run was launched for — the first `in_progress` todo at launch — and the
+    # identity of the plan revision it belonged to (D-2026-08-27). Read ambiently at the launch
+    # site like `session_id` above, never model-authored, and empty for every run not launched
+    # from a plan step (a template step, the CLI, a turn with no plan). Additive and defaulted
+    # because they cross the Temporal wire and histories are in flight.
+    plan_step: str = ""
+    plan_hash: str = ""
     publish_to_graph: bool = False
 
 
@@ -268,6 +275,8 @@ def job_record_for(
         requested_by=job.requested_by,
         session_id=job.session_id,
         correlation_id=job.correlation_id,
+        plan_step=job.plan_step,
+        plan_hash=job.plan_hash,
         payload=job.payload,
         summary=result.summary,
         # The envelope's own data, whole: for a campaign that is every observation it made, which

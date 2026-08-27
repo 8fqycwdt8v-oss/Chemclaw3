@@ -24,7 +24,8 @@ from chemclaw.durable.job_record import JobRecord, JobRecordSummary
 
 _COLUMNS = (
     "job_id, connector, job, rationale, requested_by, session_id, correlation_id, "
-    "payload, summary, result, note_id, calc_refs, runtime_seconds, payload_kind"
+    "plan_step, plan_hash, payload, summary, result, note_id, calc_refs, runtime_seconds, "
+    "payload_kind"
 )
 
 # Every mutable column is refreshed, **including the attribution**. Updating the reason and the
@@ -35,12 +36,14 @@ _COLUMNS = (
 # answer for the field an audit joins on. The row describes the latest run, whole.
 _UPSERT = f"""
     INSERT INTO job_records ({_COLUMNS})
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     ON CONFLICT (job_id) DO UPDATE SET
         rationale = EXCLUDED.rationale,
         requested_by = EXCLUDED.requested_by,
         session_id = EXCLUDED.session_id,
         correlation_id = EXCLUDED.correlation_id,
+        plan_step = EXCLUDED.plan_step,
+        plan_hash = EXCLUDED.plan_hash,
         payload = EXCLUDED.payload,
         summary = EXCLUDED.summary,
         result = EXCLUDED.result,
@@ -60,7 +63,7 @@ _SELECT_ONE = f"SELECT {_COLUMNS}, completed_at FROM job_records WHERE job_id = 
 # reason is a sentence rather than a document, and a search index would be machinery to maintain
 # for a scan the database does in milliseconds.
 _SEARCH = """
-    SELECT job_id, connector, job, rationale, summary, note_id, completed_at
+    SELECT job_id, connector, job, rationale, summary, note_id, plan_step, completed_at
     FROM job_records
     WHERE (%s = '' OR connector = %s)
       AND (%s = '' OR rationale ILIKE %s OR summary ILIKE %s OR job ILIKE %s)
@@ -90,6 +93,8 @@ class PostgresJobRecordSink:
                     record.requested_by,
                     record.session_id,
                     record.correlation_id,
+                    record.plan_step,
+                    record.plan_hash,
                     # psycopg adapts a mapping to `jsonb` only through its `Jsonb` wrapper — a bare
                     # dict is rejected by the adapter, not silently stringified.
                     _json(record.payload),
@@ -119,14 +124,16 @@ async def read_job_record(job_id: str) -> JobRecord | None:
         requested_by=row[4],
         session_id=row[5],
         correlation_id=row[6],
-        payload=row[7],
-        summary=row[8],
-        result=row[9],
-        note_id=row[10],
-        calc_refs=list(row[11] or []),
-        runtime_seconds=row[12],
-        payload_kind=row[13],
-        completed_at=row[14],
+        plan_step=row[7],
+        plan_hash=row[8],
+        payload=row[9],
+        summary=row[10],
+        result=row[11],
+        note_id=row[12],
+        calc_refs=list(row[13] or []),
+        runtime_seconds=row[14],
+        payload_kind=row[15],
+        completed_at=row[16],
     )
 
 
@@ -148,7 +155,8 @@ async def read_job_record_summaries(
             rationale=row[3],
             summary=row[4],
             note_id=row[5],
-            completed_at=row[6],
+            plan_step=row[6],
+            completed_at=row[7],
         )
         for row in rows
     ]

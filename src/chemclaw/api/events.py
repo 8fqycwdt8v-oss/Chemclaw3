@@ -117,6 +117,10 @@ class JobStartedEvent(BaseModel):
     # What kind of durable job this is ("calc", "report", "campaign"), so a surface can label it
     # without parsing the id. Defaulted so the field is additive for any existing consumer.
     kind: str = "job"
+    # The plan step the launch served — the todo's bare content, so a surface can badge the
+    # matching checklist item (D-2026-08-27). Empty when the job was not launched from a plan
+    # step. Defaulted so the field is additive for any existing consumer.
+    plan_step: str = ""
 
 
 class JobCompletedEvent(BaseModel):
