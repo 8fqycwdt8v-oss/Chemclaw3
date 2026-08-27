@@ -120,6 +120,14 @@ _BREAKS_PREVIOUS_IMAGE = re.compile(
 # an exempted migration still fails — an exemption is granted to statements somebody read, not to a
 # filename.
 _REVIEWED_ROLLBACK_BREAKS: dict[str, tuple[str, tuple[str, ...]]] = {
+    "058_note_proposal_superseded.sql": (
+        # Reviewed, and it does not in fact end the rollback: the drop-and-re-add *widens* the
+        # state CHECK, and the previous image only ever writes the old, still-allowed states —
+        # the ADR records that reading, and this row exists because the guard matches the DROP
+        # CONSTRAINT text, not the semantics.
+        "D-2026-08-27-the-gate-tells-the-truth-about-what-it-pushed",
+        ("ALTER TABLE note_proposals DROP CONSTRAINT",),
+    ),
     "056_reaction_record_identity.sql": (
         "D-2026-08-26-a-transcription-is-keyed-by-its-source",
         (

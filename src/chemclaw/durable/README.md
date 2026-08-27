@@ -1,7 +1,7 @@
 # `chemclaw.durable` — Temporal durable execution
 
 **Responsibility:** the durable lifecycle of core's own long jobs (ELN sync,
-re-index, reports, memory synthesis, approvals), the one generic wrapper every
+re-index, reports, memory synthesis), the one generic wrapper every
 connector job runs inside (`connector_job.py`), and the worker process that hosts
 them. Workflow code is deterministic and replayable; all I/O and non-determinism
 lives in **activities**. Durability for long or expensive work lives here and **only**

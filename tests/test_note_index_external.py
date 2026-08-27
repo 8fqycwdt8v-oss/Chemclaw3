@@ -52,10 +52,15 @@ def _record(note_id: str, vector: list[float], text: str = "ester formation") ->
 
 
 def _write_note(directory: Path, note_id: str, title: str) -> None:
-    """A minimal note the graph indexer will load, so `reindex_notes` sees a real corpus."""
+    """A minimal note the graph indexer will load, so `reindex_notes` sees a real corpus.
+
+    The title lives in the body: `Note` has no `title` field, and since `extra="forbid"` a
+    frontmatter key the schema does not know is a refused note rather than silently dropped
+    metadata — this helper used to write one, which is the finding in miniature.
+    """
     (directory / "reaction").mkdir(parents=True, exist_ok=True)
     (directory / "reaction" / f"{note_id}.md").write_text(
-        f"---\nid: {note_id}\ntype: reaction\ntitle: {title}\n---\n\n{title} notes.\n",
+        f"---\nid: {note_id}\ntype: reaction\n---\n\n# {title}\n\n{title} notes.\n",
         encoding="utf-8",
     )
 
@@ -117,9 +122,9 @@ async def test_an_empty_notes_directory_does_not_empty_the_index(tmp_path: Path)
 
 
 async def _key() -> str:
-    from chemclaw.core.embeddings import embedding_config_key
+    from chemclaw.retrieval.vector_index import note_embedding_key
 
-    return embedding_config_key()
+    return note_embedding_key()
 
 
 async def _fresh_index(store: InMemoryVectorStore) -> ExternalVectorNoteIndex:

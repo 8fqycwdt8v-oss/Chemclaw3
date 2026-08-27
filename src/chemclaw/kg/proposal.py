@@ -49,6 +49,12 @@ class ProposalState(StrEnum):
     MERGED = "merged"
     REJECTED = "rejected"
     FAILED = "failed"
+    # A newer version of the same note replaced this one in the queue. Not a decision — no human
+    # decided anything about the old bytes — and not a failure: the branch is per-note while the
+    # record is per-version, so without this state a changed re-proposal left the old version
+    # `open`, rendering bytes that existed on no branch, and the merge webhook then marked both
+    # rows merged (migration 058).
+    SUPERSEDED = "superseded"
 
 
 DECIDED_STATES = frozenset({ProposalState.MERGED, ProposalState.REJECTED})
@@ -198,6 +204,22 @@ class InMemoryProposalStore:
                 update["reason"] = proposal.reason
             self._by_id[existing_id] = existing.model_copy(update=update)
             return existing_id
+        # A new *open* version closes the note's previous open versions: exactly one row per
+        # note may be `open`, because the branch the reviewer merges is per-note. A `failed`
+        # record must not push a reviewable older version out of the queue. The Postgres store
+        # runs the same statement (`proposal_store._SUPERSEDE_OLDER`).
+        for other_id, other in self._by_id.items():
+            if (
+                proposal.state is ProposalState.OPEN
+                and other.note_id == proposal.note_id
+                and other.state is ProposalState.OPEN
+            ):
+                self._by_id[other_id] = other.model_copy(
+                    update={
+                        "state": ProposalState.SUPERSEDED,
+                        "reason": "superseded by a newer proposed version of this note",
+                    }
+                )
         new_id = self._next_id
         self._next_id += 1
         self._by_id[new_id] = proposal.model_copy(update={"id": new_id, "submitted_at": now})

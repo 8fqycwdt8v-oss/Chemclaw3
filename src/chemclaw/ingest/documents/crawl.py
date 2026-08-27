@@ -185,7 +185,12 @@ class _Walk:
         try:
             stat = entry.stat(follow_symlinks=self.binding.follow_symlinks)
         except OSError:
-            logger.warning("could not stat %s; skipping", relative)
+            # DEBUG, and the path is carried out in `result.unreadable` instead: this fires once
+            # per entry the walk cannot stat, and that population is a function of the share rather
+            # than of the request — one changed ACL on a folder is one WARNING per file inside it.
+            # `sync` reports the whole population in one line (`_summarise_skips`), which is what
+            # an operator can act on.
+            logger.debug("could not stat %s; skipping", relative)
             self.result.unreadable.append(relative)
             return True
         if stat.st_size > self.binding.max_file_bytes:

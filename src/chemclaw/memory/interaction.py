@@ -41,10 +41,14 @@ async def propose_confirmed_answer(
 ) -> str:
     """Build the confirmed-answer note and propose it through the PR-gate.
 
-    The single write path for a captured user answer, shared by the synchronous agent
-    tool (`chemclaw.agent.memory_tools.record_confirmed_answer`) and the durable async-approval
-    workflow (`chemclaw.durable.interaction_approval`) — so both build the note and open the PR
-    identically (DRY, two real callers). `submitter` is injected so tests fake the PR.
+    The single write path for a captured user answer, reached from the agent tool
+    (`chemclaw.agent.memory_tools.record_confirmed_answer`). It stays in `memory/` rather than
+    inside that tool because building the note out of an interaction is this layer's job and the
+    tool's job is the surface; `submitter` is injected so tests fake the PR.
+
+    It used to have a second caller, the durable async-approval workflow, and
+    `D-2026-08-27-a-hold-nothing-can-open-is-not-a-hold` deleted it — nothing had ever been able to
+    start one. The human decision this note needs is the pull request, which is unchanged.
 
     Returns:
         The submitter's reference for the opened PR.

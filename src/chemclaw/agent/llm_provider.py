@@ -330,9 +330,13 @@ def _tls_http_client() -> Any | None:
     `AsyncClient` — a fresh connection pool, a fresh TLS context — for every question asked, and
     nothing ever closed one: the sockets waited on the garbage collector. That is on the
     `openai_compatible` + private-CA path, which is the documented production target. It is also
-    the cost `agent/verifier._default_client` and `agent/challenge._default_client` already pay
-    `@cache` to avoid, on colder paths than this one; the main agent's client was the only one
-    building per turn.
+    the cost `agent/verifier.py::_default_client` already pays `@cache` to avoid, on a colder path
+    than this one; the main agent's client was the only one building per turn. That sentence named
+    `agent/challenge._default_client` beside it until 2026-08-27 — a module
+    `D-2026-08-15-a-capability-that-ships-off-is-not-a-capability` deleted, so the "two callers
+    already do this" argument rested on one caller and a ghost. It rests on one caller and a
+    measurement now: an uncached factory built a fresh `AsyncClient` per turn, which is the reason
+    here regardless of how many other modules do the same.
 
     Process-scoped, so the pool binds to the first loop that uses it. Production runs one loop.
     """

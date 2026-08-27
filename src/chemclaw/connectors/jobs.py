@@ -43,6 +43,7 @@ from chemclaw.core.errors import ChemclawError
 from chemclaw.core.identity_context import get_current_correlation_id
 from chemclaw.core.ids import stable_hash
 from chemclaw.core.metrics_bridge import record_metric
+from chemclaw.core.plan_context import get_current_plan_link
 from chemclaw.core.session_context import get_current_session_id
 from chemclaw.core.temporal_client import connect
 from chemclaw.core.tool_registry import CapabilityTool
@@ -355,6 +356,7 @@ def build_job_tool(connector: str, job: JobSpec) -> CapabilityTool:
         workflow_id = job_workflow_id(connector, job.name, payload)
         # `require_actor` is the core rule (F4-T3): under Entra, refuse durable work with no user.
         requested_by = require_actor()
+        plan_step, plan_hash = get_current_plan_link()
         # An unreachable broker is framed by `connect()` itself, as `SubsystemUnavailableError` —
         # one client, one message, and `chemclaw.agent.tool_authz.surface_domain_errors` hands it to
         # the model verbatim. This site used to re-frame it as a `ConnectorJobError`, which was the
@@ -378,6 +380,12 @@ def build_job_tool(connector: str, job: JobSpec) -> CapabilityTool:
                     requested_by=requested_by,
                     session_id=get_current_session_id() or "",
                     correlation_id=get_current_correlation_id() or "",
+                    # The plan step this launch serves, bound per tool call by
+                    # `agent.plan_link.stamp_plan_link` (D-2026-08-27) — ambient for the same
+                    # reason the session id is: it joins to the audit trail, so the model must
+                    # not be able to author it. Empty off the harness path.
+                    plan_step=plan_step,
+                    plan_hash=plan_hash,
                     publish_to_graph=job.publish_to_graph,
                 ),
                 id=workflow_id,

@@ -46,13 +46,17 @@ declared params model in `prepare_job_launch`.
 Read-only; touches nothing.
 """
 
+import argparse
 import importlib
 import inspect
+from collections.abc import Sequence
+from typing import NamedTuple
 
 from chemclaw.agent.profiles import registered_profile_names
 from chemclaw.connectors.registry import discovered as discovered_connectors
 from chemclaw.connectors.registry import enabled as enabled_connectors
 from chemclaw.connectors.registry import server_tools_module
+from chemclaw.core.config import settings
 from chemclaw.core.tool_registry import registered_tools
 from chemclaw.templates.manifest import AgentStep, JobStep, Template, ToolStep
 from chemclaw.templates.registry import TemplateError, discovered, enabled
@@ -152,7 +156,40 @@ def _argument_problems(
     return problems
 
 
-def unchecked_arguments() -> dict[str, list[str]]:
+class _Surface(NamedTuple):
+    """What every template is checked against: the tools, jobs, profiles and signatures that exist.
+
+    Invariant across templates, and it used to be rebuilt for each one — `_step_problems` called
+    all four helpers on entry, so the whole surface was re-derived per template. Measured on the
+    nine shipped templates, `_resolvable_signatures` alone ran ten times for **14.45 s of the
+    gate's 20.80 s**, because it imports the agent package and every discovered bundle's
+    `server.tools` module and introspects every function in them. The cost grew linearly with each
+    template added, for an answer that cannot change between two of them.
+
+    Computed once and passed down rather than memoised with `functools.cache`, deliberately. Two
+    tests in `tests/test_templates.py` pin behaviour a process-wide cache would erase: one asserts
+    `_resolvable_signatures` *raises* when a bundle cannot be imported, which a cached earlier
+    success would swallow, and one asserts the resolved set is independent of call order, which a
+    cache would satisfy trivially while the ordering hazard it guards stayed open.
+    """
+
+    tools: set[str]
+    jobs: set[str]
+    profiles: set[str]
+    signatures: dict[str, inspect.Signature]
+
+    @classmethod
+    def resolve(cls) -> "_Surface":
+        """Derive the whole surface once. The call order matters — see `_resolvable_signatures`."""
+        return cls(
+            tools=_available_tools(),
+            jobs=_available_jobs(),
+            profiles=set(registered_profile_names()),
+            signatures=_resolvable_signatures(),
+        )
+
+
+def unchecked_arguments(surface: _Surface | None = None) -> dict[str, list[str]]:
     """Tools a *shipped template* names whose arguments this tree cannot check, by template.
 
     The gap this reports is new and was introduced by the capability migration
@@ -168,8 +205,12 @@ def unchecked_arguments() -> dict[str, list[str]]:
     with nothing in the output saying so. This module's own docstring warns against exactly that
     shape ("an unresolvable tool leaves the argument check silent"); the warning was written about
     job launchers, which no template names, and the migration made it true of one that does.
+
+    Takes the signatures `main` already resolved for `validate_templates`, for the reason
+    `_Surface` gives: deriving them is the expensive half of this gate and the answer is the same
+    for every template and for both callers.
     """
-    signatures = _resolvable_signatures()
+    signatures = surface.signatures if surface is not None else _resolvable_signatures()
     unchecked: dict[str, list[str]] = {}
     for template in discovered().values():
         names = sorted(
@@ -184,13 +225,19 @@ def unchecked_arguments() -> dict[str, list[str]]:
     return unchecked
 
 
-def _step_problems(template: Template) -> list[str]:
-    """Check every step's outward references — the tool, job or profile it names, and its args."""
+def _step_problems(template: Template, surface: _Surface | None = None) -> list[str]:
+    """Check every step's outward references — the tool, job or profile it names, and its args.
+
+    `surface` is passed by `validate_templates`, which resolves it once for the whole run. The
+    default resolves it here, so a caller checking a single template — the tests do — needs no
+    ceremony to do the obvious thing.
+    """
     problems: list[str] = []
-    tools = _available_tools()
-    jobs = _available_jobs()
-    profiles = set(registered_profile_names())
-    signatures = _resolvable_signatures()
+    surface = surface if surface is not None else _Surface.resolve()
+    tools = surface.tools
+    jobs = surface.jobs
+    profiles = surface.profiles
+    signatures = surface.signatures
     for step in template.steps:
         if isinstance(step, ToolStep) and step.tool not in tools:
             problems.append(
@@ -268,11 +315,15 @@ def _write_tool_problems(
     return problems
 
 
-def validate_templates() -> list[str]:
+def validate_templates(surface: _Surface | None = None) -> list[str]:
     """Return one problem string per violation across every discovered template (empty = good).
 
     Discovery rather than the enabled set, for the reason `validate_connectors` gives: a template
     that is broken while disabled is one nobody can enable, and CI is where that should surface.
+
+    An **empty** discovery is a problem rather than a pass, which it was not: both sibling seams
+    already refuse one, and this gate printed its green line over an empty directory and over a
+    path that does not exist alike.
     """
     # Profiles are files too, and a template may name one — so they have to be registered before the
     # check can tell "unknown profile" from "not loaded yet".
@@ -283,7 +334,21 @@ def validate_templates() -> list[str]:
         found = discovered()
     except ValueError as exc:  # ProfileError and TemplateError are both ValueError
         return [str(exc)]
-    problems = [problem for template in found.values() for problem in _step_problems(template)]
+    if not found:
+        # Zero templates is not a clean sheet, it is a gate with nothing to check — the same
+        # refusal `validate_datasources` and `validate_connectors` make, for the same reason. An
+        # empty directory and one that does not exist both arrive here identically, and both are
+        # what a mis-set `CHEMCLAW_TEMPLATES_DIR` or an image that failed to ship `data/templates/`
+        # look like. Every `run_*` launcher the agent advertises is backed by one of these files.
+        return [
+            f"no templates discovered under {settings.templates_dir!r} — every `run_*` launcher "
+            "would be unavailable, and this gate would have checked nothing"
+        ]
+    # Resolved once for the whole run, not once per template — see `_Surface`.
+    surface = surface if surface is not None else _Surface.resolve()
+    problems = [
+        problem for template in found.values() for problem in _step_problems(template, surface)
+    ]
     try:
         enabled()  # resolves `templates_enabled` against what exists
     except TemplateError as exc:
@@ -291,14 +356,26 @@ def validate_templates() -> list[str]:
     return problems
 
 
-def main() -> int:
+def main(argv: Sequence[str] | None = None) -> int:
     """Validate every template; print problems and exit non-zero if any (the CI gate).
 
     The unchecked-argument note prints on both paths, because it qualifies a pass just as much as
     it qualifies a failure — and a reader who only ever sees the green line is the one it is for.
+
+    Parses even though it declares no option, for the reason its siblings do: an argument this
+    cannot honour is refused rather than discarded under a green line. `CHEMCLAW_TEMPLATES_DIR`
+    is the knob.
     """
-    problems = validate_templates()
-    for name, tools in sorted(unchecked_arguments().items()):
+    argparse.ArgumentParser(
+        prog="python -m chemclaw.cli.validate_templates",
+        description="Validate every discovered step template. Set CHEMCLAW_TEMPLATES_DIR to "
+        "point this at another tree.",
+    ).parse_args(argv)
+    # One surface for both halves of the report: `validate_templates` would otherwise resolve it
+    # and `unchecked_arguments` resolve the identical thing again, at ~5 s a time.
+    surface = _Surface.resolve()
+    problems = validate_templates(surface)
+    for name, tools in sorted(unchecked_arguments(surface).items()):
         print(
             f"note: template {name!r} names {tools}, whose bundle is declared but not run here — "
             "name-checked, arguments unchecked"

@@ -15,16 +15,19 @@ tags:
 - esterification
 - worked-example
 type: reaction
+valid_from: 2026-03-02
 ---
 
 Acetylation of salicylic acid with acetic anhydride to give aspirin.
 
-- substrate: [[precursor-of:compound-salicylic-acid]]
-- reagent: [[reagent-in:compound-acetic-anhydride]]
-- product: [[product-of:compound-acetylsalicylic-acid]]
-- catalyst: [[catalyzes:compound-dipea]] (2 mol%, in place of the classical mineral acid)
+- substrate: [[compound-salicylic-acid]]
+- reagent: [[compound-acetic-anhydride]]
+- product: [[compound-acetylsalicylic-acid]]
+- catalyst: [[compound-dipea]] (2 mol%, in place of the classical mineral acid)
 - conditions: 60 °C, 2 h, neat anhydride as both reagent and medium
 - isolated yield: 88%
 
 Yield determined by mass after recrystallisation from ethanol/water; see
 [[measured-by:playbook-recrystallisation-purity]].
+
+The teaching run behind [[part-of:campaign-aspirin-teaching]].

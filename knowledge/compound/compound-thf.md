@@ -15,3 +15,5 @@ type: compound
 Tetrahydrofuran. Coordinating ether solvent, bp 66 °C. Peroxide-forming on storage.
 
 - also written: THF, oxolane
+
+The organic half of the medium in [[solvent-for:rxn-suzuki-biaryl]].

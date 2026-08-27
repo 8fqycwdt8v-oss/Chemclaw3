@@ -15,7 +15,7 @@ from rdkit.Chem import rdFingerprintGenerator
 
 from chemclaw.core.chem import STANDARDIZATION_VERSION, standardize
 from chemclaw.core.config import settings
-from chemclaw.science.fingerprints.store import FingerprintError
+from chemclaw.science.fingerprints.store import FingerprintInputError
 
 
 @lru_cache(maxsize=8)
@@ -25,7 +25,7 @@ def _generator(radius: int, n_bits: int) -> rdFingerprintGenerator.FingerprintGe
 
 
 def _parse(smiles: str) -> Chem.Mol:
-    """Parse a SMILES into an RDKit molecule, raising `FingerprintError` on failure.
+    """Parse a SMILES into an RDKit molecule, raising `FingerprintInputError` on failure.
 
     RDKit parses the empty string to a zero-atom Mol rather than failing; that would
     fingerprint to all zeros — a meaningless query/index entry — so it is rejected here
@@ -33,9 +33,9 @@ def _parse(smiles: str) -> Chem.Mol:
     """
     mol = Chem.MolFromSmiles(smiles)
     if mol is None:
-        raise FingerprintError(f"unparseable SMILES: {smiles!r}")
+        raise FingerprintInputError(f"unparseable SMILES: {smiles!r}")
     if mol.GetNumAtoms() == 0:
-        raise FingerprintError(f"empty SMILES (no atoms): {smiles!r}")
+        raise FingerprintInputError(f"empty SMILES (no atoms): {smiles!r}")
     return mol
 
 

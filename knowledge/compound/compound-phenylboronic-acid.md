@@ -16,3 +16,5 @@ The transmetalating partner. Prone to protodeboronation in protic solvent at hig
 which is the failure mode behind [[failure-aqueous-protodeboronation]].
 
 - also written: phenylboronic acid, PhB(OH)2
+
+Starting material for [[precursor-of:compound-4-methoxybiphenyl]].

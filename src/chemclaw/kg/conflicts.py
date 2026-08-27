@@ -21,9 +21,12 @@ A conflict is a **flag on the evidence**, never a filter. Dropping one side woul
 deciding which of two curated notes is right, and it has no basis for that.
 """
 
+import heapq
+import logging
 import threading
 from collections import defaultdict
 from datetime import date
+from functools import lru_cache
 from pathlib import Path
 
 from pydantic import BaseModel
@@ -31,6 +34,8 @@ from pydantic import BaseModel
 from chemclaw.core.config import settings
 from chemclaw.kg.graph import NotesFingerprint, cached_notes
 from chemclaw.kg.note import Note
+
+log = logging.getLogger(__name__)
 
 # Relations that assert an incompatibility outright. `superseded-by` is not here: it points from
 # the *retired* note forward, and a retired note is already excluded from current-evidence sweeps
@@ -118,7 +123,12 @@ def _strongest(note_id: str, conflicts: list[Conflict]) -> NoteConflicts:
 
 
 def _declared(notes: list[Note], known: set[str]) -> list[Conflict]:
-    """Conflicts an author stated through a `contradicts`/`supersedes` relation."""
+    """Conflicts an author stated through a `contradicts`/`supersedes` relation.
+
+    A self-edge is excluded: `[[contradicts:itself]]` is an authoring mistake, and without the
+    guard it reached the model as `conflicts_with: ["itself"]` on every evidence chunk citing the
+    note — a note flagged as disagreeing with itself is a flag nobody can act on.
+    """
     return [
         Conflict(
             note_id=note.id,
@@ -128,52 +138,64 @@ def _declared(notes: list[Note], known: set[str]) -> list[Conflict]:
         )
         for note in notes
         for relation in note.outgoing_relations()
-        if relation.rel in _CONFLICTING_RELATIONS and relation.to in known
+        if relation.rel in _CONFLICTING_RELATIONS
+        and relation.to in known
+        and relation.to != note.id
     ]
 
 
-def _overlaps(left: Note, right: Note) -> bool:
-    """Whether two notes' validity windows intersect at all.
-
-    Two notes about one compound that were never simultaneously valid are a *history*, not a
-    disagreement — the later one replaced the earlier one, which is the system working.
-    """
-    if left.valid_to is not None and right.valid_from is not None:
-        if left.valid_to < right.valid_from:
-            return False
-    if right.valid_to is not None and left.valid_from is not None:
-        if right.valid_to < left.valid_from:
-            return False
-    return True
+def _suspected_conflict(
+    note: Note, confidence: float, other: Note, other_confidence: float
+) -> Conflict:
+    """One suspected pair, its severity the confidence gap — the one place the prose is written."""
+    return Conflict(
+        note_id=note.id,
+        other_id=other.id,
+        kind="suspected",
+        detail=(
+            f"both describe {note.compound_smiles} as {note.type} notes valid at "
+            f"the same time, with confidence {confidence} vs {other_confidence}"
+        ),
+        severity=abs(confidence - other_confidence),
+    )
 
 
 def _widest_disagreements(
-    ordered: list[tuple[Note, float]], index: int, threshold: float, cap: int
+    candidates: list[tuple[Note, float]],
+    note: Note,
+    confidence: float,
+    threshold: float,
+    cap: int,
 ) -> list[Conflict]:
-    """The `cap` notes in `ordered` that disagree most with `ordered[index]`, widest gap first.
+    """The `cap` notes in `candidates` that disagree most with `note`, widest gap first.
 
-    `ordered` is sorted by confidence, so the partners that disagree most with any member sit at
+    `candidates` is sorted by confidence, so the partners that disagree most with the note sit at
     the two ends. Walking inward from both ends and always taking the wider side visits candidates
     in descending order of disagreement — which means the walk can **stop** as soon as the wider
-    side falls under `threshold`, since nothing further in can exceed it.
+    side falls under `threshold`, since nothing further in can exceed it. That is what makes the
+    scan `cap` steps per note rather than quadratic. It matters at the shape a real programme has:
+    an optimization campaign is many runs on one substrate, and a synthetic 2,000-note corpus over
+    7 substrates enumerated **141,156** pairs in 637 ms and put ~141 ids on every evidence chunk
+    reaching the model.
 
-    That is what turns the pairwise scan from quadratic into `cap` steps per note in the ordinary
-    case. It matters at the shape a real programme has: an optimization campaign is many runs on
-    one substrate, and a synthetic 2,000-note corpus over 7 substrates enumerated **141,156** pairs
-    in 637 ms and put ~141 ids on every evidence chunk reaching the model. Both numbers are the
-    same fact — a scan that flags a note against every other note on its substrate tells a reader
-    nothing they can act on, and costs the most exactly where the system is most used.
+    **Every candidate must be guaranteed to overlap the note's validity window** — that is the
+    caller's contract, and it is what restored the early stop. This walk used to carry its own
+    `_overlaps` check as a `continue`, which quietly defeated the `break`: a rejected candidate
+    consumed a step without ending the walk, so a *dated* corpus (closed windows, the structure
+    `knowledge/README.md` advertises) walked its whole group per note — measured 4× per corpus
+    doubling, 3.1 s at 4,000 one-note-per-day notes, on the retrieval hot path, returning zero
+    conflicts for the work. `_suspected` now partitions by window class so that overlap is
+    guaranteed here and checked only where it is genuinely conditional (the interval sweep).
 
     A note is never its own partner (the walk steps over itself without ending), and the threshold
     check is what ends the walk rather than the note count, so a group whose members all agree
     costs one comparison per note.
     """
-    note, confidence = ordered[index]
-    low, high = 0, len(ordered) - 1
+    low, high = 0, len(candidates) - 1
     taken: list[Conflict] = []
     while low <= high and len(taken) < cap:
-        below, below_confidence = ordered[low]
-        above, above_confidence = ordered[high]
+        below, below_confidence = candidates[low]
+        above, above_confidence = candidates[high]
         # The signed gaps to the two ends; at least one is non-negative while `low <= high` and,
         # whichever is larger, no candidate still between them can beat it.
         if confidence - below_confidence >= above_confidence - confidence:
@@ -186,40 +208,103 @@ def _widest_disagreements(
             continue  # the walk reached the note itself, which is not a disagreement
         if gap < threshold:
             break
-        if not _overlaps(note, other):
-            continue
-        taken.append(
-            Conflict(
-                note_id=note.id,
-                other_id=other.id,
-                kind="suspected",
-                # The partner's confidence is carried out of the branch that chose it, not
-                # re-derived from the gap. The re-derivation asked `other is below`, and when the
-                # two pointers meet `below` *is* `above` — so the test answered True for both
-                # branches and the `above` case rendered `2*confidence - gap`: a number belonging
-                # to no note, in prose a chemist reads at the PR gate.
-                detail=(
-                    f"both describe {note.compound_smiles} as {note.type} notes valid at "
-                    f"the same time, with confidence {confidence} vs {other_confidence}"
-                ),
-                severity=gap,
-            )
-        )
+        taken.append(_suspected_conflict(note, confidence, other, other_confidence))
     return taken
+
+
+def _conditional_disagreements(
+    windowed: list[tuple[Note, float]], threshold: float, cap: int
+) -> list[Conflict]:
+    """Suspected pairs among windowed notes whose overlap is genuinely conditional.
+
+    A start-ordered interval sweep: a note entering at `start` overlaps exactly the active notes
+    whose end has not passed, so only truly-overlapping pairs are ever examined — a corpus of
+    disjoint one-day windows (the shape that made the old walk quadratic) enumerates zero. Pairs
+    the walks already guarantee are *skipped*, not re-emitted: two endless notes (`valid_to` both
+    absent) and two startless ones (`valid_from` both absent) always overlap and are handled by
+    `_widest_disagreements`, and skipping them here is also what keeps the realistic dated corpus
+    — every run note carrying `valid_from` only — from turning the sweep itself quadratic: such
+    notes pair only against the *bounded* active set, which that corpus leaves empty.
+
+    Per-note output is capped at the `cap` widest gaps via a heap, so a pathological group of
+    mutually-overlapping closed windows bounds what reaches `_strongest` exactly as the walk does.
+    """
+    events = sorted(windowed, key=lambda pair: (pair[0].valid_from or date.min, pair[0].id))
+    bounded: list[tuple[Note, float]] = []  # active notes with a closed end (valid_to set)
+    endless: list[tuple[Note, float]] = []  # active notes with valid_from set, valid_to absent
+    # Per note id: a min-heap of (gap, tiebreak, conflict) holding its `cap` widest pairs.
+    best: dict[str, list[tuple[float, int, Conflict]]] = defaultdict(list)
+    tiebreak = 0
+
+    def _keep(note_id: str, gap: float, conflict: Conflict) -> None:
+        nonlocal tiebreak
+        tiebreak += 1
+        heap = best[note_id]
+        if len(heap) < cap:
+            heapq.heappush(heap, (gap, tiebreak, conflict))
+        elif gap > heap[0][0]:
+            heapq.heapreplace(heap, (gap, tiebreak, conflict))
+
+    for note, confidence in events:
+        start = note.valid_from or date.min
+        bounded = [(n, c) for n, c in bounded if n.valid_to is not None and n.valid_to >= start]
+        candidates = bounded if note.valid_to is None else bounded + endless
+        for other, other_confidence in candidates:
+            # Skip the guaranteed classes the walks own: both endless, or both startless.
+            if note.valid_to is None and other.valid_to is None:
+                continue
+            if note.valid_from is None and other.valid_from is None:
+                continue
+            gap = abs(confidence - other_confidence)
+            if gap < threshold:
+                continue
+            conflict = _suspected_conflict(note, confidence, other, other_confidence)
+            _keep(note.id, gap, conflict)
+            _keep(other.id, gap, conflict)
+        if note.valid_to is None:
+            if note.valid_from is not None:
+                endless.append((note, confidence))
+        else:
+            bounded.append((note, confidence))
+
+    return [conflict for heap in best.values() for _, _, conflict in heap]
+
+
+@lru_cache(maxsize=4096)
+def _grouping_smiles(smiles: str) -> str:
+    """The canonical form a conflict group keys on, falling back to the raw string.
+
+    `C1CCOC1` and `O1CCCC1` are the same molecule; grouped on the raw frontmatter string they
+    never paired, so the detector's recall depended on whoever typed the SMILES — a silent
+    under-detection nothing could see. Unparseable input keeps its raw spelling: refusing it here
+    would drop the note from the scan entirely, and a typo'd SMILES pairing only with its own
+    spelling is strictly better than not being scanned at all.
+    """
+    from chemclaw.core.chem import InvalidSmilesError, canonical_smiles
+
+    try:
+        return canonical_smiles(smiles)
+    except InvalidSmilesError:
+        return smiles
 
 
 def _suspected(notes: list[Note], cap: int) -> list[Conflict]:
     """Same-compound, same-type, concurrently-valid notes whose confidences disagree.
 
-    Grouped by `(type, compound_smiles)` because that is the coarsest pairing that is still about
-    one thing: two `reaction` notes on one compound may well describe different experiments, but a
-    materially different confidence between them is worth a reader's eye. Notes with no stated
-    confidence are skipped — an absent confidence is not a low one.
+    Grouped by `(type, canonical compound_smiles)` because that is the coarsest pairing that is
+    still about one thing: two `reaction` notes on one compound may well describe different
+    experiments, but a materially different confidence between them is worth a reader's eye.
+    Notes with no stated confidence are skipped — an absent confidence is not a low one.
 
-    Each note contributes at most `cap` pairs, its widest disagreements first. This is a change of
-    *claim*, not only of volume: the exhaustive list said "here is every note on this substrate
-    whose confidence differs from yours", which is a fact about the corpus rather than a signal
-    about the note. KM-8's stated target was a signal, and the strongest few disagreements are one.
+    Each note contributes at most `cap` pairs per candidate class, its widest disagreements
+    first. Within a group the pairs are found by window class, so that every comparison is either
+    guaranteed to overlap (the confidence-sorted end-walks, which stop early) or known to overlap
+    (the interval sweep, which never examines a disjoint pair):
+
+    - every note against the *open* notes (no window — they overlap everything);
+    - the endless notes (`valid_to` absent) against each other;
+    - the startless notes (`valid_from` absent) against each other;
+    - everything else — the pairs whose overlap depends on the actual dates — by the sweep.
     """
     # Carry the confidence alongside the note rather than re-reading `note.confidence` inside the
     # loop: the filter above already established it is not None, and expressing that structurally
@@ -229,7 +314,9 @@ def _suspected(notes: list[Note], cap: int) -> list[Conflict]:
     grouped: dict[tuple[str, str], list[tuple[Note, float]]] = defaultdict(list)
     for note in notes:
         if note.compound_smiles and note.confidence is not None:
-            grouped[(note.type, note.compound_smiles)].append((note, note.confidence))
+            grouped[(note.type, _grouping_smiles(note.compound_smiles))].append(
+                (note, note.confidence)
+            )
 
     threshold = settings.conflict_confidence_gap
     found: list[Conflict] = []
@@ -238,8 +325,27 @@ def _suspected(notes: list[Note], cap: int) -> list[Conflict]:
         # lets `_widest_disagreements` stop early; the id is the tiebreak so the scan stays
         # deterministic over notes that state the same confidence.
         ordered = sorted(group, key=lambda pair: (pair[1], pair[0].id))
-        for index in range(len(ordered)):
-            found.extend(_widest_disagreements(ordered, index, threshold, cap))
+        open_notes = [
+            pair for pair in ordered if pair[0].valid_from is None and pair[0].valid_to is None
+        ]
+        endless = [
+            pair for pair in ordered if pair[0].valid_to is None and pair[0].valid_from is not None
+        ]
+        startless = [
+            pair for pair in ordered if pair[0].valid_from is None and pair[0].valid_to is not None
+        ]
+        windowed = [
+            pair
+            for pair in ordered
+            if pair[0].valid_from is not None or pair[0].valid_to is not None
+        ]
+        for note, confidence in ordered:
+            found.extend(_widest_disagreements(open_notes, note, confidence, threshold, cap))
+        for note, confidence in endless:
+            found.extend(_widest_disagreements(endless, note, confidence, threshold, cap))
+        for note, confidence in startless:
+            found.extend(_widest_disagreements(startless, note, confidence, threshold, cap))
+        found.extend(_conditional_disagreements(windowed, threshold, cap))
     return found
 
 
@@ -290,11 +396,23 @@ def conflicts_by_note(conflicts: list[Conflict]) -> dict[str, list[Conflict]]:
 # guarded the lookup would let all three miss together and compute the same answer three times in
 # parallel — measured at 4,238 ms for the first sweep of a 2,000-note corpus against 1,525 ms for
 # one computation. A second caller waiting is strictly better than a second caller duplicating: it
-# waits exactly as long as the work it would otherwise have redone. Nothing here awaits, and
-# `chemclaw.kg.graph`'s lock is only ever taken *inside* this one, so there is no cycle to deadlock
-# on.
-_INDEX_LOCK = threading.Lock()
+# waits exactly as long as the work it would otherwise have redone.
+#
+# One lock **per directory**, not one for the process: this used to be a single global lock held
+# across `cached_notes` *and* the scan, so a deployment reading two note trees (the knowledge dir
+# plus a second corpus) serialized their unrelated computations against each other — and the
+# corpus snapshot sat inside the critical section, coupling this lock to `graph`'s for the length
+# of a cold parse. The snapshot now happens before the lock (the graph package owns its own
+# concurrency), so lock ordering is uniformly graph-then-index and there is no cycle to deadlock
+# on. Lock objects are never removed, for the reason `graph._COMPUTE_LOCKS` states.
+_LOCKS_GUARD = threading.Lock()
+_INDEX_LOCKS: dict[str, threading.Lock] = {}
 _INDEX_CACHE: dict[str, tuple[NotesFingerprint, date, dict[str, NoteConflicts]]] = {}
+
+# Warned once per process: with `graph_cache_enabled=false` there is no fingerprint to key the
+# index on, so every retrieval pays the full scan — a knob that quietly turns a cached 1.5 s into
+# a per-call 1.5 s deserves one line in the log saying so.
+_WARNED_UNCACHED = False
 
 
 def conflict_index(notes_dir: Path, as_of: date) -> dict[str, NoteConflicts]:
@@ -334,8 +452,28 @@ def conflict_index(notes_dir: Path, as_of: date) -> dict[str, NoteConflicts]:
     if not settings.conflict_detection_enabled or not notes_dir.exists():
         return {}
     key = str(notes_dir)
-    with _INDEX_LOCK:
-        fingerprint, notes = cached_notes(notes_dir)
+    # The corpus snapshot happens before this module's lock: `cached_notes` holds its own
+    # per-directory computation lock, so concurrent callers already share one parse, and taking it
+    # inside ours would couple two subsystems' critical sections for the length of a cold parse.
+    fingerprint, notes = cached_notes(notes_dir)
+    if fingerprint is None:
+        global _WARNED_UNCACHED
+        if not _WARNED_UNCACHED:
+            _WARNED_UNCACHED = True
+            log.warning(
+                "graph_cache_enabled=false: the conflict index cannot be cached, so every "
+                "retrieval pays the full conflict scan for %s",
+                notes_dir,
+            )
+        # Not stored: there would be no key to invalidate it against, so every read would serve
+        # the first corpus this process ever saw.
+        return {
+            note_id: _strongest(note_id, conflicts)
+            for note_id, conflicts in conflicts_by_note(find_conflicts(notes, as_of=as_of)).items()
+        }
+    with _LOCKS_GUARD:
+        lock = _INDEX_LOCKS.setdefault(key, threading.Lock())
+    with lock:
         cached = _INDEX_CACHE.get(key)
         if cached is not None and cached[0] == fingerprint and cached[1] == as_of:
             return cached[2]
@@ -343,9 +481,5 @@ def conflict_index(notes_dir: Path, as_of: date) -> dict[str, NoteConflicts]:
             note_id: _strongest(note_id, conflicts)
             for note_id, conflicts in conflicts_by_note(find_conflicts(notes, as_of=as_of)).items()
         }
-        # Not stored when caching is off (`graph_cache_enabled=false` yields no fingerprint): there
-        # would be no key to invalidate it against, so every read would serve the first corpus this
-        # process ever saw.
-        if fingerprint is not None:
-            _INDEX_CACHE[key] = (fingerprint, as_of, index)
+        _INDEX_CACHE[key] = (fingerprint, as_of, index)
     return index

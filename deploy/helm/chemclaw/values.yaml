@@ -346,6 +346,20 @@ config:
   CHEMCLAW_LLM_MODEL: "gpt-oss"
   CHEMCLAW_HARNESS_ENABLED: "true"
   CHEMCLAW_HARNESS_AUTONOMY: "plan_only"
+  # The LLM-as-judge over every answer's citation faithfulness is a **deployment opt-in**, off by
+  # default here as in code, and switching it on is two facts, not one flag:
+  #   1. Startup then runs `require_verifier_capability()` — one structured-output probe against
+  #      the routed `"verifier"` model — and **refuses to serve** if that endpoint rejects or
+  #      ignores `response_format` (json_schema). On `openai_compatible` that support is the whole
+  #      feature: without it the judge degrades to the offline citation gate on every turn while
+  #      looking enabled, which is the silent posture the probe exists to end.
+  #   2. Near `CHEMCLAW_VERIFIER_CONFIDENCE_THRESHOLD` the verdict is re-rolled and the median
+  #      decides, within `CHEMCLAW_VERIFIER_REVIEW_BAND` (default 0.2 — measured, not chosen:
+  #      D-2026-08-27-a-verdict-at-the-margin-is-a-coin-toss); the band costs extra judge calls
+  #      only on answers that land inside it, counted by chemclaw_verifier_band_rerolls_total.
+  # Uncomment to opt in; the model it runs on comes from CHEMCLAW_MODEL_ROUTES' "verifier" entry.
+  # CHEMCLAW_VERIFIER_ENABLED: "true"
+  # CHEMCLAW_VERIFIER_CONFIDENCE_THRESHOLD: "0.7"
   CHEMCLAW_SESSION_STORE: "postgres"
   # Stated rather than left to the code default (16), because the code default was chosen for one
   # process and this chart runs seventeen of them. 8 matches the front door's own admission cap
@@ -381,6 +395,22 @@ config:
   # `connectors.safety.url` name their siblings: whatever Service the sibling repo's chart gives
   # its `calc` server in this namespace.
   CHEMCLAW_CALC_SERVER_URL: "http://chemclaw3-mcp-calc:8860/mcp"
+  # Where the reaction labeller answers (`Chemclaw3-mcp`'s `rxnlabel`, port 8865). The same
+  # argument as `CHEMCLAW_CALC_SERVER_URL` above and reached the same way — the code default is a
+  # loopback address chosen for a dev process, and `durable/schedules.py` creates the
+  # `reaction-labels` Schedule for any data source that `provides` reactions with no separate
+  # enable flag by design. So a site that attaches its reaction corpus (the shipped, supported
+  # path) had its hourly drain dial `127.0.0.1:8865` — the background worker's own pod — and every
+  # faceted precedent question answered from an empty label index with no error anywhere. That is
+  # D-131 on the one client the connector seam never covered, because this manifest is deliberately
+  # off `CHEMCLAW_CONNECTORS_DIR` (it is an internal primitive, not a tool the agent chooses).
+  #
+  # Inert until a corpus is attached: with no reactions-providing source, no Schedule exists and
+  # nothing dials this. Named `chemclaw3-mcp-rxnlabel` for the reason `chemclaw3-mcp-calc` is —
+  # whatever Service the sibling repo's chart gives that server in this namespace. Its bearer is
+  # `secrets.optionalKeys.rxnlabelToken`, and its port is `networkPolicy.egressPorts.rxnlabel`;
+  # both are needed, because an egress rule restricts by port independently of `to:`.
+  CHEMCLAW_RXNLABEL_SERVER_URL: "http://chemclaw3-mcp-rxnlabel:8865/mcp"
   # Entra identity is mandatory system-wide (the one exception is the generic LLM credential).
   CHEMCLAW_ENTRA_REQUIRED: "true"
   CHEMCLAW_ENTRA_TENANT_ID: "00000000-0000-0000-0000-000000000000"
@@ -553,6 +583,29 @@ secrets:
     calcMcpToken: "CHEMCLAW_CALC_MCP_TOKEN"
     molfpMcpToken: "CHEMCLAW_MOLFP_MCP_TOKEN"
     rxnfpMcpToken: "CHEMCLAW_RXNFP_MCP_TOKEN"
+    # The reaction labeller's bearer (`settings.rxnlabel_server_token_env`, read per request by
+    # `ingest/labels/labeller.py`). Same shape as `calcToken` one hop away: a credential this
+    # release *presents* to a server it does not run.
+    rxnlabelToken: "CHEMCLAW_RXNLABEL_TOKEN"
+    # **Four credentials that had no slot at all**, and therefore exactly one chart seam left:
+    # `.Values.config`, which renders a ConfigMap the OpenShift `view` role can read and which
+    # `helm get values` prints. Each has a live reader, and each is optional in the sense the four
+    # above are — the release runs without it, and the feature it gates does not.
+    #
+    #   * `llmFallbackApiKey` — the failover endpoint's own credential
+    #     (`agent/llm_provider.py`). `core/config/llm.py` describes the gap it closes as "total
+    #     rather than degraded", and enabling it needs three keys: two ordinary config and this.
+    #   * `vectorStoreApiKey` — Qdrant / Databricks Vector Search
+    #     (`retrieval/vectors/{qdrant,databricks}.py`). Unused by the `pgvector` default.
+    #   * `temporalApiKey` — the Temporal Cloud path (`core/temporal_client.py`), which was simply
+    #     unreachable from this chart. Self-hosted Temporal uses the mTLS Secret instead.
+    #   * `sessionStoreDsn` — a session store split off `postgres_dsn`
+    #     (`agent/session_store.py`). It falls back to `CHEMCLAW_POSTGRES_DSN`, so a split store
+    #     had no seam.
+    llmFallbackApiKey: "CHEMCLAW_LLM_FALLBACK_API_KEY"
+    vectorStoreApiKey: "CHEMCLAW_VECTOR_STORE_API_KEY"
+    temporalApiKey: "CHEMCLAW_TEMPORAL_API_KEY"
+    sessionStoreDsn: "CHEMCLAW_SESSION_STORE_DSN"
   # Secrets for the **migration hook Job only**, and the separation from `keys` above is the whole
   # point rather than tidiness: `chemclaw.env` mounts every key in that map onto every pod, so a
   # migration credential listed there would be present on the front door and every worker for the
@@ -692,6 +745,11 @@ networkPolicy:
     https: 443
     llm: 8000
     otel: 4317
+    # The reaction labeller (`config.CHEMCLAW_RXNLABEL_SERVER_URL` above), on the same terms as the
+    # three sibling servers below: plain HTTP on its own port, so `egressPorts.https` does not
+    # cover it, and without an entry here an operator who adds the host to `egressDestinations`
+    # still has every packet dropped.
+    rxnlabel: 8865
     # The `chem`, `safety` and `calc` sibling servers (`connectors.chem.url`,
     # `connectors.safety.url`, `config.CHEMCLAW_CALC_SERVER_URL` above) — plain HTTP on their own
     # ports rather than 443, so `egressPorts.https` does not cover them (the misreading this chart

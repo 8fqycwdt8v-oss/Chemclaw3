@@ -26,6 +26,24 @@ from tests import warehouse_fake
 _DRIVER = "tests.warehouse_fake:open_fake"
 
 
+@pytest.fixture(autouse=True)
+def _no_real_record_store(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every test here runs against an in-memory transcription store, never Postgres.
+
+    The retriever's suppression check calls `default_record_store()` on every retrieval, so with
+    the database down these tests *failed* rather than skipped — 10 of them, measured — which
+    buried real regressions in a wall of connection errors on any offline run. Nothing in this
+    file is about the durable store: the suppression rule itself is proven against
+    `InMemoryReactionRecordStore` (`_ingested`), and the backends' agreement is
+    `test_reaction_records.py`'s job. `_ingested` overrides this with a seeded store; everything
+    else gets an empty one, which answers "nothing ingested" exactly as a fresh deployment would.
+    """
+    store = InMemoryReactionRecordStore()
+    monkeypatch.setattr(
+        "chemclaw.ingest.eln.warehouse.retriever.default_record_store", lambda: store
+    )
+
+
 def _binding(**vector: Any) -> dict[str, Any]:
     """A retrieve-only binding; `vector` overrides individual keys of its `vector:` section."""
     section: dict[str, Any] = {
@@ -237,7 +255,7 @@ def test_an_unreachable_warehouse_costs_this_leg_and_no_other() -> None:
     with pytest.raises(ConnectionError):
         asyncio.run(retriever.retrieve("ester formation", {}))
 
-    ranked, failed = asyncio.run(
+    ranked, failed, _skipped = asyncio.run(
         sweep_sources([("graph", _Graph()), ("eln-warehouse", retriever)], "ester formation", {})
     )
     assert [len(chunks) for chunks in ranked] == [1, 0]
@@ -288,7 +306,9 @@ def test_a_misconfigured_source_costs_this_leg_and_no_other(
     with pytest.raises(BindingError):
         asyncio.run(retriever.retrieve("ester formation", {}))
 
-    _, failed = asyncio.run(sweep_sources([("eln-warehouse", retriever)], "ester formation", {}))
+    _, failed, _skipped = asyncio.run(
+        sweep_sources([("eln-warehouse", retriever)], "ester formation", {})
+    )
     assert failed == ["eln-warehouse"]
 
 
@@ -315,7 +335,9 @@ def test_an_embedding_provider_failure_costs_this_leg_and_no_other(
     with pytest.raises(_ProviderError):
         asyncio.run(retriever.retrieve("ester formation", {}))
 
-    _, failed = asyncio.run(sweep_sources([("eln-warehouse", retriever)], "ester formation", {}))
+    _, failed, _skipped = asyncio.run(
+        sweep_sources([("eln-warehouse", retriever)], "ester formation", {})
+    )
     assert failed == ["eln-warehouse"]
 
 
@@ -327,7 +349,7 @@ def test_the_query_is_embedded_off_the_event_loop(monkeypatch: pytest.MonkeyPatc
     """
     real = embed_texts
 
-    def _slow(texts: list[str]) -> list[list[float]]:
+    def _slow(texts: list[str], **kwargs: object) -> list[list[float]]:
         time.sleep(0.4)
         return real(texts)
 

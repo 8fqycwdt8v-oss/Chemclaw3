@@ -8,6 +8,7 @@ import os
 import re
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -286,6 +287,9 @@ def test_entra_required_accepts_issuer_plus_jwks_url() -> None:
         entra_audience="api://x",
         entra_issuer="https://login.microsoftonline.com/tid-1/v2.0",
         entra_jwks_url="https://login.microsoftonline.com/tid-1/discovery/v2.0/keys",
+        # Enforcing identity now requires the plan gate with it, or an explicit acceptance —
+        # see `test_enforcing_identity_without_the_plan_gate_is_refused`.
+        harness_enabled=True,
     )
     assert settings.entra_required is True
 
@@ -317,6 +321,7 @@ def test_entra_privileged_roles_without_actions_is_accepted() -> None:
         entra_audience="api://x",
         entra_tenant_id="t",
         entra_privileged_roles="calc-operator",
+        harness_enabled=True,
     )
     assert settings.entra_privileged_role_set == {"calc-operator"}
     assert settings.entra_expensive_action_set == frozenset()
@@ -331,6 +336,7 @@ def test_entra_required_full_config_is_accepted() -> None:
         entra_tenant_id="t",
         entra_expensive_actions="sample_conformers",
         entra_privileged_roles="compute",
+        harness_enabled=True,
     )
     assert settings.entra_required is True
 
@@ -483,6 +489,97 @@ def test_configurations_the_comments_forbid_are_rejected(name: str, overrides: d
     """A rule worth writing in a comment is worth failing on at startup."""
     with pytest.raises(ValueError):
         Settings(_env_file=None, **overrides)  # type: ignore[call-arg]
+
+
+# The minimum a deployment must state to be in the enforced posture at all — `entra_required`
+# alone is refused for a *different* reason (no audience, no issuer). `Any` because these are
+# splatted into `Settings(**...)`, whose fields have twenty different types.
+_ENFORCED: dict[str, Any] = {
+    "entra_required": True,
+    "entra_audience": "api://chemclaw",
+    "entra_tenant_id": "00000000-0000-0000-0000-000000000000",
+}
+
+
+def test_enforcing_identity_without_the_plan_gate_is_refused() -> None:
+    """The two settings that decide "is a turn supervised" were never checked against each other.
+
+    `plan_gate.gate_applies` is `harness_enabled_for(profile) and autonomy_for(profile) ==
+    "plan_only"`. `harness_autonomy` defaults to `plan_only`, but `harness_enabled` defaults to
+    **False** — so the gate D-167/DARK-1 exists for is attached only where an operator turned the
+    harness on. The shipped chart does (`CHEMCLAW_HARNESS_ENABLED: "true"`); the image run
+    directly, `docker compose`, the live lane and any non-Helm deployment do not.
+
+    A deployment that sets `CHEMCLAW_ENTRA_REQUIRED=true` believes it is in the enforced posture.
+    Without the chart's ConfigMap it gets an agent with no plan approval at all, and an ordinary
+    authenticated user holding no app roles can then run a turn that autonomously starts
+    state-changing work with nothing to approve it — measured, `report_measurement` (which writes
+    the calibration ledger), `compute_xtb_energy`, `watch_for` and `remember_preference` are all
+    allowed by both `authorize_tool` and `authorize_trigger`.
+
+    `_refuse_unauthenticated_exposure` already makes exactly this argument for the analogous
+    "the safe posture is one env var away" pair.
+    """
+    with pytest.raises(ValueError, match="harness_enabled"):
+        Settings(_env_file=None, **_ENFORCED)  # type: ignore[call-arg]
+
+
+def test_the_enforced_posture_with_the_gate_attached_constructs() -> None:
+    """The control: what the shipped chart sets must still boot."""
+    assert Settings(_env_file=None, harness_enabled=True, **_ENFORCED) is not None  # type: ignore[call-arg]
+
+
+def test_the_opt_out_is_stated_in_the_same_vocabulary_as_the_thing_it_declines() -> None:
+    """A deployment that means "unsupervised" says so with `harness_autonomy`, not a security knob.
+
+    `service_allow_insecure` was the obvious escape hatch and is the wrong one: it means "boot
+    unauthenticated on a non-loopback bind", its own comment ends "Entra-enforced deployments never
+    need it", and a knob that means two things is one that gets set for the wrong reason.
+
+    `harness_autonomy=execute` is the right one because it is the *statement* this refusal is
+    asking for. With the harness off it changes no behaviour at all — `autonomy_for` is read
+    nowhere but `gate_applies`, which is already False — so it buys nothing except making the
+    posture visible in `helm show values` and in a values diff, which is the whole point.
+
+    A per-profile `harness_autonomy` still wins over it (`autonomy_for` prefers the profile), so
+    the opt-out cannot silently disarm a profile that narrowed on purpose.
+    """
+    relaxed = Settings(_env_file=None, harness_autonomy="execute", **_ENFORCED)  # type: ignore[call-arg]
+    assert relaxed.entra_required and not relaxed.harness_enabled
+    assert (
+        Settings(  # type: ignore[call-arg]
+            _env_file=None, harness_enabled=True, harness_autonomy="execute", **_ENFORCED
+        )
+        is not None
+    )
+
+
+def test_a_wildcard_cors_origin_is_refused() -> None:
+    """`*` is the one value this allow-list may not hold, and nothing checked it.
+
+    `_add_cors` splits the field on commas and hands the result to `CORSMiddleware` verbatim, so
+    `CHEMCLAW_SERVICE_CORS_ORIGINS=*` became `allow_origins=["*"]`. The blast radius is bounded —
+    `allow_credentials` is left False and the API authenticates with a bearer rather than a cookie,
+    so a hostile origin cannot ride a user's session — and "bounded" is not "intended": the knob's
+    own comment calls the empty default "the safe default" without ever saying which values are the
+    unsafe ones, and the bound depends on two properties of *other* code that nothing pins.
+
+    Refused rather than opted out of, because there is no deployment that needs it: an empty value
+    already means "no cross-origin access", a same-origin embedded UI needs none, and a browser
+    client that does need access has an origin to name.
+    """
+    with pytest.raises(ValueError, match="service_cors_origins"):
+        Settings(_env_file=None, service_cors_origins="*")  # type: ignore[call-arg]
+    with pytest.raises(ValueError, match="service_cors_origins"):
+        Settings(_env_file=None, service_cors_origins="https://ui.example, *")  # type: ignore[call-arg]
+
+
+def test_a_named_cors_origin_is_still_accepted() -> None:
+    """The control: an allow-list of real origins is what the field is for."""
+    named = Settings(  # type: ignore[call-arg]
+        _env_file=None, service_cors_origins="https://ui.example, https://alt.example"
+    )
+    assert named.service_cors_origins.startswith("https://ui.example")
 
 
 def test_the_shipped_defaults_still_construct() -> None:
@@ -643,4 +740,54 @@ def test_no_calculator_setting_is_declared_without_a_reader() -> None:
         + ". The calculation server reads these same names under the same env prefix, so a "
         "field left here is a knob an operator can set on the wrong deployment and watch do "
         "nothing. Delete it here, or give it a reader."
+    )
+
+
+def test_note_reindex_is_derived_from_the_source_list_unless_overridden() -> None:
+    """Enabling an index-backed leg must enable the reindex that builds what it queries.
+
+    As an independent switch defaulting to off, `vector`/`lexical` could be enabled with the
+    index never built — both legs then reported `chunks: 0, failed: false` forever, and the
+    deployment believed it ran hybrid retrieval. The same derivation move
+    `D-2026-08-26-a-knob-that-renders-nothing-is-not-a-knob` made for connectors.
+    """
+    derived_on = Settings(_env_file=None, data_sources="graph,vector,lexical")  # type: ignore[call-arg]
+    assert derived_on.note_reindex_effective is True
+    derived_off = Settings(_env_file=None, data_sources="graph")  # type: ignore[call-arg]
+    assert derived_off.note_reindex_effective is False
+    # An explicit choice still wins in both directions.
+    opted_out = Settings(  # type: ignore[call-arg]
+        _env_file=None, data_sources="graph,vector,lexical", note_reindex_enabled=False
+    )
+    assert opted_out.note_reindex_effective is False
+    forced = Settings(  # type: ignore[call-arg]
+        _env_file=None, data_sources="graph", note_reindex_enabled=True
+    )
+    assert forced.note_reindex_effective is True
+
+
+def test_the_connector_job_ceiling_covers_every_activity_a_bundle_child_can_run() -> None:
+    """The ceiling rule has to name the longest activity, not the one the author remembered.
+
+    `_the_job_ceiling_covers_the_activity_it_bounds` knew only about `xtb_job_timeout_seconds`, so
+    the `results` bundle's republish walk — the other multi-hour activity a connector job can
+    start — sailed past it: it was given `connector_job_timeout_seconds` *itself* as a
+    start-to-close, which the parent ceiling equals rather than exceeds. Both then expire within
+    milliseconds of each other, the activity's five-attempt retry policy is unreachable, and the
+    run dies as a bare `WorkflowExecutionTimedOut` naming neither setting. The guard is written
+    against the max over the budgets so the next long activity is covered by construction.
+    """
+    with pytest.raises(ValueError, match="connector_job_timeout_seconds"):
+        Settings(  # type: ignore[call-arg]
+            _env_file=None,
+            connector_job_timeout_seconds=18_000.0,
+            result_republish_timeout_seconds=18_000.0,
+        )
+
+
+def test_the_shipped_republish_budget_is_strictly_inside_the_job_ceiling() -> None:
+    """The relation the defect violated, asserted on the numbers that actually ship."""
+    default = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert default.connector_job_timeout_seconds > (
+        default.result_republish_timeout_seconds + default.activity_timeout_seconds
     )

@@ -105,6 +105,12 @@ def _rendered_publish_path() -> str:
     # `[1]` starts mid-action (` -}}\n…`); drop through that closing delimiter to the body itself.
     define = template.split('define "chemclaw.knowledgePublishPath"')[1]
     body = define.split("-}}", 1)[1].split("{{- end -}}")[0]
+    # `required "<message>" .Values.X` renders exactly as `.Values.X` whenever X is set, and this
+    # helper reads a `config` key that must never be absent — an empty one publishes to
+    # `<noteRepoPath>/`, where no reader looks. The wrapper is stripped rather than matched
+    # verbatim so this substitution keeps asserting the *path*, and the refusal it adds is asserted
+    # where it can be: `tests/test_deploy_chart.py` renders the key-absent case with `helm`.
+    body = re.sub(r'\{\{ required "[^"]*" (\.Values\.[A-Za-z0-9_.]+) \}\}', r"{{ \1 }}", body)
     rendered = (
         body.replace("{{ .Values.knowledge.noteRepoPath }}", _VALUES["knowledge"]["noteRepoPath"])
         .replace(
@@ -284,6 +290,24 @@ def test_chart_declares_only_the_documented_secrets() -> None:
     framing key, "optional" describes the capability; for these three, it describes only the
     upgrade, and an operator still has to set all three before the bundle they gate works at all.
 
+    The tenth through fourteenth are the ones that were **missing**, and each is an exposure
+    *reduction* rather than a new secret at rest — which is why they belong here without an
+    architecture change. Every one has a live reader and a documented setting; what none of them
+    had was a correct place to put the value. `chemclaw.env` mounts only what these maps name, so
+    the sole remaining seam was `.Values.config` — a ConfigMap the OpenShift `view` role reads and
+    `helm get values` prints — and `test_no_secret_is_carried_in_the_plaintext_config_map` refuses
+    that, correctly, leaving the operator with nowhere to go. They are `optionalKeys` for the
+    upgrade reason above and, unlike the connector bearers, genuinely optional in capability too:
+    each gates a feature the shipped release does not use.
+
+    `rxnlabelToken` is the labelling server's bearer, one hop away exactly as `calcToken` is.
+    `llmFallbackApiKey` is the failover endpoint's own credential — `core/config/llm.py` calls the
+    gap it closes "total rather than degraded", and enabling it took three keys of which this was
+    the one with no slot. `vectorStoreApiKey` is Qdrant's / Databricks Vector Search's, unused by
+    the `pgvector` default. `temporalApiKey` made the Temporal Cloud path unreachable from this
+    chart at all. `sessionStoreDsn` falls back to `CHEMCLAW_POSTGRES_DSN`, so splitting the session
+    store off had no seam.
+
     Both maps are asserted, because "which secrets does this chart name" is one question and
     splitting the answer across two values is exactly how a key comes to be in neither.
     """
@@ -302,6 +326,11 @@ def test_chart_declares_only_the_documented_secrets() -> None:
         "CHEMCLAW_CHEM_TOKEN",
         "CHEMCLAW_SAFETY_TOKEN",
         "CHEMCLAW_CALC_TOKEN",
+        "CHEMCLAW_RXNLABEL_TOKEN",
+        "CHEMCLAW_LLM_FALLBACK_API_KEY",
+        "CHEMCLAW_VECTOR_STORE_API_KEY",
+        "CHEMCLAW_TEMPORAL_API_KEY",
+        "CHEMCLAW_SESSION_STORE_DSN",
     }
 
 
@@ -649,4 +678,102 @@ def test_no_secret_is_carried_in_the_plaintext_config_map() -> None:
         f"these settings hold a credential (they are in _SECRET_SETTINGS) but are declared in "
         f".Values.config, which renders into a plaintext ConfigMap: {exposed}. Move each to "
         "secrets.keys and argue it in test_chart_declares_only_the_documented_secrets."
+    )
+
+
+def test_the_verifier_opt_in_is_documented_in_the_values_file() -> None:
+    """The commented-out `CHEMCLAW_VERIFIER_*` block is the chart's opt-in surface — pinned as text.
+
+    The verifier ships off (code default and chart alike), so the chart cannot *render* anything
+    to assert; what a deployer has instead is the documented block in `values.yaml` naming the two
+    facts that make the flip safe — the startup capability probe, and the review band. Prose in a
+    values file is exactly the kind of claim that silently vanishes in a refactor, which is what
+    this pin exists to make loud. It checks the raw text because the keys are comments: parsed
+    YAML deliberately does not carry them, and that they are NOT in the parsed config is asserted
+    too — an uncommented default would switch every deployment's judge on from a values edit that
+    read like documentation.
+    """
+    text = (_CHART / "values.yaml").read_text(encoding="utf-8")
+    for key in ("CHEMCLAW_VERIFIER_ENABLED", "CHEMCLAW_VERIFIER_CONFIDENCE_THRESHOLD"):
+        assert f"# {key}" in text, f"the commented opt-in for {key} left values.yaml"
+        assert key not in _VALUES["config"], f"{key} must stay a documented opt-in, not a default"
+    assert "require_verifier_capability" in text, (
+        "the comment must name the startup probe a deployer will hit"
+    )
+
+
+def test_every_credential_this_deployment_holds_has_a_secret_slot() -> None:
+    """A credential with no Secret slot has exactly one chart seam left: the plaintext ConfigMap.
+
+    `chemclaw.env` mounts every `secrets.keys`/`optionalKeys` entry on every pod, and
+    `secrets.migrationKeys` on the hook Job — so a credential named in none of the three can only
+    be set through `.Values.config`, which `templates/config.yaml` ranges into a `kind: ConfigMap`.
+    `test_no_secret_is_carried_in_the_plaintext_config_map` then correctly refuses to let it be
+    declared there, which leaves an operator with a documented setting and no correct way to set
+    it. Four were in that state — `llm_fallback_api_key` (whose own comment calls the gap it closes
+    "total rather than degraded"), `vector_store_api_key`, `temporal_api_key` (so the Temporal Cloud
+    path was unreachable from the chart) and `session_store_dsn` — and the natural operator action
+    for each is `--set config.CHEMCLAW_…=<secret>`, i.e. the credential in a ConfigMap the
+    OpenShift `view` role reads and in `helm get values` output.
+
+    Driven off `Settings` rather than a hand-kept list, so a credential added to the config object
+    arrives here rather than at a deployment. It is the same question
+    `tests/test_credentials.py::test_every_credential_shaped_setting_is_in_the_redaction_inventory`
+    asks of the log filter, asked of the chart.
+    """
+    from tests.test_credentials import _credential_shaped
+
+    slots = {
+        name
+        for section in ("keys", "optionalKeys", "migrationKeys")
+        for name in _VALUES["secrets"][section].values()
+    }
+    # Plus every credential the config names by *variable* rather than by value: a `*_token_env`
+    # field holds the name of the variable a bearer is read from, so the slot the chart owes is
+    # that name. `calc_server_token_env` is the worked example already in `optionalKeys`.
+    wanted = {f"CHEMCLAW_{name.upper()}" for name in _credential_shaped(Settings)} | {
+        str(field.default)
+        for name, field in Settings.model_fields.items()
+        if name.endswith("_token_env")
+    }
+    # `live_probe_token` is the one exemption, and it is not a deployment credential at all: the
+    # live lane mints it (`infra/live/processes.sh`) for a *client* pointed at a running front
+    # door. Nothing in a pod reads it, so a Secret slot would be a credential this release neither
+    # holds nor needs.
+    wanted -= {"CHEMCLAW_LIVE_PROBE_TOKEN"}
+    assert wanted <= slots, f"credentials with no Secret slot: {sorted(wanted - slots)}"
+
+
+def test_the_labelling_server_is_addressable_from_the_chart() -> None:
+    """`rxnlabel` is dialled by a live Temporal Schedule and had no deployment surface at all.
+
+    `durable/schedules.py` creates a `reaction-labels` Schedule for any data source that `provides`
+    reactions — deliberately with no separate enable flag (`core/config/labels.py`: "There is
+    deliberately no `labels_enabled`"), so attaching a reaction corpus is the whole trigger. The
+    client's default address is `http://127.0.0.1:8865/mcp`, chosen for a dev process, and the
+    chart named no host, no bearer and no egress port for it.
+
+    In a cluster that is D-131 exactly: the drain dials the *worker's own pod*, where nothing
+    listens, and the corpus is never labelled — so every faceted precedent question answers from an
+    empty label index, with no error anywhere. `connectors/registry.py` records the same defect
+    ("in a cluster the front door probed `127.0.0.1:881x` — its own pod") and the connector seam
+    fixed it for every bundle; this is the one client that was never given a chart value.
+
+    The egress port is asserted with it because the two only work together: a NetworkPolicy egress
+    rule restricts by port independently of its `to:` peer list, so an operator who sets the URL
+    and adds the host to `egressDestinations` still has every packet dropped. That is the trap
+    `values.yaml` documents for `chem`/`safety`/`calc` and did not apply to this one.
+    """
+    url = _VALUES["config"].get("CHEMCLAW_RXNLABEL_SERVER_URL")
+    assert url, "the chart states no address for the labelling server"
+    assert "127.0.0.1" not in url, f"the chart ships the dev loopback address: {url}"
+
+    port = _VALUES["networkPolicy"]["egressPorts"].get("rxnlabel")
+    assert port, "networkPolicy.egressPorts names no rxnlabel port"
+    assert str(port) in url, f"the egress port {port} is not the port the URL dials ({url})"
+
+    policy = (_CHART / "templates" / "networkpolicy.yaml").read_text(encoding="utf-8")
+    assert "egressPorts.rxnlabel" in policy, (
+        "the port is declared in values.yaml but never emitted in the egress rule, so it permits "
+        "nothing"
     )

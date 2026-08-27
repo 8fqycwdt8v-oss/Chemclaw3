@@ -22,7 +22,7 @@ from chemclaw.kg.graph import invalidate_cache
 from chemclaw.kg.note import Note
 from chemclaw.kg.pr_gate import propose_note
 from chemclaw.kg.render import render_note
-from chemclaw.kg.submission import NoteSubmission
+from chemclaw.kg.submission import NoteSubmission, SubmissionOutcome
 from chemclaw.kg.validate import validate
 
 _KEY = "xtb.hess@GFN2-xTB+tblite+0.4.0:ab12cd:34ef56"
@@ -36,10 +36,10 @@ class _Capturing:
         """Start with nothing captured."""
         self.submission: NoteSubmission | None = None
 
-    async def submit(self, submission: NoteSubmission) -> str:
+    async def submit(self, submission: NoteSubmission) -> SubmissionOutcome:
         """Record the submission and return its branch."""
         self.submission = submission
-        return submission.branch
+        return SubmissionOutcome(reference=submission.branch)
 
 
 def test_a_note_may_cite_a_calculation_that_lives_outside_the_graph() -> None:

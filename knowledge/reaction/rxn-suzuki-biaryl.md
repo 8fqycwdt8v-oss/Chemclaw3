@@ -14,19 +14,24 @@ tags:
 - cross-coupling
 - suzuki
 type: reaction
+valid_from: 2026-05-05
 ---
 
 Suzuki-Miyaura coupling of 4-bromoanisole with phenylboronic acid.
 
-- aryl halide: [[precursor-of:compound-4-bromoanisole]]
-- boronic acid: [[precursor-of:compound-phenylboronic-acid]]
-- product: [[product-of:compound-4-methoxybiphenyl]]
-- pre-catalyst: [[catalyzes:compound-pd-oac2]] (1.5 mol% Pd)
+- aryl halide: [[compound-4-bromoanisole]]
+- boronic acid: [[compound-phenylboronic-acid]]
+- product: [[compound-4-methoxybiphenyl]]
+- pre-catalyst: [[compound-pd-oac2]] (1.5 mol% Pd)
 - base: K2CO3 (2.0 equiv)
-- solvent: [[solvent-for:compound-thf]]/water 4:1
+- solvent: [[compound-thf]]/water 4:1
 - conditions: 80 °C, 12 h, degassed
 - isolated yield: 76%
 
 An electron-rich aryl bromide is a deliberately unfavourable substrate: oxidative addition is the
 slow step, so this reaction is sensitive to ligand and temperature in a way an activated aryl
 bromide is not. See [[playbook-pd-cross-coupling-scope]].
+
+One of the couplings in [[part-of:campaign-biaryl-scope]]; the typed participant edges
+(precursor, product, catalyst, solvent) live on the compound notes, which is the direction the
+relation vocabulary runs in.

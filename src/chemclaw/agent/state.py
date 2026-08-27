@@ -234,3 +234,29 @@ def turn_config(thread_id: str | None = None) -> dict[str, Any]:
     if thread_id is not None:
         config["configurable"] = {"thread_id": thread_id}
     return config
+
+
+def answer_text(result: Any) -> str:
+    """The final assistant text out of a completed graph turn — the output side of `turn_input`.
+
+    The graph returns its whole message list rather than a single `response.text`, so the answer is
+    the last message's content. Joined across content blocks because a model may answer in parts,
+    and coerced with `str` so a caller never fails on a shape the model managed to produce.
+
+    **One definition, because there were two.** `cli/chat.py` and `durable/template_activities.py`
+    each carried a byte-identical copy — the only exact structural clone in the tree — so the
+    reasoning above lived beside one of them and the other had a one-line docstring. Both already
+    import this module for `turn_input`/`turn_config`, which is why the shared home is here and not
+    a new one: this is the third function about the shape of a turn.
+    """
+    messages = result.get("messages") or []
+    if not messages:
+        return ""
+    content = messages[-1].content
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(
+            str(part.get("text", "")) if isinstance(part, dict) else str(part) for part in content
+        )
+    return str(content)

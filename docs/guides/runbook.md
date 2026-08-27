@@ -352,6 +352,16 @@ binding's `mount:` at the same path, and name the source in `CHEMCLAW_DATA_SOURC
 share, reads nothing, and reports what would be indexed and what cannot be read. The full concept,
 including how the share's AD group becomes an entitlement, is in `docs/guides/sharedrive-concept.md`.
 
+**A source that `provides` reactions turns the labeller on, with no second switch.**
+`durable/schedules.py` creates a `reaction-labels` Schedule for any active source that supplies
+reactions — deliberately, because `CHEMCLAW_DATA_SOURCES` plus the source's `labels:` block already
+answers "is anything being labelled here". So attaching a reaction corpus is also the moment the
+background worker starts dialling `CHEMCLAW_RXNLABEL_SERVER_URL` (`Chemclaw3-mcp`'s `rxnlabel`,
+port 8865). The chart ships an in-cluster Service name for it, `secrets.optionalKeys.rxnlabelToken`
+for its bearer and `networkPolicy.egressPorts.rxnlabel` for the wire — check all three before you
+enable the corpus, because none of them fails loudly: an unreachable labeller leaves the drain
+retrying and every faceted precedent question answering from an empty label index.
+
 ## (iv) Add a capability — a tool, a durable job, and their skills (a **connector**)
 
 A capability is a **connector bundle**: one folder declaring everything it contributes. There is no
@@ -394,7 +404,9 @@ connectors/<name>/
    both cases and the model never has to guess a cost. Keep `n` comfortably under
    `CHEMCLAW_SERVICE_TURN_TIMEOUT_SECONDS`: the wait is spent inside a turn. Cancelling the turn does
    not cancel the run — it completes, caches and pushes back regardless. `connectors/calc` is the
-   worked example (five jobs, one workflow, one queue, its own worker).
+   worked example (one workflow, one queue and its own worker, however many jobs the manifest
+   declares — `tests/test_repo_map.py` pins that shape, and no count is written here because a
+   count in prose goes stale silently).
 3. Run `make connector-validate`. It checks the manifest, that declared skills/profiles exist (and
    that no undeclared ones are hiding in the bundle), the read-only tool surface, and that every
    job can actually be built.
@@ -415,7 +427,7 @@ on who hosts it); only the deployment differs, per D-2026-08-09-a-connector-we-d
    streamable-HTTP, and because it is not loopback it must carry a credential —
    `auth: {mode: bearer, token_env: CHEMCLAW_<NAME>_TOKEN}`, the variable name, never the token.
    A non-loopback URL with `auth: mode: none` is refused at load. Omit `health_url` if the server
-   exposes none; `/readyz` then reports it `unprobed` rather than guessing a path.
+   exposes none; the probe then records it `unprobed` rather than guessing a path.
 2. In `values.yaml`, set `connectors.<name>.url` to its address. That bundle gets **no** Deployment
    and **no** Service, and the front door dials what you gave instead of an in-cluster name.
    `server: true` still mirrors the manifest's `endpoint:` and says nothing about who runs it.
@@ -438,9 +450,12 @@ override a shipped one), `CHEMCLAW_CONNECTORS_ENABLED`, `CHEMCLAW_CONNECTOR_URLS
 (`endpoint.request_timeout`, `endpoint.auth`); the `bearer` mode names an env var, so no credential is
 ever written into a bundle.
 
-**Troubleshooting.** `GET /readyz` reports each enabled connector as `healthy`, `unreachable` or
-`unprobed` (no `health_url` declared — honest for a third-party server), and
-`chemclaw_connectors_unhealthy` on `/metrics` counts the unreachable ones. An unreachable connector
+**Troubleshooting.** Each enabled connector is probed as `healthy`, `unreachable` or `unprobed`
+(no `health_url` declared — honest for a third-party server). `GET /readyz` reports the *count* of
+unreachable ones and never their names — it is unauthenticated by necessity, so its body is a public
+document and a roster of the internal capability surface does not belong in one. The names are on
+`/metrics` (`chemclaw_connectors_unhealthy`) and in the WARNING each failed probe logs, which also
+carries the reason. An unreachable connector
 costs its tools for that turn, not the turn itself; set `CHEMCLAW_CONNECTORS_REQUIRED=true` to fail
 startup instead. Verify a bundle standalone with `uvicorn chemclaw.connectors.<name>.server.app:app` and check
 `/healthz`; tool *discovery* needs no database, but *invoking* a search does.
@@ -1206,6 +1221,33 @@ python -m chemclaw.cli.backfill_publications --requeue
 Only *delivered* rows are ever pruned (`CHEMCLAW_RETENTION_RESULT_PUBLICATIONS_DAYS`), and that
 predicate is the policy: sweeping a pending or failed row on a clock would turn an outage into a
 silent gap.
+
+## (xvi-b) Switch on the answer verifier (the LLM-as-judge)
+
+Off by default, in code and in the chart, and turning it on is a deployment decision with two
+facts attached — both learned the hard way and both now enforced rather than documented-only:
+
+1. **Startup probes the judge, and refuses to serve if it cannot comply.** With
+   `CHEMCLAW_VERIFIER_ENABLED=true` on an `openai_compatible` provider, the front door's lifespan
+   runs one structured-output probe against the routed `"verifier"` model
+   (`agent/verifier.require_verifier_capability`). An endpoint that rejects or ignores
+   `response_format` (json_schema) fails the boot with a message naming the setting — because
+   without that support the judge silently degrades to the offline citation gate on **every**
+   turn while looking enabled, for the lifetime of the deployment.
+2. **Verdicts at the margin are re-rolled.** The judge's score is reproducible on unambiguous
+   answers and unstable exactly where `CHEMCLAW_VERIFIER_CONFIDENCE_THRESHOLD` (0.7) lives, so a
+   confidence landing within `CHEMCLAW_VERIFIER_REVIEW_BAND` of the threshold triggers up to
+   `CHEMCLAW_VERIFIER_BAND_REROLLS` extra rolls and the median decides
+   (`D-2026-08-27-a-verdict-at-the-margin-is-a-coin-toss` — the width is measured, not chosen).
+   Watch `chemclaw_verifier_band_rerolls_total` against answers verified: that ratio is the
+   band's real cost, and it should be a small fraction. `chemclaw_verifier_degraded_total`
+   climbing means the judge endpoint is failing and answers are getting the weaker deterministic
+   verdict — a judge outage, not a slow path.
+
+To enable: set the `CHEMCLAW_VERIFIER_*` keys the chart's `values.yaml` carries commented-out,
+route the judge with `CHEMCLAW_MODEL_ROUTES='{"verifier": "<cheap-model>"}'`, and roll. To re-fit
+the band on your own corpus: `make live-verifier-margin` re-rolls the raw judge and prints the
+recommended width (see the CLI's own docstring for what the number does and does not mean).
 
 ## (xvii) The other commands with no section of their own
 

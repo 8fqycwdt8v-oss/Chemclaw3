@@ -17,7 +17,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 from chemclaw.core.ids import stable_hash
-from chemclaw.kg.note import Note, require_note_slug, strip_links
+from chemclaw.kg.note import Note, require_note_slug, split_link, strip_links
 from chemclaw.retrieval.evidence import EvidenceChunk, SourceRetriever
 from chemclaw.retrieval.fanout import sweep_sources
 
@@ -180,18 +180,38 @@ async def gather_section(
     an incomplete sweep pass as a genuinely empty one — and it is strictly more informative than
     before, because the section is marked incomplete *and* keeps what was retrieved.
     """
-    ranked_lists, failed = await sweep_sources(
+    ranked_lists, failed, skipped = await sweep_sources(
         [(retriever.name, retriever) for retriever in retrievers],
         section.query,
         section.filters,
     )
     evidence = [chunk for chunks in ranked_lists for chunk in chunks]
+    # A skip counts as incompleteness here, deliberately: for the conversational sweep a declined
+    # source is an answer the model can relay, but a *report* is signed by a chemist, and a
+    # section swept without the share leg (an unentitled service actor, a filter the source
+    # cannot serve) is a section about less than the whole corpus, whatever the reason.
     return SynthesizedSection(
         heading=section.heading,
         memory_layer=section.memory_layer,
         evidence=evidence,
-        retrieval_failed=bool(failed),
+        retrieval_failed=bool(failed or skipped),
     )
+
+
+def groundable_ids(evidence: list[EvidenceChunk]) -> set[str]:
+    """Every id a citation may ground against: each chunk's source id, plus its colon-split half.
+
+    `source_note_id` is not always a note id: document chunks carry `<retriever>:<doc>#<ordinal>`
+    (`retrievers._document_chunks` explains the shape). A wikilink citing one —
+    `[[docs:abc123#4]]` — is partitioned by `cited_ids` at the first colon into a relation and an
+    id, so the citation arrives as `abc123#4` and could never equal the stored id: measured, every
+    document citation in an answer scored as ungrounded while the note-id citations beside it
+    passed. Adding each stored id's own split half makes the two extractions meet in the middle
+    without special-casing any retriever's naming, and note ids are unchanged — a slug cannot
+    contain a colon, so its split half is itself.
+    """
+    ids = {chunk.source_note_id for chunk in evidence}
+    return ids | {split_link(stored)[1] for stored in ids}
 
 
 def verify_claims(
@@ -208,7 +228,7 @@ def verify_claims(
     by construction, but LLM-written *claims about* that evidence are only trustworthy once
     checked here, which is why the guard lives in code, tested, not left to the prose step.
     """
-    known = {chunk.source_note_id for chunk in evidence}
+    known = groundable_ids(evidence)
     supported: list[Claim] = []
     discarded: list[Claim] = []
     for claim in claims:
@@ -287,12 +307,24 @@ def report_note(report: Report) -> Note:
     lines = [f"# {report.title}\n"]
     for section in report.sections:
         lines.append(f"## {section.heading} [layer: {section.memory_layer}]\n")
-        if section.retrieval_failed:
-            # A failed section is flagged distinctly from an empty one: the gap is visible to the
-            # reviewer (and re-runnable), never silently absent from the draft (F10-D2).
+        if section.retrieval_failed and section.evidence:
+            # A partially-failed section keeps what was retrieved. `retrieval_failed` is set by
+            # *any* failed source, and `gather_section` was changed specifically so a dead share
+            # no longer throws away three working sources' chunks — but this renderer used to
+            # `continue` past `section.evidence` on the flag, restoring the original defect one
+            # layer down: the rendered note the chemist signed was byte-identical to the pre-fix
+            # behaviour the gather docstring said was repaired. The marker stays (the reviewer
+            # must see the gap), and the evidence renders under it.
+            lines.append(
+                "_Some retrieval sources failed for this section; the evidence below is "
+                "incomplete — re-run required._\n"
+            )
+        elif section.retrieval_failed:
+            # Nothing was retrieved at all: flagged distinctly from an empty section, so the gap
+            # is visible to the reviewer (and re-runnable), never silently absent (F10-D2).
             lines.append("_Retrieval failed for this section; incomplete — re-run required._\n")
             continue
-        if not section.supported:
+        elif not section.supported:
             lines.append("_No supporting data found; section left unsupported._\n")
             continue
         for chunk in section.evidence:

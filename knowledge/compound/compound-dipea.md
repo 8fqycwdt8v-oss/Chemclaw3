@@ -17,3 +17,6 @@ carboxylic acid, too hindered to compete as a nucleophile, which is what makes i
 amide couplings.
 
 - also written: DIPEA, Hunig's base, N,N-diisopropylethylamine
+
+The base in [[reagent-in:rxn-amide-edc]] and the amine catalyst in
+[[catalyzes:rxn-aspirin-acetylation]].

@@ -114,6 +114,20 @@ def resolves_outside_graph(note_id: str) -> bool:
     return note_id.startswith(EXTERNAL_ID_PREFIXES)
 
 
+def external_record_id(note_id: str) -> str:
+    """The store-side id behind an external citation — the prefix stripped, whichever matched.
+
+    `unresolved_citations` used to spell `removeprefix("reaction-")` twice against a constant that
+    is a *tuple*, so a second entry in `EXTERNAL_ID_PREFIXES` would have queried the store with an
+    unstripped id and reported every such citation missing. One function, driven by the constant,
+    so growing the namespace list cannot silently break the lookup.
+    """
+    for prefix in EXTERNAL_ID_PREFIXES:
+        if note_id.startswith(prefix):
+            return note_id[len(prefix) :]
+    return note_id
+
+
 def note_relative_path(note_type: str, note_id: str) -> str:
     """Where a note lives inside the knowledge directory: `<type>/<id>.md`.
 
@@ -154,7 +168,13 @@ def cited_ids(text: str) -> list[str]:
 #
 # The three keys are enumerated rather than matched as a `*_id` suffix, because that would also
 # swallow `structure_id`, `calc_id`, `job_id` and `session_id` — none of which names a note, and
-# every one of which would make an answer look grounded in something it never saw.
+# every one of which would make an answer look grounded in something it never saw. The bare `id`
+# key is the residual over-capture the enumeration cannot close: any JSON object with a plain
+# `"id":` field matches, including a session or job dumped with one. The exposure is bounded by
+# what the check does with a capture — a grounding verdict only credits an id the *answer also
+# cites*, so a swallowed `sess-…` grounds nothing unless the model cites `[[sess-…]]` — but it is
+# an over-capture, not the "our own formats only" claim the paragraph above makes, and narrowing
+# it means renaming the `id` field in the note serializations, not tightening this pattern.
 #
 # The `\\?` before each quote is not defensive padding. A `gather_evidence` result is JSON whose
 # `content` field holds the `<retrieved-note ... id="X">` envelope as *text*, so on the wire the
@@ -264,6 +284,28 @@ def _reject_unencodable(value: str, field: str) -> str:
     return value
 
 
+def _walk_encodable(model: BaseModel, prefix: str) -> None:
+    """Reject any unencodable string on `model`, recursing into nested models and lists.
+
+    The generic walk behind `Note._text_is_writable`. Field names are joined dotted
+    (`conditions.major_impurity`) so the error names the actual field a fix has to touch, not the
+    top-level container it sits under.
+    """
+    for name in type(model).model_fields:
+        value = getattr(model, name)
+        path = f"{prefix}{name}"
+        if isinstance(value, str):
+            _reject_unencodable(value, path)
+        elif isinstance(value, BaseModel):
+            _walk_encodable(value, f"{path}.")
+        elif isinstance(value, list):
+            for index, item in enumerate(value):
+                if isinstance(item, str):
+                    _reject_unencodable(item, f"{path}[{index}]")
+                elif isinstance(item, BaseModel):
+                    _walk_encodable(item, f"{path}[{index}].")
+
+
 # Every note type this system mints, with what it means. Previously `type` was an unconstrained
 # slug written from nine different call sites, so a typo minted a *new* type silently and any
 # retrieval filter keyed on type (the committed `retrieval-coupling-playbook-filter` eval case does
@@ -336,9 +378,17 @@ class TemporalWindow(BaseModel):
 
     Frozen here rather than in each subclass: every carrier of a window in this package is an
     immutable value object shared out of the note cache (KM-14).
+
+    `extra="forbid"`, because pydantic's default is `ignore` and ignore is silent data loss: a
+    note authored with `valid-from:` or `conditons:` parsed clean, validated green, and the
+    metadata was simply gone — the note sat outside every bi-temporal query with no error
+    anywhere. That is the same failure `KNOWN_NOTE_TYPES` exists to prevent for the *value* of
+    `type`, applied to field names. The resilient/strict split is unchanged: `load_notes` still
+    skips the now-invalid file so one typo cannot block a query, while `kg-validate` reports it
+    with the path and the offending key.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     valid_from: date | None = None
     valid_to: date | None = None
@@ -446,7 +496,9 @@ class ProcessConditions(BaseModel):
     major_impurity: str | None = None
     impurity_area_percent: float | None = Field(default=None, ge=0.0, le=100.0)
 
-    model_config = ConfigDict(frozen=True)
+    # `extra="forbid"` for the reason `TemporalWindow` gives: a typo'd key silently dropped is a
+    # number a chemist wrote that no comparison will ever render.
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
 
 class Note(TemporalWindow):
@@ -528,24 +580,20 @@ class Note(TemporalWindow):
         gain an unchecked one silently, and the whole point is that any unencodable value breaks
         every writer rather than the one that happened to be tested.
 
-        **Four fields are deliberately not walked, because something already refuses them.**
+        **Some fields are deliberately not walked, because something already refuses them.**
         Measured: pydantic's own constrained-string validation rejects a surrogate in `id`, `type`
         and `Relation.rel`/`to` (all `min_length=1`) with `string_unicode` before this validator
         runs, and `_calc_ref_shape`/`_artifact_ref_shape` reject the ref lists because a lone
         surrogate is no calculation key. What actually reaches here is the unconstrained set —
-        `body`, `source`, `compound_smiles`, `tags` — so walking the rest would be code that cannot
-        run, which reads as coverage while proving nothing. `tests/test_properties_core.py` pins
-        both halves without pinning *who* rejects what, so the split fails loudly if either of the
-        other two checks ever stops covering its part.
+        `body`, `source`, `compound_smiles`, `tags`, and every unconstrained string on a *nested*
+        model. The nested walk exists because the enumeration above once went stale exactly as
+        this docstring predicted: `conditions` grew `major_impurity`, an unconstrained `str`,
+        and a surrogate in it built a Note that raised `UnicodeEncodeError` in the PR-gate's
+        commit — the precise failure this validator says it prevents.
+        `tests/test_properties_core.py` pins both halves without pinning *who* rejects what, so
+        the split fails loudly if either of the other two checks ever stops covering its part.
         """
-        for name in type(self).model_fields:
-            value = getattr(self, name)
-            if isinstance(value, str):
-                _reject_unencodable(value, name)
-            elif isinstance(value, list):
-                for index, item in enumerate(value):
-                    if isinstance(item, str):
-                        _reject_unencodable(item, f"{name}[{index}]")
+        _walk_encodable(self, "")
         return self
 
     def outgoing_links(self) -> list[str]:

@@ -77,6 +77,37 @@ def test_re_running_a_job_updates_its_row_rather_than_forking_it() -> None:
     asyncio.run(_run())
 
 
+def test_the_plan_step_survives_the_round_trip_and_reaches_the_listing() -> None:
+    """The job↔step join (D-2026-08-27): the record keeps both halves, the summary shows the step.
+
+    The listing carries `plan_step` so "which step was this run for" needs no second lookup;
+    `plan_hash` stays on the full record, where a reader matching a superseded plan revision goes.
+    """
+
+    async def _run() -> None:
+        sink = await _sink_or_skip()
+        stamped = _CAMPAIGN.model_copy(
+            update={
+                "job_id": "pg-plan-step-1",
+                # Its own reason, so the search-by-reason test's term matches exactly one row.
+                "rationale": "step two of the approved plan wants the campaign run",
+                "plan_step": "run the optimization campaign",
+                "plan_hash": "plan-rev-abc",
+            }
+        )
+        await sink.record(stamped)
+
+        stored = await read_job_record("pg-plan-step-1")
+        assert stored is not None
+        assert stored.plan_step == "run the optimization campaign"
+        assert stored.plan_hash == "plan-rev-abc"
+        summaries = await read_job_record_summaries("", "bo", 50)
+        by_id = {s.job_id: s for s in summaries}
+        assert by_id["pg-plan-step-1"].plan_step == "run the optimization campaign"
+
+    asyncio.run(_run())
+
+
 def test_a_past_run_is_found_by_the_reason_it_was_run() -> None:
     """The retrospective question is "why did we do this", so the reason has to be searchable."""
 

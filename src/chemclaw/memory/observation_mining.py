@@ -63,6 +63,23 @@ def mine_corpus(reactions: list[OrdReaction]) -> list[Observation]:
         r for r in reactions if r.outcome_class in (OutcomeClass.FAILURE, OutcomeClass.INCONCLUSIVE)
     ]
     projected = [r for r in unsuccessful if r.project]
+    # Say which field emptied the pass. A source whose binding maps no `outcome_class` (or no
+    # `project`) makes this miner produce nothing, forever, and "recorded 0 finding(s)" is
+    # indistinguishable from a healthy quiet corpus — the operator-visible sentence has to name
+    # the field, because that is the thing a binding author can actually fix.
+    if reactions and not unsuccessful:
+        logger.warning(
+            "observation mining saw %d reaction(s) and none carried a stated failure or "
+            "inconclusive outcome_class — if the source records outcomes, the binding is not "
+            "mapping them, and this miner will never produce anything",
+            len(reactions),
+        )
+    elif unsuccessful and not projected:
+        logger.warning(
+            "observation mining saw %d non-successful reaction(s) and none carried a project — "
+            "cross-project recurrence cannot be counted without one",
+            len(unsuccessful),
+        )
     fingerprints = reaction_fingerprints(projected)
     project_of = {r.reaction_id: r.project for r in projected if r.reaction_id in fingerprints}
     outcome_of = {

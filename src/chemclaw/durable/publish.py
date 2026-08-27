@@ -29,12 +29,31 @@ with workflow.unsafe.imports_passed_through():
 # so every bad-data name that can cross an activity boundary is listed explicitly.
 # `ValidationError` (pydantic) subclasses `ValueError` but has its own class name, so
 # a model-build failure on corrupt data would otherwise be treated as retryable.
+#
+# The completeness walk in `tests/test_publish.py` asserts every `ChemclawError` subclass is
+# either listed here or *declared* retryable below — a subclass in neither set is the drift the
+# walk exists to catch, while a silent exemption would be the walk defeated.
+_DECLARED_RETRYABLE = frozenset(
+    {
+        # `kg.git_submitter.GitRemoteError`: a dead remote, a timed-out git command, a contended
+        # submit lock. The transient half `GitSubmitError` used to cover with one name — which
+        # made `note_write_max_attempts` dead for exactly the failures it was configured for.
+        "GitRemoteError",
+    }
+)
+
 _BAD_DATA_TYPES = [
     "ValueError",
     "ValidationError",
     "ChemclawError",
     "InvalidSmilesError",
     "FingerprintError",
+    # The *argument* was not fingerprintable — a prose sentence where a reaction SMILES was
+    # expected, an OCR artefact in an impurity list (`science.fingerprints.store`). Listed beside
+    # its parent because Temporal matches by class *name*, so a subclass inherits nothing here, and
+    # `tests/test_publish.py` walks the hierarchy precisely so this cannot be forgotten. Retrying a
+    # string the parser has already refused finds the identical refusal.
+    "FingerprintInputError",
     "ElnMappingError",
     "ElnFormatError",
     "OrdFormatError",
@@ -174,9 +193,13 @@ BAD_DATA_RETRY = RetryPolicy(
 def note_publish_retry() -> RetryPolicy:
     """Bounded retries for a PR-gate note write (config `note_write_max_attempts`).
 
-    Shares the bad-data type list so a bad note (`NoteError`, `ValidationError`)
-    fails fast instead of burning the transient-retry budget; only a genuinely
-    transient `GitSubmitError` (dead remote) is retried, up to the bound.
+    Shares the bad-data type list so a bad note (`NoteError`, `ValidationError`) or a structural
+    gate refusal (`GitSubmitError` — a mis-pointed checkout, a proposal branch a human pushed to)
+    fails fast instead of burning the transient-retry budget. `GitRemoteError` — a dead remote, a
+    timed-out command, a contended lock — is the retryable subclass: Temporal matches these names
+    exactly, so the subclass's different name is what makes `note_write_max_attempts` real. This
+    docstring used to promise that split while the code listed the one class that covered both,
+    so a 30-second network blip dropped a note from a synthesis batch on its first attempt.
     """
     return RetryPolicy(
         maximum_attempts=settings.note_write_max_attempts,

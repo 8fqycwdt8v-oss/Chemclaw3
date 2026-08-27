@@ -290,14 +290,26 @@ def cached_notes(notes_dir: Path) -> tuple[NotesFingerprint | None, list[Note]]:
         now = time.monotonic()
         fingerprint = _dir_fingerprint(notes_dir)
         with _CACHE_LOCK:
-            _LAST_SCAN[key] = now
             cached = _NOTES_CACHE.get(key)
             if cached is not None and cached[0] == fingerprint:
-                return fingerprint, cached[1]
+                _LAST_SCAN[key] = now
+                # A shallow copy, not the live list: this function is public and `kg/README.md`
+                # names it "the seam every derived-from-notes cache keys on" — a caller that
+                # sorted the shared list in place would corrupt the cache for every reader.
+                # `Note` itself is frozen, so copying the list is the whole cost.
+                return fingerprint, list(cached[1])
         notes = _parse_notes(notes_dir)
         with _CACHE_LOCK:
+            # The scan is stamped only once the notes it validated are actually in the cache.
+            # It used to be stamped *before* the parse, which opened a window the docstring's
+            # "a waiter finds the answer it queued for" claim did not survive: a second thread
+            # hitting the TTL fast path inside that window paired a fresh `scanned_at` with the
+            # *old* `_NOTES_CACHE` entry and returned the pre-change corpus without waiting —
+            # measured, reader B was served the stale note list while A was mid-parse. The window
+            # scaled with parse time, i.e. with exactly the corpus size where it matters.
             _NOTES_CACHE[key] = (fingerprint, notes)
-        return fingerprint, notes
+            _LAST_SCAN[key] = now
+        return fingerprint, list(notes)
 
 
 def _within_ttl(key: str, ttl: float) -> tuple[NotesFingerprint, list[Note]] | None:
@@ -316,7 +328,9 @@ def _within_ttl(key: str, ttl: float) -> tuple[NotesFingerprint, list[Note]] | N
         cached = _NOTES_CACHE.get(key)
         scanned_at = _LAST_SCAN.get(key)
         if cached is not None and scanned_at is not None and time.monotonic() - scanned_at < ttl:
-            return cached
+            # Copied for the reason `cached_notes` copies: the cached list must never be handed
+            # out live to a caller that might mutate it.
+            return cached[0], list(cached[1])
     return None
 
 
@@ -333,10 +347,11 @@ def load_notes(notes_dir: Path) -> list[Note]:
     does not re-parse the whole tree on every query; any change to a note busts the cache. Within
     `graph_cache_ttl_seconds` the scan itself is skipped too (DA-5), so an externally-made change
     can lag by up to that window — local writers call `invalidate_cache` to bypass it, and `0`
-    restores always-scan. A shallow copy is returned so a caller cannot mutate the cached list, and
-    `Note` is frozen, so the shared note instances cannot be mutated either.
+    restores always-scan. `cached_notes` already returns a fresh shallow copy on every path, so a
+    caller cannot mutate the cached list, and `Note` is frozen, so the shared note instances
+    cannot be mutated either.
     """
-    return list(cached_notes(notes_dir)[1])
+    return cached_notes(notes_dir)[1]
 
 
 def _assemble_graph(notes: list[Note]) -> nx.DiGraph:
@@ -407,7 +422,7 @@ def build_graph(notes_dir: Path) -> nx.DiGraph:
 
 
 def related(graph: nx.DiGraph, note_id: str, rel: str, as_of: date | None = None) -> list[str]:
-    """The ids `note_id` points at through relation `rel`, ordered, newest edges included.
+    """The ids `note_id` points at through relation `rel`, ordered.
 
     The query typed edges exist to make possible: "what are this compound's precursors", "what does
     this note contradict". Directed on purpose, unlike `neighborhood` — a relation has a direction
@@ -417,8 +432,13 @@ def related(graph: nx.DiGraph, note_id: str, rel: str, as_of: date | None = None
     `as_of` applies the edge's own validity window (STO-9), so a relation that stopped holding is
     excluded from a current-evidence query while remaining in git and in the graph. Omit it to see
     every asserted edge regardless of when it held.
+
+    The unknown-id check goes through `note_in`, not `in graph` — its docstring calls the
+    difference "a shipped defect", and this function shipped it anyway: a *dangling* id (cited by
+    some note, defined by none) is a member of the graph, so the membership test let it through
+    and the query returned `[]`, which reads as "no precursors" for a note that does not exist.
     """
-    if note_id not in graph:
+    if note_in(graph, note_id) is None:
         raise KeyError(f"unknown note id: {note_id!r}")
     found = []
     for _, target, data in graph.out_edges(note_id, data=True):
@@ -433,11 +453,18 @@ def related(graph: nx.DiGraph, note_id: str, rel: str, as_of: date | None = None
 
 
 def neighborhood(graph: nx.DiGraph, note_id: str, hops: int = 1) -> set[str]:
-    """Return note ids within `hops` of `note_id`, following links both ways.
+    """Return graph node ids within `hops` of `note_id`, following links both ways.
 
     Chemical relations are meaningful in both directions (a precursor and a
     product reference each other), so traversal is undirected over the directed
     graph — the 1–2 hop expansion the query skill uses (D-004).
+
+    **The result holds node ids, not necessarily note ids**, and the anchor may itself be a
+    dangling node: `_assemble_graph` mints a bare node for every cited-but-undefined target, and
+    an external `reaction-<id>` citation is exactly such a node — dropping those here would hide
+    the ELN records a campaign's neighbourhood is mostly made of. A caller that needs real notes
+    filters through `note_in`, as `agent.graph_tools.expand_note` does; a caller that indexes
+    `graph.nodes[nid]["note"]` unguarded will `KeyError` on the first dangling neighbour.
     """
     if note_id not in graph:
         raise KeyError(f"unknown note id: {note_id!r}")

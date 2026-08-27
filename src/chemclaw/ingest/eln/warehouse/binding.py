@@ -32,7 +32,7 @@ from typing import Annotated, Any, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from chemclaw.core.connect import ENV_SUFFIX, check_env_name
+from chemclaw.core.connect import ENV_SUFFIX, check_env_name, check_identifier
 from chemclaw.ingest.eln.ord import OrdReaction, Role
 from chemclaw.ingest.eln.warehouse.expr import (
     PathSyntaxError,
@@ -41,12 +41,6 @@ from chemclaw.ingest.eln.warehouse.expr import (
     validate_transform,
 )
 from chemclaw.science.labels.vocabulary import LabelGroup
-
-# A relation or column name, optionally qualified (`eln_prod.reactions.v_reaction`). Interpolated
-# into SQL, so it is checked rather than trusted: everything a binding contributes to a statement
-# is either an identifier matching this or a bound parameter. `$` is legal inside a warehouse
-# identifier and appears in generated views; it is not legal as the first character.
-_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_$]*(?:\.[A-Za-z_][A-Za-z0-9_$]*)*$")
 
 # The fields of `OrdReaction` a `reaction:` entry may not map, for two different reasons.
 #
@@ -69,18 +63,15 @@ class BindingError(PathSyntaxError):
 
 
 def _check_identifier(value: str, what: str) -> str:
-    """Raise unless `value` is a bare or dotted SQL identifier safe to interpolate."""
-    # `fullmatch` rather than `match`: with a trailing `$` anchor, `match` also accepts one
-    # trailing newline, so a function name ending in one passed and reached the statement text.
-    # Nothing could follow that newline — the rest of the value would have to match as well — so
-    # this was hygiene rather than a hole. But a checker whose whole job is "the value is exactly
-    # this shape" should not rest on which of two anchor semantics it happened to get.
-    if not _IDENTIFIER.fullmatch(value):
-        raise BindingError(
-            f"{what} {value!r} is not a plain SQL identifier; a binding may only name relations "
-            "and columns, and every value it contributes is a bound parameter"
-        )
-    return value
+    """Raise unless `value` is a bare or dotted SQL identifier safe to interpolate.
+
+    The pattern and the message live in `core.connect` beside `check_env_name`, because that module
+    owns what a `connection:` block may contribute and a binding is not the only thing that
+    contributes an identifier — a sink's `schema:` does too, into libpq's `options`. This stays as
+    the local name that binds the error type, so the thirteen call sites below read unchanged and
+    every failure here is still a `BindingError`.
+    """
+    return check_identifier(value, what, error=BindingError)
 
 
 class FieldBinding(BaseModel):

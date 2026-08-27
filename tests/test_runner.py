@@ -26,10 +26,12 @@ import chemclaw.agent.verifier as verifier_module
 import chemclaw.api.runner as runner
 import chemclaw.api.runner_trace as runner_trace
 from chemclaw.agent.loop_cap import record_loop_cap
+from chemclaw.agent.plan_gate import PLAN_APPROVAL_PROMPT
 from chemclaw.agent.session import TurnSession
 from chemclaw.agent.verifier import ClaimCheck, VerificationResult
 from chemclaw.api.events import (
     AnswerEvent,
+    ApprovalRequestEvent,
     CapabilityDegradedEvent,
     ErrorEvent,
     Event,
@@ -996,3 +998,88 @@ def test_the_transcript_stores_what_the_agent_did_not_only_what_it_said() -> Non
     # And the pairing survives, which is what the ref join needs: a result whose call id matches no
     # stored call is worse than an absent one, because the transcript would render it under nothing.
     assert {c["id"] for m in calls for c in m.tool_calls} == {m.tool_call_id for m in results}
+
+
+# --- the plan-approval prompt: a gated turn that ends blocked must say so on the stream ----------
+
+
+def _plan_gated(monkeypatch: pytest.MonkeyPatch, todos: list[str] | None, approved: bool) -> None:
+    """Arrange a `plan_only` turn whose session proposes `todos` under a given decision state.
+
+    The plan and the decision are faked at the runner's own imports — the same seam the
+    verification tests above use — because what is under test is the emission rule, not the
+    checkpointer read or the approval store, which have their own tests.
+    """
+    monkeypatch.setattr(settings, "harness_enabled", True)
+    monkeypatch.setattr(settings, "harness_autonomy", "plan_only")
+
+    async def _todos(_session_id: str) -> list[str] | None:
+        return todos
+
+    async def _stands(_session_id: str, _plan_hash: str | None) -> bool:
+        return approved
+
+    monkeypatch.setattr(runner, "session_todos", _todos)
+    monkeypatch.setattr(runner, "approval_stands", _stands)
+
+
+def test_a_gated_turn_holding_an_unapproved_plan_asks_for_the_decision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The event the reference surface's approval card mounts on, finally produced.
+
+    `ApprovalRequestEvent` documented the empty `approval_id` as the plan-approval shape and the
+    card renders on exactly it — but nothing emitted one, so under `plan_only` a chemist saw the
+    plan and the gate's refusal with no way to act on either. Before the answer, because the
+    answer is the turn's final event.
+    """
+    _plan_gated(monkeypatch, ["compute the pKa", "propose a note"], approved=False)
+    events = _run_turn()
+    prompts = [e for e in events if isinstance(e, ApprovalRequestEvent)]
+    assert len(prompts) == 1, "one blocked turn asks exactly once"
+    assert prompts[0].approval_id == "", "a plan approval has no durable hold to address"
+    assert prompts[0].prompt == PLAN_APPROVAL_PROMPT
+    assert events.index(prompts[0]) < events.index(_answer(events)), (
+        "the ask must precede the answer, which ends the turn"
+    )
+
+
+def test_an_approved_plan_is_not_re_asked(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A standing approval means nothing is waiting on the chemist — prompting would cry wolf."""
+    _plan_gated(monkeypatch, ["compute the pKa"], approved=True)
+    assert [e for e in _run_turn() if isinstance(e, ApprovalRequestEvent)] == []
+
+
+def test_a_session_proposing_no_plan_is_not_asked_to_approve_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An empty plan has no identity to decide on — same rule as the decision route's 409.
+
+    `plan_identity` returns `None` for it, and both readers ask the same function.
+    """
+    _plan_gated(monkeypatch, [], approved=False)
+    assert [e for e in _run_turn() if isinstance(e, ApprovalRequestEvent)] == []
+
+
+def test_an_unreadable_plan_stays_silent_rather_than_failing_the_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`None` from the checkpointer is "unreadable", not "absent" — the turn keeps its answer.
+
+    The card is skipped, and the gate still refuses unapproved work on the next call.
+    """
+    _plan_gated(monkeypatch, None, approved=False)
+    events = _run_turn()
+    assert [e for e in events if isinstance(e, ApprovalRequestEvent)] == []
+    assert _answer(events) is not None
+
+
+def test_a_classic_turn_never_asks_for_plan_approval(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With the harness off there is no plan and no gate — the prompt would be unanswerable."""
+    monkeypatch.setattr(settings, "harness_enabled", False)
+
+    async def _todos(_session_id: str) -> list[str] | None:
+        raise AssertionError("an ungated turn must not read the plan at all")
+
+    monkeypatch.setattr(runner, "session_todos", _todos)
+    assert [e for e in _run_turn() if isinstance(e, ApprovalRequestEvent)] == []

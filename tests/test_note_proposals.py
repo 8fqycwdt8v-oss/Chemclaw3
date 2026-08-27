@@ -40,6 +40,7 @@ from chemclaw.kg.proposal import (
     proposal_store,
     record_proposal_submitted,
 )
+from chemclaw.kg.submission import SubmissionOutcome
 from tests.conftest import FakeSubmitter
 
 _SECRET = "webhook-secret"
@@ -133,7 +134,7 @@ def test_a_failed_submission_keeps_the_note_it_could_not_push(
     """The half a counter could not give: a lost note is replayable, not merely tallied."""
 
     class DeadRemote:
-        async def submit(self, submission: object) -> str:
+        async def submit(self, submission: object) -> SubmissionOutcome:
             raise RuntimeError("could not push to origin")
 
     with pytest.raises(RuntimeError):
@@ -158,7 +159,7 @@ def test_a_multi_file_submission_records_every_file_it_would_have_written(
     """
 
     class DeadRemote:
-        async def submit(self, submission: object) -> str:
+        async def submit(self, submission: object) -> SubmissionOutcome:
             raise RuntimeError("could not push to origin")
 
     compound = Note(id="compound-ethanol", type="compound", created_by="agent", body="the compound")
@@ -195,7 +196,7 @@ def test_a_credential_in_a_git_error_is_redacted_before_it_is_stored(
     secret = "ghp_S3cretTokenValue"
 
     class UnauthenticatedRemote:
-        async def submit(self, submission: object) -> str:
+        async def submit(self, submission: object) -> SubmissionOutcome:
             raise RuntimeError(
                 "fatal: could not read Username for "
                 f"'https://x-access-token:{secret}@git.example.invalid': No such device"
@@ -627,3 +628,63 @@ def test_every_state_is_counted(store: InMemoryProposalStore) -> None:
     _run(propose_note(_note(), FakeSubmitter()))
 
     assert METRICS.value("chemclaw_note_proposals_total") > before
+
+
+def test_a_changed_reproposal_supersedes_the_open_predecessor(
+    store: InMemoryProposalStore,
+) -> None:
+    """Exactly one open row per note — the branch a reviewer merges is per-note.
+
+    Without this, a changed re-proposal force-pushed the one branch and left the earlier
+    version's row `open`, rendering bytes that existed on no branch — and the merge webhook's
+    open-rows predicate then marked *both* rows merged, the compliance table asserting a human
+    merged content that was never merged (D-2026-08-27).
+    """
+    first = _run(store.upsert(_proposal(content="v1")))
+    second = _run(store.upsert(_proposal(content="v2")))
+    assert first != second
+
+    old = _run(store.read(first))
+    new = _run(store.read(second))
+    assert old is not None and old.state is ProposalState.SUPERSEDED
+    assert "newer proposed version" in (old.reason or "")
+    assert new is not None and new.state is ProposalState.OPEN
+
+    # The webhook moves only the live version.
+    assert _run(store.mark_merged(["reaction-1"], "webhook")) == 1
+    assert _run(store.read(first)).state is ProposalState.SUPERSEDED
+    assert _run(store.read(second)).state is ProposalState.MERGED
+
+
+def test_a_failed_record_does_not_supersede_a_reviewable_version(
+    store: InMemoryProposalStore,
+) -> None:
+    """A `failed` upsert must not push an older, genuinely open version out of the queue."""
+    live = _run(store.upsert(_proposal(content="v1")))
+    _run(store.upsert(_proposal(content="v2", state=ProposalState.FAILED, reason="dead remote")))
+    assert _run(store.read(live)).state is ProposalState.OPEN
+
+
+def test_reconcile_names_a_merged_row_the_corpus_does_not_hold(
+    store: InMemoryProposalStore, tmp_path: Any
+) -> None:
+    """The two review surfaces can disagree, and the reconciler is what makes it visible.
+
+    `POST /proposals/{id}/decision` records `merged` with no git action, so a reviewer who
+    approves in the API and forgets the merge leaves a compliance row asserting the note is in
+    the graph while `knowledge/` does not contain it (D-2026-08-27). Read-only by design — the
+    row has at least two true stories and only a person can tell which.
+    """
+    from chemclaw.cli.reconcile_proposals import merged_but_absent
+
+    (tmp_path / "reaction").mkdir()
+    (tmp_path / "reaction" / "reaction-present.md").write_text(
+        "---\nid: reaction-present\ntype: reaction\n---\nmerged for real\n", encoding="utf-8"
+    )
+    present = _run(store.upsert(_proposal(note_id="reaction-present", branch="note/p")))
+    absent = _run(store.upsert(_proposal(note_id="reaction-ghost", branch="note/g")))
+    _run(store.mark_merged(["reaction-present", "reaction-ghost"], "webhook"))
+
+    missing = _run(merged_but_absent(tmp_path))
+    assert [row.id for row in missing] == [absent]
+    assert present != absent

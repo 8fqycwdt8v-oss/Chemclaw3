@@ -246,3 +246,72 @@ def test_a_failed_shared_computation_fails_every_waiter_and_clears_the_slot() ->
 
     assert asyncio.run(_run()) == {"energy": 7}
     assert attempts == 2
+
+
+def test_two_calculations_cannot_flatten_to_one_cache_key() -> None:
+    """`as_str()` is the `calculation_results` primary key, so its encoding has to be a bijection.
+
+    It is `f"{calc_type}@{calc_version}:{input_hash}:{params_hash}"`, and all four fields were free
+    text taken verbatim off the calculation server's `calculation_key` answer — which
+    `connectors/calc/remote.py` is right to do, since deriving a key on this side would build one
+    that matches nothing. The consequence is that the *identity* of every cached row was a string
+    this process never checked, and two distinct calculations flattened to one:
+
+        calc_type="a@b", calc_version="c"  ->  a@b@c:d:e
+        calc_type="a",   calc_version="b@c" ->  a@b@c:d:e
+
+    The second upserts over the first, and `cached_compute` then serves the wrong payload for a key
+    it believes it derived — with correct-looking provenance, into the RRHO arithmetic, the
+    calibration ledger and any note citing the `calc_ref`. The table is also the one the retention
+    sweep deliberately never prunes.
+
+    **Only the fields that create the ambiguity are constrained, and `calc_version` is deliberately
+    not one of them.** A real version carries both delimiters — `esol-delaney@2004` carries the
+    `@`, `cal-0.28733:-29.3116` carries the `:` — which is the measured fact
+    `connectors/calc/remote.py` records as the reason the key crosses the wire as four parts rather
+    than as one string. Barring `@` from `calc_type` fixes the left-hand parse; barring `:` from the
+    two hashes fixes the right-hand one; between them the middle is whatever is left, so the version
+    may contain anything.
+    """
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        CalculationKey(calc_type="a@b", calc_version="c", input_hash="d", params_hash="e")
+    with pytest.raises(ValidationError):
+        CalculationKey(calc_type="a:b", calc_version="c", input_hash="d", params_hash="e")
+    with pytest.raises(ValidationError):
+        CalculationKey(calc_type="a", calc_version="b", input_hash="d:e", params_hash="f")
+
+    # And a version carrying both delimiters still round-trips, because the parse does not need it
+    # to be free of them.
+    key = CalculationKey(
+        calc_type="solubility",
+        calc_version="esol-delaney@2004:cal-0.28",
+        input_hash="ab",
+        params_hash="cd",
+    )
+    flat = key.as_str()
+    assert flat == "solubility@esol-delaney@2004:cal-0.28:ab:cd"
+    # The parse the encoding now guarantees: type up to the first `@`, the two hashes off the last
+    # two `:`, version whatever is between. Written out because "unambiguous" is only a claim until
+    # somebody recovers all four.
+    calc_type, _, rest = flat.partition("@")
+    rest, _, params_hash = rest.rpartition(":")
+    calc_version, _, input_hash = rest.rpartition(":")
+    assert (calc_type, calc_version, input_hash, params_hash) == (
+        key.calc_type,
+        key.calc_version,
+        key.input_hash,
+        key.params_hash,
+    )
+
+
+def test_an_empty_key_is_not_a_key() -> None:
+    """`CalculationKey(calc_type="", ...)` used to build, and `as_str()` returned `"@::"`.
+
+    A primary key that four empty strings can produce is one every miswired producer collides on.
+    """
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        CalculationKey(calc_type="", calc_version="", input_hash="", params_hash="")

@@ -57,40 +57,6 @@ function openEventStream(id) {
   events.onerror = () => add("trace", "… job stream interrupted, reconnecting");
 }
 
-// Render an approval request. When the event carries a durable hold id, the prompt gets real
-// Yes/No controls wired to POST /approvals/{id}/decision — before this the request rendered as an
-// inert trace line, so a hold could only ever expire unanswered (gap RCH-3).
-function addApproval(evt) {
-  const el = add("trace", `⏸ ${evt.prompt}`);
-  if (!evt.approval_id) return;
-  const controls = document.createElement("div");
-  controls.className = "approval-controls";
-  const decide = async (approved) => {
-    controls.querySelectorAll("button").forEach((b) => (b.disabled = true));
-    try {
-      const res = await fetch(`/approvals/${encodeURIComponent(evt.approval_id)}/decision`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ approved }),
-      });
-      if (!res.ok) throw await httpError(res, "recording the decision");
-      controls.textContent = approved ? "✓ saved for review" : "✗ discarded";
-    } catch (err) {
-      // Re-enable so a transient failure is retryable rather than losing the decision.
-      controls.querySelectorAll("button").forEach((b) => (b.disabled = false));
-      add("error", err.message);
-    }
-  };
-  for (const [label, approved] of [["Yes", true], ["No", false]]) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.textContent = label;
-    button.addEventListener("click", () => decide(approved));
-    controls.appendChild(button);
-  }
-  el.appendChild(controls);
-}
-
 // Apply one decoded event to the transcript; `answerEl` accumulates streamed tokens.
 // Which specialist raised an event, as a trace prefix. Empty for the main agent, which is what
 // every event carried before teams existed — so an untagged line reads exactly as it always did.
@@ -158,7 +124,12 @@ function applyEvent(evt, answerEl) {
       add("trace", `📝 proposed ${evt.note_id} for review — ${evt.reference}`);
       return answerEl;
     case "approval_request":
-      addApproval(evt);
+      // A trace line and nothing else. This carried Yes/No buttons that POSTed to
+      // `/approvals/{id}/decision`, which only ever made sense for the durable interaction hold —
+      // deleted, because nothing could open one. A plan approval is answered by the *next turn*
+      // through `POST /sessions/{id}/plan/decision`, so a button here would have to know a session
+      // this renderer is not given. The reference surface shows the ask; a real one wires it.
+      add("trace", `⏸ ${evt.prompt}`);
       return answerEl;
     case "tool_failed":
       // In the trace, not the error lane: the step failed, the turn did not. Without this the

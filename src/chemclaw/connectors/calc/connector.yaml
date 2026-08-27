@@ -10,8 +10,8 @@
 # them by string.
 #
 # That server's own manifest must **not** go on `CHEMCLAW_CONNECTORS_DIR`: its seventeen primitives
-# are orchestrator-facing, and a partial port would win the `calc` name collision and take the six
-# read tools and every durable job off the agent's surface with no error.
+# are orchestrator-facing, and a partial port would win the `calc` name collision and take the read
+# tools declared below and every durable job off the agent's surface with no error.
 #
 # `report_measurement` writes, but to the *calibration ledger*, which is this capability's own store —
 # not the knowledge graph, whose only agent-reachable write path remains the PR-gate in core.
@@ -113,9 +113,10 @@ skills:
 # job id. That replaced a predicted-cost threshold evaluated in the agent's process, which is what
 # had kept `tblite`, RDKit and SciPy in the chat service's image (D-114).
 #
-# All five share one workflow: `XtbJobSpec` is already a closed union discriminated on `kind`, so
-# each job references its own member as `params_model` and the workflow dispatches on it. One
-# durable path, five typed, separately-documented tools — which is what the model needs, because
+# Every job below shares one workflow: `XtbJobSpec` is already a closed union discriminated on
+# `kind`, so each job references its own member as `params_model` and the workflow dispatches on it.
+# One durable path, one typed and separately-documented tool per job — which is what the model
+# needs, because
 # "compare these solvents" and "scan this bond" are different questions even when the machinery
 # underneath is identical.
 jobs:
@@ -225,8 +226,8 @@ jobs:
     precondition: chemclaw.science.calc.solvents:require_supported_solvents
     # A CREST search is the one genuinely costly thing in this bundle — minutes of saturated
     # CPU, and unlike the xTB tasks its cost is not bounded by the input's size. So it carries
-    # the role gate that used to sit on `run_xtb_task`, the expert escape hatch these five typed
-    # jobs replaced: that gate existed for exactly this, an unbounded calculation, and dropping
+    # the role gate that used to sit on `run_xtb_task`, the expert escape hatch the typed jobs
+    # below replaced: that gate existed for exactly this, an unbounded calculation, and dropping
     # it with the tool would have been a silent loosening. It did not in fact inherit anything —
     # `run_xtb_task`'s gate was `DEFAULT_WRITE_TOOL_GATES` membership, which went with the tool,
     # and `expensive: true` authorized nothing at all until `authz.expensive_actions` derived the
@@ -254,7 +255,7 @@ jobs:
       job warns where `predict_pka` refuses. Load `ionization-and-partitioning` before using it.
     params_model: chemclaw.connectors.calc.specs:MicrostatePkaJobSpec
     precondition: chemclaw.science.calc.solvents:require_supported_solvents
-    # Two CREST searches, so the same unbounded-cost gate the other two sampling jobs carry.
+    # Two CREST searches, so the same unbounded-cost gate the other sampling jobs carry.
     expensive: true
 
   - name: compute_interaction_energy
@@ -270,8 +271,8 @@ jobs:
     precondition: chemclaw.science.calc.solvents:require_supported_solvents
     # A CREST search is the one genuinely costly thing in this bundle — minutes of saturated
     # CPU, and unlike the xTB tasks its cost is not bounded by the input's size. So it carries
-    # the role gate that used to sit on `run_xtb_task`, the expert escape hatch these five typed
-    # jobs replaced: that gate existed for exactly this, an unbounded calculation, and dropping
+    # the role gate that used to sit on `run_xtb_task`, the expert escape hatch the typed jobs
+    # below replaced: that gate existed for exactly this, an unbounded calculation, and dropping
     # it with the tool would have been a silent loosening. It did not in fact inherit anything —
     # `run_xtb_task`'s gate was `DEFAULT_WRITE_TOOL_GATES` membership, which went with the tool,
     # and `expensive: true` authorized nothing at all until `authz.expensive_actions` derived the
@@ -280,11 +281,11 @@ jobs:
 
   # --- the multi-step protocols ---------------------------------------------------------------
   #
-  # Four jobs that are each a **fan-out**, which is why they are jobs and not templates: a template
+  # Each of these is a **fan-out**, which is why they are jobs and not templates: a template
   # has deliberately no loops, and the agent's own loop is iteration-capped, so "once per tautomer"
   # and "once per bond" fit neither. The loop lives in the job spec; a template sequences these.
   #
-  # All four count their cost before they start (`science/calc/budget.py`) and refuse above
+  # Each counts its cost before it starts (`science/calc/budget.py`) and refuses above
   # `calc_max_primitive_calls` with the count in the message. That refusal is a `ValueError`, which
   # `BAD_DATA_RETRY` treats as non-retryable, so an over-budget request fails in the first second
   # rather than three times over four hours.

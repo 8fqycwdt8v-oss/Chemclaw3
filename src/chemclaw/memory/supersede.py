@@ -19,15 +19,18 @@ in Git and remains reachable by id) plus a body line naming its replacement.
 Only notes this synthesis itself minted are candidates. "Same type, overlapping members" is not
 enough — see `_is_synthesis_minted` for the promoted-observation playbook it wrongly retired.
 
-The replacement is named as **plain text, not a `[[wikilink]]`**: the replacement note is itself an
-unmerged proposal in the same run, so a link would dangle and fail `kg-validate` if a reviewer
-merged the supersede PR first — an ordering trap for a human, in exchange for an edge nothing
-traverses (a non-current note is already out of retrieval).
+The retired note points forward with a real `superseded-by` edge to the successor whose
+submission carries it (D-2026-08-27 wave). It used to be plain text only, because retirement and
+replacement went to *separate* PR branches and the link dangled if a reviewer merged the
+retirement first. The pair now rides one submission (`pr_gate.propose_note`'s `superseded`
+argument), so the link resolves on the very branch `kg-validate` checks — and the lineage becomes
+traversable instead of a text grep. A second successor (a split) is still named in prose only:
+it lives on a different branch, and linking it would restore the ordering trap for that one case.
 """
 
 from datetime import date
 
-from chemclaw.kg.note import Note
+from chemclaw.kg.note import Note, Relation
 from chemclaw.memory.ids import is_cluster_anchored
 
 _SUPERSEDED_MARKER = "Superseded by"
@@ -63,7 +66,7 @@ def supersede_updates(new_notes: list[Note], existing: list[Note], as_of: date) 
     types = {note.type for note in new_notes}
     members: dict[str, set[str]] = {note.id: set(note.outgoing_links()) for note in new_notes}
     retired = [
-        _retire(note, successors, as_of)
+        retire_note(note, successors, as_of)
         for note in sorted(existing, key=lambda n: n.id)
         if note.type in types
         and note.id not in new_ids
@@ -106,11 +109,17 @@ def _successors_of(note: Note, members: dict[str, set[str]]) -> list[str]:
     return sorted(new_id for new_id, new_members in members.items() if cited & new_members)
 
 
-def _retire(note: Note, successors: list[str], as_of: date) -> Note:
-    """Copy `note` with `valid_to` closed and a line naming the notes that replaced it.
+def retire_note(note: Note, successors: list[str], as_of: date) -> Note:
+    """Copy `note` with `valid_to` closed, a `superseded-by` edge, and prose naming the rest.
 
+    The first successor gets the typed edge — it is the note whose submission carries this
+    retirement, so the link resolves in the same PR — and every successor is named in the body.
     `valid_to` is never set before `valid_from` (the schema rejects that window, F10-G2): a note
     whose validity has not begun is closed at its own start date instead of today.
+
+    Public because the observations tier retires a promoted playbook the same way when a superset
+    finding replaces it (`durable.observation_jobs`), and two spellings of "how a note is retired"
+    is how the two would come to disagree.
     """
     valid_to = as_of
     if note.valid_from is not None and note.valid_from > as_of:
@@ -122,4 +131,16 @@ def _retire(note: Note, successors: list[str], as_of: date) -> Note:
         "changed (merge or shrink), so the note above is no longer the current account of its "
         "experiments. Kept for the record; excluded from current-evidence retrieval.\n"
     )
-    return note.model_copy(update={"valid_to": valid_to, "body": body})
+    relations = [
+        *note.relations,
+        Relation(rel="superseded-by", to=successors[0]),
+    ]
+    return note.model_copy(update={"valid_to": valid_to, "body": body, "relations": relations})
+
+
+def carrier_of(retired: Note) -> str:
+    """Which successor's submission carries this retirement — the typed edge's target."""
+    for relation in retired.relations:
+        if relation.rel == "superseded-by":
+            return relation.to
+    raise ValueError(f"{retired.id!r} is not a retirement this module produced")

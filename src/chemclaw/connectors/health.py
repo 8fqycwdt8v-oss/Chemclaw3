@@ -39,8 +39,10 @@ class ConnectorHealth(BaseModel):
 
     name: str
     state: ConnectorState
-    # Why it is unreachable — a bounded message, so a probe failure is diagnosable from `/readyz`
-    # without reading pod logs. Empty for the healthy and unprobed states.
+    # Why it is unreachable — a bounded message. It reaches the WARNING each failed probe logs and
+    # `connectors_required`'s startup refusal; it is deliberately **not** in `/readyz`'s body, which
+    # is unauthenticated and therefore reports a count rather than naming the fleet. Empty for the
+    # healthy and unprobed states.
     detail: str = ""
 
 

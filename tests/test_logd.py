@@ -14,6 +14,8 @@ are the numbers the shipped predictor produced for these molecules, so the pinne
 pinned outputs of the whole composition.
 """
 
+import math
+
 import pytest
 from rdkit import Chem
 from rdkit.Chem import Crippen
@@ -59,12 +61,53 @@ def test_logd_increases_as_ph_drops_below_the_pka() -> None:
     assert acidic.log_d == pytest.approx(acidic.clogp, abs=0.05)
 
 
-def test_logd_reports_the_pka_uncertainty_it_was_built_on() -> None:
-    """The pKa model's uncertainty is surfaced, not silently dropped.
+def test_the_uncertainty_is_a_propagation_of_its_two_inputs_and_not_a_copy() -> None:
+    """LogD's error bar is Crippen's RMSE and the pKa's, each carried through its own derivative.
 
-    Crippen adds none of its own, so this *is* the whole error bar.
+    `logD = clogP - log10(1 + 10**(±(pH - pKa)))`, so `dlogD/dclogP = 1` and `dlogD/dpKa` is the
+    **ionised fraction** — between 0 and 1, and near zero for exactly the molecules this
+    composition is allowed to serve, since `_require_a_single_equilibrium` refuses a polyprotic
+    molecule above `logd_negligible_ionised_fraction`. Copying the pKa's residual across is
+    therefore neither a propagation nor, in general, the dominant term.
+
+    Pyridine at pH 7.4 is the measured case: 0.67 % ionised, so the pKa contributes 0.0094 log
+    units of the bar it was reported as the whole of.
     """
-    assert logd_from_pka(_pka(_BENZOIC_ACID, 6.2784)).uncertainty == pytest.approx(1.6)
+    from chemclaw.core.config import settings
+
+    pka_uncertainty = 1.0
+    result = logd_from_pka(_pka(_PYRIDINE, 5.23, site="base"), ph=7.4)
+
+    # Derived here, from the Henderson-Hasselbalch expression rather than from the code under test.
+    ionised_ratio = 10.0 ** (5.23 - 7.4)
+    ionised_fraction = ionised_ratio / (1.0 + ionised_ratio)
+    crippen = settings.crippen_logp_uncertainty
+    expected = math.hypot(crippen, ionised_fraction * pka_uncertainty)
+    print(
+        f"reported {result.uncertainty!r} against propagated {expected!r}; "
+        f"pKa term = {ionised_fraction * pka_uncertainty!r}, Crippen term = {crippen!r}"
+    )
+    assert ionised_fraction == pytest.approx(0.006715427889235968, abs=1e-12)
+    assert result.uncertainty == pytest.approx(expected, abs=1e-12)
+    # The claim the old docstring made, now checkable: the pKa is *not* the dominant term here.
+    assert ionised_fraction * pka_uncertainty < 0.02 < crippen
+
+
+def test_a_fully_ionised_acid_carries_both_terms_in_quadrature() -> None:
+    """The other end of the same derivative: at f ≈ 1 the pKa term arrives essentially in full.
+
+    Benzoic acid at pH 7.4 is 93 % ionised, so the bar must be larger than either input alone —
+    the direction the copied value got wrong the *other* way, understating rather than overstating.
+    """
+    from chemclaw.core.config import settings
+
+    result = logd_from_pka(_pka(_BENZOIC_ACID, 6.2784), ph=7.4)
+    ionised_ratio = 10.0 ** (7.4 - 6.2784)
+    ionised_fraction = ionised_ratio / (1.0 + ionised_ratio)
+    expected = math.hypot(settings.crippen_logp_uncertainty, ionised_fraction * 1.6)
+    print(f"reported {result.uncertainty!r} against propagated {expected!r}")
+    assert result.uncertainty == pytest.approx(expected, abs=1e-12)
+    assert result.uncertainty > 1.6
 
 
 def test_a_base_is_corrected_in_the_other_direction() -> None:
@@ -151,7 +194,11 @@ def test_a_monoprotic_acid_is_unchanged_by_the_multi_site_refusal() -> None:
     assert result.clogp == pytest.approx(1.3848, abs=1e-4)
     assert result.pka == pytest.approx(6.2784, abs=1e-3)
     assert result.log_d == pytest.approx(0.2315, abs=1e-3)
-    assert result.uncertainty == pytest.approx(1.6)
+    # The *uncertainty* deliberately did move: it was the pKa residual copied across, and is now
+    # that residual carried through `dlogD/dpKa` and combined with Crippen's own RMSE. Benzoic acid
+    # at pH 7.4 is 93 % ionised, so almost all of the pKa term survives the derivative and the bar
+    # grows rather than shrinks — see `test_a_fully_ionised_acid_carries_both_terms_in_quadrature`.
+    assert result.uncertainty == pytest.approx(1.6356, abs=1e-4)
 
 
 # --- the site enumeration the domain check is exactly as good as ------------------------------

@@ -56,6 +56,7 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.durable.notify import notify_session_best_effort
     from chemclaw.durable.publish_results import JobPublishInput, publish_job_result
     from chemclaw.kg.note import Note
+    from chemclaw.memory.jobs import SynthesisUnit
 
 from chemclaw.durable.publish import (
     BAD_DATA_RETRY,
@@ -139,6 +140,13 @@ class ConnectorJobInput(BaseModel):
     # nothing about it, so a durable job was an island in the trail. Empty off the request path,
     # where there is no turn to correlate to.
     correlation_id: str = ""
+    # The plan step this run was launched for — the first `in_progress` todo at launch — and the
+    # identity of the plan revision it belonged to (D-2026-08-27). Read ambiently at the launch
+    # site like `session_id` above, never model-authored, and empty for every run not launched
+    # from a plan step (a template step, the CLI, a turn with no plan). Additive and defaulted
+    # because they cross the Temporal wire and histories are in flight.
+    plan_step: str = ""
+    plan_hash: str = ""
     publish_to_graph: bool = False
 
 
@@ -268,6 +276,8 @@ def job_record_for(
         requested_by=job.requested_by,
         session_id=job.session_id,
         correlation_id=job.correlation_id,
+        plan_step=job.plan_step,
+        plan_hash=job.plan_hash,
         payload=job.payload,
         summary=result.summary,
         # The envelope's own data, whole: for a campaign that is every observation it made, which
@@ -283,6 +293,34 @@ def job_record_for(
 # On the light queue: this wrapper does no work itself — it starts a child on the
 # connector's own queue and waits — so it belongs with the many light workers, not the few
 # heavy ones. The *capability* is heavy; this is not (D-006).
+# The four things the wrapper still does *after* its child returns, each one activity's worth of
+# wall clock: write the durable record (D-157), offer the composite to the results store, PR-gate
+# the note, push back to the launching session. They are why the wrapper is not a pass-through, and
+# why anyone giving it an execution timeout must leave room for them.
+_FINISH_STEPS = 4
+
+
+def wrapper_execution_timeout() -> timedelta:
+    """A ceiling for the *wrapper*, strictly above the one it hands its own child.
+
+    A caller that bounds `ConnectorJobWorkflow` at exactly `connector_job_timeout_seconds` — the
+    number the wrapper then gives its child — leaves **zero** headroom, and since the wrapper
+    starts first its ceiling expires first. A workflow execution timeout is not delivered to
+    workflow code, so the `except BaseException -> _notify_failure` clause that exists precisely to
+    stop a job failing in silence never runs: measured, the run ends `TIMED_OUT` with no push-back
+    and no `job_records` row, which is the "a failure that says nothing is read as proceed" defect
+    through the one door that clause cannot cover.
+
+    The direct path (`connectors/jobs.py`) gives the wrapper no execution timeout at all and is
+    right to — the child is already bounded. This exists for the template path, which wants a
+    ceiling on the step and must not make it the child's own.
+    """
+    return timedelta(
+        seconds=settings.connector_job_timeout_seconds
+        + settings.activity_timeout_seconds * _FINISH_STEPS
+    )
+
+
 @durable_workflow("background")
 # **`failure_exception_types` because without it this workflow cannot fail — it hangs.** The
 # Temporal SDK treats a plain exception raised in workflow *code* as a suspected bug and suspends
@@ -491,7 +529,12 @@ class ConnectorJobWorkflow:
             # frame above, required and unused.
             await publish_note_best_effort(
                 publish_memory_note_activity,
-                [note_with_run_provenance(result.note, record), job.requested_by],
+                [
+                    # A connector job never retires anything — retirement is the synthesis
+                    # miners' judgment — so its unit carries the note alone.
+                    SynthesisUnit(note=note_with_run_provenance(result.note, record)),
+                    job.requested_by,
+                ],
                 label=f"{job.connector}:{job.job}",
             )
         if job.session_id:

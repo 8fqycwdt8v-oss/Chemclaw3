@@ -93,6 +93,13 @@ OWNED_SCHEDULE_IDS = frozenset(
         "document-sync",
         "reaction-labels",
         "reaction-corpus",
+        # Planned since the result sinks shipped and registered here only after an audit found it
+        # missing: `_prune` computes `OWNED_SCHEDULE_IDS - planned_ids`, so a deployment that set
+        # `CHEMCLAW_RESULT_SINKS`, got the Schedule, and later cleared the setting kept firing
+        # `PublishResultsWorkflow` through every subsequent `helm upgrade`. The guard that was
+        # supposed to catch this enabled one conditional job and passed vacuously; it now builds
+        # the full plan.
+        "result-publish",
     }
 )
 
@@ -146,7 +153,9 @@ def planned_schedules() -> list[PlannedSchedule]:
         schedules.append(PlannedSchedule("eval-drift", EvalDriftWorkflow, drift_every))
     # The derived note index only earns a Schedule where a hybrid retrieval leg actually reads it
     # (gap SCH-2). A graph-only deployment would otherwise pay to rebuild an index nothing queries.
-    if settings.note_reindex_enabled:
+    # `note_reindex_effective` is derived from the source list unless a deployment overrides it —
+    # so enabling `vector`/`lexical` cannot leave both legs querying a never-built index.
+    if settings.note_reindex_effective:
         reindex_every = timedelta(minutes=settings.note_reindex_schedule_minutes)
         schedules.append(PlannedSchedule("note-reindex", NoteReindexWorkflow, reindex_every))
     # A document share earns a Schedule only where one is actually enabled. Asked of the manifests

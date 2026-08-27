@@ -41,9 +41,10 @@ from chemclaw.agent.audit_store import PostgresAuditSink
 from chemclaw.agent.checkpointer import process_checkpointer
 from chemclaw.agent.chemclaw_agent import connector_specs
 from chemclaw.agent.langgraph_agent import build_langgraph_agent
-from chemclaw.agent.state import turn_config, turn_input
+from chemclaw.agent.state import answer_text, turn_config, turn_input
 from chemclaw.connectors.registry import open_connector_specs
 from chemclaw.core.config import settings
+from chemclaw.core.errors import ChemclawError
 from chemclaw.core.identity_context import reset_current_identity, set_current_identity
 from chemclaw.core.logging import configure_logging
 
@@ -133,22 +134,7 @@ async def converse(agent: Any, prompt: str, session_id: str = _CLI_SESSION_ID) -
         turn_input(prompt),
         turn_config(session_id),
     )
-    return _answer_text(result)
-
-
-def _answer_text(result: Any) -> str:
-    """The final assistant text out of a completed graph turn."""
-    messages = result.get("messages") or []
-    if not messages:
-        return ""
-    content = messages[-1].content
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        return "".join(
-            str(part.get("text", "")) if isinstance(part, dict) else str(part) for part in content
-        )
-    return str(content)
+    return answer_text(result)
 
 
 async def _run(args: argparse.Namespace) -> None:
@@ -327,11 +313,32 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def main(argv: Sequence[str] | None = None) -> None:
-    """CLI entrypoint (`chemclaw` console script / `python -m chemclaw.agent.cli`)."""
+def main(argv: Sequence[str] | None = None) -> int:
+    """CLI entrypoint (`chemclaw` console script / `python -m chemclaw.cli.chat`).
+
+    **Startup failures are a message and an exit code, which is what the rest of this package
+    already does.** `_build_cli_agent`'s docstring promises the chat model "fails with a clear
+    message if it is missing (D-037), so a credential problem surfaces here, before the prompt" —
+    and the message is good. It arrived under nine frames of asyncio and graph construction,
+    because this function caught nothing and returned `None`, so the console script exited on a
+    traceback rather than on a status. That is the single most likely first run of the only
+    interactive entrypoint this system has, and the trace leaks the internal call chain to an
+    operator who can act on exactly one sentence of it.
+
+    The width is the three families a *startup* can fail with and nothing wider: a misconfiguration
+    (`ChemclawError`), a refused precondition like the missing credential (`RuntimeError`), and an
+    unreachable dependency such as the checkpointer DSN (`ConnectionError`). A bare `except` here
+    would swallow the programming errors this file wants to see raised. Failures *inside* a turn
+    are already handled one level down, in `_repl`, which keeps the session alive across them.
+    """
     configure_logging()
-    asyncio.run(_run(_parse_args(argv)))
+    try:
+        asyncio.run(_run(_parse_args(argv)))
+    except (ChemclawError, ConnectionError, RuntimeError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

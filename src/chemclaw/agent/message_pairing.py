@@ -49,6 +49,13 @@ from typing import Any
 
 from langchain_core.messages import BaseMessage
 
+# The stamp `agent/message_migration` writes for a converted row, *imported* rather than restated.
+# This module used to keep its own `"langchain"` literal under a comment saying the two could not
+# drift, which named the source without depending on it — and the whole point of taking the stamp
+# is that one rule decides what a row is. `tests/test_message_pairing.py` scans the package for a
+# second definition, because two equal literals cannot be told apart at runtime.
+from chemclaw.agent.message_migration import LANGCHAIN_SHAPE
+
 logger = logging.getLogger(__name__)
 
 # MAF's content-type discriminators, kept because *stored rows* still carry them: every
@@ -64,10 +71,6 @@ logger = logging.getLogger(__name__)
 # days later and no longer say why.
 _MAF_CALL = "function_call"
 _MAF_RESULT = "function_result"
-
-# The stamp `agent/message_migration` writes for a converted row. Named from that module so the two
-# cannot drift: the whole point of taking the stamp is that one rule decides what a row is.
-_LANGCHAIN_SHAPE = "langchain"
 
 
 def stored_call_ids(payload: Mapping[str, Any], shape: str | None = None) -> frozenset[str] | None:
@@ -101,7 +104,7 @@ def stored_call_ids(payload: Mapping[str, Any], shape: str | None = None) -> fro
         The call ids the row mentions, whether as a call or as its answer, or `None` when the row
         matches neither stored shape.
     """
-    if shape == _LANGCHAIN_SHAPE:
+    if shape == LANGCHAIN_SHAPE:
         return _langchain_call_ids(payload)
     if "contents" in payload:
         contents = payload.get("contents")

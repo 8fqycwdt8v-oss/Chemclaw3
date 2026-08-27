@@ -112,6 +112,7 @@ from psycopg_pool import AsyncConnectionPool
 from chemclaw.agent.session_store import _session_dsn
 from chemclaw.agent.state import ChemclawState
 from chemclaw.core.config import settings
+from chemclaw.core.db import register_pool, unregister_pool
 
 logger = logging.getLogger(__name__)
 
@@ -383,6 +384,14 @@ async def _checkpoint_pool() -> Any:
                 open=False,
             )
             await pool.open()
+            # Counted in this process's pool readings. It is not a `core.db` pool — this module
+            # owns its lifecycle, which is why registration is all that happens here — but it is
+            # `pg_pool_max_size` more connections the process may open, and every turn's state
+            # write goes through it. Unregistered, a turn-serving process opened twice what
+            # `chemclaw_pg_pool_max_size` reported (the number the fleet budget is checked
+            # against), and a saturated checkpointer stalled turns inside `AsyncPostgresSaver`
+            # while `chemclaw_pg_pool_requests_waiting` read 0.
+            register_pool(pool)
             _pool = pool
     return _pool
 
@@ -422,6 +431,9 @@ async def close_checkpointer() -> None:
     pool, _pool = _pool, None
     if pool is None:
         return
+    # Off the process's readings before it is closed, so a gauge scraped mid-shutdown does not
+    # count connections that are going away.
+    unregister_pool(pool)
     try:
         await pool.close()
     except RuntimeError:

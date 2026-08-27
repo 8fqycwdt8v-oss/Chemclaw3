@@ -22,6 +22,16 @@ goes to zero, and the lowest modes are exactly where the harmonic approximation 
 5 cm^-1 mode from a floppy molecule can contribute several kcal/mol of nonsense to G. Below
 `rrho_cutoff_cm` a mode is interpolated toward a free rotor, which is what `xtb` itself does.
 
+**The standard state follows the phase, and is not a knob.** A free energy is only a quantity once
+its reference state is named, and the two conventions differ by RT ln(RT c0/P0) = 1.894 kcal/mol per
+mole of species at 298.15 K — a factor of 24.47 in K per unit of Δn. The gas-phase convention is
+1 atm; the one a chemist means by "ΔG in THF" is 1 mol/L. Which applies is decided by the medium the
+Hessian was taken in (`HessianPayload.solvent`), because the electronic energy came out of an ALPB
+implicit-solvent SCF: the phase is a property of the calculation, not a caller's preference, and a
+"gas standard state in solution" is a hybrid of two references that describes nothing. It cancels
+exactly for Δn = 0, which is why every tautomer, protomer and stereoisomer ranking in this tree is
+unaffected, and why a dissociation, an association or a BDFE was wrong by 1.894·Δn without it.
+
 **The rotational symmetry number is an input, not a guess.** It shifts the entropy by exactly
 R ln(sigma) — 1.4 cal/mol/K for a C2 axis, 4.9 for benzene — and deriving it needs point-group
 detection this layer does not do. It defaults to 1, and a caller that leaves it unstated is told so
@@ -49,6 +59,7 @@ from chemclaw.science.calc.models import (
     EnsembleSearch,
     HessianPayload,
     Interconversion,
+    StandardState,
     Structure,
     ThermochemistryResult,
     VibrationalMode,
@@ -85,6 +96,11 @@ _IR_TO_KM_PER_MOL = 42.2561
 # and has one rotational degree of freedom fewer.
 _LINEAR_INERTIA_RATIO = 1e-4
 
+# The 1 mol/L solution standard state, in mol/m^3. Not a setting: it is the definition of the
+# solution standard state, the same way 1 atm is the definition of the gas one, and a deployment
+# that could move it would be publishing free energies nobody else's number can be compared with.
+_MOLAR_STANDARD_CONCENTRATION = 1000.0
+
 
 class ThermoSettings(BaseModel):
     """The state variables an RRHO free energy is computed at — and nothing the Hessian depends on.
@@ -98,6 +114,9 @@ class ThermoSettings(BaseModel):
     """
 
     temperature_k: float = Field(default_factory=lambda: settings.xtb_thermo_temperature_k, gt=0)
+    # The **gas-phase** reference pressure, and only that. A calculation in an implicit solvent is
+    # quoted at the 1 mol/L standard state instead, whose reference pressure is c0·R·T and is
+    # therefore derived rather than configured — see `_reference_pressure` and the module docstring.
     pressure_pa: float = Field(default_factory=lambda: settings.xtb_thermo_pressure_pa, gt=0)
     # Rotational symmetry number. 1 unless the caller knows better; see the module docstring for
     # why it is not derived.
@@ -245,6 +264,40 @@ def _translational(mass_amu: float, temperature: float, pressure: float) -> tupl
     return 1.5 * _GAS_CONSTANT * temperature, _GAS_CONSTANT * (math.log(partition) + 2.5)
 
 
+def standard_state_for(solvent: str | None) -> StandardState:
+    """Which reference state a free energy computed in this medium is quoted at.
+
+    One definition, because two layers need the answer and must not disagree about it: the RRHO
+    arithmetic below evaluates the translational partition function at the matching pressure, and
+    `connectors/calc/compose.py` stamps the same string onto every reaction, screen and ranking it
+    publishes. A composite that re-derived the rule could quote a species at 1 atm while the
+    thermochemistry it differenced was computed at 1 M — the two numbers would differ by
+    1.894 kcal/mol and nothing would say which.
+    """
+    return "gas-1atm" if solvent is None else "solution-1M"
+
+
+def _reference_pressure(spec: ThermoSettings, solvent: str | None) -> tuple[float, StandardState]:
+    """The pressure the translational partition function is evaluated at, and what to call it.
+
+    The only place the standard state enters the arithmetic, because the only pressure-dependent
+    term is Sackur-Tetrode's volume factor. A gas-phase calculation keeps the configured 1 atm; one
+    in an implicit solvent is quoted at 1 mol/L, whose ideal-gas reference pressure is c0·R·T —
+    2.479 MPa at 298.15 K, i.e. 24.47 times 1 atm, so the entropy falls by R ln(24.47) and G rises
+    by 1.894 kcal/mol per species.
+
+    **Derived from the medium rather than asked for**, and that is the fix: the electronic energy
+    came back from an ALPB SCF, so `hessian.solvent` already says which phase this free energy is
+    about. A knob would have been a knob nobody sets — the shape this repository has named as a
+    defect often enough — and would have let one composite quote a species at 1 atm while another
+    quoted the same species in the same solvent at 1 M.
+    """
+    state = standard_state_for(solvent)
+    if state == "gas-1atm":
+        return spec.pressure_pa, state
+    return _GAS_CONSTANT * spec.temperature_k * _MOLAR_STANDARD_CONCENTRATION, state
+
+
 def _rotational(
     masses: np.ndarray, positions: np.ndarray, temperature: float, symmetry: int
 ) -> tuple[float, float]:
@@ -312,6 +365,15 @@ def thermochemistry_from_hessian(
     through `is_minimum` rather than refusing, because "this geometry is a saddle point" is a useful
     answer and often the question.
 
+    **And "not a minimum" now covers the case with no imaginary mode in it.** A geometry that is not
+    stationary at all produces small spurious modes that `_vibrational` drops from a sum it takes
+    over positive wavenumbers only, so its zero-point energy is too low with nothing in the
+    frequencies to show it. `HessianPayload.max_gradient_hartree_per_angstrom` is the evidence the
+    server sends for exactly that, and it is read here against
+    `xtb_stationary_gradient_tolerance` — reported through `is_stationary`, and folded into
+    `is_minimum`, because a result that claims to be a minimum on evidence it has not got is the
+    silent failure this whole model is arranged against.
+
     Synchronous and CPU-bound (an eigendecomposition of a 3N x 3N matrix), so a caller on an event
     loop hands it to `asyncio.to_thread` — the same treatment the embedding used to get.
     """
@@ -336,8 +398,12 @@ def thermochemistry_from_hessian(
         )
 
     temperature = spec.temperature_k
+    # The reference state is the medium's, not the caller's — see `_reference_pressure`. Everything
+    # below is unchanged in the gas phase and shifted by exactly RT ln(RT c0/P0) per species in
+    # solution, which is the term that does *not* cancel across a reaction with Δn != 0.
+    pressure, standard_state = _reference_pressure(spec, hessian.solvent)
     translation_energy, translation_entropy = _translational(
-        float(masses.sum()), temperature, spec.pressure_pa
+        float(masses.sum()), temperature, pressure
     )
     rotation_energy, rotation_entropy = _rotational(
         masses, positions, temperature, spec.symmetry_number
@@ -366,6 +432,21 @@ def thermochemistry_from_hessian(
         for value in wavenumbers
         if value < -settings.xtb_imaginary_threshold_cm
     ]
+    # **The other way of not being a minimum**, and the one the frequencies cannot show. A Hessian
+    # describes the surface *around* a point, and only at a stationary point do its eigenvalues mean
+    # frequencies — so the server reports the gradient it already had beside every matrix, and this
+    # is where that evidence is read. `None` is "not assessed" (the `xtb` binary backend reports no
+    # gradient, and a cache row written before the field existed carries none), which must stay a
+    # different answer from "it is stationary".
+    #
+    # It matters most where it is least visible: away from a stationary point the spurious modes
+    # are small and often *not* imaginary, so `_vibrational` silently drops them from a sum taken
+    # over positive wavenumbers only, and the zero-point energy comes out quietly too low rather
+    # than obviously wrong.
+    gradient = hessian.max_gradient_hartree_per_angstrom
+    stationary = (
+        None if gradient is None else gradient <= settings.xtb_stationary_gradient_tolerance
+    )
     # The *most negative* imaginary mode is the first, since modes are sorted ascending and an
     # imaginary frequency is reported as negative — so index 0 is the steepest downhill direction,
     # not the softest one. That is the direction to escape along.
@@ -380,10 +461,13 @@ def thermochemistry_from_hessian(
         method=hessian.method,
         solvent=hessian.solvent,
         temperature_k=temperature,
-        pressure_pa=spec.pressure_pa,
+        pressure_pa=pressure,
+        standard_state=standard_state,
         symmetry_number=spec.symmetry_number,
-        is_minimum=not imaginary,
+        is_minimum=not imaginary and stationary is not False,
         imaginary_frequencies_cm=imaginary,
+        is_stationary=stationary,
+        max_gradient_hartree_per_angstrom=gradient,
         modes=[
             VibrationalMode(
                 wavenumber_cm=round(float(wavenumber), 1),
@@ -490,23 +574,6 @@ def half_life_from_barrier(
         / rate_from_barrier(barrier_kcal + band, temperature_k),
         uncertainty_kcal=band,
     )
-
-
-def barrier_from_half_life(half_life_seconds: float, temperature_k: float) -> float:
-    """The barrier a required lifetime implies — Eyring read backwards, in kcal/mol.
-
-    The question a formulation or a specification actually asks: *what barrier would this compound
-    need for a two-year shelf life?* Answering it turns a computed barrier from a number into a
-    comparison against a requirement, which is what decides whether an experiment is worth running.
-
-    The exact inverse of `rate_from_barrier`, so the two cannot drift into disagreeing about the
-    prefactor.
-    """
-    if half_life_seconds <= 0:
-        raise ValueError(f"a half-life is positive; got {half_life_seconds}")
-    rate = math.log(2.0) / half_life_seconds
-    prefactor = _BOLTZMANN * temperature_k / _PLANCK
-    return -_GAS_CONSTANT_CAL * temperature_k * math.log(rate / prefactor) / 1000.0
 
 
 def boltzmann_populations(

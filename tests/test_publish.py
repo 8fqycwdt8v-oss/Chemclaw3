@@ -83,8 +83,14 @@ def test_every_chemclaw_error_subclass_is_listed_non_retryable() -> None:
     def names(cls: type) -> set[str]:
         return {cls.__name__}.union(*(names(sub) for sub in cls.__subclasses__()), set())
 
-    missing = names(ChemclawError) - set(BAD_DATA_RETRY.non_retryable_error_types or [])
+    from chemclaw.durable.publish import _DECLARED_RETRYABLE
+
+    registered = set(BAD_DATA_RETRY.non_retryable_error_types or []) | _DECLARED_RETRYABLE
+    missing = names(ChemclawError) - registered
     assert not missing, f"ChemclawError subclasses not registered in _BAD_DATA_TYPES: {missing}"
+    # And an exemption must never also be listed — a name in both sets is a contradiction the
+    # policy would resolve silently (the list wins, and the "retryable" claim becomes false).
+    assert not _DECLARED_RETRYABLE & set(BAD_DATA_RETRY.non_retryable_error_types or [])
 
 
 def test_every_authorization_error_subclass_is_listed_non_retryable() -> None:

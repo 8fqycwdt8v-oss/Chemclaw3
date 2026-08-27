@@ -39,17 +39,12 @@ from chemclaw.agent.checkpointer import close_checkpointer
 from chemclaw.agent.chemclaw_agent import connector_specs, history_provider
 from chemclaw.agent.durable_tools import cancel_job, job_status, request_note_reindex
 from chemclaw.agent.graph_tools import expand_note
-from chemclaw.agent.interaction_tools import (
-    approval_owner,
-    approval_status,
-    decide_approval,
-    list_pending_approvals,
-)
 from chemclaw.agent.langgraph_agent import build_langgraph_agent
 from chemclaw.agent.plan_approval_store import plan_approval_store
 from chemclaw.agent.profile_discovery import load_profiles
 from chemclaw.agent.scratchpad import close_memory_store
 from chemclaw.agent.session_events import stream_new_events
+from chemclaw.agent.verifier import require_verifier_capability
 from chemclaw.api.budget import BudgetTracker
 from chemclaw.api.detach import RunningTurns
 from chemclaw.api.middleware import (
@@ -61,7 +56,6 @@ from chemclaw.api.middleware import (
     _subsystem_unavailable,
 )
 from chemclaw.api.routes import (
-    approvals,
     jobs,
     notes,
     ops,
@@ -86,6 +80,7 @@ from chemclaw.connectors.health import check_connectors_at_startup, probe_connec
 from chemclaw.core import db
 from chemclaw.core.config import settings
 from chemclaw.core.errors import SubsystemUnavailableError
+from chemclaw.core.executor import install_default_executor
 from chemclaw.core.logging import configure_logging, configure_telemetry
 from chemclaw.core.metrics import METRICS
 from chemclaw.durable.job_record import search_job_records
@@ -105,14 +100,10 @@ __all__ = [
     "_TRANSCRIPT_ARG_CHARS",
     "_transcript",
     # Collaborators the suite patches on this module; routes read them through it at call time.
-    "approval_owner",
-    "approval_status",
     "cancel_job",
-    "decide_approval",
     "expand_note",
     "fetchable_refs",
     "job_status",
-    "list_pending_approvals",
     "load_tool_result",
     "probe_connectors",
     "request_note_reindex",
@@ -163,6 +154,21 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     # deployment configuration error, and a front door that started anyway would 400 every
     # request naming that profile with no hint as to why.
     load_profiles()
+    # Before anything can offload. Every `asyncio.to_thread` in this process — token validation on
+    # every request, the retrieval and knowledge-graph legs, embeddings, attachment parses — shares
+    # one pool, and the loop's stock default is `min(32, cpu_count + 4)`: 8 on a 4-CPU pod, the
+    # same number as `service_max_concurrent_turns`, so the admission cap could fill it on its own
+    # and authentication queued behind chemistry. See `core/executor.py` for the measurement.
+    install_default_executor(
+        component="front-door",
+        reserved=settings.service_max_concurrent_turns + settings.attachment_max_concurrent_parses,
+    )
+
+    # Before serving, for the reason `connectors_required` raises here: a judge endpoint that
+    # cannot enforce structured output degrades *every* verified answer silently, and refusing to
+    # start is the only way to keep that pod out of a rollout. A no-op unless `verifier_enabled`
+    # on the `openai_compatible` provider — see `require_verifier_capability`.
+    await require_verifier_capability()
     async with db.pooling():
         app.state.connector_health = await check_connectors_at_startup()
         app.state.connector_health_at = time.monotonic()
@@ -369,7 +375,6 @@ def create_app(
         streams,
         results,
         plan,
-        approvals,
         proposals,
         notes,
         jobs,

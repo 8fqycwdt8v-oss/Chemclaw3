@@ -105,11 +105,24 @@ def test_an_unknown_relation_fails_validation(tmp_path: Path) -> None:
 
 
 def test_every_known_relation_is_accepted(tmp_path: Path) -> None:
-    """The vocabulary and the validator agree — a relation listed but rejected would be a trap."""
-    target = Note(id="b", type="compound")
+    """The vocabulary and the validator agree — a relation listed but rejected would be a trap.
+
+    Endpoint types come from `RELATION_SIGNATURES` where the relation declares a direction,
+    because "accepted" now means "accepted *as directed*": a `catalyzes` edge from a report was
+    never a sensible sentence, and validating it green is exactly how the seed corpus came to
+    hold twelve inverted edges.
+    """
+    from chemclaw.kg.relations import RELATION_SIGNATURES
+
     for relation in sorted(KNOWN_RELATIONS):
-        source = Note(id="a", type="report", relations=[Relation(rel=relation, to="b")])
-        assert validate(_write(tmp_path, source, target)) == [], relation
+        sources, targets = RELATION_SIGNATURES.get(relation, (None, None))
+        source_type = sorted(sources)[0] if sources else "report"
+        target_type = sorted(targets)[0] if targets else "compound"
+        target = Note(id="b", type=target_type)
+        source = Note(id="a", type=source_type, relations=[Relation(rel=relation, to="b")])
+        # A fresh tree per relation: endpoint *types* now vary, so reusing one tree would leave
+        # each iteration's notes behind as duplicate ids under the previous types' directories.
+        assert validate(_write(tmp_path / relation, source, target)) == [], relation
 
 
 def test_two_relations_between_the_same_pair_both_survive(tmp_path: Path) -> None:

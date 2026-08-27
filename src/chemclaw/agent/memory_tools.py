@@ -67,14 +67,17 @@ async def recall_observations(limit: int = 0) -> list[Observation]:
     the claim from the notes.
 
     If an answer rests on an observation and nothing more, say so explicitly — that it is a pattern
-    the system noticed and no one has confirmed. `support` is how many merged notes back it and
+    the system noticed and no one has confirmed. `support` is how many cited runs back it and
     `projects_seen` which projects it spans; both low means a thin reading, not a weak fact.
 
     Args:
-        limit: How many to return, best-supported first. 0 uses the configured page size.
+        limit: How many to return, best-supported first. 0 uses the configured page size, and
+            any request is clamped to that page size (`observation_max_results`, 10 by default) —
+            asking for more returns the configured maximum, so a full page may mean the tier
+            holds more than you were shown.
 
     Returns:
-        Open observations with their statements, scope, supporting merged note ids, and projects.
+        Open observations with their statements, scope, supporting note ids, and projects.
     """
     if not settings.observations_enabled:
         return []

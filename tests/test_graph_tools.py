@@ -36,7 +36,7 @@ def test_find_notes_matches_tag(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     """find_notes locates a note by tag substring."""
     _seed(tmp_path)
     monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
-    refs = asyncio.run(find_notes("target"))
+    refs = asyncio.run(find_notes("target")).matches
     assert {r.id for r in refs} == {"compound-a"}
 
 
@@ -55,17 +55,28 @@ def test_find_notes_matches_all_words_not_a_literal_phrase(
     # "target" is on compound-a; "reaction" only appears on reaction-r's own id/type, and
     # compound-a's body only links to it as "[[reaction-r]]" — no note contains the literal
     # phrase "target reaction", but compound-a contains both words independently.
-    refs = asyncio.run(find_notes("target reaction"))
+    refs = asyncio.run(find_notes("target reaction")).matches
     assert {r.id for r in refs} == {"compound-a"}
 
 
 def test_find_notes_returns_nothing_when_one_word_is_absent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """All-words matching still excludes a note missing even one of the query's words."""
+    """All-words matching widens rather than dropping to nothing — and says it widened.
+
+    A query with one absent word used to return `[]`, while the sweep's graph leg widened to
+    partial matches over the same corpus — so the two tools the prompt chains disagreed about one
+    question. The partial hit now comes back marked `widened`, which is the honest version of
+    both behaviours.
+    """
     _seed(tmp_path)
     monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
-    assert asyncio.run(find_notes("target nonexistentword")) == []
+    found = asyncio.run(find_notes("target nonexistentword"))
+    assert found.widened is True
+    assert {r.id for r in found.matches} == {"compound-a"}
+    # And a query where *nothing* matches at all is still an empty result.
+    nothing = asyncio.run(find_notes("nonexistentword absentterm"))
+    assert nothing.matches == [] and nothing.widened is False
 
 
 def test_expand_note_returns_neighbors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -112,7 +123,7 @@ def test_find_notes_surfaces_provenance(tmp_path: Path, monkeypatch: pytest.Monk
         encoding="utf-8",
     )
     monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
-    (ref,) = asyncio.run(find_notes("prep"))
+    (ref,) = asyncio.run(find_notes("prep")).matches
     assert ref.created_by == "agent"
     assert ref.source == "eln-7"
     assert ref.confidence == 0.8
@@ -129,7 +140,7 @@ def test_find_notes_excludes_expired(tmp_path: Path, monkeypatch: pytest.MonkeyP
         encoding="utf-8",
     )
     monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
-    refs = asyncio.run(find_notes("reflux"))
+    refs = asyncio.run(find_notes("reflux")).matches
     assert {r.id for r in refs} == {"reaction-new"}  # the expired note is dropped
 
 
@@ -165,15 +176,22 @@ def test_find_notes_caps_the_hit_list(tmp_path: Path, monkeypatch: pytest.Monkey
         )
     monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
     monkeypatch.setattr(settings, "graph_max_results", 3)
-    refs = asyncio.run(find_notes("acetylation"))
-    assert [r.id for r in refs] == ["reaction-00", "reaction-01", "reaction-02"]
-    assert [r.id for r in asyncio.run(find_notes("acetylation"))] == [r.id for r in refs]
+    found = asyncio.run(find_notes("acetylation"))
+    assert [r.id for r in found.matches] == ["reaction-00", "reaction-01", "reaction-02"]
+    assert found.total_matches == 10, "the cut must be declared, not silent"
+    assert [r.id for r in asyncio.run(find_notes("acetylation")).matches] == [
+        r.id for r in found.matches
+    ]
 
 
-def test_find_notes_warns_only_when_it_truncates(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+def test_find_notes_declares_a_cut_in_the_value_the_model_reads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Hitting the cap warns (never a silent partial answer); a complete result stays quiet."""
+    """The cut is in the return value, not a log line no model reads.
+
+    The old warning was exactly the defect `EvidenceSweep.truncated_by` fixed in the sibling
+    tool: a capped list with no marker is byte-identical to a small corpus.
+    """
     for i in range(4):
         (tmp_path / f"n{i}.md").write_text(
             f"---\nid: reaction-{i}\ntype: reaction\n---\nAn acetylation.\n", encoding="utf-8"
@@ -181,15 +199,12 @@ def test_find_notes_warns_only_when_it_truncates(
     monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
 
     monkeypatch.setattr(settings, "graph_max_results", 2)
-    with caplog.at_level("WARNING"):
-        asyncio.run(find_notes("acetylation"))
-    assert "find_notes capped at 2 matches" in caplog.text
+    cut = asyncio.run(find_notes("acetylation"))
+    assert (len(cut.matches), cut.total_matches) == (2, 4)
 
-    caplog.clear()
     monkeypatch.setattr(settings, "graph_max_results", 50)
-    with caplog.at_level("WARNING"):
-        asyncio.run(find_notes("acetylation"))
-    assert "capped" not in caplog.text
+    whole = asyncio.run(find_notes("acetylation"))
+    assert (len(whole.matches), whole.total_matches) == (4, 4)
 
 
 def test_propose_knowledge_note_uses_gate(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -505,11 +520,11 @@ def test_find_notes_ignores_a_dangling_link_target(
         encoding="utf-8",
     )
     monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
-    assert [ref.id for ref in asyncio.run(find_notes("target"))] == ["reaction-r"]
+    assert [ref.id for ref in asyncio.run(find_notes("target")).matches] == ["reaction-r"]
     # The dangling id is findable as *text in a body*, which is right — it is in that note's
     # haystack. What it must never be is a hit in its own right, a reference to a note that has no
     # body, type or provenance to report.
-    assert [ref.id for ref in asyncio.run(find_notes("compound-pending"))] == ["reaction-r"]
+    assert [ref.id for ref in asyncio.run(find_notes("compound-pending")).matches] == ["reaction-r"]
 
 
 def test_find_notes_truncates_in_id_order(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -524,4 +539,7 @@ def test_find_notes_truncates_in_id_order(tmp_path: Path, monkeypatch: pytest.Mo
         )
     monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
     monkeypatch.setattr(settings, "graph_max_results", 2)
-    assert [ref.id for ref in asyncio.run(find_notes("target"))] == ["compound-a", "compound-b"]
+    assert [ref.id for ref in asyncio.run(find_notes("target")).matches] == [
+        "compound-a",
+        "compound-b",
+    ]

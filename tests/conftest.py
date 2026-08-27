@@ -33,7 +33,7 @@ from chemclaw.connectors.registry import discovered as _connectors_discovered
 from chemclaw.core.config import settings
 from chemclaw.ingest.eln.warehouse.connect import forget_open_warehouses as _forget_warehouses
 from chemclaw.ingest.sources.registry import discovered as _sources_discovered
-from chemclaw.kg.submission import NoteSubmission
+from chemclaw.kg.submission import NoteSubmission, SubmissionOutcome
 from chemclaw.retrieval.vectors.registry import forget_vector_store as _forget_vector_store
 from chemclaw.templates.registry import discovered as _templates_discovered
 from tests.pg import create_test_schema, drop_test_schema, schema_dsn
@@ -58,10 +58,10 @@ class FakeSubmitter:
         """Start with no captured submissions."""
         self.submissions: list[NoteSubmission] = []
 
-    async def submit(self, submission: NoteSubmission) -> str:
+    async def submit(self, submission: NoteSubmission) -> SubmissionOutcome:
         """Capture the submission and return a fake PR reference."""
         self.submissions.append(submission)
-        return f"pr://{submission.branch}"
+        return SubmissionOutcome(reference=f"pr://{submission.branch}")
 
 
 @pytest.fixture(scope="session", autouse=True)

@@ -6,7 +6,7 @@ cross-section validators; fields, env names and defaults are exactly as they wer
 sections shared a single module (D-072 mixins, split per D-156).
 """
 
-from pydantic import Field
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings
 
 
@@ -79,7 +79,12 @@ class EvalSettings(BaseSettings):
     # and should not become one: whoever starts the lane already has to mint an identity with the
     # roles the probes need (the expensive-job probes need a privileged one), so the only thing
     # this needs to know is the result. `infra/live/processes.sh` mints it and exports this.
-    live_probe_token: str = ""
+    #
+    # A `SecretStr` and a member of `_SECRET_SETTINGS`, like every other credential on this object.
+    # It was neither until 2026-08-27 — the one credential covered by no mechanism on any
+    # configuration source — and the identity it carries is a *privileged* one, written into
+    # `live_probe_transcript_dir` on disk by design.
+    live_probe_token: SecretStr = SecretStr("")
     # One turn's ceiling. Generous: a probe that triggers an inline calculation legitimately
     # waits, and cutting it short would record a system timeout as a model failure.
     live_probe_timeout_seconds: float = Field(default=300.0, gt=0)
@@ -104,11 +109,6 @@ class EvalSettings(BaseSettings):
     # conversations and routing keys scored by their own suites, and folding them into the
     # 190-question corpus would change what that run measures without changing what it reports.
     live_m12_probe_dir: str = "data/evals/probes/m12"
-    # How long to wait for a turn's row to appear in `turn_costs`. The ledger's write is scheduled
-    # rather than awaited (D-130), so it lands shortly after the stream this harness reads closes;
-    # this bounds the wait rather than expressing an expectation about it. Exceeded, the turn is
-    # recorded as *unmeasured* rather than as free.
-    live_probe_cost_wait_seconds: float = Field(default=5.0, gt=0)
     # Where an archived probe run is published so it can be diffed against the next one (AG-13,
     # `D-2026-08-11-a-model-call-is-a-span-and-phoenix-is-a-deployment` left this half open).
     #

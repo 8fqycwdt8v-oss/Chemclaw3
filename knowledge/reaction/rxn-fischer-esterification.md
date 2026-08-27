@@ -11,6 +11,7 @@ source: seed-corpus
 tags:
 - esterification
 type: reaction
+valid_from: 2026-03-30
 ---
 
 Fischer esterification of acetic acid with ethanol, H2SO4 catalytic, reflux 6 h.

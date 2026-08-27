@@ -18,5 +18,5 @@ Route selection, scope boundary and the recommended conditions for the biaryl co
 Evidence: [[cites:rxn-suzuki-biaryl]], [[cites:campaign-biaryl-scope]],
 [[cites:opt-suzuki-conditions]], [[cites:playbook-pd-cross-coupling-scope]].
 
-Recommendation: 1.5 mol% Pd(OAc)2/SPhos, K2CO3, THF/water 4:1, 80 °C, rigorously degassed. Isolated
-yield 76%; do not optimise on LCAP.
+Recommendation: 1.5 mol% Pd(OAc)2 (ligand-free, as [[rxn-suzuki-biaryl]] ran), K2CO3, THF/water
+4:1, 80 °C, rigorously degassed. Isolated yield 76%; do not optimise on LCAP.

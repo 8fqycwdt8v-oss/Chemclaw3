@@ -1,13 +1,8 @@
-"""The HTTP facts more than one layer needs: what an address means, and how a failure is quoted.
+"""The HTTP fact more than one layer needs: what an address means.
 
-Two small primitives rather than a module each, because both answer "how do we talk about somebody
-else's HTTP endpoint" and both exist only to stop a second copy appearing:
+One primitive rather than a module of its own, because it answers "how do we talk about somebody
+else's HTTP endpoint" and exists only to stop a second copy appearing:
 
-- **`error_detail`** — several modules (the Nextflow launcher, the Entra token/OBO exchanges) turn
-  an upstream failure into an exception or log line. Interpolating the raw `response.text` can
-  splatter an unbounded upstream body — an HTML error page, a reverse-proxy dump — into that record.
-  This caps the body once so every caller reports "<status> <reason>: <body>" instead of a whole
-  page.
 - **`LOOPBACK_HOSTS` / `is_loopback_url`** — the one definition of "this address cannot be reached
   from the network", which two unrelated safety rules ask about: the front door refuses to boot
   unauthenticated on a non-loopback *bind* (`api.middleware`, SEC-2), and a connector manifest
@@ -15,15 +10,17 @@ else's HTTP endpoint" and both exist only to stop a second copy appearing:
   questions differ; the answer must not, or one of them would be enforcing a weaker notion of
   "safe address" than the other claims. It lives here because `connectors -> api` is an edge the
   layering policy explicitly removed (`tests/test_layering.py`).
+
+There was a second primitive, `error_detail`, and the paragraph above used to say in the present
+tense that "several modules (the Nextflow launcher, the Entra token/OBO exchanges)" called it. All
+three were deleted — the launcher with the HPC tier in
+`D-2026-08-26-semiempirical-is-the-whole-tier`, the OBO exchange in
+`D-2026-08-15-a-capability-that-ships-off-is-not-a-capability` — and the function outlived its
+callers while the prose outlived the function. Whoever needs a bounded quotation of somebody else's
+error body again should write it back with the caller that needs it, not before.
 """
 
 from urllib.parse import urlsplit
-
-import httpx
-
-# How many characters of an upstream error body to keep: enough to diagnose the failure, not a whole
-# error page. A module constant (like the audit/tool-arg previews elsewhere), not a tuning knob.
-_ERROR_BODY_MAX_CHARS = 500
 
 # Loopback interfaces: an address here is reachable only from the local host, so an unauthenticated
 # service or connector on one is not a network-exposed footgun. Anything else is — notably the
@@ -50,18 +47,3 @@ def is_loopback_url(url: str) -> bool:
     except ValueError:
         return False
     return host in LOOPBACK_HOSTS
-
-
-def error_detail(response: httpx.Response) -> str:
-    """Return a bounded "STATUS REASON: BODY" summary of a failed HTTP response for logs/errors.
-
-    The body is truncated to `_ERROR_BODY_MAX_CHARS` (with an ellipsis when cut) so a large or
-    hostile upstream response cannot flood the log. On a failed request an OAuth/launcher body
-    carries an error description, not a credential, so a bounded excerpt is safe and useful for
-    diagnosis.
-    """
-    body = response.text
-    if len(body) > _ERROR_BODY_MAX_CHARS:
-        body = body[:_ERROR_BODY_MAX_CHARS] + "…"
-    reason = response.reason_phrase or ""
-    return f"{response.status_code} {reason}: {body}".rstrip()

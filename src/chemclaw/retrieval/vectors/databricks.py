@@ -143,12 +143,14 @@ def open_databricks_client() -> DatabricksSearchClient:
 
     The token is registered with the log-redaction inventory **here, where it is read** — the
     placement `open_qdrant_client` uses and the one that cannot drift from the value it protects.
+    The field is also a `SecretStr` in `_SECRET_SETTINGS`, which is what covers it whatever
+    configuration source supplied it; see the fuller note beside the Qdrant client.
     """
     client_class = _client_class()
     register_secret_env("CHEMCLAW_VECTOR_STORE_API_KEY")
     client: DatabricksSearchClient = client_class(
         workspace_url=settings.vector_store_url,
-        personal_access_token=settings.vector_store_api_key or None,
+        personal_access_token=settings.vector_store_api_key.get_secret_value() or None,
         # The client prints a support notice to stdout on construction. In a worker that is log
         # noise on every process start, and it is not information an operator acts on.
         disable_notice=True,

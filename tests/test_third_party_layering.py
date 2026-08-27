@@ -262,6 +262,11 @@ _ALLOWED_MODULE_STACKS: dict[Edge, str] = {
     ("chemclaw.cli", "http"): "connectors_dev and mock_llm serve real ASGI apps",
     ("chemclaw.cli", "httpx"): "the live-storm driver talks to the front door",
     ("chemclaw.cli", "temporal"): "live_jobs and live_storm poll real workflows",
+    ("chemclaw.cli", "langgraph"): (
+        "trajectory_census reads stored transcripts, whose rows decode to LangChain messages — "
+        "the tool-call sequences it counts live on `AIMessage.tool_calls`, and a census that "
+        "re-modelled them would count a copy of the record rather than the record"
+    ),
 }
 
 # Function-scope-only exceptions: a stack this package must not depend on at *import* time. The
@@ -311,12 +316,8 @@ _KNOWN_LEAKS: dict[Site, str] = {
         "different ones, and an earlier attempt to unify them had to be reverted. Tracked in "
         "BACKLOG.md; until the helper exists this edge is debt, not design"
     ),
-    ("src/chemclaw/agent/interaction_tools.py", "temporal"): (
-        "the same launch idiom, and the copy that has already diverged: `start_approval` omits "
-        "the `id_reuse_policy` the other four pass. Same fix, same BACKLOG row"
-    ),
     ("src/chemclaw/templates/registry.py", "temporal"): (
-        "the fifth copy of the launch idiom. `templates/` is core's own sequencer, so starting a "
+        "the last copy of the launch idiom. `templates/` is core's own sequencer, so starting a "
         "`TemplateWorkflow` is legitimate work — reaching for `temporalio` to do it is what is not"
     ),
     ("src/chemclaw/agent/job_results.py", "temporal"): (

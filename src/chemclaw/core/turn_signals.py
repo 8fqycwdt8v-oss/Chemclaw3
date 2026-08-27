@@ -42,12 +42,17 @@ from typing import Any
 from langgraph.config import get_stream_writer
 from pydantic import BaseModel
 
+from chemclaw.core.plan_context import get_current_plan_link
+
 
 class JobSignal(BaseModel):
     """A durable job a tool started during this turn."""
 
     job_id: str
     kind: str
+    # The plan step the launch served, read ambiently at emit time (D-2026-08-27). Empty when the
+    # launch was not made from a plan step — a template step, the CLI, a turn with no plan.
+    plan_step: str = ""
 
 
 class QuestionSignal(BaseModel):
@@ -62,24 +67,6 @@ class ProposalSignal(BaseModel):
 
     note_id: str
     reference: str
-
-
-class ApprovalSignal(BaseModel):
-    """A durable approval hold a tool opened during this turn (gap RCH-3).
-
-    `ApprovalRequestEvent` has carried an `approval_id` field — documented as "the durable hold's
-    handle, so a surface can actually answer it via `POST /approvals/{id}/decision`" — since the
-    hold was built, but nothing ever populated it: `start_approval` returns the id *into the
-    model's context*, and the runner only sees the model's streamed updates. So every approval
-    event reached the UI with an empty handle, and a surface could render the request but not the
-    button that answers it, which is the whole point of the hold.
-
-    Carried as a turn signal for the same reason as `JobSignal`: the id must come from the tool
-    that opened the hold, not from anything the model can author.
-    """
-
-    prompt: str
-    approval_id: str
 
 
 class ToolFailureSignal(BaseModel):
@@ -110,7 +97,7 @@ class ToolFailureSignal(BaseModel):
     call_id: str = ""
 
 
-Signal = JobSignal | ProposalSignal | QuestionSignal | ApprovalSignal | ToolFailureSignal
+Signal = JobSignal | ProposalSignal | QuestionSignal | ToolFailureSignal
 
 
 # The key a signal rides under in the graph's custom stream. Namespaced because the channel is
@@ -171,8 +158,16 @@ def stream_writer_or_none() -> Any | None:
 
 
 def record_job_started(job_id: str, kind: str) -> None:
-    """Note that `kind` job `job_id` was launched. A no-op where nothing is streaming."""
-    _emit(JobSignal(job_id=job_id, kind=kind))
+    """Note that `kind` job `job_id` was launched. A no-op where nothing is streaming.
+
+    The plan step is folded in here rather than threaded through every launcher: the link is
+    ambient by design (`core.plan_context`, bound per tool call by the harness's middleware), so
+    reading it at the one place every launch announcement passes stamps all of them uniformly —
+    the connector jobs, the report, the memory synthesis — and a caller outside the harness
+    contributes the empty string without knowing the field exists.
+    """
+    plan_step, _ = get_current_plan_link()
+    _emit(JobSignal(job_id=job_id, kind=kind, plan_step=plan_step))
 
 
 def record_proposal(note_id: str, reference: str) -> None:
@@ -183,11 +178,6 @@ def record_proposal(note_id: str, reference: str) -> None:
 def record_question(question: str, options: list[str]) -> None:
     """Note that the agent asked the chemist to disambiguate. A no-op where nothing streams."""
     _emit(QuestionSignal(question=question, options=options))
-
-
-def record_approval_request(prompt: str, approval_id: str) -> None:
-    """Note that a durable approval hold was opened. A no-op where nothing is streaming."""
-    _emit(ApprovalSignal(prompt=prompt, approval_id=approval_id))
 
 
 def record_tool_failure(tool: str, message: str, call_id: str = "") -> None:

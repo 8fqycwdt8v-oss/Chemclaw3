@@ -51,7 +51,8 @@
     },
     "job_started": {
       "job_id": "str",
-      "kind": "str"
+      "kind": "str",
+      "plan_step": "str"
     },
     "note_proposed": {
       "note_id": "str",

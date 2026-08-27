@@ -75,10 +75,18 @@ def test_the_graph_is_connected_enough_to_traverse() -> None:
     """A corpus of islands would validate perfectly and exercise no graph query at all."""
     graph = build_graph(_KNOWLEDGE)
     assert graph.number_of_edges() >= 40
-    # The query typed edges were added for, against real content rather than a fixture.
-    assert related(graph, "rxn-suzuki-biaryl", "precursor-of") == [
-        "compound-4-bromoanisole",
-        "compound-phenylboronic-acid",
+    # The queries typed edges were added for, against real content rather than a fixture — in the
+    # direction the vocabulary declares. This test used to pin the *inverse* (`precursor-of`
+    # asserted from the reaction toward its starting materials), which is how twelve backwards
+    # edges merged green and `product-of` came to point both ways in one graph
+    # (`docs/archive/REVIEW-2026-08-27-knowledge-system-analysis.md` §1).
+    assert related(graph, "compound-4-bromoanisole", "precursor-of") == [
+        "compound-4-methoxybiphenyl",
+    ]
+    assert related(graph, "rxn-suzuki-biaryl", "part-of") == ["campaign-biaryl-scope"]
+    assert related(graph, "compound-pd-oac2", "catalyzes") == [
+        "rxn-buchwald-amination",
+        "rxn-suzuki-biaryl",
     ]
 
 
@@ -120,14 +128,20 @@ def test_the_corpus_contains_a_declared_conflict() -> None:
     assert any(conflict.kind == "declared" for conflict in conflicts)
 
 
-def test_a_computed_note_cites_the_calculation_behind_it() -> None:
-    """The crosslink (STO-7) with real content on both ends of it."""
-    notes = {note.id: note for note in _notes()}
-    computed = notes["job-aspirin-thermo"]
-    assert computed.calc_refs
-    assert computed.artifact_refs
-    # An artifact citation implies the run that produced it, so both keys resolve from one note.
-    assert len(cited_calculations(computed)) == 2
+def test_the_seed_corpus_cites_no_calculation_the_store_cannot_back() -> None:
+    """A seed `calc_ref` is a fabricated key, and `kg-validate` now checks every key exists.
+
+    The corpus used to demonstrate the STO-7 crosslink with invented hex — exactly the "key
+    nothing produced" the existence gate (`unresolved_calc_refs`) was built to catch, so the
+    demonstration failed the gate on every fresh database. The crosslink itself is proven with
+    real stored keys in `tests/test_crosslink.py`; here, every seed job-result must instead say
+    in prose why its refs are empty, which is the discipline a real note is held to.
+    """
+    for note in _notes():
+        assert cited_calculations(note) == [], (
+            f"seed note {note.id!r} cites a calculation no store holds; "
+            "kg-validate fails on it against any fresh database"
+        )
 
 
 def test_the_seed_corpus_and_the_eval_corpus_stay_separate() -> None:

@@ -8,7 +8,7 @@ The line these tests hold is that a conflict is a *flag*, never a filter. Droppi
 be this layer deciding which of two curated notes is right, and it has no basis for that.
 """
 
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
@@ -453,9 +453,95 @@ def test_the_walk_stops_at_the_first_agreeing_candidate_instead_of_reading_the_w
     ordered = _Counting(
         (_note(f"s{i}", compound_smiles="CCO", confidence=0.8), 0.8) for i in range(500)
     )
+    probe, probe_confidence = list.__getitem__(ordered, 0)
     _Counting.reads = 0
-    assert conflicts_module._widest_disagreements(ordered, 0, 0.3, 3) == []
+    assert conflicts_module._widest_disagreements(ordered, probe, probe_confidence, 0.3, 3) == []
     assert _Counting.reads <= 6, (
         f"read {_Counting.reads} of 500 candidates to reject a group that agrees — the walk must "
         "stop at the first end inside the threshold, not scan past it"
     )
+
+
+# --- the dated corpus: the window classes and the sweep --------------------------------------
+
+
+def test_two_notes_with_overlapping_closed_windows_are_suspected() -> None:
+    """The sweep's positive case: closed windows that genuinely intersect must still pair."""
+    left = _note(
+        "a",
+        compound_smiles="CCO",
+        confidence=0.9,
+        valid_from=date(2026, 1, 1),
+        valid_to=date(2026, 3, 1),
+    )
+    right = _note(
+        "b",
+        compound_smiles="CCO",
+        confidence=0.1,
+        valid_from=date(2026, 2, 1),
+        valid_to=date(2026, 4, 1),
+    )
+    found = find_conflicts([left, right])
+    assert [(c.kind, c.pair()) for c in found] == [("suspected", ("a", "b"))]
+
+
+def test_a_run_note_and_a_retired_note_pair_when_their_windows_intersect() -> None:
+    """The mixed class: `valid_from`-only (a run) against a closed window (a retired note)."""
+    run = _note("run", compound_smiles="CCO", confidence=0.9, valid_from=date(2026, 2, 1))
+    retired = _note(
+        "old",
+        compound_smiles="CCO",
+        confidence=0.1,
+        valid_from=date(2026, 1, 1),
+        valid_to=date(2026, 6, 1),
+    )
+    # `as_of=None` scans the whole corpus, retired notes included.
+    assert [c.pair() for c in find_conflicts([run, retired])] == [("old", "run")]
+    # And the same pair with disjoint windows is a history, not a disagreement.
+    later = _note("later", compound_smiles="CCO", confidence=0.9, valid_from=date(2026, 7, 1))
+    assert find_conflicts([later, retired]) == []
+
+
+def test_a_disjoint_dated_corpus_scans_in_linear_time() -> None:
+    """The regression the review measured: closed non-overlapping windows restored O(N²).
+
+    The old walk's `_overlaps` rejection consumed a step without ending the walk, so a
+    one-note-per-day corpus — the exact structure `knowledge/README.md` advertises — walked its
+    whole group per note: 714 ms at 2,000 notes, 3.1 s at 4,000, clean 4× per doubling, returning
+    zero conflicts for the work. The sweep never examines a disjoint pair, so this corpus now
+    scans in ~10 ms. The ceiling is two orders of magnitude above the fixed cost and one below
+    the quadratic one, so it discriminates without being flaky on a slow runner.
+    """
+    import time as _time
+
+    base = date(2020, 1, 1)
+    notes = [
+        _note(
+            f"d{i}",
+            compound_smiles="CCO",
+            confidence=(i % 10) / 10,
+            valid_from=base + timedelta(days=i),
+            valid_to=base + timedelta(days=i),
+        )
+        for i in range(4000)
+    ]
+    start = _time.perf_counter()
+    assert find_conflicts(notes) == []
+    assert _time.perf_counter() - start < 1.5
+
+
+def test_two_spellings_of_one_molecule_land_in_one_conflict_group() -> None:
+    """Grouping canonicalizes the SMILES: `C1CCOC1` and `O1CCCC1` are both THF.
+
+    Grouped on the raw string they never paired, so the detector's recall depended on whoever
+    typed the frontmatter — silent under-detection nothing could see.
+    """
+    left = _note("a", compound_smiles="C1CCOC1", confidence=0.9)
+    right = _note("b", compound_smiles="O1CCCC1", confidence=0.1)
+    assert [c.pair() for c in find_conflicts([left, right])] == [("a", "b")]
+
+
+def test_a_self_contradiction_is_not_a_conflict() -> None:
+    """`[[contradicts:itself]]` is an authoring mistake, not a disagreement a reader can act on."""
+    note = _note("a", body="[[contradicts:a]]")
+    assert find_conflicts([note]) == []

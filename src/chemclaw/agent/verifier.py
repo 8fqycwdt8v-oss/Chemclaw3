@@ -60,7 +60,7 @@ from chemclaw.core.config import settings
 from chemclaw.core.metrics_bridge import record_metric
 from chemclaw.kg.note import cited_ids
 from chemclaw.retrieval.evidence import EvidenceChunk
-from chemclaw.retrieval.harness import Claim, verify_claims
+from chemclaw.retrieval.harness import Claim, groundable_ids, verify_claims
 
 logger = logging.getLogger(__name__)
 
@@ -194,8 +194,10 @@ def _deterministic_result(answer: str, evidence: list[EvidenceChunk]) -> Verific
     supported, _discarded = verify_claims([Claim(text=body, citations=citations)], evidence)
     is_ok = bool(supported)
     # On a miss, name the citation that actually failed to resolve (the fabricated one), not
-    # citations[0] — which may be a valid citation when only a later one is unretrieved.
-    retrieved = {chunk.source_note_id for chunk in evidence}
+    # citations[0] — which may be a valid citation when only a later one is unretrieved. The same
+    # id set `verify_claims` grounds against, so a document citation the gate accepts is never
+    # named as the offender here.
+    retrieved = groundable_ids(evidence)
     offending = next((c for c in citations if c not in retrieved), citations[0])
     return VerificationResult(
         claims=[ClaimCheck(text=body, supported=is_ok, cited_note_id=offending)],
@@ -338,6 +340,149 @@ def _default_client() -> Any:
     return build_chat_model("verifier")
 
 
+async def require_verifier_capability(*, client: Any | None = None) -> None:
+    """Refuse to start a deployment whose judge endpoint cannot enforce structured output.
+
+    On `openai_compatible`, a server that rejects `response_format` with a 400 — or accepts it and
+    returns prose — lands in `verify_answer`'s broad `except` and silently degrades **every**
+    judged answer to the deterministic citation gate for the life of the deployment. Measured
+    against a real loopback server (`tests/test_verifier.py`): the same contradicted-citation
+    answer a working judge scores `confidence=0.0, unsupported=True` comes back
+    `confidence=1.0, unsupported=False` degraded. `score_answer` flags the substitution per turn,
+    but a misconfiguration that is permanent deserves the `_require_anthropic_key` treatment: fail
+    at startup, naming what to fix, rather than as a counter that climbs quietly in production.
+
+    So this makes one real structured-output call against the routed `"verifier"` model before the
+    front door serves, and raises when the call fails or returns nothing parseable. Called from
+    `api/app.py::_lifespan` beside `check_connectors_at_startup` — the seam that already exists
+    because refusing to *start* is the only way to keep a misconfigured pod out of a rollout.
+
+    A no-op unless `verifier_enabled`, because the probe costs a model call and the degradation it
+    guards against cannot happen with the judge off. A no-op on `anthropic` too: `ChatAnthropic`
+    does not implement structured output via `response_format`, so the failure mode this probes for
+    does not exist there — and probing would make a startup depend on a paid external call.
+    """
+    if not settings.verifier_enabled or settings.llm_provider != "openai_compatible":
+        return
+    if client is None:
+        # The same cached client every verified turn will use, so the probe exercises the exact
+        # transport and binding the answers will — injected in tests, like `verify_answer`'s.
+        client = _default_client()
+    try:
+        async with asyncio.timeout(settings.verifier_timeout_seconds):
+            response = await client.with_structured_output(
+                VerificationResult, method="json_schema"
+            ).ainvoke(_verifier_prompt("capability probe", []))
+    except Exception as exc:
+        raise RuntimeError(
+            "verifier_enabled is on, but the configured openai_compatible endpoint failed a "
+            "structured-output probe (response_format json_schema) — every judged answer would "
+            "silently degrade to the deterministic citation gate, which certifies answers the "
+            "judge exists to catch. Fix the endpoint (or its model), or disable verifier_enabled."
+        ) from exc
+    if not isinstance(response, VerificationResult):
+        raise RuntimeError(
+            "verifier_enabled is on, but the configured openai_compatible endpoint accepted "
+            "response_format and returned prose instead of the requested JSON schema — the judge "
+            "cannot enforce structured output there, and every judged answer would silently "
+            "degrade to the deterministic citation gate. Fix the endpoint (or its model), or "
+            "disable verifier_enabled."
+        )
+
+
+async def judge_once(
+    answer: str, evidence: list[EvidenceChunk], *, client: Any
+) -> VerificationResult:
+    """One roll of the LLM judge — the raw scoring call, no band, no degrade, no fallback.
+
+    Extracted from `verify_answer` so the same call has exactly two callers and one definition:
+    the verified turn (which wraps it in the review band and the degrade-to-citation-gate
+    policy) and `cli.verifier_margin` (which measures the roll-to-roll spread of precisely this
+    call, and therefore must not be handed the band it exists to size).
+
+    Raises on any failure — a timeout, a transport error, a reply that is not the structured
+    model — because what to do about a failed roll is the caller's policy, and the two callers
+    disagree: the turn degrades, the measurement records a failed roll.
+    """
+    # Bounded by its own budget, because the judge is the one awaited call between the model's
+    # last token and the AnswerEvent that has no timeout anywhere beneath it: a stalled judge
+    # endpoint was charged to `service_turn_timeout_seconds` — minutes of a finished answer
+    # sitting undelivered — and the front-door deadline then tore down a turn that had already
+    # committed its exchange. On expiry the `TimeoutError` lands in the caller's policy, so a
+    # slow judge costs the score, never the answer. Per roll, deliberately: the band's rerolls
+    # each get the same budget rather than sharing one.
+    async with asyncio.timeout(settings.verifier_timeout_seconds):
+        # `with_structured_output` rather than a free-text parse: the judge's whole output is a
+        # `VerificationResult`, and letting the provider enforce that is what makes the failure
+        # mode "no structured answer" (raised below) instead of "prose that almost parses".
+        #
+        # **`method="json_schema"` is load-bearing, and its absence made this feature a
+        # no-op.** The default `"function_calling"` path renders the model through
+        # `convert_to_openai_tool`, which marks a field optional whenever it has a default — so
+        # `claims` (`default_factory=list`) and `verified_by` dropped out of `required` and the
+        # emitted schema demanded `confidence` alone. Measured against `claude-sonnet-5`: 8 of 8
+        # calls failed validation, the model either omitting `confidence` or returning the whole
+        # object as a JSON *string* inside `claims`. Both then degraded the judge to the citation
+        # gate **every time** — and `score_answer`'s third rule then appends "the judge did not
+        # run" and flags the answer. The net effect of switching `verifier_enabled` on was that
+        # every non-empty answer was flagged unconditionally, with nothing but a log line to say
+        # so. `json_schema` makes the provider enforce the whole model: 13 of 13 with no other
+        # change.
+        #
+        # `tests/test_verifier.py` asserts the *schema*, not the call, because that is the part
+        # that can be checked without a credential and is where the defect actually lived.
+        #
+        # **`off_stream_metering()` is what puts this call on the turn's bill.** Every other
+        # model call a turn makes happens inside the graph, so its usage rides the `messages`
+        # stream `api/graph_stream` meters — including the ones a *tool body* makes, which
+        # inherit the graph's callbacks through LangChain's ambient config. This one runs after
+        # the stream is exhausted (`api/runner_answer.build_answer_event`), so nothing was
+        # watching it: its tokens reached neither the budget guard, nor
+        # `chemclaw_tokens_total`, nor the `turn_costs` row. That is the same hole
+        # `agent/turn_usage.py` was moved to `agent/` to close for the template path.
+        #
+        # It belongs here and nowhere else in this repository: an explicit `callbacks` list
+        # replaces the inherited one, so the same call on an in-graph path would take that call
+        # *off* the stream that already meters it.
+        response = await client.with_structured_output(
+            VerificationResult, method="json_schema"
+        ).ainvoke(_verifier_prompt(answer, evidence), config=off_stream_metering())
+    if not isinstance(response, VerificationResult):
+        raise ValueError("the judge returned no structured VerificationResult")
+    return response
+
+
+async def _banded_verdict(
+    first: VerificationResult, answer: str, evidence: list[EvidenceChunk], *, client: Any
+) -> VerificationResult:
+    """The review band: re-roll a verdict that landed at the margin, and take the median.
+
+    D-2026-08-27's answer to the measured fact that the judge is stable where the answer is
+    unambiguous and unstable exactly where the threshold lives: a confidence within
+    `verifier_review_band` of `verifier_confidence_threshold` triggers up to
+    `verifier_band_rerolls` further rolls, and the roll with the **median confidence** is the
+    verdict — its claims travel with it, so the reported claims always belong to the reported
+    score. Outside the band the first roll stands unrerolled, which is what keeps the band's
+    cost confined to the answers that need it.
+
+    A reroll that fails is dropped rather than degrading the whole verdict: one judged roll is
+    already in hand, and the citation gate is a *weaker* answer than the judge's own median-so-far.
+    """
+    threshold = settings.verifier_confidence_threshold
+    band = settings.verifier_review_band
+    if band <= 0 or abs(first.confidence - threshold) > band:
+        return first
+    rolls = [first]
+    for _ in range(settings.verifier_band_rerolls):
+        record_metric(lambda metrics: metrics.increment("chemclaw_verifier_band_rerolls_total"))
+        try:
+            rolls.append(await judge_once(answer, evidence, client=client))
+        except Exception:
+            logger.warning("a review-band reroll failed; deciding from %d roll(s)", len(rolls))
+    rolls.sort(key=lambda result: result.confidence)
+    return rolls[len(rolls) // 2]
+
+
 async def verify_answer(
     answer: str, evidence: list[EvidenceChunk], *, client: Any | None = None
 ) -> VerificationResult:
@@ -369,48 +514,14 @@ async def verify_answer(
         # is the likelier of the two on the day the feature is switched on.
         if client is None:
             client = _default_client()
-        # Bounded by its own budget, because the judge is the one awaited call between the model's
-        # last token and the AnswerEvent that has no timeout anywhere beneath it: a stalled judge
-        # endpoint was charged to `service_turn_timeout_seconds` — minutes of a finished answer
-        # sitting undelivered — and the front-door deadline then tore down a turn that had already
-        # committed its exchange. On expiry the `TimeoutError` lands in the degrade path below,
-        # so a slow judge costs the score, never the answer.
-        async with asyncio.timeout(settings.verifier_timeout_seconds):
-            # `with_structured_output` rather than a free-text parse: the judge's whole output is a
-            # `VerificationResult`, and letting the provider enforce that is what makes the failure
-            # mode "no structured answer" (handled below) instead of "prose that almost parses".
-            #
-            # **`method="json_schema"` is load-bearing, and its absence made this feature a
-            # no-op.** The default `"function_calling"` path renders the model through
-            # `convert_to_openai_tool`, which marks a field optional whenever it has a default — so
-            # `claims` (`default_factory=list`) and `verified_by` dropped out of `required` and the
-            # emitted schema demanded `confidence` alone. Measured against `claude-sonnet-5`: 8 of 8
-            # calls failed validation, the model either omitting `confidence` or returning the whole
-            # object as a JSON *string* inside `claims`. Both land in the `except` below, so the
-            # judge degraded to the citation gate **every time** — and `score_answer`'s third rule
-            # then appends "the judge did not run" and flags the answer. The net effect of switching
-            # `verifier_enabled` on was that every non-empty answer was flagged unconditionally,
-            # with nothing but a log line to say so. `json_schema` makes the provider enforce the
-            # whole model: 13 of 13 with no other change.
-            #
-            # `tests/test_verifier.py` asserts the *schema*, not the call, because that is the part
-            # that can be checked without a credential and is where the defect actually lived.
-            #
-            # **`off_stream_metering()` is what puts this call on the turn's bill.** Every other
-            # model call a turn makes happens inside the graph, so its usage rides the `messages`
-            # stream `api/graph_stream` meters — including the ones a *tool body* makes, which
-            # inherit the graph's callbacks through LangChain's ambient config. This one runs after
-            # the stream is exhausted (`api/runner_answer.build_answer_event`), so nothing was
-            # watching it: its tokens reached neither the budget guard, nor
-            # `chemclaw_tokens_total`, nor the `turn_costs` row. That is the same hole
-            # `agent/turn_usage.py` was moved to `agent/` to close for the template path.
-            #
-            # It belongs here and nowhere else in this repository: an explicit `callbacks` list
-            # replaces the inherited one, so the same call on an in-graph path would take that call
-            # *off* the stream that already meters it.
-            response = await client.with_structured_output(
-                VerificationResult, method="json_schema"
-            ).ainvoke(_verifier_prompt(answer, evidence), config=off_stream_metering())
+        # One roll (`judge_once` carries the how and the why of the call itself), then the review
+        # band: a verdict at the margin is re-rolled and decided by the median, because measured,
+        # the judge is stable where the answer is unambiguous and unstable exactly where the
+        # threshold lives (D-2026-08-27). A failed *first* roll lands in the degrade path below; a
+        # failed reroll is the band's own business.
+        response = await _banded_verdict(
+            await judge_once(answer, evidence, client=client), answer, evidence, client=client
+        )
     except Exception:
         # An unreachable/failing judge endpoint must not weaken verification below the offline
         # gate: degrade to the deterministic citation check (which needs no network) instead of
@@ -420,14 +531,9 @@ async def verify_answer(
         )
         record_metric(lambda metrics: metrics.increment("chemclaw_verifier_degraded_total"))
         return _deterministic_result(answer, evidence)
-    if isinstance(response, VerificationResult):
-        # The judge does not author this field — it is a property of *which check ran*, not of what
-        # the check concluded, and a model that emitted it would be asserting its own reliability.
-        return response.model_copy(update={"verified_by": "judge"})
-    # The model returned nothing parseable: fall back to the deterministic gate so a flaky verifier
-    # degrades to the citation check rather than dropping verification entirely.
-    record_metric(lambda metrics: metrics.increment("chemclaw_verifier_degraded_total"))
-    return _deterministic_result(answer, evidence)
+    # The judge does not author this field — it is a property of *which check ran*, not of what
+    # the check concluded, and a model that emitted it would be asserting its own reliability.
+    return response.model_copy(update={"verified_by": "judge"})
 
 
 class TurnReview(BaseModel):

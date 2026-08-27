@@ -142,6 +142,17 @@ class LlmSettings(BaseSettings):
     # unsupported; the deterministic citation gate still checks every output regardless. Sized
     # like `gather_evidence_max_chars`, the same instrument one layer down.
     verifier_evidence_max_chars: int = Field(default=60_000, ge=1)
+    # The review band around the threshold, inside which a verdict is re-rolled and decided by
+    # the median (D-2026-08-27-a-verdict-at-the-margin-is-a-coin-toss). Measured, not chosen: the
+    # judge's roll-to-roll spread is a margin effect — 0.000 over 32 rolls on grounded answers,
+    # up to 0.167 deviation from the median exactly where the threshold lives — so the default is
+    # that measured 0.167 rounded up to 0.2 (`make live-verifier-margin`, 2026-08-27, artifact in
+    # docs/archive/). Re-fitting it on a deployment's own answers is the same command. `0`
+    # switches the band off and restores the single-roll verdict. The cost is
+    # `verifier_band_rerolls` extra judge calls only on answers that land inside the band, each
+    # under its own `verifier_timeout_seconds`.
+    verifier_review_band: float = Field(default=0.2, ge=0, le=0.5)
+    verifier_band_rerolls: int = Field(default=2, ge=1)
     # The per-protocol condensation call's own deadline (`agent.condense`). Per *map unit*, so
     # one stalled extraction costs one row of the comparison and never the turn — the same
     # degrade-per-item rule the verifier applies to the whole answer, one level down. Larger than
@@ -182,6 +193,11 @@ class LlmSettings(BaseSettings):
     # round trip on the interactive path. Entries are keyed by provider+model+dim as well as the
     # text, so a config change can never serve the previous model's vectors. 0 disables the cache.
     embedding_cache_size: int = Field(default=2048, ge=0)
+    # The most texts one provider request may carry. A reindex used to post the *entire* changed
+    # set as a single request — a first run over a large corpus exceeded typical batch/token
+    # ceilings, and because the failure was all-or-nothing under retry, the retry re-sent the
+    # same oversized payload. Chunking bounds the request; order is preserved across chunks.
+    embedding_batch_size: int = Field(default=256, ge=1)
 
     @model_validator(mode="after")
     def _llm_provider_config(self) -> Self:

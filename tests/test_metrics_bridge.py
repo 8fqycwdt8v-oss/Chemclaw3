@@ -17,21 +17,21 @@ from types import SimpleNamespace
 from chemclaw.core.metrics import METRICS
 from chemclaw.kg.note import Note
 from chemclaw.kg.pr_gate import propose_note
-from chemclaw.kg.submission import NoteSubmission
+from chemclaw.kg.submission import NoteSubmission, SubmissionOutcome
 
 
 class _Submitter:
     """A submitter that succeeds, so the count reflects a note that reached the branch."""
 
-    async def submit(self, submission: NoteSubmission) -> str:
+    async def submit(self, submission: NoteSubmission) -> SubmissionOutcome:
         """Return a stable reference without touching git."""
-        return f"ref:{submission.branch}"
+        return SubmissionOutcome(reference=f"ref:{submission.branch}")
 
 
 class _FailingSubmitter:
     """A submitter that raises, standing in for a broken token or unreachable remote."""
 
-    async def submit(self, submission: NoteSubmission) -> str:
+    async def submit(self, submission: NoteSubmission) -> SubmissionOutcome:
         """Fail the way a real submitter fails."""
         raise RuntimeError("git push rejected")
 

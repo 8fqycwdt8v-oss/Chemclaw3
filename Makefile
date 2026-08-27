@@ -39,7 +39,7 @@ SHELL := bash
 
 .DEFAULT_GOAL := help
 
-.PHONY: help install lint type test cov check ci chat db-migrate db-grants schedules-apply kg-validate eval eval-strict eval-baseline eval-baseline-check eln-validate skill-validate connector-validate datasource-validate sink-validate sink-schema template-validate connectors prose-validate helm-validate explain user-erase reindex reindex-full up down phoenix-up phoenix-down phoenix-publish deps-audit live-infra live-infra-down live-up live-down live-status live-jobs live-probes live-data live-plan-gate live-degradation live-storm live-soak live-soak-report leak-probe mutants mutant-results
+.PHONY: help install lint type test cov check ci chat db-migrate db-grants schedules-apply kg-validate proposals-reconcile synthesize eval eval-strict eval-baseline eval-baseline-check eln-validate skill-validate connector-validate datasource-validate sink-validate sink-schema template-validate connectors prose-validate helm-validate explain user-erase reindex reindex-full up down phoenix-up phoenix-down phoenix-publish deps-audit live-infra live-infra-down live-up live-down live-status live-jobs live-probes live-verifier-margin trajectory-census live-data live-plan-gate live-degradation live-storm live-soak live-soak-report leak-probe mutants mutant-results
 
 help:  ## List every target with its one-line description (the default).
 	@# Reads the `## ` comments beside each target, so a new target documents itself the day it is
@@ -104,6 +104,13 @@ schedules-apply:  ## Create/update the Temporal Schedules for the periodic backg
 
 kg-validate:  ## Validate the knowledge graph (schema, duplicate ids, broken links, citations).
 	uv run python -m chemclaw.cli.validate_kg
+
+proposals-reconcile:  ## Report merged proposal rows whose note the corpus does not hold (D-2026-08-27).
+	uv run python -m chemclaw.cli.reconcile_proposals
+
+synthesize:  ## Start a memory-synthesis job: KIND=campaign|playbook|optimization|observation-promotion [FRESH=1].
+	@test -n "$(KIND)" || { echo "usage: make synthesize KIND=<kind> [FRESH=1]"; exit 64; }
+	uv run python -m chemclaw.cli.synthesize $(KIND) $(if $(filter 1,$(FRESH)),--fresh,)
 
 eval:  ## Score the versioned eval case-set and print the citable report (Phase 2b).
 	uv run python -m chemclaw.evals.harness
@@ -342,6 +349,12 @@ live-jobs:  ## Run a real durable job end to end (Temporal + connector worker + 
 
 live-probes:  ## Ask the running front door the live probe set (needs ANTHROPIC_API_KEY).
 	uv run python -m chemclaw.cli.live_probes $(ARGS)
+
+live-verifier-margin:  ## Re-roll the raw judge and measure its margin at the threshold (needs a model credential).
+	uv run python -m chemclaw.cli.verifier_margin $(ARGS)
+
+trajectory-census:  ## Count recurring tool-call trajectories over the stored sessions (the distiller's trigger).
+	uv run python -m chemclaw.cli.trajectory_census $(ARGS)
 
 # The corpus half of the same question `live-probes` asks of the model: not "did a tool answer"
 # but "is the number in the answer the number in the paper". Checks every published measurement

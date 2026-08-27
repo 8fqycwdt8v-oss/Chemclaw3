@@ -18,6 +18,7 @@ Three properties matter, and none can be proven without a live backend:
 import asyncio
 
 import pytest
+from psycopg_pool import AsyncConnectionPool
 
 from chemclaw.core import db
 from chemclaw.core.config import settings
@@ -232,3 +233,116 @@ def test_pooling_binds_the_pool_gauges_so_every_pooled_process_reports_them(
             assert name in rendered, f"{name} is not exposed by a process that opened a pool"
 
     asyncio.run(_run())
+
+
+def test_a_second_event_loop_gets_its_own_pool_rather_than_borrowing_a_broken_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pool belongs to the loop that opened it, so the key has to name the loop.
+
+    `psycopg_pool` binds its waiter futures and background workers to the loop the pool was opened
+    in. `_pool_for` keyed only on `(dsn, options)`, so any coroutine on any loop in the process got
+    the *same* object — and a checkout queued on loop-2 was never woken by the hand-off callback
+    running on loop-1. Measured with `max_size=1` and a `pool_timeout` of 8 s, the holder releasing
+    at t=1.00 s: the cross-loop waiter was served after **8.01 s** (its own timeout expiring),
+    against **1.00 s** for the identical hand-off on the pool's own loop.
+
+    `evals/retrieval._run_sync` creates exactly that second loop, on purpose, when a metric is
+    invoked from a coroutine — and then blocks the first on `thread.join()` for the whole wait.
+    """
+    monkeypatch.setattr(settings, "pg_pool_min_size", 0)
+    monkeypatch.setattr(settings, "pg_pool_max_size", 1)
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        async with db.pooling():
+            async with db.connection(settings.postgres_dsn):
+                pass
+            here = id(asyncio.get_running_loop())
+            mine = {pool for key, pool in db._POOLS.items() if key[0] == here}
+            assert mine, "the first loop opened no pool, so this test proves nothing"
+
+            def _second_loop() -> set[object]:
+                """A second loop in the same process — what `evals/retrieval._run_sync` starts."""
+
+                async def _touch() -> set[object]:
+                    async with db.connection(settings.postgres_dsn):
+                        pass
+                    there = id(asyncio.get_running_loop())
+                    return {pool for key, pool in db._POOLS.items() if key[0] == there}
+
+                return asyncio.run(_touch())
+
+            theirs = await asyncio.to_thread(_second_loop)
+
+        assert theirs, "the second loop's checkout was served by no pool of its own"
+        assert not (mine & theirs), (
+            "the second loop was handed a pool bound to the first loop's futures; its checkouts "
+            "are woken by nothing and are served only when the pool timeout expires"
+        )
+
+    asyncio.run(_run())
+
+
+def test_the_reported_per_process_ceiling_counts_pools_and_not_processes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`chemclaw_pg_pool_max_size` is the per-process half of the fleet budget, so it must be true.
+
+    Two defects, one number. `bind_pool_metrics` reported `settings.pg_pool_max_size` — *one*
+    pool's ceiling — while a process routinely holds more than one: `db.py` deliberately keys pools
+    on `(dsn, options)` so `/readyz`'s 2 s-bounded connection stays out of the stores' 30 s pool,
+    and the LangGraph checkpointer opens a third, autocommit pool that `pool_stats` could not see
+    at all. Measured in one process against a live server: three pools, 48 connections, reported as
+    16 — which puts the shipped chart at ~184 real connections against the
+    `postgres.maxConnections: 136` its values file says is exactly what it provisions.
+
+    So the gauge sums the `max_size` of every pool this process actually holds, foreign ones
+    included, and the checkpointer registers its pool instead of the metrics learning about it
+    twice.
+    """
+    monkeypatch.setattr(settings, "pg_pool_max_size", 4)
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        registry = Metrics()
+        monkeypatch.setattr("chemclaw.core.metrics.METRICS", registry)
+        async with db.pooling():
+            # The stores' pool and `/readyz`'s differently-bounded one: two keys, by design.
+            async with db.connection(settings.postgres_dsn):
+                pass
+            async with db.connection(settings.postgres_dsn, statement_timeout_seconds=2.0):
+                pass
+            # And the pool `core.db` does not build — the checkpointer's shape.
+            foreign = AsyncConnectionPool(
+                conninfo=settings.postgres_dsn,
+                kwargs={"autocommit": True},
+                min_size=0,
+                max_size=settings.pg_pool_max_size,
+                open=False,
+            )
+            await foreign.open()
+            db.register_pool(foreign)
+            try:
+                reported = _gauge(registry.render(), "chemclaw_pg_pool_max_size")
+                stats = db.pool_stats()
+            finally:
+                db.unregister_pool(foreign)
+                await foreign.close()
+
+        assert reported == 3 * settings.pg_pool_max_size, (
+            f"this process may open {3 * settings.pg_pool_max_size} connections and reports "
+            f"{reported:.0f}; the fleet budget check is made against this number"
+        )
+        # And the foreign pool's saturation is legible at all, which it was not before.
+        assert stats["pool_size"] >= 1
+
+    asyncio.run(_run())
+
+
+def _gauge(rendered: str, name: str) -> float:
+    """The value of one gauge in a rendered exposition."""
+    for line in rendered.splitlines():
+        if line.startswith(f"{name} "):
+            return float(line.split(" ", 1)[1])
+    raise AssertionError(f"{name} is not in the exposition")

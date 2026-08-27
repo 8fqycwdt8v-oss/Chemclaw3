@@ -539,6 +539,30 @@ def test_the_run_is_attributed_to_the_turns_actor(client: _FakeClient) -> None:
     assert payload.requested_by == "user-7"
 
 
+def test_the_run_is_stamped_with_the_plan_step_it_was_launched_for(client: _FakeClient) -> None:
+    """The ambient plan link (D-2026-08-27) travels onto the input — never authored by the model."""
+    from chemclaw.core.plan_context import reset_current_plan_link, set_current_plan_link
+
+    tool = build_job_tool("calc", _SPEC)
+    token = set_current_plan_link("run the conformer search", "plan-hash-1")
+    try:
+        _launch(tool, smiles="CCO")
+    finally:
+        reset_current_plan_link(token)
+    payload: ConnectorJobInput = client.calls[0]["input"]
+    assert payload.plan_step == "run the conformer search"
+    assert payload.plan_hash == "plan-hash-1"
+
+
+def test_a_launch_outside_any_plan_stamps_the_empty_link(client: _FakeClient) -> None:
+    """A template step or CLI call says "not launched from a plan step", never a stale one."""
+    tool = build_job_tool("calc", _SPEC)
+    _launch(tool, smiles="CCO")
+    payload: ConnectorJobInput = client.calls[0]["input"]
+    assert payload.plan_step == ""
+    assert payload.plan_hash == ""
+
+
 # --- inline_wait_seconds: one tool for the fast and the slow case (D-114) ----------------
 
 

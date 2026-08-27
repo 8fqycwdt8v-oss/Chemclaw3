@@ -40,6 +40,7 @@ from chemclaw.durable.memory_jobs import publish_memory_note_activity
 from chemclaw.durable.notify import record_session_event_activity
 from chemclaw.kg.note import Note
 from chemclaw.kg.pr_gate import propose_note
+from chemclaw.memory.jobs import SynthesisUnit
 from tests.fixtures.connectors.fixture.workflows import FixtureJobWorkflow
 from tests.temporal_env import pydantic_client, start_env_or_skip
 
@@ -90,11 +91,14 @@ def test_the_publish_activity_calls_the_pr_gate_the_way_the_pr_gate_expects(
     monkeypatch.setattr("chemclaw.durable.memory_jobs.default_submitter", lambda: object())
 
     note = Note(id="n", type="job-result", created_by="agent", body="no links")
-    assert asyncio.run(publish_memory_note_activity(note)) == "pr://note/n"
+    unit = SynthesisUnit(note=note, retirements=[])
+    assert asyncio.run(publish_memory_note_activity(unit)) == "pr://note/n"
     assert seen["note"] is note
     # The dependency list is passed, not omitted — a note that links a compound must carry it into
-    # the same PR or the link dangles on the branch it is proposed on.
+    # the same PR or the link dangles on the branch it is proposed on. The retirements ride the
+    # same submission as `superseded`, which is what makes a supersede atomic (one PR, one merge).
     assert seen["dependencies"] == []
+    assert seen["superseded"] == []
 
 
 def test_a_connector_workflow_returns_a_well_formed_envelope(

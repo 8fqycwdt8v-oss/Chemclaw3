@@ -13,11 +13,11 @@ interface with swappable backends (in-memory for tests, Postgres for real), and
 import asyncio
 import logging
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import datetime
 from typing import Any, Protocol, runtime_checkable
 
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, Field, model_validator
 
 from chemclaw.core.chem import require_canonical_smiles
 from chemclaw.core.ids import stable_hash
@@ -30,6 +30,16 @@ ResultPayload = dict[str, Any]
 
 # The version of **ChemClaw's own** contribution to a stored result — the half no `calc_version`
 # covers.
+#
+# **The calculation server has a constant of the same name, and the two are composed rather than
+# compared.** `remote_key` folds this value into a `params_hash` the server has *already* folded its
+# own epoch into, so the stored address carries both and neither side has to know the other's
+# number: a bump here re-addresses every `calc` row without the server moving, and a bump there does
+# the same without this file moving. They are two independent invalidators, not one constant with
+# two homes — which is why nothing here asserts equality with the constant of the same name in
+# `Chemclaw3-mcp`'s calculation server, and why a test that did would go red on a legitimate
+# one-sided bump. `tests/test_calc_remote.py` holds the relationship that actually exists, in
+# `test_the_two_epochs_compose_rather_than_having_to_match`.
 #
 # **It is folded in wherever a key is assembled, and getting that wrong is silent.**
 # `CalculationKey.build` is the original and folds it in; every `calc` key comes back from the
@@ -88,7 +98,16 @@ class CalculationKey(BaseModel):
     the same input with the same parameters, under the same `CALCULATION_EPOCH`.
     `calc_version` is what prevents a model/method update from returning a pre-update
     cached result; the epoch is what prevents a *ChemClaw*-side fix or payload change
-    from doing the same, and it is why `build` is the only honest way to make a key.
+    from doing the same.
+
+    **`build` is not the live path, and a reader verifying an epoch bump through it verifies
+    nothing.** Every `calc` key in a deployment comes back from the calculation server as four
+    parts and is assembled by `connectors.calc.remote.remote_key`, which folds the epoch in there;
+    `build` has no caller in `src/` since the physics left. It is kept rather than deleted because
+    it is the one definition of the fold the suite can exercise — hand-folding the epoch across the
+    seven test files that construct keys would put the rule in the tests and leave `src/` with
+    none — but the two folds are separate code and a new way of assembling a key is a new place to
+    fold the epoch.
 
     **`calc_version` names every program whose output survives into the payload, and no program
     that does not run** (D-2026-08-01-a-key-names-what-ran) — a calculation that composes two
@@ -104,10 +123,30 @@ class CalculationKey(BaseModel):
     for.
     """
 
-    calc_type: str
-    calc_version: str
-    input_hash: str
-    params_hash: str
+    # **Constrained because `as_str()` below is the `calculation_results` primary key**, and its
+    # four fields arrive verbatim from the calculation server's `calculation_key` answer — which
+    # `connectors/calc/remote.py` is right to take rather than re-derive, and which means the
+    # identity of every cached row was a string this process never checked. Unchecked, the flat form
+    # was ambiguous: `calc_type="a@b", calc_version="c"` and `calc_type="a", calc_version="b@c"`
+    # both flatten to `a@b@c:d:e`, so the second upserts over the first and `cached_compute` serves
+    # the wrong payload under a key it believes it derived. `("", "", "", "")` built happily and
+    # flattened to `"@::"`.
+    #
+    # **Only the ambiguity is closed, and `calc_version` is deliberately left free of both
+    # delimiters' exclusion.** A real version carries them — `esol-delaney@2004` the `@`,
+    # `cal-0.28733:-29.3116` the `:` — which is the measured fact that made the key cross the wire
+    # as four parts. Barring `@` from `calc_type` fixes the parse from the left, barring `:` from
+    # the two hashes fixes it from the right, and the version is then whatever lies between: the
+    # encoding is a bijection without constraining the one field that needs to be free. Whitespace
+    # is excluded everywhere because a newline inside a primary key would let one key's text carry
+    # another's, and no producer has ever emitted one.
+    #
+    # A pattern here rather than at the reader alone: `kg/note.py::_CALC_REF` validates this shape
+    # at the PR-gate, so the check existed only on the way *out* of the system.
+    calc_type: str = Field(min_length=1, pattern=r"^[^\s@:]+$")
+    calc_version: str = Field(min_length=1, pattern=r"^\S+$")
+    input_hash: str = Field(min_length=1, pattern=r"^[^\s:]+$")
+    params_hash: str = Field(min_length=1, pattern=r"^[^\s:]+$")
 
     @classmethod
     def build(
@@ -282,6 +321,10 @@ class InMemoryStore:
     async def put(self, stored: StoredResult) -> None:
         """Persist `stored`, overwriting any existing result for its key."""
         self._data[stored.key.as_str()] = stored
+
+    async def known(self, keys: Sequence[str]) -> set[str]:
+        """Which of `keys` the cache holds — parity with the Postgres store's existence probe."""
+        return {key for key in keys if key in self._data}
 
     async def find(self, query: CalculationQuery) -> list[StoredResult]:
         """Return results matching `query`, newest first, capped at `query.limit`.

@@ -100,6 +100,32 @@ class EvidenceSweep(BaseModel):
     # Sources that could not be asked at all. Empty is the ordinary case; a name here means this
     # answer is about less than the whole corpus, whatever the chunks say.
     sources_failed: list[str] = Field(default_factory=list)
+    # What each source contributed to the merge, by name — the per-branch fact the fan-out
+    # already computed and then dropped at this boundary, so the model could not tell "the share
+    # leg found nothing", "the share leg isn't configured" and "the share leg declined" apart:
+    # three different answers rendered identically as an absence. Counts are pre-merge (what the
+    # source handed the sweep), so a source out-competed at the cap still shows its work.
+    sources: dict[str, int] = Field(default_factory=dict)
+    # Sources that declined the question, by name -> the reason they gave (`RetrieverSkip`).
+    # Distinct from `sources_failed` because the fixes differ: a failure is an outage, a skip is
+    # a fact about the deployment or the call (an unentitled actor, a filter a source cannot
+    # serve, a notes directory with nothing in it).
+    sources_skipped: dict[str, str] = Field(default_factory=dict)
+
+
+class RetrieverSkip(Exception):
+    """A source declining to answer, with the reason a reader can act on.
+
+    Raised by a retriever when it *cannot meaningfully ask* — an unentitled caller, a filter the
+    source cannot serve, a notes tree with nothing in it — as opposed to asking and finding
+    nothing. The fan-out reports it as a skip rather than a failure or a zero: all three used to
+    collapse into an indistinguishable `[]`, which is the D-2026-08-01 class one category over.
+    """
+
+    def __init__(self, reason: str) -> None:
+        """Carry `reason` both as the exception message and as a named field."""
+        super().__init__(reason)
+        self.reason = reason
 
 
 @runtime_checkable

@@ -20,9 +20,12 @@ the half that can be wrong silently:
 established is worth keeping in view here, because it is the reason this file no longer covers a
 third suite: two of its three live findings were defects in the *reading* rather than in the system
 — the `agent` attribution named the tool node instead of the specialist, and the cost column was
-silently `None` for every turn because `session_tokens` gated on this process's own `session_store`
+silently `None` for every turn because the reader gated on this process's own `session_store`
 — and **both had passing unit tests**. A suite that grades a live system can be wrong in ways its
-own unit tests cannot see.
+own unit tests cannot see. Both findings have outlived their subjects: the attribution went in
+`D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution` and the cost column on
+2026-08-27, its fixed reader never having acquired a caller — see
+`tests/test_live_probes.py::test_the_harness_makes_no_token_cost_claim_it_cannot_take`.
 
 The plan-gate and degradation suites remain unexecuted against a live model. What each of these
 tests still owns is the half that can be wrong silently: the scoring, the wire reading, and the

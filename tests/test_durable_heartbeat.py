@@ -8,7 +8,9 @@ where that caller lives (`tests/test_calc_heartbeat.py`, `tests/test_bo_heartbea
 
 import ast
 import asyncio
+from datetime import timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 from temporalio import activity
@@ -261,3 +263,78 @@ def test_the_beat_interval_has_exactly_one_derivation_in_the_tree() -> None:
         "heartbeat beat interval derived outside `durable.heartbeat.beating` — pass the timeout "
         f"to the helper instead: {offenders}"
     )
+
+
+def test_the_republish_walk_beats_and_is_bounded_below_the_job_ceiling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The one multi-hour activity in the tree that neither beat nor had a budget of its own.
+
+    `RepublishResultsWorkflow` runs a full scan of two never-pruned tables and gave its single
+    activity **the parent's whole `connector_job_timeout_seconds`** — the same number
+    `ConnectorJobWorkflow` uses as the child's execution timeout, so the two expired within
+    milliseconds of each other and the activity's `BAD_DATA_RETRY` could never be spent. It also
+    carried no `heartbeat_timeout` and never heartbeated, unlike every other long activity here
+    (`calc`, `bo`, ELN, label, corpus, document, template steps), so a worker killed ten minutes
+    into the walk went unnoticed for the whole five hours.
+
+    Both halves are asserted here: the arguments the workflow hands the activity, and that the walk
+    actually beats while it runs.
+    """
+    from chemclaw.connectors.results import workflows as republish
+    from chemclaw.connectors.results.specs import RepublishSpec
+    from chemclaw.core.config import settings
+
+    # --- the budget the workflow declares -------------------------------------------------
+    captured: dict[str, Any] = {}
+
+    async def _capture(*args: Any, **kwargs: Any) -> dict[str, int]:
+        captured.update(kwargs)
+        return dict.fromkeys(
+            (
+                "requeued",
+                "calculations_seen",
+                "calculations_queued",
+                "calculations_skipped",
+                "jobs_seen",
+                "jobs_queued",
+                "jobs_skipped",
+            ),
+            0,
+        )
+
+    monkeypatch.setattr("temporalio.workflow.execute_activity", _capture)
+    asyncio.run(republish.RepublishResultsWorkflow().run(RepublishSpec()))
+
+    ceiling = timedelta(seconds=settings.connector_job_timeout_seconds)
+    assert captured["start_to_close_timeout"] < ceiling, (
+        f"the walk is budgeted {captured['start_to_close_timeout']} against a parent ceiling of "
+        f"{ceiling}: they expire together, so the activity's retry policy is unreachable"
+    )
+    assert captured["heartbeat_timeout"] == timedelta(
+        seconds=settings.result_republish_heartbeat_timeout_seconds
+    )
+
+    # --- and the walk itself beats -------------------------------------------------------
+    beats: list[str] = []
+    # `*a` with no index: the walk beats once eagerly with no details, because `beating()` waits a
+    # whole interval before its first and a short walk would otherwise report nothing at all.
+    monkeypatch.setattr(activity, "heartbeat", lambda *a: beats.append(str(a)))
+    monkeypatch.setattr(settings, "result_republish_heartbeat_timeout_seconds", 4.0)
+
+    async def _slow_walk(**kwargs: object) -> tuple[int, int, int]:
+        await asyncio.sleep(1.3)
+        return (0, 0, 0)
+
+    async def _fast_walk(**kwargs: object) -> tuple[int, int, int]:
+        return (0, 0, 0)
+
+    monkeypatch.setattr(republish, "backfill_cached", _slow_walk)
+    monkeypatch.setattr(republish, "backfill_jobs", _fast_walk)
+    asyncio.run(republish.republish_stored_results(RepublishSpec()))
+
+    assert len(beats) >= 2, (
+        "a corpus walk that can take hours must beat *while it runs*, not only at the start: "
+        f"beats={beats}"
+    )
+    assert any("still running" in beat for beat in beats)

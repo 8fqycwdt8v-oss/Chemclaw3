@@ -13,7 +13,7 @@ type: campaign
 
 Three amide couplings with and without HOBt.
 
-- [[part-of:rxn-amide-edc]]
+- [[rxn-amide-edc]]
 
 Consistent ~25 point yield difference in favour of the additive, on all three substrates.
 Distilled into [[evidence-for:playbook-amide-coupling-additive]].

@@ -36,7 +36,6 @@ is waiting for is work a pod is spending on nobody.
 """
 
 import asyncio
-import contextlib
 import logging
 from dataclasses import dataclass
 from types import TracebackType
@@ -219,20 +218,44 @@ class HeldConnectorSession:
         return False
 
     async def _shut_down(self) -> None:
-        """Signal the holder task and await its unwind, bounded so teardown cannot wedge the turn.
+        """Signal the holder task and await its unwind, bounded, and reraising the caller's own.
 
-        The await used to be unbounded, which made the end of every turn hostage to the slowest
-        session close: a connector that would not finish unwinding held the `AsyncExitStack` until
-        the turn deadline cancelled everything. `wait_for` cancels the task at the bound and then
-        waits for that cancellation to land, so past it the holder is torn down rather than
-        abandoned — the same "signal it on its own task" rule, with a clock on it.
+        Two properties, both load-bearing, from two separate defects. **Bounded**: the await used
+        to be unbounded, which made the end of every turn hostage to the slowest session close — a
+        connector that would not finish unwinding held the `AsyncExitStack` until the turn deadline
+        cancelled everything. `wait_for` cancels the *holder* task at the bound and waits for that
+        cancellation to land, so past it the holder is torn down rather than abandoned — the same
+        "signal it on its own task" rule, with a clock on it.
+
+        **The caller's own cancellation is not part of what this bound absorbs.** `await
+        wait_for(...)` is the suspension point at which a cancellation of *this* task is
+        delivered — a client that closed the tab, or the front door's
+        `asyncio.timeout(service_turn_timeout_seconds)` (`api/routes/turns.py`) — and a blanket
+        `suppress(CancelledError, ...)` swallowed it. Measured: the cancelled turn completed
+        normally and ran the code after the teardown, so
+        `run_turn`'s `except (GeneratorExit, asyncio.CancelledError)` rollback never ran and
+        `asyncio.timeout.__aexit__`, which only converts to `TimeoutError` when it *receives* a
+        `CancelledError`, let the turn run past its deadline. `_is_really_cancelled()` — the same
+        discriminator `absorb_connect_failure` uses — tells that apart from the holder's own
+        `anyio` cancel scope, which also raises `CancelledError` on its way out without anyone
+        having cancelled this task; only the former is re-raised. `wait_for`'s own bound expiring
+        raises `TimeoutError` on this task without touching its cancel count, so the two paths
+        cannot be confused with each other.
         """
         self._stop.set()
         task = self._task
         self._task = None
         if task is not None:
-            with contextlib.suppress(asyncio.CancelledError, Exception):
+            try:
                 await asyncio.wait_for(task, timeout=settings.connector_teardown_timeout_seconds)
+            except TimeoutError:
+                pass
+            except asyncio.CancelledError:
+                if _is_really_cancelled():
+                    raise
+            except Exception:
+                # A connector that errors while closing costs its own close, never the turn.
+                pass
 
     async def _hold(self) -> None:
         """Own the session end to end: open it, publish its tools, then wait to be told to stop.
