@@ -11,6 +11,11 @@ The question this answers is the one a reviewer and a chemist ask in the same wo
 this run?"** Before the join it was answerable for durable jobs and for nothing else, because a
 tool call recorded its arguments and its actor and had no key back to the conversation.
 
+A tool call now also names **which plan step it served** (`audit_events.plan_step`,
+`D-2026-08-27-a-refusal-is-not-a-crash`), which is the nearest thing to a stated reason that can be
+recorded without inventing one — including for a call a gate *refused*, where no job exists to carry
+the rationale.
+
 Read-only by construction: three `SELECT`s and no writes. Deliberately not an agent tool — the
 audit trail is evidence *about* the agent, and a surface that let the agent read its own trail
 would invite it to summarize rather than to be examined.
@@ -34,11 +39,23 @@ _MESSAGES = """
     ORDER BY id ASC
 """
 
+# `plan_step` rather than `purpose`, and the swap is the point. `purpose` is "why this call was
+# made, in the requester's terms" and has been empty on every row ever written — nothing can author
+# it honestly (see `agent/audit.AuditEvent.purpose`), so the operator tool's "why" column was
+# *structurally* blank while looking like a column that sometimes has content. `plan_step` is a
+# narrower question with an exact answer: the plan step in flight when the call was made. Rendering
+# the answerable one is better than rendering the honest blank, and copying `plan_step` into
+# `purpose` would have been the inference that field refuses to be.
+#
+# Ordered by `ts` before `id`, because `id` is a `BIGSERIAL` assigned when the batching sink
+# *flushes* — so under load the reconstruction told the flusher's story rather than the turn's.
+# `id` stays as the tiebreak: two calls can start inside the same clock tick, and insertion order
+# is the only thing left that distinguishes them.
 _AUDIT = """
-    SELECT correlation_id, tool, outcome, detail, latency_ms, actor, purpose
+    SELECT correlation_id, tool, outcome, detail, latency_ms, actor, plan_step
     FROM audit_events
     WHERE session_id = %s
-    ORDER BY id ASC
+    ORDER BY ts ASC, id ASC
 """
 
 # A durable job states its reason outright (D-157), so where one exists it is the best answer this
@@ -59,7 +76,7 @@ class ToolCall(NamedTuple):
     detail: str
     latency_ms: float
     actor: str
-    purpose: str
+    plan_step: str
 
 
 class Job(NamedTuple):
@@ -151,10 +168,10 @@ async def explain(session_id: str, dsn: str | None = None) -> list[str]:
             detail,
             latency,
             actor,
-            purpose,
+            plan_step,
         ) in await cursor.fetchall():
             calls.setdefault(correlation_id, []).append(
-                ToolCall(tool, outcome, detail, latency, actor, purpose)
+                ToolCall(tool, outcome, detail, latency, actor, plan_step)
             )
 
         # `job_records` predates this join and is keyed independently, so a job whose correlation id
@@ -207,9 +224,9 @@ def _render(
             lines.append(f"   job {job.connector}:{job.job} — because: {_wrap(job.rationale)}")
             lines.append(f"       → {_wrap(job.summary, limit=200)}")
         for call in calls.get(correlation_id, []):
-            reason = f" — because: {_wrap(call.purpose, limit=120)}" if call.purpose else ""
+            step = f" — for step: {_wrap(call.plan_step, limit=120)}" if call.plan_step else ""
             stamp = f"{call.outcome}, {call.latency_ms:.0f} ms, {call.actor}"
-            lines.append(f"   tool {call.tool} [{stamp}]{reason}")
+            lines.append(f"   tool {call.tool} [{stamp}]{step}")
         lines.append("")
     return lines
 

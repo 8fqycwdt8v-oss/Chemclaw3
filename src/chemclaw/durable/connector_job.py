@@ -51,6 +51,7 @@ from temporalio.exceptions import ActivityError, ChildWorkflowError
 
 with workflow.unsafe.imports_passed_through():
     from chemclaw.core.config import settings
+    from chemclaw.durable.job_metrics import job_ended, job_running
     from chemclaw.durable.job_record import JobRecord, note_with_run_provenance, record_job
     from chemclaw.durable.memory_jobs import publish_memory_note_activity
     from chemclaw.durable.notify import notify_session_best_effort
@@ -290,6 +291,47 @@ def job_record_for(
     )
 
 
+def failed_job_record(
+    job_id: str,
+    job: ConnectorJobInput,
+    reason: str,
+    runtime_seconds: float,
+) -> JobRecord:
+    """The durable record of a run that ended badly — what was asked for, and why it broke.
+
+    **The half of `job_record_for` that did not exist.** A failing job raises before `_finish`, so
+    it wrote no row at all: measured on a live broker, one `ConnectorJobWorkflow` run twice — once
+    succeeding, once failing on a `ValueError` — left one `job_records` row for two jobs. Every
+    question this table exists to answer months later ("what did we try", "why was it run") had no
+    answer for exactly the runs somebody would go looking for, and the flagship interaction had no
+    failure rate anywhere.
+
+    A separate function rather than a `result=None` branch in `job_record_for`, because there is no
+    envelope to take one from: `ConnectorJobResult.summary` is `min_length=1`, so a failure cannot
+    be expressed as an empty result without loosening the contract that makes a *successful*
+    envelope trustworthy. What the two share is the launch input, and that is what both copy.
+
+    `summary` stays empty and the reason goes in `failure_reason`, deliberately: `summary` is the
+    one line a listing shows for what a run produced, and a listing that cannot tell a result from
+    a failure is the ambiguity the pair of columns exists to remove.
+    """
+    return JobRecord(
+        job_id=job_id,
+        connector=job.connector,
+        job=job.job,
+        rationale=job.rationale,
+        requested_by=job.requested_by,
+        session_id=job.session_id,
+        correlation_id=job.correlation_id,
+        plan_step=job.plan_step,
+        plan_hash=job.plan_hash,
+        payload=job.payload,
+        runtime_seconds=runtime_seconds,
+        state="failed",
+        failure_reason=reason,
+    )
+
+
 # On the light queue: this wrapper does no work itself — it starts a child on the
 # connector's own queue and waits — so it belongs with the many light workers, not the few
 # heavy ones. The *capability* is heavy; this is not (D-006).
@@ -368,6 +410,10 @@ class ConnectorJobWorkflow:
         # `workflow.now()` and not `time.monotonic()`: a workflow's clock must come from the one
         # Temporal records in history, or a replay would measure the replay rather than the run.
         started_at = workflow.now()
+        # This process is now carrying the run. Idempotent under replay by construction — see
+        # `durable/job_metrics.py` — so it needs no `is_replaying` guard, unlike every *counter*
+        # a workflow body touches.
+        job_running(workflow.info().workflow_id)
         try:
             result = await self._run_child(job)
             return await self._finish(job, result, started_at)
@@ -386,8 +432,23 @@ class ConnectorJobWorkflow:
             # the parent reaches CANCELED and the session gets `job_failed reason="Cancelled"`),
             # and `_notify_failure` never raises, so a broken push-back cannot replace the real
             # reason with its own.
+            # **Written before the push-back, and for the same reason `_finish` writes its record
+            # before publishing the note**: this row is the durable copy, and the notification is a
+            # message to a session that may no longer be listening. A failed run used to leave
+            # neither — it existed only in Temporal's expiring history, so a job whose failure
+            # push-back was dropped left literally nothing behind.
+            await self._record_run(
+                failed_job_record(
+                    workflow.info().workflow_id,
+                    job,
+                    failure_reason(exc),
+                    (workflow.now() - started_at).total_seconds(),
+                )
+            )
             await self._notify_failure(job, exc)
             raise
+        finally:
+            job_ended(workflow.info().workflow_id)
 
     async def _run_child(self, job: ConnectorJobInput) -> ConnectorJobResult:
         """Start the bundle's own workflow on its queue and wait for its result."""

@@ -96,10 +96,130 @@ def _failover_exceptions() -> tuple[type[BaseException], ...]:
     `APIConnectionError` covers `APITimeoutError` (its subclass) and every DNS/TLS/refused-socket
     case; `InternalServerError` is the 5xx family. Everything else — 400, 401, 404, 422 — is about
     the request and is left to fail where it was made.
+
+    Explicit `from openai import …` rather than a lookup by name, deliberately: a rename upstream
+    must fail loudly here, because the silent alternative is a failover that quietly handles nothing
+    while the deployment still believes it has one. `classify_model_failure` reuses this set as its
+    `transport` family for exactly that reason — the taxonomy is stated once.
     """
     from openai import APIConnectionError, InternalServerError
 
     return (APIConnectionError, InternalServerError)
+
+
+# What a provider says when the request was fine and the *thread* was too long, in the two SDKs
+# this seam speaks to. Matched on the message because neither exposes it as a distinct class: it
+# arrives as an ordinary `BadRequestError`, which is how it came to be classified `("internal",
+# False)` by `api/runner._classify` — "internal error, do not retry" told to a chemist about the one
+# failure mode `agent/compaction.py` exists to prevent, and the one that a shorter question fixes.
+#
+# Substrings rather than a setting, because these are somebody else's wording rather than a
+# threshold: a deployment cannot tune what its provider writes. An unrecognised phrasing falls
+# through to `error`, which is the honest degradation — it is not counted as something it might not
+# be. `tests/test_agent_observability_model.py` pins the two live spellings.
+_CONTEXT_LENGTH_MARKERS: tuple[str, ...] = (
+    "context_length_exceeded",
+    "maximum context length",
+    "context window",
+    "prompt is too long",
+)
+
+
+def _sdk_exceptions(module_name: str, *names: str) -> tuple[type[BaseException], ...]:
+    """The named exception classes from a provider SDK, or nothing when it is not installed.
+
+    Tolerant where `_failover_exceptions` is strict, and the asymmetry is the point: that function
+    configures a *control* (which failures fail over), so a missing name must break the build. This
+    one feeds a *label*, and a classifier that raised would replace the failure it was called to
+    describe. Both SDKs are asked because a process may be configured for either and each is an
+    optional dependency of the other's deployment.
+    """
+    import importlib
+
+    try:
+        module = importlib.import_module(module_name)
+    except ImportError:  # pragma: no cover - both SDKs are installed in this workspace
+        return ()
+    found = (getattr(module, name, None) for name in names)
+    return tuple(k for k in found if isinstance(k, type) and issubclass(k, BaseException))
+
+
+@cache
+def _failure_families() -> tuple[tuple[str, tuple[type[BaseException], ...]], ...]:
+    """The provider SDKs' failure taxonomy, most specific first — one table, both providers.
+
+    **The taxonomy was already known and simply not recorded.** `_failover_exceptions` proved it:
+    this seam has always distinguished "the endpoint is down" from "the request is wrong", because
+    failover depends on the difference. Nothing else did — no metric, no log, no span named a
+    provider failure at all — so a 429, a dead endpoint and a context-length overflow were the same
+    invisible event.
+
+    Order is the classification. `APITimeoutError` subclasses `APIConnectionError` in both SDKs, so
+    a linear scan that tested transport first would report every timeout as `transport`; the same
+    ordering argument `agent/audit._refusal_types` makes for the refusals.
+
+    Cached because the tuple is fixed for the life of the process and this is only ever reached
+    from a failed model call.
+    """
+    return (
+        (
+            "timeout",
+            _sdk_exceptions("openai", "APITimeoutError")
+            + _sdk_exceptions("anthropic", "APITimeoutError"),
+        ),
+        (
+            "rate_limited",
+            _sdk_exceptions("openai", "RateLimitError")
+            + _sdk_exceptions("anthropic", "RateLimitError"),
+        ),
+        # The failover set *is* the transport family — the same sentence read for a different
+        # purpose — plus the Anthropic SDK's twins, which have no failover to configure.
+        (
+            "transport",
+            _failover_exceptions()
+            + _sdk_exceptions("anthropic", "APIConnectionError", "InternalServerError"),
+        ),
+    )
+
+
+def classify_model_failure(exc: BaseException) -> str:
+    """What kind of provider failure this is: the outcome label a model call is counted under.
+
+    One of `rate_limited`, `context_length`, `timeout`, `transport` or `error` — the label space
+    `chemclaw_model_calls_total` declares beside `ok`. Anything unrecognised is `error` rather than
+    a guess, because the point of the series is that a deployment can tell these apart, and a
+    mislabelled 401 would put an operator on the wrong runbook.
+
+    `context_length` is tested first: it arrives as a `BadRequestError`, so any test of the request
+    families would have to run after it anyway, and it is the one label with a specific remedy —
+    the thread is too long, and `agent/compaction.py` is the mechanism that is supposed to prevent
+    it. It could not be counted at all before this, which is to say the failure mode compaction
+    exists for was the one nobody could measure.
+    """
+    if _is_context_length(exc):
+        return "context_length"
+    for label, kinds in _failure_families():
+        if kinds and isinstance(exc, kinds):
+            return label
+    return "error"
+
+
+def _is_context_length(exc: BaseException) -> bool:
+    """Whether this is the provider refusing a thread that no longer fits.
+
+    A `BadRequestError` first, so a message that merely quotes a context-length phrase — a chemist
+    asking about context windows, echoed back in some other error — cannot be classified by its
+    words alone. `code` is read where the SDK sets one (OpenAI's `context_length_exceeded`);
+    Anthropic sets none, so the message is all there is.
+    """
+    if not isinstance(
+        exc,
+        _sdk_exceptions("openai", "BadRequestError")
+        + _sdk_exceptions("anthropic", "BadRequestError"),
+    ):
+        return False
+    text = f"{getattr(exc, 'code', '') or ''} {exc}".lower()
+    return any(marker in text for marker in _CONTEXT_LENGTH_MARKERS)
 
 
 class _CachingDisabled(AgentMiddleware):

@@ -3,9 +3,24 @@
 
        REV-2 closed "nothing scrapes `/metrics`" by adding a ServiceMonitor, and its own comment
        makes the argument that an endpoint which answers while nothing collects it is how
-       observability fails quietly. The same argument applies one level up: thirty-seven metrics
-       were collected and **no rule fired on any of them**. There was no PrometheusRule anywhere in
-       the repo, no SLO, and no Alertmanager route.
+       observability fails quietly. The same argument applies one level up: every metric this
+       system declares was collected and **no rule fired on any of them**. There was no
+       PrometheusRule anywhere in the repo, no SLO, and no Alertmanager route.
+
+       How many metrics that was is deliberately not written here. The number this sentence used to
+       carry said thirty-seven while the registry declared sixty-six, and the count that replaced it
+       would have gone stale on the next commit that declared one — the same failure `CLAUDE.md`
+       records for the Makefile's target count and `tests/conftest.py`'s skip count. The registry is
+       the only honest source: `len(declared_metric_names())`, and
+       `tests/test_deploy_chart.py::test_every_counter_that_can_fail_silently_has_an_alert` is what
+       makes the *coverage* of it checkable rather than believed.
+
+       The other two absences that sentence named are closed beside this file, not in it.
+       `templates/alertmanagerconfig.yaml` is the route — values-gated, because a receiver is a
+       deployment fact — and it is inert until a cluster admin turns on user-workload
+       AlertmanagerConfig, exactly as this object is inert until they turn on user-workload
+       monitoring at all. `docs/guides/runbook.md` § "When an alert fires" is the SLO's practical
+       half and the target of every `runbook_url` below.
 
        The tell is `agent/audit.py`, which logs `audit_sink_failure` at ERROR with a stable marker
        and increments a counter, with a comment saying in as many words that a lost audit
@@ -47,6 +62,7 @@ spec:
           labels:
             severity: critical
           annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawaudittrailincomplete
             summary: Audit records are not being persisted
             description: >-
               The audit sink failed to record at least one tool call in the last 10 minutes, so the
@@ -63,6 +79,7 @@ spec:
           labels:
             severity: warning
           annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawverifierdegraded
             summary: Answers are being scored by the citation gate, not the judge
             description: >-
               The LLM judge is unreachable, so answers are scored for citation *resolvability*
@@ -75,6 +92,7 @@ spec:
           labels:
             severity: critical
           annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawusageunreadable
             summary: Token usage is unparseable, so the cost guard is not binding
             description: >-
               The model provider reported usage this build cannot read, so affected turns meter
@@ -89,6 +107,7 @@ spec:
           labels:
             severity: warning
           annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawdurableunreachable
             summary: Temporal is not answering its health probe
             description: >-
               Chemists are being told durable jobs are unavailable. The threshold is what suppresses
@@ -107,6 +126,7 @@ spec:
           labels:
             severity: critical
           annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawknowledgenoteslost
             summary: Knowledge notes are failing to reach the PR-gate
             description: >-
               A note could not be opened on a branch and the failure was swallowed so the job could
@@ -124,6 +144,7 @@ spec:
           labels:
             severity: critical
           annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawturnleasefailing
             summary: The cross-process turn guard is lapsing
             description: >-
               A turn's lease could not be refreshed, so it may expire while the turn is still
@@ -140,6 +161,7 @@ spec:
           labels:
             severity: critical
           annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawturnsfailing
             summary: More than 10% of turns are ending in an error
             description: Every failure reaches a chemist as an opaque internal-error message.
 
@@ -159,6 +181,7 @@ spec:
           labels:
             severity: warning
           annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawfleetaboveitsturnceiling
             summary: The front-door fleet can admit more concurrent turns than it is allowed to
             description: >-
               More front-door pods are running than the declared fleet ceiling accounts for, so the
@@ -173,6 +196,7 @@ spec:
           labels:
             severity: warning
           annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawturnsshed
             summary: Turns are being rejected for lack of admission capacity
             description: >-
               The admission guard is shedding load (503). Either the deployment is undersized or
@@ -187,6 +211,7 @@ spec:
           labels:
             severity: warning
           annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawconnectorsunhealthy
             summary: One or more connectors are unreachable
             description: >-
               Turns are being answered without these capabilities and nothing in the answer says
@@ -204,6 +229,7 @@ spec:
           labels:
             severity: warning
           annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawsubsystemunavailable
             summary: Requests are being shed because a subsystem is unavailable
             description: >-
               Callers are getting 503s because a dependency the route needed did not answer — the
@@ -224,6 +250,7 @@ spec:
           labels:
             severity: warning
           annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawgroupclaimoverage
             summary: A token arrived with more groups than it could carry
             description: >-
               A user's Entra token replaced `groups` with `_claim_names`, so none of their
@@ -237,6 +264,7 @@ spec:
           labels:
             severity: critical
           annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawdatabaseunavailable
             summary: Postgres is unreachable from the front door
             description: >-
               Sessions, the audit trail and the calculation cache all live there; a turn that
@@ -254,6 +282,7 @@ spec:
           labels:
             severity: warning
           annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawpgpoolsaturated
             summary: Callers are queueing for a Postgres connection
             description: >-
               A process has more concurrent database work than `CHEMCLAW_PG_POOL_MAX_SIZE` allows,
@@ -278,6 +307,7 @@ spec:
           labels:
             severity: warning
           annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawfleetaboveitsconnectionceiling
             summary: The fleet can open more Postgres connections than it is allowed to
             description: >-
               More pooled processes are running than `postgres.maxConnections` accounts for, so the
@@ -293,6 +323,7 @@ spec:
           labels:
             severity: warning
           annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawtokenburnhigh
             summary: Token consumption is above the configured hourly expectation
             description: >-
               The per-process budget guard bounds one runaway process; it says nothing about the

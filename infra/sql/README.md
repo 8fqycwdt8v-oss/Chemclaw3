@@ -48,7 +48,7 @@ the pair applies in filename order and neither shadows the other.
 | `reaction_labels` | 051 | `science/labels/store.py` | derived and rebuildable: drop it and re-run the corpus drain plus the label backfill |
 | `reaction_species` | 051 | `science/labels/store.py` | derived and rebuildable; a species the source amended away is deleted with its reaction's record phase |
 | `corpus_molecules` | 054 | `ingest/labels/corpus.py` | derived and rebuildable: refilled by re-draining the corpus |
-| `audit_events` | 006 (+010, 011, 026, 044, 045) | `agent/audit_store.py` | **refused**: the trail is the record of who ran what, and disposing of it is a policy decision for whoever owns that record rather than an age cutoff in a cleanup job. `prev_hash`/`row_hash`/`chain_version` are retired columns, unwritten, at their defaults |
+| `audit_events` | 006 (+010, 011, 026, 044, 045, 059) | `agent/audit_store.py` | **refused**: the trail is the record of who ran what, and disposing of it is a policy decision for whoever owns that record rather than an age cutoff in a cleanup job. `prev_hash`/`row_hash`/`chain_version` are retired columns, unwritten, at their defaults |
 | `sync_cursors` | 007 | `ingest/eln/cursor.py` | — (one row per ingest source; bounded by the source count) |
 | `session_messages` | 008 (+022, 026, 043, 046 `message_shape` check) | `agent/session_store.py` | `durable/retention.py`, per session through the pairing closure (D-145). The in-line compaction on write this row used to name went with the engine that needed it |
 | `session_events` | 009 (+014, 028) | `agent/session_events.py` | `durable/retention.py`, **consumed rows only** — an undelivered push-back must outlive the window that would have destroyed it |
@@ -61,7 +61,7 @@ the pair applies in filename order and neither shadows the other.
 | `artifact_blobs` | 019 | `science/calc/postgres_artifacts.py` | `durable/artifact_eviction.py`, by idle window and size budget (both off by default) |
 | `calculation_artifacts` | 019 | `science/calc/postgres_artifacts.py` | cascades from `artifact_blobs` |
 | `plan_approvals` | 020 (+034) | `agent/plan_approval_store.py` | — (consumed rows are marked, not removed) |
-| `job_records` | 023 (+033, 049, 055, 057) | `durable/job_record_store.py` | **refused**: the table exists because a durable run's result used to expire with Temporal's history and take a campaign's evaluation record with it (D-157) |
+| `job_records` | 023 (+033, 049, 055, 057, 059) | `durable/job_record_store.py` | **refused**: the table exists because a durable run's result used to expire with Temporal's history and take a campaign's evaluation record with it (D-157) |
 | `observations` | 025 | `memory/observations.py` | stale rows retired by status, not deleted |
 | `note_proposals` | 027 (+036, +058) | `kg/proposal_store.py` | — |
 | `measurements` | 030 | `science/calc/calibration.py` | — |

@@ -24,7 +24,7 @@ from chemclaw.core.config import settings
 from chemclaw.core.logging import configure_logging, configure_telemetry
 from chemclaw.core.temporal_client import connect
 from chemclaw.durable.registry import describe, registered_activities, registered_workflows
-from chemclaw.durable.serve import serve_worker
+from chemclaw.durable.serve import serve_worker, worker_interceptors
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +57,15 @@ async def run_bundle_worker(connector: str) -> None:
         # rather than database work — `calc`, whose CREST searches hold a slot for their whole
         # runtime — raises it in the chart, where the memory that bounds it is also declared.
         max_concurrent_activities=settings.worker_max_concurrent_activities,
+        # Every activity this worker serves, bound to the turn that asked for it and recorded on
+        # its way in and out (`durable/interceptor.py`). Here rather than in `serve_worker` for
+        # the reason `graceful_shutdown_timeout` is: it is a property of what the worker *serves*,
+        # and a reader looking for "why does this activity log anything" looks at the constructor.
+        #
+        # The SDK's OpenTelemetry interceptor rides beside it when span export is on, which is the
+        # half that makes a durable job a child of the launching turn — `core/temporal_client.py`
+        # writes the context on the client, this reads it here.
+        interceptors=worker_interceptors(),
     )
     logger.info("%s connector worker connected: queue=%s %s", connector, queue, describe(queue))
     await serve_worker(worker, component=f"connector-worker-{connector}")
