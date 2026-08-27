@@ -24,6 +24,12 @@ from starlette.datastructures import Headers
 
 from chemclaw.agent.turn_usage import TurnUsage
 from chemclaw.api.detach import DetachableTurn
+from chemclaw.api.events import (
+    JobStartedEvent,
+    TokenEvent,
+    ToolCallEvent,
+    ToolFailedEvent,
+)
 from chemclaw.api.middleware import _CORRELATION_ID, _UNMATCHED_ROUTE, _request_correlation_id
 from chemclaw.api.runner import _OUTCOMES, _settle_outcome, _TurnLedger
 from chemclaw.core.config import settings
@@ -433,6 +439,44 @@ def test_every_outcome_is_reachable_and_none_is_invented() -> None:
         }
 
     assert asyncio.run(_produced()) == set(_OUTCOMES)
+
+
+def test_the_turn_record_separates_a_tool_failure_from_a_governance_refusal() -> None:
+    """A refused call is the control working; a failed call is a step that broke.
+
+    Folding them together reports a correctly-gated turn as a broken one — the exact mistake
+    `ToolFailedEvent.reason` was added to prevent, and the reason the ledger gets two columns
+    rather than one. The classification is not re-derived here: `reason` is set once, from the
+    exception *class*, by `agent/plan_gate.plan_gate_failure_reason`.
+    """
+    ledger = _ledger()
+    for event in (
+        ToolCallEvent(tool="predict_pka", arguments="{}"),
+        ToolCallEvent(tool="propose_note", arguments="{}"),
+        ToolFailedEvent(tool="predict_pka", message="boom"),
+        ToolFailedEvent(tool="propose_note", message="refused", reason="plan_gate"),
+        JobStartedEvent(job_id="j-1", kind="calc"),
+        TokenEvent(text="hello"),
+    ):
+        ledger.note_event(event)
+    assert (ledger.tool_calls, ledger.tool_failures, ledger.tool_refusals) == (2, 1, 1)
+    assert ledger.jobs_started == 1
+    assert ledger.ttft_seconds is not None and ledger.ttft_seconds >= 0
+
+
+def test_time_to_first_token_is_the_first_token_not_the_last() -> None:
+    """TTFT is the number a chemist experiences; `duration_seconds` is the whole turn.
+
+    A turn that spent 40 s on tools and then streamed instantly and one that stalled 40 s before
+    its first word were the same sample under the only measurement that existed. `None` — no token
+    at all — is kept as a distinct fact rather than collapsed to zero.
+    """
+    ledger = _ledger()
+    assert ledger.ttft_seconds is None
+    ledger.note_event(TokenEvent(text="first"))
+    first = ledger.ttft_seconds
+    ledger.note_event(TokenEvent(text="second"))
+    assert first is not None and ledger.ttft_seconds == first
 
 
 def test_a_capped_turn_is_not_recorded_as_answered() -> None:
