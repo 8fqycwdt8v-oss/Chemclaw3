@@ -294,6 +294,28 @@ class ToolFailedEvent(BaseModel):
     reason: Literal["plan_gate"] | None = None
 
 
+class ResultValue(BaseModel):
+    """One number a structured tool result returned, under the name the tool gave it.
+
+    `numbers` beside this is a bare list, and it stays one: it feeds a grounding check that asks
+    "did a tool in this turn return this figure?", where a label is irrelevant and a missed value
+    is a false accusation. This feeds a *surface*, where the opposite is true — the entity rail
+    could only ever say "predict_pka returned 4.76, 1.6", because pairing an unlabelled pair into
+    "pKa 4.76 ± 1.6" would invent a relationship the tool never stated.
+
+    So the label is the payload's own key path and the unit is the payload's own `unit`, or empty.
+    Nothing here is prettified or inferred; `chemclaw.core.quantities.labelled_values` is where
+    that rule is enforced and argued.
+
+    Only for a result that parses as JSON. One that does not carries `numbers` and no `values`,
+    which is the honest report: the figures are known, their names are not.
+    """
+
+    label: str
+    value: float
+    unit: str = ""
+
+
 class ToolResultEvent(BaseModel):
     """What a tool call returned, as data rather than as the model's paraphrase (D-159).
 
@@ -343,6 +365,19 @@ class ToolResultEvent(BaseModel):
     exists to keep is untouched: a surface pulls the one result it decided to render, once, rather
     than every result being streamed to every consumer.
 
+    `values` is `numbers` with the names the tool filed them under, for the surfaces that *display*
+    a figure rather than check one. See `ResultValue`: the two coexist because a grounding check
+    wants every value and no names, and a value strip wants names and refuses to guess them.
+
+    `result_inline` is the small-result shortcut, and it exists because the split above is a rule
+    about *large* results applied to every result. A 300-byte ICH limit or a two-field pKa costs a
+    second round trip to be rendered as anything but prose, and that round trip buys nothing: the
+    payload is smaller than the preview's own budget several times over. Under
+    `stream_inline_result_bytes` the text rides along and a surface renders immediately; over it,
+    the field is empty and the ref is how the result is reached, exactly as before. The cap is the
+    control — this is not a way to stream a 40-chunk evidence sweep to a browser, and the default
+    is set well below where that becomes possible.
+
     **Empty means "not stored", and it is one meaning with three causes** — the store is off
     (`stream_max_result_bytes` at 0), the result was over that cap, or the write failed. A consumer
     has exactly one thing to check, and none of the three ever costs the turn its answer: storing a
@@ -355,7 +390,9 @@ class ToolResultEvent(BaseModel):
     preview: str = ""
     note_ids: list[str] = Field(default_factory=list)
     numbers: list[float] = Field(default_factory=list)
+    values: list[ResultValue] = Field(default_factory=list)
     result_ref: str = ""
+    result_inline: str = ""
     agent: str = _AGENT_FIELD
 
 

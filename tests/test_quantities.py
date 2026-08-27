@@ -9,7 +9,12 @@ that looked right matched nothing on a live run; and the emphasis case below (`*
 real draft of this module silently dropping five of the six masses in a charge table.
 """
 
-from chemclaw.core.quantities import is_rounding_of, returned_values, stated_numerals
+from chemclaw.core.quantities import (
+    is_rounding_of,
+    labelled_values,
+    returned_values,
+    stated_numerals,
+)
 
 # `compute_electronic_properties(smiles="Clc1ccc(S(=O)(=O)F)cc1")`, verbatim, head of the result.
 _PROPERTIES = (
@@ -165,3 +170,68 @@ def test_returned_values_deduplicates_and_keeps_first_seen_order() -> None:
     is the distinct set the comparison needs and the event carries.
     """
     assert returned_values('{"a": 12.5, "b": 3, "c": 12.5, "d": 3}') == [12.5, 3.0]
+
+
+# --- labelled values: the same numbers, under the names the tool gave them -----------------------
+
+
+def test_a_json_result_names_every_number_it_returned() -> None:
+    """The label is the payload's key path, verbatim — never prettified and never inferred.
+
+    A surface printing `pka 4.76` and `sd 1.6` side by side is telling the truth; one printing
+    `pKa 4.76 ± 1.6` is not, unless the tool said so. The names are the whole of what this adds,
+    so they are the whole of what is asserted.
+    """
+    values = labelled_values('{"pka": 4.76, "sd": 1.6}')
+    assert [(v.label, v.value, v.unit) for v in values] == [("pka", 4.76, ""), ("sd", 1.6, "")]
+
+
+def test_a_unit_is_read_only_from_the_object_that_states_it() -> None:
+    """`{"basis": …, "value": 0.5, "unit": "µg/day"}` — the shape the ICH tables use.
+
+    Read from a parent or a sibling object it would be a guess about which numbers it applies to;
+    inside a list under the key that states it, it is the same sentence written once.
+    """
+    limit = labelled_values(
+        '{"limit": {"limits": [{"basis": "oral", "value": 0.5, "unit": "\u00b5g/day"}]}}'
+    )
+    assert [(v.label, v.unit) for v in limit] == [("limit.limits.0.value", "\u00b5g/day")]
+
+    shared = labelled_values('{"unit": "eV", "homo": -11.8, "lumo": -7.9}')
+    assert {v.unit for v in shared} == {"eV"}
+
+
+def test_prose_is_left_to_the_bare_numbers() -> None:
+    """A non-JSON result yields no labels at all, and that is the honest report.
+
+    Falling back on the number grammar and pairing each value with whatever word preceded it would
+    be exactly the invented relationship this refuses. The figures are still on the wire — they
+    simply arrive unnamed, which is what they are.
+    """
+    assert labelled_values("the pKa is about 4.76") == []
+    assert returned_values("the pKa is about 4.76") == [4.76]
+
+
+def test_a_boolean_is_not_a_quantity() -> None:
+    """`bool` is an `int` in Python, and "converged 1" is a number nobody computed."""
+    assert [v.label for v in labelled_values('{"converged": true, "energy": -35.5}')] == ["energy"]
+
+
+def test_an_unlabelled_number_belongs_to_the_other_reader() -> None:
+    """A bare top-level list has no names to give, so it yields none rather than indices alone."""
+    assert labelled_values("[1, 2, 3]") == []
+    assert returned_values("[1, 2, 3]") == [1.0, 2.0, 3.0]
+
+
+def test_the_same_label_and_value_is_recorded_once() -> None:
+    """Deduplicated on the pair, not on the value.
+
+    A repeated column heading does not repeat the entry, and two different keys holding one value
+    stay two entries — the names are the point, so collapsing on the number alone would lose one.
+    """
+    values = labelled_values('{"rows": [{"mass_g": 2.0}, {"mass_g": 2.0}], "total_g": 2.0}')
+    assert [(v.label, v.value) for v in values] == [
+        ("rows.0.mass_g", 2.0),
+        ("rows.1.mass_g", 2.0),
+        ("total_g", 2.0),
+    ]

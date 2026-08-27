@@ -87,8 +87,10 @@
       "note_ids": "list[str]",
       "numbers": "list[float]",
       "preview": "str",
+      "result_inline": "str",
       "result_ref": "str",
-      "tool": "str"
+      "tool": "str",
+      "values": "list[ResultValue]"
     }
   }
 }

@@ -1,5 +1,12 @@
 """The numbers a payload returned, the numbers a prose answer states, and whether one is the other.
 
+Three readers, one subject. `returned_values` scans arbitrary text with the number grammar below
+and is generous, because it feeds a grounding check where a missed value makes a verbatim
+quotation look invented. `labelled_values` walks *parsed JSON* and is strict, because it feeds a
+display where a number shown under the wrong name is worse than a number shown under none.
+`stated_numerals` reads an answer. They share this module so that a literal one of them can see is
+a literal the others can reason about.
+
 The numeric counterpart to `chemclaw.kg.note`'s `mentioned_ids` / `cited_ids` pair, and here for
 the same reason that pair lives in one module: two readers of one syntax drift, and a gate then
 disagrees with the thing it gates. A tool result and an answer are scanned by *different*
@@ -20,9 +27,11 @@ precision, is exactly it. Half-up, not Python's half-even `round`: a model writi
 is rounding the way a person does, where banker's rounding gives 4.54 and calls the figure invented.
 """
 
+import json
 import math
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator, Mapping
+from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
 # A decimal literal, optionally signed, optionally in exponent form, with thousands separators
@@ -72,6 +81,121 @@ def returned_values(text: str) -> list[float]:
         if value is not None:
             seen.setdefault(value, None)
     return list(seen)
+
+
+@dataclass(frozen=True, slots=True)
+class Quantity:
+    """One number a *structured* result returned, under the name the tool gave it.
+
+    `label` is the payload's own key path and nothing else — `pka`, `limits.0.value`. It is never
+    prettified, never mapped through a table of nicer names, and never inferred: the moment this
+    starts deciding that `sd` means "uncertainty on the value above it" it is asserting a
+    relationship the tool did not state, which is the exact fabrication this pair of fields exists
+    to prevent. A surface printing `pka 4.76` and `sd 1.6` side by side is telling the truth; one
+    printing `pKa 4.76 ± 1.6` is not, unless the tool said so.
+
+    `unit` is likewise only ever the payload's, taken from a `unit`/`units` string sitting beside
+    the number in the same object — the `{"basis": …, "value": 0.5, "unit": "µg/day"}` shape the
+    ICH tables use. Empty when the result did not say, which is most of them.
+    """
+
+    label: str
+    value: float
+    unit: str = ""
+
+
+# How deep into a result the walk goes. A tool result is arbitrary JSON and a pathological one can
+# nest without bound; past this the labels are longer than the values they name and nobody reads
+# them anyway.
+_MAX_DEPTH = 6
+
+
+def labelled_values(text: str) -> list[Quantity]:
+    """Every number a JSON result returned, with the key the tool filed it under.
+
+    The structured counterpart to `returned_values` above, and the two coexist for the same reason
+    `note_ids` coexists with `preview`: they answer different questions and neither can answer the
+    other's. `returned_values` scans *arbitrary text* with the number grammar and is deliberately
+    generous, because its job is grounding — a value it misses makes a verbatim quotation look
+    invented. This walks *parsed JSON* and is deliberately strict, because its job is display: a
+    number shown under the wrong name is worse than a number shown under none.
+
+    So a result that is not JSON yields nothing here. That is not a gap to be filled by falling
+    back on the regex and pairing values with whatever word preceded them — a label guessed from
+    prose is exactly the invented relationship the `Quantity` docstring refuses. The figures are
+    still on the wire in `numbers`; they simply arrive unnamed, which is what they are.
+
+    Deduplicated on (label, value), in first-seen order, so a table repeating a column heading's
+    value does not repeat the entry.
+    """
+    try:
+        parsed = json.loads(text)
+    except (ValueError, TypeError):
+        return []
+    seen: dict[tuple[str, float], Quantity] = {}
+    for quantity in _walk(parsed, prefix="", depth=0):
+        seen.setdefault((quantity.label, quantity.value), quantity)
+    return list(seen.values())
+
+
+def _walk(
+    node: object, *, prefix: str, depth: int, unit: str = "", named: bool = False
+) -> Iterator[Quantity]:
+    """Yield every finite number under `node`, labelled by the path that reaches it.
+
+    `named` is whether any segment of that path came from a *key* rather than a list position. A
+    bare `[1, 2, 3]` reaches the leaves with the labels "0", "1", "2", which are positions and not
+    names — a value strip listing them would be showing the reader the index it already had. Those
+    numbers belong to `returned_values`, which is exactly where they still are.
+    """
+    if depth > _MAX_DEPTH:
+        return
+    # `bool` is an `int` in Python, and `{"converged": true}` is a state rather than a quantity —
+    # a value strip listing "converged 1" would be reporting a number nobody computed.
+    if isinstance(node, bool):
+        return
+    if isinstance(node, (int, float)):
+        # An unlabelled number is one the caller cannot name: a bare `[1, 2, 3]` at the top level
+        # reaches here with nothing but its position and belongs to `returned_values`, not to this.
+        if named and math.isfinite(node):
+            yield Quantity(label=prefix, value=float(node), unit=unit)
+        return
+    if isinstance(node, Mapping):
+        # A `unit` beside the numbers in the same object qualifies them: that is the shape
+        # `{"basis": …, "value": 0.5, "unit": "µg/day"}` has. Read from anywhere else — a parent,
+        # a sibling object — it would be a guess about which numbers it applies to. A nested object
+        # states its own or has none; a nested list inherits, because `{"unit": "eV", "values":
+        # [...]}` is the same sentence written once.
+        own = _unit_of(node)
+        for key, value in node.items():
+            yield from _walk(
+                value, prefix=_join(prefix, str(key)), depth=depth + 1, unit=own, named=True
+            )
+        return
+    if isinstance(node, (list, tuple)):
+        for index, value in enumerate(node):
+            yield from _walk(
+                value, prefix=_join(prefix, str(index)), depth=depth + 1, unit=unit, named=named
+            )
+
+
+def _join(prefix: str, key: str) -> str:
+    """`limits.0.value` — the path as the payload spells it, dotted, with no prettifying."""
+    return f"{prefix}.{key}" if prefix else key
+
+
+# The keys a tool uses to say what its numbers are measured in. Two spellings and no more: a
+# guessing list ("dimension", "scale", "basis") would attach units nobody wrote.
+_UNIT_KEYS = ("unit", "units")
+
+
+def _unit_of(node: Mapping[str, object]) -> str:
+    """The unit this object states for its own numbers, or `""` when it states none."""
+    for key in _UNIT_KEYS:
+        value = node.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return ""
 
 
 def stated_numerals(text: str) -> list[str]:
