@@ -103,18 +103,21 @@ def open_qdrant_client() -> QdrantClient:
     is the one production entry point and the alternative is a second place that decides what
     "the vector store" means.
 
-    **The key is registered with the log-redaction inventory here, at build time.** It used to say
-    the config section did that, which was simply false — `register_secret_env` had exactly one
-    caller in the tree (the warehouse's `connect_options`) and this variable was registered nowhere,
-    so a client echoing its own configuration into a traceback would have put the key in a log. The
-    registration is done where the secret is *read*, which is the warehouse's placement and the one
-    that cannot drift from the read.
+    **The key is registered with the log-redaction inventory here, at build time**, where the secret
+    is read — the warehouse seam's placement, and the one that cannot drift from the read.
+
+    It is no longer the *only* thing covering this key, and for one commit it covered nothing at
+    all: `register_secret_env` stores a variable *name* and `_secret_values` resolved it against
+    `os.environ`, while `Settings` reads `.env` without exporting anything — so on the documented
+    `.env` posture the registration resolved to the empty string. `logging._configured_by` closes
+    that, and the field is now a `SecretStr` in `_SECRET_SETTINGS` besides, which is the protection
+    that cannot depend on where the value came from.
     """
     module = _client_module()
     register_secret_env("CHEMCLAW_VECTOR_STORE_API_KEY")
     options: dict[str, Any] = {
         "url": settings.vector_store_url,
-        "api_key": settings.vector_store_api_key or None,
+        "api_key": settings.vector_store_api_key.get_secret_value() or None,
         "timeout": int(settings.vector_store_timeout_seconds),
     }
     # The private-CA bundle the rest of this system's transports honour, passed **only** when one is

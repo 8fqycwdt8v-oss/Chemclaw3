@@ -86,7 +86,7 @@ def bearer_token_envs() -> dict[str, str]:
     }
 
 
-def ensure_dev_tokens() -> dict[str, str]:
+def ensure_dev_tokens() -> tuple[dict[str, str], frozenset[str]]:
     """Fill in a random token for every credential variable the environment does not already set.
 
     Minted, never defaulted. A constant would be a credential committed to the tree, and the one
@@ -96,15 +96,25 @@ def ensure_dev_tokens() -> dict[str, str]:
     Existing values are left exactly as they are, which is what lets a caller (a live lane, a
     compose file, an operator) decide the secret and have both processes agree on it.
 
+    **Which ones were already there is returned, not inferred.** It cannot be re-derived afterwards,
+    because this function writes every value into `os.environ` — so by the time a caller looks, a
+    minted token and an operator's are indistinguishable. That is exactly how a real
+    `CHEMCLAW_*_MCP_TOKEN` ended up echoed verbatim in the serving banner, which in any wrapped or
+    CI invocation is a log.
+
     Returns:
-        Every credential variable and its value, whether minted here or already present.
+        Every credential variable and its value, and the subset that was already set.
     """
     resolved: dict[str, str] = {}
+    preexisting: set[str] = set()
     for env_var in sorted(set(bearer_token_envs().values())):
-        token = os.environ.get(env_var) or secrets.token_urlsafe(24)
+        existing = os.environ.get(env_var)
+        if existing:
+            preexisting.add(env_var)
+        token = existing or secrets.token_urlsafe(24)
         os.environ[env_var] = token
         resolved[env_var] = token
-    return resolved
+    return resolved, frozenset(preexisting)
 
 
 def build_composite() -> tuple[FastAPI, dict[str, str]]:
@@ -142,14 +152,27 @@ def build_composite() -> tuple[FastAPI, dict[str, str]]:
     return composite, urls
 
 
-def _export_lines(urls: dict[str, str], tokens: dict[str, str]) -> list[str]:
+def _export_lines(
+    urls: dict[str, str], tokens: dict[str, str], preexisting: frozenset[str] = frozenset()
+) -> list[str]:
     """Everything a *separate* core process needs in order to reach and authenticate to these apps.
 
     One function so the human-readable banner and the `eval`-able output cannot disagree about what
     core needs — the failure mode of two copies here is a lane that starts and 401s every tool call,
     which reads as a broken connector rather than a missing variable.
+
+    `preexisting` names the credentials the operator supplied, and their *values* are replaced with
+    a placeholder. Printing a token this process minted is the point — it is random, ephemeral, and
+    a second process needs it. Printing one the operator already exported tells them nothing they
+    do not have and writes a real credential into whatever captured this output. The default is
+    empty, so `--export-env` — which a caller `eval`s and which therefore needs every real value —
+    keeps printing them all by simply not passing the argument.
     """
-    values = {"CHEMCLAW_CONNECTOR_URLS": json.dumps(urls, separators=(",", ":")), **tokens}
+    shown = {
+        name: "<already set in your environment>" if name in preexisting else value
+        for name, value in tokens.items()
+    }
+    values = {"CHEMCLAW_CONNECTOR_URLS": json.dumps(urls, separators=(",", ":")), **shown}
     # `shlex.quote`, not hand-written quotes. A minted token is base64url and could never need it,
     # but an operator-supplied one is an arbitrary string, and a value carrying a quote would end
     # the assignment early — turning the rest of a *credential* into shell words that the caller
@@ -169,7 +192,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     # Before the apps are built, so a bundle's own middleware resolves a credential that exists.
-    tokens = ensure_dev_tokens()
+    tokens, preexisting = ensure_dev_tokens()
     composite, urls = build_composite()
     if args.export_env:
         # Nothing on stdout but the exports, and no `configure_logging()`: this output is `eval`ed.
@@ -184,7 +207,8 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     print(f"serving {len(urls)} connector(s) on http://{DEV_HOST}:{DEV_PORT}")
     print("point core at them with:")
-    for line in _export_lines(urls, tokens):
+    # The banner, unlike `--export-env` above, is read by a person and captured by whatever ran it.
+    for line in _export_lines(urls, tokens, preexisting=preexisting):
         print(f"  {line}")
     uvicorn.run(composite, host=DEV_HOST, port=DEV_PORT, log_level=settings.log_level.lower())
     return 0

@@ -67,6 +67,13 @@ not exist, and ADR ids with no file — none of which any gate could see.
    every gate. `check_metric_citations` carries the measurement for why the two rules have
    different reach.
 
+**Rule 0, and it runs before all nine: the corpus has to exist.** Every corpus here is assembled by
+filtering out paths that do not exist, so a `_ROOT` that is not a source checkout — an installed
+wheel, a vendored copy, a relocated package — yields zero documents, zero ADR stems, zero problems
+and the green line. Renaming one shipped document does the same thing one file at a time.
+`check_corpus_is_assembled` refuses that, because a gate that reports success having read nothing is
+the failure this whole module is about, arriving through its own front door.
+
 **`Makefile` and `.env.example` join the operator corpus for the same reason (F17).** Both are
 operator-facing — a contributor reads them before either document above — and both were outside
 the gate rules 5-7 exist to run: `.env.example:3` named the pre-split, bare-filename `config.py`
@@ -106,8 +113,10 @@ wrong more often than the prose.
 Run via `make prose-validate`; gated in CI beside `kg-validate` and `skill-validate`.
 """
 
+import argparse
 import re
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 
 from chemclaw.agent.chemclaw_agent import _INSTRUCTIONS, available_tool_names
@@ -171,6 +180,14 @@ _ROOT = Path(__file__).resolve().parents[3]
 # excluded on purpose: a merged ADR is never edited (CLAUDE.md), and an archived document is a
 # record of what was true then — validating either would demand rewriting history to satisfy a
 # gate.
+#
+# **The package READMEs are in the corpus** (via the globs below), because a reader navigates by
+# them exactly as by these: `ARCHITECTURE.md` requires one per directory and GitHub renders it the
+# moment a folder is clicked. They were outside every gate until 2026-08-27, and held nine stale or
+# unresolvable pointers when they were first scanned — one of them (`agent/README.md`'s
+# `workflows/`) at a directory that has never existed under that package. Paths in them are written
+# from the repository root or from `src/chemclaw/`, the same two spellings the rest of the corpus
+# uses, because `_path_resolves` resolves against those and not against the document's own folder.
 _OPERATOR_DOCS = (
     "README.md",
     "ARCHITECTURE.md",
@@ -186,7 +203,7 @@ _OPERATOR_DOCS = (
 # correct it to — the sentence has to be reworded, one judgement at a time. Rewriting them to the
 # nearest surviving module would falsify the build record the tickets exist to be. Tracked as its
 # own backlog row, with the count, so the remainder is visible rather than quietly out of scope.
-_OPERATOR_DOC_GLOBS = ("docs/guides/*.md", "docs/reference/*.md")
+_OPERATOR_DOC_GLOBS = ("docs/guides/*.md", "docs/reference/*.md", "src/chemclaw/**/README.md")
 
 # Two more operator documents, handled outside `_OPERATOR_DOCS`'s uniform "read the whole file"
 # path because neither is prose the way a `.md` file is (F17). Their absence is exactly how the
@@ -431,6 +448,50 @@ def _connector_token_envs() -> set[str]:
     return declared
 
 
+def check_corpus_is_assembled() -> list[str]:
+    """Refuse a corpus this module could not assemble, rather than checking it and finding it clean.
+
+    **Every corpus here is built by filtering out paths that do not exist** (`if path.is_file()`),
+    which makes a wrong `_ROOT` — an installed wheel (`site-packages/chemclaw/cli/...`), a vendored
+    copy, a relocated package — indistinguishable from a repository in which everything resolves:
+    zero documents produce zero problems and `main` prints "every named tool, note type, path, ADR
+    id, config key and metric resolves". The same silence applies one document at a time, so
+    renaming `SECURITY.md` would quietly stop it being checked rather than fail. This module's own
+    docstring warns against precisely that shape ("an unresolvable tool leaves the argument check
+    silent").
+
+    A separate check rather than a line inside `check_operator_prose`, because the two ask
+    different questions. That one asks "is this prose true"; this asks "is this the checkout".
+    Folding them together also broke every test that legitimately substitutes a one-document
+    corpus to exercise a single rule — the substitution is not a missing file.
+
+    Each name in `_OPERATOR_DOCS` is a document this repository ships, so any one missing is a fact
+    about the checkout rather than a choice, and each is named individually. `_OPERATOR_DOC_GLOBS`
+    is not, since a glob legitimately matches nothing.
+    """
+    sources = _operator_sources()
+    problems = [
+        f"{name}: named in _OPERATOR_DOCS but not found under {_ROOT} — this gate reads its corpus "
+        "by filtering out paths that do not exist, so a document it cannot find is one it silently "
+        "stops checking"
+        for name in _OPERATOR_DOCS
+        if name not in sources
+    ]
+    if not _decision_files():
+        # Rule 6 resolves every cited ADR id against this set. Empty, it cannot pass a cited id —
+        # and with no corpus either, nothing is checked at all. Both are the gate not running.
+        problems.append(
+            f"no ADR files found under {_ROOT / 'docs' / 'decisions'} — every cited ADR id would "
+            "be unverifiable, so rule 6 did not run"
+        )
+    if not _selector_sources():
+        problems.append(
+            f"no documents found under {_ROOT} for the selector corpus — rule 9 did not run, and "
+            "an alert built from a name nothing declares matches nothing and never fires"
+        )
+    return problems
+
+
 def check_operator_prose() -> list[str]:
     """Rules 5-7 over the operator documents: paths, ADR ids and config keys must resolve."""
     stems = {path.stem for path in _decision_files()}
@@ -530,9 +591,23 @@ def check_prose_contract() -> list[str]:
     return problems
 
 
-def main() -> int:
-    """CLI: report every prose/capability mismatch; non-zero exit fails the CI gate."""
-    problems = check_prose_contract() + check_operator_prose() + check_metric_citations()
+def main(argv: Sequence[str] | None = None) -> int:
+    """CLI: report every prose/capability mismatch; non-zero exit fails the CI gate.
+
+    Parses for the reason the sibling validators do: an argument this cannot honour must be
+    a refusal rather than something discarded under a green line. The corpus is derived
+    from the checkout, not configured, so there is nothing to override here at all.
+    """
+    argparse.ArgumentParser(
+        prog="python -m chemclaw.cli.validate_prose_contract",
+        description="Check that the agent-facing prose only names capability that exists.",
+    ).parse_args(argv)
+    problems = (
+        check_corpus_is_assembled()
+        + check_prose_contract()
+        + check_operator_prose()
+        + check_metric_citations()
+    )
     for problem in problems:
         print(problem, file=sys.stderr)
     if problems:

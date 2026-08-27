@@ -6,8 +6,13 @@ thread that needed it. So the rule is enforced where rows are *deleted*, and the
 form of it; `test_retention.py` pins the sweep that applies it.
 """
 
+import ast
+from pathlib import Path
+
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage, message_to_dict
 
+import chemclaw
+from chemclaw.agent.message_migration import LANGCHAIN_SHAPE, MAF_SHAPE
 from chemclaw.agent.message_pairing import (
     droppable_rows,
     stored_call_ids,
@@ -160,3 +165,40 @@ def test_an_unreadable_row_takes_its_whole_session_out_of_the_sweep() -> None:
     rows = [(1, frozenset({"c1"})), (2, None), (3, frozenset({"c1"}))]
     assert unreadable_rows(rows) == [2]
     assert droppable_rows(rows, {1, 3}) == set(), "a session with an unreadable row was pruned"
+
+
+def test_each_stored_shape_stamp_is_defined_exactly_once_in_the_tree() -> None:
+    """Two modules read the stamp; only one may *say* what it is.
+
+    `message_pairing` carried its own `_LANGCHAIN_SHAPE = "langchain"` under a comment claiming it
+    was "named from that module so the two cannot drift" — but taking a *name* from a module is not
+    importing its *value*, and two independent literals that happen to agree are two literals that
+    can stop agreeing. The direction that matters is destructive: `stored_call_ids` decides what
+    `droppable_rows` may delete, so a stamp the migration writes and this module does not recognise
+    turns a protected pairing into a droppable row, silently.
+
+    Written as a uniqueness scan over the package rather than as an equality assertion between the
+    two names, because equal string literals are interned — `is` would pass on the copy this test
+    exists to reject. It also catches the *next* copy, wherever it is made.
+    """
+    stamps = {MAF_SHAPE, LANGCHAIN_SHAPE}
+    package = Path(chemclaw.__file__).parent
+    definitions: dict[str, list[str]] = {stamp: [] for stamp in stamps}
+    for path in sorted(package.rglob("*.py")):
+        for node in ast.parse(path.read_text(encoding="utf-8")).body:
+            targets = (
+                node.targets
+                if isinstance(node, ast.Assign)
+                else [node.target]
+                if isinstance(node, ast.AnnAssign)
+                else []
+            )
+            value = getattr(node, "value", None)
+            if not targets or not isinstance(value, ast.Constant) or value.value not in stamps:
+                continue
+            definitions[value.value].append(str(path.relative_to(package)))
+
+    assert definitions == {
+        MAF_SHAPE: ["agent/message_migration.py"],
+        LANGCHAIN_SHAPE: ["agent/message_migration.py"],
+    }, f"a stored-shape stamp is defined in more than one place: {definitions}"

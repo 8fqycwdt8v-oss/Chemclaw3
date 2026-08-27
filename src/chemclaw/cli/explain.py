@@ -91,6 +91,17 @@ def _speaker(message: object, shape: str | None = None) -> tuple[str, str]:
     chemist reloading a conversation and the wrong one here — an audit reconstruction that prints a
     guessed speaker as the record is a report nobody can tell apart from a true one. The store
     stamps what it recovered (`is_degraded_render`); this is the reader that acts on it.
+
+    **The repr fallback is reached by an empty render, not only by an exception**, which is what
+    made the promise above true rather than merely written down. `message_from_row` catches
+    internally and returns a degraded message rather than raising, so the `except` arm below is
+    dead for a dict payload — and a payload with no recoverable prose came back as an *empty*
+    message, which `explain` then dropped with `if text:`. The turn rendered "transcript: absent
+    (compacted, pruned, or rolled back)": a specific, and wrong, explanation of a row that is on
+    disk and simply unreadable. `session_messages.message` is bare `jsonb`, so a shape neither
+    reader recognises is the case this exists for. It applies to the *degraded* branch only: a row
+    the store read fine and which genuinely holds no prose — a legacy image part — keeps its
+    speaker and its emptiness, because that is a different fact.
     """
     if not isinstance(message, dict):
         return "unknown", str(message)
@@ -99,9 +110,12 @@ def _speaker(message: object, shape: str | None = None) -> tuple[str, str]:
     except Exception:
         return "unknown", str(message)
     if is_degraded_render(restored):
-        return "unknown", message_text(restored).strip()
+        return "unknown", message_text(restored).strip() or str(message)
     # Rendered by the transcript route's own projection, not a second one: a conversation that
     # reads `assistant` in the browser and `ai` here would make one turn look like two records.
+    # A *readable* row with no prose keeps its role and its emptiness: a legacy row carrying only
+    # an image part has a speaker and nothing to say, which is a different fact from a row nothing
+    # could render, and only the second is worth printing as a repr.
     return message_role(restored), message_text(restored).strip()
 
 
@@ -169,8 +183,14 @@ def _render(
     projection is written once, after the answer). So the trail routinely outlives the words it
     points at. Dropping those turns would hide the evidence
     an auditor most wants.
+
+    **One insertion-ordered pass over all three, so a turn is shown once.** The de-duplication used
+    to exclude only ids already in `order`, and `(*calls, *jobs)` concatenates two key sequences
+    without comparing them to each other — so exactly the turn this docstring describes, one with
+    both a tool call and a durable job and no surviving transcript row, was rendered twice. Same
+    header, same lines, one occurrence read as two.
     """
-    shown = [*order, *(cid for cid in (*calls, *jobs) if cid not in set(order))]
+    shown = list(dict.fromkeys([*order, *calls, *jobs]))
     lines = [f"session {session_id}", ""]
     if not shown:
         lines.append("  no messages, tool calls or jobs recorded for this session")

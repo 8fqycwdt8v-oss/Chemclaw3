@@ -702,8 +702,8 @@ async def backfill(timeout_seconds: float) -> str:
             "running on the broker, so re-running this lane later reads the finished corpus"
         )
     return (
-        f"{workflow_id}: ingested {len(summary.ingested)}, "
-        f"skipped {len(summary.skipped_existing)}, rejected {len(summary.rejected)}"
+        f"{workflow_id}: ingested {summary.ingested}, "
+        f"skipped {summary.skipped_existing}, rejected {summary.rejected}"
     )
 
 

@@ -62,6 +62,39 @@ attributable "who did what to which inputs" record — but it has data-handling 
   not 401: it is our outage rather than the caller's bad credential, and reporting it as a rejected
   token both misinforms the user and files a dependency failure under "someone is probing us".
 
+## Accepted exposures
+
+Two reads are authenticated but **not owner-scoped**, and that is a decision rather than an
+oversight. Both are recorded here rather than only in a route docstring, because an accepted
+data-exposure decision belongs where a reviewer looks for one.
+
+- **`GET /jobs` lists every finished durable run's `rationale` and `summary`, and `GET /jobs/{id}`
+  returns its full result, to any authenticated principal.** The listing is the cross-project
+  learning D-004/KM-9 argues for — "have we run this before, and why" — and the agent's own
+  `find_past_jobs` is unscoped on the same grounds, so withholding it from a chemist while the
+  agent reads it on their behalf would be a distinction without a difference.
+
+  The payload is not scoped either, and the reason is mechanical rather than a policy preference:
+  `job_workflow_id` hashes `[connector, job, payload]` and **deliberately excludes the requester**
+  (D-011 — never compute twice), so two chemists asking for the same calculation join *one* run.
+  `job_records` then has one row for it, and its upsert sets `requested_by = EXCLUDED.requested_by`
+  precisely so the row does not contradict itself. `requested_by` is therefore "who last asked",
+  not an owner — scoping the result on it would withhold a run's answer from a chemist who
+  requested that very run. `cancel_durable_job` makes the same argument out loud and is gated on a
+  privileged role for it.
+
+  What this means in practice: **a `rationale` is written for colleagues to read.** It is where a
+  chemist says why they are running something — programme names, compound codes, project
+  reasoning — and every authenticated principal can read it. Only connector jobs are recorded this
+  way; a development *report*, whose content depends on the requester's document-share
+  entitlements, is not in `job_records` at all and its workflow id is keyed on the actor and their
+  roles, so it can be neither listed nor derived by anyone else.
+
+- **`GET /readyz` and `GET /metrics` are unauthenticated** (a kubelet and a scrape have no
+  identity). Both are counts and status only: `/readyz` reports how many connectors are
+  unreachable and never which, and `/metrics` carries a declared label allowlist with no session
+  id, user or turn content.
+
 ## Front-door hardening
 
 The browser-facing run service sets `Content-Security-Policy`, `X-Content-Type-Options: nosniff`,

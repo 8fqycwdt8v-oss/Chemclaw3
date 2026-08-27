@@ -382,19 +382,26 @@ class PostgresLabelIndex(LabelIndex):
         WHERE source = %(source)s AND reaction_id = %(reaction_id)s AND ordinal = %(ordinal)s
     """
 
-    _COVERAGE_ALL = """
+    # The one coverage projection, written once. All three coverage reads answer the same three
+    # numbers — labelled at this version, total, and the sources present — and differ only in what
+    # they are counted over, so the *columns* are shared and each caller appends its own scope.
+    # They were three copies before, and one of them was an inline f-string that had already drifted
+    # into its own spelling of the same `SELECT`.
+    _COVERAGE_COLUMNS = """
         SELECT count(*) FILTER (WHERE labeller_version = %(version)s), count(*),
                array_agg(DISTINCT source)
         FROM reaction_labels
     """
 
-    _COVERAGE_KEYS = """
-        SELECT count(*) FILTER (WHERE labeller_version = %(version)s), count(*),
-               array_agg(DISTINCT source)
-        FROM reaction_labels
+    _COVERAGE_ALL = _COVERAGE_COLUMNS
+
+    _COVERAGE_KEYS = (
+        _COVERAGE_COLUMNS
+        + """
         JOIN unnest(%(sources)s::text[], %(ids)s::text[]) AS k(s, i)
           ON source = k.s AND reaction_id = k.i
     """
+    )
 
     _COUNT = "SELECT count(*) FROM reaction_labels"
 
@@ -602,11 +609,7 @@ class PostgresLabelIndex(LabelIndex):
         if facet.sources:
             params["sources"] = sorted(facet.sources)
             where = " WHERE source = ANY(%(sources)s::text[])"
-        await cur.execute(
-            "SELECT count(*) FILTER (WHERE labeller_version = %(version)s), count(*), "
-            f"array_agg(DISTINCT source) FROM reaction_labels{where}",
-            params,
-        )
+        await cur.execute(self._COVERAGE_COLUMNS + where, params)
         row = await cur.fetchone()
         if row is None:
             return CorpusCoverage(labelled=0, total=0, sources=[])

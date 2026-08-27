@@ -1,265 +1,78 @@
-# Fresh full-family code review, hardening and refactoring (2026-08-26)
+# X7 false-claim repair — 2026-08-27
 
-All prior review results are discarded. This is a from-scratch audit of all three repos
-(`Chemclaw3`, `Chemclaw3-mcp`, `Chemclaw3_ui`) at `origin/main`, run as a wide subagent fan-out,
-with findings verified by execution before any fix lands.
+16 documented claims measured false (`X7-claims.md`). Every load-bearing *control* held; what is
+wrong is prose. Per item: change the code to match the claim, or the claim to match the code — and
+leave a gate behind, because a corrected sentence with no gate is the same defect one edit later.
 
-## Ground rules for this pass
+## Items
 
-- **A finding is a claim about the code, and a claim is checked by running it** (CLAUDE.md
-  "measure it, don't argue it"). A reviewer's prose is evidence about the reviewer, not the code.
-  Every accepted finding needs either a failing probe, a reproduced trace, or a line-exact reading
-  a second agent confirmed.
-- **The baseline must be genuinely green first**, with Postgres up — a local run that skips ~157
-  Postgres tests and prints green is not a baseline.
-- **No fix without a test that fails before it.** Behavioural fixes get behavioural tests, not mocks.
-- Refactors are only merged when they *delete* coupling or duplication; "tidier" alone is not a
-  reason to touch code (KISS, Rule of Three).
-- Each themed cluster of fixes is its own PR per repo, merged before the next starts, so the branch
-  never carries two unrelated arguments.
+- [x] F1 `CLAUDE.md` — the runaway cap is a first-party `before_model` counter, not upstream's
+      `ModelCallLimitMiddleware`. **Claim-changed** (the code is right, and the same file already
+      forbids that composition). Gate: absence test in `tests/test_upstream_surface.py`.
+- [x] F9 `message_pairing._LANGCHAIN_SHAPE` — **code-changed**: import the one constant, so the
+      comment claiming the two "cannot drift" becomes true; then soften `CLAUDE.md`. Gate:
+      `tests/test_message_pairing.py`.
+- [x] F3/F11 `calc`'s "five jobs" / "six read tools" — **claim-changed**, count removed. Gate:
+      `tests/test_repo_map.py` derives the one-workflow claim and rejects a re-added count.
+- [x] F4 "the eight validators" — **claim-changed**: nine, `sink-validate` missing. Gate: derive
+      the list from `make ci`.
+- [x] F5 `agent/README.md` (QM/DFT bundle, `workflows/`) and F6 `connectors/README.md`
+      (`science/safety`) — **claim-changed**. Gate: package READMEs join the prose-contract corpus;
+      the `science/` list and every "`x` bundle" mention pinned against the tree.
+- [x] F7/F8 `BACKLOG.md` — wrong self-counts, duplicated row. **Claim-changed**; new
+      `tests/test_backlog_register.py`.
+- [x] F10 documents README "Five things" (seven), F12 stale `path:line` anchors, F13
+      `test_layering.py` "exactly one left", F14 "three rules each enforced by a test",
+      F15 `agent/challenge._default_client` (deleted module).
+- [x] F16 `_tracked_directories.has_content` — **code-changed**: a package holding only
+      `__init__.py` is invisible to the map guard. Gate: the constructed case, as a test.
 
-## Phase 0 — baseline (done)
+## Verification
 
-- [x] `uv sync` in Chemclaw3 and Chemclaw3-mcp; `npm ci` in Chemclaw3_ui
-- [x] `dockerd`, `make up`, `make db-migrate` — Postgres/pgvector + Temporal running
-- [x] Baseline recorded, including what did **not** run:
-  - **Chemclaw3**: `ruff check` + `ruff format --check` green (677 files); `mypy --strict` green
-    (677 files). The full `pytest` did not finish locally — the box was carrying ~24 concurrent
-    review agents and load average sat above 25, and one run died with a pytest `INTERNALERROR`
-    under that load rather than a test failure. **CI is the authoritative gate for this repo's
-    suite in this pass**, and every fix is verified against its own suites locally before push.
-  - **Chemclaw3-mcp**: `ruff` green (201 files), `mypy --strict` green (71 files). `pytest` was
-    killed by its own timeout at ~11% under the same load (exit 143) — not a failure, and not a
-    pass either. Recorded as unrun rather than green.
-  - **Chemclaw3_ui**: `tsc -b` green, `eslint` green, `vitest` **424 passed / 36 files / 0 skipped**.
-    Playwright could not run — no Chromium binary in this environment — so the e2e tier is unrun.
-
-## Phase 1 — review fan-out (fresh, no prior results consulted)
-
-Each agent reviews one area with a single question: *what is wrong here, and how would I prove it?*
-Output is a structured finding list (file:line, claim, failure scenario, confidence). No fixes.
-
-### Chemclaw3 (backend core)
-- [ ] A1 `agent/` — LangGraph graph build, the 7 middlewares, checkpointer, compaction, plan gate, skills backend
-- [ ] A2 `api/` — front door, SSE contract, OIDC/authz gate, token budget, session push-back
-- [ ] A3 `core/` — config, db pools, audit trail, roles/entitlements, note proposals / PR-gate
-- [ ] A4 `durable/` — Temporal workflows/activities, timeouts, retention, worker wiring
-- [ ] A5 `science/` — calc cache + `cached_compute`, calibration ledger, bo, fingerprints
-- [ ] A6 `connectors/` — bundle loading, `HttpEndpoint`, MCP client/session, tool classification
-- [ ] A7 `ingest/` — sources seam, ELN warehouse engine, documents share, ORD records
-- [ ] A8 `publish/` + `kg/` — result sinks, projectors, graph indexer, PR gate
-- [ ] A9 `retrieval/` + `memory/` + `evals/` + `templates/`
-- [ ] A10 `cli/`
-
-### Cross-cutting (Chemclaw3, all packages)
-- [ ] X1 Security: authn/authz gaps, secret handling, injection (SQL/prompt/command), SSRF, path traversal, deserialization
-- [ ] X2 Concurrency: asyncio misuse, blocking calls in the loop, pool/session lifetimes, races, cancellation
-- [ ] X3 Resource safety: fds, connections, subprocesses, temp dirs, unbounded growth, retries/backoff
-- [ ] X4 Dead code, duplication, single-caller abstractions, "for later" stubs
-- [ ] X5 Config discipline: magic numbers, hardcoded URLs/paths/timeouts/model names outside settings
-- [ ] X6 Test quality: mock-only tests, untested critical paths, tests that cannot fail
-- [ ] X7 Doc/claim audit: every present-tense claim in CLAUDE.md, package READMEs and merged ADRs that
-      the code does **not** back (the `audit_events.agent` failure mode)
-
-### Chemclaw3-mcp
-- [ ] M1 `servers/calc` — the heaviest server; process isolation, keys, timeouts
-- [ ] M2 `servers/chem` + `servers/rxnlabel`
-- [ ] M3 `servers/rxnpredict` + `servers/props`
-- [ ] M4 `servers/safety` + `servers/pyexec` — **pyexec is a sandbox; treat as adversarial**
-- [ ] M5 `packages/mcp_server_kit` + fleet invariants (egress guard, manifests, identity headers)
-
-### Chemclaw3_ui
-- [ ] U1 `src/components/` — rendering, state leaks, accessibility, error surfaces
-- [ ] U2 `src/state/` + `src/api/` — SSE client, reconnect, cancellation, error propagation
-- [ ] U3 `src/chem/` — structure editor/paste path
-- [ ] U4 `server/` + `shared/` + auth — token handling, XSS, CSP, proxying
-- [ ] U5 tests + e2e quality
-
-## Phase 2 — triage and verification
-
-- [ ] Merge all findings into one register; de-duplicate across agents
-- [ ] Kill anything unreproducible: a finding that cannot be demonstrated is not a finding
-- [ ] Rank: (a) security/correctness defects, (b) resource/concurrency, (c) coupling and duplication,
-      (d) false claims in docs
-- [ ] For each survivor: write the failing probe *first*
-
-## Phase 3 — fix waves (one PR per theme per repo, merged before the next)
-
-- [ ] W1 security + correctness defects
-- [ ] W2 concurrency + resource safety
-- [ ] W3 refactor: delete duplication, dead code, single-caller abstractions
-- [ ] W4 doc/claim reconciliation + ADRs for anything that changed a decision
-
-## Phase 4 — close out
-
-- [ ] `make lint type test` green with Postgres up, in both Python repos; ui suite green
-- [ ] ADRs written for every decision taken here (`D-YYYY-MM-DD-<slug>.md` + ledger row)
-- [ ] `docs/planning/BACKLOG.md` / `DEFERRED.md` rows added or deleted as the pass decided
-- [ ] `tasks/lessons.md` updated
-- [ ] Review section written below
+`uv run ruff check . && uv run ruff format --check . && uv run mypy src examples tests`, plus
+`test_repo_map`, `test_decision_log`, `test_deferred_register`, `test_backlog_register`,
+`test_prose_contract`, `test_message_pairing`, `test_upstream_surface`, `test_layering`,
+`test_docstring_paths`.
 
 ## Review
 
-**Merged**: `Chemclaw3#245`, `Chemclaw3-mcp#25`, `Chemclaw3_ui#28`. 27 review sweeps, 10 fix teams.
+All sixteen addressed; F2 was already fixed by a concurrent session (the conflict markers are gone,
+the row kept `origin/main`'s wording, and the guard was generalised into
+`tests/test_repo_map.py::test_no_tracked_text_file_carries_an_unresolved_conflict_marker`).
 
-### What the pass was worth
+**Code changed, claim kept: two.** `agent/message_pairing.py` now imports `LANGCHAIN_SHAPE` instead
+of restating it, so the comment claiming the two cannot drift is true and the destructive path
+(`droppable_rows`) has one authority for what a row is. `tests/test_repo_map.py::_is_cache` counts
+`__init__.py` as content, so a package holding only that file can no longer be invisible to both
+halves of the map guard.
 
-The defects that mattered were not the ones a linter finds. Nearly all of them share one shape,
-and it is worth stating because it predicts where to look next time: **a design argued correctly in
-prose, resting on a premise the code contradicts.**
+**Claim changed, code kept: the rest** — every one was prose describing a working system wrongly.
+The counts (`calc`'s jobs, the validators, the archive's rows, this queue's rows, the read tools,
+the fan-out jobs, "five things", "exactly one left") were removed rather than corrected, and each
+now has a test deriving the fact from the tree.
 
-- `_check_classification`'s docstring is *right* that refusing to load is the only option that
-  cannot be wrong quietly — and a partition of nothing is trivially satisfied, so the manifest that
-  declared the least got the widest surface, unclassified.
-- `D-2026-08-25` removed the ELN PR-gate because "`record_from_ord_reaction` infers nothing", which
-  was true of that function and false of the adapter beside it, so 80 °C for 12 h was stored as
-  0 °C for 0.5 h.
-- The `Warehouse` protocol omitted `close()` on the written premise that halves live for the
-  process; they were rebuilt per tool call, 100 for 100.
-- The retrievers' own `except` clauses made `fanout`'s `failed` channel unreachable, so an outage
-  read as "no prior art".
+**Found while fixing, not in the report:** `connectors/calc/connector.yaml` carried three more stale
+counts ("Four jobs that are each a fan-out" over five, "these five typed jobs" twice, "the other two
+sampling jobs"), and the package READMEs held nine unresolvable paths once they joined the
+prose-contract corpus.
 
-Mutation testing put a number on it: 22 of 31 killed, and **all eight survivors were defences
-argued at length in a docstring and asserted nowhere**. That is the single most useful sentence
-this pass produced, and it is a search key, not a slogan.
+**Not gated, deliberately.** A heading may still count the items under it: measured, a mechanical
+rule false-positives on four of the eight counting headings in the package READMEs (a bold
+continuation line, a table, a prose enumeration), so `ingest/documents/README.md` simply lost its
+number. And `path:line` anchors in the two registers are not banned: 37 rows use one, so the rule
+would be a 37-row rewrite; the three stale ones now name symbols instead.
 
-### What was checked and found sound
+**Gate results.** `ruff check` / `ruff format --check` clean over the tree except
+`tests/test_validate_connectors.py:274` (E501, a file the concurrent dead-code sweep is editing);
+`mypy --strict src examples tests` → **Success, 678 files**. Targeted suites: `test_repo_map` 14,
+`test_backlog_register` 4, `test_deferred_register` 4, `test_decision_log` 11, `test_layering` 73,
+`test_prose_contract` 34, `test_message_pairing` 10, `test_upstream_surface` 38, `test_docstring_paths` 677 — all
+green, plus
+`make connector-validate` and `make prose-validate`.
 
-Reported because a review that only lists failures cannot be calibrated. The authorization spine
-held under adversarial probing (22 of 22 routes, a full JWT bypass battery, the redaction filter
-against 15 real `LogRecord`s, the prompt-injection envelope against seven forgery spellings). The
-RRHO/Boltzmann arithmetic re-derived to CODATA at 1e-13. The magic-number rule genuinely holds
-across 355 settings. `mcp_server_kit`'s four documented traps all held against a running server.
-The `props` corpus survived four independent cross-checks. D-011 re-measured exactly as documented.
-
-### Three findings the fix teams refuted or redirected, by measuring
-
-- The condenser was reported unmetered; it is not — a model built inside a tool body inherits the
-  graph's callbacks (3 x 55 spent, 165 metered). Only the verifier's judge was.
-- `pyexec`'s per-call isolation was reported broken; it is not — the *claim* was too absolute, so
-  the README now says what the boundary does not cover instead of a control being invented.
-- `CALCULATION_EPOCH` was expected to need a bump; it does not — Chemclaw3 folds its own epoch over
-  the server's `params_hash`, so the two compose and a bump would invalidate unrelated rows.
-
-### What I got wrong
-
-One validation change (refusing an empty `tools` list) broke tests in **three separate rounds**,
-two of them found by someone else — a reviewer working a different lens, then CI. The file that
-broke last was in my first grep's output; I read the hit, saw a variable passed through, and did
-not ask what it defaulted to. The rule is in `tasks/lessons.md`: when a change makes a
-previously-legal value illegal, search for what *produces* that value, not what names the type —
-and run the whole suite, because four of the five files that broke had nothing to do with
-connectors. I also pushed once with `ruff` red, having chained the gate into the same command as
-the commit so it ran too late to stop anything.
-
-### Left open, deliberately
-
-- `FingerprintReactionRetriever`'s `except FingerprintError: return []` — that type means a bad
-  caller anchor as well as a corrupt index, and separating them is wider than this pass.
-- An X-H rotor still cannot be *scanned*: the fix needs a dihedral in `AddHs` numbering and a
-  Chemclaw3-side change, so it spans two repositories.
-- `connector-validate` still cannot check a remote server's declared surface against what it
-  serves, and nothing bounds a connector's *response* while its request is capped (64 MB arrived
-  intact). Both are named in `D-2026-08-26-an-empty-allow-list-is-not-an-allow-list` so neither
-  reads as covered.
-- The unfixed remainder of the finding register (durable/, core/, cli/, X4's 769 deletable LOC,
-  X5's chart seam) is real and unactioned — it was scoped out, not disproved.
-
----
-
-# (Concurrent pass, kept rather than overwritten)
-
-The section below is another session's working notes, which landed on `main` while this
-review was running. Both are kept: a scratch file is not a reason to delete someone's
-record of what they were doing.
-
-# Atom-addressable reactivity — implementation
-
-Concept: `tasks/reactivity-labels-concept.md` · ADR: `docs/decisions/D-2026-08-26-an-atom-index-is-not-a-name.md`
-
-## ADR
-- [x] `D-2026-08-26-an-atom-index-is-not-a-name.md` + ledger row
-
-## Tier 0 — structural site labels (Chemclaw3-mcp / servers/chem)
-- [x] `engine/sites.py`: `Site` + `describe_atom_sites`, one entry per symmetry class
-- [x] content-addressed `site_id` on the `torsion_handle` construction
-- [x] `describe_sites` tool, declared `read_only`
-- [x] 27 tests: symmetry classes, ring relationships, C-H folding, handle stability
-
-## Tier 1 — free descriptor panel (Chemclaw3-mcp / servers/calc)
-- [x] read the ion energies `compute_fukui` was discarding
-- [x] global panel (IP/EA/mu/eta/S/omega) + local (dual, s±, omega_k) + free valence
-- [x] `test_the_panel_costs_no_extra_single_point` pins the SCF count at three
-
-## Tier 2 — xtb-binary descriptors (Chemclaw3-mcp / servers/calc)
-- [x] `engine/xtb_atomic.py` + `compute_atomic_descriptors`
-- [x] property-table and ESP-grid parsers, written against a captured 6.6.1 run
-- [x] refuses by name when the binary is absent; the *key* still derives (CREST's convention)
-
-## Composition (Chemclaw3)
-- [x] mirrored reader models, `CALCULATION_EPOCH` -> "2" in both repos
-- [x] `compute_atomic_descriptors` on the `calc` bundle; `describe_sites` on `chem`
-- [x] publish projector + property vocabulary carry the panel
-- [x] `skills/reactivity-descriptors` rewritten: start with `describe_sites`, scope the
-      question, aggregate by class, report only differences that exceed the class spread
-- [x] probe `an-34` for the new tool
-
-## Gate
-- [x] Chemclaw3 `make check`: **4799 passed, 3 skipped** — with Docker/Postgres up, so the
-      ~157 Postgres-backed tests really ran
-- [x] Chemclaw3-mcp `make check`: **1188 passed, 5 skipped** — the 5 are the binary-only Tier 2
-      tests, which run and pass with `xtb` installed (verified separately, 18 passed)
-
-## Review
-
-**What the concept got right.** The diagnosis held: the failure was presentation, not physics.
-Phenol's *para* carbon is still rank 6 of 13 in the raw ranking, and scoping plus class
-aggregation is what makes it reportable.
-
-**What building it changed.**
-
-1. **Tier 2 was verifiable after all.** `apt` carries xtb 6.6.1. Installing it replaced guesswork
-   with captured output, and caught two things prose would have got wrong: the polarisability
-   table is on *stdout*, not in `xtbout.json`, and an `--esp` run aborts (SIGABRT) after writing
-   the grid and before the JSON — so a surface calculation cannot also carry the atomic multipoles.
-2. **It exposed a live defect unrelated to this work.** `xtb_engine` defaults to `"auto"`, so with
-   a binary present `compute_xtb_energy`, `compute_electronic_properties` and
-   `predict_site_reactivity` stamped `+xtb+xtb-6.6.1` onto results computed entirely by tblite —
-   none of the three has a binary code path. Fixed by making the backend a property of the
-   **task** (`_FIXED_BACKEND`), not of the caller.
-3. **`GetDefaultValence` is the wrong RDKit call for a free valence.** A sulfone's sulfur came out
-   at −2.94. `GetValenceList` is the right one, and an element with more than one normal valence
-   now gets `None`.
-4. **Rounding a derivation separately from its inputs** made `f_zero` disagree with its own
-   definition in the fourth decimal.
-5. **A ring fusion is not a substituent.** Naphthalene was being labelled "bearing the CH
-   substituent"; fused rings and two-heteroatom rings now refuse the classical *ortho/meta/para*
-   names rather than misapplying them.
-6. **A key derives without a binary; only computing refuses.** Got this backwards first;
-   `test_deriving_a_key_runs_no_scf` caught it.
-
-**Post-merge review (8 findings, all real, all fixed).** Tests were green and saw none of them.
-The two that mattered most: `describe_sites` numbered atoms from the caller's spelling while the
-calculators canonicalise, so the documented index join mis-attributed every per-atom number; and the
-ESP surface was a flag kept out of the cache key, so `surface=True` was served the panel-only row and
-returned nothing having run nothing. Also: no projector for `xtb.atomic` (results silently dropped),
-`free_valence` still meaningless on charged atoms, colliding labels on fused rings and azines, a
-`nitro_nitrogen` SMARTS matching a form RDKit never builds, a new cached payload outside the digest
-guard, and the skill instructing the model to report a `resolved` field no tool returns. Kept rather
-than fixed: resonance-equivalent atoms do not merge, because topological symmetry cannot see
-resonance — the label-uniqueness rule is what makes that safe.
-
-**Left open, deliberately.**
-
-- **The cross-molecule claim for local electrophilicity is unsettled.** omega is 3.24 eV for
-  phenol, 3.52 for *N,N*-dimethylacrylamide, 3.74 for pyridine — plausible ordering on a
-  demonstrably wrong absolute scale. It ships as a ranking quantity for the calibration ledger to
-  settle, not as an established one.
-- **The xtb binary Hessian path produces no dipole derivatives.** Pre-existing — proven by
-  stashing this change and re-running with the binary installed — so a deployment that adds xtb
-  loses IR dipole derivatives and fails two `test_engine.py` assertions. Not this change's to fix;
-  it needs its own decision about whether the binary Hessian route is supported at all.
-- **No `profile_reactivity` composite tool.** The join, the class aggregation and the noise-floor
-  rule live in the skill rather than in a cross-connector tool: the pieces are all free and
-  `read_only`, and a composite spanning two connectors has no precedent here. If a second caller
-  appears, that is the trigger to extract it.
+The one unresolved red is `test_message_migration`'s two agent-over-Postgres tests, which **time
+out** (pytest-timeout, not an assertion) on a machine carrying another session's suites at load
+average 15 and 30 concurrent pytest processes: `test_erasure_reaches_turn_state_not_just_the_
+transcript` passed in the 824-test run with these changes applied and timed out in the next run of
+the same file. Nothing here can reach them — `message_pairing` is imported lazily by
+`durable/retention.py` and by nothing the graph build touches.

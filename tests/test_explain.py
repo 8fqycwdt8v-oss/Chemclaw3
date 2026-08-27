@@ -158,3 +158,48 @@ def test_a_row_the_store_could_only_recover_is_not_attributed_to_a_speaker() -> 
     # The contrast is the whole assertion: a row that *did* convert keeps its real speaker, so this
     # cannot be satisfied by calling everything unknown.
     assert _speaker(legacy_text("user", "hello")) == ("user", "hello")
+
+
+def test_a_turn_with_both_a_tool_call_and_a_job_is_rendered_once() -> None:
+    """The routine post-retention case, rendered twice — one occurrence read as two.
+
+    `shown` de-duplicated `(*calls, *jobs)` against the transcript's `order` and never against
+    itself, so a turn present in *both* key sequences and absent from the transcript appeared
+    twice: same header, same job line, same tool line. That is not a corner — `_render`'s own
+    docstring says the trail routinely outlives the words it points at, because `durable/retention`
+    prunes `session_messages` by age and an abandoned turn never writes a transcript row at all. A
+    reviewer asking "why was this run?" on a session older than the message-retention window was
+    shown one durable job and one tool call as two separate occurrences.
+    """
+    correlation = "turn-1"
+    report = _report(
+        calls={correlation: [ToolCall("similar_molecules", "ok", "", 1.0, "alice", "precedent")]},
+        jobs={correlation: [Job("calc", "compute_thermochemistry", "the barrier", "done")]},
+    )
+    assert report.count(f"── turn {correlation}") == 1, report
+    assert report.count("job calc:compute_thermochemistry") == 1, report
+    assert report.count("tool similar_molecules") == 1, report
+
+
+def test_an_unrenderable_row_shows_its_repr_instead_of_reading_as_an_absent_transcript() -> None:
+    """The `("unknown", <repr>)` fallback this function documents was unreachable in practice.
+
+    `_speaker`'s docstring promises "an unreadable payload renders as its repr under an `unknown`
+    role rather than raising" — the promise that matters after the blank-transcript defect
+    `CLAUDE.md` records. But `message_from_row` catches internally and returns a *degraded* message
+    rather than raising, so the `except` arm is dead for a dict payload; a payload with no
+    recoverable prose came back as an empty message and `explain` dropped the row with `if text:`.
+    The turn then rendered "transcript: absent (compacted, pruned, or rolled back)" — a specific,
+    and wrong, explanation of a row that is on disk and merely unreadable.
+
+    The column is bare `jsonb`, so a shape neither reader recognises is exactly what this is for.
+    """
+    role, text = _speaker({"nope": 1}, None)
+    assert role == "unknown"
+    assert text, "an unrenderable row rendered as nothing and would be silently dropped"
+    assert "nope" in text
+
+    # And the reconstruction distinguishes the two, which is the point: one turn holds an
+    # unreadable row, the other holds no row at all.
+    report = _report(order=["turn-a"], turns={"turn-a": [("unknown", "{'nope': 1}")]})
+    assert "transcript: absent" not in report, report

@@ -225,10 +225,6 @@ class ConversionOutcome:
     converted: int
     refused: tuple[int, ...]
 
-    def is_complete(self) -> bool:
-        """Whether every row this pass saw was converted."""
-        return not self.refused
-
 
 # One session's rows are read whole because the conversion is per row and order-free; the batch
 # bounds *memory*, not correctness, so a value that keeps a page of rows comfortably in hand is the

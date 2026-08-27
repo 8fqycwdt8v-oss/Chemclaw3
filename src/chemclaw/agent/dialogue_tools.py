@@ -3,8 +3,11 @@
 **AGT-5.** `_INSTRUCTIONS` tells the agent to "say plainly when the data is silent", but there was
 no contract for it to *ask*. An ambiguous question ("what did we get on the Suzuki?") therefore
 produced a best-guess sweep across every matching campaign — worse *and* more expensive than
-asking which one was meant. `ApprovalRequestEvent` was structurally close but semantically wrong:
-an approval is a yes/no on something already decided.
+asking which one was meant. The approval event of the day was structurally close and semantically
+wrong — an approval is a yes/no on something already decided — so `QuestionEvent` is its own member
+of the stream. That event has since gone with the hold behind it
+(`D-2026-08-27-a-hold-nothing-can-open-is-not-a-hold`); this one stayed, because a clarifying
+question has a producer.
 
 The dry-run turn flag (IDEA-4) used to live here too, since it started as a sibling interaction
 primitive; it moved to `chemclaw.agent.turn_flags` because this module's import has a side effect

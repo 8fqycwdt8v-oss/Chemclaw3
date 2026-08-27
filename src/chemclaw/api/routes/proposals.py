@@ -117,9 +117,9 @@ async def decide_note_proposal(
 ) -> Response:
     """Record the human sign-off — or, for the first time, the refusal.
 
-    Deliberately an HTTP route and not an agent tool, for the reason
-    `POST /approvals/{id}/decision` is not (D-005): a tool would let the agent sign off on its
-    own proposal and collapse the line the whole gate draws.
+    Deliberately an HTTP route and not an agent tool (D-005): a tool would let the agent sign off
+    on its own proposal and collapse the line the whole gate draws — the same reasoning that keeps
+    `POST /sessions/{id}/plan/decision` off the tool surface.
 
     This records the *decision*, which for a rejection is the entire outcome — there is no git
     action to take, and the record is what makes "we considered this and said no" answerable

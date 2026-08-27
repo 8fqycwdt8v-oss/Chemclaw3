@@ -8,6 +8,7 @@ specific handler wiring (which `logging.basicConfig` owns).
 import json
 import logging
 import os
+import pathlib
 import subprocess
 import sys
 from collections.abc import Callable
@@ -21,10 +22,12 @@ from chemclaw.core.logging import (
     ContextFilter,
     JsonFormatter,
     SecretRedactingFilter,
+    _configured_by,
     _handlers_that_reach_an_output_stream,
     configure_logging,
     configure_telemetry,
     redact_secrets,
+    register_secret_env,
 )
 
 
@@ -608,6 +611,69 @@ def test_a_connector_bearer_token_is_redacted(monkeypatch: pytest.MonkeyPatch) -
     # Constructed fresh here, so it picks up the patched `enabled()` rather than the real registry.
     SecretRedactingFilter().filter(record)
     assert token not in record.getMessage()
+
+
+def test_a_credential_supplied_through_the_env_file_is_redacted_after_registration(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: "pathlib.Path"
+) -> None:
+    """`register_secret_env` names a variable; the value may never be in `os.environ` at all.
+
+    `Settings.model_config` declares `env_file=".env"`, and pydantic-settings reads that file
+    itself — it does **not** export what it read. So for every deployment configured the documented
+    `.env` way (local, `infra/live`, the compose stack), a registered name resolved to `""` and the
+    credential was never redacted, no matter how correctly the read site called
+    `register_secret_env`. That is a property of the mechanism rather than of any one credential:
+    it covered `vector_store_api_key`, whose `core/config/store.py` comment named this exact
+    registration as its protection, and it would cover the next settings-backed variable registered
+    at its read site.
+
+    Seeded through a real `env_file` rather than `monkeypatch.setenv`, because exporting the
+    variable is the one configuration under which the defect does not reproduce.
+
+    **`_SECRET_SETTINGS` is taken away for the duration**, so what is measured is the registration
+    path alone. The field is in that inventory now as well — a credential that is a `Settings` field
+    belongs in the value inventory whatever else covers it — and leaving it there would make this
+    test green through the other mechanism and blind to a regression in this one.
+    """
+    env_file = tmp_path / ".env"
+    env_file.write_text("CHEMCLAW_VECTOR_STORE_API_KEY=Qdr-supersecret-abcdef123456\n")
+    monkeypatch.delenv("CHEMCLAW_VECTOR_STORE_API_KEY", raising=False)
+    from_file = Settings(_env_file=str(env_file))  # type: ignore[call-arg]
+    key = from_file.vector_store_api_key.get_secret_value()
+    assert key == "Qdr-supersecret-abcdef123456", "the .env must be what configured this"
+    assert "CHEMCLAW_VECTOR_STORE_API_KEY" not in os.environ, "pydantic must not have exported it"
+
+    monkeypatch.setattr(settings, "vector_store_api_key", SecretStr(key))
+    monkeypatch.setattr(
+        "chemclaw.core.logging._SECRET_SETTINGS",
+        tuple(n for n in _SECRET_SETTINGS if n != "vector_store_api_key"),
+    )
+    register_secret_env("CHEMCLAW_VECTOR_STORE_API_KEY")  # what `open_qdrant_client` does
+
+    # The name resolves to the value the `.env` configured, not to the empty string `os.environ`
+    # would have given — the whole of the defect, in one call.
+    assert _configured_by("CHEMCLAW_VECTOR_STORE_API_KEY") == key
+
+    # And end to end, on an *unlabelled* occurrence so neither structural rule can be what saves
+    # it: `_STRUCTURAL_SECRETS` anchors on `api_key=` / `Bearer `, and a client's own error message
+    # carries neither.
+    assert key not in _rendered(_record("qdrant refused: unauthorized for %s at cluster", key))
+
+
+def test_a_registered_name_that_configures_nothing_still_resolves_from_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other half of the same resolution, and the one that must not have been traded away.
+
+    Most registered names come from a *manifest* — a warehouse password, a sink token, a connector
+    bearer — and name no `Settings` field at all. Those have only the environment to resolve
+    against, so the settings fallback has to be a fallback rather than a replacement.
+    """
+    monkeypatch.setenv("CHEMCLAW_TEST_WAREHOUSE_PASSWORD", "wh-supersecret-0123456789")
+    register_secret_env("CHEMCLAW_TEST_WAREHOUSE_PASSWORD")
+    assert _configured_by("CHEMCLAW_TEST_WAREHOUSE_PASSWORD") == "", "no field configures this"
+    rendered = _rendered(_record("warehouse refused %s", "wh-supersecret-0123456789"))
+    assert "wh-supersecret-0123456789" not in rendered
 
 
 def test_every_named_secret_is_a_real_settings_field() -> None:

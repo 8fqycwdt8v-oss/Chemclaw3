@@ -52,6 +52,13 @@ Related traps:
   Report the equilibrium, then discuss how a process changes it.
 - **ΔH versus ΔG.** If the entropy term is doing the work — a reaction that changes the
   number of molecules — say so, because that is the part temperature will move.
+- **State the standard state for exactly those reactions.** Every result carries
+  `standard_state`: `gas-1atm` with no solvent, `solution-1M` with one. It cancels when the
+  molecule count is unchanged and is worth 1.894 kcal/mol per mole of change when it is not
+  — a factor of 24.5 in K per unit of Δn — so quote it whenever you quote a K or a ΔG for
+  an association, a dissociation or a homolysis. A `solvent_comparison` of such a reaction
+  says so in `warnings`: its gas-phase reference row is at 1 atm while the solvent rows are
+  at 1 M, so the gas-to-solution gap is not a solvation energy.
 - **Temperature is an input.** The default is 298.15 K. A process at 80 °C is a different
   question, and re-running at the real temperature costs nothing.
 

@@ -24,6 +24,8 @@ import re
 import subprocess
 from pathlib import Path
 
+import yaml
+
 _ROOT = Path(__file__).resolve().parents[1]
 _ARCHITECTURE = _ROOT / "ARCHITECTURE.md"
 _PACKAGE = _ROOT / "src" / "chemclaw"
@@ -36,6 +38,18 @@ _NOT_DOCUMENTED = {".git", ".github", ".venv", "src"}
 # A table row's first cell, `| `dirname/` | …` or `| `dirname` | …`, with the trailing slash and the
 # backticks optional so the map can read naturally.
 _ROW = re.compile(r"^\| `([A-Za-z0-9_.-]+)/?` \|", re.MULTILINE)
+
+
+def _is_cache(segment: str) -> bool:
+    """Whether one path segment is a tool's scratch, rather than something a reader can open.
+
+    Named rather than pattern-matched on `__`: `__pycache__` is a cache and `__init__.py` is the
+    file that makes a directory a package, and a filter that cannot tell them apart hides the
+    second (see `_tracked_directories`). Hidden segments stay excluded wholesale — `.mypy_cache`,
+    `.ruff_cache` and `.pytest_cache` are all of that shape, and a dotfile is not documentation
+    anyone clicks on GitHub.
+    """
+    return segment.startswith(".") or segment == "__pycache__"
 
 
 def _tracked_directories(parent: Path) -> set[str]:
@@ -53,6 +67,12 @@ def _tracked_directories(parent: Path) -> set[str]:
     Emptiness is judged by content rather than by asking git, so the check stays a plain filesystem
     walk with no subprocess: a directory whose whole subtree is caches and other husks has no file
     a reader could open, which is the same conclusion by a cheaper route.
+
+    **What counts as a husk is a cache name, not any dunder name**, and the difference was a hole.
+    The filter used to skip every path segment starting `__`, so a package holding only an
+    `__init__.py` had no file this walk could see: it was skipped by both tests below, needing
+    neither a README nor a map row. `__init__.py` is content — it is the file that makes the
+    directory a package at all.
     """
 
     def has_content(directory: Path) -> bool:
@@ -64,7 +84,7 @@ def _tracked_directories(parent: Path) -> set[str]:
         # caches and husks *inside* the tree; the directory's own name is filtered below.
         return any(
             path.is_file()
-            and not any(part.startswith((".", "__")) for part in path.relative_to(directory).parts)
+            and not any(_is_cache(part) for part in path.relative_to(directory).parts)
             for path in directory.rglob("*")
         )
 
@@ -122,6 +142,29 @@ def test_directories_are_found_from_a_checkout_under_a_dot_directory(tmp_path: P
 
     assert "pkg" in found, "a real directory vanished because the checkout sits under a dot-path"
     assert "cached" not in found, "a directory holding only caches must still count as empty"
+
+
+def test_a_package_holding_only_an_init_file_is_still_seen(tmp_path: Path) -> None:
+    """The cache filter must exclude caches, not every dunder name.
+
+    `has_content` skipped any file whose path below the directory had a segment starting `.` or
+    `__`, so a package containing nothing but `__init__.py` counted as *empty* and vanished from
+    both halves of this file: no README was demanded of it and no map row either. Constructed and
+    measured on the tree this was written against — a package under `src/chemclaw/` holding nothing
+    but an `__init__.py` passed all eight tests, and adding one non-dunder module beside it turned
+    two of them red.
+
+    A package with only an `__init__.py` is a plausible intermediate state during a split, which is
+    exactly when the map is most likely to go stale, so the one state the guard cannot see is the
+    one it is most needed in. `__pycache__` is what the filter is actually for.
+    """
+    root = tmp_path / "repo"
+    (root / "pkg").mkdir(parents=True)
+    (root / "pkg" / "__init__.py").write_text("", encoding="utf-8")
+
+    assert "pkg" in _tracked_directories(root), (
+        "a package holding only `__init__.py` is invisible to the map guard"
+    )
 
 
 def test_every_subpackage_has_a_readme() -> None:
@@ -276,3 +319,159 @@ def test_no_tracked_text_file_carries_an_unresolved_conflict_marker() -> None:
                 offenders.append(f"{name}:{number}")
 
     assert not offenders, f"unresolved merge conflict markers in tracked files: {offenders}"
+
+
+# A cardinal: a digit run or a number word. Used to reject counts written into prose that the tree
+# already answers (D-2026-08-01-the-count-lives-in-the-test-not-in-the-prose). "one" is deliberately
+# absent — "one workflow, one queue" is a claim about *shape*, and the test below derives it.
+_CARDINAL = (
+    r"\d+|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen"
+    r"|sixteen|seventeen|eighteen|nineteen|twenty"
+)
+_COUNTED_JOBS = re.compile(rf"\b(?:{_CARDINAL})\s+(?:\w+\s+)?jobs?\b", re.IGNORECASE)
+
+
+def _calc_manifest_sentences() -> list[str]:
+    """The `calc` manifest's comment prose, as sentences.
+
+    The manifest's header comments are where this bundle explains itself to the next reader, so
+    they are prose by every rule this repository applies to prose — and they are read here rather
+    than in `connector-validate`, which checks the declaration and not the commentary around it.
+    """
+    manifest = (_PACKAGE / "connectors" / "calc" / "connector.yaml").read_text(encoding="utf-8")
+    comments = " ".join(
+        line.strip().lstrip("#").strip()
+        for line in manifest.splitlines()
+        if line.strip().startswith("#")
+    )
+    return [sentence.strip() for sentence in re.split(r"(?<=[.:])\s", comments) if sentence.strip()]
+
+
+def test_the_calc_bundle_teaches_its_shape_without_counting_its_jobs() -> None:
+    """The runbook said five jobs and one workflow; the manifest declared twelve.
+
+    The sentence teaches something real and worth keeping: every job goes down *one* durable path,
+    so adding a job is adding a typed member to a union rather than a second workflow. The count
+    beside it taught nothing and went stale silently, in three places at once — the runbook, the
+    manifest's own header, and the section comment introducing the fan-outs, which said "four" over
+    five jobs.
+
+    So the shape is derived from the manifest and the counts are refused. The failure that motivates
+    the second half is not that a reader is misinformed about a number; it is that a document
+    disagreeing with itself stops being read as authoritative at all.
+    """
+    manifest = yaml.safe_load(
+        (_PACKAGE / "connectors" / "calc" / "connector.yaml").read_text(encoding="utf-8")
+    )
+    workflows = {job["workflow"] for job in manifest["jobs"]}
+    assert workflows == {"CalcJobWorkflow"}, (
+        f"calc's jobs no longer share one workflow ({sorted(workflows)}); the runbook and the "
+        "manifest both teach that they do"
+    )
+
+    sentences = _calc_manifest_sentences()
+    assert sentences, "the calc manifest carries no comment prose; the parse or the layout moved"
+    shape = [sentence for sentence in sentences if "one workflow" in sentence]
+    assert shape, "the manifest no longer states the one-workflow shape this test derives"
+    counted = [sentence for sentence in shape if re.search(rf"\b(?:{_CARDINAL})\b", sentence, re.I)]
+    assert not counted, (
+        f"the one-workflow sentence counts the jobs sharing it: {counted}. The manifest declares "
+        "them; a number here is a second answer that goes stale on its own."
+    )
+    miscounted = [sentence for sentence in sentences if _COUNTED_JOBS.search(sentence)]
+    assert not miscounted, f"the calc manifest counts its own jobs in prose: {miscounted}"
+
+    runbook = (_ROOT / "docs" / "guides" / "runbook.md").read_text(encoding="utf-8")
+    worked_example = [
+        paragraph
+        for paragraph in runbook.split("\n\n")
+        if "worked example (" in paragraph and "connectors/calc" in paragraph
+    ]
+    assert len(worked_example) == 1, "the runbook's calc worked-example paragraph has moved"
+    assert not _COUNTED_JOBS.search(worked_example[0]), (
+        "the runbook counts calc's jobs again; it declared twelve while the sentence said five"
+    )
+
+
+def _ci_validators() -> set[str]:
+    """Every `*-validate` target `make ci` runs, read off the recipe itself."""
+    makefile = (_ROOT / "Makefile").read_text(encoding="utf-8")
+    ci_line = next(line for line in makefile.splitlines() if line.startswith(("ci:", "ci ")))
+    return {word for word in re.split(r"[\s:#]+", ci_line) if word.endswith("-validate")}
+
+
+def test_both_documents_name_every_validator_the_gate_runs() -> None:
+    """Both documents said "the eight validators" and listed eight; `make ci` runs nine.
+
+    `sink-validate` — the newest, guarding the `sink.yaml` seam — was in neither list, so a reader
+    who ran the eight believed they had run what CI runs. The same file that refuses to state a
+    target count six lines earlier ("the one that was said 23 while the file held 28") stated this
+    one; a count is not the problem, an *unchecked* count is.
+
+    Derived from the `ci` recipe rather than from `make help`, because the claim both documents make
+    is about the gate, and a validator that exists but is not wired into `ci` would be the more
+    dangerous omission of the two.
+    """
+    validators = _ci_validators()
+    assert len(validators) >= 8, f"the ci recipe no longer lists validators: {validators}"
+    for document in ("README.md", "CLAUDE.md"):
+        text = (_ROOT / document).read_text(encoding="utf-8")
+        missing = sorted(name for name in validators if f"`{name}`" not in text)
+        assert not missing, f"{document} does not name {missing}, which `make ci` runs"
+
+
+def _science_engines() -> set[str]:
+    """Every subpackage of `science/`, named by its directory."""
+    return _tracked_directories(_PACKAGE / "science")
+
+
+def test_the_connector_readme_lists_the_science_packages_that_exist() -> None:
+    """The boundary against `science/` is only useful while it names the right packages.
+
+    It listed `calc`, `bo`, `safety` and `fingerprints`: `science/safety` had been deleted with the
+    hazard gate that justified it (`D-2026-08-15-safety-is-a-tool-not-a-gate`) and `science/labels`
+    was missing — a map of a layer wrong in both directions, three lines under the heading that
+    calls that boundary a rule. `ARCHITECTURE.md` had it right, so the tree carried two maps of one
+    layer that disagreed, which is worse than one map.
+    """
+    engines = _science_engines()
+    assert engines, "no science subpackages found; the layout moved"
+    readme = (_PACKAGE / "connectors" / "README.md").read_text(encoding="utf-8")
+    boundary = readme.split("## The boundary against", 1)
+    assert len(boundary) == 2, "the section that names the science packages has been renamed"
+    section = boundary[1].split("\n## ", 1)[0]
+    missing = sorted(name for name in engines if f"`{name}`" not in section)
+    assert not missing, f"connectors/README.md's science list does not name {missing}"
+
+
+def test_no_shipped_document_names_a_connector_bundle_that_is_gone() -> None:
+    """`agent/README.md` advertised "the QM/DFT job" as a bundle three weeks after its deletion.
+
+    The `D-2026-08-26` sweep caught the runbook — because the test above pins that paragraph — and
+    missed this README, which nothing pinned. A bundle name is the one part of such a sentence a
+    machine can resolve, so every "`name` bundle" spelling in the documents a reader navigates by
+    must be a directory that exists.
+
+    Scoped to that spelling on purpose: it is the phrase that makes a *present-tense* claim about
+    the capability surface, and it cannot fire on prose that merely mentions a word.
+    """
+    named = re.compile(r"`([a-z][a-z0-9_]*)` bundle\b")
+    documents = [
+        _ROOT / "README.md",
+        _ROOT / "CLAUDE.md",
+        _ROOT / "ARCHITECTURE.md",
+        *sorted((_PACKAGE).rglob("README.md")),
+        *sorted((_ROOT / "docs" / "guides").glob("*.md")),
+    ]
+    bundles = _bundles()
+    assert bundles, "no connector bundles found; the glob or the layout moved"
+    stale = sorted(
+        {
+            f"{path.relative_to(_ROOT)}: `{name}`"
+            for path in documents
+            if path.is_file()
+            for name in named.findall(path.read_text(encoding="utf-8"))
+            if name not in bundles
+        }
+    )
+    assert not stale, f"documents naming a connector bundle that does not exist: {stale}"

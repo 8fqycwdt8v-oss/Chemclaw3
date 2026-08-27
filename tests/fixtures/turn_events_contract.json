@@ -19,10 +19,6 @@
       "unsupported_claims": "list[str]",
       "verified_by": "Optional[Literal['judge', 'citation-gate']]"
     },
-    "approval_request": {
-      "approval_id": "str",
-      "prompt": "str"
-    },
     "capability_degraded": {
       "connectors": "list[str]"
     },

@@ -16,6 +16,7 @@ The two properties worth reading the file for:
 """
 
 import asyncio
+import logging
 import shutil
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
@@ -2123,3 +2124,54 @@ def test_neither_backend_ranks_a_chunk_from_a_superseded_embedding_configuration
 
     with pytest.MonkeyPatch.context() as monkeypatch:
         asyncio.run(_run(monkeypatch))
+
+
+def test_a_systematic_read_failure_costs_log_lines_by_the_pass_not_by_the_corpus(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """One WARNING per skipped file makes log volume a function of the share.
+
+    Each of those lines is right for the case it was written for — one bad PDF, named so an
+    operator can go and look at it. The case that actually happens is systematic: a folder whose
+    permissions changed, an OCR pass that broke every extraction, a format the parser stopped
+    accepting. Then the count is the corpus's, the one line saying *why* is indistinguishable from
+    the other 999,999, and under a log driver with backpressure the volume slows the very pass that
+    is failing. The reasons and the total are what an operator can act on, and `SyncReport` already
+    carries the count.
+    """
+    root = tmp_path / "share"
+    (root / "Docs").mkdir(parents=True)
+    for index_ in range(40):
+        (root / "Docs" / f"broken-{index_:02d}.pdf").write_bytes(b"%PDF-1.4 not a pdf at all")
+    binding = load_binding(
+        {
+            "mount": str(root),
+            "roots": [{"path": "Docs"}],
+            "public": True,
+            "extensions": [".pdf"],
+        }
+    )
+
+    with caplog.at_level(logging.DEBUG, logger="chemclaw.ingest.documents"):
+        report = asyncio.run(sync_share(SOURCE, binding, InMemoryDocumentIndex()))
+
+    assert report.skipped_unreadable == 40
+    # This tree's own records only: `pypdf` logs one line of its own per malformed file, which is
+    # the same volume problem one library down and is silenced by logging configuration rather
+    # than by this module.
+    warnings = [
+        record
+        for record in caplog.records
+        if record.levelno >= logging.WARNING and record.name.startswith("chemclaw.")
+    ]
+    assert len(warnings) == 1, (
+        f"40 unreadable documents produced {len(warnings)} WARNING line(s); at share scale that is "
+        "one line per file in the corpus, and the reason is in every one of them"
+    )
+    summary = warnings[0].getMessage()
+    assert "40" in summary and "DocumentParseError" in summary, (
+        f"the one line an operator reads must carry the count and the distinct reasons: {summary!r}"
+    )
+    # The individual paths are not lost, they are moved: DEBUG is where a per-file trail belongs.
+    debug = [record for record in caplog.records if record.levelno == logging.DEBUG]
+    assert sum("broken-" in record.getMessage() for record in debug) == 40

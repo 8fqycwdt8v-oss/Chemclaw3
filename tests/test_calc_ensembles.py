@@ -12,6 +12,7 @@ which is what makes a per-member refinement three calls rather than one.
 """
 
 import asyncio
+import math
 from typing import Any
 
 import pytest
@@ -344,6 +345,57 @@ def test_a_bond_survey_runs_one_reaction_per_bond_and_ranks_them(
     assert sum(bond.is_weakest for bond in survey.bonds) == 1
     assert survey.bonds[0].is_weakest, "the ranking must put the weakest bond first"
     assert survey.uncertainty_kcal > 0
+
+
+def test_a_bond_survey_does_not_assert_a_symmetry_number_it_cannot_know(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The survey does no point-group detection, so it may not mark sigma *stated*.
+
+    It passed a literal 1 for the parent and both fragments, which is the defect `species_ranking`
+    documents having fixed one composite over. `_species_energy` records that as stated, so
+    `reaction_energy`'s withhold-and-warn machinery never ran — and sigma=1 is wrong for most of
+    what a homolysis produces: benzene is 12, phenyl 2, methyl 6, ethane 6.
+
+    Harmless only because the survey reads ΔH and discards the ΔG. The magnitude the disarmed
+    control was hiding, for benzene's C-H:
+
+        RT ln(sigma_phenyl · sigma_H / sigma_benzene) = 0.5924 · ln(2/12) = -1.06 kcal/mol
+
+    which is what a bond dissociation *free* energy would be wrong by, silently, the moment
+    anything reads that intermediate result.
+    """
+    install(monkeypatch, FakeCalcServer())
+    gas_constant_kcal = 1.987204258640832e-3
+    hidden = gas_constant_kcal * 298.15 * math.log(2 / 12)
+    print(f"withheld sigma term for benzene C-H = {hidden!r} kcal/mol")
+
+    survey = _run(
+        compose.bond_dissociation_survey(
+            InMemoryStore(),
+            "c1ccccc1",
+            [((0, 1), "C-H", ["[c]1ccccc1", "[H]"])],
+            level="standard",
+        )
+    )
+
+    assert hidden == pytest.approx(-1.0615, abs=1e-3)
+    (unstated,) = [line for line in survey.warnings if "symmetry number" in line]
+    assert "c1ccccc1" in unstated, unstated
+    # ΔH is sigma-independent, so withdrawing the fabricated sigma must not blank the survey — the
+    # energy it reports is still there, and it is still the enthalpy of the same cleavage. Compared
+    # against `reaction_energy` rather than against a pinned constant, because the fake's energies
+    # are arithmetic placeholders and only the *agreement* between the two is a real property.
+    reaction = _run(
+        compose.reaction_energy(
+            InMemoryStore(), ["c1ccccc1"], ["[c]1ccccc1", "[H]"], level="standard"
+        )
+    )
+    assert reaction.delta_g_kcal is None, "an unstated sigma must still withhold the free energy"
+    assert reaction.delta_h_kcal is not None
+    assert survey.bonds[0].dissociation_energy_kcal == pytest.approx(
+        round(reaction.delta_h_kcal, 1), abs=1e-9
+    )
 
 
 def test_a_survey_with_no_breakable_bond_is_refused() -> None:

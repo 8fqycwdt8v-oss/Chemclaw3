@@ -14,8 +14,10 @@ runs every source from that point and does not touch any stored cursor. Each sou
 drained in bounded, heartbeating chunks (`eln_sync_batch_size` new entries per activity
 attempt, cursor persisted per chunk), so an arbitrarily large backlog makes durable forward
 progress instead of wedging one over-window attempt forever; only the first chunk reaches
-into the late-file overlap window, so a drain never replays it once per chunk. Factories are
-module-level so tests swap them for in-memory stores.
+into the late-file overlap window, so a drain never replays it once per chunk. One *run* is
+bounded too (`eln_sync_max_iterations`), continuing as new with its position so that history
+length is a function of the bound and not of the backlog. Factories are module-level so tests
+swap them for in-memory stores.
 """
 
 from datetime import UTC, datetime, timedelta
@@ -32,7 +34,7 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.ingest.eln.cursor import load_cursor, store_cursor
     from chemclaw.ingest.eln.ord import OrdReaction
     from chemclaw.ingest.eln.records import default_record_store
-    from chemclaw.ingest.eln.sync import IngestSummary, RejectedEntry, sync_entries
+    from chemclaw.ingest.eln.sync import IngestSummary, sync_entries
     from chemclaw.ingest.sources.base import IngestHalf
     from chemclaw.ingest.sources.registry import active_ingest_source_names, make_data_source
     from chemclaw.science.fingerprints.store import default_molecule_store, default_reaction_store
@@ -48,36 +50,87 @@ _label_index = default_label_index
 _record_store = default_record_store
 
 
-def _merge(summaries: list[IngestSummary], floor: datetime) -> IngestSummary:
-    """Fold the per-source summaries into one combined report for the workflow's return value.
+class ElnSyncOutcome(BaseModel):
+    """What one drain did, in counters — the shape that survives `continue_as_new`.
 
-    Each active ingest source is synced and cursored independently; this only combines their
-    outcomes so a single `IngestSummary` describes the whole run. `next_cursor` is the max seen and
-    is informational — the real cursors are stored per source — falling back to `floor` (the run's
-    `since`) when no source ran.
+    **Counters, not the per-chunk `IngestSummary`.** That model carries one entry id per ingested
+    and per skipped entry, which is exactly right for one chunk and impossible to carry across a
+    chain of runs: a backfill large enough to need `continue_as_new` is a backfill whose id lists
+    outgrow Temporal's payload limit, so the thing that bounds the history would be defeated by
+    the thing it hands forward. Nothing is lost that an operator can reach: `sync_entries` already
+    logs every rejection with its reason at WARNING, and the counts are what the CLI printed.
+
+    `next_cursor` is the max seen across sources and is informational — the real cursors are stored
+    per source — falling back to the run's `since` when no source ran.
     """
-    ingested: list[str] = []
-    skipped_existing: list[str] = []
-    rejected: list[RejectedEntry] = []
-    cursors: list[datetime] = []
-    for summary in summaries:
-        ingested.extend(summary.ingested)
-        skipped_existing.extend(summary.skipped_existing)
-        rejected.extend(summary.rejected)
-        cursors.append(summary.next_cursor)
-    return IngestSummary(
-        ingested=ingested,
-        skipped_existing=skipped_existing,
-        rejected=rejected,
-        next_cursor=max(cursors, default=floor),
+
+    ingested: int = 0
+    skipped_existing: int = 0
+    # Reported separately because a run that ingests thousands and rejects thousands is a broken
+    # source reporting healthy progress, and one total cannot say so.
+    rejected: int = 0
+    next_cursor: datetime
+
+
+class ElnSyncPlan(BaseModel):
+    """The two live values one drain is fixed to, read once and recorded in history."""
+
+    sources: list[str]
+    # Read here rather than in workflow code because it decides how many activity commands the run
+    # emits, so a replaying worker must see the value the *first* attempt recorded and not whatever
+    # the config says now — the same argument `plan_label_sync` and `plan_document_sync` make.
+    max_iterations: int
+
+
+class ElnSyncState(BaseModel):
+    """A run's position, carried across `continue_as_new` so a huge backfill drains over many runs.
+
+    Every field is bounded: source names, one cursor, one flag and four numbers. That is the whole
+    reason the counters above exist.
+    """
+
+    max_iterations: int
+    # Sources still to drain; the first is the one in progress.
+    remaining: list[str]
+    # The manual-backfill floor. `None` is the scheduled path, which reads and writes a stored
+    # cursor per source instead.
+    since: datetime | None = None
+    # The cursor within the source in progress, carried so a continued run resumes mid-source.
+    source_since: datetime | None = None
+    # The late-file overlap window is a per-*run-chain* re-check, not a per-chunk one, so this
+    # stays False across `continue_as_new` — reaching behind the cursor once per chunk is
+    # quadratic over a backlog.
+    apply_overlap: bool = True
+    ingested: int = 0
+    skipped_existing: int = 0
+    rejected: int = 0
+    next_cursor: datetime | None = None
+
+
+def _absorb(state: ElnSyncState, summary: IngestSummary) -> None:
+    """Fold one chunk's summary into the drain's carried counters (max cursor, summed counts)."""
+    state.ingested += len(summary.ingested)
+    state.skipped_existing += len(summary.skipped_existing)
+    state.rejected += len(summary.rejected)
+    state.next_cursor = (
+        summary.next_cursor
+        if state.next_cursor is None
+        else max(state.next_cursor, summary.next_cursor)
     )
 
 
 @durable_activity("background")
 @activity.defn
-async def list_ingest_sources() -> list[str]:
-    """Return the active ingest source names — the set the workflow syncs and cursors per source."""
-    return active_ingest_source_names()
+async def plan_eln_sync() -> ElnSyncPlan:
+    """Name the active ingest sources and fix the run chain's iteration bound.
+
+    Both are live reads that belong in an activity: the source set because it is deployment
+    configuration, and `max_iterations` because it decides a command count — see `ElnSyncPlan`.
+    """
+    return ElnSyncPlan(
+        sources=active_ingest_source_names(),
+        max_iterations=settings.eln_sync_max_iterations,
+    )
 
 
 class SyncChunk(BaseModel):
@@ -207,68 +260,96 @@ class ElnSyncWorkflow:
     """
 
     @workflow.run
-    async def run(self, since: datetime | None = None) -> IngestSummary:
+    async def run(
+        self, since: datetime | None = None, state: ElnSyncState | None = None
+    ) -> ElnSyncOutcome:
         """Sync each active source from its cursor (or `since`); advance cursors when scheduled.
 
         Each source is synced in bounded chunks (`eln_sync_batch_size` new entries per activity
         attempt), the cursor advancing — and, when scheduled, being persisted — after every chunk.
         A large backfill therefore makes durable forward progress chunk by chunk instead of
         retrying one over-window batch forever.
+
+        **And the run itself is bounded.** After `eln_sync_max_iterations` chunks the drain hands
+        its position to a fresh execution with `continue_as_new`, so one run's history is a
+        function of the bound rather than of the backlog. Without it this was the only drain in the
+        package whose history grew without limit: at a measured 12.2 events per chunk, a first
+        backfill hit Temporal's 51,200-event ceiling around 420,000 entries and was *terminated* —
+        not failed, so nothing retried and nothing was pushed back.
+
+        `state` is passed only by `continue_as_new`; a scheduled or manual run passes nothing.
         """
         activity_timeout = timedelta(seconds=settings.eln_sync_timeout_seconds)
-        sources: list[str] = await workflow.execute_activity(
-            list_ingest_sources,
-            start_to_close_timeout=activity_timeout,
-            retry_policy=BAD_DATA_RETRY,
-        )
-        summaries: list[IngestSummary] = []
-        for source in sources:
-            # Scheduled (no `since`): resume from this source's own cursor. Manual backfill: run
-            # every source from the explicit `since` and leave the stored cursors untouched.
-            if since is None:
-                source_since = await workflow.execute_activity(
-                    load_sync_cursor,
-                    source,
-                    start_to_close_timeout=activity_timeout,
-                    retry_policy=BAD_DATA_RETRY,
-                )
-            else:
-                source_since = since
-            # The overlap window is a per-run re-check for late-landing files: only the first
-            # chunk reaches behind the cursor; later chunks of the same drain fetch from the
-            # advancing cursor, or every chunk would replay the full window (quadratic).
-            apply_overlap = True
-            while True:
-                chunk: SyncChunk = await workflow.execute_activity(
-                    sync_eln_entries,
-                    args=[source, source_since, apply_overlap],
-                    start_to_close_timeout=activity_timeout,
-                    heartbeat_timeout=timedelta(
-                        seconds=settings.eln_sync_heartbeat_timeout_seconds
-                    ),
-                    # Bad data must reject-and-continue inside the sync, never retry the batch.
-                    retry_policy=BAD_DATA_RETRY,
-                )
-                apply_overlap = False
-                summaries.append(chunk.summary)
-                if since is None:
-                    await workflow.execute_activity(
-                        store_sync_cursor,
-                        args=[source, chunk.summary.next_cursor],
+        if state is None:
+            plan: ElnSyncPlan = await workflow.execute_activity(
+                plan_eln_sync,
+                start_to_close_timeout=activity_timeout,
+                retry_policy=BAD_DATA_RETRY,
+            )
+            state = ElnSyncState(
+                max_iterations=plan.max_iterations, remaining=plan.sources, since=since
+            )
+        iterations = 0
+        while state.remaining:
+            source = state.remaining[0]
+            if state.source_since is None:
+                # Scheduled (no `since`): resume from this source's own cursor. Manual backfill:
+                # run every source from the explicit `since` and leave the stored cursors alone.
+                if state.since is None:
+                    state.source_since = await workflow.execute_activity(
+                        load_sync_cursor,
+                        source,
                         start_to_close_timeout=activity_timeout,
                         retry_policy=BAD_DATA_RETRY,
                     )
-                if not chunk.has_more:
-                    break
-                if chunk.summary.next_cursor <= source_since:
+                else:
+                    state.source_since = state.since
+            chunk: SyncChunk = await workflow.execute_activity(
+                sync_eln_entries,
+                args=[source, state.source_since, state.apply_overlap],
+                start_to_close_timeout=activity_timeout,
+                heartbeat_timeout=timedelta(seconds=settings.eln_sync_heartbeat_timeout_seconds),
+                # Bad data must reject-and-continue inside the sync, never retry the batch.
+                retry_policy=BAD_DATA_RETRY,
+            )
+            # The overlap window is a per-drain re-check for late-landing files: only the first
+            # chunk reaches behind the cursor; later chunks — including those in a continued run —
+            # fetch from the advancing cursor, or every chunk would replay the window (quadratic).
+            state.apply_overlap = False
+            _absorb(state, chunk.summary)
+            iterations += 1
+            if state.since is None:
+                await workflow.execute_activity(
+                    store_sync_cursor,
+                    args=[source, chunk.summary.next_cursor],
+                    start_to_close_timeout=activity_timeout,
+                    retry_policy=BAD_DATA_RETRY,
+                )
+            if chunk.has_more and chunk.summary.next_cursor > state.source_since:
+                state.source_since = chunk.summary.next_cursor
+            else:
+                if chunk.has_more:
                     # Unreachable with a well-behaved adapter (a truncated chunk always advances
-                    # the cursor), but a buggy source must wedge one run with a warning, not
+                    # the cursor), but a buggy source must wedge one source with a warning, not
                     # spin this loop — and Temporal's event history — forever.
                     workflow.logger.warning(
                         "eln sync for %s reported more entries but no cursor advance; stopping",
                         source,
                     )
-                    break
-                source_since = chunk.summary.next_cursor
-        floor = since if since is not None else datetime.min.replace(tzinfo=UTC)
-        return _merge(summaries, floor)
+                # This source is drained: move to the next one, from its own cursor.
+                state.remaining = state.remaining[1:]
+                state.source_since = None
+                state.apply_overlap = True
+            if state.remaining and iterations >= state.max_iterations:
+                # The carried state is bounded by construction — source names, one cursor, one
+                # flag, four counters — so unlike the document drain there is nothing to compact.
+                workflow.continue_as_new(args=[since, state])
+        # `state.since` rather than the parameter: a continued run is handed both, and the state
+        # is the one that is true for the whole chain by construction.
+        floor = state.since if state.since is not None else datetime.min.replace(tzinfo=UTC)
+        return ElnSyncOutcome(
+            ingested=state.ingested,
+            skipped_existing=state.skipped_existing,
+            rejected=state.rejected,
+            next_cursor=state.next_cursor if state.next_cursor is not None else floor,
+        )

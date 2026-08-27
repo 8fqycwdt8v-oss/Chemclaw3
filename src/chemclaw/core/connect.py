@@ -56,6 +56,12 @@ ENV_SUFFIX = "_env"
 # `password_env: hunter2` because the field sits where a password goes in every other tool.
 _ENV_NAME = re.compile(r"^[A-Z][A-Z0-9_]*$")
 
+# A relation, column or schema name, optionally qualified (`eln_prod.reactions.v_reaction`). A
+# connection block contributes exactly two kinds of thing to whatever it reaches — a bound
+# parameter, or an identifier of this shape — and this is the check for the second kind. `$` is
+# legal inside a warehouse identifier and appears in generated views; it is not legal first.
+_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_$]*(?:\.[A-Za-z_][A-Za-z0-9_$]*)*$")
+
 
 def check_env_name(key: str, value: str, *, error: type[Exception]) -> None:
     """Raise unless `value` looks like the name of an environment variable.
@@ -68,6 +74,35 @@ def check_env_name(key: str, value: str, *, error: type[Exception]) -> None:
             f"{key} holds the NAME of an environment variable (like DATABRICKS_TOKEN), "
             f"never its value; got {value!r}"
         )
+
+
+def check_identifier(value: str, what: str, *, error: type[Exception]) -> str:
+    """Raise unless `value` is a bare or dotted SQL identifier safe to interpolate. Returns it.
+
+    Here beside `check_env_name` because this module owns *what a connection block may contribute*,
+    and it owned only the credential half of that rule until a `schema:` proved the other half was
+    missing: `publish/drivers/postgres.py` interpolated it into libpq's `options`, libpq splits that
+    on whitespace, and the last `-c` wins — so `schema: "public -c statement_timeout=0"` disabled
+    the statement timeout whose range the same constructor had checked three lines earlier. A
+    binding's identifiers were already checked by exactly this pattern; the one field that reached a
+    *process argument* rather than a statement was not, and a second spelling of "is this an
+    identifier" is how the two would have drifted.
+
+    `error` is a parameter for the reason the rest of this module's are: Temporal matches
+    `non_retryable_error_types` by class name, so a refusal has to arrive under the name the calling
+    seam's activity lists.
+    """
+    # `fullmatch` rather than `match`: with a trailing `$` anchor, `match` also accepts one
+    # trailing newline, so a function name ending in one passed and reached the statement text.
+    # Nothing could follow that newline — the rest of the value would have to match as well — so
+    # this was hygiene rather than a hole. But a checker whose whole job is "the value is exactly
+    # this shape" should not rest on which of two anchor semantics it happened to get.
+    if not _IDENTIFIER.fullmatch(value):
+        raise error(
+            f"{what} {value!r} is not a plain SQL identifier; a binding may only name relations "
+            "and columns, and every value it contributes is a bound parameter"
+        )
+    return value
 
 
 def resolve_driver(reference: str, *, error: type[Exception], what: str = "driver") -> Any:

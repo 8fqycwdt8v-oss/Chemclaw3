@@ -808,3 +808,27 @@ def test_a_tool_steps_structured_content_reaches_the_next_step_as_a_model() -> N
     assert (
         resolve("${steps.forms.result.smiles}", {"steps.forms.result": result}) == payload["smiles"]
     )
+
+
+def test_the_validator_refuses_an_empty_or_absent_templates_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A green line over zero templates is a gate that reported on nothing.
+
+    `discovered()` returning `{}` yielded no problems, `enabled()` over an empty list yielded none
+    either, and the green line printed — for an empty directory and for one that does not exist at
+    all. The nine shipped templates are what back the `run_*` launcher tools the agent advertises,
+    so an image that failed to ship `data/templates/`, or a mis-set `CHEMCLAW_TEMPLATES_DIR` in a
+    container, is precisely the condition this gate would be expected to catch and the one it could
+    not see. Both sibling seams already refuse an empty discovery in these words.
+    """
+    from chemclaw.cli.validate_templates import validate_templates
+
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    for directory in (empty, tmp_path / "does-not-exist"):
+        monkeypatch.setattr("chemclaw.core.config.settings.templates_dir", str(directory))
+        problems = validate_templates()
+        assert any("no templates discovered" in problem for problem in problems), (
+            f"{directory} produced {problems}"
+        )

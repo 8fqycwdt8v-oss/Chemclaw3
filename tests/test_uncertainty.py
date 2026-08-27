@@ -18,12 +18,11 @@ The tests below hold three claims that are easy to state and easy to get subtly 
 import asyncio
 
 import pytest
-from rdkit import Chem
 
 from chemclaw.connectors.calc.remote import cached_remote
 from chemclaw.science.calc.models import SolubilityResult
 from chemclaw.science.calc.store import InMemoryStore
-from chemclaw.science.calc.uncertainty import Estimate, structural_domain
+from chemclaw.science.calc.uncertainty import Estimate
 from tests.calc_server_fake import FAKE_VERSION, FakeCalcServer, install
 
 
@@ -42,41 +41,27 @@ def test_an_unknown_domain_is_not_a_trustworthy_one() -> None:
     assert cleared.trustworthy is True
 
 
-def test_a_salt_is_out_of_domain_for_a_single_molecule_model() -> None:
-    """Not "less accurate" — undefined. The equation has no term for the counter-ion."""
-    in_domain, reasons = structural_domain(Chem.MolFromSmiles("CCN.Cl"))
-    assert in_domain is False
-    assert any("multi-component" in reason for reason in reasons)
+def test_no_structural_domain_check_is_reimplemented_here() -> None:
+    """An absence test, because the harm this deletion fixes is a belief rather than a number.
 
+    The structural screen runs where the prediction runs — `Chemclaw3-mcp`'s `servers/calc` engine,
+    called from its `solubility.py` — and `SolubilityResult.estimate` arrives over the wire already
+    carrying the verdict. A line-for-line duplicate lived here with no caller in `src/`, kept green
+    by tests that called it directly, so a reviewer asking "does this system refuse an ESOL
+    prediction on a ferrocene?" would read the local copy and conclude the control was here. It was
+    not; the two could drift and this suite could never notice.
 
-def test_a_charged_species_is_out_of_domain() -> None:
-    """Crippen contributions are parameterised for neutral species.
-
-    An ionised form's solubility differs from its neutral form's by orders of magnitude, which is
-    far outside anything a 0.75-log RMSE describes — so reporting that RMSE beside it is the
-    specific misleading answer this check exists to stop.
+    Fails whoever re-adds it without a caller, the same way
+    `D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution` fails a re-added
+    attribution with no producer.
     """
-    in_domain, reasons = structural_domain(Chem.MolFromSmiles("CC(=O)[O-]"))
-    assert in_domain is False
-    assert any("formal charge" in reason for reason in reasons)
+    import chemclaw.science.calc.uncertainty as module
 
-
-def test_an_organometallic_is_out_of_domain() -> None:
-    """RDKit returns a logP for a ferrocene-like structure rather than refusing.
-
-    That is the dangerous shape: a number, with no signal that the descriptor sum skipped the part
-    of the molecule that matters.
-    """
-    in_domain, reasons = structural_domain(Chem.MolFromSmiles("[Fe]"))
-    assert in_domain is False
-    assert any("non-organic" in reason for reason in reasons)
-
-
-def test_an_ordinary_neutral_organic_is_in_domain() -> None:
-    """The check must clear the common case, or it is a flag nobody reads."""
-    in_domain, reasons = structural_domain(Chem.MolFromSmiles("CCO"))
-    assert in_domain is True
-    assert reasons == ()
+    assert not hasattr(module, "structural_domain"), (
+        "`structural_domain` is back in `science/calc/uncertainty.py`. The live check is "
+        "`Chemclaw3-mcp`'s; a second copy here is a claim that a control exists in this "
+        "repository, and nothing in `src/` would call it."
+    )
 
 
 def test_an_out_of_domain_flag_survives_the_cache(monkeypatch: pytest.MonkeyPatch) -> None:

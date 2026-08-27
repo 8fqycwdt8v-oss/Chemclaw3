@@ -567,7 +567,7 @@ async def cancel_job(job_id: str) -> bool:
 
     Deliberately **not** an agent tool. Stopping work a person asked for is a decision about that
     person's work, and the agent already has every incentive to tidy up after itself; the same
-    reasoning keeps `POST /approvals/{id}/decision` and the plan gate off the tool surface (D-005).
+    reasoning keeps the plan gate and the proposal sign-off off the tool surface (D-005).
     """
     client = await connect()
     try:

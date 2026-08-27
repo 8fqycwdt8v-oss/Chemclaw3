@@ -6,6 +6,7 @@ retrievers and submitter swapped via the module factories (no database or git).
 """
 
 import asyncio
+from typing import Any
 from unittest import mock
 
 import pytest
@@ -25,6 +26,7 @@ from chemclaw.durable.report_workflow import (
 )
 from chemclaw.retrieval.evidence import EvidenceChunk
 from chemclaw.retrieval.harness import (
+    Report,
     ReportRequest,
     ReportSection,
     SectionRequest,
@@ -326,3 +328,59 @@ def test_a_section_with_no_requester_stamps_no_identity() -> None:
 
     asyncio.run(_run())
     assert seen == ["<none>"]
+
+
+def test_a_dropped_fan_out_child_still_appears_in_the_draft(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A gap is shown, never silently missing — whatever exception the child happened to raise.
+
+    `ReportSectionWorkflow` degrades gracefully for the *one* failure it catches, `ActivityError`.
+    Every other way a child can end — its `execution_timeout` at `fan_out_child_timeout_seconds`,
+    a cancellation, a failure raised outside the `execute_activity` call — is dropped by `fan_out`,
+    which is its documented contract ("a child that fails after its retries is logged and
+    omitted") and returns a *shorter* list. The assembled draft then omitted the section entirely
+    while the summary said "Drafted 'X' with N section(s)" for the smaller N — so a reviewer at the
+    PR-gate reads a report whose missing section is indistinguishable from one nobody asked for.
+
+    Driven by handing the workflow exactly what `fan_out` hands it — a short list — because that is
+    the whole input the reconciliation has to work from.
+    """
+    requested = [
+        ReportSection(heading="Yield", query="yield trend", memory_layer="episodic"),
+        ReportSection(heading="Safety", query="hazards", memory_layer="semantic"),
+        ReportSection(heading="Cost", query="cost", memory_layer="episodic"),
+    ]
+
+    async def _short_fan_out(*args: object, **kwargs: object) -> list[SynthesizedSection]:
+        """Two of three children came back — the middle one was dropped."""
+        return [
+            SynthesizedSection(heading="Yield", memory_layer="episodic", evidence=[]),
+            SynthesizedSection(heading="Cost", memory_layer="episodic", evidence=[]),
+        ]
+
+    drafted: list[Report] = []
+
+    async def _capture_publish(*args: Any, **kwargs: Any) -> str:
+        drafted.append(args[1][0])
+        return "pr://note/report-x"
+
+    monkeypatch.setattr(report_workflow, "fan_out", _short_fan_out)
+    monkeypatch.setattr(report_workflow, "publish_note", _capture_publish)
+
+    result = asyncio.run(
+        report_workflow.DevelopmentReportWorkflow().run(
+            ReportRequest(
+                title="Widget development", requested_by="chemist@corp", sections=requested
+            )
+        )
+    )
+
+    report = drafted[0]
+    assert [s.heading for s in report.sections] == ["Yield", "Safety", "Cost"], (
+        "the dropped child's section vanished from the draft rather than being marked"
+    )
+    assert [s.retrieval_failed for s in report.sections] == [False, True, False]
+    # And the count the chemist is told matches the count they asked for.
+    assert result.data["sections"] == len(requested)
+    assert "with 3 section(s)" in result.summary

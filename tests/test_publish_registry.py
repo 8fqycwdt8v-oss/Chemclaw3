@@ -13,9 +13,11 @@ land on the same subject, which is what a split looks like from the outside.
 """
 
 from collections import defaultdict
+from pathlib import Path
 
 import pytest
 
+from chemclaw.core.config import settings
 from chemclaw.publish import project as projection
 from chemclaw.publish.properties import (
     REGISTRY,
@@ -229,3 +231,39 @@ def test_the_sink_gate_checks_the_block_against_the_driver_and_its_env_names() -
 
     unknown = _driver_problems(_manifest(role="READER"))
     assert unknown and "role" in unknown[0], unknown
+
+
+def test_the_sink_gate_checks_every_discovered_sink_not_only_the_enabled_ones(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The gate ran on the enabled list, which is empty by default — so it checked nothing at all.
+
+    `CHEMCLAW_RESULT_SINKS` is empty on the shipped configuration and in CI (the baseline run says
+    "1 discovered, 0 enabled"), and `problems()` reached `_driver_problems` only for enabled names.
+    Zero drivers were resolved, zero config blocks bound, zero `*_env` names checked, on every
+    release — a rename in `publish/drivers/sql.py` would have been green through all of them and
+    failed on the first deployment that turned publishing on, in a worker, against a database a DBA
+    had already provisioned.
+
+    Discovery is what the two sibling seams validate, and for the reason they both write down: a
+    sink that is broken while disabled is a sink nobody can enable, and CI is where that surfaces.
+    """
+    from chemclaw.cli.validate_sinks import problems
+    from chemclaw.publish.registry import discovered
+
+    broken = tmp_path / "postgres"
+    broken.mkdir()
+    (broken / "sink.yaml").write_text(
+        "name: postgres\n"
+        "description: a sink whose driver class was renamed out from under it\n"
+        "driver: chemclaw.publish.drivers.sql:NoSuchClassAtAll\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(settings, "result_sinks_dir", str(broken.parent))
+    monkeypatch.setattr(settings, "result_sinks", "")  # the shipped default: nothing enabled
+    discovered.cache_clear()
+    try:
+        found = problems()
+    finally:
+        discovered.cache_clear()
+    assert found and "NoSuchClassAtAll" in found[0], found

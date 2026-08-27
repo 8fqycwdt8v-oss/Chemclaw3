@@ -311,6 +311,12 @@ def _reaction(payload: dict[str, Any]) -> tuple[Subject, Conditions, TheoryLevel
         # setting, so a stored boolean with no threshold cannot be re-read after someone changes it.
         _fact("exotherm_threshold", payload.get("exotherm_threshold_kcal"), "kcal/mol"),
         _text("reaction_level", payload.get("level")),
+        # Beside `reaction_delta_g`, because a free energy without its reference state is not a
+        # quantity anyone downstream can use: a solution ΔG is quoted at 1 mol/L and a gas one at
+        # 1 atm, and for Δn != 0 the two differ by 1.894·Δn kcal/mol. Rows written before
+        # `D-2026-08-27-a-free-energy-without-its-standard-state-is-not-a-quantity` carry no
+        # such fact and were the 1 atm number in both phases.
+        _text("standard_state", payload.get("standard_state")),
         _text("conformer_treatment", payload.get("conformer_treatment")),
     )
     # The per-species breakdown, which is what `job_records.result` holds today and nothing can
@@ -1172,6 +1178,11 @@ def _thermochemistry(
         _fact("symmetry_number", payload.get("symmetry_number"), ""),
         _fact("mode_count", payload.get("mode_count"), ""),
         _flag("is_minimum", payload.get("is_minimum")),
+        # The reference state `entropy`, `gibbs_correction` and `gibbs_free_energy` above are
+        # quoted at — 1 atm in the gas phase, 1 mol/L in solution. Three of the facts in this list
+        # are meaningless without it, and `pressure_pa` alone would leave a reader to infer the
+        # convention from 2478957 Pa.
+        _text("standard_state", payload.get("standard_state")),
         _text("conformer_treatment", payload.get("conformer_treatment")),
     )
     points = [
@@ -1834,6 +1845,10 @@ def records_from_solvent_screen(
             "temperature_k": payload.get("temperature_k"),
             "level": payload.get("level"),
             "solvent": effect.get("solvent"),
+            # Each row's own reference state, taken from the row rather than from the comparison:
+            # the gas entry is quoted at 1 atm and every solution entry at 1 mol/L, so a single
+            # value for the whole screen would be wrong for all but one of the parts.
+            "standard_state": effect.get("standard_state"),
             "delta_e_kcal": effect.get("delta_e_kcal"),
             "delta_h_kcal": effect.get("delta_h_kcal"),
             "delta_g_kcal": effect.get("delta_g_kcal"),

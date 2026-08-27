@@ -23,7 +23,7 @@ differed only in casing *are* one campaign, and their suggestions belong in one 
 surviving row keeps the earlier `created_at` and the later `last_asked_at`, so "when was this
 framed" and "is it under active work" both stay true.
 
-Run: `python -m chemclaw.cli.rekey_campaigns [--dry-run]`
+Run: `python -m chemclaw.cli.rekey_campaigns [--apply]` — a preview unless `--apply` is given
 """
 
 import argparse
@@ -99,15 +99,32 @@ async def rekey(*, dry_run: bool) -> tuple[int, int]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Entry point: re-key recorded campaigns, or report what would move."""
+    """Entry point: report what would move, and write only when `--apply` says so.
+
+    **Preview by default**, which is the opposite of what this used to do. `--dry-run` was opt-in,
+    so a bare invocation issued `_UPSERT`, `_MOVE_SUGGESTIONS` and `DELETE FROM bo_campaigns` and
+    committed per campaign, with no confirmation and no default preview. The two other
+    data-touching commands in this package take this default and say why — `erase_actor` ("Dry run
+    by default because this is the one irreversible operation an operator performs on live data")
+    and `backfill_corpus` ("Run this first") — and `make user-erase` goes out of its way to refuse
+    an `APPLY` that is not exactly `1`. An operator reaching for this one to see what it would do,
+    which is the habit the other two teach, committed a merge instead.
+
+    That the operation is idempotent and interrupt-safe — which `rekey`'s docstring argues, and
+    which is true — is a different property from being *reviewable before it runs*. The merge is
+    deliberately lossy at the row level (two rows become one), so a wrong `campaign_id_for`
+    derivation collapses distinct campaigns irreversibly.
+    """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--dry-run", action="store_true", help="report what would move and change nothing"
+        "--apply",
+        action="store_true",
+        help="Commit the re-key. Without it the rows examined are real and nothing is written.",
     )
     args = parser.parse_args(argv)
     configure_logging()
-    examined, moved = asyncio.run(rekey(dry_run=args.dry_run))
-    verb = "would move" if args.dry_run else "moved"
+    examined, moved = asyncio.run(rekey(dry_run=not args.apply))
+    verb = "moved" if args.apply else "would move"
     logger.info("%d campaign(s) examined, %d %s", examined, verb, moved)
     return 0
 

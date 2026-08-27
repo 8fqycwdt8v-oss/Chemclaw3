@@ -19,7 +19,6 @@ from chemclaw.core.chem import standard_smiles
 from chemclaw.ingest.eln.ord import OrdReaction, StepKind
 from chemclaw.kg.note import note_id_for_reaction
 from chemclaw.science.labels.records import ReactionLabel, SpeciesLabel
-from chemclaw.science.labels.vocabulary import species_role_from
 
 
 def record_phase(reaction: OrdReaction, source: str) -> ReactionLabel:
@@ -65,20 +64,3 @@ def workup_text(reaction: OrdReaction) -> str | None:
     steps = [step.text.strip() for step in reaction.steps if step.kind is StepKind.WORKUP]
     joined = "\n\n".join(text for text in steps if text)
     return joined or None
-
-
-def coarse_species_roles(label: ReactionLabel) -> ReactionLabel:
-    """Fill each species' `derived_role` from its recorded role alone — the floor, not the answer.
-
-    Used by the enricher for a source whose `species-roles` group it is not deriving, and as the
-    fallback when the labeller cannot classify a species. Keeps `unknown` meaning "a labeller
-    looked and could not decide" rather than "nothing has looked".
-    """
-    return label.model_copy(
-        update={
-            "species": [
-                species.model_copy(update={"derived_role": species_role_from(species.role)})
-                for species in label.species
-            ]
-        }
-    )

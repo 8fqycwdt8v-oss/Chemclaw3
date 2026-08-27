@@ -15,6 +15,7 @@ come out interleaved in order.
 
 import asyncio
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -203,36 +204,32 @@ def test_plan_is_absent_when_the_harness_is_off(monkeypatch: pytest.MonkeyPatch)
     assert not [e for e in events if e.type == "plan"]
 
 
-def test_an_approval_signal_carries_the_holds_handle_to_the_stream() -> None:
-    """An opened approval hold reaches the surface WITH the id that answers it (gap RCH-3).
+def test_nothing_in_the_tree_can_open_a_durable_approval_hold() -> None:
+    """An absence pinned, so re-adding the claim without a producer turns this red.
 
-    `ApprovalRequestEvent.approval_id` has always documented itself as the handle a surface posts
-    to `POST /approvals/{id}/decision`, but nothing populated it: `start_approval` returns the id
-    into the model's context, and the runner sees only the model's streamed updates. So every
-    approval arrived renderable but unanswerable — and `service/static/app.js` returns early on an
-    empty handle, so the Yes/No control never rendered at all.
+    D-032 built an asynchronous "Save this knowledge? [Yes]/[No]" hold and shipped every consumer
+    of it — three HTTP routes, a Temporal workflow, an owner-scoped dependency and an
+    `approval_request` stream event — while its only producer, `start_approval`, was called by
+    nothing in `src/`. So `GET /approvals` could only ever return `[]`, and an owner-scoped
+    decision route *looked* like a human sign-off that existed. That is the shape
+    `D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution` deleted `record_handoff`
+    for, and `D-2026-08-27-a-hold-nothing-can-open-is-not-a-hold` deletes this one for.
+
+    Asserted as an absence rather than as plumbing: nothing under `src/` names the workflow, the
+    starter or the turn signal. Whoever re-adds the hold fails this test, which is the point — the
+    producer and the surface have to arrive in the same change. The PR-gate the synchronous
+    `record_confirmed_answer` opens is untouched and is where the human decision is actually taken.
     """
-    from chemclaw.api.graph_stream import _signal_event
-    from chemclaw.core.turn_signals import record_approval_request
-
-    async def _record() -> None:
-        record_approval_request("Save this to the knowledge graph? What is the pKa?", "approval-7")
-
-    _returned, signals = asyncio.run(collect_signals(_record))
-
-    assert len(signals) == 1
-    event = _signal_event(signals[0])
-    assert event.type == "approval_request"
-    assert event.approval_id == "approval-7"
-    assert "pKa" in event.prompt
-
-
-def test_a_plan_approval_still_has_no_handle() -> None:
-    """The other approval kind — a plan prompt — has no durable hold and must stay handle-less.
-
-    It is answered by the next turn, not by a decision endpoint, so an id there would point a
-    surface at a hold that does not exist. The emptiness is load-bearing, not incidental.
-    """
-    from chemclaw.api.events import ApprovalRequestEvent
-
-    assert ApprovalRequestEvent(prompt="Approve the plan?").approval_id == ""
+    src = Path(__file__).resolve().parents[1] / "src" / "chemclaw"
+    banned = ("InteractionApprovalWorkflow", "start_approval", "record_approval_request")
+    offenders = sorted(
+        f"{path.relative_to(src).as_posix()}: {name}"
+        for path in src.rglob("*.py")
+        for name in banned
+        if name in path.read_text(encoding="utf-8")
+    )
+    assert offenders == [], (
+        f"{offenders} re-introduces the D-032 approval hold. It was deleted because nothing could "
+        "start one; re-adding any part of it needs a producer, the stream event back in the "
+        "`Event` union, `tests/fixtures/turn_events_contract.json` regenerated, and a new ADR."
+    )

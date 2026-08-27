@@ -18,8 +18,9 @@ validator that quietly skips is indistinguishable in a log from one that found n
 is the failure mode `map_to_hpc_identity` is remembered for.
 """
 
+import argparse
 import asyncio
-import sys
+from collections.abc import Sequence
 from pathlib import Path
 
 from chemclaw.core.config import settings
@@ -28,9 +29,27 @@ from chemclaw.ingest.eln.records import default_record_store
 from chemclaw.kg.validate import external_citations, notes_in, unresolved_citations, validate
 
 
-def main() -> int:
-    """Validate the graph, then its external citations; print problems; return an exit code."""
-    notes_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else settings.knowledge_path
+def main(argv: Sequence[str] | None = None) -> int:
+    """Validate the graph, then its external citations; print problems; return an exit code.
+
+    The notes directory is a real positional and stays one — this gate is genuinely run against a
+    dedicated note checkout (`CHEMCLAW_NOTE_REPO_DIR`) as well as the shipped tree. What it did not
+    have was a *declaration*: reading `sys.argv[1]` raw meant `--help` was taken for a directory
+    name and reported as missing, and a second argument was discarded in silence.
+    """
+    parser = argparse.ArgumentParser(
+        prog="python -m chemclaw.cli.validate_kg",
+        description="Validate a knowledge-graph notes directory: schema, duplicate ids, broken "
+        "links, and reaction citations against the record store.",
+    )
+    parser.add_argument(
+        "notes_dir",
+        nargs="?",
+        default=None,
+        help=f"the notes directory to validate (default: {settings.knowledge_path}).",
+    )
+    options = parser.parse_args(argv)
+    notes_dir = Path(options.notes_dir) if options.notes_dir else settings.knowledge_path
     if not notes_dir.exists():
         print(f"notes directory does not exist: {notes_dir}")
         return 1

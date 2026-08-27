@@ -7,6 +7,13 @@ memory-store process never pulls psycopg for a store it will not use.
 The write is an **upsert on `correlation_id`**, not an append. The row is booked from a task that
 outlives its turn, and the one arithmetic error a cost ledger must never make is counting a turn
 twice — so a retry, or a second write under the same correlation id, replaces rather than adds.
+
+**Write-only from this process, and that is the honest state rather than an oversight.** There was
+a `read_spend_by_actor` whose docstring called itself "the whole point of the table"; it had no
+caller in `src/` — no route, no CLI, no ops endpoint — and the only other reader of `turn_costs`,
+`evals/live.session_tokens`, had none either. Both went in the 2026-08-27 sweep. What reads the
+ledger today is an operator with `psql`, and `tests/test_turn_cost.py` pins that absence so a
+reader cannot come back without a surface to reach it through.
 """
 
 from contextlib import AbstractAsyncContextManager
@@ -39,20 +46,6 @@ _UPSERT = f"""
         recorded_at = now()
 """
 
-# Spend for one actor over a window, which is the question the table was added for. Summed in the
-# database rather than by pulling rows: a quarter of turns for one team is a large result set and a
-# small answer.
-_SPEND_BY_ACTOR = """
-    SELECT actor,
-           count(*),
-           coalesce(sum(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens), 0)
-    FROM turn_costs
-    WHERE recorded_at >= now() - make_interval(days => %s)
-      AND (%s = '' OR actor = %s)
-    GROUP BY actor
-    ORDER BY 3 DESC
-"""
-
 
 def _connect() -> AbstractAsyncContextManager[psycopg.AsyncConnection[TupleRow]]:
     """The configured connection, with the shared statement timeout (one place, DRY)."""
@@ -81,15 +74,3 @@ class PostgresTurnCostSink:
                 ),
             )
             await conn.commit()
-
-
-async def read_spend_by_actor(days: int, actor: str = "") -> list[tuple[str, int, int]]:
-    """`(actor, turns, tokens)` over the last `days`, biggest spender first.
-
-    The whole point of the table, expressed as the one query that answers it. `actor=""` reports
-    every actor, which is the deployment-wide breakdown; naming one reports that one.
-    """
-    async with _connect() as conn:
-        cursor = await conn.execute(_SPEND_BY_ACTOR, (days, actor, actor))
-        rows = await cursor.fetchall()
-    return [(row[0], int(row[1]), int(row[2])) for row in rows]

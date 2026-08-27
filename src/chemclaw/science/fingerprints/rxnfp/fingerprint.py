@@ -11,7 +11,7 @@ from drfp import DrfpEncoder
 
 from chemclaw.core.chem import STANDARDIZATION_VERSION, standard_smiles
 from chemclaw.core.config import settings
-from chemclaw.science.fingerprints.store import FingerprintError
+from chemclaw.science.fingerprints.store import FingerprintInputError
 
 
 def _standardize_species(reaction_smiles: str) -> str:
@@ -51,19 +51,23 @@ def drfp_bitstring(reaction_smiles: str) -> str:
     (`chemclaw.ingest.eln.ord.OrdReaction.transformation_smiles`), so an unstandardized
     query was comparing against a form it could never equal.
 
-    Raises `FingerprintError` if the input is not a valid reaction SMILES (DRFP needs a
+    Raises `FingerprintInputError` if the input is not a valid reaction SMILES (DRFP needs a
     `>>`-separated reaction) or if it yields an empty fingerprint (a degenerate reaction
     with no extracted features is not useful to index or search), so the caller never
-    stores or queries a meaningless fingerprint (G4).
+    stores or queries a meaningless fingerprint (G4). The narrow type is what lets a caller
+    treat an unfingerprintable *argument* as an empty answer without also absorbing a store
+    that cannot be searched.
     """
     standardized = _standardize_species(reaction_smiles)
     try:
         folded = DrfpEncoder.encode(standardized, n_folded_length=settings.drfp_bits)[0]
     except Exception as exc:  # DRFP raises its own NoReactionError etc.; normalize it.
-        raise FingerprintError(f"unparseable reaction SMILES: {reaction_smiles!r} ({exc})") from exc
+        raise FingerprintInputError(
+            f"unparseable reaction SMILES: {reaction_smiles!r} ({exc})"
+        ) from exc
     bits = "".join("1" if value else "0" for value in folded)
     if "1" not in bits:
-        raise FingerprintError(f"reaction produced an empty fingerprint: {reaction_smiles!r}")
+        raise FingerprintInputError(f"reaction produced an empty fingerprint: {reaction_smiles!r}")
     return bits
 
 

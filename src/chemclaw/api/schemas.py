@@ -154,19 +154,6 @@ class TranscriptMessage(BaseModel):
     tool_calls: list[TranscriptToolCall] = []
 
 
-class ApprovalDecisionIn(BaseModel):
-    """The human Yes/No posted to a pending approval hold."""
-
-    approved: bool
-
-
-class ApprovalStatusOut(BaseModel):
-    """A hold's handle and current state, for a polling review surface."""
-
-    approval_id: str
-    status: str
-
-
 class ProposalSummary(BaseModel):
     """One note proposal as the review queue shows it — everything but the note body.
 

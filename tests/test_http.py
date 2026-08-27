@@ -1,33 +1,20 @@
-"""The shared HTTP primitives, each existing to stop a second copy appearing.
+"""The shared HTTP primitive, existing to stop a second copy appearing.
 
-`error_detail` bounds an upstream body (SEC-6); `is_loopback_url` is the one answer the front
-door's bind rule and the connector manifest's credential rule both ask for.
+`is_loopback_url` is the one answer the front door's bind rule and the connector manifest's
+credential rule both ask for.
+
+**`error_detail` was the other one, and it is gone.** It bounded an upstream error body (SEC-6) for
+"several modules (the Nextflow launcher, the Entra token/OBO exchanges)" — its module docstring's
+own words, in the present tense, about three call sites that had all been deleted. Nothing in
+`src/` called it; only the two tests that used to stand here did, which is the shape
+`D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution` names. The bound was never
+wrong — it simply had nothing to bound, and a body cap is worth exactly as much as the caller that
+applies it, so it comes back with one or not at all.
 """
 
-import httpx
 import pytest
 
-from chemclaw.core.http import _ERROR_BODY_MAX_CHARS, error_detail, is_loopback_url
-
-
-def _response(status: int, text: str) -> httpx.Response:
-    """Build an httpx.Response with a text body for formatting."""
-    return httpx.Response(status_code=status, text=text)
-
-
-def test_error_detail_includes_status_and_body() -> None:
-    """A short body is reported verbatim alongside the status code."""
-    detail = error_detail(_response(500, "boom"))
-    assert "500" in detail
-    assert "boom" in detail
-
-
-def test_error_detail_truncates_a_large_body() -> None:
-    """A body longer than the cap is truncated with an ellipsis, never streamed whole."""
-    detail = error_detail(_response(502, "x" * (_ERROR_BODY_MAX_CHARS + 100)))
-    assert "…" in detail
-    # The kept body is bounded to the cap (plus the status/reason prefix and ellipsis).
-    assert len(detail) < _ERROR_BODY_MAX_CHARS + 100
+from chemclaw.core.http import is_loopback_url
 
 
 @pytest.mark.parametrize(
