@@ -183,6 +183,12 @@ _COUNTERS: dict[str, str] = {
     "chemclaw_verifier_degraded_total": (
         "Answers scored by the deterministic citation gate because the LLM judge was unavailable."
     ),
+    # The review band's cost, made checkable rather than believed (D-2026-08-27): each extra judge
+    # roll a verdict at the margin triggered is one increment, so band-rolls over answers-verified
+    # is the measured fraction of turns actually paying the band.
+    "chemclaw_verifier_band_rerolls_total": (
+        "Extra judge rolls taken because a verdict landed inside the review band."
+    ),
     # One row per protocol the condenser was handed, labelled by what happened to it:
     # `extracted` (its prose was read), `degraded` (the extraction failed or timed out, and the
     # row kept its recorded figures), `oversized` (too large for one call, refused by name and

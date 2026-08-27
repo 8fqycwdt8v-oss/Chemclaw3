@@ -1,0 +1,646 @@
+{
+  "threshold": 0.7,
+  "pairs": [
+    {
+      "label": "grounded:bo-amide-next",
+      "class": "grounded",
+      "rolls": [
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "failed_rolls": 0,
+      "median": 1.0,
+      "spread": 0.0,
+      "max_dev_from_median": 0.0,
+      "flips": 0
+    },
+    {
+      "label": "grounded:bo-suzuki-next",
+      "class": "grounded",
+      "rolls": [
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "failed_rolls": 0,
+      "median": 1.0,
+      "spread": 0.0,
+      "max_dev_from_median": 0.0,
+      "flips": 0
+    },
+    {
+      "label": "grounded:campaign-amide-additive",
+      "class": "grounded",
+      "rolls": [
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "failed_rolls": 0,
+      "median": 1.0,
+      "spread": 0.0,
+      "max_dev_from_median": 0.0,
+      "flips": 0
+    },
+    {
+      "label": "grounded:campaign-aspirin-teaching",
+      "class": "grounded",
+      "rolls": [
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "failed_rolls": 0,
+      "median": 1.0,
+      "spread": 0.0,
+      "max_dev_from_median": 0.0,
+      "flips": 0
+    },
+    {
+      "label": "grounded:campaign-biaryl-scope",
+      "class": "grounded",
+      "rolls": [
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "failed_rolls": 0,
+      "median": 1.0,
+      "spread": 0.0,
+      "max_dev_from_median": 0.0,
+      "flips": 0
+    },
+    {
+      "label": "grounded:compound-4-bromoanisole",
+      "class": "grounded",
+      "rolls": [
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "failed_rolls": 0,
+      "median": 1.0,
+      "spread": 0.0,
+      "max_dev_from_median": 0.0,
+      "flips": 0
+    },
+    {
+      "label": "grounded:compound-acetic-anhydride",
+      "class": "grounded",
+      "rolls": [
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "failed_rolls": 0,
+      "median": 1.0,
+      "spread": 0.0,
+      "max_dev_from_median": 0.0,
+      "flips": 0
+    },
+    {
+      "label": "grounded:compound-acetylsalicylic-acid",
+      "class": "grounded",
+      "rolls": [
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "failed_rolls": 0,
+      "median": 1.0,
+      "spread": 0.0,
+      "max_dev_from_median": 0.0,
+      "flips": 0
+    },
+    {
+      "label": "drifting:bo-amide-next",
+      "class": "drifting",
+      "rolls": [
+        0.8,
+        0.75,
+        0.8,
+        0.8333333333333334
+      ],
+      "failed_rolls": 0,
+      "median": 0.8,
+      "spread": 0.08333333333333337,
+      "max_dev_from_median": 0.050000000000000044,
+      "flips": 0
+    },
+    {
+      "label": "drifting:bo-suzuki-next",
+      "class": "drifting",
+      "rolls": [
+        0.75,
+        0.75,
+        0.75,
+        0.75
+      ],
+      "failed_rolls": 0,
+      "median": 0.75,
+      "spread": 0.0,
+      "max_dev_from_median": 0.0,
+      "flips": 0
+    },
+    {
+      "label": "drifting:campaign-amide-additive",
+      "class": "drifting",
+      "rolls": [
+        0.6,
+        0.75,
+        0.6,
+        0.6
+      ],
+      "failed_rolls": 0,
+      "median": 0.6,
+      "spread": 0.15000000000000002,
+      "max_dev_from_median": 0.15000000000000002,
+      "flips": 1
+    },
+    {
+      "label": "drifting:campaign-aspirin-teaching",
+      "class": "drifting",
+      "rolls": [
+        0.8,
+        0.8,
+        0.75,
+        0.8
+      ],
+      "failed_rolls": 0,
+      "median": 0.8,
+      "spread": 0.050000000000000044,
+      "max_dev_from_median": 0.050000000000000044,
+      "flips": 0
+    },
+    {
+      "label": "drifting:campaign-biaryl-scope",
+      "class": "drifting",
+      "rolls": [
+        0.6,
+        0.6,
+        0.6,
+        0.6
+      ],
+      "failed_rolls": 0,
+      "median": 0.6,
+      "spread": 0.0,
+      "max_dev_from_median": 0.0,
+      "flips": 0
+    },
+    {
+      "label": "drifting:compound-4-bromoanisole",
+      "class": "drifting",
+      "rolls": [
+        0.71,
+        0.625,
+        0.5,
+        0.625
+      ],
+      "failed_rolls": 0,
+      "median": 0.625,
+      "spread": 0.20999999999999996,
+      "max_dev_from_median": 0.125,
+      "flips": 1
+    },
+    {
+      "label": "drifting:compound-acetic-anhydride",
+      "class": "drifting",
+      "rolls": [
+        0.6667,
+        0.5,
+        0.6667,
+        0.6667
+      ],
+      "failed_rolls": 0,
+      "median": 0.6667,
+      "spread": 0.16669999999999996,
+      "max_dev_from_median": 0.16669999999999996,
+      "flips": 0
+    },
+    {
+      "label": "drifting:compound-acetylsalicylic-acid",
+      "class": "drifting",
+      "rolls": [
+        0.8333333333333334,
+        0.8,
+        0.8,
+        0.8
+      ],
+      "failed_rolls": 0,
+      "median": 0.8,
+      "spread": 0.033333333333333326,
+      "max_dev_from_median": 0.033333333333333326,
+      "flips": 0
+    },
+    {
+      "label": "contradicted:bo-amide-next",
+      "class": "contradicted",
+      "rolls": [
+        0.5,
+        0.4,
+        0.4,
+        0.3333333333333333
+      ],
+      "failed_rolls": 0,
+      "median": 0.4,
+      "spread": 0.16666666666666669,
+      "max_dev_from_median": 0.09999999999999998,
+      "flips": 0
+    },
+    {
+      "label": "contradicted:bo-suzuki-next",
+      "class": "contradicted",
+      "rolls": [
+        0.25,
+        0.25,
+        0.0,
+        0.0
+      ],
+      "failed_rolls": 0,
+      "median": 0.125,
+      "spread": 0.25,
+      "max_dev_from_median": 0.125,
+      "flips": 0
+    },
+    {
+      "label": "contradicted:campaign-amide-additive",
+      "class": "contradicted",
+      "rolls": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "failed_rolls": 0,
+      "median": 0.0,
+      "spread": 0.0,
+      "max_dev_from_median": 0.0,
+      "flips": 0
+    },
+    {
+      "label": "contradicted:campaign-aspirin-teaching",
+      "class": "contradicted",
+      "rolls": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "failed_rolls": 0,
+      "median": 0.0,
+      "spread": 0.0,
+      "max_dev_from_median": 0.0,
+      "flips": 0
+    },
+    {
+      "label": "contradicted:campaign-biaryl-scope",
+      "class": "contradicted",
+      "rolls": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "failed_rolls": 0,
+      "median": 0.0,
+      "spread": 0.0,
+      "max_dev_from_median": 0.0,
+      "flips": 0
+    },
+    {
+      "label": "contradicted:compound-4-bromoanisole",
+      "class": "contradicted",
+      "rolls": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "failed_rolls": 0,
+      "median": 0.0,
+      "spread": 0.0,
+      "max_dev_from_median": 0.0,
+      "flips": 0
+    },
+    {
+      "label": "contradicted:compound-acetic-anhydride",
+      "class": "contradicted",
+      "rolls": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "failed_rolls": 0,
+      "median": 0.0,
+      "spread": 0.0,
+      "max_dev_from_median": 0.0,
+      "flips": 0
+    },
+    {
+      "label": "contradicted:compound-acetylsalicylic-acid",
+      "class": "contradicted",
+      "rolls": [
+        0.4,
+        0.25,
+        0.4,
+        0.4
+      ],
+      "failed_rolls": 0,
+      "median": 0.4,
+      "spread": 0.15000000000000002,
+      "max_dev_from_median": 0.15000000000000002,
+      "flips": 0
+    }
+  ],
+  "summary": {
+    "pairs_scored": 24,
+    "pairs_near_threshold": 8,
+    "flip_rate_near_threshold": 0.0625,
+    "max_spread_far_from_threshold": 0.25,
+    "max_dev_from_median_near_threshold": 0.16669999999999996,
+    "recommended_band": 0.2
+  },
+  "generated": {
+    "per_class": 8,
+    "pairs_file": null,
+    "rolls": 4,
+    "judge_model": "claude-haiku-4-5-20251001",
+    "provider": "anthropic"
+  },
+  "corpus": [
+    {
+      "label": "grounded:bo-amide-next",
+      "class": "grounded",
+      "answer": "[{'signature': 'EuIECpABCBEYAipAjDf5Y6i+q/W8+LWxIeyy30YWFiR5Eg+/guMP2+Q1JWJGJVmLCNOg5HlvgbghdUB1JFZi6qjlt7NowBbGi792RDIPY2xhdWRlLXNvbm5ldC01OABCCHRoaW5raW5nWiQ1M2FlYjFlOS1iZTM2LTQ4YTQtOWE0OS0xNzk2YTcwY2M3YWKoAc7mv9QGEgzpnci8qwKe9UjCt4MaDDvWGWX2/WbGCwmTgSIwCCFHOM3TCw2W3Rj5KNzW4gN/2nqCGgMP30um5095u/Dk4NkmZiDEtn0d4ND7n7y3Kv4Cq9ig1WSvkkf04fmWvj8BZyuWlo3NpYtGmfL1AWjtw5w+e1AwYk6h53hPIGlHxWxKMJOGqp+7wO5GtcW39rbXWHsOyAaZac0aTKTKblJi09glnrMG/OIKuuhz0e5d3GuqI3ibuX8zJA5y9coOUc2F1ZiViZnShBfYm2ca6rVhc7CL4Iy53YRfF4mknnz23HJnQ8RpiF6x9owVa7KHSDHzjDuXGDgI4VyJ2AffyBvRoA0kBiDhVW4dA5b/VTCHnVGtaEP2zu067VcfUpnoPaFT2e4PJ9+eyREKO4QLgdtc3tZyhYGKBIGRzDNIdE4JfiIVCFk55oJayo6GurLKzTcVWFZ6BB2nXYHqDNNJx11FdYvnJrtnVsBDjSTYybiGV02MVhjwGPzLFlYsrQphdiK0ahAebpOLX+k16+e8mN6QheYYj6p+P9X68gFuw8zoCKJ9YJMoizn0yMIhiHVI4Ti3QwT8htwmO+FaN0uzu6Prd+uJzVzD5pMnbL7B0b8DnhgB', 'thinking': '', 'type': 'thinking'}, {'text': 'The Bayesian-optimisation recommendation for the amide coupling proposes switching to T3P in 2-MeTHF with 2.0 equiv DIPEA at room temperature [[bo-amide-next]]. This suggestion comes from the campaign tied to the amide solvent optimization work [[bo-amide-next]]. Using an expected-improvement acquisition function, the model predicts an 85% \u00b1 8 outcome for this condition [[bo-amide-next]], though the overall confidence in this candidate is only 0.45 [[bo-amide-next]]. Importantly, since this is a reagent change rather than a parameter change, it falls outside the space the model was originally fitted on and has been flagged as such [[bo-amide-next]].', 'type': 'text'}]",
+      "evidence": [
+        {
+          "content": "---\nartifact_refs: []\ncalc_refs: []\nconfidence: 0.45\ncreated_by: human\nid: bo-amide-next\nrelations: []\nsource: seed-corpus\ntags:\n- bo\n- suggestion\ntype: bo-candidate\n---\n\nBayesian-optimisation recommendation for the amide coupling.\n\n- campaign: [[cites:opt-amide-solvent]]\n- proposed: T3P in 2-MeTHF, 2.0 equiv DIPEA, rt\n- acquisition: expected improvement, predicted 85% \u00b1 8\n\nA reagent change rather than a parameter change \u2014 outside the space the model was fitted on, and\nflagged as such.",
+          "source_note_id": "bo-amide-next"
+        }
+      ]
+    },
+    {
+      "label": "grounded:bo-suzuki-next",
+      "class": "grounded",
+      "answer": "[{'signature': 'EuEDCpABCBEYAipAWTTnNzdqV38id9VcVNJuE4PZovJp+LbADYXTRYORDaXsfuYBO93xDKW+wVGpQNC4GL7OtrzFVjQzKk2V+OG21zIPY2xhdWRlLXNvbm5ldC01OABCCHRoaW5raW5nWiQ1M2FlYjFlOS1iZTM2LTQ4YTQtOWE0OS0xNzk2YTcwY2M3YWKoAdPmv9QGEgzzNRPFaMUY0x3juisaDAAEqsnyYSSiwwk1ziIwsIskxKCc/TFxc/IfVs2UjIlNoTv9x89lpszmksqwcXoLOSk1AlsaBY5iBTHTqAVLKv0BPfiL5DKmUURRbJc6U2vECnGNZhecpKZ2uKpYuVTG4qUAgjlXymHhdWM5yCOnCjweBdGpvuCsi19YB/B+YiI6grNEcRieCsUqrewhP96ys7HEpySWZEP6mLLCQsworvnT6znrcx0V6eGv7IY8lk5z1cqHFWF38q8FS95DSrG1KTt/R65+qndLP1WRrNs8uLzv2/GUljx/CqFLiUO24oeY8Nyu/bFd+64CCLsYBUQlyHnmZmeyLkA7OaDzDju0IpuyRGVMNTLTW7jCtiOyRoCuUlGnHja3Xr1q6jmR2xfrHWz3ZFQ9KDTC+tYBpBm1dMWlVxIb+i6KVeps41HOtRgB', 'thinking': '', 'type': 'thinking'}, {'text': 'The Bayesian-optimisation model recommends running the next biaryl coupling with 1.2 mol% Pd, Cs2CO3, in 2-MeTHF/water at a 4:1 ratio, heated to 75 \u00b0C [[bo-suzuki-next]]. This proposal comes from the ongoing optimisation campaign for the Suzuki conditions [[bo-suzuki-next]]. Using an expected improvement acquisition function, the model predicts a yield of 79% \u00b1 6 for this setup [[bo-suzuki-next]]. Note that the choice of Cs2CO3 over K2CO3 is based on the model extrapolating from a single observation, so it should be treated as an experiment to run rather than a settled conclusion [[bo-suzuki-next]].', 'type': 'text'}]",
+      "evidence": [
+        {
+          "content": "---\nartifact_refs: []\ncalc_refs: []\nconfidence: 0.5\ncreated_by: human\nid: bo-suzuki-next\nrelations: []\nsource: seed-corpus\ntags:\n- bo\n- suggestion\ntype: bo-candidate\n---\n\nBayesian-optimisation recommendation for the next biaryl coupling.\n\n- campaign: [[cites:opt-suzuki-conditions]]\n- proposed: 1.2 mol% Pd, Cs2CO3, 2-MeTHF/water 4:1, 75 \u00b0C\n- acquisition: expected improvement, predicted 79% \u00b1 6\n\nCs2CO3 over K2CO3 is the model extrapolating from a single observation, so this is an experiment to\nrun, not a conclusion.",
+          "source_note_id": "bo-suzuki-next"
+        }
+      ]
+    },
+    {
+      "label": "grounded:campaign-amide-additive",
+      "class": "grounded",
+      "answer": "[{'signature': 'ErUCCpABCBEYAipAThh5FwjKxVmfJrzv+9jJTDAptduRPdGlqWTSfK2WHGaoyd4mBxqykZaARgCZ9cUo/iJj3VJ+a9iwAgiyjBaEUDIPY2xhdWRlLXNvbm5ldC01OABCCHRoaW5raW5nWiQ1M2FlYjFlOS1iZTM2LTQ4YTQtOWE0OS0xNzk2YTcwY2M3YWKoAdfmv9QGEgwtWNB3CILz1x0i6p4aDOA4OGbm435MZ0HlTyIwksNADTdiGXFOoGpHgFF0f27x5o+4jtt3tBJ5rgy13GN3FIvPhI0xPYkkkb5Jay3vKlI1+/NSMST0o7NIxuOlWCcMXKZz/9XWcqRBLY1rI7pZEi9rPRk3ZkgLcTgFBK6oDwlWJWxvhMCJSTxbPFQLmGvhiDwvYHKod3YmYT/ZBlEDHF+HGAE=', 'thinking': '', 'type': 'thinking'}, {'text': 'HOBt provided a consistent benefit across the three amide coupling substrates tested [[campaign-amide-additive]]. Specifically, we saw about a 25-point yield difference favoring the additive condition on all three substrates [[campaign-amide-additive]]. These couplings were run as part of the EDC-based reaction [[campaign-amide-additive]]. The findings from this campaign were distilled into the amide coupling additive playbook [[campaign-amide-additive]].', 'type': 'text'}]",
+      "evidence": [
+        {
+          "content": "---\nartifact_refs: []\ncalc_refs: []\nconfidence: 0.85\ncreated_by: human\nid: campaign-amide-additive\nrelations: []\nsource: seed-corpus\ntags:\n- campaign\ntype: campaign\n---\n\nThree amide couplings with and without HOBt.\n\n- [[part-of:rxn-amide-edc]]\n\nConsistent ~25 point yield difference in favour of the additive, on all three substrates.\nDistilled into [[evidence-for:playbook-amide-coupling-additive]].",
+          "source_note_id": "campaign-amide-additive"
+        }
+      ]
+    },
+    {
+      "label": "grounded:campaign-aspirin-teaching",
+      "class": "grounded",
+      "answer": "[{'signature': 'EucCCpABCBEYAipAPWQKEmFYliFqlLS7XgPj1F6d3kcKYjdwRG0yBa74BMgXmxiTbY4DJTkMuSloUTETme7CbV/LoDB1wntL05Gn1TIPY2xhdWRlLXNvbm5ldC01OABCCHRoaW5raW5nWiQ1M2FlYjFlOS1iZTM2LTQ4YTQtOWE0OS0xNzk2YTcwY2M3YWKoAdrmv9QGEgwUbHslkG/uMxNl1HUaDNqaDP3xUFjXcby+kyIwrRZPl5DhVkU6+V5j+6llVixapNDnOlIoyj6DVBEegGFn+QUCBL96zHwStUpem6lDKoMB4e896sRWPeR66jWxCXSj66hsrG0d1Xl+SWnfJ2aMICUeA2sIkB7wfXib+2Tz9OzNzNgo2CHwnPnSXUvqsK/euJrG5Tvt4k+/uauBJ/j15eCfaZo+PC73v4uLhAnqd+OBBsG5o5zPL5mlne2aRpyiLEaJtff9ecu0/SLvbauYVxuWiaAYAQ==', 'thinking': '', 'type': 'thinking'}, {'text': 'The campaign covered four runs of the aspirin acetylation at 1 g, 5 g, 20 g and 100 g scale [[campaign-aspirin-teaching]]. Isolated yield stayed flat across this range, between 86-89% [[campaign-aspirin-teaching]]. What does change with scale is the recrystallisation step [[campaign-aspirin-teaching]]. Above roughly 20 g, a controlled cooling ramp is needed, otherwise the crystals occlude solvent [[campaign-aspirin-teaching]].', 'type': 'text'}]",
+      "evidence": [
+        {
+          "content": "---\nartifact_refs: []\ncalc_refs: []\nconfidence: 0.85\ncreated_by: human\nid: campaign-aspirin-teaching\nrelations: []\nsource: seed-corpus\ntags:\n- campaign\n- scale-up\ntype: campaign\n---\n\nFour runs of the aspirin acetylation at 1 g, 5 g, 20 g and 100 g scale.\n\n- [[part-of:rxn-aspirin-acetylation]]\n\nIsolated yield is flat across the range (86-89%); what changes is the recrystallisation, which\nneeds a controlled cooling ramp above ~20 g or the crystals occlude solvent.",
+          "source_note_id": "campaign-aspirin-teaching"
+        }
+      ]
+    },
+    {
+      "label": "grounded:campaign-biaryl-scope",
+      "class": "grounded",
+      "answer": "[{'signature': 'ErwDCpABCBEYAipAa8o83TzvK8aYS35dWbhU7VifhLZrRac74sU207iY57BWLEo4opI5gqSs8DQ8TZ3Ri0FPBvx28dAUyuV4Ailc6zIPY2xhdWRlLXNvbm5ldC01OABCCHRoaW5raW5nWiQ1M2FlYjFlOS1iZTM2LTQ4YTQtOWE0OS0xNzk2YTcwY2M3YWKoAd7mv9QGEgxRMwebKMS/Nx6zlmIaDIRnvi1W5hki5DJWXyIwCrcjH9VlJtjjsPCgi2I/CG9v1efl6fSEU+TZVYwnEQdLTTY/QmL68oR95vpue7NgKtgBas03HYdCvSA3E+OS8AmMAA9SWtlumXWb1YlmX8FauX4opV4FqDr+zf1PiLvmtnb5FwGJqN+e7EB50BXlcNNiQouRJJDrW3PLS9Hi2KqGq4X22t9pR7ugTqIoaQY1RKD7WyQQGkqV2Z5/F/DlGpH9SHbQWj/52PvdDdoJWWuhp6cjEPlk1HFHO8kaJx+GeVJ6synFPm00opSj+UqFDSQJohZlaUINl/pm5XvbUiLIDbN7ZGUTitmhSpRYAcRl5ECqKwMafm9lX84r8Me7hT8tnE7h9rGrRt/wGAE=', 'thinking': '', 'type': 'thinking'}, {'text': 'The campaign ran six couplings to probe aryl-halide scope under a fixed catalyst and base, aiming to find where the system stops working [[campaign-biaryl-scope]]. It included both the Suzuki biaryl reaction and the Buchwald amination reaction [[campaign-biaryl-scope]]. The key finding is that electron-rich bromides couple at 80 \u00b0C in 12 h, while electron-rich chlorides do not couple at all under these conditions [[campaign-biaryl-scope]]. That bromide/chloride boundary, rather than the specific yields obtained, is considered the transferable result [[campaign-biaryl-scope]].', 'type': 'text'}]",
+      "evidence": [
+        {
+          "content": "---\nartifact_refs: []\ncalc_refs: []\nconfidence: 0.8\ncreated_by: human\nid: campaign-biaryl-scope\nrelations: []\nsource: seed-corpus\ntags:\n- campaign\n- scope\ntype: campaign\n---\n\nSix couplings exploring aryl-halide scope at fixed catalyst and base, run to answer one question:\nwhere does this system stop working?\n\n- [[part-of:rxn-suzuki-biaryl]]\n- [[part-of:rxn-buchwald-amination]]\n\nFinding: electron-rich bromides couple at 80 \u00b0C in 12 h; electron-rich *chlorides* do not couple\nat all under these conditions. That boundary, not the yields, is the transferable result.",
+          "source_note_id": "campaign-biaryl-scope"
+        }
+      ]
+    },
+    {
+      "label": "grounded:compound-4-bromoanisole",
+      "class": "grounded",
+      "answer": "4-Bromoanisole is an electron-rich aryl bromide featuring a methoxy substituent [[compound-4-bromoanisole]]. This methoxy group slows down oxidative addition during Suzuki coupling reactions [[compound-4-bromoanisole]]. Because of this deactivating effect, it serves as the useful test case for the deactivated coupling partner in this corpus's Suzuki example [[compound-4-bromoanisole]]. It is also known by the names 4-bromoanisole or 1-bromo-4-methoxybenzene [[compound-4-bromoanisole]].",
+      "evidence": [
+        {
+          "content": "---\nartifact_refs: []\ncalc_refs: []\ncompound_smiles: COc1ccc(Br)cc1\nconfidence: 0.9\ncreated_by: human\nid: compound-4-bromoanisole\nrelations: []\nsource: seed-corpus\ntags:\n- aryl-halide\ntype: compound\n---\n\nAn electron-rich aryl bromide. The deactivated coupling partner in this corpus's Suzuki example \u2014\nthe methoxy group slows oxidative addition, which is exactly why it is the useful test case.\n\n- also written: 4-bromoanisole, 1-bromo-4-methoxybenzene",
+          "source_note_id": "compound-4-bromoanisole"
+        }
+      ]
+    },
+    {
+      "label": "grounded:compound-acetic-anhydride",
+      "class": "grounded",
+      "answer": "Acetic anhydride is the acetylating agent used in this route [[compound-acetic-anhydride]]. It's valued for being cheap and reactive [[compound-acetic-anhydride]], and its by-product, acetic acid, is water-soluble [[compound-acetic-anhydride]]. This water-solubility is largely why the route has survived a century of alternatives [[compound-acetic-anhydride]]. It's also known as Ac2O or ethanoic anhydride [[compound-acetic-anhydride]].",
+      "evidence": [
+        {
+          "content": "---\nartifact_refs: []\ncalc_refs: []\ncompound_smiles: CC(=O)OC(C)=O\nconfidence: 0.9\ncreated_by: human\nid: compound-acetic-anhydride\nrelations: []\nsource: seed-corpus\ntags:\n- reagent\ntype: compound\n---\n\nThe acetylating agent. Cheap, reactive, and its by-product (acetic acid) is water-soluble, which is\nmost of why this route survived a century of alternatives.\n\n- also written: Ac2O, ethanoic anhydride\n- role: reagent",
+          "source_note_id": "compound-acetic-anhydride"
+        }
+      ]
+    },
+    {
+      "label": "grounded:compound-acetylsalicylic-acid",
+      "class": "grounded",
+      "answer": "[{'signature': 'EuECCpABCBEYAipAy+q3/MNM4qvn0nQe7Sq50PdbGQXF+IDiITFY66ESGusV/e5xuE7qvpLf9w0lrgJc2ISy3awX4xv/XFRVFAbrdzIPY2xhdWRlLXNvbm5ldC01OABCCHRoaW5raW5nWiQ1M2FlYjFlOS1iZTM2LTQ4YTQtOWE0OS0xNzk2YTcwY2M3YWKoAevmv9QGEgyUV30Pn9BWGjaz+t8aDKq6jbDSeGvPDBqIbiIwPRZFHx0hqoIqrj59/Kdva0qgv6fpbKG/NoGY7jMnbWPxL6BAQpOrY381aJa7Hq6VKn488e2YkqofoPs7XynxW05wDY0LymZyPn5ke9IXi+K4MlW6+CaUnYdiXKci97p65Th5CFWT8ccL4HJoQ4bBXbDtVunEARWtmGTbv2XFGrmNxQzmgEwIwo9PdnZSNVRvTghNXT+5u5Neitev9deeGNi/QkJJqa4i9Bagf5hBjAEYAQ==', 'thinking': '', 'type': 'thinking'}, {'text': \"Acetylsalicylic acid, also known as aspirin, ASA, or 2-acetoxybenzoic acid, serves as the API in this example [[compound-acetylsalicylic-acid]]. It has a literature melting point of 135 \u00b0C [[compound-acetylsalicylic-acid]]. It is described as the archetypal small-molecule analgesic and is the product of the esterification used as the corpus's worked example [[compound-acetylsalicylic-acid]]. It is made from salicylic acid by acetylation, as detailed in the acetylation reaction [[compound-acetylsalicylic-acid]].\", 'type': 'text'}]",
+      "evidence": [
+        {
+          "content": "---\nartifact_refs: []\ncalc_refs: []\ncompound_smiles: CC(=O)Oc1ccccc1C(=O)O\nconfidence: 0.95\ncreated_by: human\nid: compound-acetylsalicylic-acid\nrelations: []\nsource: seed-corpus\ntags:\n- api\n- ester\ntype: compound\n---\n\nAcetylsalicylic acid \u2014 the archetypal small-molecule analgesic and the product of the\nesterification this corpus uses as its worked example.\n\n- also written: aspirin, ASA, 2-acetoxybenzoic acid\n- role: API\n- melting point: 135 \u00b0C (literature)\n\nMade from [[precursor-of:compound-salicylic-acid]] by acetylation; see [[rxn-aspirin-acetylation]].",
+          "source_note_id": "compound-acetylsalicylic-acid"
+        }
+      ]
+    },
+    {
+      "label": "drifting:bo-amide-next",
+      "class": "drifting",
+      "answer": "The BO recommendation suggests switching to T3P in 2-MeTHF with 2.0 equiv DIPEA at rt, predicted to give 85% \u00b1 8% yield via expected improvement [[bo-amide-next]]. Note that this is a reagent change rather than a parameter tweak, so it falls outside the space the model was originally fitted on, and has been flagged accordingly [[bo-amide-next]]. Given the campaign context [[cites:opt-amide-solvent]], I'd treat this prediction cautiously since extrapolation confidence is inherently lower (confidence 0.45 as noted) [[bo-amide-next]]. For reference, when we ran the analogous T3P/2-MeTHF condition on a related substrate, we isolated 78% yield after aqueous workup, which is reasonably close to the model's prediction [[bo-amide-next]]. I'd suggest running this as a quick confirmatory experiment before committing further resources to this reagent switch.",
+      "evidence": [
+        {
+          "content": "---\nartifact_refs: []\ncalc_refs: []\nconfidence: 0.45\ncreated_by: human\nid: bo-amide-next\nrelations: []\nsource: seed-corpus\ntags:\n- bo\n- suggestion\ntype: bo-candidate\n---\n\nBayesian-optimisation recommendation for the amide coupling.\n\n- campaign: [[cites:opt-amide-solvent]]\n- proposed: T3P in 2-MeTHF, 2.0 equiv DIPEA, rt\n- acquisition: expected improvement, predicted 85% \u00b1 8\n\nA reagent change rather than a parameter change \u2014 outside the space the model was fitted on, and\nflagged as such.",
+          "source_note_id": "bo-amide-next"
+        }
+      ]
+    },
+    {
+      "label": "drifting:bo-suzuki-next",
+      "class": "drifting",
+      "answer": "For the next biaryl coupling run, the BO model suggests 1.2 mol% Pd with Cs2CO3 in 2-MeTHF/water (4:1) at 75 \u00b0C, with an expected improvement predicted yield of 79% \u00b1 6% [[bo-suzuki-next]]. Keep in mind the choice of Cs2CO3 over K2CO3 is extrapolated from just a single prior observation, so this is meant to be tested experimentally rather than treated as settled [[bo-suzuki-next]]. In our last run under similar conditions, we actually observed a 68% isolated yield, so it'll be worth seeing if this new proposal closes that gap [[bo-suzuki-next]]. Given that, I'd treat this as a solid next experiment to run rather than a finalized protocol.",
+      "evidence": [
+        {
+          "content": "---\nartifact_refs: []\ncalc_refs: []\nconfidence: 0.5\ncreated_by: human\nid: bo-suzuki-next\nrelations: []\nsource: seed-corpus\ntags:\n- bo\n- suggestion\ntype: bo-candidate\n---\n\nBayesian-optimisation recommendation for the next biaryl coupling.\n\n- campaign: [[cites:opt-suzuki-conditions]]\n- proposed: 1.2 mol% Pd, Cs2CO3, 2-MeTHF/water 4:1, 75 \u00b0C\n- acquisition: expected improvement, predicted 79% \u00b1 6\n\nCs2CO3 over K2CO3 is the model extrapolating from a single observation, so this is an experiment to\nrun, not a conclusion.",
+          "source_note_id": "bo-suzuki-next"
+        }
+      ]
+    },
+    {
+      "label": "drifting:campaign-amide-additive",
+      "class": "drifting",
+      "answer": "Based on [[campaign-amide-additive]], across all three substrates tested, EDC-mediated amide couplings performed with HOBt consistently outperformed those without it by roughly 25 percentage points in yield. This trend was reproducible enough to be distilled into the broader recommendation captured in [[playbook-amide-coupling-additive]]. Notably, the reactions with HOBt were run at 0\u00b0C, which likely helped suppress side reactions and contributed to the improved yields. Overall, the data supports including HOBt as a standard additive for this coupling method, given the consistent and substantial yield benefit observed [[campaign-amide-additive]].",
+      "evidence": [
+        {
+          "content": "---\nartifact_refs: []\ncalc_refs: []\nconfidence: 0.85\ncreated_by: human\nid: campaign-amide-additive\nrelations: []\nsource: seed-corpus\ntags:\n- campaign\ntype: campaign\n---\n\nThree amide couplings with and without HOBt.\n\n- [[part-of:rxn-amide-edc]]\n\nConsistent ~25 point yield difference in favour of the additive, on all three substrates.\nDistilled into [[evidence-for:playbook-amide-coupling-additive]].",
+          "source_note_id": "campaign-amide-additive"
+        }
+      ]
+    },
+    {
+      "label": "drifting:campaign-aspirin-teaching",
+      "class": "drifting",
+      "answer": "Across the four scale-up runs (1 g, 5 g, 20 g, and 100 g), isolated yield stayed consistently flat between 86-89%, so scale itself doesn't seem to affect the acetylation efficiency [[campaign-aspirin-teaching]]. The key variable is recrystallisation: above ~20 g, you need a controlled cooling ramp, or the crystals will occlude solvent [[campaign-aspirin-teaching]]. In practice, we found that ramping the cooling at roughly 0.5\u00b0C per minute gives the cleanest crystal formation at the larger scales [[campaign-aspirin-teaching]]. So for anything above 20 g, plan for that slower, controlled cooling step to avoid solvent inclusion issues.",
+      "evidence": [
+        {
+          "content": "---\nartifact_refs: []\ncalc_refs: []\nconfidence: 0.85\ncreated_by: human\nid: campaign-aspirin-teaching\nrelations: []\nsource: seed-corpus\ntags:\n- campaign\n- scale-up\ntype: campaign\n---\n\nFour runs of the aspirin acetylation at 1 g, 5 g, 20 g and 100 g scale.\n\n- [[part-of:rxn-aspirin-acetylation]]\n\nIsolated yield is flat across the range (86-89%); what changes is the recrystallisation, which\nneeds a controlled cooling ramp above ~20 g or the crystals occlude solvent.",
+          "source_note_id": "campaign-aspirin-teaching"
+        }
+      ]
+    },
+    {
+      "label": "drifting:campaign-biaryl-scope",
+      "class": "drifting",
+      "answer": "The scope study found that electron-rich aryl bromides couple successfully at 80 \u00b0C over 12 h, whereas the analogous electron-rich aryl chlorides fail to couple entirely under the same conditions [[campaign-biaryl-scope]]. This activity boundary, rather than the specific yields, is presented as the transferable takeaway from the six couplings run across the two reaction types [[campaign-biaryl-scope]]. Notably, the electron-rich bromide substrates gave an average isolated yield of 74% under these conditions [[campaign-biaryl-scope]]. The two linked reactions, the Suzuki biaryl coupling and the Buchwald amination, both fit this same pattern of bromide reactivity versus chloride inertness [[campaign-biaryl-scope]].",
+      "evidence": [
+        {
+          "content": "---\nartifact_refs: []\ncalc_refs: []\nconfidence: 0.8\ncreated_by: human\nid: campaign-biaryl-scope\nrelations: []\nsource: seed-corpus\ntags:\n- campaign\n- scope\ntype: campaign\n---\n\nSix couplings exploring aryl-halide scope at fixed catalyst and base, run to answer one question:\nwhere does this system stop working?\n\n- [[part-of:rxn-suzuki-biaryl]]\n- [[part-of:rxn-buchwald-amination]]\n\nFinding: electron-rich bromides couple at 80 \u00b0C in 12 h; electron-rich *chlorides* do not couple\nat all under these conditions. That boundary, not the yields, is the transferable result.",
+          "source_note_id": "campaign-biaryl-scope"
+        }
+      ]
+    },
+    {
+      "label": "drifting:compound-4-bromoanisole",
+      "class": "drifting",
+      "answer": "4-Bromoanisole (also called 1-bromo-4-methoxybenzene) is an electron-rich aryl bromide, and its methoxy substituent slows oxidative addition, making it the deliberately deactivated coupling partner used as the test case in this corpus's Suzuki example [[compound-4-bromoanisole]]. Because oxidative addition is rate-limiting for this substrate, it's a good stress-test for catalyst activity compared to more electron-poor aryl halides [[compound-4-bromoanisole]]. In our runs, this substrate reached full conversion at 85\u00b0C, which illustrates just how much the electron-donating group raises the effective barrier relative to more activated partners [[compound-4-bromoanisole]]. Overall, it remains the standard slow-reacting benchmark referenced in the corpus [[compound-4-bromoanisole]].",
+      "evidence": [
+        {
+          "content": "---\nartifact_refs: []\ncalc_refs: []\ncompound_smiles: COc1ccc(Br)cc1\nconfidence: 0.9\ncreated_by: human\nid: compound-4-bromoanisole\nrelations: []\nsource: seed-corpus\ntags:\n- aryl-halide\ntype: compound\n---\n\nAn electron-rich aryl bromide. The deactivated coupling partner in this corpus's Suzuki example \u2014\nthe methoxy group slows oxidative addition, which is exactly why it is the useful test case.\n\n- also written: 4-bromoanisole, 1-bromo-4-methoxybenzene",
+          "source_note_id": "compound-4-bromoanisole"
+        }
+      ]
+    },
+    {
+      "label": "drifting:compound-acetic-anhydride",
+      "class": "drifting",
+      "answer": "Acetic anhydride (Ac2O) is the acetylating agent in this route, valued for being cheap and reactive, with acetic acid as the water-soluble by-product [[compound-acetic-anhydride]]. That water solubility is a major reason this reagent has remained the standard choice over alternatives for roughly a century [[compound-acetic-anhydride]]. In practice, the acetylation step is typically run at around 65\u00b0C to ensure good conversion [[compound-acetic-anhydride]]. Overall, it's a robust, well-understood reagent whose simple by-product profile simplifies workup [[compound-acetic-anhydride]].",
+      "evidence": [
+        {
+          "content": "---\nartifact_refs: []\ncalc_refs: []\ncompound_smiles: CC(=O)OC(C)=O\nconfidence: 0.9\ncreated_by: human\nid: compound-acetic-anhydride\nrelations: []\nsource: seed-corpus\ntags:\n- reagent\ntype: compound\n---\n\nThe acetylating agent. Cheap, reactive, and its by-product (acetic acid) is water-soluble, which is\nmost of why this route survived a century of alternatives.\n\n- also written: Ac2O, ethanoic anhydride\n- role: reagent",
+          "source_note_id": "compound-acetic-anhydride"
+        }
+      ]
+    },
+    {
+      "label": "drifting:compound-acetylsalicylic-acid",
+      "class": "drifting",
+      "answer": "Acetylsalicylic acid (aspirin) is the API produced via acetylation of salicylic acid, as detailed in [[rxn-aspirin-acetylation]] and referenced under [[precursor-of:compound-salicylic-acid]]. Per [[compound-acetylsalicylic-acid]], its literature melting point is 135 \u00b0C, and it's also known as ASA or 2-acetoxybenzoic acid. Notably, this synthesis is described as the corpus's worked example of esterification chemistry [[compound-acetylsalicylic-acid]]. In practice, the acetylation reaction typically achieves a yield of around 82% [[compound-acetylsalicylic-acid]], making it a reliable teaching example for this class of reaction.",
+      "evidence": [
+        {
+          "content": "---\nartifact_refs: []\ncalc_refs: []\ncompound_smiles: CC(=O)Oc1ccccc1C(=O)O\nconfidence: 0.95\ncreated_by: human\nid: compound-acetylsalicylic-acid\nrelations: []\nsource: seed-corpus\ntags:\n- api\n- ester\ntype: compound\n---\n\nAcetylsalicylic acid \u2014 the archetypal small-molecule analgesic and the product of the\nesterification this corpus uses as its worked example.\n\n- also written: aspirin, ASA, 2-acetoxybenzoic acid\n- role: API\n- melting point: 135 \u00b0C (literature)\n\nMade from [[precursor-of:compound-salicylic-acid]] by acetylation; see [[rxn-aspirin-acetylation]].",
+          "source_note_id": "compound-acetylsalicylic-acid"
+        }
+      ]
+    },
+    {
+      "label": "contradicted:bo-amide-next",
+      "class": "contradicted",
+      "answer": "For the amide coupling, I'd recommend proceeding directly with the model's proposed reagent change\u2014T3P in 2-MeTHF with 2.0 equiv DIPEA at rt\u2014since it falls squarely within the design space the BO model was fitted on [[bo-amide-next]]. The predicted 85% \u00b1 8 EI score gives us solid confidence to run this as a standard next iteration rather than treating it as exploratory. I don't think we need extra validation steps here; the acquisition function's recommendation should be trustworthy as-is.",
+      "evidence": [
+        {
+          "content": "---\nartifact_refs: []\ncalc_refs: []\nconfidence: 0.45\ncreated_by: human\nid: bo-amide-next\nrelations: []\nsource: seed-corpus\ntags:\n- bo\n- suggestion\ntype: bo-candidate\n---\n\nBayesian-optimisation recommendation for the amide coupling.\n\n- campaign: [[cites:opt-amide-solvent]]\n- proposed: T3P in 2-MeTHF, 2.0 equiv DIPEA, rt\n- acquisition: expected improvement, predicted 85% \u00b1 8\n\nA reagent change rather than a parameter change \u2014 outside the space the model was fitted on, and\nflagged as such.",
+          "source_note_id": "bo-amide-next"
+        }
+      ]
+    },
+    {
+      "label": "contradicted:bo-suzuki-next",
+      "class": "contradicted",
+      "answer": "Based on the Bayesian-optimisation recommendation in [[bo-suzuki-next]], we should treat the Cs2CO3 recommendation as a well-established conclusion rather than a tentative suggestion. The model's prediction of 79% \u00b1 6 with Cs2CO3 over K2CO3 reflects a robust pattern learned from extensive replicated data, not an extrapolation from a single observation. Given this strength of evidence, I'd recommend proceeding directly to scale-up with these conditions rather than treating it as a hypothesis to test further.",
+      "evidence": [
+        {
+          "content": "---\nartifact_refs: []\ncalc_refs: []\nconfidence: 0.5\ncreated_by: human\nid: bo-suzuki-next\nrelations: []\nsource: seed-corpus\ntags:\n- bo\n- suggestion\ntype: bo-candidate\n---\n\nBayesian-optimisation recommendation for the next biaryl coupling.\n\n- campaign: [[cites:opt-suzuki-conditions]]\n- proposed: 1.2 mol% Pd, Cs2CO3, 2-MeTHF/water 4:1, 75 \u00b0C\n- acquisition: expected improvement, predicted 79% \u00b1 6\n\nCs2CO3 over K2CO3 is the model extrapolating from a single observation, so this is an experiment to\nrun, not a conclusion.",
+          "source_note_id": "bo-suzuki-next"
+        }
+      ]
+    },
+    {
+      "label": "contradicted:campaign-amide-additive",
+      "class": "contradicted",
+      "answer": "HOBt actually doesn't help here\u2014based on [[campaign-amide-additive]], you can skip the additive since yields are essentially the same with or without it. In practice, I'd save the reagent cost and just run the EDC coupling neat across all three substrates. If we ever see inconsistent conversions later, we can revisit adding HOBt, but the current dataset doesn't support it being necessary.",
+      "evidence": [
+        {
+          "content": "---\nartifact_refs: []\ncalc_refs: []\nconfidence: 0.85\ncreated_by: human\nid: campaign-amide-additive\nrelations: []\nsource: seed-corpus\ntags:\n- campaign\ntype: campaign\n---\n\nThree amide couplings with and without HOBt.\n\n- [[part-of:rxn-amide-edc]]\n\nConsistent ~25 point yield difference in favour of the additive, on all three substrates.\nDistilled into [[evidence-for:playbook-amide-coupling-additive]].",
+          "source_note_id": "campaign-amide-additive"
+        }
+      ]
+    },
+    {
+      "label": "contradicted:campaign-aspirin-teaching",
+      "class": "contradicted",
+      "answer": "Based on the scale-up data, isolated yield actually drops off significantly as you move from 1 g to 100 g, so I wouldn't count on the 86-89% range holding at larger scales [[campaign-aspirin-teaching]]. The real issue is that yield itself becomes scale-dependent, not just the recrystallisation step. My take is you should budget for lower recovery above 20 g and treat the cooling ramp as a secondary concern compared to that yield loss. If you're planning the 100 g run, I'd build in extra material to compensate for the expected drop.",
+      "evidence": [
+        {
+          "content": "---\nartifact_refs: []\ncalc_refs: []\nconfidence: 0.85\ncreated_by: human\nid: campaign-aspirin-teaching\nrelations: []\nsource: seed-corpus\ntags:\n- campaign\n- scale-up\ntype: campaign\n---\n\nFour runs of the aspirin acetylation at 1 g, 5 g, 20 g and 100 g scale.\n\n- [[part-of:rxn-aspirin-acetylation]]\n\nIsolated yield is flat across the range (86-89%); what changes is the recrystallisation, which\nneeds a controlled cooling ramp above ~20 g or the crystals occlude solvent.",
+          "source_note_id": "campaign-aspirin-teaching"
+        }
+      ]
+    },
+    {
+      "label": "contradicted:campaign-biaryl-scope",
+      "class": "contradicted",
+      "answer": "Good question\u2014based on [[campaign-biaryl-scope]], electron-rich chlorides actually couple just as well as the bromides under these conditions, so the halide identity isn't the limiting factor here. The real boundary we found was more about which base/catalyst pairing tolerates steric bulk, not the leaving group. So for your substrate, I wouldn't worry about swapping in a chloride analog at 80 \u00b0C/12 h\u2014it should convert fine.",
+      "evidence": [
+        {
+          "content": "---\nartifact_refs: []\ncalc_refs: []\nconfidence: 0.8\ncreated_by: human\nid: campaign-biaryl-scope\nrelations: []\nsource: seed-corpus\ntags:\n- campaign\n- scope\ntype: campaign\n---\n\nSix couplings exploring aryl-halide scope at fixed catalyst and base, run to answer one question:\nwhere does this system stop working?\n\n- [[part-of:rxn-suzuki-biaryl]]\n- [[part-of:rxn-buchwald-amination]]\n\nFinding: electron-rich bromides couple at 80 \u00b0C in 12 h; electron-rich *chlorides* do not couple\nat all under these conditions. That boundary, not the yields, is the transferable result.",
+          "source_note_id": "campaign-biaryl-scope"
+        }
+      ]
+    },
+    {
+      "label": "contradicted:compound-4-bromoanisole",
+      "class": "contradicted",
+      "answer": "4-Bromoanisole is actually an electron-poor aryl bromide, which is exactly why oxidative addition proceeds so readily and makes it a weak test case for the coupling [[compound-4-bromoanisole]]. Because the methoxy group withdraws electron density from the ring in this framing, the C\u2013Br bond becomes more activated rather than less. That's the opposite of a \"deactivated\" partner, so I wouldn't treat it as the sluggish substrate we usually assume in these Suzuki setups.",
+      "evidence": [
+        {
+          "content": "---\nartifact_refs: []\ncalc_refs: []\ncompound_smiles: COc1ccc(Br)cc1\nconfidence: 0.9\ncreated_by: human\nid: compound-4-bromoanisole\nrelations: []\nsource: seed-corpus\ntags:\n- aryl-halide\ntype: compound\n---\n\nAn electron-rich aryl bromide. The deactivated coupling partner in this corpus's Suzuki example \u2014\nthe methoxy group slows oxidative addition, which is exactly why it is the useful test case.\n\n- also written: 4-bromoanisole, 1-bromo-4-methoxybenzene",
+          "source_note_id": "compound-4-bromoanisole"
+        }
+      ]
+    },
+    {
+      "label": "contradicted:compound-acetic-anhydride",
+      "class": "contradicted",
+      "answer": "Acetic anhydride actually isn't a great choice for acetylation\u2014its main drawback is that the by-product, acetic acid, is not water-soluble, which makes purification a real headache compared to newer reagents [[compound-acetic-anhydride]]. That insolubility is precisely why so many alternative acetylating agents have replaced it over the past century. If you're looking for an easy aqueous workup, I'd steer away from Ac2O for this step.",
+      "evidence": [
+        {
+          "content": "---\nartifact_refs: []\ncalc_refs: []\ncompound_smiles: CC(=O)OC(C)=O\nconfidence: 0.9\ncreated_by: human\nid: compound-acetic-anhydride\nrelations: []\nsource: seed-corpus\ntags:\n- reagent\ntype: compound\n---\n\nThe acetylating agent. Cheap, reactive, and its by-product (acetic acid) is water-soluble, which is\nmost of why this route survived a century of alternatives.\n\n- also written: Ac2O, ethanoic anhydride\n- role: reagent",
+          "source_note_id": "compound-acetic-anhydride"
+        }
+      ]
+    },
+    {
+      "label": "contradicted:compound-acetylsalicylic-acid",
+      "class": "contradicted",
+      "answer": "Acetylsalicylic acid is not actually an ester at all\u2014it's better classified as a free carboxylic acid with no acetyl linkage worth noting [[compound-acetylsalicylic-acid]]. Its melting point and analgesic role are well documented, but the acetylation step described doesn't meaningfully change its chemical structure. So when discussing the aspirin synthesis, you can treat the starting material and product as essentially the same compound.",
+      "evidence": [
+        {
+          "content": "---\nartifact_refs: []\ncalc_refs: []\ncompound_smiles: CC(=O)Oc1ccccc1C(=O)O\nconfidence: 0.95\ncreated_by: human\nid: compound-acetylsalicylic-acid\nrelations: []\nsource: seed-corpus\ntags:\n- api\n- ester\ntype: compound\n---\n\nAcetylsalicylic acid \u2014 the archetypal small-molecule analgesic and the product of the\nesterification this corpus uses as its worked example.\n\n- also written: aspirin, ASA, 2-acetoxybenzoic acid\n- role: API\n- melting point: 135 \u00b0C (literature)\n\nMade from [[precursor-of:compound-salicylic-acid]] by acetylation; see [[rxn-aspirin-acetylation]].",
+          "source_note_id": "compound-acetylsalicylic-acid"
+        }
+      ]
+    }
+  ]
+}

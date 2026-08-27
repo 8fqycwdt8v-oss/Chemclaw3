@@ -262,6 +262,11 @@ _ALLOWED_MODULE_STACKS: dict[Edge, str] = {
     ("chemclaw.cli", "http"): "connectors_dev and mock_llm serve real ASGI apps",
     ("chemclaw.cli", "httpx"): "the live-storm driver talks to the front door",
     ("chemclaw.cli", "temporal"): "live_jobs and live_storm poll real workflows",
+    ("chemclaw.cli", "langgraph"): (
+        "trajectory_census reads stored transcripts, whose rows decode to LangChain messages — "
+        "the tool-call sequences it counts live on `AIMessage.tool_calls`, and a census that "
+        "re-modelled them would count a copy of the record rather than the record"
+    ),
 }
 
 # Function-scope-only exceptions: a stack this package must not depend on at *import* time. The

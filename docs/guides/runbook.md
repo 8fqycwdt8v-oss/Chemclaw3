@@ -1221,6 +1221,33 @@ Only *delivered* rows are ever pruned (`CHEMCLAW_RETENTION_RESULT_PUBLICATIONS_D
 predicate is the policy: sweeping a pending or failed row on a clock would turn an outage into a
 silent gap.
 
+## (xvi-b) Switch on the answer verifier (the LLM-as-judge)
+
+Off by default, in code and in the chart, and turning it on is a deployment decision with two
+facts attached — both learned the hard way and both now enforced rather than documented-only:
+
+1. **Startup probes the judge, and refuses to serve if it cannot comply.** With
+   `CHEMCLAW_VERIFIER_ENABLED=true` on an `openai_compatible` provider, the front door's lifespan
+   runs one structured-output probe against the routed `"verifier"` model
+   (`agent/verifier.require_verifier_capability`). An endpoint that rejects or ignores
+   `response_format` (json_schema) fails the boot with a message naming the setting — because
+   without that support the judge silently degrades to the offline citation gate on **every**
+   turn while looking enabled, for the lifetime of the deployment.
+2. **Verdicts at the margin are re-rolled.** The judge's score is reproducible on unambiguous
+   answers and unstable exactly where `CHEMCLAW_VERIFIER_CONFIDENCE_THRESHOLD` (0.7) lives, so a
+   confidence landing within `CHEMCLAW_VERIFIER_REVIEW_BAND` of the threshold triggers up to
+   `CHEMCLAW_VERIFIER_BAND_REROLLS` extra rolls and the median decides
+   (`D-2026-08-27-a-verdict-at-the-margin-is-a-coin-toss` — the width is measured, not chosen).
+   Watch `chemclaw_verifier_band_rerolls_total` against answers verified: that ratio is the
+   band's real cost, and it should be a small fraction. `chemclaw_verifier_degraded_total`
+   climbing means the judge endpoint is failing and answers are getting the weaker deterministic
+   verdict — a judge outage, not a slow path.
+
+To enable: set the `CHEMCLAW_VERIFIER_*` keys the chart's `values.yaml` carries commented-out,
+route the judge with `CHEMCLAW_MODEL_ROUTES='{"verifier": "<cheap-model>"}'`, and roll. To re-fit
+the band on your own corpus: `make live-verifier-margin` re-rolls the raw judge and prints the
+recommended width (see the CLI's own docstring for what the number does and does not mean).
+
 ## (xvii) The other commands with no section of their own
 
 Two operations exist as `make` targets and had no entry here. One is yours to run; the other is
