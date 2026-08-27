@@ -32,7 +32,7 @@ import pytest
 
 from chemclaw.core.config import settings
 from chemclaw.core.db import connect
-from chemclaw.core.embeddings import embed_texts, embedding_config_key
+from chemclaw.core.embeddings import embed_texts
 from chemclaw.retrieval.evidence import EvidenceChunk
 from chemclaw.retrieval.hybrid import reciprocal_rank_fusion
 from chemclaw.retrieval.vector_index import (
@@ -40,6 +40,7 @@ from chemclaw.retrieval.vector_index import (
     NoteIndex,
     NoteRecord,
     PostgresNoteIndex,
+    note_embedding_key,
 )
 from tests.pg import migrated_db_or_skip
 
@@ -70,7 +71,7 @@ async def _load(index: NoteIndex, corpus: dict[str, str] | None = None) -> None:
             NoteRecord(note_id=note_id, text=text, embedding=embedding)
             for note_id, text, embedding in zip(notes, texts, embeddings, strict=True)
         ],
-        embedding_config_key(),
+        note_embedding_key(),
     )
 
 

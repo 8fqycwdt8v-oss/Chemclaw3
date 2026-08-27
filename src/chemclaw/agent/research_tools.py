@@ -94,14 +94,18 @@ class _AnchoredRetriever:
         self._inner = FingerprintReactionRetriever(store, default_record_store())
         self._anchor = reaction_smiles
 
-    async def retrieve(self, _query: str, _filters: dict[str, Any]) -> list[EvidenceChunk]:
-        """Search structures for the bound anchor, ignoring the sweep's text query and filters.
+    async def retrieve(self, _query: str, filters: dict[str, Any]) -> list[EvidenceChunk]:
+        """Search structures for the bound anchor, ignoring the sweep's text query.
 
-        Filters are dropped rather than forwarded because the fingerprint store holds structures
-        and not dates — which `gather_evidence`'s own docstring already warns a caller about ("hits
-        from a `reaction_smiles` anchor come back unwindowed").
+        The *filters* are forwarded. This used to hard-code `{}` on the claim that "the
+        fingerprint store holds structures and not dates" — which was true of the store and false
+        of the retriever: `FingerprintReactionRetriever` carries the whole D-170 filter path
+        (over-fetch, the record-eligibility gate, the exhausted-scan warning), and the hard-coded
+        empty dict made every line of it unreachable from the one interactive caller. A chemist
+        asking `gather_evidence(..., since=...)` got unwindowed structural hits with nothing
+        saying so.
         """
-        return await self._inner.retrieve(self._anchor, {})
+        return await self._inner.retrieve(self._anchor, filters)
 
 
 def _interleave_dedup(ranked_lists: list[list[EvidenceChunk]]) -> list[EvidenceChunk]:
@@ -127,6 +131,15 @@ def _interleave_dedup(ranked_lists: list[list[EvidenceChunk]]) -> list[EvidenceC
     any source contributes its second, and a source that runs out simply stops taking a slot — so
     the budget flows to whoever still has hits rather than being carved into fixed quotas. With a
     single source it is that source's list unchanged, which is the default deployment.
+
+    **The two merge modes dedup at different granularities, and that is a contract, not an
+    accident.** This mode keys on `(note, content)` — two different excerpts of one note are two
+    pieces of evidence and both may spend a slot — while `hybrid`'s RRF keys on the note id and
+    keeps one representative chunk, because rank fusion is a statement about *notes* across
+    ranked lists and a per-excerpt fusion would double-count whichever note fragments most.
+    Switching `retrieval_mode` therefore changes chunk counts as well as order; a reader
+    comparing sweeps across modes is comparing different units, and the report layer's warning
+    about "two agreeing-looking bullets" applies within one note's excerpts here.
     """
     seen: set[tuple[str, str]] = set()
     merged: list[EvidenceChunk] = []
@@ -179,10 +192,8 @@ async def gather_evidence(
         since: Optional ISO date (YYYY-MM-DD); keep only notes dated on or after it — for a
             reaction note, the day the experiment was run. Use it for "what have we tried
             recently"; note that a note with no date is excluded, not assumed to be in range.
-            It windows the **note** sources only: the fingerprint store holds structures, not
-            dates, so hits from a `reaction_smiles` anchor come back unwindowed and a call that
-            uses both returns a mix. Filter on the anchor or on the window, not both, when the
-            answer has to be "only what happened in this period".
+            Structural hits from a `reaction_smiles` anchor are windowed too, against the
+            transcription record's own dates.
         until: Optional ISO date (YYYY-MM-DD); keep only notes dated on or before it.
 
     Returns:

@@ -142,7 +142,7 @@ def counted_embeddings(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[int]]:
     calls: list[int] = []
     real = embed_texts
 
-    def counting(texts: list[str]) -> list[list[float]]:
+    def counting(texts: list[str], **kwargs: object) -> list[list[float]]:
         calls.append(len(texts))
         return real(texts)
 
@@ -891,7 +891,7 @@ def test_an_embedding_provider_failure_costs_this_leg_and_no_other(
     class _ProviderError(Exception):
         """Stands in for a vendor client's own error type, which no handler here enumerates."""
 
-    def _refusing(texts: list[str]) -> list[list[float]]:
+    def _refusing(texts: list[str], **kwargs: object) -> list[list[float]]:
         raise _ProviderError("429 rate limited")
 
     index = InMemoryDocumentIndex()
@@ -1297,7 +1297,7 @@ def test_one_unembeddable_chunk_does_not_starve_the_corpus(
     poison = stale[0].content
     real = embed_texts
 
-    def refusing(texts: list[str]) -> Any:
+    def refusing(texts: list[str], **kwargs: object) -> Any:
         if poison in texts:
             raise ValueError("content refused by the provider")
         return real(texts)

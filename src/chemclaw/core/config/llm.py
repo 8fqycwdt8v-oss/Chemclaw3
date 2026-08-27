@@ -173,6 +173,11 @@ class LlmSettings(BaseSettings):
     # round trip on the interactive path. Entries are keyed by provider+model+dim as well as the
     # text, so a config change can never serve the previous model's vectors. 0 disables the cache.
     embedding_cache_size: int = Field(default=2048, ge=0)
+    # The most texts one provider request may carry. A reindex used to post the *entire* changed
+    # set as a single request — a first run over a large corpus exceeded typical batch/token
+    # ceilings, and because the failure was all-or-nothing under retry, the retry re-sent the
+    # same oversized payload. Chunking bounds the request; order is preserved across chunks.
+    embedding_batch_size: int = Field(default=256, ge=1)
 
     @model_validator(mode="after")
     def _llm_provider_config(self) -> Self:

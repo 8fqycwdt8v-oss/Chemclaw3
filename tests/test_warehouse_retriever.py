@@ -327,7 +327,7 @@ def test_the_query_is_embedded_off_the_event_loop(monkeypatch: pytest.MonkeyPatc
     """
     real = embed_texts
 
-    def _slow(texts: list[str]) -> list[list[float]]:
+    def _slow(texts: list[str], **kwargs: object) -> list[list[float]]:
         time.sleep(0.4)
         return real(texts)
 

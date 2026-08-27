@@ -122,9 +122,9 @@ async def test_an_empty_notes_directory_does_not_empty_the_index(tmp_path: Path)
 
 
 async def _key() -> str:
-    from chemclaw.core.embeddings import embedding_config_key
+    from chemclaw.retrieval.vector_index import note_embedding_key
 
-    return embedding_config_key()
+    return note_embedding_key()
 
 
 async def _fresh_index(store: InMemoryVectorStore) -> ExternalVectorNoteIndex:

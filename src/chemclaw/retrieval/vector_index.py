@@ -145,6 +145,22 @@ class NoteIndex(Protocol):
         ...
 
 
+# The version of the note-text derivation behind every stored note vector. `search_text` decides
+# what a note's embedded text *is*, and `embedding_config_key()` cannot see that decision — it
+# keys the model, endpoint and dimension, so a change to the derivation (adding `conditions` and
+# `source` to the haystack did exactly this) left every stored vector reading as current while
+# embedding a different text than a fresh index would. Folding the version into the note-side key
+# makes the old rows invisible to dense reads (the safe failure) and the next reindex re-embed
+# them, which is the same self-healing path a model swap already takes. Bump it whenever
+# `chemclaw.kg.search.search_text`'s composition changes.
+_NOTE_TEXT_VERSION = "ntv2"
+
+
+def note_embedding_key() -> str:
+    """The embedding identity of a stored note vector: model configuration plus text derivation."""
+    return f"{embedding_config_key()}|{_NOTE_TEXT_VERSION}"
+
+
 def _cosine(a: list[float], b: list[float]) -> float:
     """Cosine similarity of two equal-length vectors; 0.0 if either is a zero vector."""
     dot = sum(x * y for x, y in zip(a, b, strict=True))
@@ -203,7 +219,7 @@ class InMemoryNoteIndex:
         `PostgresNoteIndex.search_dense` for the defect that scoping both directions closes, and
         why a reference that scoped only the write path could not stand in for the backend.
         """
-        current = embedding_config_key()
+        current = note_embedding_key()
         hits = [
             IndexHit(note_id=r.note_id, score=_cosine(query_embedding, r.embedding))
             for r in self._records.values()
@@ -473,7 +489,7 @@ class PostgresNoteIndex:
         overrides `search_dense` to rank in the store), which is exactly when a shared spelling is
         cheap to get right and expensive to discover later.
         """
-        return embedding_config_key()
+        return note_embedding_key()
 
     async def fingerprints(self, embedding_key: str) -> dict[str, str]:
         """Stored fingerprints for every row that has one *and* was embedded under this key.
@@ -630,7 +646,7 @@ async def reindex_notes(
     retired = await index.retire_absent({note.id for note in notes})
     if retired:
         log.info("retired %d note(s) no longer on disk", retired)
-    embedding_key = embedding_config_key()
+    embedding_key = note_embedding_key()
     stored_fingerprints = {} if full else await index.fingerprints(embedding_key)
     changed = [
         note
@@ -641,7 +657,7 @@ async def reindex_notes(
         return 0
     texts = [search_text(note) for note in changed]
     # embed_texts may call the endpoint (openai_compatible) — offload so the event loop is free.
-    embeddings = await asyncio.to_thread(embed_texts, texts)
+    embeddings = await asyncio.to_thread(lambda: embed_texts(texts, cache=False))
     records = [
         NoteRecord(
             note_id=note.id,

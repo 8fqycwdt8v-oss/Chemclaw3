@@ -31,7 +31,7 @@ from chemclaw.ingest.documents.index import (
     FileRecord,
     PostgresDocumentIndex,
 )
-from chemclaw.retrieval.vector_index import NoteRecord, PostgresNoteIndex
+from chemclaw.retrieval.vector_index import NoteRecord, PostgresNoteIndex, note_embedding_key
 from tests.pg import migrated_db_or_skip
 
 # pgvector's own default `ef_search`. Asserted rather than read back from the server so the test
@@ -175,7 +175,7 @@ def test_dense_search_runs_under_the_configured_parameters(
                 NoteRecord(note_id="rxn-1", text="amide coupling epimerization", embedding=near),
                 NoteRecord(note_id="rxn-2", text="amide coupling workup", embedding=far),
             ],
-            embedding_config_key(),
+            note_embedding_key(),
         )
         (query,) = await asyncio.to_thread(embed_texts, ["amide coupling epimerization"])
         assert [h.note_id for h in await index.search_dense(query, top_k=1)] == ["rxn-1"]

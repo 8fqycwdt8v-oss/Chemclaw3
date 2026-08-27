@@ -230,6 +230,9 @@ def test_the_sweep_is_bounded_by_characters_and_not_only_by_a_chunk_count(
             f"---\nid: reaction-{i}\ntype: reaction\n---\n{body}\n", encoding="utf-8"
         )
     monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
+    # The graph leg is bounded by retrieval_top_k like every sibling; raised so the sweep-level
+    # budgets under test are the binding ones.
+    monkeypatch.setattr(settings, "retrieval_top_k", 40)
     monkeypatch.setattr(settings, "gather_evidence_max_chunks", 20)
     monkeypatch.setattr(settings, "gather_evidence_max_chars", 1_000)
 
@@ -252,6 +255,9 @@ def test_hitting_the_chunk_count_says_so_rather_than_looking_like_a_small_corpus
             f"---\nid: reaction-{i}\ntype: reaction\n---\nyield noted.\n", encoding="utf-8"
         )
     monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
+    # Raised past the fixture size so the sweep-level count cap is the truncation under test,
+    # not the graph leg's own retrieval_top_k bound.
+    monkeypatch.setattr(settings, "retrieval_top_k", 40)
     monkeypatch.setattr(settings, "gather_evidence_max_chunks", 5)
 
     sweep = asyncio.run(gather_evidence("yield"))

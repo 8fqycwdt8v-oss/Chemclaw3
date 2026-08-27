@@ -242,7 +242,7 @@ def _chunks_for(documents: list[_Parsed], binding: DocumentShareBinding) -> list
             pending.append((document.doc_id, piece.ordinal, piece.content, piece.coordinate))
     if not pending:
         return []
-    embeddings = embed_texts([content for _, _, content, _ in pending])
+    embeddings = embed_texts([content for _, _, content, _ in pending], cache=False)
     return [
         ChunkRecord(
             doc_id=doc_id,
@@ -365,7 +365,9 @@ async def reembed_stale(
     if not stale:
         return ReembedReport()
     try:
-        embeddings = await asyncio.to_thread(embed_texts, [chunk.content for chunk in stale])
+        embeddings = await asyncio.to_thread(
+            lambda: embed_texts([chunk.content for chunk in stale], cache=False)
+        )
         refreshed = list(zip(stale, embeddings, strict=True))
         failed = 0
     except Exception:
