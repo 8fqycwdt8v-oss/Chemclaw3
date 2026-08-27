@@ -18,3 +18,7 @@ as the boronate equilibrium).
 
 Semiempirical prediction with an uncertainty of roughly ±1 unit — enough to say the boronate is
 significant at pH 9 and not enough to quote a number in a report.
+
+Seed content: no calculation row backs this figure, which is why `calc_refs` is empty here — a
+real job-result cites the calculation keys its numbers came from, as [[job-aspirin-thermo]]
+does.

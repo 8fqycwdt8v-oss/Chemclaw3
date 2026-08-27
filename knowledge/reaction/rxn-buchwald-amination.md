@@ -14,6 +14,7 @@ tags:
 - cross-coupling
 - amination
 type: reaction
+valid_from: 2026-05-19
 ---
 
 Buchwald-Hartwig amination of 4-bromoanisole with morpholine.

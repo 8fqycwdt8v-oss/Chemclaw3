@@ -15,6 +15,7 @@ tags:
 - esterification
 - worked-example
 type: reaction
+valid_from: 2026-03-02
 ---
 
 Acetylation of salicylic acid with acetic anhydride to give aspirin.

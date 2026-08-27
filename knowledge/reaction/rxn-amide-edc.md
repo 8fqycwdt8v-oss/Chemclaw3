@@ -12,6 +12,7 @@ source: seed-corpus
 tags:
 - amide-coupling
 type: reaction
+valid_from: 2026-04-14
 ---
 
 EDC/HOBt amide coupling of benzoic acid with benzylamine.

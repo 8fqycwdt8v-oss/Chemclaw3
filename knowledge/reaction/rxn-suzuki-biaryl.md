@@ -14,6 +14,7 @@ tags:
 - cross-coupling
 - suzuki
 type: reaction
+valid_from: 2026-05-05
 ---
 
 Suzuki-Miyaura coupling of 4-bromoanisole with phenylboronic acid.

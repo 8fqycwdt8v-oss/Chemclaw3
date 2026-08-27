@@ -1,6 +1,10 @@
 ---
 artifact_refs: []
 calc_refs: []
+conditions:
+  outcome: failure
+  temperature_c: 20.0
+  yield_percent: 34.0
 confidence: 0.75
 created_by: human
 id: failure-dcm-amide-coupling
