@@ -36,7 +36,7 @@ one that knows which of its two error classes a given failure belongs in.
 import json
 import logging
 import os
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import asynccontextmanager
 from datetime import timedelta
 from typing import Any
@@ -57,6 +57,8 @@ from mcp.types import (
     EmptyResult,
     PingRequest,
 )
+
+from chemclaw.core.http import same_origin
 
 # How long to wait for the TCP/TLS handshake, as distinct from how long a tool may take to answer.
 # Deliberately not a config field: it is a property of "is this host there at all", the same for
@@ -256,7 +258,10 @@ def bearer_from_env(variable: str) -> str | None:
     return os.environ.get(variable) or None
 
 
-def short_connect_client(read_bound_seconds: float) -> Callable[..., httpx.AsyncClient]:
+def short_connect_client(
+    read_bound_seconds: float,
+    request_hooks: Sequence[Callable[[httpx.Request], Awaitable[None]]] = (),
+) -> Callable[..., httpx.AsyncClient]:
     """A `httpx_client_factory` whose *connect* bound is short however long the read bound is.
 
     `streamablehttp_client(timeout=…)` composes one `httpx.Timeout` for connect, write and pool
@@ -268,6 +273,10 @@ def short_connect_client(read_bound_seconds: float) -> Callable[..., httpx.Async
     private-import allow-list deliberately empty. What that factory adds over a plain client is
     `follow_redirects=True`, so that is what is restated: an MCP endpoint behind an ingress that
     redirects `/mcp` to `/mcp/` is ordinary, and httpx does not follow by default.
+
+    `request_hooks` exists because of that redirect: a hook runs on every hop, which is the only
+    place a header set attached to the *connection* can be taken back off again before it reaches
+    an origin the caller never named. `open_session` passes one when it is given identity headers.
     """
 
     def factory(
@@ -279,6 +288,7 @@ def short_connect_client(read_bound_seconds: float) -> Callable[..., httpx.Async
         return httpx.AsyncClient(
             headers=headers,
             auth=auth,
+            event_hooks={"request": list(request_hooks)},
             follow_redirects=True,
             timeout=httpx.Timeout(
                 bound.read,
@@ -322,15 +332,50 @@ def auth_rejection(exc: BaseException) -> int | None:
     return None
 
 
+def _origin_scoped(
+    endpoint: str, names: tuple[str, ...]
+) -> Callable[[httpx.Request], Awaitable[None]]:
+    """A request hook that removes `names` from any request that left `endpoint`'s origin.
+
+    The mirror of `connectors.identity.turn_identity_hook`, for the transport this module owns and
+    over the same hazard: httpx runs a hook on every redirect hop and builds each hop from the
+    previous request's headers, dropping `Authorization` and nothing else. Removing rather than
+    declining to re-add is the point — these headers are attached to the *connection*, so the
+    copies arrive on the foreign hop whatever a hook chooses to add.
+    """
+
+    async def strip(request: httpx.Request) -> None:
+        """Drop the caller's identity headers when this hop is not the endpoint we were given."""
+        if not same_origin(str(request.url), endpoint):
+            for name in names:
+                request.headers.pop(name, None)
+
+    return strip
+
+
 @asynccontextmanager
 async def open_session(
-    url: str, *, token_env: str, timeout_seconds: float
+    url: str,
+    *,
+    token_env: str,
+    timeout_seconds: float,
+    identity_headers: dict[str, str] | None = None,
 ) -> AsyncIterator[ClientSession]:
     """Open one MCP session to `url` with the bearer from `token_env` attached.
 
     The credential is a *connection* header rather than a per-call one, for the reason
     `connectors.identity` records: MCP's per-call header callback is not applied to the
     `initialize()` that opens the connection, so a credential passed that way 401s at connect.
+
+    `identity_headers` — who is asking — rides on the same connection, and *may* here for the
+    reason a connector's own client cannot: a connector session is held open for a whole turn, so
+    its identity has to be stamped per request by a hook, while this session is opened per call and
+    therefore belongs to exactly one caller from `initialize()` onwards. They are passed in rather
+    than read here because the builder is `connectors.identity.turn_headers` and `core` imports no
+    sibling (`tests/test_layering.py`); a second builder in this module is the one thing that must
+    not happen, since the two would then disagree about what a connector is told. Without them the
+    heaviest server in the fleet — minutes-to-hours CREST runs — logged `actor=- session=-` on
+    every request, so nothing joined an incident there to the turn that caused it.
 
     A session per call, not one per process: the MCP transport's tasks inherit the context of
     whoever opened the connection, so a shared session misattributes concurrent callers to each
@@ -343,15 +388,24 @@ async def open_session(
     is not answering" and, worse, was reclassified from bad data into a retryable outage.
     """
     token = bearer_from_env(token_env)
-    headers = {"Authorization": f"Bearer {token}"} if token else None
+    headers = dict(identity_headers or {})
+    if token:
+        # Last, so a caller's header set can never displace the credential this connection is
+        # authenticated with.
+        headers["Authorization"] = f"Bearer {token}"
     connected = False
     try:
         async with streamablehttp_client(
             url,
-            headers=headers,
+            headers=headers or None,
             timeout=timedelta(seconds=timeout_seconds),
             sse_read_timeout=timedelta(seconds=timeout_seconds + READ_TIMEOUT_GRACE_SECONDS),
-            httpx_client_factory=short_connect_client(timeout_seconds),
+            httpx_client_factory=short_connect_client(
+                timeout_seconds,
+                # Only the caller's own headers are scoped: the bearer is httpx's to strip, and it
+                # already does that cross-origin.
+                [_origin_scoped(url, tuple(identity_headers))] if identity_headers else (),
+            ),
         ) as (read, write, _):
             async with ClientSession(
                 read, write, read_timeout_seconds=timedelta(seconds=timeout_seconds)

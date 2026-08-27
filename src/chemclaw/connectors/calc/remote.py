@@ -36,6 +36,7 @@ from typing import Any
 from mcp import ClientSession
 from pydantic import BaseModel, ConfigDict
 
+from chemclaw.connectors.identity import turn_headers
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError, SubsystemUnavailableError
 from chemclaw.core.ids import stable_hash
@@ -115,6 +116,13 @@ async def calc_session(timeout_seconds: float | None = None) -> AsyncIterator[Cl
             settings.calc_server_url,
             token_env=settings.calc_server_token_env,
             timeout_seconds=timeout_seconds or settings.calc_server_timeout_seconds,
+            # Who is asking, on the same terms every connector call carries it — the *same*
+            # builder, never a second one, so the backend that runs the longest jobs in the fleet
+            # is told what a two-millisecond property lookup is told. It logged `actor=- session=-`
+            # on every request until this line existed, so an incident on an hours-long CREST
+            # search had no join back to the turn that started it. A session is opened per call
+            # here, which is what makes connection headers truthful (see `open_session`).
+            identity_headers=turn_headers(),
         ) as session:
             yield session
     except McpCredentialRefused as exc:

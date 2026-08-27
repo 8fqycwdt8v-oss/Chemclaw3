@@ -10,6 +10,12 @@ else's HTTP endpoint" and exists only to stop a second copy appearing:
   questions differ; the answer must not, or one of them would be enforcing a weaker notion of
   "safe address" than the other claims. It lives here because `connectors -> api` is an edge the
   layering policy explicitly removed (`tests/test_layering.py`).
+- **`same_origin`** — the one definition of "this request is still talking to the endpoint we
+  meant", which is what decides whether the turn's identity headers may travel on it. Two callers
+  ask it of two different transports: `connectors.identity.turn_identity_hook` for a bundle's own
+  client, and `core.mcp_session.open_session` for the MCP session this kernel opens on a caller's
+  behalf. Same reason as above — the two must not answer differently, or one of them is stripping
+  identity where the other leaks it.
 
 There was a second primitive, `error_detail`, and the paragraph above used to say in the present
 tense that "several modules (the Nextflow launcher, the Entra token/OBO exchanges)" called it. All
@@ -47,3 +53,47 @@ def is_loopback_url(url: str) -> bool:
     except ValueError:
         return False
     return host in LOOPBACK_HOSTS
+
+
+# The port a scheme means when a URL does not spell one out, so an address written bare and the same
+# address written with an explicit `:80` are one origin — the normalization httpx itself does before
+# it strips `Authorization` on a redirect.
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+
+
+def same_origin(url: str, other: str) -> bool:
+    """Whether two URLs share a scheme, host and port — i.e. name the same server.
+
+    The question behind it is always the same: an httpx request hook runs on *every* hop of a
+    redirect chain, and httpx carries the previous request's headers into the redirected one,
+    dropping `Authorization` alone. So a server that answers `302` toward an origin it controls
+    harvests everything else — which for this system is the caller's Entra object id, their session
+    and the turn's correlation id. Both callers use this to remove those headers rather than merely
+    decline to re-add them, because the copied originals arrive on the foreign hop anyway.
+
+    Conservative in the same direction as `is_loopback_url`: a URL that cannot be parsed does not
+    match anything, so an unreadable address is treated as foreign and the headers are stripped.
+
+    Args:
+        url: The URL a request is actually going to.
+        other: The endpoint the caller meant to talk to.
+
+    Returns:
+        True when both name the same (scheme, host, port).
+    """
+
+    def origin(value: str) -> tuple[str, str, int] | None:
+        try:
+            parts = urlsplit(value)
+        except ValueError:
+            return None
+        if not parts.hostname:
+            return None
+        return (
+            parts.scheme,
+            parts.hostname,
+            parts.port or _DEFAULT_PORTS.get(parts.scheme, 0),
+        )
+
+    first = origin(url)
+    return first is not None and first == origin(other)

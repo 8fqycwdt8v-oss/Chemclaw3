@@ -38,8 +38,10 @@ from mcp.server.fastmcp import FastMCP
 from mcp.shared.exceptions import McpError
 
 from chemclaw.agent.audit import _served_by
+from chemclaw.connectors.calc.remote import calc_session
 from chemclaw.connectors.identity import (
     HEADER_ACTOR,
+    HEADER_CORRELATION,
     HEADER_SESSION,
 )
 from chemclaw.connectors.manifest import ConnectorManifest, HttpEndpoint, StdioEndpoint
@@ -53,8 +55,14 @@ from chemclaw.connectors.registry import (
 )
 from chemclaw.connectors.server import connector_app
 from chemclaw.connectors.transport import SERVED_BY, ConnectorSpec, _stamped
-from chemclaw.core.identity_context import reset_current_identity, set_current_identity
-from chemclaw.core.mcp_session import cancel_on_timeout
+from chemclaw.core.config import settings
+from chemclaw.core.identity_context import (
+    reset_current_correlation_id,
+    reset_current_identity,
+    set_current_correlation_id,
+    set_current_identity,
+)
+from chemclaw.core.mcp_session import _origin_scoped, cancel_on_timeout, invoke
 from chemclaw.core.session_context import reset_current_session_id, set_current_session_id
 from tests.conftest import _free_port
 
@@ -242,6 +250,90 @@ def test_the_turn_identity_actually_arrives_at_the_connector() -> None:
         and headers.get(HEADER_SESSION.lower()) == "session-xyz"
         for headers in received
     ), received
+
+
+def test_the_turn_identity_reaches_the_calculation_backend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The backend behind `cached_compute` is reached by a different transport, and it carried none.
+
+    `connectors/calc/remote.py` does not dial a connector: it opens an MCP session through
+    `core.mcp_session.open_session`, which sent the bearer and nothing else. So the fleet's longest
+    and most incident-prone calls — CREST searches measured in hours — were logged there as
+    `actor=- session=-`, with no way back from an incident on that server to the turn that caused
+    it, while a two-millisecond property lookup through a connector was fully attributed.
+
+    Asserted over the wire, on a served app, for the reason the connector test above says: a header
+    contract is only real if the bytes land. The identity is stamped as a *connection* header here
+    rather than by a per-request hook, which is truthful only because this session is opened per
+    call — the connector's is held for a whole turn, which is why the two differ.
+    """
+    received: list[dict[str, str]] = []
+    server = FastMCP("calc-probe")
+
+    @server.tool()
+    async def echo() -> dict[str, bool]:
+        """A trivial tool answering JSON, so a real call round-trips over a real session."""
+        return {"ok": True}
+
+    app = connector_app(server, name="calc-probe")
+
+    @app.middleware("http")
+    async def _capture(request: Any, call_next: Any) -> Any:
+        """Record the Chemclaw headers of every request reaching the backend."""
+        received.append(
+            {key: value for key, value in request.headers.items() if key.startswith("x-chemclaw-")}
+        )
+        return await call_next(request)
+
+    port = _free_port()
+    monkeypatch.setattr(settings, "calc_server_url", f"http://127.0.0.1:{port}/mcp")
+
+    async def _call() -> None:
+        async with calc_session() as session:
+            await invoke(session, "echo", {})
+
+    identity = set_current_identity("user-42", frozenset({"process-chemist"}))
+    session_token = set_current_session_id("session-xyz")
+    correlation = set_current_correlation_id("turn-99")
+    try:
+        with _Server(app, port):
+            asyncio.run(_call())
+    finally:
+        reset_current_correlation_id(correlation)
+        reset_current_session_id(session_token)
+        reset_current_identity(identity)
+
+    assert any(
+        headers.get(HEADER_ACTOR.lower()) == "user-42"
+        and headers.get(HEADER_SESSION.lower()) == "session-xyz"
+        and headers.get(HEADER_CORRELATION.lower()) == "turn-99"
+        for headers in received
+    ), received
+
+
+def test_the_backend_session_takes_its_identity_back_off_a_foreign_hop() -> None:
+    """A redirect must not carry the caller's identity to an origin nobody named.
+
+    The same hazard `turn_identity_hook` guards for a connector, on the transport `core` owns: an
+    httpx hook runs on every hop and httpx builds each hop from the previous request's headers,
+    dropping `Authorization` alone. These headers are attached to the connection, so the copies
+    arrive on the foreign hop whatever a hook chooses to *add* — which is why the guard removes.
+    """
+    stamped = {HEADER_ACTOR: "user-42", HEADER_SESSION: "session-xyz"}
+    strip = _origin_scoped("http://127.0.0.1:8860/mcp", tuple(stamped))
+
+    same = httpx.Request("POST", "http://127.0.0.1:8860/mcp/", headers=stamped)
+    foreign = httpx.Request("POST", "http://evil.example/mcp", headers=stamped)
+
+    async def _both() -> None:
+        """Run the hook over one same-origin hop and one foreign one."""
+        await strip(same)
+        await strip(foreign)
+
+    asyncio.run(_both())
+    assert same.headers.get(HEADER_ACTOR) == "user-42"
+    assert HEADER_ACTOR not in foreign.headers and HEADER_SESSION not in foreign.headers
 
 
 def test_a_tool_body_can_read_the_caller_core_stamped() -> None:

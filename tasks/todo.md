@@ -17,16 +17,16 @@ Every fix below either makes the machine enforce the claim or deletes the claim.
 
 ### Runtime correctness
 
-- [ ] **BS-01 (high)** `execute_activity` bounds how long a job runs once started, never how long it
+- [x] **BS-01 (high)** `execute_activity` bounds how long a job runs once started, never how long it
       waits to start. 31 call sites in `durable/` set `start_to_close_timeout` and nothing else; a
       queue nobody polls waits forever, and `ScheduleOverlapPolicy.SKIP` then silently skips every
       later fire of that job family. `notify.py:102` already carries the fix and the measurement
       (75 s against a 30 s timeout) — generalize it. Add `execution_timeout` to the Schedules.
-- [ ] **BS-02 (high)** `_acting_as` (`durable/template_activities.py:170`) binds actor and
+- [x] **BS-02 (high)** `_acting_as` (`durable/template_activities.py:170`) binds actor and
       session_id and drops `correlation_id`, which `StepIdentity` already carries as a required
       field. Every durable-job log line books `correlation_id='-'`. Same bug class the function's
       own docstring describes for session_id.
-- [ ] **BS-03 (high)** `core/mcp_session.open_session` sends only `Authorization`, so the calc
+- [x] **BS-03 (high)** `core/mcp_session.open_session` sends only `Authorization`, so the calc
       backend — the one server running minutes-to-hours CREST/xTB work — receives no actor,
       session, correlation or `traceparent`. `connectors/identity.turn_headers()` already builds
       exactly the right dict.
@@ -125,4 +125,29 @@ Per repo, before its PR is opened:
 
 ## Review
 
-_(filled in per repo as each PR lands)_
+**Chemclaw3, BS-01/02/03 (2026-08-27).** All three fixed, each with a test that was run against the
+unfixed code first. Three ADRs:
+`D-2026-08-27-a-start-to-close-timeout-does-not-bound-the-wait`,
+`D-2026-08-27-a-step-runs-under-the-correlation-id-it-was-launched-with`,
+`D-2026-08-27-the-backend-is-told-who-is-asking`.
+
+- **BS-01.** One shared `queue_wait_timeout()` (`durable/publish.py`) passed as
+  `schedule_to_start_timeout` at all 30 unbounded dispatched-activity call sites; `notify.py`'s
+  stricter `schedule_to_close` stays. **Schedule-to-start, not schedule-to-close**: the latter caps
+  every attempt together and would have deleted the retry budget everywhere. Measured on the test
+  server: a ScheduleToStart timeout is *not* retried (3 attempts, 10 s bound → one failure at
+  10.028 s), and before the change the same workflow against an unserved queue was still running
+  when the test was killed at 90 s. Schedules gained `execution_timeout`.
+- **BS-02.** `_acting_as` now binds the correlation id too. **The finding's premise was partly
+  wrong and the test says so**: audit rows were *not* affected (`agent/audit.py` falls back to the
+  id each step activity passes explicitly, so an audit-row test passes with the fix removed). The
+  real victims are the ambient's readers — log lines, `ambient_provenance` on PR-gated proposals,
+  and `ConnectorJobInput.correlation_id` for jobs a template launches. `memory_jobs` and
+  `report_workflow` have no correlation id available to bind; the report half is a new BACKLOG row
+  rather than an invented id.
+- **BS-03.** `open_session` takes `identity_headers` (passed in, because `core` imports no
+  sibling), `calc_session` supplies the existing `turn_headers()`, and the redirect guard comes
+  with them over one shared `core/http.same_origin`. The durable path had *no ambient identity to
+  send*: `CalcJobWorkflow` now reads the memo core already sets and the activity stamps it. The
+  reaction labeller stays anonymous — `ingest` may not import `connectors` — and the ADR records
+  what moving the builder into `core` would cost.

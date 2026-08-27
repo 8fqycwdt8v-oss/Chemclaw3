@@ -36,7 +36,8 @@ registered there explicitly rather than through `chemclaw.durable.registry` — 
 core's two queues, and a connector's queue is the connector's own business.
 """
 
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Iterator
+from contextlib import contextmanager
 from typing import TypeVar
 
 from temporalio import activity
@@ -62,6 +63,12 @@ from chemclaw.connectors.calc.specs import (
 from chemclaw.connectors.queues import bundle_queue
 from chemclaw.core.chem import require_canonical_smiles
 from chemclaw.core.config import settings
+from chemclaw.core.identity_context import (
+    reset_current_correlation_id,
+    reset_current_identity,
+    set_current_correlation_id,
+    set_current_identity,
+)
 from chemclaw.durable.heartbeat import beating
 from chemclaw.durable.registry import durable_activity
 from chemclaw.science.calc.models import RotationProfile, Structure, Torsion
@@ -115,9 +122,41 @@ async def _subject(structure_id: str | None, smiles: str) -> Structure | None:
     return structure
 
 
+@contextmanager
+def _acting_for(actor: str, correlation_id: str) -> Iterator[None]:
+    """Stamp the run's requester and correlation id ambient for the duration of the calculation.
+
+    A worker has no request context, so the two travel in this activity's arguments (off the run's
+    memo) and are bound here — the same shape `durable/template_activities.py::_acting_as` uses,
+    written out rather than shared because that one binds a `StepIdentity` including roles and a
+    session, and this path has neither: `ConnectorJobWorkflow`'s memo carries the actor and the
+    correlation id, and the conversation stays core's to join through `job_records`.
+
+    What reads it is `core.mcp_session.open_session`, through the identity headers
+    `connectors/calc/remote.py::calc_session` passes: the calculation server logged `actor=-
+    session=-` on every durable run, so the longest, most incident-prone calls in the fleet were
+    the ones nothing could trace back to a person. Off the durable path — a direct call, a test —
+    both are empty and nothing is stamped, which keeps "no identity" honest rather than fabricated.
+    """
+    if not actor and not correlation_id:
+        yield
+        return
+    identity_token = set_current_identity(actor, frozenset()) if actor else None
+    correlation_token = set_current_correlation_id(correlation_id) if correlation_id else None
+    try:
+        yield
+    finally:
+        if correlation_token is not None:
+            reset_current_correlation_id(correlation_token)
+        if identity_token is not None:
+            reset_current_identity(identity_token)
+
+
 @durable_activity(bundle_queue("calc"))
 @activity.defn
-async def run_xtb_calculation(spec: XtbJobSpec) -> XtbJobResult:
+async def run_xtb_calculation(
+    spec: XtbJobSpec, actor: str = "", correlation_id: str = ""
+) -> XtbJobResult:
     """Run one durable xTB task and return its typed result.
 
     Dispatches on the spec's `kind`. The `summary` field is written here rather than by
@@ -128,8 +167,13 @@ async def run_xtb_calculation(spec: XtbJobSpec) -> XtbJobResult:
     `calc_refs` is collected around the whole dispatch rather than per branch, because every branch
     wants it and the collector already de-duplicates: a solvent screen reaching the same relaxation
     in five media cites it once.
+
+    `actor` and `correlation_id` are the run's, off its memo (see the workflow), and are stamped
+    ambient for the whole dispatch so every remote call this activity makes names the person it is
+    for. Both default to empty: an in-flight run started before they existed, and any direct
+    caller, still decode and simply stamp nothing.
     """
-    with collecting() as calc_refs:
+    with _acting_for(actor, correlation_id), collecting() as calc_refs:
         result = await _dispatch(spec)
     return result.model_copy(update={"calc_refs": calc_refs})
 
