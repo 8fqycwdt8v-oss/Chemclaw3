@@ -189,6 +189,18 @@ class BoCampaignWorkflow:
             # `predicted_value`/`predicted_sd`. The terminal write below records the *best* point
             # instead, which is a different statement and has no surrogate belief attached to it —
             # so the per-round rows are also the only place a campaign's predictions survive.
+            #
+            # **This doubles event-history growth, and that is the price of the guarantee.**
+            # The history is now sent to two activities per round rather than one, so the
+            # quadratic term doubles: measured on the Reizman problem at 173 B/observation
+            # (the same order as the 178 B behind `_carry_on_if_history_is_filling_up`), a
+            # batch-1 campaign books 17.25 MB of activity input over 441 rounds before this and
+            # 34.79 MB after — 2.02x. It is a cost rather than a regression because the
+            # continue-as-new trigger is Temporal's own dynamic signal and not a round count:
+            # the campaign continues roughly twice as often and never approaches the limit. If
+            # that frequency ever becomes the problem, the fix is to record every Nth round
+            # rather than to send less history, because a row holding only one round's
+            # observations would leave a resume with no evidence before it.
             await workflow.execute_activity(
                 record_campaign_run,
                 args=[
