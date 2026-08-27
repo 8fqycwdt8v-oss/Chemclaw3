@@ -107,12 +107,19 @@ async def fan_out(
             child in the Temporal UI reads as e.g. `...-section-2`. Required — ids must be clear.
         task_queue: Queue the children run on; defaults to the light `background-jobs` queue.
         retry_policy: Per-child retry policy. None defaults to `BAD_DATA_RETRY` — *not* Temporal's
-            own default, which has `maximum_attempts=0` (unlimited) and no non-retryable types, so
-            a child that fails deterministically (a bad-data error, or any other exception once its
-            own bounded activity retries are exhausted) would retry forever and the fan-out could
-            never isolate-and-drop it as documented below (D-093: `_DoublerWorkflow`'s poison input
-            hung the fan-out test indefinitely against a real server — the bug this default fixes).
-            Pass an explicit policy only when a child genuinely needs a different bound.
+            own default, which has `maximum_attempts=0` (unlimited), so a child that fails
+            deterministically (a bad-data error, or any other exception once its own bounded
+            activity retries are exhausted) would retry forever and the fan-out could never
+            isolate-and-drop it as documented below (D-093: `_DoublerWorkflow`'s poison input hung
+            the fan-out test indefinitely against a real server — the bug this default fixes).
+            **Only the `maximum_attempts` half of that policy does anything here**: Temporal matches
+            `non_retryable_error_types` against the *outermost* failure, and a child that failed
+            through its own activity surfaces as a child/activity failure, a name deliberately
+            absent from `_BAD_DATA_TYPES`. So the effective bound on a deterministic failure is
+            `activity_max_attempts` child executions, which is only acceptable because a fan-out
+            child's work is small and independent — `connector_job.py` and `template_job.py` both
+            pass `maximum_attempts=1` for exactly this reason, their child being neither. Pass an
+            explicit policy whenever a child's re-execution is not cheap.
         max_parallel: Concurrency bound; defaults to `orchestrator_max_parallel_children`,
             resolved via a local activity so the recorded value — not a live settings read —
             shapes the batches, keeping replay deterministic across config changes.

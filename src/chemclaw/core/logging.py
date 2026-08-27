@@ -568,6 +568,13 @@ _SECRET_SETTINGS = (
     # caught it.
     "llm_fallback_api_key",
     "temporal_api_key",
+    # The external vector store's key, and the live lane's bearer. Both were plain `str` outside
+    # this list until 2026-08-27, which made them invisible to the type rule *and* to the value
+    # inventory at once — the shape `tests/test_credentials.py`'s two directions could not see,
+    # because each is a closed loop over one of the two. The third direction added there is a
+    # credential-shaped-name check over `Settings`, so the next one cannot arrive the same way.
+    "vector_store_api_key",
+    "live_probe_token",
     "postgres_dsn",
     "postgres_migration_dsn",
     "session_store_dsn",
@@ -611,6 +618,26 @@ def register_secret_env(name: str) -> None:
     """
     if name:
         _RUNTIME_SECRET_ENVS.add(name)
+
+
+def _configured_by(env_name: str) -> str:
+    """The `Settings` value that environment variable configures, or `""` if it configures none.
+
+    **The half a registered name cannot see on its own.** `_secret_values` resolves a registered
+    name against `os.environ`, and `Settings.model_config` declares `env_file=".env"` — which
+    pydantic-settings reads *itself*, without exporting anything. So on the documented `.env`
+    posture the settings object held the credential and the inventory held an empty string, for
+    every registered name that also happens to be a config field. `vector_store_api_key` was the
+    measured instance and `core/config/store.py`'s comment named this registration as its
+    protection; the defect was the mechanism, not that one call site.
+
+    The prefix comes off `model_config` rather than being written here, because a second spelling of
+    `CHEMCLAW_` is a second thing to keep in step.
+    """
+    prefix = str(type(settings).model_config.get("env_prefix", ""))
+    if not env_name.startswith(prefix):
+        return ""
+    return _secret_text(getattr(settings, env_name[len(prefix) :].lower(), ""))
 
 
 # Below this length a "secret" is more likely to be a placeholder, an empty default, or a string
@@ -878,9 +905,10 @@ def _secret_values(connector_token_envs: tuple[str, ...] = ()) -> tuple[str, ...
         *connector_token_envs,
         *sorted(_RUNTIME_SECRET_ENVS),
     ):
-        value = os.environ.get(env_name, "")
-        if len(value) >= _MIN_REDACTABLE:
-            values.add(value)
+        # The environment first — it is where a rotated credential lands, and a name registered
+        # from a manifest usually has no field behind it at all. `_configured_by` is the fallback
+        # for the `.env` posture, where the value never reaches `os.environ`.
+        _consider(os.environ.get(env_name, "") or _configured_by(env_name))
     return tuple(sorted(values, key=len, reverse=True))
 
 

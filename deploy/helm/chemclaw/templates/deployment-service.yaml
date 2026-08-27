@@ -30,8 +30,12 @@ spec:
              were in flight, at a point where the conversation state that made them resumable lives
              in the pod's memory (D-121). Derived from the turn budget plus the router drain rather
              than written as a number, so raising one raises the other; `tests/test_deploy_chart.py`
-             pins both the derivation and that the ConfigMap key it reads exists. */}}
-      terminationGracePeriodSeconds: {{ add (int .Values.config.CHEMCLAW_SERVICE_TURN_TIMEOUT_SECONDS) (int .Values.service.drainSeconds) }}
+             pins both the derivation and that the ConfigMap key it reads exists.
+
+             `required`, because `int nil` is `0`: without it an absent key rendered
+             `terminationGracePeriodSeconds: 15` — a plausible-looking number, and the SIGKILL this
+             comment says was fixed. */}}
+      terminationGracePeriodSeconds: {{ add (int (required "config.CHEMCLAW_SERVICE_TURN_TIMEOUT_SECONDS must be set: the front door terminationGracePeriodSeconds is derived from it" .Values.config.CHEMCLAW_SERVICE_TURN_TIMEOUT_SECONDS)) (int .Values.service.drainSeconds) }}
       securityContext:
         {{- include "chemclaw.podSecurityContext" . | nindent 8 }}
       containers:

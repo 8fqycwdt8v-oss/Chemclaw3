@@ -49,6 +49,22 @@ class PublishSettings(BaseSettings):
     # able to grant itself unlimited runtime.
     result_publish_timeout_seconds: float = Field(default=120.0, gt=0)
 
+    # How long the *republish* walk may take — a full scan of `calculation_results` and
+    # `job_records`, neither of which is ever pruned, so on a years-old deployment it is the one
+    # multi-hour activity outside the calculators. Its own budget rather than the parent's: it ran
+    # with `connector_job_timeout_seconds`, the same number `ConnectorJobWorkflow` gives the child
+    # as an execution timeout, so both expired within milliseconds of each other, the activity's
+    # `BAD_DATA_RETRY` could never reach a second attempt, and the run died as a bare
+    # `WorkflowExecutionTimedOut` naming neither setting. `_the_job_ceiling_covers_the_activity_it
+    # _bounds` now takes the max over this and `xtb_job_timeout_seconds`.
+    result_republish_timeout_seconds: float = Field(default=14_400.0, gt=0)
+
+    # How long Temporal waits to hear "still running" from that walk before declaring the worker
+    # dead. Without it a worker killed ten minutes in was not noticed for the whole budget above;
+    # `durable.heartbeat.beating` derives the beat interval from this number so the two cannot
+    # drift. Same value and same reasoning as the calculators' own heartbeat timeout.
+    result_republish_heartbeat_timeout_seconds: float = Field(default=300.0, gt=0)
+
     # How many delivery failures a row survives before it stops being retried. It is never deleted
     # — a row that has given up is the record of a destination that was down, and an operator
     # re-queues it with the backfill CLI once the cause is fixed.

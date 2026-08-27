@@ -12,9 +12,11 @@ already in flight.
 those programs runs here any more. Keeping twenty files whose names describe a physics stack this
 process does not have would leave the tree's own map pointing at a system that no longer exists,
 which is the exact failure `tests/test_docstring_paths.py` was built for. What is left is one
-responsibility, stated once: *the shape of a calculation's input, its answer, and the geometry
-both are about.* So it is one module, and its sections follow the ladder a calculation climbs —
-structure, single point, optimization, second derivatives, and the composites built over them.
+responsibility, stated once: *the shape of a calculation's answer, and the geometry it is about.*
+So it is one module, and its sections follow the ladder a calculation climbs — structure, single
+point, optimization, second derivatives, and the composites built over them. The request-side
+shapes went with the engines: five `*Input` models outlived their callers by ten days and were
+deleted unreferenced, which is why nothing here describes a call being made.
 
 **Nothing here derives a `calc_version`, and nothing here computes.** A model whose construction
 needed tblite, crest or an embedding is not a model, it is an engine, and the whole point of the
@@ -60,6 +62,16 @@ CrestEffort = Literal["quick", "normal", "extensive"]
 # first searches conformational space, works from the lowest member, and adds the conformational
 # entropy that a single-conformer free energy is missing.
 ReactionLevel = Literal["quick", "standard", "thorough"]
+
+# Which standard state a free energy — and the entropy under it — is quoted at.
+#
+# **A free energy without its standard state is not a quantity a chemist can use**, and the two
+# conventions here differ by RT ln(RT c0/P0) = 1.894 kcal/mol per mole of species at 298.15 K,
+# which is a factor of 24.47 in K for every mole a reaction creates or destroys. The gas-phase
+# convention is 1 atm; the one a chemist means by "ΔG in THF" is 1 mol/L. The term cancels exactly
+# when Δn = 0, which is why a tautomer or stereoisomer ranking never showed the difference and a
+# dissociation, an association or a BDFE is wrong by a factor of 24.47 per unit of Δn without it.
+StandardState = Literal["gas-1atm", "solution-1M"]
 
 # Decimal places coordinates are rounded to before a `Structure` is hashed. 4 decimals = 0.1 pm,
 # far below any chemical significance, so run-to-run float noise cannot fork the cache.
@@ -169,19 +181,6 @@ class Structure(BaseModel):
         return np.array(self.elements), np.array(self.positions)
 
 
-class XtbInput(BaseModel):
-    """A single-point xTB request: a molecule and its charge.
-
-    `charge` is redundant with the SMILES — the server validates it against the formal charge the
-    structure already carries, so it cannot disagree. It is kept anyway, deliberately: the LLM tool
-    signature stays loud, and a model that passes a charge contradicting the structure gets an
-    error instead of having its argument silently ignored.
-    """
-
-    smiles: str = Field(min_length=1)
-    charge: int = 0
-
-
 class XtbResult(BaseModel):
     """The parsed result of a GFN2-xTB single point."""
 
@@ -189,12 +188,6 @@ class XtbResult(BaseModel):
     method: str
     charge: int
     total_energy_hartree: float
-
-
-class PkaInput(BaseModel):
-    """A pKa request: the neutral acid as SMILES."""
-
-    smiles: str = Field(min_length=1)
 
 
 class PkaResult(BaseModel):
@@ -221,12 +214,6 @@ class PkaResult(BaseModel):
     site: Literal["acid", "base"] = "acid"
 
 
-class SolubilityInput(BaseModel):
-    """A solubility request: just the molecule."""
-
-    smiles: str = Field(min_length=1)
-
-
 class SolubilityResult(BaseModel):
     """Predicted aqueous solubility as log S (mol/L), with an uncertainty.
 
@@ -244,12 +231,6 @@ class SolubilityResult(BaseModel):
     log_s_mol_per_l: float
     uncertainty_log: float
     estimate: Estimate | None = None
-
-
-class DescriptorInput(BaseModel):
-    """A descriptor-panel request: just the molecule."""
-
-    smiles: str
 
 
 class DescriptorProfile(BaseModel):
@@ -275,18 +256,15 @@ class DescriptorProfile(BaseModel):
     veber_pass: bool
 
 
-class LogdInput(BaseModel):
-    """A logD request: the molecule and the pH (defaults to `settings.logd_default_ph`)."""
-
-    smiles: str = Field(min_length=1)
-    ph: float | None = None
-
-
 class LogdResult(BaseModel):
     """Predicted logD at a given pH, alongside the logP/pKa it was derived from.
 
-    `uncertainty` propagates only the pKa calibration's residual (the dominant error term); Crippen
-    LogP itself carries no reported uncertainty in RDKit.
+    `uncertainty` is a propagation of both inputs: Crippen's reported RMSE
+    (`settings.crippen_logp_uncertainty`) combined in quadrature with the pKa calibration's
+    residual carried through `dlogD/dpKa`, which is the **ionised fraction**. It used to be the pKa
+    residual copied across unscaled and described as "the dominant error term" — two claims that
+    were both false for most of what this composite may serve: pyridine at pH 7.4 published +/-1.4
+    of which the pKa contributes 0.0094, while the unreported Crippen term is ~0.68.
     """
 
     smiles: str
@@ -597,6 +575,16 @@ class HessianPayload(BaseModel):
     The arrays cross as base64 rather than as JSON number lists because they are megabytes at drug
     size: a 33-atom Hessian is 99x99 doubles, and `.npy` is self-describing so the shape cannot be
     lost in transit.
+
+    **`max_gradient_hartree_per_angstrom` is the evidence that the geometry was a stationary
+    point**, and declaring it is what stops a wrong zero-point energy from being silent. The server
+    differentiates *whatever* geometry it is handed — a transition state and a scan point are both
+    legitimate subjects — so a Hessian alone says nothing about where it was taken. Away from a
+    stationary point the modes are not frequencies, and `thermo._vibrational` skips every
+    non-positive wavenumber, so the ZPE that comes out is quietly too small rather than obviously
+    wrong. The field is optional because the `xtb` binary backend reports no gradient beside its
+    Hessian, and because a row written before the server returned it is still a complete row —
+    which is why `CALCULATION_EPOCH` does not move for it.
     """
 
     structure_id: str
@@ -604,6 +592,10 @@ class HessianPayload(BaseModel):
     solvent: str | None
     atom_count: int
     electronic_energy_hartree: float
+    # Largest absolute gradient component (Hartree/Angstrom) at the geometry that was
+    # differentiated. `None` = not reported by the backend that ran, which is a different claim
+    # from "zero" and must stay distinguishable from it.
+    max_gradient_hartree_per_angstrom: float | None = None
     hessian_npy: str
     dipole_derivatives_npy: str | None = None
     ir_intensities: list[float] | None = None
@@ -625,13 +617,31 @@ class ThermochemistryResult(BaseModel):
     """RRHO thermochemistry at the semiempirical level, with its caveats in the data.
 
     Absolute values are in Hartree (what a reaction differences); the corrections are in kcal/mol
-    (what a person reads). `is_minimum=False` with a populated `imaginary_frequencies_cm` is the
-    point of the model: the result states that its own free energy is not a free energy, rather
-    than relying on the caller to notice.
+    (what a person reads). `is_minimum=False` is the point of the model: the result states that its
+    own free energy is not a free energy, rather than relying on the caller to notice.
+
+    **There are two ways not to be a minimum and the model reports both**, because only one of them
+    is visible in the frequencies. A geometry with an imaginary mode is a saddle point and says so
+    through `imaginary_frequencies_cm`. A geometry that is not *stationary* at all — an unrelaxed
+    embedding, a constrained scan point, a structure displaced along a soft direction — often shows
+    no imaginary mode whatsoever, and its harmonic analysis is meaningless for a subtler reason:
+    `thermo._vibrational` sums over positive wavenumbers only, so the spurious near-zero and
+    negative modes such a geometry produces are *dropped*, and the zero-point energy that comes out
+    is quietly too small. `is_stationary` and `max_gradient_hartree_per_angstrom` are what make that
+    case statable rather than silent.
 
     `conformer_treatment="single"` is the second built-in caveat. Everything here describes one
     conformer, and a single-conformer free energy is the most common silent error in semiempirical
     work.
+
+    `standard_state` is the third, and it changes published numbers rather than annotating them:
+    a solution result is quoted at 1 mol/L, so its `entropy_cal_per_mol_k`, `gibbs_correction_kcal`
+    and `gibbs_free_energy_hartree` are each 1.894 kcal/mol-worth of reference state away from what
+    this model used to report
+    (`D-2026-08-27-a-free-energy-without-its-standard-state-is-not-a-quantity`) — in the
+    direction that makes them the numbers a chemist means. `electronic_energy_hartree`, the
+    enthalpy and the frequencies are unchanged: a translational *energy* is 1.5RT at any
+    pressure.
     """
 
     smiles: str | None
@@ -639,11 +649,29 @@ class ThermochemistryResult(BaseModel):
     method: str
     solvent: str | None
     temperature_k: float
+    # The pressure the translational partition function was evaluated at — 1 atm in the gas phase,
+    # and the 1 mol/L reference pressure (c0·R·T, ~24.8 bar at 298.15 K) in solution. Reported as
+    # the pressure actually used rather than as the configured gas-phase knob, because a solution
+    # entropy quoted beside 101325 Pa is a number labelled with a state it was not computed in.
     pressure_pa: float
+    # ...and the same fact in the words a chemist reads. Derived from the medium the Hessian was
+    # taken in, never from a caller's preference: the electronic energy came out of an ALPB SCF, so
+    # the phase is a property of the calculation.
+    standard_state: StandardState = "gas-1atm"
     symmetry_number: int
 
+    # False when the geometry carries an imaginary mode **or** when it is known not to be a
+    # stationary point. Never `True` on evidence this result does not have: an unassessed
+    # stationarity (`is_stationary=None`) leaves the verdict to the frequencies alone, which is what
+    # it always was.
     is_minimum: bool
     imaginary_frequencies_cm: list[float]
+    # Whether the geometry the Hessian was taken at is a stationary point, and the number that
+    # decided it. `None` = not assessed, because the backend that ran reported no gradient — a
+    # different claim from "it is stationary", and the reason this is a tri-state rather than a
+    # bool. The threshold is `xtb_stationary_gradient_tolerance`.
+    is_stationary: bool | None = None
+    max_gradient_hartree_per_angstrom: float | None = None
     # Every normal mode, ordered by wavenumber. A caller with a context budget may truncate this to
     # the bands that matter (`strongest_bands`); `mode_count` is then the honest statement of how
     # many there were — the same truncation contract `SiteReactivityResult` uses for atoms.
@@ -759,6 +787,11 @@ class Torsion(BaseModel):
     """
 
     torsion_id: str
+    # **Empty for a rotor whose rotating end carries only hydrogens**, because `enumerate_torsions`
+    # cannot name a dihedral through one: it would need a hydrogen index, and that means something
+    # only inside a particular explicit-H numbering. `compose._rotor_dihedral` builds it in the
+    # structure's own numbering — or refuses, when the rotor is a symmetric top whose barrier is
+    # already inside the quasi-RRHO free-rotor treatment of the low modes.
     atoms: list[int] = Field(min_length=0, max_length=4)
     bond: list[int] = Field(min_length=2, max_length=2)
     label: str
@@ -1350,6 +1383,13 @@ class ReactionEnergyResult(BaseModel):
     Deltas are products minus reactants in kcal/mol: negative is downhill. Report the uncertainty
     with the number — a semiempirical reaction free energy is a screening quantity, good for
     comparing related reactions and poor as an absolute.
+
+    **`delta_g_kcal` moved for solution reactions that change the molecule count**
+    (`D-2026-08-27-a-free-energy-without-its-standard-state-is-not-a-quantity`). Every ΔG
+    used to be the gas-phase 1 atm one, so a solution association or dissociation
+    was off by 1.894·Δn kcal/mol — a factor of 24.47 in K per unit of Δn — while nothing said which
+    state it was in. `standard_state` now does, and the number matches it. ΔE and ΔH are unchanged
+    at every level: neither depends on the reference pressure.
     """
 
     reactants: list[str]
@@ -1357,6 +1397,11 @@ class ReactionEnergyResult(BaseModel):
     method: str
     solvent: str | None
     temperature_k: float
+    # Which reference state `delta_g_kcal` is quoted at. A solution ΔG is the 1 mol/L one, so a
+    # reaction with Δn != 0 carries a 1.894·Δn kcal/mol term that a 1 atm number does not — see
+    # `StandardState`. Historical rows predate the correction and read "gas-1atm", which is what
+    # they were.
+    standard_state: StandardState = "gas-1atm"
     level: ReactionLevel
     delta_e_kcal: float
     delta_h_kcal: float | None
@@ -1380,9 +1425,17 @@ class ReactionEnergyResult(BaseModel):
 
 
 class SolventEffect(BaseModel):
-    """One solvent's effect on the same reaction. `solvent=None` is the gas phase."""
+    """One solvent's effect on the same reaction. `solvent=None` is the gas phase.
+
+    Each row carries its own `standard_state` because the screen's gas reference is quoted at 1 atm
+    and every solution row at 1 mol/L — the conventions the two phases actually use. Solvent
+    against solvent, which is the comparison the screen exists for, is therefore like against like;
+    the gas-to-solution gap additionally carries 1.894·Δn kcal/mol of reference state, and
+    `SolventComparisonResult.warnings` says so whenever Δn != 0.
+    """
 
     solvent: str | None
+    standard_state: StandardState = "gas-1atm"
     delta_e_kcal: float
     delta_h_kcal: float | None
     delta_g_kcal: float | None

@@ -44,7 +44,6 @@ from langchain_core.messages import AIMessageChunk, ToolMessage
 from chemclaw.agent.plan_gate import plan_gate_failure_reason, plan_identity
 from chemclaw.agent.state import turn_input
 from chemclaw.api.events import (
-    ApprovalRequestEvent,
     Event,
     EvidenceSourceEvent,
     JobStartedEvent,
@@ -59,7 +58,6 @@ from chemclaw.api.runner_usage import graph_usage_tokens
 from chemclaw.api.schemas import message_text
 from chemclaw.core.turn_signals import _KEY as _SIGNAL_KEY
 from chemclaw.core.turn_signals import (
-    ApprovalSignal,
     JobSignal,
     QuestionSignal,
     Signal,
@@ -409,11 +407,6 @@ def _signal_event(signal: Signal) -> Event:
         return JobStartedEvent(job_id=signal.job_id, kind=signal.kind, plan_step=signal.plan_step)
     if isinstance(signal, QuestionSignal):
         return QuestionEvent(question=signal.question, options=signal.options)
-    if isinstance(signal, ApprovalSignal):
-        # Carries the durable hold's handle, so a surface can answer it via
-        # POST /approvals/{id}/decision. Plan approval is *not* this: that is
-        # `chemclaw.agent.plan_gate`, and it never reaches this stream.
-        return ApprovalRequestEvent(prompt=signal.prompt, approval_id=signal.approval_id)
     if isinstance(signal, ToolFailureSignal):
         # The one place a `PlanNotApprovedError` becomes an event, so the one place the refusal can
         # be labelled as such. Downstream — the UI, the eval classifier — then reads a field

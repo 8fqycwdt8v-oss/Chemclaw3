@@ -10,8 +10,8 @@ directory; it is not editing core.
 | File | What it is | Required |
 | --- | --- | --- |
 | `connector.yaml` | the manifest: tools, jobs, health, `module:callable` pointers | yes |
-| `server/app.py` | the FastAPI transport — `/healthz` + `/mcp`, built by `connector_app()` | if **we** host the server |
-| `server/tools.py` | the `FastMCP` instance: the argument names, defaults and docstrings the agent sees | if **we** host the server |
+| `app.py` | the FastAPI transport, in `server/` — `/healthz` + `/mcp`, built by `connector_app()` | if **we** host the server |
+| `tools.py` | the `FastMCP` instance, in `server/`: the argument names, defaults and docstrings the agent sees | if **we** host the server |
 | `worker.py`, `workflows.py`, `activities.py` | the Temporal half, on the bundle's own queue | if it owns durable work |
 | `skills/<name>/SKILL.md` | judgment that belongs to *this* capability and deploys with it | optional |
 
@@ -31,10 +31,13 @@ non-loopback URL.
 ## The boundary against `science/`
 
 A bundle is a *surface*, not an implementation. The computation lives in `chemclaw.science`
-(`calc`, `bo`, `safety`, `fingerprints`) which imports no Temporal, no MCP and no FastAPI, and is
-therefore testable without any of them. `connectors/calc/` and `science/calc/` are a pair, not a
-duplicate: merging them would put orchestration imports inside the physics, which is the layering
-rule `tests/test_layering.py` guards.
+(`bo`, `calc`, `fingerprints`, `labels`) which imports no Temporal, no MCP and no FastAPI, and is
+therefore testable without any of them. That list is checked against the tree
+(`tests/test_repo_map.py`): it named `safety`, deleted when
+`D-2026-08-15-safety-is-a-tool-not-a-gate` made the hazard screen an ordinary MCP server, and
+omitted `labels`, so it was wrong in both directions at once. `connectors/calc/` and
+`science/calc/` are a pair, not a duplicate: merging them would put orchestration imports inside
+the physics, which is the layering rule `tests/test_layering.py` guards.
 
 Since D-156 this holds without exception — `molfp` and `rxnfp` were the last bundles whose code
 lived somewhere else (`chemclaw.mcp`), and their engines are now `science/fingerprints/`.

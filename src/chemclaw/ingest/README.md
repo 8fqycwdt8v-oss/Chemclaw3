@@ -4,12 +4,12 @@
 
 - **`sources/`** is the seam itself (D-120). A data source has an ingest half, a retrieve half, or
   both; attaching one is a `sources/<name>/datasource.yaml` folder plus its name in
-  `CHEMCLAW_DATA_SOURCES`, and **zero** core edits. `sources/README.md` is the how-to.
+  `CHEMCLAW_DATA_SOURCES`, and **zero** core edits. `ingest/sources/README.md` is the how-to.
 - **`eln/`** is the first concrete family of adapters — free-text JSON exports and ORD — re-hosted
   behind the seam unchanged when F7 introduced it.
 - **`documents/`** is a mounted SMB/CIFS file share read as cited evidence (D-2026-08-06). It is
   also this system's one home for *reading a document* — the PDF/DOCX/XLSX/PPTX parsers live in
-  `documents/parse.py` and `agent/attachments.py` imports them, because reading a PDF is an ingest
+  `ingest/documents/parse.py` and `agent/attachments.py` imports them, because reading a PDF is an ingest
   concern that an upload happens to use, and `chemclaw.ingest` may not import `chemclaw.agent`.
 
 A share is a **retrieve-only** source: the ingest half of this seam is reaction-shaped

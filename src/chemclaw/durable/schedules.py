@@ -93,6 +93,13 @@ OWNED_SCHEDULE_IDS = frozenset(
         "document-sync",
         "reaction-labels",
         "reaction-corpus",
+        # Planned since the result sinks shipped and registered here only after an audit found it
+        # missing: `_prune` computes `OWNED_SCHEDULE_IDS - planned_ids`, so a deployment that set
+        # `CHEMCLAW_RESULT_SINKS`, got the Schedule, and later cleared the setting kept firing
+        # `PublishResultsWorkflow` through every subsequent `helm upgrade`. The guard that was
+        # supposed to catch this enabled one conditional job and passed vacuously; it now builds
+        # the full plan.
+        "result-publish",
     }
 )
 

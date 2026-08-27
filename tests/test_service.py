@@ -1609,3 +1609,42 @@ def test_every_session_scoped_route_is_ownership_gated() -> None:
                 f"{method} {route.path} answered {res.status_code} for a non-owner — "
                 "it must resolve ownership (404, no existence leak) before doing anything"
             )
+
+
+def test_readyz_does_not_name_the_connector_fleet_to_an_unauthenticated_caller(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`/readyz` is outside `require_principal` by necessity, so its body is a public document.
+
+    A kubelet cannot present a token, which is why the route is open and why that is right. What
+    the body carried was more than a readiness verdict: the name of every enabled connector and
+    which of them was currently down — an inventory of the deployment's internal capability
+    surface, plus a live signal of when a dependency is degraded, to anyone who can reach the pod
+    or the Route (which declares no `spec.path`, so `/readyz` is reachable on the external host).
+
+    The verdict and a count answer every question a probe or an operator's `curl` actually asks;
+    the names stay where they were already accepted as scrape-visible —
+    `chemclaw_connectors_unhealthy` on `/metrics`, and the per-connector WARNING each failed probe
+    already logs. The chart's own comment accepts "operational reconnaissance" for `/metrics`
+    counts; it never argued it for names.
+    """
+    from chemclaw.api import app as service_app
+    from chemclaw.connectors.health import ConnectorHealth
+
+    async def _degraded() -> list[ConnectorHealth]:
+        return [
+            ConnectorHealth(name="calc", state="unreachable", detail="connection refused"),
+            ConnectorHealth(name="molfp", state="healthy"),
+        ]
+
+    monkeypatch.setattr(service_app, "probe_connectors", _degraded)
+    monkeypatch.setattr(service_app, "check_connectors_at_startup", _degraded)
+    monkeypatch.setattr(settings, "session_store", "memory")
+
+    with TestClient(service_app.create_app(connector_factory=_no_connectors)) as client:
+        body = client.get("/readyz").json()
+    assert body["status"] == "ready"
+    rendered = json.dumps(body)
+    assert "calc" not in rendered and "molfp" not in rendered, rendered
+    assert "connection refused" not in rendered, rendered
+    assert body["connectors_unhealthy"] == 1

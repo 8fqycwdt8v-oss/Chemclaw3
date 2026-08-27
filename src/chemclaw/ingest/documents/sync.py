@@ -184,6 +184,30 @@ def _file_record(source: str, ref: FileRef, doc_id: str, chunking_key: str) -> F
     )
 
 
+def _summarise_skips(what: str, reasons: Counter[str], example: str) -> None:
+    """One WARNING for a pass's whole population of one kind of skip; nothing when there was none.
+
+    **Log volume must be a function of the pass, not of the corpus.** These lines were written for
+    one bad file and are right for it; what happens in practice is systematic — a folder whose
+    permissions changed, a format the parser stopped accepting, an OCR run that broke every
+    extraction — and then the count is the share's. At share scale that is millions of lines into
+    the pod's stdout in one pass, the one line saying *why* indistinguishable from the other
+    999,999, and under a log driver with backpressure it slows the very pass that is failing.
+
+    So the per-item trail moves to DEBUG and this is what an operator sees: how many, which
+    distinct reasons, and one path to go and look at. `SyncReport` carries the counts as data.
+    """
+    if not reasons:
+        return
+    logger.warning(
+        "%s: %d file(s) skipped this pass — %s (e.g. %s)",
+        what,
+        sum(reasons.values()),
+        ", ".join(f"{reason} x{count}" for reason, count in sorted(reasons.items())),
+        example,
+    )
+
+
 async def _parse_changed(
     refs: list[FileRef], report: SyncReport, max_bytes: int
 ) -> tuple[list[_Parsed], dict[str, FileRef], list[str]]:
@@ -199,6 +223,8 @@ async def _parse_changed(
     parsed: list[_Parsed] = []
     by_path: dict[str, FileRef] = {}
     refused: list[str] = []
+    unreadable: Counter[str] = Counter()
+    first_unreadable = ""
     for ref in refs:
         try:
             result = await asyncio.to_thread(_read_and_parse, ref, max_bytes)
@@ -214,7 +240,12 @@ async def _parse_changed(
             refused.append(ref.path)
             continue
         except (DocumentParseError, OSError) as exc:
-            logger.warning("skipping %s: %s", ref.path, exc)
+            # DEBUG per file, one WARNING for the pass — see `_summarise_skips`. The path stays
+            # visible here for whoever is debugging one document; the count and the distinct
+            # reasons are what an operator needs when the whole share stopped parsing.
+            logger.debug("skipping %s: %s", ref.path, exc)
+            unreadable[type(exc).__name__] += 1
+            first_unreadable = first_unreadable or ref.path
             report.skipped_unreadable += 1
             refused.append(ref.path)
             continue
@@ -222,6 +253,7 @@ async def _parse_changed(
             report.empty += 1
         parsed.append(result)
         by_path[ref.path] = ref
+    _summarise_skips("unreadable documents", unreadable, first_unreadable)
     return parsed, by_path, refused
 
 
@@ -302,6 +334,14 @@ async def sync_share(
     # could see but not stat. Marking only what this pass handled is how a transient `EACCES` on a
     # subtree, or a lock on one document, turns into a deletion of rows whose files never moved.
     await index.touch(source, unchanged + crawl.unreadable)
+    # `crawl_share` records these rather than logging them one by one, for `_summarise_skips`'s
+    # reason: a permission change on one folder is one line per file under it. `OSError` is the
+    # only way an entry lands in that list, so it is the whole reason histogram.
+    _summarise_skips(
+        "unreadable share entries",
+        Counter({"OSError": len(crawl.unreadable)}) if crawl.unreadable else Counter(),
+        crawl.unreadable[0] if crawl.unreadable else "",
+    )
     if not changed:
         return report
 
@@ -416,9 +456,11 @@ async def _reembed_individually(
         try:
             vector = await asyncio.to_thread(embed_texts, [chunk.content])
         except Exception as exc:
-            logger.warning(
-                "chunk %s#%d could not be embedded: %s", chunk.doc_id, chunk.ordinal, exc
-            )
+            # DEBUG per chunk, because the caller already reports this population: an embedding
+            # endpoint that is down fails every chunk in the batch, and the batch is
+            # `document_reembed_batch_size` — 500 identical lines saying once that the endpoint is
+            # down, ahead of the one ERROR that says what it costs. Not summarised twice.
+            logger.debug("chunk %s#%d could not be embedded: %s", chunk.doc_id, chunk.ordinal, exc)
             failed += 1
             continue
         refreshed.append((chunk, vector[0]))

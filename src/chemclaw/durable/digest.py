@@ -14,6 +14,7 @@ every other chemist's digest, so each is delivered independently and a failure i
 skipped — the same reject-and-continue discipline the ELN sync uses.
 """
 
+import asyncio
 import logging
 from collections.abc import Sequence
 from datetime import timedelta
@@ -61,10 +62,29 @@ async def collect_digests() -> list[DigestItem]:
     rather than the note repo — so in any deployment that points `note_repo_dir` at a dedicated
     clone, the digest scanned a different tree from the one the graph is published to and reported
     nothing, silently: an empty scan is not an error, it is just no new matches.
+
+    **The read and the match are one `to_thread` hop**, because this is a coroutine on the
+    `background-jobs` worker's single loop, which `worker_max_concurrent_activities` shares with
+    seven other activities — including `beating()`'s heartbeat timers for a CREST search that costs
+    hours if one is missed. `load_notes` is a recursive `rglob` + `stat` + frontmatter parse and the
+    match pass is O(subscriptions x notes) of pure Python; run inline they held the loop for the
+    whole of it (measured on a 2,000-note corpus: 1,223.8 ms of loop stall against 27.0 ms
+    threaded, for identical work). One hop rather than two also keeps `kg.graph._corpus_lock` — a
+    blocking `threading.RLock` — off the loop, which is the condition that lock's own design
+    assumes of every caller.
+    """
+    subscriptions = await all_subscriptions()
+    return await asyncio.to_thread(_match_corpus, subscriptions)
+
+
+def _match_corpus(subscriptions: Sequence[Subscription]) -> list[DigestItem]:
+    """Read the corpus and find each subscription's new matches — the whole blocking half.
+
+    Split out purely so `collect_digests` has one thing to offload; the body is unchanged.
     """
     notes = load_notes(settings.knowledge_path)
     digests: list[DigestItem] = []
-    for subscription in await all_subscriptions():
+    for subscription in subscriptions:
         # Tokenized once per subscription, not once per note: the query does not vary across the
         # corpus, and this loop is subscriptions × notes. Measured over 50 subscriptions and 2,000
         # notes, hoisting it took the match pass from 352 ms to 225 ms — on an hourly activity that

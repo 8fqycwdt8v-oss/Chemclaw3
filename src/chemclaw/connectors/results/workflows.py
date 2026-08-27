@@ -21,6 +21,7 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.durable.registry import durable_activity, durable_workflow
     from chemclaw.publish.backfill import backfill_cached, backfill_jobs, requeue_failed
 
+from chemclaw.durable.heartbeat import beating
 from chemclaw.durable.publish import BAD_DATA_RETRY
 
 _QUEUE = bundle_queue("results")
@@ -35,6 +36,18 @@ async def republish_stored_results(spec: RepublishSpec) -> dict[str, int]:
     never-pruned tables, which is precisely the shape that should not share a worker with the many
     small jobs.
     """
+    # Beating throughout, not just around one leg: the walk is a scan of two never-pruned tables
+    # and has no unit boundary to report progress at, so the honest signal is "still running" — the
+    # `beating()` case exactly. Without it a worker killed ten minutes into a five-hour walk was
+    # not noticed until the start-to-close lapsed.
+    activity.heartbeat()
+    return await beating(
+        _walk(spec), "republish stored results", settings.result_republish_heartbeat_timeout_seconds
+    )
+
+
+async def _walk(spec: RepublishSpec) -> dict[str, int]:
+    """The scan itself, so the activity above is nothing but its heartbeat wrapper."""
     requeued = await requeue_failed() if spec.requeue_failed else 0
     cached_seen, cached_queued, cached_skipped = await backfill_cached(
         dry_run=False, batch=spec.batch
@@ -75,7 +88,13 @@ class RepublishResultsWorkflow:
         counts = await workflow.execute_activity(
             republish_stored_results,
             spec,
-            start_to_close_timeout=timedelta(seconds=settings.connector_job_timeout_seconds),
+            # Its own budget, strictly inside the parent's ceiling — see
+            # `result_republish_timeout_seconds`. Handing it `connector_job_timeout_seconds` made
+            # the two expire together, which cost the retry policy and named neither setting.
+            start_to_close_timeout=timedelta(seconds=settings.result_republish_timeout_seconds),
+            heartbeat_timeout=timedelta(
+                seconds=settings.result_republish_heartbeat_timeout_seconds
+            ),
             retry_policy=BAD_DATA_RETRY,
         )
         queued = counts["calculations_queued"] + counts["jobs_queued"]

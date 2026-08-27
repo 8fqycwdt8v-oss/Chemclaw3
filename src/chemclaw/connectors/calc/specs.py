@@ -94,7 +94,13 @@ class TorsionSpec(BaseModel):
     # field would be tokens spent teaching it to do the one thing the tool tells it not to. The
     # tool's own description says where the value comes from; the schema says only its shape.
     torsion_id: str = Field(min_length=1)
-    atoms: list[int] = Field(min_length=4, max_length=4)
+    # 0 or 4, mirroring `science/calc/models.py::Torsion`: `enumerate_torsions` reports an **empty**
+    # list for a rotor whose rotating end carries only hydrogens, because a dihedral through one
+    # needs a hydrogen index and that means something only inside an explicit-H numbering. Requiring
+    # four here made the copy-the-entry-through instruction impossible to follow for exactly the
+    # rotors whose barriers are worth asking about — an amide N-H, a carboxylic O-H — and the
+    # composite builds the dihedral itself (`compose._rotor_dihedral`).
+    atoms: list[int] = Field(min_length=0, max_length=4)
     bond: list[int] = Field(min_length=2, max_length=2)
     label: str = Field(min_length=1)
     symmetry_order: int = Field(default=1, ge=1)

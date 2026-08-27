@@ -46,7 +46,6 @@ from pydantic import BaseModel, ConfigDict, Field
 from temporalio.service import RPCError
 
 from chemclaw.core.config import settings
-from chemclaw.core.db import connection as db_connection
 from chemclaw.core.errors import SubsystemUnavailableError
 from chemclaw.core.quantities import is_rounding_of, stated_numerals
 from chemclaw.core.temporal_client import connect as temporal_connect
@@ -82,19 +81,6 @@ PLAN_GATE_REASON: Final = "plan_gate"
 # where it is easiest to satisfy.
 _OUTPUT_EVENTS = frozenset({"token", "answer"})
 
-# What a session's turns cost, from the ledger the runner books every turn into. Summed in the
-# database for the same reason `turn_cost_store._SPEND_BY_ACTOR` is: the answer is six numbers and
-# the rows behind it are not interesting.
-_SESSION_COST_SQL = """
-    SELECT count(*),
-           coalesce(sum(input_tokens), 0),
-           coalesce(sum(output_tokens), 0),
-           coalesce(sum(cache_read_tokens), 0),
-           coalesce(sum(cache_write_tokens), 0)
-    FROM turn_costs
-    WHERE session_id = %s
-"""
-
 # Citations are extracted with `chemclaw.kg.note.cited_ids` — the same function the note schema and
 # the answer verifier use — never a private regex. A stricter local copy reported a clean citation
 # record for an answer whose nine `[[**id**]]` links were every one of them dangling: the production
@@ -118,35 +104,6 @@ class ToolResult(BaseModel):
 
     tool: str
     preview: str = ""
-
-
-class TurnTokens(BaseModel):
-    """What the cost ledger says a session's turns spent, split as that ledger splits it.
-
-    Read from `turn_costs` (`agent/turn_cost_store.py`) rather than from the event stream, because
-    the stream carries no usage event at all — the runner meters a turn into the budget guard, the
-    Prometheus counters and this table, and only the table can be asked about *one* session after
-    the fact. The alternative considered and rejected was diffing `chemclaw_tokens_total` around
-    each turn: that is correct only while the front door serves nothing else, so it would silently
-    become wrong the first time two probes ran concurrently, which is the default here.
-
-    The four columns are kept apart rather than summed away for the reason `api/runner_usage.py`
-    records: they are priced differently, so a routing arm that caches well and one that does not
-    would report the same total while their bills differ several-fold. `total` is the sum the
-    comparison actually uses, carried explicitly so a reader of a transcript does not have to add.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    # How many turn rows this session contributed. One for a single-question probe; a scripted
-    # probe's session holds one per turn, and reporting the count is what stops a multi-turn
-    # session's cost being read as a single turn's.
-    turns: int = 0
-    input: int = 0
-    output: int = 0
-    cache_read: int = 0
-    cache_write: int = 0
-    total: int = 0
 
 
 class ProbeOutcome(BaseModel):
@@ -245,11 +202,6 @@ class ProbeOutcome(BaseModel):
     # because a plan refusal is not a broken tool — it is the gate working — and folding them
     # together would make a correctly-gated turn indistinguishable from one whose tools fell over.
     plan_refusals: list[str] = Field(default_factory=list)
-    # What this turn's session cost, per the ledger. `None` means the ledger could not be asked —
-    # no Postgres session store, or the row had not landed inside the wait — which is a different
-    # finding from "it cost nothing", and the two are kept apart for the same reason
-    # `_job_outcomes` records `unreachable` rather than `not-found`.
-    tokens: TurnTokens | None = None
 
 
 def load_probes(probe_dir: str | None = None) -> list[Probe]:
@@ -370,69 +322,6 @@ async def open_session(client: httpx.AsyncClient) -> str:
     created = await client.post("/sessions", json={})
     created.raise_for_status()
     return str(created.json()["session_id"])
-
-
-async def session_tokens(session_id: str) -> TurnTokens | None:
-    """What the cost ledger says this session spent, or `None` when it cannot be asked.
-
-    Best-effort by construction, exactly like `_job_outcomes`: a measurement the harness could not
-    take must be reported as untaken rather than as a zero, because "the ledger was off" and "the
-    turn was free" are different findings and only one of them is about the system under test.
-
-    **It polls, and the reason is a deliberate property of the ledger rather than a race to paper
-    over.** `record_turn_cost` never awaits — it schedules the write as a task, because it is
-    called from a `finally` that also runs on the disconnect path, where an `await` would re-raise
-    the cancellation and skip every teardown step after it (D-130). So the row lands shortly
-    *after* the stream this harness is reading closes. Waiting a bounded moment for it is the
-    honest read; querying once and recording `None` would report most turns as unmeasured.
-
-    **It asks the ledger rather than asking this process's settings whether one exists.** There
-    used to be a `settings.session_store != "postgres"` short-circuit here, and it was a local
-    guess about a *remote* process: the harness runs outside the lane, `processes.sh` exports
-    `CHEMCLAW_SESSION_STORE` only to the processes it starts, and the default is `memory` — so a
-    `make live-routing` run from an ordinary shell reported **every** turn unmeasured against a
-    front door that was writing the ledger correctly the whole time. Measured: 15/15 turns priced
-    `None` with 26 rows sitting in `turn_costs`. Two readers for one fact, disagreeing silently,
-    with the arithmetic the M9 comparison needs as the casualty. The query is the only reader that
-    can be right, so it is now the only reader; an absent ledger fails the connection and takes the
-    logged `None` below, which is the same answer arrived at honestly.
-    """
-    dsn = settings.session_store_dsn or settings.postgres_dsn
-    deadline = time.monotonic() + settings.live_probe_cost_wait_seconds
-    # A tenth of the budget, so the wait is sampled ten times whatever it is set to. Derived rather
-    # than declared: a poll interval that did not scale with its own deadline would be a second
-    # knob meaning the same thing as the first.
-    interval = settings.live_probe_cost_wait_seconds / 10
-    while True:
-        try:
-            async with db_connection(dsn) as conn:
-                cursor = await conn.execute(_SESSION_COST_SQL, (session_id,))
-                row = await cursor.fetchone()
-        # Broad on purpose, and the precedent is `agent/turn_cost.record_turn_cost`'s own
-        # `except Exception` with the same one-line reason: telemetry must never escalate into the
-        # thing it is measuring. Naming `psycopg.Error` instead would make `chemclaw.evals` a
-        # declared Postgres consumer (`tests/test_third_party_layering.py`) for an exception type,
-        # which is a layering statement this harness has no business making — it reads one table
-        # through `core.db`, the package that owns the pool.
-        except Exception as exc:
-            logger.warning("cannot reach the cost ledger for session %s: %s", session_id, exc)
-            return None
-        if row is not None and int(row[0]):
-            tokens = TurnTokens(
-                turns=int(row[0]),
-                input=int(row[1]),
-                output=int(row[2]),
-                cache_read=int(row[3]),
-                cache_write=int(row[4]),
-            )
-            tokens.total = tokens.input + tokens.output + tokens.cache_read + tokens.cache_write
-            return tokens
-        if time.monotonic() >= deadline:
-            logger.warning(
-                "no cost row for session %s within the wait; recording it as unknown", session_id
-            )
-            return None
-        await asyncio.sleep(interval)
 
 
 async def run_probe(client: httpx.AsyncClient, probe: Probe) -> ProbeOutcome:

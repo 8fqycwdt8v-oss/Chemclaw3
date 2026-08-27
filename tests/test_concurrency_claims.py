@@ -23,6 +23,7 @@ import asyncio
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -31,6 +32,7 @@ from chemclaw.agent.session_store import SessionTurnClaims
 from chemclaw.api.budget import BudgetExceeded, BudgetTracker
 from chemclaw.core.config import settings
 from chemclaw.core.db import connect
+from chemclaw.core.executor import install_default_executor
 from chemclaw.kg.git_submitter import GitSubmitError, _checkout_lock
 from tests.pg import migrated_db_or_skip
 
@@ -270,3 +272,73 @@ def test_the_submit_lock_reports_a_missing_checkout_rather_than_proceeding(tmp_p
     with pytest.raises(GitSubmitError, match="cannot open submit lock"):
         with _checkout_lock(str(tmp_path / "not-a-checkout")):
             pass
+
+
+# How long each stand-in for "a corpus parse on an executor thread" blocks. Stated once so the
+# assertions below read as fractions of it rather than as absolute milliseconds.
+_BLOCK_SECONDS = 0.3
+
+
+def _queued_short_call_ms(reserved: int, *, install: bool) -> float:
+    """Saturate the process's `to_thread` pool with `reserved` blocking calls, then time a tiny one.
+
+    The tiny call stands in for `api/auth.py`'s `await asyncio.to_thread(validate_token, ...)`,
+    which every authenticated request makes; the blocking ones stand in for the corpus parses,
+    embeddings and attachment parses that share the same pool. What is measured is the thing an
+    operator actually feels: how long authentication waits when the admission cap's worth of
+    chemistry is already in flight.
+    """
+
+    async def _scenario() -> float:
+        if install:
+            install_default_executor(component="front-door", reserved=reserved)
+        blocking = [asyncio.create_task(asyncio.to_thread(time.sleep, _BLOCK_SECONDS))]
+        blocking += [
+            asyncio.create_task(asyncio.to_thread(time.sleep, _BLOCK_SECONDS))
+            for _ in range(reserved - 1)
+        ]
+        # Let every blocking call actually reach a thread before the short one is submitted.
+        await asyncio.sleep(0.05)
+        started = time.perf_counter()
+        await asyncio.to_thread(lambda: None)
+        waited = (time.perf_counter() - started) * 1000
+        await asyncio.gather(*blocking)
+        return waited
+
+    return asyncio.run(_scenario())
+
+
+def test_a_short_call_does_not_queue_behind_a_full_admission_cap_of_blocking_work() -> None:
+    """Authentication latency must not be a function of corpus size.
+
+    `asyncio.to_thread` is `run_in_executor(None, ...)` — the loop's single default pool, sized
+    `min(32, cpu_count + 4)`, i.e. **8 on a 4-CPU pod**, which is exactly the shipped
+    `service_max_concurrent_turns`. So the admission cap could fill the whole offload budget on its
+    own and every subsequent request queued its token validation behind a note-corpus parse; the
+    audit measured a queued short call at 0.2 ms with 1 concurrent `load_notes`, 565.5 ms with 8
+    and 813.4 ms with 16. The fix is that the process states its own caps and gets a pool wider
+    than them, so this test drives exactly that: the caps' worth of blocking work, then one short
+    call.
+    """
+    reserved = settings.service_max_concurrent_turns + settings.attachment_max_concurrent_parses
+
+    waited_ms = _queued_short_call_ms(reserved, install=True)
+
+    assert waited_ms < _BLOCK_SECONDS * 1000 / 2, (
+        f"a token validation queued {waited_ms:.1f} ms behind {reserved} blocking offloads; the "
+        "process's to_thread pool is no wider than its own admission caps"
+    )
+
+
+def test_the_installed_pool_is_wider_than_the_caps_that_can_fill_it() -> None:
+    """The width itself, pinned — the behavioural test above cannot say *why* it passed.
+
+    Written because the obvious wrong sizing — a pool exactly as wide as the admission cap — passes
+    a one-short-call probe on a quiet loop and still leaves nothing for the second request.
+    """
+    reserved = settings.service_max_concurrent_turns + settings.attachment_max_concurrent_parses
+
+    async def _install() -> int:
+        return install_default_executor(component="front-door", reserved=reserved)._max_workers
+
+    assert asyncio.run(_install()) == reserved + settings.service_thread_pool_headroom

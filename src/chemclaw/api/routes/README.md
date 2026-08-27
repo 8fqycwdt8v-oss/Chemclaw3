@@ -19,7 +19,6 @@ disables `app.dependency_overrides`.)
 | `streams.py` | `GET /sessions/{id}/events` — the job push-back stream and its per-user/per-pod caps |
 | `results.py` | `GET /sessions/{id}/tool-results/{ref}` — the full text of what one tool returned, which the 200-character `ToolResultEvent.preview` cannot carry. Session-scoped so it reuses `resolve_session` rather than inventing an auth story for a bare `/tool-results/{ref}` |
 | `plan.py` | `GET/POST /sessions/{id}/plan[...]` — the pre-execution harness-plan gate (D-137/D-167) |
-| `approvals.py` | `GET/POST /approvals[...]` — the durable Yes/No holds (D-032) |
 | `proposals.py` | `GET/POST /proposals[...]`, `POST /events/knowledge-merged` — the PR-gate's review queue and the webhook that closes it |
 | `notes.py` | `GET /notes/{id}` — one knowledge note as the `NoteView` `expand_note` returns, so a citation chip resolves to the note it cites. `CurrentUser`-gated, not owner-scoped: the graph has no owner |
 | `jobs.py` | `GET/DELETE /jobs[...]` — the durable-run surface over `job_records` |

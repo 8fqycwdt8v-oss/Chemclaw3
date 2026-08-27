@@ -19,6 +19,7 @@ from typing import Any
 import pytest
 
 from chemclaw.connectors.calc import compose
+from chemclaw.core.config import settings as calc_settings
 from chemclaw.science.calc.store import InMemoryStore
 from tests.calc_server_fake import FakeCalcServer, install
 
@@ -300,6 +301,13 @@ def test_an_interaction_energy_differences_relaxed_species(
 
 
 _ESTERIFICATION = (["CC(=O)O", "CCO"], ["CC(=O)OCC", "O"])
+# Two ethenes into cyclobutane: balanced, and Δn = -1, which is the class the standard state
+# actually moves. Esterification above is 2 -> 2, so the term cancels there exactly.
+_DIMERISATION = (["C=C", "C=C"], ["C1CCC1"])
+_SIGMAS = {"C=C": 4, "C1CCC1": 8}
+# RT ln(RT c0 / P0) at 298.15 K in kcal/mol, from CODATA and nothing in `src/` — see
+# `tests/test_calc_thermo.py`, which derives it twice and pins it to 1e-12.
+_STANDARD_STATE_KCAL = 1.8943284454483122
 
 
 def test_an_unbalanced_equation_is_rejected_before_anything_is_computed(
@@ -442,6 +450,117 @@ def test_an_open_shell_species_is_multiplicity_two_and_says_so(
     assert any("open-shell" in line for line in result.warnings)
 
 
+def test_a_solution_reaction_that_changes_the_molecule_count_is_corrected_to_one_molar(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Δn != 0 in solution: the reported ΔG must be the 1 mol/L one, not the 1 atm one.
+
+    The electronic energy comes back from an ALPB implicit-solvent SCF while the entropy is the
+    ideal-gas one, so a solution ΔG quoted at 1 atm is wrong by RT ln(RT c0/P0) = 1.894 kcal/mol
+    per mole the reaction creates or destroys — a factor of 24.47 in K per unit of Δn. The fake
+    returns the same energies in every medium (which is what the solvent screen's own test rests
+    on), so the entire gas-to-solution difference here *is* the standard-state term and nothing
+    else.
+
+    An association (Δn = -1) must become **more** favourable in the 1 M state, because 1 M is the
+    more concentrated reference: the sign is asserted rather than only the magnitude.
+    """
+    install(monkeypatch, FakeCalcServer())
+    store = InMemoryStore()
+
+    gas = _run(
+        compose.reaction_energy(store, *_DIMERISATION, solvent=None, symmetry_numbers=_SIGMAS)
+    )
+    solution = _run(
+        compose.reaction_energy(store, *_DIMERISATION, solvent="thf", symmetry_numbers=_SIGMAS)
+    )
+    assert gas.delta_g_kcal is not None and solution.delta_g_kcal is not None
+    shift = solution.delta_g_kcal - gas.delta_g_kcal
+    print(
+        f"association: ΔG(1 M) {solution.delta_g_kcal} - ΔG(1 atm) {gas.delta_g_kcal} = {shift} "
+        f"against Δn·RT ln(RT c0/P0) = {-_STANDARD_STATE_KCAL}"
+    )
+    assert shift == pytest.approx(-_STANDARD_STATE_KCAL, abs=0.011)
+    assert gas.standard_state == "gas-1atm"
+    assert solution.standard_state == "solution-1M"
+    # ΔH does not depend on the reference pressure, so it must be untouched by all of this.
+    assert solution.delta_h_kcal == gas.delta_h_kcal
+
+
+def test_the_standard_state_term_follows_the_sign_of_delta_n(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The same reaction read backwards moves the other way, by the same 1.894 kcal/mol.
+
+    A dissociation makes a mole of species and is therefore **less** favourable at 1 M; checking
+    both directions is what distinguishes a correct correction from a constant offset applied
+    wherever a solvent is named.
+    """
+    install(monkeypatch, FakeCalcServer())
+    store = InMemoryStore()
+    reactants, products = _DIMERISATION
+
+    gas = _run(
+        compose.reaction_energy(store, products, reactants, solvent=None, symmetry_numbers=_SIGMAS)
+    )
+    solution = _run(
+        compose.reaction_energy(store, products, reactants, solvent="thf", symmetry_numbers=_SIGMAS)
+    )
+    assert gas.delta_g_kcal is not None and solution.delta_g_kcal is not None
+    shift = solution.delta_g_kcal - gas.delta_g_kcal
+    print(
+        f"dissociation: ΔG(1 M) {solution.delta_g_kcal} - ΔG(1 atm) {gas.delta_g_kcal} = {shift} "
+        f"against Δn·RT ln(RT c0/P0) = {_STANDARD_STATE_KCAL}"
+    )
+    assert shift == pytest.approx(_STANDARD_STATE_KCAL, abs=0.011)
+
+
+def test_a_reaction_that_conserves_the_molecule_count_is_unmoved_by_the_solvent_reference(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Δn = 0 cancels the term exactly, which is why this defect never showed as a wrong number.
+
+    Esterification is 2 -> 2. If the correction were applied per *species* rather than per mole of
+    change, this would shift by 4 x 1.894 and every tautomer ranking in the tree with it.
+    """
+    install(monkeypatch, FakeCalcServer())
+    store = InMemoryStore()
+    sigmas = {"CC(=O)O": 1, "CCO": 1, "CC(=O)OCC": 1, "O": 2}
+
+    gas = _run(
+        compose.reaction_energy(store, *_ESTERIFICATION, solvent=None, symmetry_numbers=sigmas)
+    )
+    solution = _run(
+        compose.reaction_energy(store, *_ESTERIFICATION, solvent="thf", symmetry_numbers=sigmas)
+    )
+    assert gas.delta_g_kcal == solution.delta_g_kcal
+    assert solution.standard_state == "solution-1M"
+
+
+def test_a_solvent_screen_says_which_standard_state_each_number_is_in(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The screen's gas reference is quoted at 1 atm and its solutions at 1 M, so it must say so.
+
+    Solvent-against-solvent — the comparison the tool exists for — is unaffected: every solution
+    entry is in the same state. The gas-to-solution gap is not, and for Δn != 0 it carries the
+    1.894·Δn term on top of the solvation. A reader differencing the two columns without being
+    told is the failure this warning prevents.
+    """
+    install(monkeypatch, FakeCalcServer())
+    result = _run(
+        compose.solvent_comparison(
+            InMemoryStore(), *_DIMERISATION, ["water", "toluene"], symmetry_numbers=_SIGMAS
+        )
+    )
+    states = {effect.solvent: effect.standard_state for effect in result.effects}
+    print(states)
+    assert states[None] == "gas-1atm"
+    assert states["water"] == "solution-1M" and states["toluene"] == "solution-1M"
+    (mixed,) = [line for line in result.warnings if "standard state" in line]
+    assert "1.89" in mixed, mixed
+
+
 def test_a_solvent_screen_ranks_the_media_and_includes_the_gas_phase(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -480,3 +599,53 @@ def test_a_screen_that_cannot_distinguish_its_solvents_says_so(
     )
     assert result.spread_kcal == 0.0
     assert any("does not distinguish" in line for line in result.warnings)
+
+
+# --- what this system offers when a Hessian is out of reach --------------------------------
+
+
+def test_an_oversized_hessian_is_refused_here_with_the_routes_this_system_actually_has(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The molecule too big for a Hessian is refused before the wire, naming a real way forward.
+
+    The calculation server has its own atom ceiling and refuses above it — and its refusal used to
+    tell the model to "submit it through Chemclaw3's durable QM job path instead", a route
+    `D-2026-08-26-semiempirical-is-the-whole-tier` deleted. There is no such path: every durable
+    job here composes the *same* `compute_hessian` primitive under the same ceiling, so escalating
+    changes nothing.
+
+    So the fence is a preflight on this side, in the `require_within_budget` family, and it names
+    the two things that do work: `level="quick"`, which skips every Hessian, and a smaller model
+    system. The count assertion is the whole test — a refusal that arrives after the call is not a
+    preflight, however true its message.
+    """
+    server = install(monkeypatch, FakeCalcServer())
+    monkeypatch.setattr(calc_settings, "calc_hessian_max_atoms", 4)
+
+    async def _go() -> Any:
+        return await compose.hessian(InMemoryStore(), await compose.embed("CCO"), None)
+
+    with pytest.raises(ValueError, match=r'level="quick"'):
+        _run(_go())
+
+    assert server.count("compute_hessian") == 0, "the refusal came after the calculation was asked"
+
+
+def test_a_hessian_carries_the_gradient_that_says_it_was_a_stationary_point(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`max_gradient_hartree_per_angstrom` survives the wire into the payload this repository reads.
+
+    The server returns it beside every Hessian precisely because `compute_hessian` differentiates
+    whatever geometry it is handed. Dropping it here — which a model that does not declare the
+    field does silently — is what leaves a zero-point energy computed at a non-stationary geometry
+    indistinguishable from one computed at a minimum.
+    """
+    install(monkeypatch, FakeCalcServer())
+
+    async def _go() -> Any:
+        return await compose.hessian(InMemoryStore(), await compose.embed("CCO"), None)
+
+    payload, _ = _run(_go())
+    assert payload.max_gradient_hartree_per_angstrom == pytest.approx(1e-4)

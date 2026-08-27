@@ -951,7 +951,9 @@ def test_the_drain_budget_the_chart_grants_covers_the_one_the_code_takes() -> No
         "one and a developer reading the other are looking at different systems"
     )
     helpers = (CHART / "templates" / "_helpers.tpl").read_text()
-    margin = re.search(r"CHEMCLAW_WORKER_GRACEFUL_SHUTDOWN_SECONDS\)\s*(\d+)", helpers)
+    # `[\s)]*` rather than one `\)`: the key is wrapped in `required` so its absence refuses the
+    # render instead of silently rendering `int nil` = 0, which closes the parenthesis twice.
+    margin = re.search(r"CHEMCLAW_WORKER_GRACEFUL_SHUTDOWN_SECONDS[\s)]*(\d+)", helpers)
     assert margin is not None and int(margin.group(1)) > 0, (
         "the pod's grace period equals the drain budget exactly, leaving no time for cancellation "
         "to propagate or the Postgres pool to close"
@@ -1908,3 +1910,120 @@ def test_every_supply_chain_gate_the_runbook_names_actually_runs() -> None:
         "Either merge the gate or stop documenting it as one — a comment in the workflow is not "
         "a gate, and neither is a sentence next to the table."
     )
+
+
+# --- Rendered-chart assertions (need the `helm` binary) ----------------------------------------
+#
+# Everything above reads the template *source*. That cannot see what a value's *absence* renders
+# to, and absence is where this chart's derivations fail silently: `int nil` is `0` and
+# `{{ .Values.config.X }}` on a missing key is the empty string, so a derived number degrades to a
+# plausible wrong one rather than refusing. Skipped where `helm` is not installed — the same split
+# `tests/test_helm_chart.py`'s docstring describes, with `make helm-validate` as the CI half.
+
+
+def _render(*overrides: str) -> subprocess.CompletedProcess[str]:
+    """`helm template` on the chart, with the egress posture stated and `--set` overrides applied.
+
+    `networkPolicy.allowAnyDestination=true` is the same flag the Makefile's two renders, the
+    runbook and `deploy/README.md` all pass: the chart refuses to render until a release states
+    where its pods may talk, and a validation render has no destinations to enumerate.
+    """
+    return subprocess.run(
+        [
+            "helm",
+            "template",
+            "chemclaw",
+            str(CHART),
+            "--set",
+            "networkPolicy.allowAnyDestination=true",
+            *overrides,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
+@pytest.mark.parametrize(
+    ("key", "helper"),
+    [
+        ("CHEMCLAW_SERVICE_TURN_TIMEOUT_SECONDS", "deployment-service.yaml"),
+        ("CHEMCLAW_WORKER_GRACEFUL_SHUTDOWN_SECONDS", "chemclaw.workerGracePeriod"),
+        ("CHEMCLAW_KNOWLEDGE_DIR", "chemclaw.knowledgePublishPath"),
+    ],
+)
+def test_a_derived_value_refuses_rather_than_rendering_a_plausible_wrong_one(
+    key: str, helper: str
+) -> None:
+    """Three templates derive a value from a `config` key. Removing the key must stop the render.
+
+    Deriving is the right instinct — `_helpers.tpl`'s own comment argues it at length: "a path that
+    only has to *agree* with another path eventually does not, so this one is derived rather than
+    declared". What the derivations lacked was the other half, which `deployment-connectors.yaml`
+    already had: `required`. Without it the degradation is silent and each one is worse than a
+    crash —
+
+    * `CHEMCLAW_SERVICE_TURN_TIMEOUT_SECONDS` absent rendered `terminationGracePeriodSeconds: 15`
+      on the front door (`0 + drainSeconds`) while `Settings` still ran turns to 600 s, so every
+      rolling update and node drain SIGKILLed in-flight conversations — the exact regression
+      `deployment-service.yaml`'s comment says it fixed;
+    * `CHEMCLAW_WORKER_GRACEFUL_SHUTDOWN_SECONDS` absent rendered 30 s against a 120 s drain;
+    * `CHEMCLAW_KNOWLEDGE_DIR` absent published to `<noteRepoPath>/` while every reader resolves
+      `note_repo_dir / knowledge_dir` — the silent empty-knowledge-tree failure the same helper's
+      comment narrates and claims to have made impossible.
+
+    An operator reaches this by moving one key into an ExternalSecret, a sidecar-injected env, or
+    simply `--set config.<KEY>=null` after deciding the code default is fine.
+    """
+    result = _render("--set", f"config.{key}=null")
+    assert result.returncode != 0, (
+        f"{helper} still rendered with {key} absent:\n{result.stdout[:2000]}"
+    )
+    assert key in result.stderr, result.stderr
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        pytest.param(("--set", "connectors=null"), id="block-removed"),
+        pytest.param(
+            tuple(
+                arg
+                for name in ("molfp", "rxnfp", "safety", "chem", "calc", "bo", "results")
+                for arg in ("--set", f"connectors.{name}.enabled=false")
+            ),
+            id="all-disabled",
+        ),
+    ],
+)
+def test_a_release_that_enables_no_connector_does_not_render(overrides: tuple[str, ...]) -> None:
+    """Both spellings of "no connectors", because the `fail` only ever caught one of them.
+
+    `chemclaw.connectorsEnabled` refused the all-disabled release and told the operator to *remove
+    the connectors block entirely* instead — a remedy that skipped the guard's own
+    `and .Values.connectors` condition and rendered `CHEMCLAW_CONNECTORS_ENABLED: ""`, which
+    `connectors_enabled_list` reads as **every discovered bundle**. Together with
+    `CHEMCLAW_CONNECTOR_URLS: "{}"` every bundle then fell back to its manifest's loopback dev
+    address, so the front door advertised all seven bundles' tools while dialling its own pod: the
+    "pods gone, tools advertised" regression that helper exists to close, reached through the door
+    the message left open.
+
+    It also rendered `matchExpressions … values: null` on the connector-ingress NetworkPolicy,
+    which the Kubernetes API rejects and `kubeconform -strict` passes — so `--atomic` rolled the
+    release back with an error naming neither connectors nor the values file. That selector is
+    unreachable once this render refuses, which is why there is no separate guard on it.
+    """
+    result = _render(*overrides)
+    assert result.returncode != 0, f"a connector-less release rendered:\n{result.stdout[:2000]}"
+    assert "CHEMCLAW_CONNECTORS_ENABLED" in result.stderr, result.stderr
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
+def test_the_shipped_defaults_still_render() -> None:
+    """The control the refusals above are worthless without: `required` on a key that *is* set."""
+    result = _render()
+    assert result.returncode == 0, result.stderr
+    assert "terminationGracePeriodSeconds: 615" in result.stdout
+    assert "terminationGracePeriodSeconds: 150" in result.stdout

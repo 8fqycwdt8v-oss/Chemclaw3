@@ -259,3 +259,44 @@ def test_a_same_named_table_in_another_schema_does_not_decide_the_columns(
             await conn.execute(f"DROP SCHEMA IF EXISTS {other} CASCADE")
 
     asyncio.run(_run())
+
+
+def test_a_schema_cannot_smuggle_a_second_libpq_option_past_the_timeout_bound() -> None:
+    """The `schema:` a manifest writes reaches libpq's `options`, so it is an identifier or nothing.
+
+    `PostgresWarehouse.__init__` range-checks `query_timeout_seconds` three lines before it builds
+    the options string, and its comment says why: `statement_timeout=0` is Postgres' spelling of
+    *no* timeout, so the check exists specifically to keep that value out. libpq splits `options`
+    on whitespace and the **last** `-c` wins, so a `schema` carrying a space set the very value the
+    check refuses — measured against this server before the fix:
+
+        options='-c statement_timeout=60000 -c search_path=public -c statement_timeout=0'
+        SHOW statement_timeout -> '0'
+
+    Both directions are asserted live rather than by reading the options string, because the string
+    is not the control: what the *server* ends up with is. Every other field of a `connection:`
+    block is checked — `_env` names against `check_env_name`, the whole block against the driver's
+    signature, every binding identifier against `check_identifier` — and this was the one that
+    reaches a process argument rather than a statement.
+    """
+    from chemclaw.publish.connect import SinkConnectionError
+    from chemclaw.publish.drivers.postgres import PostgresWarehouse
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        dsn = settings.postgres_dsn
+
+        with pytest.raises(SinkConnectionError, match="plain SQL identifier"):
+            PostgresWarehouse(dsn=dsn, schema="public -c statement_timeout=0")
+
+        # The legitimate path still reaches the server with the timeout the driver declared, which
+        # is what makes the refusal above a narrowing rather than a breakage.
+        benign = PostgresWarehouse(dsn=dsn, schema="public", query_timeout_seconds=60)
+        try:
+            async with benign.cursor() as cursor:
+                await cursor.execute("SHOW statement_timeout", [])
+                assert await cursor.fetchall() == [{"statement_timeout": "1min"}]
+        finally:
+            await benign.aclose()
+
+    asyncio.run(_run())

@@ -175,6 +175,24 @@ class NoteProposedEvent(BaseModel):
     reference: str
 
 
+class ApprovalRequestEvent(BaseModel):
+    """The turn ended holding a plan a human has not approved, so a surface can offer the decision.
+
+    **Only the plan shape exists.** `approval_id` is always empty and the field is kept because it
+    is what says so: the event once documented a second shape carrying the handle of a durable
+    interaction hold (`POST /approvals/{id}/decision`, D-032), and that whole surface was deleted in
+    `D-2026-08-27-a-hold-nothing-can-open-is-not-a-hold` because nothing in `src/` could ever open
+    one. A plan approval is answered by `POST /sessions/{id}/plan/decision` and enforced by
+    `agent.plan_gate`, not by a hold — the two were never the same mechanism, and collapsing them
+    is what let a producerless feature look live for as long as it did.
+    """
+
+    type: Literal["approval_request"] = "approval_request"
+    prompt: str
+    #: Always `""`. See the class docstring: a non-empty value would name a hold that cannot exist.
+    approval_id: str = ""
+
+
 class CapabilityDegradedEvent(BaseModel):
     """A capability did not come up, so this turn answers with fewer tools (REV-6).
 
@@ -197,17 +215,6 @@ class CapabilityDegradedEvent(BaseModel):
 
     type: Literal["capability_degraded"] = "capability_degraded"
     connectors: list[str]
-
-
-class ApprovalRequestEvent(BaseModel):
-    """The turn is waiting on a human decision (plan approval or an interaction approval)."""
-
-    type: Literal["approval_request"] = "approval_request"
-    prompt: str
-    # The durable hold's handle (`InteractionApprovalWorkflow` id), so a surface can actually
-    # answer it via `POST /approvals/{id}/decision` (gap RCH-3). Empty for a plan-approval
-    # prompt, which is answered by the next turn rather than by a durable hold.
-    approval_id: str = ""
 
 
 class AnswerEvent(BaseModel):
@@ -488,8 +495,8 @@ Event = (
     | JobCompletedEvent
     | JobFailedEvent
     | CapabilityDegradedEvent
-    | ApprovalRequestEvent
     | NoteProposedEvent
+    | ApprovalRequestEvent
     | QuestionEvent
     | AnswerEvent
     | ToolFailedEvent

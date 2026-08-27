@@ -46,7 +46,12 @@ from chemclaw.science.calc.artifacts import (
     ArrayOffloadingStore,
     ArtifactStore,
 )
-from chemclaw.science.calc.budget import estimate_units, require_within_budget, rotation_units
+from chemclaw.science.calc.budget import (
+    estimate_units,
+    require_hessian_affordable,
+    require_within_budget,
+    rotation_units,
+)
 from chemclaw.science.calc.geometry import check_server_address, structures_in
 from chemclaw.science.calc.models import (
     BondDissociationSurvey,
@@ -101,6 +106,7 @@ from chemclaw.science.calc.thermo import (
     half_life_from_barrier,
     macrostate_free_energy_kcal,
     rt_kcal,
+    standard_state_for,
     thermochemistry_from_hessian,
     weighted_average,
 )
@@ -305,7 +311,16 @@ async def hessian(
     wrapped: the packed arrays go to the artifact store and the row keeps their content hashes.
     Nothing else about the call changes, which is the point of expressing the policy as a
     `ResultStore` rather than as a second caching path.
+
+    **The single place every Hessian in this repository passes through**, which is why the atom
+    fence is here rather than at each composite. The server has its own ceiling and would refuse
+    too — but its refusal named a durable QM path this system deleted, and no durable path could
+    have helped anyway, since every job here composes *this* function. So the refusal a chemist
+    reads is written on the side that knows the alternatives (`require_hessian_affordable`).
     """
+    require_hessian_affordable(
+        len(structure.elements), f"a Hessian of {structure.smiles or structure.structure_id}"
+    )
     blobs = artifacts if artifacts is not None else default_artifact_store()
     payload, cached = await run(
         cached_remote(
@@ -1144,6 +1159,15 @@ async def reaction_energy(
     aromatic consumes or makes benzene), so a reaction with any species' sigma unstated reports ΔE
     and ΔH and withholds ΔG with a warning naming the species.
 
+    **The ΔG is quoted at the standard state of the medium it was computed in**, which `solvent`
+    decides and `standard_state` records: 1 atm in the gas phase, 1 mol/L in solution. That matters
+    only when the equation changes the number of molecules — the term is 1.894·Δn kcal/mol at
+    298.15 K, a factor of 24.47 in K per unit of Δn — and it cancels exactly for Δn = 0. **This
+    changed published numbers**
+    (`D-2026-08-27-a-free-energy-without-its-standard-state-is-not-a-quantity`): every
+    solution ΔG used to be the 1 atm one, so every association, dissociation and BDFE ran with
+    that offset and nothing said so.
+
     Args:
         store: The calculation store; every species is computed once, ever.
         reactants: SMILES of every reactant, repeated per stoichiometric equivalent.
@@ -1180,9 +1204,12 @@ async def reaction_energy(
                 store, smiles, role, solvent, thermo, sigmas.get(smiles), level, run
             )
         )
+    # "not a minimum" covers two findings and the message no longer picks one of them: a saddle
+    # point shows an imaginary mode, while a geometry that is not stationary at all often shows
+    # nothing in its frequencies and still has a zero-point energy that is quietly too low.
     warnings = [
-        f"{entry.smiles} is not a minimum (imaginary frequency): its free energy is not "
-        "a free energy"
+        f"{entry.smiles} is not a minimum (an imaginary mode, or a geometry that is not a "
+        "stationary point): its free energy is not a free energy"
         for entry in species
         if entry.is_minimum is False
     ]
@@ -1229,6 +1256,10 @@ async def reaction_energy(
         method=species[0].method or settings.xtb_method,
         solvent=solvent,
         temperature_k=temperature,
+        # Read from the one rule in `science/calc/thermo.py` rather than restated here, so the
+        # state this result is labelled with is the state its species' partition functions were
+        # evaluated at. A solution ΔG is the 1 mol/L one; ΔE and ΔH do not depend on it.
+        standard_state=standard_state_for(solvent),
         level=level,
         delta_e_kcal=round(delta_e, 2),
         delta_h_kcal=_round(_difference(species, "enthalpy_hartree")),
@@ -1305,6 +1336,7 @@ async def solvent_comparison(
     effects = [
         SolventEffect(
             solvent=result.solvent,
+            standard_state=result.standard_state,
             delta_e_kcal=result.delta_e_kcal,
             delta_h_kcal=result.delta_h_kcal,
             delta_g_kcal=result.delta_g_kcal,
@@ -1319,6 +1351,20 @@ async def solvent_comparison(
     spread = ranking(effects[-1]) - ranking(effects[0])
     uncertainty = settings.xtb_reaction_uncertainty_kcal
     warnings = list(dict.fromkeys(warning for result in results for warning in result.warnings))
+    # **The gas reference and the solution rows are in different standard states**, because each is
+    # in the convention its own phase uses. Solvent against solvent — what this screen ranks — is
+    # like against like and needs no caveat. The gas-to-solution gap does: for Δn != 0 it carries
+    # 1.894·Δn kcal/mol of reference state on top of the solvation, and a reader differencing the
+    # two columns without being told would read that as a solvent effect.
+    delta_n = len(products) - len(reactants)
+    if delta_n and any(effect.delta_g_kcal is not None for effect in effects):
+        warnings.append(
+            f"this equation changes the molecule count by {delta_n:+d}, and the gas-phase row is "
+            "quoted at the 1 atm standard state while every solvent row is quoted at 1 mol/L (the "
+            "convention each phase uses). Solvent-against-solvent comparisons are unaffected; the "
+            f"gas-to-solution difference additionally carries {abs(delta_n) * 1.894:.2f} kcal/mol "
+            "of standard state and is not a solvation energy"
+        )
     if spread <= uncertainty:
         warnings.append(
             f"the solvents span {spread:.1f} kcal/mol, within the method's "
@@ -1441,7 +1487,7 @@ async def refined_ensemble(
     if any(not member.is_minimum for member in members):
         warnings.append(
             "at least one refined conformer did not settle on a genuine minimum, so its free "
-            "energy is computed at a saddle point and its population is not meaningful"
+            "energy is computed at a geometry that is not one and its population is not meaningful"
         )
     return RefinedEnsemble(
         smiles=require_canonical_smiles(smiles),
@@ -1906,6 +1952,13 @@ async def bond_dissociation_survey(
     Defaults to `level="quick"`: a survey is a *ranking*, the ordering is what it supports, and a
     Hessian per fragment per bond multiplies a twenty-bond survey by three for a magnitude
     semiempirical theory does not deliver anyway. Ask for `standard` when the question is one bond.
+
+    **The energies are ΔH (or ΔE at `quick`), and no symmetry number is asserted.** This composite
+    does no point-group detection, so it states none — sigma is wrong at 1 for most of what a
+    homolysis makes, and `RT ln(sigma_phenyl·sigma_H/sigma_benzene) = -1.06 kcal/mol` is the size
+    of it for benzene's C-H. ΔH does not depend on sigma, so the ranking is unaffected; the ΔG that
+    would be is withheld by `reaction_energy` and its warning is surfaced here rather than
+    swallowed. That is also why no bond dissociation *free* energy is reported.
     """
     if not cleavages:
         raise ValueError(f"no breakable bond was enumerated for {smiles}")
@@ -1916,6 +1969,11 @@ async def bond_dissociation_survey(
 
     results: list[DissociatedBond] = []
     methods: list[str] = []
+    # Every composed reaction's own caveats, deduplicated on the way out — the idiom
+    # `solvent_comparison` already uses over its fan-out. Without it a survey swallowed the
+    # unstated-sigma and open-shell warnings of every reaction it ran, which is what let a disarmed
+    # sigma control look like an absent one.
+    caveats: list[str] = []
     for index, (atoms, bond, fragments) in enumerate(cleavages, start=1):
         progress(f"bond {index}/{len(cleavages)} ({bond}) of {smiles}")
         # Keyword arguments deliberately: `BondCleavageSpec`'s own docstring argues that a
@@ -1929,11 +1987,21 @@ async def bond_dissociation_survey(
             solvent=solvent,
             temperature_k=temperature_k,
             level=level,
-            symmetry_numbers=dict.fromkeys([smiles, *fragments], 1),
+            # **No symmetry map, not a map of fabricated ones.** This passed
+            # `dict.fromkeys([smiles, *fragments], 1)`, which marked sigma *stated* for the parent
+            # and both fragments — so `reaction_energy`'s withhold-and-warn machinery never ran,
+            # and sigma=1 is wrong for most of what a homolysis produces (benzene 12, phenyl 2,
+            # methyl 6, ethane 6). It was harmless only because the ΔG is discarded below; the
+            # moment anything reads it, or this grows a BDFE, the control was already disarmed and
+            # would not have said so. `None` computes at sigma=1 exactly as before and records that
+            # nobody said so — the same fix `species_ranking` carries, now uniform across the three
+            # composites that share `_species_energy`.
+            symmetry_numbers=None,
             progress=no_progress,
             run=run,
         )
         methods.append(reaction.method)
+        caveats.extend(reaction.warnings)
         energy = (
             reaction.delta_h_kcal if reaction.delta_h_kcal is not None else reaction.delta_e_kcal
         )
@@ -1967,7 +2035,8 @@ async def bond_dissociation_survey(
         uncertainty_kcal=settings.xtb_reaction_uncertainty_kcal,
         warnings=[
             "semiempirical bond dissociation energies carry several kcal/mol of error, so the "
-            "ordering is the answer and the magnitudes are not"
+            "ordering is the answer and the magnitudes are not",
+            *dict.fromkeys(caveats),
         ],
     )
 
@@ -2129,20 +2198,20 @@ def _verified_torsion(structure: Structure, torsion: Torsion) -> tuple[int, int,
     The bond must also be acyclic: driving a ring bond deforms the ring rather than rotating about
     it, and the profile would be a ring pucker reported as a rotational barrier.
 
+    **A rotor whose rotating end carries only hydrogens arrives with no dihedral at all**, because
+    `enumerate_torsions` cannot name one: a dihedral through such a bond needs a hydrogen index, and
+    a hydrogen index means something only inside one explicit-H numbering. There are two of those
+    rotors and they are not the same finding, which is why `_rotor_dihedral` builds the dihedral for
+    one of them and refuses the other.
+
     Raises:
         ValueError: the handle does not name a bond of this molecule, an index is out of range, the
-            named atoms are not bonded, or the bond is in a ring.
+            named atoms are not bonded, the bond is in a ring, or the rotor is a symmetric top.
     """
     if structure.smiles is None:
         raise ValueError(
             "a rotational profile needs a molecule to check the torsion against, and this "
             "geometry carries no SMILES"
-        )
-    if len(torsion.atoms) != 4:
-        raise ValueError(
-            f"{torsion.label!r} carries {len(torsion.atoms)} atoms, not four. A symmetric top "
-            "(a methyl or tert-butyl rotation) has no heavy-atom dihedral to drive; its energetic "
-            "effect is already in the free-rotor treatment of the low modes."
         )
     mol = require_molecule(structure.smiles)
     if max(torsion.bond) >= mol.GetNumAtoms():
@@ -2167,8 +2236,104 @@ def _verified_torsion(structure: Structure, torsion: Torsion) -> tuple[int, int,
             "one carried from another compound, another way of writing this one, or another RDKit "
             "build will not resolve. Re-run enumerate_torsions on this molecule."
         )
-    first, begin, end, last = _checked_dihedral(structure, mol, torsion)
+    explicit = _explicit_molecule(structure, mol)
+    if not torsion.atoms:
+        return _rotor_dihedral(explicit, torsion)
+    if len(torsion.atoms) != 4:
+        raise ValueError(
+            f"{torsion.label!r} carries {len(torsion.atoms)} atoms, not four — a dihedral is four "
+            "atoms bonded in sequence. Pass the enumerate_torsions entry through unchanged rather "
+            "than assembling one."
+        )
+    first, begin, end, last = _checked_dihedral(structure, explicit, torsion)
     return first, begin, end, last
+
+
+def _explicit_molecule(structure: Structure, mol: Chem.Mol) -> Chem.Mol:
+    """`mol` with explicit hydrogens, in the atom order `structure` itself is numbered in.
+
+    **The numbering is a cross-repository contract and this is where it stops being an assumption.**
+    Every geometry here is `AddHs` over the canonical SMILES — heavy atoms in canonical order,
+    hydrogens appended by parent — which is what `structure_from_smiles` builds on the calculation
+    server and what `scan_point` validates its atom indices against. Comparing the element lists
+    turns that reliance into an assertion, exactly as the server's own `_mol_with_conformer` does,
+    because the alternative is driving the wrong atoms and getting a plausible profile for it.
+
+    Heavy indices are unaffected — `AddHs` appends — so every existing check reads the same. What it
+    adds is that a *hydrogen* index is now in range, which is the whole of what an X-H rotor needs.
+    """
+    explicit = Chem.AddHs(mol)
+    elements = [atom.GetAtomicNum() for atom in explicit.GetAtoms()]
+    if elements != structure.elements:
+        raise ValueError(
+            f"{structure.smiles!r} does not describe this geometry: it expands to {len(elements)} "
+            f"atoms and the structure carries {len(structure.elements)}. A torsion is driven by "
+            "atom index, so the two must be the same molecule in the same order."
+        )
+    return explicit
+
+
+def _rotor_dihedral(explicit: Chem.Mol, torsion: Torsion) -> tuple[int, int, int, int]:
+    """The dihedral for a rotor `enumerate_torsions` reported without one, or a refusal saying why.
+
+    `Chemclaw3-mcp`'s `chem` server splits these into two kinds and this side must too, because the
+    two get opposite answers:
+
+    - a **symmetric top** — a methyl or tert-butyl, three hydrogens on the rotating end — is
+      refused. Its barrier is genuinely already counted, in the quasi-RRHO free-rotor treatment of
+      the low modes, so profiling it would spend a scan to double-count something.
+    - an **X-H rotor** — one or two hydrogens: an O-H, S-H or N-H — is scanned. Acetamide's amide
+      N-H is 16-18 kcal/mol and acetic acid's syn/anti O-H is 5-6 with two genuinely distinct
+      rotamers, and none of that is in the low modes. Calling those a methyl told the model their
+      barrier was already accounted for, which is the reason this function exists.
+
+    The dihedral is built rather than received, in the structure's own explicit-H numbering, and
+    each loose end is chosen deterministically so two runs of the same question drive the same four
+    atoms — which is what keeps each scan point's cache key stable.
+    """
+    begin, end = (explicit.GetAtomWithIdx(index) for index in torsion.bond)
+    rotating, anchor = (end, begin) if _heavy_neighbours(begin, end) else (begin, end)
+    if _heavy_neighbours(rotating, anchor):
+        raise ValueError(
+            f"{torsion.label!r} carries no dihedral, but both ends of {torsion.bond} carry a heavy "
+            "neighbour, so this bond has one. Re-run enumerate_torsions on this molecule and pass "
+            "its entry through unchanged."
+        )
+    hydrogens = sorted(
+        atom.GetIdx() for atom in rotating.GetNeighbors() if atom.GetAtomicNum() == 1
+    )
+    if len(hydrogens) >= 3:
+        raise ValueError(
+            f"{torsion.label!r} is a symmetric top (a methyl or tert-butyl rotation): every "
+            "orientation is the same structure, so there is no barrier to profile. Its energetic "
+            "effect is already in the free-rotor treatment of the low modes."
+        )
+    # A dihedral needs one atom off the axis at each end. `enumerate_torsions` never reports a bond
+    # without them — it excludes a monovalent end by name, because turning about C-Cl moves nothing
+    # — so reaching this is a hand-assembled entry, and it gets a sentence rather than an
+    # `IndexError` out of the arithmetic two functions further down.
+    anchored = sorted(
+        atom.GetIdx() for atom in anchor.GetNeighbors() if atom.GetIdx() != rotating.GetIdx()
+    )
+    if not hydrogens or not anchored:
+        raise ValueError(
+            f"{torsion.label!r} has nothing off the axis to measure an angle against: rotating "
+            "about it moves no atom. Take the torsion from enumerate_torsions on this molecule."
+        )
+    # Heavy atoms preferred, then lowest index — a deterministic choice at each end, so two runs of
+    # the same question drive the same four atoms and hit the same scan-point cache rows.
+    reference = min(
+        anchored, key=lambda index: (explicit.GetAtomWithIdx(index).GetAtomicNum() == 1, index)
+    )
+    return reference, anchor.GetIdx(), rotating.GetIdx(), hydrogens[0]
+
+
+def _heavy_neighbours(atom: Chem.Atom, other: Chem.Atom) -> bool:
+    """Does `atom` carry a heavy neighbour besides `other`? The test for "there is a dihedral"."""
+    return any(
+        neighbour.GetAtomicNum() > 1 and neighbour.GetIdx() != other.GetIdx()
+        for neighbour in atom.GetNeighbors()
+    )
 
 
 def _checked_dihedral(
@@ -2189,13 +2354,15 @@ def _checked_dihedral(
     middle.
     """
     atoms = list(torsion.atoms)
-    heavy = mol.GetNumAtoms()
-    if [index for index in atoms if not 0 <= index < heavy]:
+    # `mol` carries explicit hydrogens, so the bound is the structure's own atom count rather than
+    # its heavy-atom count — an X-H rotor's dihedral ends on a hydrogen and must be in range.
+    count = mol.GetNumAtoms()
+    if [index for index in atoms if not 0 <= index < count]:
         raise ValueError(
             f"the dihedral {atoms} of {torsion.label!r} is not four atoms of "
-            f"{structure.smiles!r}, which has {heavy}. Take the torsion from enumerate_torsions "
-            "rather than working the indices out; a negative index in particular addresses a real "
-            "atom and would have driven a different dihedral silently."
+            f"{structure.smiles!r}, which has {count} with its hydrogens. Take the torsion from "
+            "enumerate_torsions rather than working the indices out; a negative index in "
+            "particular addresses a real atom and would have driven a different dihedral silently."
         )
     if len(set(atoms)) != 4:
         raise ValueError(
@@ -2423,10 +2590,18 @@ async def _released_wells(
                 # `xtb_minimum_refinement_attempts` and returns what it has. A free energy at a
                 # geometry that is still a saddle is not a free energy, and this is the "a well
                 # that would not settle" the result model promises to report.
+                # Names whichever finding actually stands: the imaginary modes when there are
+                # any, and otherwise the gradient — a well that stops short of a stationary point
+                # reports an empty frequency list, and `[] cm^-1` is not a reason anyone can act on.
+                why = (
+                    f"{thermo.imaginary_frequencies_cm} cm^-1"
+                    if thermo.imaginary_frequencies_cm
+                    else f"max |gradient| {thermo.max_gradient_hartree_per_angstrom} Ha/A"
+                )
                 warnings.append(
-                    f"the rotamer near {angle:g} degrees is still a saddle point after "
-                    f"refinement ({thermo.imaginary_frequencies_cm} cm^-1), so its free energy "
-                    "and any barrier measured from it describe a geometry that is not a minimum"
+                    f"the rotamer near {angle:g} degrees is still not a minimum after "
+                    f"refinement ({why}), so its free energy and any barrier measured from it "
+                    "describe a geometry that is not one"
                 )
         # Read the angle off the geometry that is actually being kept, and merge on *that* — so a
         # refinement that walked a well into its neighbour is caught rather than recorded twice.

@@ -261,3 +261,67 @@ def test_a_server_module_with_no_server_object_is_reported_not_skipped() -> None
         problems = _served_tool_problems(ConnectorManifest.model_validate(_MANIFEST))
     assert len(problems) == 1, problems
     assert "defines no `server`" in problems[0]
+
+
+def test_a_declared_tool_the_server_does_not_serve_is_reported() -> None:
+    """The other half of "the two must agree exactly" — the half that was never computed.
+
+    `_served_tool_problems` reported `served - declared` and stopped there, while its own docstring
+    stated the rule as an equality. A *phantom* tool — named under `tools:` and classified, served
+    by nothing — therefore passed this gate, and then passed the other three as well: `tools:` is
+    what feeds `available_tool_names()`, the single set `skill-validate`, `template-validate` and
+    `prose-validate` all resolve names through. So a rename that lands in a bundle's
+    `connectors/<name>/server/tools.py` and not in its `connector.yaml` is green in CI, and
+    advertises a capability that answers "unknown tool" the first time a chemist reaches it — the
+    "fails at step four after spending compute" this family exists to prevent.
+    """
+    from chemclaw.cli.validate_connectors import _served_tool_problems
+
+    served = FastMCP("probe")
+
+    @served.tool()
+    async def probe_tool(value: str) -> str:
+        """The one tool that really is served."""
+        return value
+
+    manifest = ConnectorManifest.model_validate(
+        {
+            **_MANIFEST,
+            "endpoint": {
+                **_MANIFEST["endpoint"],  # type: ignore[dict-item]
+                "tools": ["probe_tool", "phantom_search"],
+                "read_only": ["probe_tool", "phantom_search"],
+            },
+        }
+    )
+    with mock.patch(
+        "chemclaw.connectors.registry.importlib.import_module",
+        return_value=mock.Mock(server=served),
+    ):
+        problems = _served_tool_problems(manifest)
+    assert len(problems) == 1, problems
+    assert "phantom_search" in problems[0]
+    assert "does not serve it" in problems[0]
+
+
+def test_a_declared_but_unserved_tool_is_unverifiable_for_a_bundle_we_do_not_run() -> None:
+    """What the fix above does *not* cover, made visible instead of silent.
+
+    `chem` and `safety` declare an endpoint and ship no `server/` here — their capability is
+    `Chemclaw3-mcp`'s (D-2026-08-09). Nothing offline can ask those servers what they serve, so the
+    declared→served direction is unverifiable for them, and reporting every declared tool as a
+    phantom would fail the gate on two correct manifests. They are reported as *unverified* rather
+    than as problems, the same shape `validate_templates.unchecked_arguments` uses for the argument
+    check's identical blind spot.
+    """
+    from chemclaw.cli.validate_connectors import _served_tool_problems, unverified_tool_surfaces
+
+    manifest = ConnectorManifest.model_validate(_MANIFEST)
+    absent = ModuleNotFoundError("No module named 'chemclaw.connectors.probe.server'")
+    absent.name = "chemclaw.connectors.probe.server.tools"
+    with mock.patch("chemclaw.connectors.registry.importlib.import_module", side_effect=absent):
+        assert _served_tool_problems(manifest) == []
+    # The shipped tree: both declared-not-run bundles, with the tools nothing here can verify.
+    unverified = unverified_tool_surfaces()
+    assert set(unverified) == {"chem", "safety"}, unverified
+    assert "screen_hazards" in unverified["safety"]

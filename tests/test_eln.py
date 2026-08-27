@@ -2148,3 +2148,41 @@ def test_the_validator_checks_the_sources_that_are_attached(
     nothing = capsys.readouterr().out
     assert "not a pass" in nothing, "but it must never read as one"
     assert "OK" not in nothing
+
+
+def test_the_validator_does_not_report_ok_over_a_source_that_yielded_nothing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An OK line over zero entries is the empty-enabled-set defect, one level down.
+
+    The problem counter was the only signal, so a source offering no entries produced zero problems
+    and a success line whose own text is the tell nobody reads in CI. A directory that does not
+    exist behaves identically — the adapter yields nothing rather than raising — so a typo'd
+    `export_dir`, or an ORD export that was not mounted into the image, reported OK while the
+    structure and mass-balance gate on everything entering the graph and the fingerprint index had
+    silently stopped running.
+
+    **Zero is not legitimate here, and that is the difference from an empty enabled set.** No
+    sources enabled is a configuration a deployment chose and can be read straight off
+    `CHEMCLAW_DATA_SOURCES`, so `main` states it and exits 0. A source that *is* attached and
+    supplies nothing is a claim that failed, and nothing in the adapter can tell an empty ELN from
+    a mis-mounted one — so it is reported and the gate fails.
+    """
+    from chemclaw.ingest.eln.validate import main
+
+    manifests = tmp_path / "manifests"
+    (manifests / "eln-empty").mkdir(parents=True)
+    (manifests / "eln-empty" / "datasource.yaml").write_text(
+        "name: eln-empty\n"
+        "description: an ELN whose export directory was never mounted.\n"
+        "ingest: chemclaw.ingest.eln.json_adapter:JsonExportAdapter\n"
+        f"config:\n  export_dir: {tmp_path / 'never-mounted'}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(settings, "data_sources_dir", str(manifests))
+    monkeypatch.setattr(settings, "data_sources", "eln-empty")
+
+    assert main() == 1
+    printed = capsys.readouterr().out
+    assert "OK:" not in printed, printed
+    assert "eln-empty" in printed and "no entries" in printed, printed

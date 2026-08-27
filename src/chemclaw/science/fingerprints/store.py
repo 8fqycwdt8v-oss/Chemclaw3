@@ -32,6 +32,22 @@ class FingerprintError(ChemclawError):
     """A fingerprint could not be computed or two fingerprints are incomparable (G4)."""
 
 
+class FingerprintInputError(FingerprintError):
+    """The *string* handed in is not something this domain can fingerprint (G4).
+
+    A subclass rather than a flag, because the two facts `FingerprintError` used to carry are read
+    by different callers for opposite reasons. This one is about the caller's own argument — a
+    prose sentence where a reaction SMILES was expected, an OCR artefact in an ELN impurity list —
+    and answering it with "nothing found" is correct. Its parent also covers the index refusing to
+    be searched (`cannot compare fingerprints of different widths`), which is an outage: reported
+    as "nothing found" it tells a chemist the company has no precedent, which is the failure
+    `tests/test_gather_evidence_outage.py` exists to prevent.
+
+    So a caller that means "a bad query is an empty answer" catches *this*; a caller that catches
+    the parent is saying it can absorb a broken index too, and has to mean it.
+    """
+
+
 def tanimoto(bits_a: str, bits_b: str) -> float:
     """Tanimoto (Jaccard) similarity of two equal-length fingerprint bitstrings.
 

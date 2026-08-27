@@ -24,12 +24,23 @@ over-budget request fails in the first second rather than burning the activity b
 **A unit is one remote primitive**, not one second. Duration depends on the molecule and this
 module cannot see the molecule; the call count is exactly what a composite knows before it starts,
 and it is the quantity that scales with the fan-out the caller chose.
+
+**One fence here counts atoms instead, and it is the same shape for a different runaway.** A Hessian
+is 6N single points on a *single* molecule, so no fan-out count catches it — and the calculation
+server, which does refuse above its own ceiling, answered with a route that no longer exists
+(`require_hessian_affordable`). The unit differs; what does not is that the refusal names what to do
+instead, before anything is spent.
 """
 
 from chemclaw.core.config import settings
 from chemclaw.science.calc.models import ReactionLevel
 
-__all__ = ["estimate_units", "require_within_budget", "rotation_units"]
+__all__ = [
+    "estimate_units",
+    "require_hessian_affordable",
+    "require_within_budget",
+    "rotation_units",
+]
 
 # What one species costs, in remote primitives, at each level — read off `_species_energy` rather
 # than guessed. That function is `embed` -> (thorough: `conformer_ensemble` -> lowest) -> `relax`
@@ -104,4 +115,40 @@ def require_within_budget(units: int, what: str) -> None:
         "job. Narrow the species set, lower the refinement level, or raise "
         "CHEMCLAW_CALC_MAX_PRIMITIVE_CALLS if the cost is understood — a conformer search is "
         "minutes of saturated CPU each and they do not run in parallel here."
+    )
+
+
+def require_hessian_affordable(atom_count: int, what: str) -> None:
+    """Refuse a Hessian on a molecule too large for one, naming the routes this system has.
+
+    The second fence in this module, and the only one counted in atoms rather than in calls: a
+    Hessian is 6N single points on *one* molecule, so its runaway is the molecule and not the
+    fan-out.
+
+    **It exists for the message as much as for the refusal.** The calculation server has its own
+    atom ceiling, and its refusal used to tell the model to "submit it through Chemclaw3's durable
+    QM job path instead" — a route `D-2026-08-26-semiempirical-is-the-whole-tier` deleted, and one
+    that would not have helped if it existed: every durable job here composes the *same*
+    `compute_hessian` primitive under the same ceiling, so escalating a 200-atom Hessian to Temporal
+    changes which process waits and nothing else. A false instruction handed to a model is worse
+    than a bare refusal, because the model acts on it.
+
+    So this side, which is the side that knows what this system offers, says it: `level="quick"`
+    differences electronic energies and takes no Hessian at all, and a truncated model system is the
+    chemistry answer to a molecule whose remote substituents cannot matter to the mode in question.
+    Neither is a workaround — they are the two things a chemist does here.
+
+    Raises:
+        ValueError: the molecule has more atoms than `calc_hessian_max_atoms` allows. Non-retryable
+            by `durable/publish.py::BAD_DATA_RETRY`, because the molecule will not get smaller.
+    """
+    ceiling = settings.calc_hessian_max_atoms
+    if atom_count <= ceiling:
+        return
+    raise ValueError(
+        f"{what} needs second derivatives on {atom_count} atoms, over the {ceiling} this "
+        f"deployment allows: a Hessian costs 6N single points, so this one is {6 * atom_count} of "
+        'them. There is no larger-molecule route to escalate to — ask at level="quick", which '
+        "differences electronic energies and takes no Hessian, or put the question to a truncated "
+        "model system, or raise CHEMCLAW_CALC_HESSIAN_MAX_ATOMS if the cost is understood."
     )
