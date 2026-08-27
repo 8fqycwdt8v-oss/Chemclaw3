@@ -81,7 +81,7 @@ _SELECT_MANY = f"""
 
 _SELECT_ONE = f"SELECT {_COLUMNS} FROM note_proposals WHERE id = %s"
 
-# A freshly-upserted version closes the note's previous open versions (migration 057 says why).
+# A freshly-upserted version closes the note's previous open versions (migration 058 says why).
 # Scoped by id rather than content hash so the statement is correct on the refresh path too — the
 # row the upsert just returned must never supersede itself.
 _SUPERSEDE_OLDER = """

@@ -21,7 +21,7 @@ as one branch (`claude/knowledge-system-analysis-3xwwc3`) of ordered, per-theme 
       `total_matches`, embedding batch chunking + `note_embedding_key`
 - [x] WP8 — PR-gate honesty (`D-2026-08-27-the-gate-tells-the-truth-about-what-it-pushed`):
       gate-commit trailer + foreign-tip refusal, `GitRemoteError` retryable class, one open row
-      per note (`superseded`, migration 057), `SubmissionOutcome`, dependencies never overwrite,
+      per note (`superseded`, migration 058), `SubmissionOutcome`, dependencies never overwrite,
       cross-pod advisory lock, `make proposals-reconcile`
 - [x] WP9 — memory loop (`D-2026-08-27-a-retirement-rides-its-replacement`): `SynthesisUnit`
       pairing, real `superseded-by` edge, partial-read retirement skip, store-seeded promotion

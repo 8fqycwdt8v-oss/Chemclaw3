@@ -53,7 +53,7 @@ class ProposalState(StrEnum):
     # decided anything about the old bytes — and not a failure: the branch is per-note while the
     # record is per-version, so without this state a changed re-proposal left the old version
     # `open`, rendering bytes that existed on no branch, and the merge webhook then marked both
-    # rows merged (migration 057).
+    # rows merged (migration 058).
     SUPERSEDED = "superseded"
 
 

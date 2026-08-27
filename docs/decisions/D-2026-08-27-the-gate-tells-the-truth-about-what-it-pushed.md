@@ -54,7 +54,7 @@ in `tests/test_publish.py` still catches an unregistered subclass without forcin
 into the non-retryable list.
 
 **Exactly one open row per note.** A freshly-upserted open version closes the note's previous
-open versions with the new `superseded` state (migration `057_note_proposal_superseded.sql`) —
+open versions with the new `superseded` state (migration `058_note_proposal_superseded.sql`) —
 not a decision, not a failure, just "a newer version replaced it in the queue". The merge
 webhook's open-rows predicate then has at most one row to move. The migration drops and re-adds
 the state CHECK, which the additivity guard flags textually; it does **not** end the

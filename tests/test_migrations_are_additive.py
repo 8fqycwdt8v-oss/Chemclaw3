@@ -120,7 +120,7 @@ _BREAKS_PREVIOUS_IMAGE = re.compile(
 # an exempted migration still fails — an exemption is granted to statements somebody read, not to a
 # filename.
 _REVIEWED_ROLLBACK_BREAKS: dict[str, tuple[str, tuple[str, ...]]] = {
-    "057_note_proposal_superseded.sql": (
+    "058_note_proposal_superseded.sql": (
         # Reviewed, and it does not in fact end the rollback: the drop-and-re-add *widens* the
         # state CHECK, and the previous image only ever writes the old, still-allowed states —
         # the ADR records that reading, and this row exists because the guard matches the DROP
