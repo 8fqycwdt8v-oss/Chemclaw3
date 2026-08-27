@@ -42,12 +42,17 @@ from typing import Any
 from langgraph.config import get_stream_writer
 from pydantic import BaseModel
 
+from chemclaw.core.plan_context import get_current_plan_link
+
 
 class JobSignal(BaseModel):
     """A durable job a tool started during this turn."""
 
     job_id: str
     kind: str
+    # The plan step the launch served, read ambiently at emit time (D-2026-08-27). Empty when the
+    # launch was not made from a plan step — a template step, the CLI, a turn with no plan.
+    plan_step: str = ""
 
 
 class QuestionSignal(BaseModel):
@@ -171,8 +176,16 @@ def stream_writer_or_none() -> Any | None:
 
 
 def record_job_started(job_id: str, kind: str) -> None:
-    """Note that `kind` job `job_id` was launched. A no-op where nothing is streaming."""
-    _emit(JobSignal(job_id=job_id, kind=kind))
+    """Note that `kind` job `job_id` was launched. A no-op where nothing is streaming.
+
+    The plan step is folded in here rather than threaded through every launcher: the link is
+    ambient by design (`core.plan_context`, bound per tool call by the harness's middleware), so
+    reading it at the one place every launch announcement passes stamps all of them uniformly —
+    the connector jobs, the report, the memory synthesis — and a caller outside the harness
+    contributes the empty string without knowing the field exists.
+    """
+    plan_step, _ = get_current_plan_link()
+    _emit(JobSignal(job_id=job_id, kind=kind, plan_step=plan_step))
 
 
 def record_proposal(note_id: str, reference: str) -> None:

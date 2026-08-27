@@ -406,7 +406,7 @@ def _signal_event(signal: Signal) -> Event:
     stream payload rather than out of a contextvar.
     """
     if isinstance(signal, JobSignal):
-        return JobStartedEvent(job_id=signal.job_id, kind=signal.kind)
+        return JobStartedEvent(job_id=signal.job_id, kind=signal.kind, plan_step=signal.plan_step)
     if isinstance(signal, QuestionSignal):
         return QuestionEvent(question=signal.question, options=signal.options)
     if isinstance(signal, ApprovalSignal):
