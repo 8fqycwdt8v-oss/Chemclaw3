@@ -210,6 +210,32 @@ def test_verify_discards_unsupported_and_fabricated_claims() -> None:
     assert {c.text for c in discarded} == {"Fabricated 40% trend.", "Uncited assertion."}
 
 
+def test_a_document_citation_grounds_against_the_stored_chunk_id() -> None:
+    """A citation of a document chunk survives the two extractions disagreeing about colons.
+
+    Document chunks carry `<retriever>:<doc>#<ordinal>` as their source id, and `cited_ids`
+    partitions every wikilink at the first colon — so the citation for `[[docs:abc123#4]]`
+    arrives as `abc123#4` and, before `groundable_ids`, never equalled the stored id: measured,
+    every document citation in an answer scored as ungrounded (2026-08-27 review §5). Driven
+    through `cited_ids` rather than a hand-written citation so the coupling under test is the
+    real one.
+    """
+    from chemclaw.kg.note import cited_ids
+
+    evidence = [
+        EvidenceChunk(content="the SOP says", source_note_id="docs:abc123#4", retriever="documents")
+    ]
+    citations = cited_ids("Per the SOP ([[docs:abc123#4]]).")
+    claims = [Claim(text="Per the SOP.", citations=citations)]
+    supported, discarded = verify_claims(claims, evidence)
+    assert [c.text for c in supported] == ["Per the SOP."]
+    assert discarded == []
+    # A fabricated document citation still fails: the split half of a *different* id is no match.
+    ghost = cited_ids("Per the SOP ([[docs:ffff99#1]]).")
+    supported, discarded = verify_claims([Claim(text="Ghost.", citations=ghost)], evidence)
+    assert supported == []
+
+
 # --- concrete retrievers (5b.3) -------------------------------------------------------
 
 

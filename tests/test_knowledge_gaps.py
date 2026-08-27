@@ -448,3 +448,43 @@ def test_a_surrogate_in_a_nested_conditions_field_is_refused_at_the_note() -> No
             type="reaction",
             conditions=ProcessConditions(major_impurity="bad\ud800"),
         )
+
+
+def test_a_calc_ref_the_store_never_produced_is_reported() -> None:
+    """The calc half of the citation-existence gate (2026-08-27 review §5).
+
+    `_calc_ref_shape` validates a key's *form* and its own comment concedes that existence "is a
+    question only a database can answer" — and nothing asked it, so a transposed digit merged
+    silently and `calc_ref_index` indexed a key no calculation ever produced. The store is a
+    parameter (`CalculationExistence`), so this needs no patching, exactly like the reaction check.
+    """
+    import asyncio
+
+    from chemclaw.kg.validate import calc_citations, unresolved_calc_refs
+    from chemclaw.science.calc.store import (
+        CalculationKey,
+        InMemoryStore,
+        StoredResult,
+    )
+
+    async def _run() -> list[str]:
+        store = InMemoryStore()
+        real = CalculationKey.build("xtb", "gfn2", inputs={"smiles": "CCO"})
+        await store.put(StoredResult(key=real, result={"energy": -1.0}, provenance="computed"))
+        typo = real.as_str()[:-1] + ("0" if not real.as_str().endswith("0") else "1")
+        note = Note(
+            id="job-result-x",
+            type="job-result",
+            created_by="agent",
+            calc_refs=[real.as_str(), typo],
+            body="two refs, one real",
+        )
+        citations = calc_citations([note])
+        assert citations == [("job-result-x", real.as_str()), ("job-result-x", typo)] or (
+            citations == [("job-result-x", typo), ("job-result-x", real.as_str())]
+        )
+        return await unresolved_calc_refs(citations, store)
+
+    problems = asyncio.run(_run())
+    assert len(problems) == 1
+    assert "job-result-x" in problems[0] and "calc_refs" in problems[0]

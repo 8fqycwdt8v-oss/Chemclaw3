@@ -60,7 +60,7 @@ from chemclaw.core.config import settings
 from chemclaw.core.metrics_bridge import record_metric
 from chemclaw.kg.note import cited_ids
 from chemclaw.retrieval.evidence import EvidenceChunk
-from chemclaw.retrieval.harness import Claim, verify_claims
+from chemclaw.retrieval.harness import Claim, groundable_ids, verify_claims
 
 logger = logging.getLogger(__name__)
 
@@ -194,8 +194,10 @@ def _deterministic_result(answer: str, evidence: list[EvidenceChunk]) -> Verific
     supported, _discarded = verify_claims([Claim(text=body, citations=citations)], evidence)
     is_ok = bool(supported)
     # On a miss, name the citation that actually failed to resolve (the fabricated one), not
-    # citations[0] — which may be a valid citation when only a later one is unretrieved.
-    retrieved = {chunk.source_note_id for chunk in evidence}
+    # citations[0] — which may be a valid citation when only a later one is unretrieved. The same
+    # id set `verify_claims` grounds against, so a document citation the gate accepts is never
+    # named as the offender here.
+    retrieved = groundable_ids(evidence)
     offending = next((c for c in citations if c not in retrieved), citations[0])
     return VerificationResult(
         claims=[ClaimCheck(text=body, supported=is_ok, cited_note_id=offending)],

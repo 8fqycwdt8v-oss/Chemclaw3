@@ -17,7 +17,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 from chemclaw.core.ids import stable_hash
-from chemclaw.kg.note import Note, require_note_slug, strip_links
+from chemclaw.kg.note import Note, require_note_slug, split_link, strip_links
 from chemclaw.retrieval.evidence import EvidenceChunk, SourceRetriever
 from chemclaw.retrieval.fanout import sweep_sources
 
@@ -198,6 +198,22 @@ async def gather_section(
     )
 
 
+def groundable_ids(evidence: list[EvidenceChunk]) -> set[str]:
+    """Every id a citation may ground against: each chunk's source id, plus its colon-split half.
+
+    `source_note_id` is not always a note id: document chunks carry `<retriever>:<doc>#<ordinal>`
+    (`retrievers._document_chunks` explains the shape). A wikilink citing one —
+    `[[docs:abc123#4]]` — is partitioned by `cited_ids` at the first colon into a relation and an
+    id, so the citation arrives as `abc123#4` and could never equal the stored id: measured, every
+    document citation in an answer scored as ungrounded while the note-id citations beside it
+    passed. Adding each stored id's own split half makes the two extractions meet in the middle
+    without special-casing any retriever's naming, and note ids are unchanged — a slug cannot
+    contain a colon, so its split half is itself.
+    """
+    ids = {chunk.source_note_id for chunk in evidence}
+    return ids | {split_link(stored)[1] for stored in ids}
+
+
 def verify_claims(
     claims: list[Claim], evidence: list[EvidenceChunk]
 ) -> tuple[list[Claim], list[Claim]]:
@@ -212,7 +228,7 @@ def verify_claims(
     by construction, but LLM-written *claims about* that evidence are only trustworthy once
     checked here, which is why the guard lives in code, tested, not left to the prose step.
     """
-    known = {chunk.source_note_id for chunk in evidence}
+    known = groundable_ids(evidence)
     supported: list[Claim] = []
     discarded: list[Claim] = []
     for claim in claims:

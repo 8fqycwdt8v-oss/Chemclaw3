@@ -12,7 +12,7 @@ interface with swappable backends (in-memory for tests, Postgres for real), and
 
 import logging
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import datetime
 from typing import Any, Protocol, runtime_checkable
 
@@ -281,6 +281,10 @@ class InMemoryStore:
     async def put(self, stored: StoredResult) -> None:
         """Persist `stored`, overwriting any existing result for its key."""
         self._data[stored.key.as_str()] = stored
+
+    async def known(self, keys: Sequence[str]) -> set[str]:
+        """Which of `keys` the cache holds — parity with the Postgres store's existence probe."""
+        return {key for key in keys if key in self._data}
 
     async def find(self, query: CalculationQuery) -> list[StoredResult]:
         """Return results matching `query`, newest first, capped at `query.limit`.

@@ -254,6 +254,49 @@ async def unresolved_citations(
     ]
 
 
+def calc_citations(notes: list[Note]) -> list[tuple[str, str]]:
+    """Every `(source id, calculation key)` a note's `calc_refs` cites.
+
+    The calculation half of what `external_citations` does for reaction ids. `_calc_ref_shape`
+    checks the *form* of a key at parse time and concedes in its own comment that existence "is a
+    question only a database can answer" — and until this pair of functions, nothing asked it.
+    A transposed digit in a hash merged silently and indexed (`crosslink.calc_ref_index`) a key no
+    calculation ever produced, so `find_notes_for_calculation` simply never returned the note.
+    """
+    return sorted((note.id, ref) for note in notes for ref in note.calc_refs)
+
+
+@runtime_checkable
+class CalculationExistence(Protocol):
+    """The one question this check asks of the calculation cache.
+
+    Declared here rather than imported for the reason `RecordExistence` gives: `science.calc`
+    must not be a `kg` dependency for a one-method need. `cli.validate_kg`, which is allowed to
+    see both layers, supplies the store.
+    """
+
+    async def known(self, keys: Sequence[str]) -> set[str]:
+        """Which of `keys` the calculation store holds."""
+        ...
+
+
+async def unresolved_calc_refs(
+    citations: list[tuple[str, str]], store: CalculationExistence
+) -> list[str]:
+    """Report the `calc_refs` whose calculation `store` does not hold.
+
+    Raises on an unreachable database exactly as `unresolved_citations` does, and for the same
+    reason: the caller decides what an unrunnable check means.
+    """
+    known = await store.known([key for _, key in citations])
+    return [
+        f"note {source!r} cites calculation {key!r} in calc_refs, and the calculation store "
+        "does not hold that key"
+        for source, key in citations
+        if key not in known
+    ]
+
+
 def _registry_problems(
     values: Iterable[tuple[Note, Path, str]],
     registry: frozenset[str],
