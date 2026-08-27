@@ -79,58 +79,57 @@ the same file. Nothing here can reach them — `message_pairing` is imported laz
 
 # Plan-visibility + verifier-probe fixes (this session)
 
-Findings from the Claude-Science comparison investigation, scoped to what is actionable now.
+# The three deferred items — plan approved 2026-08-27
 
-## Chemclaw3 (backend)
+Step 0 probed the environment's credential: **live** (the 2026-08-25 401 is gone), so Track A
+takes the live-measurement path.
 
-- [x] 1. Emit `ApprovalRequestEvent(approval_id="")` at end of a plan-gated turn whose current
-      plan is non-empty and unapproved — the UI's `PlanApprovalPrompt` already mounts on exactly
-      that shape (`events.py:198` documents it; nothing produced it). Helper in `api/runner.py`,
-      wording constant beside the gate's other wording in `agent/plan_gate.py`. Never raises.
-- [x] 2. Verifier pre-flight capability probe (BACKLOG row, `agent/verifier.py:372` bare except):
-      `require_verifier_capability()` in `agent/verifier.py`, wired in `api/app.py::_lifespan`,
-      fail-loudly-at-startup posture of `_require_anthropic_key`. Only when `verifier_enabled`
-      and `llm_provider == "openai_compatible"` (Anthropic unaffected, per the row).
-- [x] 3. Delete the BACKLOG row in the same commit (repo rule).
-- [x] 4. Tests: runner emission (gated+unapproved → event before answer; approved → none;
-      classic → none); probe against `_FakeOpenAiEndpoint` (compliant → pass, 400 → raise,
-      prose → raise, disabled/anthropic → no-op).
-- [x] 5. `make lint type test` green with Postgres up; note skip count.
+## Track B — job↔plan-step linkage (this repo)
 
-## Chemclaw3_ui (frontend)
+- [x] ADR `D-2026-08-27-a-job-names-the-step-it-serves` + ledger row
+- [x] `core/plan_context.py` — ambient `(plan_step, plan_hash)`, the `session_context` pattern
+- [x] `agent/plan_link.py` — `stamp_plan_link` middleware (first `in_progress` todo +
+      `plan_identity`), attached in `langgraph_agent.tool_governance_middleware` whenever the
+      harness runs (innermost, inside the gate)
+- [x] `ConnectorJobInput`/`JobRecord`/`JobRecordSummary` gain `plan_step`(+`plan_hash`); store
+      columns + migration `057_job_plan_step.sql` (additive, defaulted)
+- [x] `JobSignal`/`record_job_started` fold the ambient step in; `JobStartedEvent.plan_step`;
+      `graph_stream` maps it
+- [x] Tests: `tests/test_plan_link.py` (7), launch stamp + empty stamp in
+      `test_connector_jobs.py`, Postgres round-trip + listing in `test_job_record_postgres.py`
+- [x] BACKLOG §3 row deleted in this change
+- [ ] `make lint type test` green, PR, auto-merge
 
-- [x] 6. Parse the `[x] `/`[ ] ` prefix the backend deliberately renders into real checkbox
-      state in `PlanChecklist` (MessageList) and the `plan` trace row (TracePanel) — one shared
-      helper; unprefixed lines stay plain (the GET /plan route returns bare content).
-- [x] 7. Rehydrate: after `hydrateTranscript`, fetch `GET /sessions/{id}/plan` and attach the
-      current plan to the last assistant message so the checklist survives a reload (silent on
-      any failure — older service, no plan).
-- [x] 8. Tests: prefix parsing (checked/unchecked/plain), approval card mounts from an
-      `approval_request` with empty `approval_id`, rehydrated plan renders.
-- [x] 9. `npm run typecheck && npm run lint && npm test` green.
+## Track B UI — plan checklist job chips (Chemclaw3_ui)
 
-## Ship
+- [ ] `shared/events.ts` `JobStartedEvent.plan_step` + helpers builder default
+- [ ] chatStore job feed carries `planStep`; `PlanItems` badges the matching row
+      (spinner running, ✓/✕ on completion/failure via job_id join)
+- [ ] Tests; typecheck/lint/vitest green; PR, auto-merge
 
-- [x] 10. PR per repo on `claude/claude-science-chemclaw-vt4vqi`, auto-merge, delete branch.
+## Track A — verifier opt-in + judge margin (this repo)
 
-## Deliberately not done (and why)
+- [ ] Chart/runbook opt-in surface (commented `CHEMCLAW_VERIFIER_*` in values.yaml naming the
+      startup probe + the reproducibility caveat) + values-prose pin in `test_helm_chart.py`
+- [ ] `infra/live` margin measurement: re-roll flagged answers 3×, measure flip rate/margin near
+      threshold 0.7
+- [ ] Hysteresis band from the measured width (`verifier_review_band`, re-roll majority inside the
+      band only) + `chemclaw_verifier_band_rerolls_total`; ADR; delete the DEFERRED
+      reproducibility row in the same commit
+- [ ] Correct the stale BACKLOG §5 "API-KEY is present and rejected" row (re-measured live
+      2026-08-27)
 
-- `harness_enabled`/`verifier_enabled` defaults stay off — deliberate deployment opt-ins,
-  documented in `core/config/agent.py` / ADRs; flipping them is a deployment decision.
-- Job↔plan-step linkage — tracked BACKLOG design task (needs a design, not a patch).
-- Trajectory→skill distillation — standing BACKLOG row requires a measurement on a deployment
-  with real sessions first; corpus measured empty 2026-08-25.
+## Track C — trajectory census instrument (this repo)
 
-## Review
+- [ ] ADR defining "recurring trajectory" + the trigger numbers that would greenlight the
+      distillation generator (which stays unbuilt until a real corpus exists)
+- [ ] `chemclaw.cli.trajectory_census` + `make trajectory-census`; offline tests with fixture rows
+- [ ] Delete the duplicate "Memory records…" BACKLOG row; point the surviving row at the
+      instrument
 
-- Backend gate: `make lint` green, `make type` green, `make test` **4902 passed, 3 skipped**
-  against a live migrated Postgres (dockerd + `make up` + `make db-migrate` first, per CLAUDE.md —
-  the 3 skips are environment edges, not the ~216-test offline hole).
-- UI gate: `tsc -b`, `eslint`, vitest **454 passed** (11 new).
-- One process mistake caught mid-flight: a persisted `cd` from a compound command made the UI's
-  commit land in this repo first; amended in place before the PR opened (own branch, no history
-  anyone held). Lesson: `pwd` before `git commit` when two repos are in play.
-- The two fixes were both "a control that existed on paper": the approval card's event was
-  documented on both sides and produced by neither, and the verifier's degradation path was
-  measured, written into BACKLOG, and left silent. Emitting the event / probing at startup were
-  each ~40 lines; the tests are the bulk.
+## Deliberately not done (user-confirmed 2026-08-27)
+
+- Code defaults for `harness_enabled`/`verifier_enabled` stay `False` — the chart is the opt-in
+  surface (harness already on there).
+- No explicit `plan_step` tool argument — rejected in the ADR with its reopen condition.
+- No distillation generator, no synthetic corpus — the ADR defines the greenlight numbers.

@@ -282,15 +282,6 @@ it happens.
       `asyncio.to_thread` with no `wait_for` at all, so one pathological file can hold the sync
       activity indefinitely; giving it the bound the front door already has is ~10 lines.
 
-- [ ] **A surface cannot tell a waiting plan from a stalled one** — [M], **restated**. This row used
-      to say the LangGraph rebuild "did not carry" an `awaiting-job:` marker. It was deleted on
-      purpose, twice (`D-2026-08-11`, re-confirmed `D-2026-08-12`), and `agent/state.py:16-29` is
-      the docstring saying so. It cannot be cleanly restored either: `Todo` is upstream's TypedDict
-      written by a model-facing tool, and prefixing `content` would perturb `plan_identity`'s hash
-      so an approved plan revokes its own approval the moment it starts a job. What is genuinely
-      missing is any **link from a job to a plan step** — the surface gets `JobStartedEvent` and
-      `job_records` but nothing joins them to a todo. That is a design task.
-
 - [ ] **The digest is written to a mailbox with no reader, and the watermark advances anyway** —
       [L]. `durable/digest.py:146-166` writes to `session_events` under session id `digest-<owner>`
       with `kind="digest"`, and the only consumer in the tree is `GET /sessions/{id}/events`, which

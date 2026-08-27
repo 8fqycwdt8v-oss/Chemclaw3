@@ -59,6 +59,11 @@ class JobRecord(BaseModel):
     requested_by: str = Field(min_length=1)
     session_id: str = ""
     correlation_id: str = ""
+    # The plan step this run served and the plan revision it belonged to (D-2026-08-27) — the join
+    # a surface needs to tell a step waiting on a job from a plan that stalled. Empty means the
+    # run was not launched from a plan step, never that the fields were forgotten.
+    plan_step: str = ""
+    plan_hash: str = ""
     payload: dict[str, Any] = Field(default_factory=dict)
     summary: str = ""
     result: dict[str, Any] = Field(default_factory=dict)
@@ -101,6 +106,9 @@ class JobRecordSummary(BaseModel):
     rationale: str
     summary: str
     note_id: str = ""
+    # The plan step the run served (D-2026-08-27), in the listing so "which step was this for"
+    # needs no second lookup. Empty when the run was not launched from a plan step.
+    plan_step: str = ""
     completed_at: datetime | None = None
 
 
