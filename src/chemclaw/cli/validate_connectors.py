@@ -2,8 +2,9 @@
 
 `make connector-validate`, the gate that keeps a connector's *declaration* honest — the same job
 `make skill-validate` does for `SKILL.md` and `make kg-validate` does for notes. Pydantic already
-rejects a malformed manifest at load; this gate catches the four things a per-file schema cannot
-see:
+rejects a malformed manifest at load; this gate catches what a per-file schema cannot see. No count
+is written here: the sentence said "four" over five numbered rules and then over six, which is the
+drift `CLAUDE.md` records about a target count that read 23 while the file held 28.
 
 1. **An enabled connector that does not exist.** `connectors_enabled` naming a missing bundle would
    otherwise advertise nothing at run time and look like a capability that quietly stopped working.
@@ -19,21 +20,38 @@ see:
    to its allow-list would hand the model a write path around the PR-gate.
 4. **A job that cannot be built.** A `params_model` reference that does not resolve, or two
    connectors claiming the same job name, fails here rather than when a chemist first calls it.
-5. **A tool the server serves and the manifest never mentions.** Everything above reads the
-   manifest, so none of it could see the gap between what a bundle *declares* and what its MCP
-   server actually *answers*. `molfp` and `rxnfp` each served an `index_*` write tool that no
-   manifest named: not on `tools` (correct, D-029), but not in `state_changing`/`read_only` either,
-   so `_check_classification` never saw it and nothing else looked. A connector authenticates
-   nothing by design — the network policy is the boundary — so an undeclared tool on `/mcp` is
-   reachable by anything that can open a socket to that pod. Proved by completing an anonymous MCP
-   handshake against the real app and writing a row into `molecule_fingerprints`, the table the
-   report path cites as lab precedent.
+5. **A disagreement between what a bundle declares and what its server serves — in either
+   direction.** Everything above reads the manifest, so none of it could see that gap at all.
+   *Served and undeclared*: `molfp` and `rxnfp` each served an `index_*` write tool that no
+   manifest named — not on `tools` (correct, D-029), but not in `state_changing`/`read_only`
+   either, so `_check_classification` never saw it and nothing else looked. A connector
+   authenticates nothing by design — the network policy is the boundary — so an undeclared tool on
+   `/mcp` is reachable by anything that can open a socket to that pod. Proved by completing an
+   anonymous MCP handshake against the real app and writing a row into `molecule_fingerprints`,
+   the table the report path cites as lab precedent. *Declared and unserved* is the mirror image
+   and was the half this rule computed no answer for: a phantom tool passes into
+   `available_tool_names()`, which is the one set the other three validators resolve names
+   through, so it is green everywhere and fails at call time.
+
+6. **A `connector_urls` key naming no discovered bundle.** A typo'd key is silently ignored by
+   `_endpoint_url`, which falls back to the manifest's dev-loopback default — unreachable in a
+   cluster. The symptom is a WARNING plus a degraded `/readyz`, indistinguishable from a transient
+   outage, so a configuration bug presents as an infrastructure problem.
+
+**What this gate cannot cover, and says so.** The direction that needs a server to ask only works
+for a bundle whose server is in this tree. `chem` and `safety` declare an endpoint and ship no
+`server/` here (D-2026-08-09), so their `tools:` lists are unverifiable offline;
+`unverified_tool_surfaces` names them on both the passing and the failing path rather than letting
+a shrinking check hide behind an unchanged green line. `Chemclaw3-mcp`'s own
+`assert_manifest_matches` is where those are checked, against the running server.
 
 Read-only; touches nothing.
 """
 
+import argparse
 import asyncio
 import inspect
+from collections.abc import Sequence
 from importlib import import_module
 from pathlib import Path
 from typing import Any
@@ -108,7 +126,7 @@ def _tool_surface_problems(manifest: ConnectorManifest) -> list[str]:
 
 
 def _served_tool_problems(manifest: ConnectorManifest) -> list[str]:
-    """Refuse a tool the bundle's MCP server serves that its manifest never declares (rule 5).
+    """Refuse any disagreement between what a bundle declares and what it serves (rule 5).
 
     The only check here that reads the *running server* rather than the YAML. Everything the other
     rules know comes from the manifest, which is precisely why an undeclared tool was invisible to
@@ -124,10 +142,13 @@ def _served_tool_problems(manifest: ConnectorManifest) -> list[str]:
     exposes it, for the ingestion path") described a state the schema cannot express, which is why
     the only place it was ever written down was a comment.
 
-    So `tools` is the served set, and the two must agree exactly. A capability that genuinely must
-    not be on the agent's surface is a `jobs:` entry — which core authorizes, dry-run-gates and
-    attributes — or a core PR-gate tool. That is D-029's actual shape; an undeclared MCP tool was
-    never the third option it looked like.
+    So `tools` is the served set, and the two must agree exactly — **both differences are
+    computed**, which they were not: this reported `served - declared` and left `declared - served`
+    uncalculated while stating the rule as an equality. A capability that genuinely must not be on
+    the agent's surface is a `jobs:` entry — which core authorizes, dry-run-gates and attributes —
+    or a core PR-gate tool. That is D-029's actual shape; an undeclared MCP tool was never the
+    third option it looked like, and a declared one nothing serves was never a way to reserve a
+    name.
 
     A bundle with no server module is not a violation: `results` is job-only, and its capability
     is a
@@ -170,13 +191,55 @@ def _served_tool_problems(manifest: ConnectorManifest) -> list[str]:
             "The declared tools stay unverified against the running surface until it is restored"
         ]
     served = {tool.name for tool in asyncio.run(server.list_tools())}
-    return [
+    declared = set(manifest.endpoint.tools)
+    undeclared = [
         f"connector {manifest.name!r}: tool {tool!r} is served on /mcp but the manifest does not "
         "declare it — connectors authenticate nothing by design, so an undeclared tool is callable "
         "by anything that can reach the pod, around every gate core applies. Declare it in `tools` "
         "(and classify it), or make it a `jobs:` entry, or stop serving it"
-        for tool in sorted(served - set(manifest.endpoint.tools))
+        for tool in sorted(served - declared)
     ]
+    unserved = [
+        f"connector {manifest.name!r}: tool {tool!r} is declared in `tools` but the bundle's "
+        "server does not serve it — core advertises it to the model, every other validator "
+        "resolves names through it, and the call fails at the MCP server. Serve it, or take it "
+        "off `tools` (and out of `read_only`/`state_changing`)"
+        for tool in sorted(declared - served)
+    ]
+    return [*undeclared, *unserved]
+
+
+def unverified_tool_surfaces() -> dict[str, list[str]]:
+    """Endpoint-bearing bundles whose declared tools nothing here can check, by connector.
+
+    The declared→served direction above needs a server to ask, and two shipped bundles have none:
+    `chem`'s and `safety`'s capabilities are `Chemclaw3-mcp`'s, and what stays here is the manifest
+    (D-2026-08-09). Their `tools:` lists are therefore unverifiable offline — not wrong, unasked.
+
+    Reported rather than raised, and reported rather than left silent, for the reason
+    `validate_templates.unchecked_arguments` gives about the identical blind spot in the argument
+    check: failing would force deleting a correct manifest to make a validator pass, and staying
+    quiet would make "connector validation passed." mean less than it did the day before with
+    nothing in the output saying so. A phantom tool in one of these lists is caught by
+    `Chemclaw3-mcp`'s own `assert_manifest_matches`, against the running server — which is the only
+    place it *can* be caught.
+    """
+    try:
+        found = discovered()
+    except ConnectorError:
+        return {}  # already reported as a problem by `validate_connectors`
+    unverified: dict[str, list[str]] = {}
+    for _bundle, manifest in found.values():
+        if manifest.endpoint is None:
+            continue
+        try:
+            if server_tools_module(manifest.name) is not None:
+                continue
+        except Exception:
+            continue  # a broken server module is a problem, not an unverified surface
+        if manifest.endpoint.tools:
+            unverified[manifest.name] = sorted(manifest.endpoint.tools)
+    return unverified
 
 
 def _precondition_problems(connector: str, job: JobSpec) -> list[str]:
@@ -279,7 +342,7 @@ def _job_problems(manifest: ConnectorManifest) -> list[str]:
 
 
 def _connector_urls_problems(discovered_names: set[str]) -> list[str]:
-    """Check that every key in `connector_urls` names a discovered bundle (rule 5).
+    """Check that every key in `connector_urls` names a discovered bundle (rule 6).
 
     A typo'd key is silently ignored by `_endpoint_url`, falling back to the manifest's
     dev-loopback default, which is unreachable in a cluster. The symptom is a WARNING plus a
@@ -312,7 +375,7 @@ def validate_connectors() -> list[str]:
         problems.extend(_tool_surface_problems(manifest))
         problems.extend(_served_tool_problems(manifest))
         problems.extend(_job_problems(manifest))
-    # Check that connector_urls configuration is valid (rule 5).
+    # Check that connector_urls configuration is valid (rule 6).
     problems.extend(_connector_urls_problems(discovered_names))
     try:
         # Two properties of the enabled *set*, not of any one manifest: `connectors_enabled` naming
@@ -345,9 +408,30 @@ def validate_connectors() -> list[str]:
     return problems
 
 
-def main() -> int:
-    """Validate every connector bundle; print problems and exit non-zero if any (the CI gate)."""
+def main(argv: Sequence[str] | None = None) -> int:
+    """Validate every connector bundle; print problems and exit non-zero if any (the CI gate).
+
+    The unverified-surface note prints on both paths, because it qualifies a pass exactly as much
+    as it qualifies a failure — and the reader who only ever sees the green line is the one it is
+    for. Same reasoning, and same shape, as `validate_templates`' unchecked-argument note.
+
+    Parses even though it declares no option: not parsing is not neutral — this used to accept a
+    directory on the command line, discard it, and print the green line about the *configured*
+    bundles. `CHEMCLAW_CONNECTORS_DIR` is the knob and is a `PATH`-style list, so it stays the one
+    spelling; argparse turns the wrong one into a refusal and supplies `--help`.
+    """
+    argparse.ArgumentParser(
+        prog="python -m chemclaw.cli.validate_connectors",
+        description="Validate every discovered connector bundle. Set CHEMCLAW_CONNECTORS_DIR "
+        "(a PATH-style list) to point this at another tree.",
+    ).parse_args(argv)
     problems = validate_connectors()
+    for name, tools in sorted(unverified_tool_surfaces().items()):
+        print(
+            f"note: connector {name!r} declares {tools} and is served by a server this tree does "
+            "not hold — declared tools name-checked here, agreement with the running surface "
+            "checked in Chemclaw3-mcp"
+        )
     if problems:
         print("connector validation failed:")
         for problem in problems:

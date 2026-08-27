@@ -8,7 +8,7 @@ sections shared a single module (D-072 mixins, split per D-156).
 
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings
 
 
@@ -36,6 +36,10 @@ class ServiceSettings(BaseSettings):
     # deployment is a conscious decision (one loud env var), never a default. Loopback dev and
     # Entra-enforced deployments never need it.
     service_allow_insecure: bool = False
+    # A comma-separated allow-list of browser origins. Empty (the default) is *no* cross-origin
+    # access; `*` is refused below, because it is the one value that turns an allow-list into no
+    # list at all and there is no deployment that needs it — a same-origin embedded UI needs none,
+    # and a browser client that does need access has an origin to name.
     service_cors_origins: str = ""
     # How many uvicorn worker *processes* the container starts (`deploy/entrypoint.sh`). One
     # asyncio event loop saturates one CPU, and a load test measured throughput flat at
@@ -104,6 +108,17 @@ class ServiceSettings(BaseSettings):
     # are not gated (they are not LLM-bound).
     service_max_concurrent_turns: int = Field(default=8, gt=0)
     service_turn_admission_timeout_seconds: float = Field(default=5.0, gt=0)
+    # Threads kept *above* whatever this process's own admission caps can occupy, in the one
+    # `asyncio.to_thread` pool they all share (`core/executor.py`). They exist for the calls that
+    # are microseconds long and must never wait behind a corpus parse or an embedding: bearer-token
+    # validation on every request, a readiness probe, an SSE reconnect. Without a sized pool the
+    # loop's stock default is `min(32, cpu_count + 4)` — 8 on a 4-CPU pod, which is exactly
+    # `service_max_concurrent_turns`, so the admission cap could fill the pool on its own and
+    # authentication latency became a function of corpus size (measured: a queued short call waited
+    # 0.2 ms at 1 concurrent `load_notes`, 565.5 ms at 8, 813.4 ms at 16). The *reserved* half is
+    # derived from the caps that already exist, so raising a cap widens the pool with it; this is
+    # the only part an operator tunes, and only if short calls are seen queuing.
+    service_thread_pool_headroom: int = Field(default=8, gt=0)
     # The two numbers that turn the *per-process* cap above into the load the shared LLM endpoint
     # actually sees, because a process cannot discover either of them.
     #
@@ -261,3 +276,28 @@ class ServiceSettings(BaseSettings):
     # kubelet's own probe timeout, so the answer arrives rather than being cut off as a timeout
     # whose cause the pod never logs.
     service_readiness_db_timeout_seconds: float = Field(default=2.0, gt=0)
+
+    @field_validator("service_cors_origins")
+    @classmethod
+    def _no_wildcard_origin(cls, value: str) -> str:
+        """Refuse `*`, the one entry that makes this allow-list allow everything.
+
+        `api/middleware._add_cors` splits on commas and passes the result to `CORSMiddleware`
+        verbatim, so `*` reached `allow_origins=["*"]` with nothing between. The harm is bounded
+        today — `allow_credentials` is left False and this API authenticates with a bearer rather
+        than a cookie, so a hostile origin cannot ride a user's session — but that bound rests on
+        two properties of *other* modules, and neither is pinned anywhere. A guard rail on the knob
+        itself does not.
+
+        Checked on every entry rather than on the whole string, because the dangerous value is just
+        as dangerous in a list beside real origins.
+        """
+        for origin in (part.strip() for part in value.split(",")):
+            if origin == "*":
+                raise ValueError(
+                    "service_cors_origins may not contain '*': that allows every browser origin, "
+                    "which is the opposite of an allow-list. Leave it empty for no cross-origin "
+                    "access (the default, and what a same-origin embedded UI needs), or name the "
+                    "origins that may call this API."
+                )
+        return value

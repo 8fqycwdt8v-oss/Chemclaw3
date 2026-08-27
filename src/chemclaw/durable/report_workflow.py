@@ -26,6 +26,7 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.retrieval.harness import (
         Report,
         ReportRequest,
+        ReportSection,
         SectionRequest,
         SynthesizedSection,
         gather_section,
@@ -141,6 +142,47 @@ class ReportSectionWorkflow:
             )
 
 
+def _reconcile(
+    requested: list[ReportSection], retrieved: list[SynthesizedSection]
+) -> list[SynthesizedSection]:
+    """One section per requested section, in request order — a gap is marked, never omitted.
+
+    **The degradation contract is enforced here because it is claimed here.**
+    `ReportSectionWorkflow` degrades gracefully for the one failure it catches, `ActivityError`;
+    every other way a child can
+    end — its `execution_timeout` at `fan_out_child_timeout_seconds`, a cancellation, a failure
+    raised outside the `execute_activity` call — is *dropped* by `fan_out`, which is that helper's
+    documented contract and returns a shorter list. The draft then omitted the section while the
+    summary reported the smaller count, so a reviewer at the PR-gate could not tell a missing
+    section from one nobody asked for. Making the invariant depend on which exception a child
+    happened to raise is what made it untrue.
+
+    Matched by heading and consumed in order, so a report that legitimately repeats a heading gets
+    one placeholder for each child that did not come back rather than one for all of them.
+    """
+    by_heading: dict[str, list[SynthesizedSection]] = {}
+    for synthesized in retrieved:
+        by_heading.setdefault(synthesized.heading, []).append(synthesized)
+    reconciled: list[SynthesizedSection] = []
+    for section in requested:
+        got = by_heading.get(section.heading)
+        if got:
+            reconciled.append(got.pop(0))
+            continue
+        # Not logged again: `fan_out` already logs and counts every child it drops
+        # (`chemclaw_fan_out_children_dropped_total`). What is missing there is the *report*, and
+        # that is what this returns.
+        reconciled.append(
+            SynthesizedSection(
+                heading=section.heading,
+                memory_layer=section.memory_layer,
+                evidence=[],
+                retrieval_failed=True,
+            )
+        )
+    return reconciled
+
+
 @durable_workflow("background")
 @workflow.defn
 class DevelopmentReportWorkflow:
@@ -180,14 +222,18 @@ class DevelopmentReportWorkflow:
             ],
             id_prefix="section",
         )
-        report = Report(title=request.title, sections=sections)
+        report = Report(title=request.title, sections=_reconcile(request.sections, sections))
         # The note reference *is* this workflow's result, so the publish is not
         # best-effort — but it shares the bounded-attempts discipline (G4).
         note_ref = await publish_note(propose_report, [report, request.requested_by])
         return ConnectorJobResult(
             summary=(
-                f"Drafted {request.title!r} with {len(sections)} section(s); "
+                # `report.sections`, not the fan-out's return: after reconciliation that is one
+                # per requested section, so the count the chemist is told is the count they asked
+                # for. Reading the short list is how "Drafted 'X' with 2 section(s)" came to be a
+                # true sentence about a report that was missing one.
+                f"Drafted {request.title!r} with {len(report.sections)} section(s); "
                 f"opened for review as {note_ref}."
             ),
-            data={"note_ref": note_ref, "title": request.title, "sections": len(sections)},
+            data={"note_ref": note_ref, "title": request.title, "sections": len(report.sections)},
         )

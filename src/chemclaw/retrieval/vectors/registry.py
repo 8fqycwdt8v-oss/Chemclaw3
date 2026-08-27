@@ -60,7 +60,7 @@ def _configuration() -> tuple[str, ...]:
     return (
         settings.vector_store_provider,
         settings.vector_store_url,
-        settings.vector_store_api_key,
+        settings.vector_store_api_key.get_secret_value(),
         settings.vector_store_endpoint_name,
         str(settings.vector_store_timeout_seconds),
     )

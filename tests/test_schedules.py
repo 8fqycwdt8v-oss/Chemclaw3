@@ -176,9 +176,43 @@ def test_document_sync_schedule_is_added_only_when_a_share_is_mounted(
 
 
 def test_planned_ids_stay_inside_owned_namespace(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Every plannable id is registered in the prune namespace, else prune could miss it."""
-    monkeypatch.setattr(settings, "eval_drift_enabled", True)
-    assert {p.schedule_id for p in planned_schedules()} <= OWNED_SCHEDULE_IDS
+    """Every plannable id is registered in the prune namespace, else prune could miss it.
+
+    **With every conditional job actually turned on**, which is what makes this an assertion rather
+    than a formality. It used to enable `eval_drift_enabled` alone, so nine of the eleven
+    conditional jobs were off by default and the subset held vacuously — and `result-publish`
+    duly slipped through unregistered. `OWNED_SCHEDULE_IDS` is the only thing authorising `_prune`
+    to delete a Schedule, so an unregistered planned id is a Schedule that survives every
+    subsequent `helm upgrade` after the deployment turns its feature off, and keeps firing.
+    """
+    from chemclaw.durable import schedules as schedules_module
+
+    for flag in (
+        "eval_drift_enabled",
+        "note_reindex_enabled",
+        "digest_enabled",
+        "retention_enabled",
+        "observations_enabled",
+    ):
+        monkeypatch.setattr(settings, flag, True)
+    monkeypatch.setattr(settings, "retention_session_events_days", 30)
+    monkeypatch.setattr(settings, "artifact_store_max_bytes", 1)
+    monkeypatch.setattr(schedules_module, "share_sources", lambda: {"sharedrive": object()})
+    monkeypatch.setattr(schedules_module, "corpus_sources", lambda: {"pistachio": object()})
+    monkeypatch.setattr(schedules_module, "active_ingest_source_names", lambda: ["eln-json"])
+    monkeypatch.setattr(schedules_module, "publishing_enabled", lambda: True)
+
+    planned = {p.schedule_id for p in planned_schedules()}
+
+    # The guard is only worth anything if the plan is actually full — an empty plan is a subset of
+    # everything. Ten conditional jobs plus the two unconditional ones.
+    assert len(planned) >= 11, (
+        f"the plan is not fully enabled, so the subset below is vacuous: {sorted(planned)}"
+    )
+    assert planned <= OWNED_SCHEDULE_IDS, (
+        f"planned but not in the prune namespace: {sorted(planned - OWNED_SCHEDULE_IDS)} — "
+        "_prune can never delete these, so they outlive the setting that created them"
+    )
 
 
 def test_apply_prunes_stale_owned_schedule_only() -> None:

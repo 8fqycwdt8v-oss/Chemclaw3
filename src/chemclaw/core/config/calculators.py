@@ -121,6 +121,21 @@ class CalculatorSettings(BaseSettings):
     # on a molecule this layer cannot see. 120 is roughly six species refined over five members
     # each; past that the request wants narrowing rather than a longer timeout.
     calc_max_primitive_calls: int = Field(default=120, ge=1)
+    # The second preflight in that family, counted in *atoms* rather than in calls, because the
+    # runaway it fences is one molecule rather than a fan-out: a Hessian costs 6N single points.
+    #
+    # **The calculation server has its own ceiling and it stays authoritative** — this one exists so
+    # the refusal a chemist reads is written by the side that knows what this system offers instead.
+    # The server's own message named "Chemclaw3's durable QM job path", a route
+    # `D-2026-08-26-semiempirical-is-the-whole-tier` deleted; and there is no replacement for it,
+    # because every durable job here composes the *same* `compute_hessian` primitive under the same
+    # ceiling. Escalating changes nothing, so the honest alternatives are a cheaper level or a
+    # smaller molecule, and `science/calc/budget.py` is where they are named.
+    #
+    # Defaulted to the server's shipped `CHEMCLAW_XTB_HESSIAN_MAX_ATOMS`, deliberately not derived
+    # from it: the two are independent knobs, and a deployment that lowers this one gets a truer
+    # refusal sooner while a deployment that raises it simply falls through to the server's.
+    calc_hessian_max_atoms: int = Field(default=150, ge=1)
     # xTB semiempirical calculator (plan step 1c.2). Method is the GFN parametrization
     # (latest: GFN2-xTB). `xtb_embed_seed` fixes RDKit 3D embedding so results are
     # reproducible; it is part of the cache key so changing it recomputes.
@@ -144,8 +159,11 @@ class CalculatorSettings(BaseSettings):
     # (one species' optimization plus Hessian on a large molecule), short enough that a
     # crash is noticed in minutes rather than at the start-to-close budget.
     xtb_job_heartbeat_timeout_seconds: int = 600
-    # Thermochemistry conditions. 298.15 K and 1 atm are the reference state every
-    # tabulated thermodynamic quantity is quoted at.
+    # Thermochemistry conditions. 1 atm is the **gas-phase** reference pressure; it is not the
+    # reference state every tabulated quantity is quoted at, which is what this comment used to
+    # claim. The thermochemical standard has been 1 bar since 1982, and the standard state a
+    # chemist means in solution is 1 mol/L — which `science/calc/thermo.py` derives from the medium
+    # rather than reading from here, because it is a definition and not a deployment's choice.
     xtb_thermo_temperature_k: float = 298.15
     xtb_thermo_pressure_pa: float = 101325.0
     # Quasi-RRHO damping frequency (cm^-1, Grimme 2012): below it a vibration is treated
@@ -157,6 +175,18 @@ class CalculatorSettings(BaseSettings):
     # the finite differences, not a real imaginary mode. Above it the geometry is a
     # saddle point and the thermochemistry says so.
     xtb_imaginary_threshold_cm: float = 25.0
+    # Its counterpart on the *other* way of not being a minimum: the largest gradient component
+    # (Hartree/Angstrom) at which a geometry still counts as a stationary point. The server reports
+    # that number beside every Hessian, and without a threshold to read it against, a frequency set
+    # taken at an unrelaxed geometry is indistinguishable from one taken at a minimum — while its
+    # zero-point energy is quietly too small, because the RRHO sum drops the spurious non-positive
+    # modes such a geometry produces.
+    #
+    # 5e-4 is the convergence criterion the server's own optimizer stops at, so a geometry that came
+    # out of `relax_structure` passes by construction and only a geometry that never went through
+    # one can fail. Judged here rather than there because the verdict belongs with the arithmetic
+    # that would otherwise be reported without it.
+    xtb_stationary_gradient_tolerance: float = 5e-4
     # Reported uncertainty on a semiempirical reaction free energy, in kcal/mol.
     # Attached to every result, like `pka_uncertainty` — GFN2 reaction energies are
     # useful for comparison and poor as absolute numbers.
@@ -234,6 +264,17 @@ class CalculatorSettings(BaseSettings):
     # contribute as much as the modelled one (~0.3 log units for a diprotic acid) — which is why
     # this is a small number and not "is the pH past the pKa".
     logd_negligible_ionised_fraction: float = Field(default=0.05, gt=0, lt=0.5)
+    # Wildman-Crippen's own reported RMSE on their training set, in log units, and the *dominant*
+    # term in a logD error bar for the population this composite is allowed to serve. It sits here
+    # beside `pka_uncertainty` because it is the same kind of number: a model's published error,
+    # not a measurement of this deployment's chemistry.
+    #
+    # It is combined in quadrature with the pKa's residual carried through the
+    # Henderson-Hasselbalch derivative (`science/calc/logd.py`). Before that, `LogdResult`
+    # reported the pKa residual alone — pyridine at pH 7.4 published +/-1.4 of which the pKa
+    # contributed 0.0094, because `dlogD/dpKa` is the ionised fraction and that molecule is 0.67 %
+    # ionised.
+    crippen_logp_uncertainty: float = Field(default=0.68, gt=0)
 
     # Reaction energetics (calc.reaction, D-098): a reaction electronic energy at or
     # below this threshold (kcal/mol, negative = exothermic) is flagged for thermal-hazard

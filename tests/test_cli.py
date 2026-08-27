@@ -343,3 +343,40 @@ class _WriteTodosThenAnswer(GenericFakeChatModel):
     def bind_tools(self, tools: Any, **kwargs: Any) -> Any:
         """Accept the binding; the script already names the call."""
         return self
+
+
+def test_a_startup_failure_is_a_message_and_an_exit_code_not_a_traceback(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The single most likely first run of the only interactive entrypoint, answered properly.
+
+    `_build_cli_agent`'s docstring promises the chat model "fails with a clear message if it is
+    missing (D-037), so a credential problem surfaces here, before the prompt". The message is
+    good; `main` had no exception handling and returned `None`, so it arrived under an asyncio and
+    graph-construction stack trace — and the console script exited on the traceback rather than on
+    a code. A new operator running `make chat` without a credential got nine frames instead of the
+    one sentence naming what to export, and the same hole covered every other startup failure: an
+    unreachable checkpointer DSN, a bad `CHEMCLAW_LLM_PROVIDER`.
+    """
+
+    def _fails(_args: object) -> None:
+        raise RuntimeError("ANTHROPIC_API_KEY is not set — the Anthropic chat-client path needs it")
+
+    monkeypatch.setattr(cli, "_run", _fails)
+    assert cli.main(["--admin", "-m", "hello"]) == 1
+    assert "ANTHROPIC_API_KEY is not set" in capsys.readouterr().err
+
+
+def test_the_console_script_returns_an_exit_code_on_the_happy_path_too(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`main` hands an exit code to the console script, not `None`, in both directions.
+
+    `[project.scripts] chemclaw = "chemclaw.cli.chat:main"` — the console-script wrapper turns
+    whatever `main` returns into the process status, so a `-> None` entrypoint always exited 0 and
+    a caller had no way to tell a refused startup from an answered question except by reading the
+    traceback. Asserted beside the failure case so the error path cannot be satisfied by returning
+    1 unconditionally.
+    """
+    monkeypatch.setattr(cli, "_run", lambda _args: asyncio.sleep(0))
+    assert cli.main(["--admin", "-m", "hello"]) == 0

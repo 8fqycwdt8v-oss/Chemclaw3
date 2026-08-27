@@ -179,7 +179,9 @@ def _ionised_smiles(smiles: str | None, shift: int) -> str | None:
     return None
 
 
-def harmonic_hessian(structure: dict[str, Any], *, imaginary: bool = False) -> dict[str, Any]:
+def harmonic_hessian(
+    structure: dict[str, Any], *, imaginary: bool = False, max_gradient: float | None = 1e-4
+) -> dict[str, Any]:
     """A well-formed Hessian payload for `structure`, optionally carrying one negative eigenvalue.
 
     Not physics: a diagonal matrix whose spectrum is chosen, base64-encoded exactly as the server
@@ -187,6 +189,12 @@ def harmonic_hessian(structure: dict[str, Any], *, imaginary: bool = False) -> d
     escape it performs is a property of this repository (the key of a thermochemistry would name
     the geometry the loop settles on, which is why it was never shipped), so it has to be
     exercisable without a real saddle point.
+
+    `max_gradient` defaults to a *converged* value, because every geometry this fake is asked about
+    came out of its own `relax_structure`. It is a parameter because the second silent failure —
+    a frequency set taken at a geometry that is not a stationary point, whose zero-point energy is
+    quietly too low and whose modes show nothing wrong — has to be drivable too. `None` reproduces
+    the `xtb` binary backend, which reports no gradient beside its Hessian.
     """
     import base64
     import io
@@ -214,6 +222,7 @@ def harmonic_hessian(structure: dict[str, Any], *, imaginary: bool = False) -> d
         "solvent": structure.get("solvent"),
         "atom_count": len(structure["elements"]),
         "electronic_energy_hartree": -1.0 * len(structure["elements"]),
+        "max_gradient_hartree_per_angstrom": max_gradient,
         "hessian_npy": pack(matrix),
         "dipole_derivatives_npy": pack(np.zeros((size, 3))),
         "ir_intensities": None,

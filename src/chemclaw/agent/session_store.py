@@ -244,7 +244,14 @@ _INSERT = (
 # Row ids come back too. The repair that used to write a fixed message back to its own row is gone
 # (D-2026-08-10 §2), so what the id serves now is the caller that needs to name a row — the
 # conversion pass stamping it, and an operator reading a refusal's row number out of a log.
-_SELECT_WITH_ID = (
+#
+# **Public, and shared with the retention sweep.** `message_shape` is in the projection because the
+# pairing rule reads it, and the sweep and the transcript reader must decide "which serialization
+# is this" the same way — `message_from_row` is already the one function allowed to decide that
+# (`D-2026-08-11-what-the-removal-found`), so the SELECT that feeds it is single too. It used to be
+# written twice, byte-identically, and the destructive copy was the one living furthest from this
+# rule.
+SELECT_SESSION_ROWS = (
     "SELECT id, message, message_shape FROM session_messages WHERE session_id = %s ORDER BY id"
 )
 
@@ -374,7 +381,7 @@ class PostgresHistoryProvider:
             return []
         async with self._connection() as conn:
             async with conn.cursor() as cur:
-                await cur.execute(_SELECT_WITH_ID, (session_id,))
+                await cur.execute(SELECT_SESSION_ROWS, (session_id,))
                 rows = await cur.fetchall()
         return [message_from_row(row[1], row[2]) for row in rows]
 

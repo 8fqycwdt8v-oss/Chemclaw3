@@ -23,7 +23,7 @@ from chemclaw.kg.search import query_terms, term_coverage
 from chemclaw.retrieval.evidence import EvidenceChunk
 from chemclaw.retrieval.vector_index import IndexHit, NoteIndex, default_note_index
 from chemclaw.science.fingerprints.rxnfp.search import find_similar_reactions
-from chemclaw.science.fingerprints.store import FingerprintError, FingerprintStore, Match
+from chemclaw.science.fingerprints.store import FingerprintInputError, FingerprintStore, Match
 
 log = logging.getLogger(__name__)
 
@@ -276,6 +276,13 @@ class FingerprintReactionRetriever:
 
         A query that is not a valid reaction SMILES yields no evidence (not an error) — each
         retriever answers only what its source can, so prose queries simply return empty here.
+        **Only that**, which is why the catch below names `FingerprintInputError` rather than its
+        parent: `FingerprintError` also covers the index refusing to be searched (`cannot compare
+        fingerprints of different widths` — an index built under different parameters than the
+        query), and returning `[]` for that told a chemist the corpus holds no similar reaction.
+        The sweep's `sources_failed` channel is where that belongs, and `fanout._sweep` puts it
+        there the moment this stops swallowing it — the same correction the share, warehouse and
+        vendored halves already took.
         Each match cites the corresponding `reaction-<id>` note. Unlike the graph retriever, this
         cites from the fingerprint index, whose entries are written at ingestion while the note
         is merged separately (D-018): a reaction indexed but whose note is still pending review
@@ -304,7 +311,7 @@ class FingerprintReactionRetriever:
                     self._store, query, top_k=self._depth(page) if wanted else None
                 )
             ).hits
-        except FingerprintError:
+        except FingerprintInputError:
             return []
         if wanted:
             matches = await self._eligible(matches, wanted, page)

@@ -879,6 +879,18 @@ _DELIBERATELY_UNREAD: dict[str, dict[str, str]] = {
     "ThermochemistryResult": {
         "imaginary_displacement": "a 3N vector of refinement machinery; the tool itself nulls it",
         "lowest_wavenumbers_cm": "a derived view of `modes`, all of which are published as points",
+        "is_stationary": (
+            "the second half of `is_minimum`, which *is* published: a geometry that is not a "
+            "stationary point is not a minimum, and the flag now says so. Publishing both would "
+            "put two booleans about one finding into the record, and the one a reader acts on is "
+            "the one that already answers 'may I use this free energy?'"
+        ),
+        "max_gradient_hartree_per_angstrom": (
+            "the evidence behind that flag, in Hartree/Angstrom — deliberately not published under "
+            "the existing `max_gradient` property, which is registered in hartree/bohr and belongs "
+            "to the optimization that produced the geometry. One property name for two units is "
+            "the silent-wrong-number shape this whole registry exists to prevent"
+        ),
     },
     "ElectronicProperties": {},
     "SiteReactivityResult": {

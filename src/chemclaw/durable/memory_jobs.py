@@ -13,6 +13,7 @@ unchanged — it is the *trigger* that moved — so a chemist or an agent workfl
 there is a reason to look at what the corpus now supports.
 """
 
+import asyncio
 import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -113,25 +114,35 @@ async def all_reactions() -> list[OrdReaction]:
     return (await read_corpus()).reactions
 
 
+# Every builder is threaded, and the hop is here rather than inside `memory/jobs.py` so that module
+# stays the pure sync layer it is documented to be. Two blocking halves are covered by the one hop:
+# the clustering, which is pure CPU over the whole reaction corpus, and `_with_supersedes`'s
+# `load_notes` — a recursive `rglob` + `stat` + frontmatter parse that also takes
+# `kg.graph._corpus_lock`, a blocking `threading.RLock` whose design assumes every caller is on a
+# thread. These are coroutines on the `background-jobs` worker's single loop, which
+# `worker_max_concurrent_activities` shares with seven other activities — including `beating()`'s
+# heartbeat timers, and an activity whose heartbeat is missed is declared dead and retried from
+# zero. `MemorySynthesisWorkflow` fans all three out at once. Measured inline on a 2,000-note
+# corpus: 1,223.8 ms of loop stall against 27.0 ms threaded, for identical work.
 @durable_activity("background")
 @activity.defn
 async def build_campaign_notes_activity() -> list[Note]:
     """Detect reaction chains across the corpus and build (not publish) one campaign note each."""
-    return build_campaign_notes(await all_reactions())
+    return await asyncio.to_thread(build_campaign_notes, await all_reactions())
 
 
 @durable_activity("background")
 @activity.defn
 async def build_playbook_notes_activity() -> list[Note]:
     """Distil cross-project candidates across the corpus and build a playbook note per candidate."""
-    return build_playbook_notes(await all_reactions())
+    return await asyncio.to_thread(build_playbook_notes, await all_reactions())
 
 
 @durable_activity("background")
 @activity.defn
 async def build_optimization_notes_activity() -> list[Note]:
     """Group same-transformation runs across the corpus and build an optimization note per group."""
-    return build_optimization_notes(await all_reactions())
+    return await asyncio.to_thread(build_optimization_notes, await all_reactions())
 
 
 @durable_activity("background")

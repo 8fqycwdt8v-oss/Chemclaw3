@@ -20,6 +20,7 @@ agreement this arithmetic had before the split.
 """
 
 import json
+import math
 from pathlib import Path
 
 import pytest
@@ -84,8 +85,6 @@ def test_the_symmetry_number_shifts_the_entropy_by_exactly_r_ln_sigma() -> None:
     for the chemistry worth computing they do not — every hydrogenation consumes H2. That is why a
     reaction with any species' sigma unstated withholds its free energy instead of reporting one.
     """
-    import math
-
     structure, hessian = _recorded("water")
     at_one = thermochemistry_from_hessian(ThermoSettings(), structure, hessian)
     at_two = thermochemistry_from_hessian(ThermoSettings(symmetry_number=2), structure, hessian)
@@ -271,3 +270,105 @@ def test_an_empty_ensemble_is_refused_rather_than_weighted() -> None:
         ensemble_from_members(
             empty, smiles="O", search="conformers", temperature_k=298.15, max_members=10
         )
+
+
+# --- the standard state a free energy is quoted at ---------------------------------------------
+
+
+def _standard_state_correction_kcal(temperature_k: float) -> float:
+    """RT ln(RT c0 / P0) in kcal/mol, derived here from CODATA and nothing in `src/`.
+
+    The gas-phase standard state is 1 atm and the solution one a chemist means by "ΔG in THF" is
+    1 mol/L. For an ideal gas G(P) = G°(P°) + RT ln(P/P°), and the pressure of one mole per litre
+    is c0·R·T — so moving one mole of species between the two states costs exactly this, whatever
+    the molecule weighs. The reference number this file asserts against is written out rather than
+    imported so that a defect in the code under test cannot also produce the expectation.
+    """
+    gas_constant = 8.314462618  # J/(mol K), CODATA
+    standard_pressure = 101325.0  # Pa, 1 atm
+    molar_concentration = 1000.0  # mol/m^3, 1 mol/L
+    ratio = molar_concentration * gas_constant * temperature_k / standard_pressure
+    return gas_constant * temperature_k * math.log(ratio) / 4184.0
+
+
+def test_a_solution_phase_free_energy_is_quoted_at_the_one_molar_standard_state() -> None:
+    """A solution ΔG at the *gas* standard state is wrong by 1.894 kcal/mol per mole of species.
+
+    The whole difference lives in the volume factor of the translational partition function, so it
+    is exactly RT ln(RT c0/P0) per species and independent of the mass — which is what makes it
+    cancel for Δn = 0 and dominate for a dissociation or an association. The electronic energy came
+    back from an ALPB implicit-solvent SCF, so the phase is not a caller's preference: the Hessian
+    payload says which medium it was taken in, and that is what decides the reference state.
+    """
+    structure, gas = _recorded("water")
+    in_solution = gas.model_copy(update={"solvent": "thf"})
+
+    dry = thermochemistry_from_hessian(ThermoSettings(symmetry_number=2), structure, gas)
+    wet = thermochemistry_from_hessian(ThermoSettings(symmetry_number=2), structure, in_solution)
+
+    expected = _standard_state_correction_kcal(298.15)
+    shift = wet.gibbs_correction_kcal - dry.gibbs_correction_kcal
+    print(f"G(1 M) - G(1 atm) = {shift!r}  against  RT ln(RT c0/P0) = {expected!r}")
+    assert expected == pytest.approx(1.8943284454483122, abs=1e-12)
+    assert shift == pytest.approx(expected, abs=1e-9)
+
+    # The state travels with the number: a free energy without it is not a quantity anyone can use.
+    assert dry.standard_state == "gas-1atm"
+    assert wet.standard_state == "solution-1M"
+    # Enthalpy is untouched — translational *energy* is 1.5RT at any pressure. Only S and G move.
+    assert wet.enthalpy_hartree == pytest.approx(dry.enthalpy_hartree, abs=1e-12)
+    # ...and the entropy falls by exactly R ln(RT c0/P0), the same term read as -T dS.
+    entropy_shift = dry.entropy_cal_per_mol_k - wet.entropy_cal_per_mol_k
+    assert entropy_shift == pytest.approx(expected * 1000.0 / 298.15, abs=1e-6)
+
+
+def test_a_gas_phase_hessian_is_unmoved_by_the_solution_correction() -> None:
+    """The correction follows the phase, so nothing computed in vacuum shifts.
+
+    Guards the direction of the fix: applying a 1 M reference to a gas-phase calculation would
+    break every tabulated comparison this file makes against NIST, which quotes 1 atm.
+    """
+    structure, gas = _recorded("carbon_dioxide")
+    result = thermochemistry_from_hessian(ThermoSettings(symmetry_number=2), structure, gas)
+    assert result.standard_state == "gas-1atm"
+    assert result.pressure_pa == pytest.approx(101325.0)
+    assert result.entropy_cal_per_mol_k == pytest.approx(51.06, abs=0.3)
+
+
+def test_a_frequency_set_taken_off_a_stationary_point_says_so() -> None:
+    """The silent half of "not a minimum": no imaginary mode, and a meaningless zero-point energy.
+
+    `_vibrational` sums over **positive** wavenumbers only, so the small spurious modes a
+    non-stationary geometry produces are dropped rather than flagged, and the ZPE that comes out is
+    quietly too low. Nothing in the frequencies shows it — which is why the calculation server
+    reports the gradient it already had beside every Hessian, and why dropping that field on this
+    side left the failure with no witness at all.
+
+    Driven off water's recorded minimum, so the only thing that changes between the two results is
+    the gradient: same matrix, same modes, same ZPE — and one of them is a claim about a minimum
+    while the other is not.
+    """
+    structure, hessian = _recorded("water")
+    unrelaxed = hessian.model_copy(update={"max_gradient_hartree_per_angstrom": 0.05})
+    result = thermochemistry_from_hessian(ThermoSettings(symmetry_number=2), structure, unrelaxed)
+
+    assert result.max_gradient_hartree_per_angstrom == 0.05
+    assert result.is_stationary is False
+    assert not result.imaginary_frequencies_cm, "this geometry has nothing wrong with its modes"
+    assert not result.is_minimum, "a geometry that is not stationary is not a minimum"
+
+
+def test_a_backend_that_reports_no_gradient_leaves_stationarity_unassessed() -> None:
+    """`None` is not `False`: the `xtb` binary sends no gradient, and silence is not evidence.
+
+    The recorded fixtures predate the field entirely, which is the same case a `calculation_results`
+    row written before the server returned it presents. Both must fall back to the verdict the
+    frequencies alone support, rather than degrading a real minimum into a suspect one.
+    """
+    structure, hessian = _recorded("water")
+    assert hessian.max_gradient_hartree_per_angstrom is None
+
+    result = thermochemistry_from_hessian(ThermoSettings(symmetry_number=2), structure, hessian)
+
+    assert result.is_stationary is None
+    assert result.is_minimum

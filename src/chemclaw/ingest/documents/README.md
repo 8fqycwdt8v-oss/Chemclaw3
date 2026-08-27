@@ -29,7 +29,7 @@ whole document-parsing stack in the process that serves conversations — the de
 for `calc` and fixed with its `specs.py`/`results.py` split.
 `tests/test_datasource_isolation.py` holds it in a subprocess.
 
-## Five things to know before changing anything here
+## What to know before changing anything here
 
 **The share is mounted, never called.** Everything takes a POSIX path. There is no SMB client, no
 credential in Python, and no new egress host (D-089) — a CIFS PersistentVolume is the platform's

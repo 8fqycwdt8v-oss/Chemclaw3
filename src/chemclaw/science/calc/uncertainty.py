@@ -10,9 +10,13 @@ RMSE attached, and the `calculation-selection` skill had nothing machine-readabl
 
 *How wrong is this likely to be?* — `uncertainty`, and `method` says how it was obtained.
 `reported` is the model's published error, a constant that knows nothing about *this* molecule.
-`propagated` is an input's uncertainty carried through arithmetic (`logd` does this from the pKa
-calibration). The distinction matters to a reviewer: a constant RMSE is a claim about a paper's
-test set rather than about this system's chemistry.
+`propagated` is an input's uncertainty carried through arithmetic — `logd` combines Crippen's
+reported RMSE with the pKa calibration's residual *scaled by the Henderson-Hasselbalch derivative*,
+which is the ionised fraction. The scaling is the whole content of the word: copying an input's
+uncertainty into an output is not a propagation, it is a number with the shape of one, and it was
+overstating a barely-ionised base's bar by 150x while omitting the term that dominated it. The
+distinction matters to a reviewer: a constant RMSE is a claim about a paper's test set rather than
+about this system's chemistry.
 
 The same ticket also asked for conformal prediction "where feasible", and a split-conformal
 half-width over this deployment's own recorded residuals was written for it. It never became
@@ -31,22 +35,29 @@ distribution the residuals were drawn from.
 *Do we know?* — `None`, and it is not the same as `False`. A calculator with no declared domain
 reports "unknown", which is the honest answer and the one that keeps a reviewer's attention.
 
-**On what a domain check may honestly assert here.** The statistical applicability domain of a
-fitted model — a leverage or a descriptor-space distance — needs its training set, and this
-repository ships none. Inventing bounds and labelling them "the training ranges" would be a
-fabricated threshold, which is worse than no check. What *can* be asserted without
-the training set is the model's **structural** domain: what its terms are defined over at all. ESOL
-is a linear equation in Crippen logP over neutral single-component organic molecules; it is not that
-a salt is far from the training data, it is that the equation's inputs do not describe a salt. Those
-checks follow from the model's definition, are citable, and catch exactly the cases where a
-confident number is most wrong. The statistical half stays open and is named in the backlog rather
-than approximated.
+**On what a domain check may honestly assert.** The statistical applicability domain of a fitted
+model — a leverage or a descriptor-space distance — needs its training set, and this repository
+ships none. Inventing bounds and labelling them "the training ranges" would be a fabricated
+threshold, which is worse than no check. What *can* be asserted without the training set is the
+model's **structural** domain: what its terms are defined over at all. ESOL is a linear equation in
+Crippen logP over neutral single-component organic molecules; it is not that a salt is far from the
+training data, it is that the equation's inputs do not describe a salt. The statistical half stays
+open and is named in the backlog rather than approximated.
+
+**That check does not live here, and a copy of it here was worse than none.** The structural screen
+runs where the prediction runs — in `Chemclaw3-mcp`'s `calc` server, whose own uncertainty engine
+is called by its solubility model — and `SolubilityResult.estimate` arrives over the wire already
+carrying the verdict. This module held a line-for-line duplicate with no caller in `src/`, kept
+green by tests that called it directly: a reviewer asking "does this system refuse an ESOL
+prediction on a ferrocene?" would read it, conclude the control was here, and be wrong — and if the
+live copy regressed, every test in this repository would still have passed. That is the
+`map_to_hpc_identity` shape `CLAUDE.md` names, so it is deleted rather than kept in sympathy with
+the real one.
 """
 
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
-from rdkit import Chem
 
 from chemclaw.core.errors import ChemclawError
 
@@ -54,11 +65,6 @@ from chemclaw.core.errors import ChemclawError
 # published this model measured this spread on its own test set" and "this deployment measured this
 # spread on its own chemistry", and a reviewer weighs the two differently.
 Method = Literal["reported", "propagated", "none"]
-
-# Elements ESOL-style organic property models are parameterised over. Not a chemistry opinion — the
-# Crippen contributions and the aromatic-proportion term are defined for organic structures, and a
-# molecule outside this set is one the equation has no terms for.
-_ORGANIC_ELEMENTS = frozenset({"H", "B", "C", "N", "O", "F", "Si", "P", "S", "Cl", "Br", "I"})
 
 # How an uncertainty was obtained, in the words someone reviewing a merged note reads. Kept beside
 # `Method` so the two cannot drift: a method with no prose here would render as an empty
@@ -156,41 +162,3 @@ class Estimate(BaseModel):
         if not self.in_domain:
             return f"{text}; OUT OF DOMAIN — {'; '.join(self.domain_reasons)}"
         return text
-
-
-def structural_domain(mol: Chem.Mol) -> tuple[bool, tuple[str, ...]]:
-    """Whether a molecule is the kind of structure an organic property model is defined over.
-
-    Three checks, each following from what such a model *is* rather than from where its training set
-    happened to fall — so they are defensible without the training data this repository does not
-    ship:
-
-    - **One component.** A salt or a co-crystal is two species; a single-molecule descriptor
-      equation has no term for the counter-ion, and the answer it returns describes neither.
-    - **Neutral.** Crippen contributions and the aromatic-proportion term are parameterised for
-      neutral species. A charged form's solubility is a different physical quantity, usually by
-      orders of magnitude, which is exactly the size of error a 0.75-log RMSE hides.
-    - **Organic elements only.** An organometallic or a boron cluster has no Crippen contribution to
-      sum; RDKit returns a number regardless, assembled from whatever fragments it recognises.
-
-    Returns `(in_domain, reasons)`; `reasons` is empty when in domain.
-    """
-    reasons: list[str] = []
-    if len(Chem.GetMolFrags(mol)) > 1:
-        reasons.append(
-            "multi-component structure (salt, co-crystal or mixture); the model describes one "
-            "molecule and has no term for the counter-ion"
-        )
-    charge = Chem.GetFormalCharge(mol)
-    if charge != 0:
-        reasons.append(
-            f"net formal charge {charge:+d}; the descriptors are parameterised for neutral species "
-            "and an ionised form is a different physical quantity"
-        )
-    foreign = sorted({a.GetSymbol() for a in mol.GetAtoms()} - _ORGANIC_ELEMENTS)
-    if foreign:
-        reasons.append(
-            f"non-organic element(s) {', '.join(foreign)}; the descriptor contributions are not "
-            "defined for them and RDKit sums whatever it recognises rather than refusing"
-        )
-    return not reasons, tuple(reasons)

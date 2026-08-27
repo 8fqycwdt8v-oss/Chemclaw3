@@ -406,7 +406,7 @@ def propose_candidates(
         raise ValueError(
             f"propose_candidates needs at least {MIN_SEED_OBSERVATIONS} observations; seed first"
         )
-    _require_fresh_points_exist(problem, observations, n)
+    _require_fresh_points_exist(problem, observations)
     strategy, _ = _fitted_strategy(problem, observations, seed)
     with _translating_surrogate_errors(f"asking for {n} candidate(s)"):
         candidates = strategy.ask(n)
@@ -418,7 +418,7 @@ def propose_candidates(
 
 
 def _require_fresh_points_exist(
-    problem: OptimizationProblem, observations: list[Observation], n: int
+    problem: OptimizationProblem, observations: list[Observation]
 ) -> None:
     """Refuse an ask a finite space cannot answer, before BoFire fails on it obscurely.
 
@@ -449,8 +449,10 @@ def _require_fresh_points_exist(
         return
     run = distinct_candidate_count(observations)
     if run < space:
-        # Fresh cells remain. Fewer than `n` of them is fine — BoFire returns what it can — so the
-        # threshold here is *zero fresh points*, not `space_exhausted`'s "cannot fill a batch".
+        # Fresh cells remain. Fewer than the batch asked for is fine — BoFire returns what it
+        # can — so the threshold here is *zero fresh points*, not `space_exhausted`'s "cannot fill
+        # a batch". The batch size is deliberately not a parameter of this guard: it was one, and
+        # the body never read it.
         # That distinction matters: `space_exhausted` is the durable loop's signal to stop, and
         # borrowing it here would refuse an ask for three that could honestly answer with two.
         return
@@ -566,32 +568,6 @@ def _metric(results: Any, metric: RegressionMetricsEnum) -> float:
     return float(results.get_metric(metric).iloc[0])
 
 
-def surrogate_fit_quality(
-    problem: OptimizationProblem,
-    observations: list[Observation],
-    folds: int | None = None,
-    seed: int | None = None,
-) -> list[FitQuality]:
-    """Cross-validate the surrogate behind the recommendation, one score per objective (W5).
-
-    **This capability was refused, and a measurement reversed the refusal.** The objection was that
-    reaching `cross_validate` means naming a surrogate class here, permanently coupling us to
-    BoFire's model zoo and risking a number that describes a *different* model than the one that
-    made the recommendation. Measured (M-7), `strategy.surrogate_specs.surrogates` exposes the
-    surrogates BoFire itself chose from the domain — `MixedSingleTaskGPSurrogate` for a mixed
-    domain, `SingleTaskGPSurrogate` for a featurized one — and `cross_validate` runs straight off
-    them. So no class is named below, and the score describes *the* model.
-
-    `folds` defaults to `bo_cv_folds`. Metrics come back keyed by `RegressionMetricsEnum`, not by
-    string, so the enum is what is read.
-
-    Raises:
-        ValueError: Below the observation floor, or when the **caller** named more folds than there
-            are runs. A *defaulted* fold count adapts instead — see `_resolve_folds`.
-    """
-    return interrogate_surrogate(problem, observations, [], folds=folds, seed=seed)[1]
-
-
 def _resolve_folds(folds: int | None, n_observations: int) -> int:
     """How many folds to cross-validate over: the caller's number, or one the data can carry.
 
@@ -660,8 +636,10 @@ def interrogate_surrogate(
     **One fit, and that is the point rather than an optimization.** The score is only worth quoting
     beside a prediction if it describes the model that made it; fitting twice would give two
     identically-configured models and a sentence that was true only by construction. `predict_at`
-    and `surrogate_fit_quality` are thin wrappers over this, so no caller can accidentally take the
-    two halves from two fits.
+    is a thin wrapper over this, so no caller can accidentally take the two halves from two fits.
+    The fit-only wrapper beside it, `surrogate_fit_quality`, was deleted unreferenced on
+    2026-08-27; `predict_outcome` asks this function for both halves at once, which is the shape
+    the paragraph above is about.
 
     Raises:
         ValueError: Below the observation floor, when the caller named more folds than runs, or

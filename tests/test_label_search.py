@@ -13,9 +13,16 @@ executed half of this file.
 import asyncio
 from collections.abc import Awaitable, Callable
 
+import pytest
+
+from chemclaw.core import db
 from chemclaw.core.config import settings
 from chemclaw.science.fingerprints.molfp.fingerprint import molecule_definition
-from chemclaw.science.fingerprints.store import InMemoryFingerprintStore, PostgresFingerprintStore
+from chemclaw.science.fingerprints.store import (
+    FingerprintError,
+    InMemoryFingerprintStore,
+    PostgresFingerprintStore,
+)
 from chemclaw.science.labels.molecules import CORPUS_MOLECULES_TABLE, CorpusMolecules
 from chemclaw.science.labels.records import ReactionLabel, SpeciesLabel
 from chemclaw.science.labels.search import (
@@ -373,3 +380,122 @@ def test_the_corpus_molecule_table_is_the_fingerprint_store_pointed_elsewhere() 
         assert not await store.is_empty()
 
     asyncio.run(_run())
+
+
+# A corpus that is cheap to index and expensive to verify: long acyclic chains have no tautomers
+# to enumerate at write time, and a wildcard-chain SMARTS that can never match has to walk each of
+# them exhaustively before saying so. That asymmetry is what lets these two tests measure the
+# verify step at 300 rows in a few seconds rather than at the 5,000-row cap.
+_CHAIN_CORPUS = ["C" * i + "O" + "C" * (240 - i) for i in range(1, 301)]
+# 48 wildcards ending in a phosphorus no chain carries: every candidate is verified in full and
+# none matches, which is the shape of the query a chemist's "does anything here look like…" takes
+# when the answer is no.
+_UNMATCHABLE = "~".join(["[*]"] * 48) + "~[#15]"
+
+
+async def _drop_corpus_molecules(structures: list[str]) -> None:
+    """Delete the structures a test seeded, so the next test's similarity search never sees them.
+
+    `tests/pg.py` isolates the *run*, not the test, and `corpus_molecules` is ranked by Tanimoto by
+    `conditions_for_similar_products` — three hundred alkanes left behind are three hundred near
+    neighbours of the hexadecane the "no neighbours" assertion above relies on.
+    """
+    async with db.connection(settings.postgres_dsn) as conn:
+        await conn.execute("DELETE FROM corpus_molecules WHERE id = ANY(%s)", (structures,))
+        await conn.commit()
+
+
+async def _worst_tick_gap(
+    work: Awaitable[object], *, interval: float = 0.005
+) -> tuple[float, float]:
+    """Run `work` beside a ticker; return how long `work` took and the ticker's worst gap.
+
+    The honest measurement of "does this stall the loop": a coroutine that only *looks* concurrent
+    still lets a 5 ms ticker keep its beat, and one that computes in-line does not — the ticker's
+    worst gap is the length of the freeze every other session on the pod would have felt.
+    """
+    gaps: list[float] = []
+    stop = asyncio.Event()
+
+    async def _tick() -> None:
+        last = asyncio.get_running_loop().time()
+        while not stop.is_set():
+            await asyncio.sleep(interval)
+            now = asyncio.get_running_loop().time()
+            gaps.append(now - last)
+            last = now
+
+    ticker = asyncio.create_task(_tick())
+    await asyncio.sleep(interval * 10)  # let the ticker settle before the work starts
+    started = asyncio.get_running_loop().time()
+    await work
+    elapsed = asyncio.get_running_loop().time() - started
+    stop.set()
+    await ticker
+    return elapsed, max(gaps)
+
+
+def test_the_substructure_verify_does_not_freeze_the_event_loop() -> None:
+    """The screen's survivors are verified off the loop, so no other session's stream stalls.
+
+    This is the property `molfp.find_substructure_matches` states for its own scan and this path
+    did not have: RDKit matching ran in a list comprehension inside `async def`, so the pod's one
+    event loop stopped for the whole verify — measured at 300 rows, a 522 ms freeze of every SSE
+    stream, `/healthz` and every bearer-token validation, and the cap is 5,000 rows.
+
+    Asserted as a number rather than as "it was called in a thread", because a thread that the
+    loop then awaits synchronously would pass the second and fail a chemist.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        molecules = CorpusMolecules()
+        await molecules.add_many(_CHAIN_CORPUS)
+        try:
+            elapsed, worst = await _worst_tick_gap(molecules.containing(_UNMATCHABLE, 5000))
+        finally:
+            await _drop_corpus_molecules(_CHAIN_CORPUS)
+        # The verify really did run inside the measured window: without this the gap assertion
+        # would also pass on a screen that returned nothing.
+        assert elapsed > 0.25, f"the verify finished in {elapsed:.3f}s — it was not the work"
+        assert worst < 0.1, f"the loop was blocked for {worst * 1000:.0f} ms during the verify"
+
+    asyncio.run(_run())
+
+
+def test_a_substructure_verify_that_runs_too_long_is_cut_off_rather_than_awaited(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The verify carries the wall-clock bound the sibling scan does; without it there was none.
+
+    A short adversarial SMARTS can match for minutes whatever the record cap is, so bounding the
+    inputs is not bounding the work. The caller is released with an error naming the setting.
+    """
+    monkeypatch.setattr(settings, "substructure_match_timeout_seconds", 0.001)
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        molecules = CorpusMolecules()
+        corpus = _CHAIN_CORPUS[:30]
+        await molecules.add_many(corpus)
+        try:
+            with pytest.raises(FingerprintError, match="CHEMCLAW_SUBSTRUCTURE_MATCH_TIMEOUT"):
+                await molecules.containing(_UNMATCHABLE, 5000)
+        finally:
+            await _drop_corpus_molecules(corpus)
+
+    asyncio.run(_run())
+
+
+def test_an_oversized_substructure_query_is_refused_before_anything_is_scanned() -> None:
+    """A model-supplied SMARTS is bounded in length, the one guard this path had no reader for.
+
+    `substructure_query_max_length` existed and only `molfp.search` read it; the pattern screen —
+    reached by the `reactions_making_substructure` tool with a string the model wrote — took any
+    length at all. Asserted through `containing` rather than through `compile_query`, because the
+    claim is that the guard is on the path a tool call takes: no database is needed for this test
+    to pass, which is itself the assertion that nothing was screened and nothing was verified.
+    """
+    oversized = "~".join(["[*]"] * settings.substructure_query_max_length)
+    with pytest.raises(FingerprintError, match="CHEMCLAW_SUBSTRUCTURE_QUERY_MAX_LENGTH"):
+        asyncio.run(CorpusMolecules().containing(oversized, 5000))

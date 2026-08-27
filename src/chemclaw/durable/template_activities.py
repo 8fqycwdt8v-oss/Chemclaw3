@@ -34,7 +34,7 @@ from temporalio import activity
 
 from chemclaw.agent.profiles import AgentProfile, get_profile
 from chemclaw.agent.repeat_guard import begin_call_watch, end_call_watch
-from chemclaw.agent.state import turn_config, turn_input
+from chemclaw.agent.state import answer_text, turn_config, turn_input
 from chemclaw.agent.tool_invocation import invoke_governed
 from chemclaw.agent.turn_cost import TurnCost, record_turn_cost
 from chemclaw.agent.turn_usage import TurnUsage, llm_result_usage
@@ -583,7 +583,7 @@ async def run_agent_step(step: AgentStepInput) -> str:
                     f"template agent step {step.step_id or step.profile or 'agent'}",
                     settings.template_step_heartbeat_timeout_seconds,
                 )
-                answer = _answer_text(result)
+                answer = answer_text(result)
                 answered = True
                 return answer
         finally:
@@ -657,26 +657,6 @@ def _book_step_spend(
     ):
         if value:
             METRICS.increment(name, float(value), labels)
-
-
-def _answer_text(result: Any) -> str:
-    """The final assistant text out of a completed graph turn.
-
-    The graph returns its whole message list rather than MAF's single `response.text`, so the
-    answer is the last message's content. Joined across content blocks because a model may answer
-    in parts, and coerced with `str` so a step never fails on a shape it managed to produce.
-    """
-    messages = result.get("messages") or []
-    if not messages:
-        return ""
-    content = messages[-1].content
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        return "".join(
-            str(part.get("text", "")) if isinstance(part, dict) else str(part) for part in content
-        )
-    return str(content)
 
 
 def step_profile(profile: str | None, write_tools: Sequence[str]) -> AgentProfile:

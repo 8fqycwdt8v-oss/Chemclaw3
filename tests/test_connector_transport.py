@@ -130,7 +130,7 @@ def composite() -> Iterator[int]:
     # exist before it serves — and the tests below need the *same* values to present. Minted the
     # way `make connectors` mints them rather than by setting a literal here, so this exercises the
     # dev path instead of a parallel one.
-    ensure_dev_tokens()
+    ensure_dev_tokens()  # returns (values, preexisting); this caller only needs the side effect
     app, _urls = build_composite()
     port = _free_port()
     with _Server(app, port):

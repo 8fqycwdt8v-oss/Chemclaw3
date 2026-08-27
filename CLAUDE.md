@@ -58,8 +58,11 @@ extracted decision functions, so an authorization refusal or an audit row cannot
 engine ran; skills come from `deepagents.SkillsMiddleware` over a backend narrowed by the same
 three predicates (`agent/skill_backend.py` — the gate had to move to the backend because deepagents
 publishes skill *paths* into the prompt); the plan is `TodoListMiddleware`'s todo list, which the
-gate (`agent/plan_gate.py`) reads as it stands at that instant; the runaway cap is upstream's
-`ModelCallLimitMiddleware`, subclassed only to record that it fired (`agent/loop_cap.py`).
+gate (`agent/plan_gate.py`) reads as it stands at that instant; the runaway cap is a first-party
+`before_model` counter over `ChemclawState.model_calls` (`agent/loop_cap.py`), so the number that
+enforces the limit and the number that records it are the same number — upstream's
+`ModelCallLimitMiddleware` was tried in that slot and reverted, for the reason the M14 paragraph
+below gives.
 
 **There is no specialist team and no challenge panel** (D-2026-08-15). Both shipped off, stayed off
 in every configuration, and were deleted with the routing measurement built to decide whether the
@@ -110,8 +113,11 @@ M13 removed the dependency itself: `agent-framework-*` is out of `pyproject.toml
 green with it uninstalled, which is how that was verified. Taking it out is also what exposed
 readers that only knew the *old* stored message shape — `chemclaw.cli.explain` was rendering every
 current session's audit reconstruction blank — so `session_store.message_from_row` is now the one
-function allowed to decide which serialization a `session_messages` row holds
-(D-2026-08-11-what-the-removal-found).
+function allowed to turn a `session_messages` row back into a message
+(D-2026-08-11-what-the-removal-found). The retention sweep's deletion guard
+(`agent/message_pairing.py`) reads the same rows to decide what may be deleted, and it now *imports*
+the shape stamp instead of restating it: the stamp has exactly one definition, in
+`agent/message_migration.py`, and `tests/test_message_pairing.py` scans the package for a second.
 
 A later pass (D-2026-08-14-the-coupling-is-the-cost-not-the-line-count) asked what the LangGraph
 stack now does out of the box, and answered it against the installed distributions rather than the
@@ -252,18 +258,27 @@ like duplicates and are not (`science/calc/` vs `connectors/calc/`; `skills/` vs
 `connectors/*/skills/`). Adding a top-level directory or a subpackage means **adding a row there
 and giving the directory a `README.md`** — `tests/test_repo_map.py` fails otherwise (D-156).
 
-Three rules the tree is arranged around, each enforced by a test rather than asked for:
+Three rules the tree is arranged around. **Two are enforced by a test rather than asked for; the
+third is a review rule, and saying so is the point** — "each enforced by a test" is what made the
+middle one feel safe when nothing checks it:
 
 - **`src/` is all the code.** Everything beside it is data, configuration or documents.
+  (`tests/test_repo_map.py`, `test_no_import_package_sits_beside_data`.)
 - **Capability code lives in a connector bundle or in `science/`, nowhere else.** The rule stands;
   what it covers shrank. `science/bo` and `science/fingerprints` are still engines — pure
   computation, with the bundle as their durable-job and MCP wrapper, a pair rather than a
   duplication. `science/calc` no longer holds an engine at all: after
   `D-2026-08-16-the-physics-leaves-the-cache-stays` it is the cache, the calibration ledger, the
   RRHO/Crippen arithmetic and the models the Temporal wire carries, while the physics answers from
-  `Chemclaw3-mcp`.
+  `Chemclaw3-mcp`. **This one is reviewed, not tested.** `tests/test_layering.py` enforces import
+  *direction* and `tests/test_third_party_layering.py` which stack a package may import; neither
+  asks where a capability lives. The obvious derivable form — "only `connectors/*/` and `science/`
+  may import `rdkit`/`bofire`/`tblite`" — was measured and is false today: `core/chem.py` and three
+  modules under `ingest/` import RDKit for structure handling that is infrastructure, so the rule
+  would have to be written as an allowlist of its own exceptions, which is a policy nobody reads.
 - **`data/` holds every corpus the code reads at runtime** — except `knowledge/` and `skills/`,
   which stay at the root because they are architecture layers 4 and 3, not configuration.
+  (`tests/test_deploy_chart.py`, `test_every_runtime_data_directory_actually_exists`.)
 
 Four layers, each with a single responsibility. **Never merge their concerns.**
 
@@ -307,8 +322,10 @@ invocations — CI runs exactly these, so a green `make` locally means a green C
 - **The gate**: `make lint` (ruff lint + format) · `make type` (`mypy --strict`, every first-party
   package) · `make test` (pytest) · `make check` runs all three · `make cov` adds the coverage floor.
 - **The validators**, each guarding a declaration against the live surface: `kg-validate`,
-  `skill-validate`, `connector-validate`, `datasource-validate`, `template-validate`,
-  `prose-validate`, `eln-validate`, `helm-validate`.
+  `skill-validate`, `connector-validate`, `datasource-validate`, `sink-validate`,
+  `template-validate`, `prose-validate`, `eln-validate`, `helm-validate`. Not counted here, and
+  derived from the `ci` target by `tests/test_repo_map.py`: the count that used to open this list
+  said eight over nine targets, and the one it omitted was the newest.
 - **Running things**: `make up` (docker-compose: Temporal + Postgres/pgvector) · `make connectors`
   (every enabled connector in one dev process) · `make chat` · `make db-migrate`.
 - Single test: `pytest path/to/test_file.py::test_name` or `pytest -k "name substring"`.

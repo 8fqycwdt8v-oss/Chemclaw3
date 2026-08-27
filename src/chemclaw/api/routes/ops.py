@@ -151,13 +151,22 @@ async def _probe_database(front: FrontDoorState) -> bool:
     return reachable
 
 
-async def readyz(request: Request, response: Response) -> dict[str, str]:
-    """Readiness: the agent can be built, Postgres answers, and each connector's reachability.
+async def readyz(request: Request, response: Response) -> dict[str, str | int]:
+    """Readiness: the agent can be built, Postgres answers, and how many connectors are down.
 
     **The database gates; the connectors do not**, and the asymmetry is the point. An unreachable
     connector costs the agent one capability, so its state is *reported* — hiding it would leave a
     chemist wondering why an answer got worse — and a deployment that would rather not serve at all
-    in that state sets `connectors_required`, which fails startup instead. Postgres under
+    in that state sets `connectors_required`, which fails startup instead.
+
+    **As a count, not as a roster**, because this route is unauthenticated and therefore its body
+    is a public document. `name=state` for every enabled bundle is an inventory of the deployment's
+    internal capability surface plus a live signal of which parts are currently down — a map for
+    choosing what to probe next — handed to anything that can reach the pod or the Route, which
+    declares no `spec.path` and so serves this on the external host. The names live where they were
+    already argued as scrape-visible: `chemclaw_connectors_unhealthy` on `/metrics`, and the
+    per-connector WARNING each failed probe logs. `values.yaml` accepts "operational
+    reconnaissance" for counts; it never accepted it for names. Postgres under
     `session_store="postgres"` is not a capability: the session claim, the conversation history, the
     owner lookup and the audit sink all go through it, so a pod that cannot reach it cannot serve a
     turn at all. It reported itself ready anyway until the 2026-08-05 database review — probing the
@@ -183,7 +192,7 @@ async def readyz(request: Request, response: Response) -> dict[str, str]:
         response.status_code = HTTPStatus.SERVICE_UNAVAILABLE
     return {
         "status": "ready" if ready else "database unreachable",
-        "connectors": ", ".join(f"{item.name}={item.state}" for item in health),
+        "connectors_unhealthy": sum(1 for item in health if item.state == "unreachable"),
     }
 
 

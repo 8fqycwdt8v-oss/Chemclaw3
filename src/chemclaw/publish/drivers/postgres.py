@@ -22,6 +22,7 @@ import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
+from chemclaw.core.connect import check_identifier
 from chemclaw.ingest.eln.warehouse.driver import (
     VectorDialect,
     WarehouseCursor,
@@ -110,6 +111,13 @@ class PostgresWarehouse:
             )
         options = [f"-c statement_timeout={int(query_timeout_seconds * 1000)}"]
         if schema:
+            # **Checked, because this one reaches a process argument rather than a statement.**
+            # libpq splits `options` on whitespace and the *last* `-c` wins, so a schema carrying a
+            # space is not a search path — it is a second setting, and the value it most usefully
+            # sets is the `statement_timeout=0` the bound three lines up exists to refuse. The
+            # checker is `core.connect`'s, the same one every binding identifier goes through, so
+            # "what a connection block may contribute" has one spelling rather than two.
+            check_identifier(schema, "connection schema", error=SinkConnectionError)
             options.append(f"-c search_path={schema}")
         self._options = " ".join(options)
         self._dsn = dsn

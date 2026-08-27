@@ -573,3 +573,54 @@ def test_a_turn_whose_tool_failed_is_still_loud_beside_an_outage() -> None:
 
     assert outcome.tools_failed == ["predict_pka"]
     assert outcome.failed_loudly
+
+
+def test_the_harness_makes_no_token_cost_claim_it_cannot_take() -> None:
+    """An absence pinned, so re-adding the claim without a caller turns this red.
+
+    `ProbeOutcome.tokens` was the only consumer of `session_tokens`, and `session_tokens` had no
+    caller anywhere — not even a test. So every probe of every live run recorded `tokens=None`,
+    which the field's own comment defined as "the ledger could not be asked", while two long
+    docstrings argued about *how* the measurement was taken and a fixed defect
+    ("15/15 turns priced `None` with 26 rows sitting in `turn_costs`") sat behind a function
+    nothing called. The reader it was built for — the routing comparison — went with the specialist
+    team in `D-2026-08-15-a-capability-that-ships-off-is-not-a-capability`.
+
+    Deleted rather than wired, because wiring it would have restored a column no report renders.
+    Whoever wants per-probe cost back needs the producer, a reader that shows it, and this test
+    updated in the same change.
+    """
+    module = Path(__file__).resolve().parents[1] / "src" / "chemclaw" / "evals" / "live.py"
+    source = module.read_text(encoding="utf-8")
+    assert "tokens" not in ProbeOutcome.model_fields
+    assert "session_tokens" not in source, (
+        "`evals/live.py` declares a token measurement again. It needs a caller and a reader in the "
+        "same change, or it records `None` on every probe the way it did before."
+    )
+
+
+def test_a_selection_that_matches_no_probe_is_an_error_not_a_clean_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Filtering every probe out ran zero, summarised nothing, and exited 0.
+
+    `--only` filters the list and `--limit` slices it, and neither guarded an empty result — so
+    `make live-probes ARGS="--only nosuchid"` measured nothing and reported success. A renamed
+    probe id turns a scripted invocation into a permanent green line over an empty set. The M12
+    suites in this same file already take the opposite convention (`0 if findings and all(...)
+    else 1`), so this is the file disagreeing with itself.
+
+    A non-positive `--limit` is refused by argparse rather than checked here, matching
+    `sync_share._positive`: `probes[:-1]` silently drops the last probe, and `probes[:0]` is the
+    empty selection above wearing a different spelling.
+    """
+    from chemclaw.cli import live_probes
+
+    monkeypatch.setattr(live_probes, "load_probes", lambda _dir: [])
+    args = live_probes._parse_args(["--only", "nosuchid"])
+    assert asyncio.run(live_probes._main(args)) == 2
+
+    with pytest.raises(SystemExit):
+        live_probes._parse_args(["--limit", "0"])
+    with pytest.raises(SystemExit):
+        live_probes._parse_args(["--limit", "-1"])

@@ -36,7 +36,6 @@ is waiting for is work a pod is spending on nobody.
 """
 
 import asyncio
-import contextlib
 import logging
 from dataclasses import dataclass
 from types import TracebackType
@@ -181,13 +180,35 @@ class HeldConnectorSession:
         return False
 
     async def _shut_down(self) -> None:
-        """Signal the holder task and await its unwind, whatever it raises on the way out."""
+        """Signal the holder task and await its unwind, whatever *it* raises on the way out.
+
+        **The caller's own cancellation is not part of "whatever it raises".** `await task` is the
+        suspension point at which a cancellation of *this* task is delivered — a client that closed
+        the tab, or the front door's `asyncio.timeout(service_turn_timeout_seconds)`
+        (`api/routes/turns.py`) — and a blanket `suppress(CancelledError, ...)` swallowed it.
+        Measured: the cancelled turn completed normally and ran the code after the teardown, so
+        `run_turn`'s `except (GeneratorExit, asyncio.CancelledError)` rollback never ran and
+        `asyncio.timeout.__aexit__`, which only converts to `TimeoutError` when it *receives* a
+        `CancelledError`, let the turn run past its deadline. A `Task.cancel()` delivers once;
+        re-raising here is the only way it survives.
+
+        Absorbing the holder's own unwind is still right and still happens: the MCP session is an
+        `anyio` cancel scope that raises `CancelledError` on its way out without anyone having
+        cancelled this task. `_is_really_cancelled()` is what tells the two apart, the same
+        discriminator `absorb_connect_failure` uses.
+        """
         self._stop.set()
         task = self._task
         self._task = None
         if task is not None:
-            with contextlib.suppress(asyncio.CancelledError, Exception):
+            try:
                 await task
+            except asyncio.CancelledError:
+                if _is_really_cancelled():
+                    raise
+            except Exception:
+                # A connector that errors while closing costs its own close, never the turn.
+                pass
 
     async def _hold(self) -> None:
         """Own the session end to end: open it, publish its tools, then wait to be told to stop.

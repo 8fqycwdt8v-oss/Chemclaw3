@@ -17,6 +17,11 @@ this suite cannot download offline) would only be able to confirm them by actual
 and retrying it. Stubbing the ambient module rather than the workflow's own code means the ids
 under test are the ids the SDK would receive.
 
+The **retry bound** on those same starts is pinned here too, because it is the other half of one
+question — how many times may this child run? — and the two halves disagreed: `BAD_DATA_RETRY`
+classifies nothing at a child-workflow boundary, so the template path's copy silently meant "run
+the whole connector job five times". See the last two tests.
+
 `REJECT_DUPLICATE` is asserted alongside, because the alternative fix — widening the child to
 `ALLOW_DUPLICATE` — buys the retry by giving up the invariant the original policy wanted: one child
 per parent execution, so a second start of the same id is a bug rather than a silent re-run. The
@@ -32,6 +37,7 @@ import pytest
 from temporalio import workflow
 from temporalio.common import WorkflowIDReusePolicy
 
+from chemclaw.core.config import settings
 from chemclaw.durable.connector_job import (
     ConnectorJobInput,
     ConnectorJobResult,
@@ -197,3 +203,71 @@ def test_two_steps_of_one_template_execution_still_get_distinct_ids(
     second = _template_job_step_child(monkeypatch, "run-a", "confirm")
     assert first["id"] != second["id"]
     assert first["id_reuse_policy"] is WorkflowIDReusePolicy.REJECT_DUPLICATE
+
+
+def test_the_template_job_step_child_is_not_retried_at_the_workflow_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A `job` step must not multiply a deterministic failure by `activity_max_attempts`.
+
+    `ConnectorJobWorkflow._run_child` measured this and fixed it for the start it owns: Temporal
+    matches `non_retryable_error_types` against the *outermost* failure, so a child that failed
+    through its own activity surfaces as a child/activity failure — a name deliberately absent from
+    `_BAD_DATA_TYPES` — and `BAD_DATA_RETRY` at a child-workflow boundary therefore classifies
+    nothing and degrades to a plain `maximum_attempts=5`. The template path starts the *same*
+    wrapper and re-introduced the defect: measured against a live broker, one deterministic
+    `ValueError` cost **5 full connector-job executions**, each minting a fresh grandchild id (the
+    id is keyed on the parent's run id), so the bundle workflow and its CREST/xTB activity ran from
+    scratch five times — and the D-011 cache cannot help, because a failed run stores nothing.
+    """
+    start = _template_job_step_child(monkeypatch, "run-a", "compute")
+
+    attempts = start["retry_policy"].maximum_attempts
+    assert attempts == 1, (
+        f"a template `job` step starts the connector-job wrapper with maximum_attempts={attempts}; "
+        "one deterministic bad-data failure therefore costs that many full connector-job "
+        "executions instead of 1"
+    )
+
+
+def test_both_paths_into_the_connector_job_wrapper_agree_on_its_retry_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The two starts of one wrapper must not disagree about how often it may run.
+
+    Written because the defect above was invisible in review precisely as a *difference*: the same
+    child, started from two files, with two policies. Pinning them together means a future edit to
+    either one has to answer for the other.
+    """
+    template = _template_job_step_child(monkeypatch, "run-a", "compute")
+    direct = _connector_job_child(monkeypatch, "run-a")
+    assert template["retry_policy"].maximum_attempts == direct["retry_policy"].maximum_attempts == 1
+
+
+def test_the_template_gives_the_wrapper_more_time_than_it_gives_its_own_child(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A parent ceiling equal to its child's is not a ceiling — it is a silent TIMED_OUT.
+
+    `ConnectorJobWorkflow` is not a pass-through: after the child returns it still writes the
+    durable record (D-157), offers the composite to the results store, PR-gates the note and pushes
+    back to the launching session. The template path bounded it at
+    `connector_job_timeout_seconds` — the identical number the wrapper then hands its *own* child —
+    so the headroom for those four steps was **zero**, and since the wrapper starts first its
+    ceiling expires first. A workflow execution timeout is not delivered to workflow code, so the
+    `except BaseException -> _notify_failure` clause that exists to stop a job failing in silence
+    is skipped entirely: measured against a live broker, status TIMED_OUT, push-back activities
+    that ran = 0. The chemist who was told "this is running" is told nothing further, and the run
+    leaves no `job_records` row.
+    """
+    start = _template_job_step_child(monkeypatch, "run-a", "compute")
+
+    child_ceiling = timedelta(seconds=settings.connector_job_timeout_seconds)
+    headroom = start["execution_timeout"] - child_ceiling
+
+    assert headroom > timedelta(0), (
+        f"the wrapper is bounded at {start['execution_timeout']} against a child ceiling of "
+        f"{child_ceiling}: it expires first, and its failure push-back is never reached"
+    )
+    # Enough for the four post-child steps, each one activity's worth of wall clock.
+    assert headroom >= timedelta(seconds=settings.activity_timeout_seconds * 4)

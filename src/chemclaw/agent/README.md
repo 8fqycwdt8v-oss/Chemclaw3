@@ -27,22 +27,24 @@ Temporal's job; the checkpointer under the graph holds this turn's state and not
 more) and **no domain judgment** (that lives in `skills/`).
 
 An agent tool that starts a long job returns immediately with a `job_id`; the
-work runs as a Temporal workflow (see `workflows/`). See `docs/reference/architektur.md` §1
-and CLAUDE.md's four-layer rule.
+work runs as a Temporal workflow (see `durable/README.md`, and each bundle's own `workflows.py`).
+See `docs/reference/architektur.md` §1 and CLAUDE.md's four-layer rule.
 
 **Current tools:** knowledge-graph read + PR-gated write (`graph_tools`), cross-source
 evidence (`research_tools`), condensing many whole protocols into one comparison
 (`protocol_tools`, over `agent/condense.py`), confirmed-answer capture (`memory_tools`), and the durable
 report launcher plus the one status tool every durable job is collected with
-(`durable_tools`). Calculators, optimization campaigns and the QM/DFT job are connector
-bundles now, advertised out of `connectors/` — including their durable launchers, which are
-generated from each bundle's manifest rather than hand-written here (D-118). Structural
-fingerprint search is reached over the MCP capability servers, and **only** over them: the
+(`durable_tools`). Calculators and optimization campaigns are the `calc` bundle and the `bo` bundle
+now, advertised out of `connectors/` — including their durable launchers, which are generated from
+each bundle's manifest rather than hand-written here (D-118). There is no QM/DFT job: the whole
+HPC/DFT tier was deleted by `D-2026-08-26-semiempirical-is-the-whole-tier`, and this sentence still
+advertised it three weeks later, which is why `tests/test_repo_map.py` now resolves every bundle
+name these documents write. Structural fingerprint search is reached over the MCP capability
+servers, and **only** over them: the
 in-process `search_tools` wrapper that shadowed them is gone, along with the "keep the two in
 sync" obligation it had already broken (D-2026-08-05). Every tool call is recorded by the one audit
 middleware (`audit`), and retrieved note content is framed as data before it reaches the
-model (`framing`). The interaction-approval starter/decider seam lives in
-`interaction_tools`.
+model (`framing`).
 
 **Skill visibility (`skill_access`)** is three narrowings over one discovered set, none of which can
 widen it: what the deployment enabled (`skills_enabled`), what this agent can actually *do*, and who

@@ -164,6 +164,15 @@ class Settings(
           never fires before the window does, which is the behaviour the split removed. The
           inverted setting is the worse of the two possible misconfigurations because it looks
           like it took effect.
+        - **A stated autonomy that nothing enforces.** `harness_autonomy="plan_only"` with
+          `harness_enabled=False` is `gate_applies` returning False — the approval-first posture
+          named in one setting and attached by neither. Both are the *code defaults*, so this is
+          refused only under `entra_required`, which is the deployment that believes it is in the
+          enforced posture: the shipped chart sets the harness on, and the image run directly,
+          `docker compose` and any non-Helm deployment did not. The opt-out is
+          `harness_autonomy=execute`, in the same vocabulary as the thing being decided rather
+          than in a security knob that means something else; with the harness off it changes no
+          behaviour, which is what makes it a statement rather than a switch.
         - **`service_uvicorn_workers > 1` silently breaks five per-process guarantees.** Until
           those have a shared story (shared rate limiter, shared budget tracker, shared attachment
           store, shared session LRU, shared metrics scrape), the knob is a foot-gun that offers no
@@ -213,6 +222,21 @@ class Settings(
                 "window, and setting it above the budget silently restores the single-threshold "
                 "behaviour it was split off from — a misconfiguration that looks like it took "
                 "effect (agent/compaction.py::context_compaction_middleware)."
+            )
+        unattached = not self.harness_enabled and self.harness_autonomy == "plan_only"
+        if self.entra_required and unattached:
+            raise ValueError(
+                "harness_autonomy='plan_only' with harness_enabled=False enforces nothing: "
+                "`plan_gate.gate_applies` is `harness_enabled and autonomy == 'plan_only'`, so "
+                "the approval gate D-167/DARK-1 exists for is not attached at all and a turn can "
+                "start state-changing work with nothing to approve it (report_measurement, which "
+                "writes the calibration ledger, plus compute_xtb_energy, watch_for and "
+                "remember_preference are allowed by both authorize_tool and authorize_trigger for "
+                "an authenticated user holding no app role). Refused only under "
+                "entra_required=true, because that is the deployment that believes it is in the "
+                "enforced posture. Set CHEMCLAW_HARNESS_ENABLED=true (what the shipped chart "
+                "does), or CHEMCLAW_HARNESS_AUTONOMY=execute to state that this deployment's "
+                "turns are deliberately unsupervised."
             )
         if self.service_uvicorn_workers > 1:
             raise ValueError(
@@ -356,15 +380,26 @@ class Settings(
         spans two: the ceiling is a connector-wide deployment choice and the search budget is the
         calculators' own, and neither section can see the other.
         """
-        needed = self.xtb_job_timeout_seconds + self.activity_timeout_seconds
+        # The **max over every activity budget a bundle child can spend**, not the one activity
+        # this rule was first written against. Naming `xtb_job_timeout_seconds` alone is how the
+        # `results` bundle's republish walk got past it: that walk scans two never-pruned tables
+        # and was handed `connector_job_timeout_seconds` itself, which the ceiling equals rather
+        # than exceeds. A new long activity gets covered by being added here.
+        longest, budget = max(
+            (
+                (self.xtb_job_timeout_seconds, "xtb_job_timeout_seconds"),
+                (self.result_republish_timeout_seconds, "result_republish_timeout_seconds"),
+            )
+        )
+        needed = longest + self.activity_timeout_seconds
         if self.connector_job_timeout_seconds <= needed:
             raise ValueError(
                 f"connector_job_timeout_seconds={self.connector_job_timeout_seconds} does not "
-                f"cover the calculation job it bounds: one attempt at the expensive activity may "
-                f"take {self.xtb_job_timeout_seconds}s (xtb_job_timeout_seconds) and the child's "
+                f"cover the job it bounds: one attempt at the longest activity may "
+                f"take {longest}s ({budget}) and the child's "
                 f"own overhead up to {self.activity_timeout_seconds}s more "
                 f"(activity_timeout_seconds). Raise connector_job_timeout_seconds above {needed}, "
-                "or lower xtb_job_timeout_seconds — raising the activity budget alone changes "
+                f"or lower {budget} — raising the activity budget alone changes "
                 "nothing, because the parent's ceiling fires first."
             )
         return self

@@ -21,7 +21,9 @@ removed.
 """
 
 import asyncio
+import contextlib
 import threading
+import time
 from typing import Any
 
 import pytest
@@ -108,3 +110,125 @@ def test_gather_evidence_runs_its_sources_concurrently() -> None:
         )
         assert asyncio.run(research_tools.gather_evidence("anything")).chunks == []
     assert peak == 2
+
+
+def _worst_loop_stall(coro_factory: Any) -> tuple[float, list[int]]:
+    """Run a coroutine while sampling the loop, returning the worst stall in ms and the loop thread.
+
+    The sampler wakes every 5 ms; whatever it *actually* waited, minus what it asked for, is the
+    time the loop was held by something that never yielded. That is the number the audit measured
+    (1,223.8 ms inline vs 27.0 ms threaded for the identical corpus work) and the only one that
+    distinguishes "this activity is slow" — which is fine, activities are — from "this activity
+    stops the other seven sharing its loop", which is not.
+    """
+    stalls: list[float] = []
+
+    async def _sample(stop: asyncio.Event) -> None:
+        while not stop.is_set():
+            before = time.perf_counter()
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(stop.wait(), 0.005)
+            stalls.append((time.perf_counter() - before - 0.005) * 1000)
+
+    async def _run() -> list[int]:
+        stop = asyncio.Event()
+        sampler = asyncio.create_task(_sample(stop))
+        await asyncio.sleep(0.02)  # let the sampler settle before the work starts
+        await coro_factory()
+        stop.set()
+        await sampler
+        return [threading.get_ident()]
+
+    loop_thread = asyncio.run(_run())
+    return max(stalls, default=0.0), loop_thread
+
+
+# How long the stand-in corpus read blocks for. Long enough that an inline call is unmistakable
+# against scheduler noise, short enough to keep the test fast; the assertions below are stated as
+# fractions of it rather than as absolute milliseconds.
+_BLOCK_SECONDS = 0.3
+
+
+def test_the_digest_reads_and_matches_the_corpus_off_the_event_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`collect_digests` shares its loop with seven other activities, and held it for the parse.
+
+    `load_notes` is a recursive `rglob` + `stat` + YAML frontmatter parse of every note, and the
+    match pass after it is O(subscriptions x notes) of pure Python. Both ran inline in a
+    `background-jobs` coroutine that `worker_max_concurrent_activities=8` shares with — among
+    others — `beating()`'s heartbeat timers for a CREST search that costs hours if its heartbeat is
+    missed. Measured by the audit on a 2,000-note corpus: 1,223.8 ms of loop stall inline against
+    27.0 ms through `to_thread`, for identical work.
+    """
+    from chemclaw.durable import digest
+
+    threads: list[int] = []
+
+    def _slow_load(*args: Any, **kwargs: Any) -> list[Any]:
+        threads.append(threading.get_ident())
+        time.sleep(_BLOCK_SECONDS)
+        return []
+
+    async def _no_subscriptions() -> list[Any]:
+        return []
+
+    monkeypatch.setattr(digest, "load_notes", _slow_load)
+    monkeypatch.setattr(digest, "all_subscriptions", _no_subscriptions)
+
+    stall_ms, loop_thread = _worst_loop_stall(digest.collect_digests)
+
+    assert threads, "the corpus read never happened"
+    assert stall_ms < _BLOCK_SECONDS * 1000 / 2, (
+        f"the digest held the worker's loop for {stall_ms:.1f} ms of a "
+        f"{_BLOCK_SECONDS * 1000:.0f} ms corpus read"
+    )
+    assert all(thread not in loop_thread for thread in threads), (
+        "collect_digests read the note corpus on the event loop"
+    )
+
+
+@pytest.mark.parametrize(
+    "activity_name",
+    [
+        "build_campaign_notes_activity",
+        "build_playbook_notes_activity",
+        "build_optimization_notes_activity",
+    ],
+)
+def test_the_memory_note_builders_run_off_the_event_loop(
+    monkeypatch: pytest.MonkeyPatch, activity_name: str
+) -> None:
+    """The same corpus read, reached three-at-a-time by `MemorySynthesisWorkflow`'s fan-out.
+
+    Each builder ends in `_with_supersedes`, which calls `load_notes`; the clustering in front of
+    it is pure CPU over the whole reaction corpus. Threading at the *activity* boundary covers both
+    and leaves `memory/jobs.py` the pure sync module its layer says it should be.
+    """
+    from chemclaw.durable import memory_jobs
+
+    threads: list[int] = []
+
+    def _slow_build(*args: Any, **kwargs: Any) -> list[Any]:
+        threads.append(threading.get_ident())
+        time.sleep(_BLOCK_SECONDS)
+        return []
+
+    async def _no_reactions() -> list[Any]:
+        return []
+
+    monkeypatch.setattr(memory_jobs, "all_reactions", _no_reactions)
+    monkeypatch.setattr(
+        memory_jobs, activity_name.removesuffix("_activity"), _slow_build, raising=True
+    )
+
+    stall_ms, loop_thread = _worst_loop_stall(getattr(memory_jobs, activity_name))
+
+    assert threads, "the builder never ran"
+    assert stall_ms < _BLOCK_SECONDS * 1000 / 2, (
+        f"{activity_name} held the worker's loop for {stall_ms:.1f} ms of a "
+        f"{_BLOCK_SECONDS * 1000:.0f} ms build"
+    )
+    assert all(thread not in loop_thread for thread in threads), (
+        f"{activity_name} built its notes on the event loop"
+    )

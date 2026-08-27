@@ -25,7 +25,7 @@ from typing import Any, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 from temporalio import workflow
-from temporalio.common import WorkflowIDReusePolicy
+from temporalio.common import RetryPolicy, WorkflowIDReusePolicy
 
 with workflow.unsafe.imports_passed_through():
     from chemclaw.core.config import settings
@@ -34,6 +34,7 @@ with workflow.unsafe.imports_passed_through():
         ConnectorJobResult,
         child_workflow_id,
         failure_reason,
+        wrapper_execution_timeout,
     )
     from chemclaw.durable.notify import notify_session_best_effort
     from chemclaw.durable.template_activities import (
@@ -315,11 +316,30 @@ class TemplateWorkflow:
                 # Still reject-duplicate: within one template execution two steps must never
                 # collide on an id, which is a template-authoring bug worth failing loudly on.
                 id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE,
-                retry_policy=BAD_DATA_RETRY,
-                # The same ceiling `ConnectorJobWorkflow` gives this child when it launches it
-                # directly (`durable/connector_job.py`), because it is the same child doing the same
-                # work — a template step must not be the one path on which a connector job runs
-                # unbounded. `BAD_DATA_RETRY` bounds failures, not a job that simply never returns.
-                execution_timeout=timedelta(seconds=settings.connector_job_timeout_seconds),
+                # **One attempt**, the same bound `ConnectorJobWorkflow._run_child` gives this
+                # child when it starts it directly, and for the same measured reason: Temporal
+                # matches `non_retryable_error_types` against the *outermost* failure, so a child
+                # that failed through its own activity surfaces as a child/activity failure — a
+                # name deliberately absent from `_BAD_DATA_TYPES` — and `BAD_DATA_RETRY` at a
+                # child-workflow boundary therefore classifies nothing and degrades to a plain
+                # `maximum_attempts=5`. Measured against a live broker: one deterministic
+                # `ValueError` cost **5 full connector-job executions**, each minting a fresh
+                # grandchild id (`child_workflow_id` is keyed on the parent's run id), so the
+                # bundle workflow and its calculation ran from scratch every time — and the D-011
+                # cache cannot help, because a failed run stores nothing. Nothing is lost: the
+                # child's own activities already carry `BAD_DATA_RETRY`, where the classification
+                # works, and a worker that dies mid-child is re-delivered without a workflow retry.
+                retry_policy=RetryPolicy(maximum_attempts=1),
+                # A template step must not be the one path on which a connector job runs
+                # unbounded — `BAD_DATA_RETRY` bounds failures, not a job that simply never
+                # returns — but the ceiling must be the *wrapper's*, not the child's. This used to
+                # be `connector_job_timeout_seconds`, the identical number `ConnectorJobWorkflow`
+                # then gives its own child, which leaves zero headroom: the wrapper starts first,
+                # so its ceiling expires first, and an execution timeout is not delivered to
+                # workflow code — the `except BaseException -> _notify_failure` clause never runs
+                # and the run ends TIMED_OUT with no push-back and no `job_records` row. See
+                # `wrapper_execution_timeout`, which owns the relation beside the child ceiling it
+                # has to clear.
+                execution_timeout=wrapper_execution_timeout(),
             ),
         )

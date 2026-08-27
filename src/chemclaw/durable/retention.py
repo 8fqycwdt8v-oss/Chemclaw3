@@ -108,6 +108,7 @@ with workflow.unsafe.imports_passed_through():
 
     from chemclaw.agent.checkpointer import CHECKPOINT_TABLES
     from chemclaw.agent.message_pairing import droppable_rows, stored_call_ids, unreadable_rows
+    from chemclaw.agent.session_store import SELECT_SESSION_ROWS
     from chemclaw.core.config import settings
     from chemclaw.core.db import connection, existing_tables
     from chemclaw.durable.registry import durable_activity, durable_workflow
@@ -246,13 +247,6 @@ _EXPIRED_SESSIONS = (
     "SELECT DISTINCT session_id FROM session_messages "
     "WHERE created_at < now() - make_interval(days => %s) "
     "ORDER BY session_id LIMIT %s"
-)
-# The whole session, in id order: the pairing closure needs the partners, which are frequently the
-# rows that are *not* expiring.
-# `message_shape` is selected because the pairing rule reads it: the sweep and the transcript
-# reader must decide "which serialization is this" the same way, and this is the destructive one.
-_SESSION_ROWS = (
-    "SELECT id, message, message_shape FROM session_messages WHERE session_id = %s ORDER BY id"
 )
 _EXPIRED_IDS = (
     "SELECT id FROM session_messages "
@@ -423,7 +417,7 @@ async def _prune_session_messages(conn: AsyncConnection[TupleRow], days: int) ->
     deferred = max(len(session_ids) - cap, 0)
     for session_id in session_ids[:cap]:
         async with conn.cursor() as cur:
-            await cur.execute(_SESSION_ROWS, (session_id,))
+            await cur.execute(SELECT_SESSION_ROWS, (session_id,))
             # Call ids, not deserialised messages. The rows of one session may be in *either*
             # stored shape — the M6 conversion pass is resumable — and the previous version read
             # them all with MAF's `Message.from_dict`, which raises `TypeError` on a LangChain

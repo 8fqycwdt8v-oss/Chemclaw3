@@ -117,7 +117,14 @@ RECORDED_SHAPES: dict[str, str] = {
     # count and has always been >= 1. Bumping the epoch would discard every cached CREST
     # search, the most expensive thing in the system, to no end.
     "EnsemblePayload": "4afdce1baac44be8",
-    "HessianPayload": "8495e40479a746f1",
+    # Changed by `max_gradient_hartree_per_angstrom`, the stationarity evidence the calculation
+    # server returns beside every Hessian. Recorded rather than epoch-bumped: the field is optional
+    # and adds a fact rather than restating one, so a row written before it existed still validates
+    # and still means exactly what it said — it simply leaves stationarity *unassessed*, which
+    # `ThermochemistryResult.is_stationary=None` reports as its own answer rather than as "it was a
+    # minimum". Discarding every cached Hessian in the system to learn a gradient the server will
+    # send with the next one is the trade this note refuses.
+    "HessianPayload": "08c8ac9597753bda",
     "OptimizationResult": "3d934a3b36e47f11",
     "PkaResult": "f4928a91c06fc746",
     "SiteReactivityResult": "ddeb1c374840d99f",

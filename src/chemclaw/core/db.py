@@ -37,6 +37,7 @@ transaction. `existing_tables` is one; `apply_vector_recall_settings` — the pg
 parameters a dense search runs under — is the other.
 """
 
+import asyncio
 import logging
 from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
@@ -51,13 +52,30 @@ from chemclaw.core.config import settings
 
 logger = logging.getLogger(__name__)
 
-# One pool per (dsn, merged libpq options). The options string carries the statement timeout, so
-# keying on it keeps the `/readyz` probe's 2s-bounded connection out of the stores' 30s-bounded
-# pool. (It once said "a migration's untimed connection", which was never a pooled connection at
-# all: `migrate` uses `connect`, not `connection`, and never enters `pooling()`.)
-_PoolKey = tuple[str, str | None]
+# One pool per (event loop, dsn, merged libpq options). The options string carries the statement
+# timeout, so keying on it keeps the `/readyz` probe's 2s-bounded connection out of the stores'
+# 30s-bounded pool. (It once said "a migration's untimed connection", which was never a pooled
+# connection at all: `migrate` uses `connect`, not `connection`, and never enters `pooling()`.)
+#
+# **The loop is part of the key, and that is not defensive.** `psycopg_pool` binds its waiter
+# futures and its background workers to the loop the pool was opened in, so a checkout issued from
+# a *second* loop in the same process is queued on a hand-off callback that will never run on it.
+# Measured with `max_size=1` and an 8 s pool timeout, the holder releasing at t=1.00 s: the
+# cross-loop waiter was served after **8.01 s** — its own timeout expiring — against 1.00 s for the
+# identical hand-off on the pool's own loop. A second loop is not hypothetical here:
+# `evals/retrieval._run_sync` starts one deliberately when a metric is invoked from a coroutine.
+# `agent/checkpointer.close_checkpointer` identifies the same hazard for its own pool; this is the
+# equivalent for these.
+_PoolKey = tuple[int, str, str | None]
 _Pool = AsyncConnectionPool[psycopg.AsyncConnection[TupleRow]]
 _POOLS: dict[_PoolKey, _Pool] = {}
+# Pools this module did not build but this process holds: today the LangGraph checkpointer's
+# autocommit pool (`agent/checkpointer.py`), which every turn's state write goes through. They are
+# registered rather than taught to the metrics separately, because `chemclaw_pg_pool_max_size` is
+# the per-process half of the fleet connection budget and a pool nobody counts is a pool the
+# deployment opens and the dashboard does not show. Their *lifecycle* stays with their owner —
+# `pooling()` closes only what it built — which is why this is a separate list and not `_POOLS`.
+_FOREIGN_POOLS: list[Any] = []
 # Whether this process has entered `pooling()`. Off means `connection()` opens a dedicated
 # connection per call — the pre-pool behavior, which is what a one-shot script or a test wants.
 _POOLING = False
@@ -141,8 +159,11 @@ def _pool_for(dsn: str, options: str | None) -> _Pool:
     store may be three different databases or one). Construction is synchronous and the
     dictionary insert happens before any `await`, so two coroutines racing on the first use of a
     DSN cannot end up with two pools for it.
+
+    Keyed on the running loop as well, so a second loop builds and owns its own pool instead of
+    borrowing one whose waiters it cannot be woken by — see `_POOLS`.
     """
-    key = (dsn, options)
+    key = (id(asyncio.get_running_loop()), dsn, options)
     pool = _POOLS.get(key)
     if pool is None:
         pool = AsyncConnectionPool(
@@ -231,7 +252,12 @@ def bind_pool_metrics() -> None:
     it across pods is what the deployment may open, and comparing that to
     `chemclaw_pg_fleet_max_connections` is the only way to see a fleet scaled past its ceiling by
     hand, since `Settings` validates the shape the chart rendered and never re-runs
-    (D-2026-08-05-the-connection-budget-is-a-fleet-number).
+    (D-2026-08-05-the-connection-budget-is-a-fleet-number). It therefore reads the **sum over every
+    pool this process holds**, not `settings.pg_pool_max_size`: a process routinely holds more than
+    one — this module keys on `(dsn, options)` precisely so `/readyz` and the stores do not share
+    connections, and the checkpointer registers a third — and measured against a live server that
+    was three pools and 48 connections reported as 16, which puts the shipped chart at ~184 real
+    connections against the 136 its values file provisions.
 
     Imported inside the function: `core/metrics.py` is a sibling of this module and `core` keeps
     its no-module-scope-sibling-import rule (`tests/test_layering.py`), the same lazy exception
@@ -244,7 +270,7 @@ def bind_pool_metrics() -> None:
     METRICS.bind_gauge(
         "chemclaw_pg_pool_requests_waiting", lambda: float(pool_stats()["requests_waiting"])
     )
-    METRICS.bind_gauge("chemclaw_pg_pool_max_size", lambda: float(settings.pg_pool_max_size))
+    METRICS.bind_gauge("chemclaw_pg_pool_max_size", lambda: float(_process_max_connections()))
     METRICS.bind_gauge(
         "chemclaw_pg_fleet_max_connections", lambda: float(settings.pg_fleet_max_connections)
     )
@@ -269,10 +295,55 @@ async def pooling() -> AsyncIterator[None]:
         yield
     finally:
         _POOLING = False
-        pools = list(_POOLS.values())
+        # **Only the pools this loop opened.** `psycopg_pool` schedules a pool's shutdown on the
+        # loop it was opened in, so closing one built on a *different* loop raises
+        # `RuntimeError: Event loop is closed` from inside the close — after the reference would
+        # otherwise have been cleared, leaving the process holding a pool nobody can close. The
+        # same hazard, and the same treatment, as `agent/checkpointer.close_checkpointer`: a pool
+        # whose loop has already ended released its connections with that loop, so dropping it
+        # leaks nothing. Production has one loop per process and closes everything it opened.
+        here = id(asyncio.get_running_loop())
+        mine = [key for key in _POOLS if key[0] == here]
+        pools = [_POOLS.pop(key) for key in mine]
         _POOLS.clear()
         for pool in pools:
             await pool.close()
+
+
+def register_pool(pool: Any) -> None:
+    """Count a pool this module did not build in this process's readings.
+
+    For the one pool that is genuinely somebody else's: the LangGraph checkpointer's autocommit
+    pool (`agent/checkpointer.py`), which every turn's state write goes through. It was invisible
+    to `pool_stats` and to `chemclaw_pg_pool_max_size`, so a turn-serving process could open twice
+    what it reported, and a saturated checkpointer stalled turns inside `AsyncPostgresSaver` while
+    `chemclaw_pg_pool_requests_waiting` read 0.
+
+    Registration only — the caller keeps the lifecycle, because `close_checkpointer` owns when that
+    pool opens and closes and a second closer is how a live pool gets shut under a running turn.
+    """
+    if pool not in _FOREIGN_POOLS:
+        _FOREIGN_POOLS.append(pool)
+
+
+def unregister_pool(pool: Any) -> None:
+    """Stop counting a foreign pool — called by its owner as it closes it."""
+    if pool in _FOREIGN_POOLS:
+        _FOREIGN_POOLS.remove(pool)
+
+
+def _all_pools() -> list[Any]:
+    """Every pool this process holds: the ones built here, plus the registered foreign ones."""
+    return [*_POOLS.values(), *_FOREIGN_POOLS]
+
+
+def _process_max_connections() -> int:
+    """How many Postgres connections this process may open — the sum over every pool it holds.
+
+    Not `settings.pg_pool_max_size`, which is one pool's ceiling: see `bind_pool_metrics` for the
+    measurement that separates the two.
+    """
+    return sum(int(pool.max_size) for pool in _all_pools())
 
 
 def pool_stats() -> dict[str, int]:
@@ -280,10 +351,11 @@ def pool_stats() -> dict[str, int]:
 
     Aggregated rather than per-DSN because the thing an operator alerts on is "is the front door
     waiting for connections?", which is a process-level question; naming each DSN would leak a
-    host into a metric label for no operational gain.
+    host into a metric label for no operational gain. Foreign pools are included for the same
+    reason they are registered at all — see `register_pool`.
     """
     total: dict[str, int] = {"pool_size": 0, "pool_available": 0, "requests_waiting": 0}
-    for pool in _POOLS.values():
+    for pool in _all_pools():
         stats = pool.get_stats()
         for name in total:
             total[name] += int(stats.get(name, 0))

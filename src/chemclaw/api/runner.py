@@ -132,7 +132,7 @@ async def run_turn(
     profile: str | None = None,
     graph_factory: Callable[..., Any] = build_langgraph_agent,
 ) -> AsyncIterator[Event]:
-    """Run one turn and yield its events (tokens, tool calls, approvals, then the answer).
+    """Run one turn and yield its events (tokens, tool calls, jobs, then the answer).
 
     Args:
         session: The caller's conversation session (per user+thread), so the turn resumes context.

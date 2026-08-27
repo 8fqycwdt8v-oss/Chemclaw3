@@ -15,13 +15,13 @@ Three steps. None of them is an edit to core Python.
 
 **1. Write the adapter** (only if no existing one fits). An ingest half implements `ElnAdapter`
 (`fetch_new_entries`, `map_to_ord`); a retrieve half implements `SourceRetriever` (`name`,
-`retrieve`). Both protocols are re-exported from `sources/base.py`. Put it wherever it belongs —
+`retrieve`). Both protocols are re-exported from `ingest/sources/base.py`. Put it wherever it belongs —
 a warehouse client belongs beside its peers, not in this folder.
 
 **For a SQL database, skip this step.** `chemclaw.ingest.eln.warehouse` is a generic ELN adapter
 whose knowledge of the source is a *binding* in the manifest rather than code, so attaching one is
 steps 2 and 3 only. See its README for the binding's shape, and
-`sources/eln-databricks/datasource.yaml` for a complete worked example. A database this repository
+`ingest/sources/eln-databricks/datasource.yaml` for a complete worked example. A database this repository
 ships no driver for adds one module — a callable satisfying
 `chemclaw.ingest.eln.warehouse.driver.Warehouse` — and nothing else: the `connection:` block below
 is that callable's own keyword arguments
@@ -66,7 +66,7 @@ processes that use your half will ever load it.
 **Configuration lives with the thing it configures.** A deployment adds a source by mounting a
 directory of manifests and putting it first in `CHEMCLAW_DATA_SOURCES_DIR` (an OS-pathsep list,
 earlier wins) — no image rebuild, no config-model change. This replaced a discriminated union of
-pydantic models in `chemclaw/config.py`, where a second ELN drop directory cost a new model, a new
+pydantic models in the settings package, where a second ELN drop directory cost a new model, a new
 arm of the union and a new branch in core (D-076 → D-120).
 
 ## What is *not* a data source

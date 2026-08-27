@@ -3,7 +3,7 @@
 **Responsibility:** the ASGI surface that runs the agent for a real caller — HTTP + SSE, behind
 OIDC. `create_app` (`app.py`) is the composition root and the only factory: middleware, `app.state`
 seeding, gauges and router inclusion, no route code. The routes live in `routes/` (one module per
-resource — see `routes/README.md`), reading process state through `state.py`'s typed
+resource — see `api/routes/README.md`), reading process state through `state.py`'s typed
 `state(request)` accessor; `deps.py` holds the authorization dependencies (`CurrentUser`,
 `CurrentSession`, hold/proposal gates); `schemas.py` the wire shapes; `middleware.py` the
 cross-cutting HTTP armor. `runner.py` owns the per-turn lifecycle (build or

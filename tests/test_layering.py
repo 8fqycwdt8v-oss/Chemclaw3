@@ -264,7 +264,7 @@ _CYCLE_EDGES: dict[Edge, str] = {
         "`test_the_connector_job_wrapper_imports_no_connector` below pins that separately, because "
         "this policy is package-granular and cannot express it"
     ),
-    ("chemclaw.agent", "chemclaw.durable"): ("agent tools start durable jobs (interaction, tools)"),
+    ("chemclaw.agent", "chemclaw.durable"): ("agent tools start durable jobs (durable_tools)"),
     ("chemclaw.durable", "chemclaw.agent"): (
         "activities stamp identity and run agent turns using agent's own audit/authz/profile code"
     ),
@@ -382,11 +382,15 @@ _ALLOWED_MODULE_EDGES: set[Edge] = {
 # imported at module scope. Each is a real edge in `_FUNCTION_SCOPE_EDGES` that is *not* in
 # `_ALLOWED_MODULE_EDGES` above - that asymmetry is the point, not a gap.
 #
-# **There is exactly one left, and that is the measurement R2 exists to produce.** `core -> api`
-# was the metrics registry and `core -> agent` was `logging.ContextFilter`'s ambient-identity
-# getters; both of those imports now resolve inside `chemclaw.core` and register as no edge at all.
-# What remains is the connector registry, which is a real capability layer rather than a primitive
-# that was merely filed one package too high, so it is not a move that would retire this entry.
+# **Exactly one of these originates in `chemclaw.core`, and that is the measurement R2 exists to
+# produce.** `core -> api` was the metrics registry and `core -> agent` was
+# `logging.ContextFilter`'s ambient-identity getters; both of those imports now resolve inside
+# `chemclaw.core` and register as no edge at all. What remains from core is the connector registry,
+# which is a real capability layer rather than a primitive that was merely filed one package too
+# high, so it is not a move that would retire this entry. The sentence used to read "there is
+# exactly one left" of the whole dict, and survived two additions to it — `test_core_has_one_lazy_
+# exception_and_the_dict_says_which` is the same claim in a form that fails when it stops being
+# true.
 _ALLOWED_LAZY_EDGES: dict[Edge, str] = {
     ("chemclaw.science", "chemclaw.publish"): (
         "cached_compute offers a freshly computed primitive to the external results store. Lazy "
@@ -567,7 +571,6 @@ _BUNDLE_ONLY_DEPENDENCIES = ("bofire", "botorch", "gpytorch", "tblite", "xgboost
 # way the conversation process comes to hold a workflow launcher.
 _AGENT_LAUNCH_SURFACE = (
     "chemclaw.agent.durable_tools",
-    "chemclaw.agent.interaction_tools",
     "chemclaw.api.app",
 )
 
@@ -636,4 +639,23 @@ def test_the_agent_layer_imports_no_bundle_workflow(module: str) -> None:
         f"{result.stderr.strip()}\n\na bundle's durable work is launched by *name* across its own "
         "queue precisely so its heavy closure never loads here; import the workflow type only when "
         "this process already carries it"
+    )
+
+
+def test_core_has_one_lazy_exception_and_the_dict_says_which() -> None:
+    """`ARCHITECTURE.md` states this as a property of the kernel, so it is asserted as one.
+
+    `chemclaw.core` is imported by every entrypoint first, which is why a lazy edge out of it is a
+    measurement worth keeping at exactly one: each is a place where the shared kernel reaches back
+    into a layer above it, deferred to call time so the import graph stays acyclic. The other two
+    entries in `_ALLOWED_LAZY_EDGES` do not originate in `core` and say nothing about this.
+
+    The comment above the dict claimed "there is exactly one left" of the whole dict, and stayed
+    there through two additions — a count in prose, three lines from the data that refutes it, in
+    the file whose subject is enforcing a rule rather than asking for it.
+    """
+    from_core = sorted(edge for edge in _ALLOWED_LAZY_EDGES if edge[0] == "chemclaw.core")
+    assert from_core == [("chemclaw.core", "chemclaw.connectors")], (
+        f"the kernel's lazy exceptions are now {from_core}; ARCHITECTURE.md states there is "
+        "exactly one, and a second is a decision rather than an entry"
     )

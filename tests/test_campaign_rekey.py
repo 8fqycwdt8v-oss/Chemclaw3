@@ -155,3 +155,36 @@ def test_a_row_with_no_stored_problem_is_left_alone(caplog: pytest.LogCaptureFix
             await conn.commit()
 
     asyncio.run(_drive())
+
+
+def test_the_cli_previews_by_default_and_writes_only_when_told(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The one data-touching default in this package that ran the deletes without being asked.
+
+    `--dry-run` was opt-in, so a bare `python -m chemclaw.cli.rekey_campaigns` issued `_UPSERT`,
+    `_MOVE_SUGGESTIONS` and `DELETE FROM bo_campaigns` and committed per campaign, with no
+    confirmation and no default preview. Both sibling commands take the opposite default and say
+    why — `erase_actor` ("Dry run by default because this is the one irreversible operation an
+    operator performs on live data") and `backfill_corpus` ("Run this first") — so an operator
+    reaching for this one to *see what it would do*, which is the habit those two teach, committed
+    a merge instead.
+
+    That the operation is idempotent and interrupt-safe, which its docstring argues and which is
+    true, is a different property from being reviewable before it runs: the merge is deliberately
+    lossy at the row level (two rows become one), so a wrong `campaign_id_for` derivation collapses
+    distinct campaigns irreversibly.
+    """
+    from chemclaw.cli import rekey_campaigns
+
+    seen: list[bool] = []
+
+    async def _record(*, dry_run: bool) -> tuple[int, int]:
+        seen.append(dry_run)
+        return 0, 0
+
+    monkeypatch.setattr(rekey_campaigns, "rekey", _record)
+    assert rekey_campaigns.main([]) == 0
+    assert seen == [True], "a bare invocation must not write"
+    assert rekey_campaigns.main(["--apply"]) == 0
+    assert seen == [True, False]

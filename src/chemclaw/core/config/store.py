@@ -6,7 +6,7 @@ cross-section validators; fields, env names and defaults are exactly as they wer
 sections shared a single module (D-072 mixins, split per D-156).
 """
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings
 
 # Qdrant's own default, and the value `vector_store_url` ships with. Named because the
@@ -159,11 +159,16 @@ class StoreSettings(BaseSettings):
     # Where the external store is. Unused by `pgvector`, which reads `postgres_dsn` like every
     # other store here.
     vector_store_url: str = _QDRANT_DEFAULT_URL
-    # Registered with the log-redaction inventory by `retrieval.vectors.qdrant.open_qdrant_client`,
-    # where it is read — so a client echoing its own configuration into a traceback cannot put the
-    # key in a log. Registered at the read rather than here, which is the warehouse seam's placement
-    # and the one that cannot drift from the value it protects.
-    vector_store_api_key: str = ""
+    # A `SecretStr` and a member of `core/logging.py`'s `_SECRET_SETTINGS`, like every other
+    # credential on this object (`D-2026-08-26-a-credential-is-a-type-not-a-convention`). It was
+    # neither until 2026-08-27, and this comment used to say the read-site `register_secret_env`
+    # call covered it instead. That was true only when the value came from the process environment:
+    # `register_secret_env` stores a *name*, `Settings` reads `.env` without exporting anything, so
+    # on the documented `.env` posture the registered name resolved to nothing. The mechanism is
+    # fixed (`logging._configured_by`) and the registrations stay, but a credential that is a field
+    # belongs in the field inventory — that is the one that cannot depend on where the value came
+    # from.
+    vector_store_api_key: SecretStr = SecretStr("")
     vector_store_timeout_seconds: float = Field(default=30.0, gt=0)
     # The collection the document corpus's chunks live in. Named rather than derived, because a
     # cluster is often shared and "which collection is ours" is a deployment fact, not a constant.

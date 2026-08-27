@@ -311,12 +311,8 @@ _KNOWN_LEAKS: dict[Site, str] = {
         "different ones, and an earlier attempt to unify them had to be reverted. Tracked in "
         "BACKLOG.md; until the helper exists this edge is debt, not design"
     ),
-    ("src/chemclaw/agent/interaction_tools.py", "temporal"): (
-        "the same launch idiom, and the copy that has already diverged: `start_approval` omits "
-        "the `id_reuse_policy` the other four pass. Same fix, same BACKLOG row"
-    ),
     ("src/chemclaw/templates/registry.py", "temporal"): (
-        "the fifth copy of the launch idiom. `templates/` is core's own sequencer, so starting a "
+        "the last copy of the launch idiom. `templates/` is core's own sequencer, so starting a "
         "`TemplateWorkflow` is legitimate work — reaching for `temporalio` to do it is what is not"
     ),
     ("src/chemclaw/agent/job_results.py", "temporal"): (

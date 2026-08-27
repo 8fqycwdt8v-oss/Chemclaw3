@@ -22,7 +22,6 @@ from chemclaw.science.bo import engine
 from chemclaw.science.bo.engine import (
     interrogate_surrogate,
     predict_at,
-    surrogate_fit_quality,
 )
 from chemclaw.science.bo.problem import (
     Candidate,
@@ -57,6 +56,22 @@ def _runs() -> list[Observation]:
         )
         for index in range(10)
     ]
+
+
+def _fit_quality(
+    problem: OptimizationProblem,
+    observations: list[Observation],
+    folds: int | None = None,
+    seed: int | None = None,
+) -> list[FitQuality]:
+    """Cross-validate the surrogate and return the scores — the fit half of one interrogation.
+
+    This was `engine.surrogate_fit_quality`, a one-line forwarder to `interrogate_surrogate` whose
+    only callers were the assertions below; production reaches `interrogate_surrogate` directly
+    from `connectors/bo/server/tools.py::predict_outcome`. It was deleted in the 2026-08-27
+    dead-code sweep and the convenience kept here, where a test's convenience belongs.
+    """
+    return interrogate_surrogate(problem, observations, [], folds=folds, seed=seed)[1]
 
 
 def test_a_point_among_the_runs_predicts_near_what_was_measured() -> None:
@@ -206,7 +221,7 @@ def test_fit_quality_is_finite_and_carries_what_it_was_computed_on() -> None:
     The counts are not decoration: R² 0.95 over ten runs and over two hundred are different
     claims, and only one of them is about the chemistry.
     """
-    quality = surrogate_fit_quality(_problem(), _runs())[0]
+    quality = _fit_quality(_problem(), _runs())[0]
     assert quality.objective == "yield"
     # Content, not a bound the model already enforces: `mae >= 0.0` is `Field(ge=0.0)` and cannot
     # fail, and `r2 <= 1.0` is arithmetic. These runs are a deliberate rising trend, so a surrogate
@@ -222,7 +237,7 @@ def test_a_score_over_few_runs_carries_the_caveat_that_it_will_be_over_read() ->
 
     A `computed_field` again, for `Prediction.summary`'s reason.
     """
-    summary = surrogate_fit_quality(_problem(), _runs())[0].summary
+    summary = _fit_quality(_problem(), _runs())[0].summary
     assert "sanity check, not as accuracy" in summary
 
 
@@ -247,13 +262,13 @@ def test_the_fit_quality_names_every_objective() -> None:
         )
         for index, run in enumerate(_runs())
     ]
-    assert [q.objective for q in surrogate_fit_quality(problem, runs)] == ["yield", "impurity"]
+    assert [q.objective for q in _fit_quality(problem, runs)] == ["yield", "impurity"]
 
 
 def test_cross_validating_more_folds_than_runs_is_refused_with_the_reason() -> None:
     """Each fold would hold out less than one run, which is not a score."""
     with pytest.raises(ValueError, match="less than one run"):
-        surrogate_fit_quality(_problem(), _runs()[:4], folds=5)
+        _fit_quality(_problem(), _runs()[:4], folds=5)
 
 
 def test_the_tool_returns_predictions_and_the_fit_behind_them() -> None:
@@ -356,7 +371,7 @@ def test_a_fold_count_the_caller_named_is_still_refused_when_the_runs_cannot_car
     one put — the same reasoning that refuses an inert screening knob rather than ignoring it.
     """
     with pytest.raises(ValueError, match="less than one run"):
-        surrogate_fit_quality(_problem(), _runs()[:3], folds=5)
+        _fit_quality(_problem(), _runs()[:3], folds=5)
 
 
 def test_the_prediction_and_the_score_come_from_one_fit(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -530,7 +545,7 @@ def test_the_fit_score_does_not_reproduce_and_is_reported_to_the_precision_it_do
     This test pins the *property*, not a value: repeats must land in a band, and the summary must
     warn a reader off comparing two scores that differ by less than it.
     """
-    scores = [surrogate_fit_quality(_problem(), _runs())[0] for _ in range(3)]
+    scores = [_fit_quality(_problem(), _runs())[0] for _ in range(3)]
     spread = max(s.r2 for s in scores) - min(s.r2 for s in scores)
     # **Both sides.** The upper bound alone would also pass if the fit were accidentally made
     # deterministic, which would make the caveats below false — and the point of this test is that
@@ -543,7 +558,7 @@ def test_the_fit_score_does_not_reproduce_and_is_reported_to_the_precision_it_do
 
 def test_the_reported_score_is_not_printed_more_precisely_than_it_repeats() -> None:
     """Two decimals on R², two significant figures on MAE — what survives a repeat."""
-    summary = surrogate_fit_quality(_problem(), _runs())[0].summary
+    summary = _fit_quality(_problem(), _runs())[0].summary
     # `(?!\S)` anchors the MAE group: without it, a value formatted as `1e+02` matched just the
     # leading `1`, whose one significant figure passes the check below and asserts nothing.
     matched = re.search(r"R² (\d+\.\d+) and mean absolute error (\S+?)(?=\.\s|\.$)", summary)
@@ -581,7 +596,7 @@ def test_a_score_over_enough_runs_drops_the_small_sample_caveat_but_keeps_the_re
 def test_a_fold_count_below_two_is_refused() -> None:
     """One fold holds nothing out, so it is not cross-validation."""
     with pytest.raises(ValueError, match="at least 2 folds"):
-        surrogate_fit_quality(_problem(), _runs(), folds=1)
+        _fit_quality(_problem(), _runs(), folds=1)
 
 
 def test_the_defaulted_fold_count_clamps_up_to_two_at_the_observation_floor() -> None:
@@ -590,7 +605,7 @@ def test_the_defaulted_fold_count_clamps_up_to_two_at_the_observation_floor() ->
     Two observations is `MIN_SEED_OBSERVATIONS`, so this is the smallest problem that can be
     cross-validated at all, and `min(5, 2)` alone would be right here only by coincidence.
     """
-    assert surrogate_fit_quality(_problem(), _runs()[:2])[0].folds == 2
+    assert _fit_quality(_problem(), _runs()[:2])[0].folds == 2
 
 
 # --- a point's *values*, not only its parameter names ------------------------------------------

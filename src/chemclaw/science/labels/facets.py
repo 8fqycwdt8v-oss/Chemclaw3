@@ -68,19 +68,6 @@ class Facet(BaseModel):
         description="Restrict to these registry sources. Empty means all.",
     )
 
-    def is_open(self) -> bool:
-        """Whether this facet narrows nothing — the whole-index case, meaningful only as a total."""
-        return not any(
-            (
-                self.named_reaction,
-                self.rxno_id,
-                self.species_smiles,
-                self.product_smiles,
-                self.product_functional_group,
-                self.sources,
-            )
-        )
-
 
 class FacetSelection(BaseModel):
     """The reactions a facet selected, what fraction of them is labelled, and whether it truncated.

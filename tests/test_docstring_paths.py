@@ -111,6 +111,7 @@ _NOT_PYTHON = frozenset(
     {
         "chemclaw.config",
         "chemclaw.connectorUrls",
+        "chemclaw.connectorsEnabled",
         "chemclaw.db",
         "chemclaw.env",
         "chemclaw.image",
