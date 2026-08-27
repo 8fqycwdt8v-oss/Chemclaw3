@@ -67,7 +67,7 @@ async def recall_observations(limit: int = 0) -> list[Observation]:
     the claim from the notes.
 
     If an answer rests on an observation and nothing more, say so explicitly — that it is a pattern
-    the system noticed and no one has confirmed. `support` is how many merged notes back it and
+    the system noticed and no one has confirmed. `support` is how many cited runs back it and
     `projects_seen` which projects it spans; both low means a thin reading, not a weak fact.
 
     Args:

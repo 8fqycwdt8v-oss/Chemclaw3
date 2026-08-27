@@ -249,7 +249,7 @@ _MEMORY_JOBS: dict[MemoryJobKind, MethodAsyncNoParam[Any, list[str]]] = {
 
 
 @tool
-async def synthesize_memory(kind: MemoryJobKind) -> str:
+async def synthesize_memory(kind: MemoryJobKind, fresh: bool = False) -> str:
     """Mine the reaction corpus for a class of knowledge and propose what it finds for review.
 
     Use this when someone asks what the corpus now supports — "have we accumulated enough on this
@@ -274,6 +274,11 @@ async def synthesize_memory(kind: MemoryJobKind) -> str:
 
     Args:
         kind: Which synthesis to run.
+        fresh: Force a new run even when one already ran today. The default deduplicates by UTC
+            day — two chemists asking the same morning share one scan — but the tool's own
+            recommended use ("after a large ELN ingest") is exactly the case where rejoining the
+            morning's run silently reports on the *pre-ingest* corpus. Pass true when the corpus
+            has changed since the day's first run.
 
     Returns:
         The job id. Poll it with `get_durable_job_status`; the result is the list of pull requests
@@ -285,7 +290,7 @@ async def synthesize_memory(kind: MemoryJobKind) -> str:
     # gate exists to prevent.
     actor = require_actor()
     client = await connect()
-    workflow_id = _memory_job_id(kind)
+    workflow_id = _memory_job_id(kind, fresh=fresh)
     try:
         handle = await client.start_workflow(
             _MEMORY_JOBS[kind],
@@ -304,7 +309,7 @@ async def synthesize_memory(kind: MemoryJobKind) -> str:
     return handle.id
 
 
-def _memory_job_id(kind: MemoryJobKind) -> str:
+def _memory_job_id(kind: MemoryJobKind, *, fresh: bool = False) -> str:
     """A deterministic id for one kind's synthesis, keyed on the **UTC date**.
 
     There is no request to key on: the input is the whole corpus as it stands, so two chemists
@@ -316,13 +321,17 @@ def _memory_job_id(kind: MemoryJobKind) -> str:
     (`memory_synthesis_schedule_minutes` defaulted to 1440), so the cadence a deployment already
     reasoned about is preserved and only the *trigger* moved from a clock to a person.
 
-    The cost is stated rather than hidden: a second ask on the same day rejoins the first run
-    instead of re-mining, so an ingest landing between the two is not picked up until tomorrow. The
-    tool returns that run's id either way, so the caller sees a job rather than silence — but it is
-    the same job, and a chemist who needs the newer corpus reflected today needs a different unit
-    here, not a retry.
+    The cost of the daily unit is stated rather than hidden: a second ask on the same day
+    rejoins the first run, so an ingest landing between the two is not picked up. `fresh` is the
+    escape hatch for exactly that — it suffixes the id with the current time, so the run really
+    re-mines. The caller opts in, because the default has to stay the shared scan: "mine after
+    this afternoon's import" was the tool's own recommended use, and it silently returned the
+    morning run's id.
     """
-    return f"memory-{kind}-{datetime.now(UTC).date().isoformat()}"
+    day = datetime.now(UTC).date().isoformat()
+    if fresh:
+        return f"memory-{kind}-{day}-{datetime.now(UTC).strftime('%H%M%S')}"
+    return f"memory-{kind}-{day}"
 
 
 @tool

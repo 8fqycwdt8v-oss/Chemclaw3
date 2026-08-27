@@ -132,6 +132,11 @@ SELECT {_COLUMNS} FROM observations
  ORDER BY id
 """
 
+_SELECT_PROMOTED = f"""
+SELECT {_COLUMNS} FROM observations
+ WHERE status = 'promoted' ORDER BY cardinality(evidence_note_ids) DESC, id
+"""
+
 _SET_STATUS = "UPDATE observations SET status = %s WHERE id = %s"
 
 # Retire what has stopped being re-observed. `last_seen` is refreshed by every run that still finds
@@ -146,9 +151,16 @@ UPDATE observations SET status = 'retired'
 class Observation(BaseModel):
     """One thing the agent noticed across the corpus, with what it rests on.
 
-    Not a note and never rendered as one. `evidence_note_ids` are **merged** note ids, so an
-    observation always points at knowledge a human already signed off — it adds a reading of that
-    knowledge, never a new fact.
+    Not a note and never rendered as one. `evidence_note_ids` are the citations the miner
+    counted: `reaction-<id>` references into the **ungated** transcription store for the corpus
+    miner (an ELN row is data, not a claim — D-2026-08-25 removed the gate from transcriptions,
+    and the evidence moved with them), and merged `interaction` note ids for the interaction
+    miner. This field's docstring said "merged note ids, so an observation always points at
+    knowledge a human already signed off" for months after that stopped being true of the larger
+    half — which made every promotion PR's "supported by N merged notes" a false statement to the
+    human at the gate. What is still true, and is the actual invariant: an observation adds a
+    *reading* of recorded evidence, never a new fact, and the promotion summary now says which
+    kind of evidence it is counting.
     """
 
     id: str = ""
@@ -288,21 +300,23 @@ async def record(observations: list[Observation], *, complete: bool) -> int:
             "this pass, so a retraction waits for the next complete one",
             len(observations),
         )
+    rows = [
+        {
+            "id": identified.id,
+            "statement": identified.statement,
+            "scope": identified.scope,
+            "evidence": identified.evidence_note_ids,
+            "projects": identified.projects_seen,
+            "origin": identified.origin,
+        }
+        for identified in (observation.with_id() for observation in observations)
+    ]
     async with _connection() as conn:
         async with conn.cursor() as cur:
-            for observation in observations:
-                identified = observation.with_id()
-                await cur.execute(
-                    statement,
-                    {
-                        "id": identified.id,
-                        "statement": identified.statement,
-                        "scope": identified.scope,
-                        "evidence": identified.evidence_note_ids,
-                        "projects": identified.projects_seen,
-                        "origin": identified.origin,
-                    },
-                )
+            # One batched statement, not one round trip per row: a mining pass records the whole
+            # corpus's findings in a single transaction either way, and N sequential executes made
+            # its cost N network latencies for no isolation the transaction did not already give.
+            await cur.executemany(statement, rows)
         await conn.commit()
     return len(observations)
 
@@ -340,6 +354,22 @@ async def promotable() -> list[Observation]:
                     settings.observation_promote_min_projects,
                 ),
             )
+            rows = await cur.fetchall()
+    return [_observation(row) for row in rows]
+
+
+async def promoted_observations() -> list[Observation]:
+    """Every promoted observation, best-supported first — what the promotion guard checks against.
+
+    The duplicate-promotion guard used to be a list local to one activity pass, so a subset
+    promoted *last week* was invisible to this week's superset (two playbooks for one finding),
+    and an activity retry started the pass over with the list empty. Reading the promoted rows
+    makes the guard a property of the store rather than of the schedule that happened to run —
+    the guarantee `with_id`'s docstring claimed and the code did not keep.
+    """
+    async with _connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(_SELECT_PROMOTED)
             rows = await cur.fetchall()
     return [_observation(row) for row in rows]
 

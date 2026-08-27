@@ -18,7 +18,7 @@ from typing import Any
 import pytest
 
 from chemclaw.core.config import settings
-from chemclaw.durable.memory_jobs import _slice_for_this_run
+from chemclaw.durable.memory_jobs import SynthesisUnit, _slice_for_this_run
 from chemclaw.kg.note import Note
 
 
@@ -43,7 +43,9 @@ class _FakeWorkflowClock:
 def _corpus(n: int) -> list[Note]:
     """`n` distinct proposable notes, ids zero-padded so id order is numeric order."""
     return [
-        Note(id=f"campaign-{i:03d}", type="campaign", created_by="agent", body="x")
+        SynthesisUnit(
+            note=Note(id=f"campaign-{i:03d}", type="campaign", created_by="agent", body="x")
+        )
         for i in range(n)
     ]
 
@@ -102,8 +104,8 @@ def test_consecutive_runs_cover_different_notes(monkeypatch: pytest.MonkeyPatch)
         fake = _FakeWorkflowClock(datetime(2026, 7, n, tzinfo=UTC))
         monkeypatch.setattr("chemclaw.durable.memory_jobs.workflow", fake)
         return {
-            note.id
-            for note in _slice_for_this_run(notes, settings.memory_max_notes_per_run, "campaign")
+            unit.note.id
+            for unit in _slice_for_this_run(notes, settings.memory_max_notes_per_run, "campaign")
         }
 
     first, second, third = _day(1), _day(2), _day(3)
@@ -120,10 +122,10 @@ def test_the_whole_corpus_is_reached_within_one_cycle(monkeypatch: pytest.Monkey
         fake = _FakeWorkflowClock(datetime(2026, 7, day, tzinfo=UTC))
         monkeypatch.setattr("chemclaw.durable.memory_jobs.workflow", fake)
         seen |= {
-            note.id
-            for note in _slice_for_this_run(notes, settings.memory_max_notes_per_run, "campaign")
+            unit.note.id
+            for unit in _slice_for_this_run(notes, settings.memory_max_notes_per_run, "campaign")
         }
-    assert seen == {note.id for note in notes}
+    assert seen == {unit.note.id for unit in notes}
 
 
 def test_the_window_wraps_rather_than_running_short(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -139,7 +141,7 @@ def test_the_window_wraps_rather_than_running_short(monkeypatch: pytest.MonkeyPa
         monkeypatch.setattr("chemclaw.durable.memory_jobs.workflow", fake)
         window = _slice_for_this_run(notes, settings.memory_max_notes_per_run, "campaign")
         assert len(window) == 7
-        assert len({note.id for note in window}) == 7  # no note twice in one run
+        assert len({unit.note.id for unit in window}) == 7  # no note twice in one run
 
 
 def test_the_slice_is_stable_within_a_run(

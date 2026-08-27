@@ -13,6 +13,7 @@ unchanged — it is the *trigger* that moved — so a chemist or an agent workfl
 there is a reason to look at what the corpus now supports.
 """
 
+import asyncio
 import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -28,9 +29,9 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.ingest.eln.ord import OrdReaction
     from chemclaw.ingest.sources.registry import active_ingest_sources
     from chemclaw.kg.git_submitter import default_submitter
-    from chemclaw.kg.note import Note
     from chemclaw.kg.pr_gate import propose_note
     from chemclaw.memory.jobs import (
+        SynthesisUnit,
         build_campaign_notes,
         build_optimization_notes,
         build_playbook_notes,
@@ -103,40 +104,52 @@ async def read_corpus() -> CorpusRead:
     return CorpusRead(reactions=reactions, complete=not skipped)
 
 
-async def all_reactions() -> list[OrdReaction]:
-    """The corpus as a plain list, for the three note builders that cannot act on completeness.
-
-    They propose notes through the PR-gate, where a human reads what was built; nothing they do
-    rewrites stored state on the strength of "this is everything". The observation miner does, and
-    calls `read_corpus` directly.
-    """
-    return (await read_corpus()).reactions
-
-
-@durable_activity("background")
-@activity.defn
-async def build_campaign_notes_activity() -> list[Note]:
-    """Detect reaction chains across the corpus and build (not publish) one campaign note each."""
-    return build_campaign_notes(await all_reactions())
+# The builders run in a worker thread, not on the activity's event loop. Each one does full DRFP
+# fingerprinting, O(n²) Tanimoto, NetworkX component analysis *and* a synchronous full corpus
+# parse (`load_notes` inside `_units`) — and the `background-jobs` queue's single worker shares
+# one loop across ELN sync, reindex, retention and every other activity, so an inline builder
+# stalled all of them for the duration, Temporal heartbeats included.
+# `observation_jobs.mine_observations_activity` threads its parse for exactly this reason; the
+# three activities that do strictly more blocking work never got the same treatment.
+#
+# Completeness travels into the builder (`corpus_complete`), because the retirement half acts on
+# "this run no longer mints that id" — which is state change, gated only by a reviewer who cannot
+# know the read was partial. `memory.jobs._units` says what it does with it.
 
 
 @durable_activity("background")
 @activity.defn
-async def build_playbook_notes_activity() -> list[Note]:
-    """Distil cross-project candidates across the corpus and build a playbook note per candidate."""
-    return build_playbook_notes(await all_reactions())
+async def build_campaign_notes_activity() -> list[SynthesisUnit]:
+    """Detect reaction chains across the corpus and build (not publish) one campaign unit each."""
+    corpus = await read_corpus()
+    return await asyncio.to_thread(
+        build_campaign_notes, corpus.reactions, corpus_complete=corpus.complete
+    )
 
 
 @durable_activity("background")
 @activity.defn
-async def build_optimization_notes_activity() -> list[Note]:
-    """Group same-transformation runs across the corpus and build an optimization note per group."""
-    return build_optimization_notes(await all_reactions())
+async def build_playbook_notes_activity() -> list[SynthesisUnit]:
+    """Distil cross-project candidates across the corpus, one playbook unit per candidate."""
+    corpus = await read_corpus()
+    return await asyncio.to_thread(
+        build_playbook_notes, corpus.reactions, corpus_complete=corpus.complete
+    )
 
 
 @durable_activity("background")
 @activity.defn
-async def publish_memory_note_activity(note: Note, actor: str = "") -> str:
+async def build_optimization_notes_activity() -> list[SynthesisUnit]:
+    """Group same-transformation runs across the corpus, one optimization unit per group."""
+    corpus = await read_corpus()
+    return await asyncio.to_thread(
+        build_optimization_notes, corpus.reactions, corpus_complete=corpus.complete
+    )
+
+
+@durable_activity("background")
+@activity.defn
+async def publish_memory_note_activity(unit: SynthesisUnit, actor: str = "") -> str:
     """PR-gate one already-built memory note; return its reference (the fan-out publish step).
 
     Any compound note the note links is minted into the same submission (STO-7). Applying that rule
@@ -154,14 +167,21 @@ async def publish_memory_note_activity(note: Note, actor: str = "") -> str:
     (a schedule, no user), and stamping a synthetic actor on them would make an unattributed
     proposal look attributed. Absent means absent.
     """
+    note = unit.note
     if not actor:
         return await propose_note(
-            note, default_submitter(), dependencies=compound_dependencies(note)
+            note,
+            default_submitter(),
+            dependencies=compound_dependencies(note),
+            superseded=unit.retirements,
         )
     token = set_current_identity(actor, frozenset())
     try:
         return await propose_note(
-            note, default_submitter(), dependencies=compound_dependencies(note)
+            note,
+            default_submitter(),
+            dependencies=compound_dependencies(note),
+            superseded=unit.retirements,
         )
     finally:
         reset_current_identity(token)
@@ -178,11 +198,11 @@ class PublishNoteWorkflow:
     """
 
     @workflow.run
-    async def run(self, note: Note) -> str:
-        """Run the PR-gate publish activity for one note with the bounded note-write retry."""
+    async def run(self, unit: SynthesisUnit) -> str:
+        """Run the PR-gate publish activity for one unit with the bounded note-write retry."""
         return await workflow.execute_activity(
             publish_memory_note_activity,
-            note,
+            unit,
             start_to_close_timeout=timedelta(seconds=settings.note_write_timeout_seconds),
             retry_policy=note_publish_retry(),
         )
@@ -208,7 +228,9 @@ async def resolve_notes_per_run() -> int:
     return settings.memory_max_notes_per_run
 
 
-def _slice_for_this_run(notes: list[Note], cap: int, id_prefix: str) -> list[Note]:
+def _slice_for_this_run(
+    units: list[SynthesisUnit], cap: int, id_prefix: str
+) -> list[SynthesisUnit]:
     """Take at most `cap` notes, rotating the window on each daily run.
 
     These jobs rescan the whole corpus with no cursor and had no ceiling on what one run could
@@ -225,10 +247,13 @@ def _slice_for_this_run(notes: list[Note], cap: int, id_prefix: str) -> list[Not
     Sorted by id so the ordering is stable rather than incidental to build order, and
     `workflow.now()` rather than a wall clock because a workflow must replay identically. `cap` is
     passed in rather than read here for the same reason — see `resolve_notes_per_run`.
+
+    The window slices *units*, so a retirement can never land in a different day's run from the
+    replacement that carries it — the pairing `SynthesisUnit` exists for.
     """
-    if cap <= 0 or len(notes) <= cap:
-        return notes
-    ordered = sorted(notes, key=lambda note: note.id)
+    if cap <= 0 or len(units) <= cap:
+        return units
+    ordered = sorted(units, key=lambda unit: unit.note.id)
     start = (workflow.now().date().toordinal() * cap) % len(ordered)
     window = (ordered + ordered)[start : start + cap]
     workflow.logger.warning(
@@ -252,7 +277,7 @@ async def _synthesize(build_activity: Any, id_prefix: str) -> list[str]:
     What one run may propose is capped, and what the cap drops is said out loud — see
     `_slice_for_this_run`.
     """
-    notes = await workflow.execute_activity(
+    units = await workflow.execute_activity(
         build_activity,
         start_to_close_timeout=timedelta(seconds=settings.memory_job_timeout_seconds),
         retry_policy=BAD_DATA_RETRY,
@@ -264,7 +289,7 @@ async def _synthesize(build_activity: Any, id_prefix: str) -> list[str]:
         retry_policy=BAD_DATA_RETRY,
     )
     return await fan_out(
-        PublishNoteWorkflow, _slice_for_this_run(notes, cap, id_prefix), id_prefix=id_prefix
+        PublishNoteWorkflow, _slice_for_this_run(units, cap, id_prefix), id_prefix=id_prefix
     )
 
 
