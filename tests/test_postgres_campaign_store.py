@@ -275,3 +275,40 @@ def test_a_suggestion_round_trips_the_space_it_was_proposed_against() -> None:
         assert recorded.job_id == "bo-job-snapshot"
 
     asyncio.run(_run())
+
+
+def test_two_turns_opening_one_campaign_at_once_agree_on_who_opened_it() -> None:
+    """The race the `xmax` read replaced a `SELECT` to close, driven concurrently for real.
+
+    `suggest_next_experiment` reports `opened_new_campaign` so a chemist who supplied runs against
+    a campaign with no record is told they may have forked one. It used to be answered by a
+    `campaign_is_known` read taken just before the write — and under two turns opening the same
+    decision space at once, both reads see nothing, both report having opened a campaign, and the
+    upsert underneath then serializes them so exactly one is right with nothing able to say which.
+
+    Postgres answers it instead: `ON CONFLICT ... RETURNING (xmax = 0)` is true only for the
+    statement that actually inserted the row. Two concurrent transactions must therefore return
+    exactly one `True` between them, whichever wins.
+
+    Driven with `asyncio.gather` over the real store rather than the in-memory one, because the
+    property under test *is* the database's concurrency control: the in-memory backend has no
+    contention to lose and would pass this test while proving nothing about a deployment.
+    """
+
+    async def _run() -> None:
+        store = await _store_or_skip()
+        campaign_id = "campaign-concurrent-open"
+        results = await asyncio.gather(
+            *(
+                store.record(_campaign(campaign_id), Suggestion(campaign_id=campaign_id))
+                for _ in range(2)
+            )
+        )
+        created = [was_created for _, was_created in results]
+        assert sum(created) == 1, f"exactly one writer opened the campaign, got {created}"
+        # Both suggestions still land — the inline path has no job id, so two asks are two
+        # entries. Only the *campaign* is created once.
+        assert len({suggestion_id for suggestion_id, _ in results}) == 2
+        assert len(await store.suggestions_for(campaign_id, 10)) == 2
+
+    asyncio.run(_run())
