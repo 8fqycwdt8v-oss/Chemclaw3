@@ -21,7 +21,17 @@ class ObservabilitySettings(BaseSettings):
 
     # The format carries the timestamp, level, and logger name every diagnosis needs.
     log_level: str = "INFO"
-    log_format: str = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+    # The three identifiers are in the default format, not only in the JSON one. `ContextFilter`
+    # stamps `correlation_id`/`actor`/`session_id` onto every record that reaches a swept handler,
+    # and until this line carried them the only way to see them was `log_json`, which is set in the
+    # chart and nowhere else — so `make chat`, `make connectors`, a hand-started worker, CI and
+    # every local reproduction ran with the join key invisible. The earlier reasoning here ("two
+    # formats to keep in step is how one of them goes stale") is right about the risk and had the
+    # cost backwards: the format a developer actually reads was the one with no way to join a line
+    # to a turn.
+    log_format: str = (
+        "%(asctime)s %(levelname)s %(name)s [%(correlation_id)s/%(session_id)s]: %(message)s"
+    )
     # One JSON object per line instead of the `%`-format string above. Off in code and on in the
     # chart, the same split `budget_enabled` uses: a developer reading a terminal wants the string,
     # and a cluster log stack wants to parse rather than guess. The `%`-format is left as the
