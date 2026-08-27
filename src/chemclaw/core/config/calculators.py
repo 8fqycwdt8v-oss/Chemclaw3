@@ -321,6 +321,18 @@ class CalculatorSettings(BaseSettings):
     # service timed out. Matched to the server's own ceiling so the *server* is what bounds a
     # search, with `crest_timeout_seconds` the one number to change.
     calc_sampling_timeout_seconds: float = Field(default=14400.0, gt=0)
+    # **The same bound again for the two calculations pinned to the `xtb` binary regardless of
+    # `CHEMCLAW_XTB_ENGINE`** (`compute_atomic_descriptors`, `compute_surface_potential`) — and for
+    # any other xtb-binary calculation once an operator sets that engine explicitly, which is a
+    # supported one-env-var change on the server. `xtb_cli_timeout_seconds` there defaults to
+    # 3600 s; left at `calc_server_timeout_seconds` (900 s), a calculation that legitimately takes
+    # between the two abandons a server that is still computing, and — because that abandonment is
+    # the retryable `SubsystemUnavailableError`, not a bad-data one — Temporal retries the activity
+    # and starts a second identical run while the first, orphaned one keeps burning CPU under its
+    # own budget. Matched to the server's own ceiling for the same reason
+    # `calc_sampling_timeout_seconds` is: the server is what should bound the wait, not a client
+    # guess shorter than it.
+    calc_atomic_timeout_seconds: float = Field(default=3600.0, gt=0)
     # The molecule `connectors/calc/remote.py::remote_version` derives a key *for* when it asks the
     # server what version a calculator is on. `calculation_key` answers an identity, and an identity
     # is of something — but the `calc_version` it reports is a property of the programs and the

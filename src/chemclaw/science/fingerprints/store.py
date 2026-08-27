@@ -9,6 +9,7 @@ real, so the ranking lives in exactly one place (DRY), just like the calculation
 """
 
 import logging
+import math
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from typing import Generic, Literal, Protocol, TypeVar, runtime_checkable
@@ -484,10 +485,38 @@ async def find_matches(
     is clamped to `[0, 1]` — the same bound the config default carries (Tanimoto's range);
     outside it, a negative value blesses disjoint structures as neighbors and >1 silently
     returns "no precedent" instead of an exact match.
+
+    **That clamp is total only over *ordered* values, and NaN is not one.** Every comparison
+    with NaN is False, so `max` and `min` both keep it: `min(max(nan, 0.0), 1.0)` is `nan`, and
+    a value that stepped over both bounds in silence reached the SQL `>= %(threshold)s` (and the
+    in-memory `>=`), where every candidate row compares False. Measured, an exact self-match of
+    an indexed molecule came back `hits: []` with `index_empty: false`, so `verdict` announced "a
+    genuine negative result" — a chemist told we have no precedent for the structure we are
+    holding. That is the one outcome this whole module is arranged against, arriving *through*
+    the guard written to prevent it, which is why NaN is refused here rather than clamped: it has
+    no nearest bound to clamp toward, and substituting the configured default would answer a
+    question the caller never asked in a way they could not tell from one they did. `±inf` still
+    clamps, because an infinity *does* have a nearest bound — 1.0 and 0.0 are what it means.
+
+    A plain `ValueError` deliberately, not a `FingerprintInputError`: that subclass is the one
+    `retrieval.retrievers` catches to mean "a bad query is an empty answer", so raising it here
+    would convert the refusal straight back into the silent empty result being fixed.
+
+    `top_k` needs no companion guard and gets none: it is typed `int` at every entry point, and
+    an int cannot be NaN. The check is not merely static — pydantic refuses a non-finite float
+    for an `int` field (`finite_number`) before either MCP tool body runs — so its clamp is
+    already total over everything that can reach it.
     """
     k = top_k if top_k is not None else settings.fingerprint_top_k
     k = min(max(k, 1), settings.fingerprint_max_top_k)
     t = threshold if threshold is not None else settings.fingerprint_similarity_threshold
+    if math.isnan(t):
+        raise ValueError(
+            "threshold must be a Tanimoto similarity between 0 and 1, but got NaN, which "
+            "compares False against every stored fingerprint and would report an empty index "
+            "as a genuine negative result; omit it to search at the configured default of "
+            f"{settings.fingerprint_similarity_threshold}"
+        )
     t = min(max(t, 0.0), 1.0)
     found = await store.find_similar(query_bits, k + 1, t)
     return found[:k], len(found) > k

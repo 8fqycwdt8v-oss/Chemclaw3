@@ -34,7 +34,9 @@ from chemclaw.science.bo.problem import (
     Observation,
     OptimizationProblem,
     discrete_candidate_count,
+    discrete_space_size,
     distinct_candidate_count,
+    distinct_feasible_candidate_count,
     observed_value,
 )
 
@@ -73,12 +75,50 @@ class CampaignProgress(BaseModel):
     window: int = Field(ge=1)
 
     n_observations: int = Field(ge=0)
-    # Distinct parameter combinations, which is what a design-space efficiency claim divides by:
-    # re-running one condition three times is one point of the grid, not three.
+    # Distinct parameter combinations *run*: re-running one condition three times is one point of
+    # the grid, not three. Counts every distinct condition performed, including one an exclusion
+    # later forbade — a chemist who ran it still ran it, and this number is the record of that.
     n_distinct: int = Field(ge=0)
-    # The full grid size for an all-categorical problem; None when any parameter is continuous and
-    # the space is therefore infinite.
+    # How many of those occupy a cell of the *feasible* grid, which is what a coverage claim may
+    # divide by. `design_space` counts feasible cells, so dividing `n_distinct` by it compared two
+    # different quantities and could print "7 distinct out of the 6 the full grid holds", which is
+    # not a rounding error but a visibly impossible sentence.
+    #
+    # **Two things make a run not occupy a cell, and an earlier version of this comment named only
+    # one.** It said the counts differ "only under an `ExcludeConstraint`". They also differ when
+    # an observed *value* is outside the declared domain — no constraint involved — because
+    # `point_is_feasible` starts with `point_in_domain`. The realistic trigger is the one
+    # `read_campaign_thread` exists for: a resumed campaign whose space was edited, where a
+    # renamed category leaves the old label in the history. Measured on a 2x2 grid with all four
+    # cells run and two recorded under a since-renamed label: `n_distinct=4`,
+    # `n_distinct_in_space=2`, `design_space=4`, no constraints — a chemist who screened the whole
+    # grid told they covered half, with the contradicting count in the same payload.
+    #
+    # It is reported rather than repaired, because the two numbers are both true and the
+    # difference between them is the finding: `out_of_space` below is what makes it legible
+    # instead of leaving a reader to subtract.
+    n_distinct_in_space: int = Field(ge=0)
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def out_of_space(self) -> int:
+        """Distinct conditions run that occupy no cell of the feasible grid.
+
+        Zero for almost every campaign. Non-zero says the history holds runs the current problem
+        cannot express — a pairing excluded after being run, or a value left behind by an edited
+        space — which is the fact behind the two counts disagreeing.
+        """
+        return self.n_distinct - self.n_distinct_in_space
+
+    # The feasible grid size, or None when it cannot be stated. **`None` carries two meanings and
+    # the caller cannot always tell them apart**: a continuous parameter makes the space genuinely
+    # infinite, *or* an exclusion over a space too large to enumerate declined the walk
+    # (`bo_max_enumerated_cells`). `space_is_infinite` separates them, because "unbounded" and
+    # "ten million cells we chose not to count" are different answers to a chemist asking how much
+    # of the space is left.
     design_space: int | None = None
+    # True only for the first of those two: at least one continuous parameter.
+    space_is_infinite: bool = False
 
     best_value: float | None = None
     # The running best after each evaluation, in the order supplied.
@@ -156,10 +196,21 @@ class CampaignProgress(BaseModel):
         """The design-space efficiency claim, when the space is finite enough to have one."""
         if self.design_space is None:
             return ""
-        return (
-            f" ({self.n_distinct} distinct condition(s) out of the {self.design_space} "
-            "the full grid holds)"
+        # Both sides feasible: `design_space` counts the cells an exclusion leaves, so the
+        # numerator has to be the runs that occupy one. `n_distinct` is still reported beside it
+        # as what was actually run.
+        stated = (
+            f" ({self.n_distinct_in_space} distinct condition(s) out of the {self.design_space} "
+            "the feasible grid holds"
         )
+        if self.out_of_space:
+            # Never silently drop them: the difference is the finding, and a reader who sees only
+            # the smaller number concludes they have screened less than they have.
+            stated += (
+                f", plus {self.out_of_space} further run(s) the current decision space no longer "
+                "contains — an excluded pairing, or a value left behind by an edited space"
+            )
+        return stated + ")"
 
 
 def campaign_progress(
@@ -235,7 +286,9 @@ def campaign_progress(
         window=span_window,
         n_observations=len(values),
         n_distinct=distinct_candidate_count(observations),
+        n_distinct_in_space=distinct_feasible_candidate_count(problem, observations),
         design_space=discrete_candidate_count(problem),
+        space_is_infinite=discrete_space_size(problem) is None,
         best_value=best,
         best_so_far=best_so_far,
         evaluations_since_improvement=since,

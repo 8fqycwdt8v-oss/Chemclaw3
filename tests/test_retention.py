@@ -17,14 +17,18 @@ import pytest
 from langchain_core.messages import HumanMessage, message_to_dict
 from psycopg.types.json import Jsonb
 
+from chemclaw.agent.checkpointer import CHECKPOINT_TABLES
+from chemclaw.agent.leaver import _RETAINED as leaver_retained
 from chemclaw.agent.message_migration import to_langchain
 from chemclaw.agent.message_pairing import droppable_rows, unmatched_result_ids
+from chemclaw.agent.scratchpad import STORE_TABLES
 from chemclaw.core import db
 from chemclaw.core.config import settings
 from chemclaw.durable import retention
 from chemclaw.durable.retention import (
     _ANALYZE_THREADS,
     _EXPIRED_THREADS,
+    _NOT_PRUNED,
     _PRUNABLE,
     RetentionOutcome,
     _window_days,
@@ -32,6 +36,12 @@ from chemclaw.durable.retention import (
 )
 from tests.legacy_rows import legacy_call, legacy_result, legacy_text
 from tests.pg import migrated_db_or_skip
+
+# The same reader `tests/test_schema_inventory.py` pins `infra/sql/README.md` with. Imported rather
+# than re-implemented: a second regex over the migrations would be a second answer to "what tables
+# exist", and the two would drift in exactly the direction that makes an exhaustiveness check pass
+# while going blind.
+from tests.test_schema_inventory import tables_on_disk
 
 
 def test_only_spent_operational_rows_are_prunable() -> None:
@@ -83,6 +93,96 @@ def test_the_calculation_cache_is_never_pruned_by_age() -> None:
     an age cutoff could quietly re-run an expensive conformer search.
     """
     assert "calculation_results" not in _PRUNABLE
+
+
+def test_a_campaign_is_a_record_and_is_never_pruned() -> None:
+    """`bo_campaigns`/`bo_suggestions` are refused, and erasure is what settles it.
+
+    A suggestion row snapshots the candidates, the observations they were drawn from and the
+    decision space they were drawn in, and migration 031 states the invariant plainly: "the
+    sequence *is* the campaign's history". Both tables are append-only, so they grow on every
+    campaign ask — which is what makes the *silence* the defect and not the absence of pruning.
+
+    The argument that decides it is already merged one module over. `agent/leaver.py`'s `_RETAINED`
+    tier keeps both through a data-subject erasure request, beside `audit_events` and `job_records`
+    — the two tables the guards above refuse. A retention clock may not dispose of what an erasure
+    request does not, so this asserts the two facts together: a change that started pruning these
+    would have to take them out of `_RETAINED` first, and that is a decision with an owner.
+    """
+    assert "bo_campaigns" not in _PRUNABLE
+    assert "bo_suggestions" not in _PRUNABLE
+    retained = {table for table, _columns, _why in leaver_retained}
+    assert {"bo_campaigns", "bo_suggestions"} <= retained
+    assert {"audit_events", "job_records"} <= retained
+
+
+def test_every_table_in_the_schema_has_a_disposal_decision() -> None:
+    """The register is exhaustive over the schema — the check the docstring's claim never had.
+
+    **This is the actual defect `bo_campaigns` exposed.** The module docstring enumerates what the
+    sweep prunes and what it refuses and reads as though that were the whole schema; measured, it
+    named three refusals against thirty-three tables it does not prune, so thirty had no disposal
+    decision anywhere a reader or a test could reach one. Nothing checked the list because nothing
+    could: it was prose. `_NOT_PRUNED` makes it data, and this makes it true.
+
+    Both directions, for the reason `tests/test_schema_inventory.py` gives about the same schema: a
+    table with no entry is a table whose growth nobody decided, and an entry with no table is a
+    decision outliving what it describes — the direction the archived storage inventory decayed in.
+
+    The expected set is **derived, never transcribed**. `tables_on_disk` is the same reader
+    `test_schema_inventory` pins the `infra/sql/README.md` inventory with, so a new migration lands
+    here automatically; `CHECKPOINT_TABLES` and `STORE_TABLES` are the first-party constants naming
+    what upstream's `setup()` creates outside `infra/sql`, which is exactly the set that "appears in
+    no schema review" (`infra/sql/README.md`) and went undisposed for as long as it existed.
+
+    Only the **keys** are asserted. The reason strings are judgements, and a test over them would be
+    a second copy of the answer — the split `infra/sql/README.md` already draws over its own
+    Disposal column.
+    """
+    schema = tables_on_disk() | set(CHECKPOINT_TABLES) | set(STORE_TABLES)
+    accounted = set(_PRUNABLE) | set(_NOT_PRUNED)
+    assert schema - accounted == set(), (
+        f"tables with no disposal decision in durable/retention.py: {sorted(schema - accounted)}. "
+        "Add each to _PRUNABLE (with its window) or to _NOT_PRUNED (with what bounds it instead, "
+        "or that nothing does) in the same commit as the migration"
+    )
+    assert accounted - schema == set(), (
+        "durable/retention.py records a disposal decision for tables that do not exist: "
+        f"{sorted(accounted - schema)}"
+    )
+
+
+def test_no_table_is_both_pruned_and_refused() -> None:
+    """Guard the guard: the two registers must partition, not merely cover.
+
+    Without this, the exhaustiveness check above passes for a table listed in both — and the
+    contradiction it would be papering over is the dangerous direction. `_NOT_PRUNED`'s entry is
+    what a reviewer reads to conclude a table is safe from the sweep, while `_PRUNABLE` is what the
+    sweep actually executes, so a table in both reads as refused and is deleted.
+    """
+    overlap = set(_PRUNABLE) & set(_NOT_PRUNED)
+    assert not overlap, f"tables in both _PRUNABLE and _NOT_PRUNED: {sorted(overlap)}"
+
+
+def test_there_are_tables_to_account_for() -> None:
+    """Guard the guard: an empty schema read would make the exhaustiveness check vacuous.
+
+    The same shape `test_schema_inventory.test_there_are_tables_to_inventory` uses, and for the
+    same reason — this repository has hit the vacuous-pass failure repeatedly, most recently a
+    migration reader that globbed the wrong directory and applied zero files without failing.
+    """
+    assert len(tables_on_disk()) > 20
+
+
+def test_every_disposal_decision_states_a_reason() -> None:
+    """An entry with an empty reason is the blank this register exists to replace.
+
+    `_NOT_PRUNED` is only worth more than a set of names because each entry says *why*; a caller
+    could satisfy the exhaustiveness check above with `""` and reintroduce the silence while the
+    test stayed green.
+    """
+    blank = [table for table, why in _NOT_PRUNED.items() if not why.strip()]
+    assert not blank, f"_NOT_PRUNED entries with no stated reason: {sorted(blank)}"
 
 
 def test_retention_is_off_until_a_policy_is_stated(monkeypatch: pytest.MonkeyPatch) -> None:

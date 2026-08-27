@@ -129,7 +129,14 @@ async def record_campaign_run(
     correlation_id: str,
     job_id: str,
 ) -> str:
-    """Write the finished durable campaign into the campaign record; return the campaign id.
+    """Write one durable campaign record; return the campaign id.
+
+    **Called once per completed round and once at the end**, which is not what this docstring said
+    when it was written. The per-round call passes that round's *proposed* candidates and a
+    `job_id` of `"{workflow_id}:r{N}"`; the terminal call passes the best point and the bare
+    workflow id. The two differ in what a `Candidate` here means — a proposal carrying the
+    surrogate's belief, or the run that won — and only the per-round rows carry
+    `predicted_value`/`predicted_sd` at all.
 
     **The gap this closes.** Both paths mint campaign ids from the same `campaign_id_for` space,
     and only the inline `suggest_next_experiment` ever wrote. So `resume_campaign` on a campaign
@@ -153,18 +160,21 @@ async def record_campaign_run(
 
     Args:
         problem: The decision space, which is also the campaign's identity.
-        candidates: The recommendation this run ended on.
+        candidates: The round's proposed candidates, or — on the terminal call — the
+            recommendation the run ended on.
         observations: Every point the campaign evaluated, which is the history a resume needs.
         actor: The Entra actor the run is attributed to, off the memo.
         correlation_id: The originating request, off the same memo.
-        job_id: This run's workflow id — the idempotency key, since an activity is retried by
-            design and a duplicate would be a second identical entry in a history that is meant to
-            record what was actually proposed.
+        job_id: The idempotency key, since an activity is retried by design and a duplicate would
+            be a second identical entry in a history meant to record what was actually proposed.
+            The workflow id on the terminal call, and `"{workflow_id}:r{N}"` per round — a
+            per-round write under the bare workflow id would dedupe against round 1 and silently
+            discard every round after it.
 
     Returns:
         The campaign id, so the workflow can report the handle a chemist quotes back.
     """
-    return await record_suggestion(
+    recorded = await record_suggestion(
         problem,
         candidates=candidates,
         observations=observations,
@@ -180,3 +190,4 @@ async def record_campaign_run(
         provenance=(actor, "", correlation_id),
         job_id=job_id,
     )
+    return recorded.campaign_id

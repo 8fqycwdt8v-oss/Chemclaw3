@@ -70,7 +70,8 @@ from chemclaw.science.bo.problem import (
     Prediction,
     ScreeningDesign,
     discrete_candidate_count,
-    distinct_candidate_count,
+    discrete_space_size,
+    distinct_feasible_candidate_count,
     observed_value,
     params_key,
     point_in_domain,
@@ -345,10 +346,24 @@ def initial_candidates(
     distinct points cannot exist.
     """
     strategy = strategies.map(RandomStrategy(domain=_to_domain(problem), seed=_resolve_seed(seed)))
-    space = discrete_candidate_count(problem)
+    # **Two different questions, and one of them must not be answered with `None`.**
+    # `discrete_space_size` is `None` only for a genuinely infinite (any-continuous) space;
+    # `discrete_candidate_count` is *also* `None` for a finite space too large to enumerate under
+    # an exclusion. Reading the second one here routed a merely-large space into the branch
+    # written for an infinite one, which silently dropped both guarantees the docstring above
+    # promises — measured on a 27-cell space with the ceiling lowered: 40 requested, 40 returned,
+    # **20 distinct**, and no refusal for asking 40 points of a 24-cell space. The ceiling is
+    # ENV-overridable, so any deployment that lowers it to bound the walk would have got that on
+    # ordinary spaces.
+    size = discrete_space_size(problem)
+    feasible = discrete_candidate_count(problem)
     with _translating_surrogate_errors("sampling initial candidates"):
-        if space is None:
+        if size is None:
             return _frame_to_candidates(problem, strategy.ask(n))
+        # Refuse against the *feasible* count when it is known, since that is the number of points
+        # that can actually be drawn; fall back to the raw size when the exclusion walk was
+        # declined, where the rejection loop's own bound is what stops an impossible ask.
+        space = feasible if feasible is not None else size
         if n > space:
             raise ValueError(
                 f"cannot seed {n} distinct points: the discrete space has only {space}"
@@ -447,7 +462,11 @@ def _require_fresh_points_exist(
     space = discrete_candidate_count(problem)
     if space is None:
         return
-    run = distinct_candidate_count(observations)
+    # Counted under the same feasibility filter `space` was: an observation of an *excluded* point
+    # is not one of the cells `discrete_candidate_count` enumerated, and counting it as one refused
+    # a legitimate ask with "the screen is complete" while fresh cells remained. See
+    # `distinct_feasible_candidate_count`.
+    run = distinct_feasible_candidate_count(problem, observations)
     if run < space:
         # Fresh cells remain. Fewer than the batch asked for is fine — BoFire returns what it
         # can — so the threshold here is *zero fresh points*, not `space_exhausted`'s "cannot fill
@@ -891,6 +910,74 @@ def _randomized(design: ScreeningDesign, seed: int | None) -> ScreeningDesign:
     return design.model_copy(update={"runs": shuffled, "randomized": True})
 
 
+def _require_design_fits_the_ceiling(
+    problem: OptimizationProblem, n_generators: int, n_center: int, n_repetitions: int
+) -> None:
+    """Refuse a screen whose run count exceeds `bo_max_design_runs`, before building it.
+
+    **The size of a full factorial is a product of model-supplied numbers, and nothing bounded
+    it.** Every level count comes from a category list the model wrote, so the corner count is
+    exponential in the parameter count: twenty two-level factors is 1 048 576 rows, each a dict of
+    twenty entries, materialized as a Python list before anything downstream sees it. That is not
+    an adversarial input — it is one plausible over-broad problem statement, and the pod dies
+    building the answer to it.
+
+    Counted rather than measured after the fact, because a bound that trips once the list exists
+    has already paid the memory. The arithmetic mirrors `_full_design`'s exactly: the factorial
+    corners (categorical levels, continuous factors at two bounds each) times `n_repetitions`,
+    plus `n_center` centre rows per categorical combination. A reduced design halves the corner
+    count per generator, so it is checked *after* the halving — 40 two-level factors at 30
+    generators really is 1 024 runs, and refusing it would refuse a design that fits.
+
+    **The product is computed in full, and the first version of this guard did not.** Stopping the
+    multiplication once it passed the ceiling looked like the careful thing to do and reproduced,
+    inside the fix, the defect this whole change is about: a partial product is *smaller* than the
+    true one, so shifting it right by `n_generators` could land back under the ceiling and admit a
+    design that never fits. Measured on this tree — 40 two-level factors at one generator passed a
+    4 096 ceiling on a partial product of 8 192, against a true reduced size of 2^39. Python
+    integers are arbitrary precision and this is one multiplication per parameter, so there was
+    nothing to optimise: counting is cheap at any magnitude, and it is *materializing the rows*
+    that is not.
+
+    This lives in the engine and not in the MCP tool deliberately, following the rule the fleet
+    states about slow tools: a bound in the transport is a bound the in-process callers do not get.
+
+    Raises:
+        ValueError: Naming the run count, the ceiling, and the two ways to get under it.
+    """
+    if n_generators and any(
+        len(p.categories) != 2 for p in problem.parameters if isinstance(p, CategoricalParameter)
+    ):
+        # Say nothing about size here: a reduced design over a three-level factor is refused by
+        # `_fractional_design` a few lines later, and this guard's arithmetic (`corners >>
+        # n_generators`) models a design that cannot be built. It reported a fictional run count
+        # and then offered two remedies that were both wrong for the input — "screen fewer
+        # factors" and "ask for a reduced design with n_generators", to a caller who had already
+        # asked for one. The real error is the caller's to act on, so let it through.
+        return
+    corners = 1
+    categorical_combinations = 1
+    for parameter in problem.parameters:
+        if isinstance(parameter, CategoricalParameter):
+            corners *= len(parameter.categories)
+            categorical_combinations *= len(parameter.categories)
+        else:
+            # A continuous factor is screened at its two bounds, exactly as `_full_design` does.
+            corners *= 2
+    if n_generators:
+        corners = max(corners >> n_generators, 1)
+    runs = corners * n_repetitions + n_center * categorical_combinations
+    if runs > settings.bo_max_design_runs:
+        raise ValueError(
+            f"this screen would generate {runs} runs, beyond the configured ceiling of "
+            f"{settings.bo_max_design_runs}. A full factorial is the product of every factor's "
+            "level count, so it grows exponentially in the number of factors — screen fewer "
+            "factors at a time, or ask for a reduced design with `n_generators` (each one halves "
+            "the run count). A design this size is not one anybody runs; it is a decision space "
+            "that needs narrowing first."
+        )
+
+
 def factorial_design(
     problem: OptimizationProblem,
     n_generators: int = 0,
@@ -949,6 +1036,7 @@ def factorial_design(
     if n_repetitions < 1:
         raise ValueError(f"n_repetitions must be 1 or more; got {n_repetitions}")
     _require_knobs_are_honoured(problem, n_center, n_repetitions, reduced=bool(n_generators))
+    _require_design_fits_the_ceiling(problem, n_generators, n_center, n_repetitions)
     design = (
         _fractional_design(problem, n_generators, n_center, n_repetitions)
         if n_generators

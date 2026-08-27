@@ -337,12 +337,46 @@ _PLAN_WRITE_TOOL = "write_todos"
 _UNANSWERABLE: Final = object()
 
 
-def plan_after_batch(request: Any) -> Any:
-    """The plan this batch atomically produces: `None` (no rewrite), a list, or `_UNANSWERABLE`.
+def rewrite_todos_in_batch(request: Any) -> Any:
+    """This batch's `write_todos` argument, whole: `None` (no rewrite), items, or `_UNANSWERABLE`.
+
+    The raw half of `plan_after_batch` — the batch-scoped lookup both it and
+    `plan_link.plan_link_from_todos` need, extracted so the two readings cannot drift on what
+    counts as "this batch's rewrite". `plan_after_batch` reduces the result to bare `content`
+    strings for the identity hash, which is all *it* needs; `plan_link`'s caller needs `status`
+    too, to find the step the batch marks `in_progress`, so this returns the items unreduced.
 
     The batch is read off the *message*, not the state, because that is the only place the other
     calls in it are visible: `ToolNode` hands each call a runtime built from one pre-batch
     snapshot, so state cannot answer "what else is running right now" by construction.
+
+    Returns `None` when the message cannot be found, or when the batch carries no `write_todos`
+    call, rather than guessing. `_UNANSWERABLE` when it does but the batch is not one clean
+    rewrite: two rewrites gathered concurrently (which lands last is a race), or a `todos` argument
+    that is not a list of mappings.
+    """
+    messages = (request.state or {}).get("messages") or []
+    this_call = request.tool_call.get("id")
+    for message in reversed(messages):
+        calls = getattr(message, "tool_calls", None) or []
+        if not any(call.get("id") == this_call for call in calls):
+            continue
+        rewrites = [call for call in calls if call.get("name") == _PLAN_WRITE_TOOL]
+        if not rewrites:
+            return None
+        if len(rewrites) > 1:
+            # Two rewrites gathered concurrently: which one lands last is a race, so "the plan
+            # this batch produces" has no answer.
+            return _UNANSWERABLE
+        items = (rewrites[0].get("args") or {}).get("todos")
+        if not isinstance(items, list) or not all(isinstance(item, Mapping) for item in items):
+            return _UNANSWERABLE
+        return items
+    return None
+
+
+def plan_after_batch(request: Any) -> Any:
+    """The plan this batch atomically produces: `None` (no rewrite), a list, or `_UNANSWERABLE`.
 
     **This is what replaced refusing every gated call batched with a rewrite, and the difference
     is the canonical harness shape.** "Tick the completed step and do the next one" is
@@ -361,27 +395,13 @@ def plan_after_batch(request: Any) -> Any:
     approval check then runs against the pre-batch plan, which is the behaviour this function's
     predecessor was added to tighten, not a new one.
     """
-    messages = (request.state or {}).get("messages") or []
-    this_call = request.tool_call.get("id")
-    for message in reversed(messages):
-        calls = getattr(message, "tool_calls", None) or []
-        if not any(call.get("id") == this_call for call in calls):
-            continue
-        rewrites = [call for call in calls if call.get("name") == _PLAN_WRITE_TOOL]
-        if not rewrites:
-            return None
-        if len(rewrites) > 1:
-            # Two rewrites gathered concurrently: which one lands last is a race, so "the plan
-            # this batch produces" has no answer.
-            return _UNANSWERABLE
-        items = (rewrites[0].get("args") or {}).get("todos")
-        if not isinstance(items, list):
-            return _UNANSWERABLE
-        contents = [item.get("content") for item in items if isinstance(item, Mapping)]
-        if len(contents) != len(items) or not all(isinstance(c, str) for c in contents):
-            return _UNANSWERABLE
-        return contents
-    return None
+    items = rewrite_todos_in_batch(request)
+    if items is None or items is _UNANSWERABLE:
+        return items
+    contents = [item.get("content") for item in items]
+    if not all(isinstance(c, str) for c in contents):
+        return _UNANSWERABLE
+    return contents
 
 
 async def _plan_behind(request: Any, session_id: str) -> list[str] | None:

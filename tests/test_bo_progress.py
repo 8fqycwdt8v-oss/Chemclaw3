@@ -21,6 +21,7 @@ from chemclaw.science.bo.problem import (
     Candidate,
     CategoricalParameter,
     ContinuousParameter,
+    ExcludeConstraint,
     Objective,
     Observation,
     OptimizationProblem,
@@ -507,3 +508,45 @@ def test_the_tool_refuses_a_clashing_problem() -> None:
                 assay_noise=2.0,
             )
         )
+
+
+def test_the_coverage_claim_counts_both_sides_the_same_way() -> None:
+    """A coverage claim of 7 out of 6 is not a rounding error, it is impossible.
+
+    `design_space` counts *feasible* cells — an exclusion removes some (W4) — while `n_distinct`
+    counts every distinct condition run. Divide one by the other and a history holding a run the
+    exclusion forbids produces a sentence with more conditions run than the grid contains. The
+    numerator for the ratio is therefore the runs that occupy a cell; `n_distinct` stays beside it
+    as the record of what was actually performed, because a chemist who ran an excluded condition
+    still ran it.
+
+    The trigger is the ordinary one: a pairing is excluded *after* being run once.
+    """
+    problem = OptimizationProblem(
+        parameters=[
+            CategoricalParameter(name="catalyst", categories=["Pd", "Ni"]),
+            CategoricalParameter(name="solvent", categories=["DMSO", "THF"]),
+        ],
+        objectives=[Objective(name="yield", direction="maximize")],
+        constraints=[
+            ExcludeConstraint(parameters=["catalyst", "solvent"], options=[["Pd"], ["DMSO"]])
+        ],
+    )
+    # Replicates, so the reading clears the plateau floor without adding distinct conditions —
+    # which is also the case `n_distinct` exists to separate from `n_observations`.
+    runs = [
+        ("Pd", "THF", 40.0),
+        ("Ni", "DMSO", 42.0),
+        ("Ni", "THF", 44.0),
+        ("Pd", "DMSO", 30.0),  # the excluded pairing, run before anybody knew
+        ("Pd", "THF", 40.4),
+        ("Ni", "THF", 44.3),
+    ]
+    observations = [Observation(params={"catalyst": c, "solvent": s}, value=v) for c, s, v in runs]
+    reading = read_progress(problem, observations, assay_noise=1.0)
+
+    assert reading.design_space == 3  # 2x2 less the one forbidden pairing
+    assert reading.n_distinct == 4  # every condition performed
+    assert reading.n_distinct_in_space == 3  # ...three of which are cells of the feasible grid
+    assert "3 distinct condition(s) out of the 3" in reading.summary
+    assert "4 distinct condition(s) out of the 3" not in reading.summary

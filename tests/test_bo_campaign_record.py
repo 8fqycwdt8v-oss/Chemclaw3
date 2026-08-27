@@ -171,7 +171,7 @@ def test_three_turns_on_one_problem_build_one_campaign_with_three_suggestions(
                 calc_refs=["xtb@v1:aaa:bbb"],
                 provenance=("chemist-a", "session-1", "corr-1"),
             )
-        )
+        ).campaign_id
 
     assert _run(store.read_campaign(campaign_id)) is not None
     suggestions = _run(store.suggestions_for(campaign_id, 10))
@@ -197,7 +197,7 @@ def test_a_suggestion_records_who_asked_and_in_which_conversation(
             calc_refs=["xtb@v1:aaa:bbb"],
             provenance=("chemist-a", "session-7", "corr-9"),
         )
-    )
+    ).campaign_id
 
     [suggestion] = _run(store.suggestions_for(campaign_id, 10))
     assert (suggestion.actor, suggestion.session_id, suggestion.correlation_id) == (
@@ -234,7 +234,7 @@ def test_recording_never_costs_the_suggestion(monkeypatch: pytest.MonkeyPatch) -
     """
 
     class BrokenStore(InMemoryCampaignStore):
-        async def record(self, campaign: Campaign, suggestion: Suggestion) -> int:
+        async def record(self, campaign: Campaign, suggestion: Suggestion) -> tuple[int, bool]:
             raise ConnectionError("database down")
 
     monkeypatch.setattr("chemclaw.science.bo.campaign_record.campaign_store", BrokenStore)
@@ -248,7 +248,7 @@ def test_recording_never_costs_the_suggestion(monkeypatch: pytest.MonkeyPatch) -
             provenance=("chemist-a", "", ""),
         )
     )
-    assert returned == campaign_id_for(_problem())
+    assert returned.campaign_id == campaign_id_for(_problem())
 
 
 def _campaign(problem: Any, opened_by: str) -> Campaign:
@@ -303,7 +303,7 @@ def test_a_later_session_recovers_the_space_and_the_runs_it_never_saw(
             calc_refs=[],
             provenance=("chemist-a", "session-1", "corr-1"),
         )
-    )
+    ).campaign_id
 
     thread = _run(read_campaign_thread(campaign_id))
 
@@ -311,7 +311,10 @@ def test_a_later_session_recovers_the_space_and_the_runs_it_never_saw(
     assert [o.value for o in thread.observations] == [55.0, 78.0]
     assert [c.params["temperature"] for c in thread.last_candidates] == [95.0]
     assert (thread.objective, thread.direction) == ("yield", "maximize")
-    assert thread.opened_by == "chemist-a"
+    # The thread deliberately carries no `opened_by` — see `CampaignThread`. The column still
+    # holds it, and that is where an audit reads it from.
+    assert not hasattr(thread, "opened_by")
+    assert _run(store.read_campaign(campaign_id)).opened_by == "chemist-a"
 
 
 def test_resuming_returns_the_latest_turn_s_evidence_not_the_first(
@@ -385,7 +388,7 @@ def test_the_bo_connector_serves_and_declares_resuming(store: InMemoryCampaignSt
             calc_refs=[],
             provenance=("chemist-a", "", ""),
         )
-    )
+    ).campaign_id
 
     thread = _run(resume_campaign(campaign_id))
     assert [o.value for o in thread.observations] == [55.0]
@@ -779,7 +782,7 @@ def test_a_programming_error_in_the_write_is_not_swallowed_as_a_database_blip() 
     """
 
     class BrokenStore(InMemoryCampaignStore):
-        async def record(self, campaign: Campaign, suggestion: Suggestion) -> int:
+        async def record(self, campaign: Campaign, suggestion: Suggestion) -> tuple[int, bool]:
             raise TypeError("a defect in this code, not a blip")
 
     monkeypatch = pytest.MonkeyPatch()
@@ -829,7 +832,7 @@ def test_a_durable_campaign_run_is_recorded_and_resumable(store: InMemoryCampaig
     thread = _run(read_campaign_thread(campaign_id))
     assert thread.observations == history, "the evidence a resume seeds from"
     assert thread.last_candidates == [Candidate(params={"ligand": "L1", "temperature": 72.0})]
-    assert thread.opened_by == "alice@example.com", (
+    assert _run(store.read_campaign(campaign_id)).opened_by == "alice@example.com", (
         "the actor is the real one off the run's memo, never a fabricated service identity"
     )
 
@@ -866,7 +869,7 @@ def test_two_inline_suggestions_are_still_two_entries(store: InMemoryCampaignSto
     one row.
     """
     problem = _problem()
-    campaign_id = _run(record_suggestion(problem, [], [], [], ("a", "s", "c")))
+    campaign_id = _run(record_suggestion(problem, [], [], [], ("a", "s", "c"))).campaign_id
     _run(record_suggestion(problem, [], [], [], ("a", "s", "c")))
     assert len(_run(store.suggestions_for(campaign_id, limit=10))) == 2
 
@@ -879,6 +882,51 @@ def test_a_suggestion_remembers_the_space_it_was_made_in(store: InMemoryCampaign
     to it. The candidates and observations were already snapshotted for exactly this reason.
     """
     problem = _problem()
-    campaign_id = _run(record_suggestion(problem, [], [], [], ("a", "s", "c")))
+    campaign_id = _run(record_suggestion(problem, [], [], [], ("a", "s", "c"))).campaign_id
     (recorded,) = _run(store.suggestions_for(campaign_id, limit=1))
     assert recorded.problem == problem.model_dump(mode="json")
+
+
+def test_the_fork_flag_comes_from_the_write_and_not_from_a_read_before_it(
+    store: InMemoryCampaignStore,
+) -> None:
+    """`opened_new_campaign` used to be a read taken just before the write, which raced it.
+
+    Two turns opening the same decision space concurrently both read no campaign and both reported
+    having opened one, while the upsert underneath serialized them — so exactly one was right and
+    nothing could tell which. The write knows; the write says.
+
+    Asserted as the sequence a race would break: the first record of a space reports opening it,
+    every record after reports joining it. A read-before-write cannot promise the second line
+    without a lock the store never took.
+    """
+    problem = _problem()
+    first = _run(record_suggestion(problem, [], [], [], ("a", "s", "c")))
+    second = _run(record_suggestion(problem, [], [], [], ("a", "s", "c")))
+
+    assert first.opened_new_campaign is True
+    assert second.opened_new_campaign is False
+    assert first.campaign_id == second.campaign_id
+
+
+def test_a_failed_write_reports_no_fork_rather_than_guessing_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A blip is ignorance, and ignorance must not be announced as a fork.
+
+    The read this replaced erred in the same direction deliberately ("assume known"), because
+    raising a fork on the strength of a failed read sends a chemist looking for a problem a
+    database outage invented. The candidates are still returned, which is the whole point of
+    swallowing the failure at all.
+    """
+
+    class BrokenStore(InMemoryCampaignStore):
+        async def record(self, campaign: Campaign, suggestion: Suggestion) -> tuple[int, bool]:
+            raise ConnectionError("database down")
+
+    monkeypatch.setattr("chemclaw.science.bo.campaign_record.campaign_store", BrokenStore)
+    campaign_store.cache_clear()
+
+    recorded = _run(record_suggestion(_problem(), [], [], [], ("a", "s", "c")))
+    assert recorded.campaign_id == campaign_id_for(_problem())
+    assert recorded.opened_new_campaign is False
