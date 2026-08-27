@@ -66,8 +66,9 @@ _EXPECTED_SUBSYSTEMS = {
     # degradation a chemist actually feels (evidence missing from an answer) was the one missing
     # from `chemclaw_degraded_total`.
     "evidence_source",
-    # `durable/connector_job.py::ConnectorJobWorkflow._record_run`, whose log line has always said the swallowed write
-    # means the run "survives only in Temporal's history" — i.e. that it loses data nothing else
+    # `durable/connector_job.py::ConnectorJobWorkflow._record_run`, whose log line has always said
+    # the swallowed write means the run "survives only in Temporal's history" — that it loses data
+    # nothing else
     # holds. A fleet-wide loss of the durable record produced exactly what a quiet deployment
     # produces.
     "job_record",

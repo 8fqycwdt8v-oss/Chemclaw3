@@ -1198,12 +1198,12 @@ def test_the_logger_sweep_survives_a_logger_created_during_the_sweep() -> None:
     class _CreatesALoggerWhenRead(logging.Logger):
         """A real `Logger` (so the sweep's `isinstance` accepts it) that mutates when inspected."""
 
-        @property  # type: ignore[override]
+        @property
         def propagate(self) -> bool:
             """Insert a new entry, then answer as an ordinary propagating logger would."""
             name = f"chemclaw.test.sweep.during{len(created)}"
             created.append(name)
-            registry[name] = logging.PlaceHolder(logging.getLogger())  # type: ignore[arg-type]
+            registry[name] = logging.PlaceHolder(logging.getLogger())
             return True
 
         @propagate.setter
