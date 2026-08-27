@@ -5,11 +5,13 @@ network work, so neither can live in the workflow. `chemclaw.durable.template_jo
 works.
 
 The part worth reading carefully is the identity restoration. A workflow has no request context, so
-the turn's actor, roles and session travel in the activity's input and are stamped ambient here
-*before* the work runs (`_acting_as`) — which is what makes the audit trail name the real user, in
-the real conversation, and, more importantly, makes `enforce_tool_authz` decide against that user
-rather than against nobody. A template must not become a way to run a tool the requester could not
-run directly, and this is where that is enforced.
+the turn's actor, roles, session and correlation id travel in the activity's input and are stamped
+ambient here *before* the work runs (`_acting_as`) — which is what makes the audit trail name the
+real user, in the real conversation, makes every note, launch and log line the step produces carry
+the id that joins them back to the turn that asked, and, more importantly, makes
+`enforce_tool_authz` decide against that user rather than against nobody. A template must not
+become a way to run a tool the requester could not run directly, and this is where that is
+enforced.
 
 **The same sentence applies to what a step costs, and used to be false of it.** An `agent` step is a
 model turn, so it is metered like one: the token counters, the `turn_costs` ledger and the per-turn
@@ -42,7 +44,12 @@ from chemclaw.connectors.jobs import prepare_job_launch
 from chemclaw.connectors.queues import bundle_queue
 from chemclaw.connectors.registry import find_job, open_connector_specs
 from chemclaw.core.config import settings
-from chemclaw.core.identity_context import reset_current_identity, set_current_identity
+from chemclaw.core.identity_context import (
+    reset_current_correlation_id,
+    reset_current_identity,
+    set_current_correlation_id,
+    set_current_identity,
+)
 from chemclaw.core.metrics import METRICS
 from chemclaw.core.session_context import reset_current_session_id, set_current_session_id
 from chemclaw.durable.heartbeat import beating
@@ -154,24 +161,36 @@ class ResolvedJob(BaseModel):
 
 @contextmanager
 def _acting_as(identity: StepIdentity) -> Iterator[None]:
-    """Run a step as its requester, in the requester's conversation, unstamping on the way out.
+    """Run a step as its requester, in their conversation, under their correlation id.
 
-    One bracket for both ambients because they are one fact — a step acts for a person *in a chat* —
-    and because splitting them is how they drifted: the actor was stamped by all three step
-    activities from the day they were written and the session by none of them, so every audit row a
-    template produced named the user and booked `session_id=""`. Two `set`/`reset` pairs written out
-    three times is also three chances to forget a reset, which leaks one run's identity into
-    whatever the worker picks up next.
+    One bracket for all three ambients because they are one fact — a step acts for a person, in a
+    chat, within one request — and because splitting them is how they drifted, twice, in the same
+    way. The actor was stamped by all three step activities from the day they were written; the
+    session by none of them, so every audit row a template produced named the user and booked
+    `session_id=""`; and the correlation id by none of them either, while `StepIdentity` carried it
+    as a `min_length=1` field whose comment says it ties the run's audit events together.
+
+    **What the third one actually cost, since the audit trail turned out not to be the victim:**
+    `agent/audit.py` falls back to the correlation id each step activity passes it explicitly, so
+    its rows were right. Everything that reads the ambient instead was not — `core/logging.py`'s
+    `ContextFilter` wrote `correlation_id="-"` on every line a durable step logged,
+    `kg/proposal.py::ambient_provenance` recorded an empty id on every note a template proposed, and
+    `connectors/jobs.py` handed `ConnectorJobInput.correlation_id=""` to every job a template
+    launched — so a paged engineer had no grep path from a running job back to the turn behind it.
 
     A context manager rather than a decorator: two callers want the stamp around only part of their
     body (the resolution, not the `ResolvedJob` built from it), and `run_agent_step` reads the
-    identity again inside it.
+    identity again inside it. Three `set`/`reset` pairs written out at three call sites would also
+    be three chances to forget a reset, which leaks one run's identity into whatever the worker
+    picks up next.
     """
     identity_token = set_current_identity(identity.actor, frozenset(identity.roles))
     session_token = set_current_session_id(identity.session_id)
+    correlation_token = set_current_correlation_id(identity.correlation_id)
     try:
         yield
     finally:
+        reset_current_correlation_id(correlation_token)
         reset_current_session_id(session_token)
         reset_current_identity(identity_token)
 

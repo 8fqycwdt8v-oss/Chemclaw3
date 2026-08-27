@@ -252,6 +252,18 @@ it happens.
 
 ## 3 — Work that is lost, dropped or invisible
 
+- [ ] **A development report's durable run has no correlation id to stamp** — [S].
+      `ReportRequest` and `SectionRequest` (`retrieval/harness.py:38,68`) carry `requested_by` and
+      `requested_roles` and no correlation id, so `report_workflow.retrieve_section` and
+      `propose_report` stamp an actor and nothing that joins the run to the turn that asked for it —
+      the log lines and the PR-gated draft both book an empty one. `ConnectorJobInput.correlation_id`
+      (`durable/connector_job.py:142`) is the shape to copy, and `request_development_report` runs
+      inside a turn where `get_current_correlation_id()` is bound, so the id exists at the launch.
+      Left out of `D-2026-08-27-a-step-runs-under-the-correlation-id-it-was-launched-with`
+      deliberately: that ADR fixed the sites that already carried an id, and inventing one here
+      would make an unjoined run look joined. `durable/memory_jobs.py:178` is the same shape and is
+      *not* this row — a synthesis job is system-triggered, so there is genuinely no turn.
+
 - [ ] **A Hessian is cached and never published, and neither is the thermochemistry built from
       it** — [M], and the two halves are one question. `xtb.hess` is a `calc_type` the server
       stamps and `_CALC_TYPE_PROJECTORS` has no prefix for it, so vibrational frequencies never
