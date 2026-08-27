@@ -188,3 +188,27 @@ def test_find_matches_the_in_memory_backend() -> None:
             assert all(r.created_at is not None for r in durable)
 
     asyncio.run(_run())
+
+
+def test_known_answers_existence_in_bulk_and_both_backends_agree() -> None:
+    """`known` is the `kg-validate` calc_refs probe: held keys come back, typos do not.
+
+    Checked against both backends in one test because the CLI runs the Postgres one while the
+    validate-layer unit tests run the in-memory one — if the two disagreed, the unit tests would
+    prove a gate the deployment does not run.
+    """
+
+    async def _run() -> None:
+        store = await _store_or_skip()
+        memory = InMemoryStore()
+        key = CalculationKey.build("xtb", "gfn2", inputs={"smiles": "pg-known-CCO"})
+        stored = StoredResult(key=key, result={"energy": -1.0}, provenance="computed")
+        await store.put(stored)
+        await memory.put(stored)
+
+        asked = [key.as_str(), "xtb@gfn2:0000:0000"]
+        assert await store.known(asked) == {key.as_str()}
+        assert await memory.known(asked) == {key.as_str()}
+        assert await store.known([]) == set()
+
+    asyncio.run(_run())

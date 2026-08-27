@@ -81,7 +81,7 @@ def test_a_note_found_by_its_smiles_is_a_note_the_retriever_can_cite(
     )
     monkeypatch.setattr("chemclaw.core.config.settings.note_repo_dir", str(tmp_path))
 
-    found = asyncio.run(find_notes("CCO"))
+    found = asyncio.run(find_notes("CCO")).matches
     chunks = asyncio.run(GraphRetriever(str(root)).retrieve("CCO", {}))
 
     assert [ref.id for ref in found] == ["compound-ethanol"]
@@ -99,7 +99,7 @@ def test_a_note_found_by_its_type_is_a_note_the_retriever_can_cite(
     root = _write(tmp_path, Note(id="rxn-1", type="reaction", body="an amidation"))
     monkeypatch.setattr("chemclaw.core.config.settings.note_repo_dir", str(tmp_path))
 
-    found = asyncio.run(find_notes("reaction"))
+    found = asyncio.run(find_notes("reaction")).matches
     chunks = asyncio.run(GraphRetriever(str(root)).retrieve("reaction", {}))
 
     assert [ref.id for ref in found] == ["rxn-1"]

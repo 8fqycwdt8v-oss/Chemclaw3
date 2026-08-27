@@ -17,3 +17,6 @@ it — which is why an aspirin assay that finds it is usually finding degradatio
 
 - also written: salicylic acid, 2-hydroxybenzoic acid
 - role: starting material, degradant
+
+Starting material for [[precursor-of:compound-acetylsalicylic-acid]] via
+[[rxn-aspirin-acetylation]].

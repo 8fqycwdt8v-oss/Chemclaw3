@@ -21,7 +21,7 @@ from chemclaw.memory.campaign import campaign_note_from_chain
 from chemclaw.memory.chains import detect_chains
 from chemclaw.memory.ids import stable_id
 from chemclaw.memory.interaction import note_from_confirmed_answer
-from chemclaw.memory.jobs import build_campaign_notes, build_playbook_notes
+from chemclaw.memory.jobs import SynthesisUnit, build_campaign_notes, build_playbook_notes
 from chemclaw.memory.observations import Observation
 from chemclaw.memory.playbook import (
     SOURCE_DISTILLATION,
@@ -302,12 +302,16 @@ def test_synthesis_publishes_supersedes_alongside_new_notes(
     (knowledge / f"{stale_id}.md").write_text(render_note(stale), encoding="utf-8")
     monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path / "knowledge"))
 
-    notes = build_campaign_notes([a, b])
+    units = build_campaign_notes([a, b])
 
-    by_id = {n.id: n for n in notes}
     merged_id = stable_id("campaign", ["a", "b"])
-    assert merged_id in by_id and by_id[merged_id].valid_to is None  # the live note
-    assert stale_id in by_id and by_id[stale_id].valid_to == date.today()  # retired in the same run
+    by_id = {unit.note.id: unit for unit in units}
+    assert merged_id in by_id and by_id[merged_id].note.valid_to is None  # the live note
+    # The retirement rides the replacement's unit — one PR, one reviewable decision — and points
+    # forward with a real superseded-by edge now that the pair shares a branch.
+    (retired,) = by_id[merged_id].retirements
+    assert retired.id == stale_id and retired.valid_to == date.today()
+    assert any(r.rel == "superseded-by" and r.to == merged_id for r in retired.relations)
 
 
 # --- playbook (5.4) -------------------------------------------------------------------
@@ -393,7 +397,7 @@ def test_a_playbook_states_which_of_its_two_producers_wrote_it() -> None:
 # --- jobs (5.3/5.4 wiring) ------------------------------------------------------------
 
 
-async def _build_and_propose(notes: list[Note], submitter: FakeSubmitter) -> list[str]:
+async def _build_and_propose(units: list[SynthesisUnit], submitter: FakeSubmitter) -> list[str]:
     """Publish built notes the way the durable job does: one PR-gate proposal each.
 
     These three tests used to call `synthesize_campaigns` / `distill_playbooks`, which built and
@@ -402,7 +406,7 @@ async def _build_and_propose(notes: list[Note], submitter: FakeSubmitter) -> lis
     the tests take the same two steps the live path takes rather than a convenience wrapper that
     only tests had.
     """
-    return [await propose_note(note, submitter) for note in notes]
+    return [await propose_note(unit.note, submitter, superseded=unit.retirements) for unit in units]
 
 
 def test_campaign_synthesis_proposes_notes_via_pr_gate() -> None:
@@ -439,12 +443,12 @@ def test_every_built_campaign_note_reaches_the_pr_gate() -> None:
     """
     a = _reaction("a", ["CCO"], ["CC=O"], project="proj-x")
     b = _reaction("b", ["CC=O"], ["CC(O)O"], project="proj-x")
-    notes = build_campaign_notes([a, b])
+    units = build_campaign_notes([a, b])
     sub = FakeSubmitter()
-    asyncio.run(_build_and_propose(notes, sub))
-    assert len(notes) == len(sub.submissions)
-    assert all(n.id in s.files[0].path for n, s in zip(notes, sub.submissions, strict=True))
-    assert all(n.type == "campaign" for n in notes)
+    asyncio.run(_build_and_propose(units, sub))
+    assert len(units) == len(sub.submissions)
+    assert all(u.note.id in s.files[0].path for u, s in zip(units, sub.submissions, strict=True))
+    assert all(u.note.type == "campaign" for u in units)
 
 
 # --- user interaction (5.5) -----------------------------------------------------------

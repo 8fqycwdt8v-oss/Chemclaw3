@@ -70,9 +70,9 @@ def test_git_submitter_pushes_branch(tmp_path: Path) -> None:
         "job-abc", content="---\nid: job-abc\ntype: job-result\ncreated_by: agent\n---\nbody\n"
     )
     submitter = GitNoteSubmitter(repo_dir=str(work), base_branch="main", remote="origin")
-    ref = asyncio.run(submitter.submit(submission))
+    outcome = asyncio.run(submitter.submit(submission))
 
-    assert ref == "note/job-abc"
+    assert outcome.reference == "note/job-abc" and outcome.pushed is True
     remote_refs = subprocess.run(
         ["git", "-C", str(work), "ls-remote", "origin", "note/job-abc"],
         capture_output=True,
@@ -90,8 +90,9 @@ def test_git_submitter_pushes_branch(tmp_path: Path) -> None:
         ["push", "-q", "origin", "main"],
     ):
         subprocess.run(["git", "-C", str(work), *cmd], check=True)
-    ref_again = asyncio.run(submitter.submit(submission))
-    assert ref_again == "note/job-abc"
+    again = asyncio.run(submitter.submit(submission))
+    # The idempotent no-op now *says* it pushed nothing, so the caller can skip the record.
+    assert again.reference == "note/job-abc" and again.pushed is False
 
 
 def test_submit_leaves_the_shared_checkout_on_base(tmp_path: Path) -> None:
@@ -218,7 +219,7 @@ def test_concurrent_submits_do_not_corrupt_branches(tmp_path: Path) -> None:
 
     async def _both() -> tuple[str, str]:
         ref_a, ref_b = await asyncio.gather(submitter.submit(sub_a), submitter.submit(sub_b))
-        return ref_a, ref_b
+        return ref_a.reference, ref_b.reference
 
     assert asyncio.run(_both()) == ("note/job-a", "note/job-b")
     for branch, own, other in (
@@ -270,7 +271,9 @@ def test_second_process_holding_the_checkout_is_rejected(tmp_path: Path) -> None
         holder.stdin.close()
         holder.wait(timeout=30)
 
-    assert asyncio.run(submitter.submit(_note_submission("job-locked"))) == "note/job-locked"
+    assert (
+        asyncio.run(submitter.submit(_note_submission("job-locked"))).reference == "note/job-locked"
+    )
 
 
 def test_lock_is_released_after_a_failed_submission(tmp_path: Path) -> None:
@@ -285,7 +288,7 @@ def test_lock_is_released_after_a_failed_submission(tmp_path: Path) -> None:
         asyncio.run(bad.submit(_note_submission("job-x")))
 
     good = GitNoteSubmitter(repo_dir=str(work), base_branch="main", remote="origin")
-    assert asyncio.run(good.submit(_note_submission("job-x"))) == "note/job-x"
+    assert asyncio.run(good.submit(_note_submission("job-x"))).reference == "note/job-x"
 
 
 def test_repropose_updated_note_from_fresh_clone(tmp_path: Path) -> None:
@@ -302,7 +305,7 @@ def test_repropose_updated_note_from_fresh_clone(tmp_path: Path) -> None:
     work_b = _clone(remote, tmp_path / "fresh")  # fresh clone: no origin/note/job-x ref
     v2 = v1.model_copy(update={"files": [NoteFile(path=v1.files[0].path, content="v2\n")]})
     submitter_b = GitNoteSubmitter(repo_dir=str(work_b), base_branch="main", remote="origin")
-    assert asyncio.run(submitter_b.submit(v2)) == "note/job-x"
+    assert asyncio.run(submitter_b.submit(v2)).reference == "note/job-x"
 
     shown = subprocess.run(
         ["git", "-C", str(remote), "show", "note/job-x:knowledge/job-result/job-x.md"],
@@ -351,7 +354,7 @@ def test_leading_dash_note_path_reaches_git_add_as_a_pathspec_not_an_option(
     )
 
     ref = asyncio.run(submitter.submit(submission))
-    assert ref == "note/dash"
+    assert ref.reference == "note/dash"
 
     remote_refs = subprocess.run(
         ["git", "-C", str(work), "ls-remote", "origin", "note/dash"],
@@ -558,3 +561,83 @@ def test_no_connector_bundle_can_reach_the_pr_gate_itself() -> None:
         f"{offenders} reach the PR-gate from inside a connector: a bundle returns its note in the "
         "job envelope and core decides whether it is proposed"
     )
+
+
+def test_a_branch_a_human_pushed_to_is_never_replaced(tmp_path: Path) -> None:
+    """The property `--force-with-lease` could not carry: a reviewer's commit survives.
+
+    The lease is refreshed by the fetch every submission starts with, so it only guards the
+    fetch-to-push window — the reviewer's commit that was already on the branch matched the fresh
+    lease and was silently discarded. The tip guard reads the gate's own commit trailer instead:
+    a tip the gate did not mint refuses the submission, non-retryably, with instructions.
+    """
+    remote, work = _make_remote_and_clone(tmp_path)
+    v1 = _note_submission("job-x", content="v1\n")
+    submitter = GitNoteSubmitter(repo_dir=str(work), base_branch="main", remote="origin")
+    asyncio.run(submitter.submit(v1))
+
+    # A reviewer clones, commits a fixup onto the proposal branch, and pushes it.
+    reviewer = _clone(remote, tmp_path / "reviewer")
+    subprocess.run(["git", "-C", str(reviewer), "checkout", "-q", "note/job-x"], check=True)
+    fixup = reviewer / "knowledge" / "job-result" / "job-x.md"
+    fixup.write_text("v1, with the reviewer's correction\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(reviewer), "commit", "-aqm", "reviewer fixup"], check=True)
+    subprocess.run(["git", "-C", str(reviewer), "push", "-q", "origin", "note/job-x"], check=True)
+
+    v2 = v1.model_copy(update={"files": [NoteFile(path=v1.files[0].path, content="v2\n")]})
+    with pytest.raises(GitSubmitError, match="did not author"):
+        asyncio.run(submitter.submit(v2))
+
+    # And the reviewer's commit is still the remote tip.
+    tip = subprocess.run(
+        ["git", "-C", str(reviewer), "ls-remote", "origin", "note/job-x"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.split()[0]
+    local = subprocess.run(
+        ["git", "-C", str(reviewer), "rev-parse", "HEAD"], capture_output=True, text=True
+    ).stdout.strip()
+    assert tip == local
+
+
+def test_a_dependency_never_overwrites_a_human_edited_file(tmp_path: Path) -> None:
+    """`overwrite=False` files are written only where the base branch has none.
+
+    A machine-rendered compound note re-rides on every proposal that links it; written
+    unconditionally, it silently reverted a chemist's post-merge edit inside a PR titled as an
+    addition.
+    """
+    _, work = _make_remote_and_clone(tmp_path)
+    # The base branch already carries the dependency, edited by a human after merge.
+    edited = work / "knowledge" / "compound" / "compound-x.md"
+    edited.parent.mkdir(parents=True)
+    edited.write_text("machine rendering, plus a chemist's hazard note\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(work), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(work), "commit", "-qm", "human edit"], check=True)
+    subprocess.run(["git", "-C", str(work), "push", "-q", "origin", "main"], check=True)
+
+    submission = NoteSubmission(
+        branch="note/job-dep",
+        files=[
+            NoteFile(path="knowledge/job-result/job-dep.md", content="the subject note\n"),
+            NoteFile(
+                path="knowledge/compound/compound-x.md",
+                content="machine rendering\n",
+                overwrite=False,
+            ),
+        ],
+        title="Add job-result note: job-dep",
+        body="review please",
+    )
+    submitter = GitNoteSubmitter(repo_dir=str(work), base_branch="main", remote="origin")
+    outcome = asyncio.run(submitter.submit(submission))
+    assert outcome.pushed is True
+
+    on_branch = subprocess.run(
+        ["git", "-C", str(work), "show", "note/job-dep:knowledge/compound/compound-x.md"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert "chemist's hazard note" in on_branch, "the human's edit must survive the proposal"

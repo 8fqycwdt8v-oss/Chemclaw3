@@ -141,11 +141,16 @@ def _cache_key(text: str) -> _CacheKey:
     return (embedding_config_key(), text)
 
 
-def embed_texts(texts: list[str]) -> list[list[float]]:
+def embed_texts(texts: list[str], *, cache: bool = True) -> list[list[float]]:
     """Embed each text into an `embedding_dim`-length vector (provider selected by config).
 
     Args:
         texts: The strings to embed (note bodies at index time, a query at search time).
+        cache: Whether this batch may read and populate the in-memory cache. Bulk indexers pass
+            `False`: the cache is FIFO and sized for the *query* workload (repeats), so a
+            reindex of more texts than `embedding_cache_size` flushed every cached query vector
+            with note bodies that would each be read exactly once — the next interactive sweep
+            then paid a fresh round trip for a query the cache existed to remember.
 
     Returns:
         One vector per input, in order. Vectors are directly comparable by cosine similarity.
@@ -162,7 +167,7 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
     if not texts:
         return []
     size = settings.embedding_cache_size
-    if size <= 0:
+    if size <= 0 or not cache:
         return _embed_uncached(texts)
 
     keys = [_cache_key(text) for text in texts]
@@ -252,8 +257,17 @@ def _openai_compatible_embeddings(texts: list[str]) -> list[list[float]]:
         settings.llm_max_retries,
         settings.llm_tls_ca_bundle,
     )
-    response = client.embeddings.create(model=settings.embedding_model, input=texts)
-    return [item.embedding for item in response.data]
+    # Chunked to `embedding_batch_size` per request: a whole-corpus reindex used to arrive here
+    # as one call with every changed text in it, which exceeds typical provider batch and token
+    # ceilings exactly on the first run — the one a fresh deployment cannot avoid.
+    vectors: list[list[float]] = []
+    step = settings.embedding_batch_size
+    for start in range(0, len(texts), step):
+        response = client.embeddings.create(
+            model=settings.embedding_model, input=texts[start : start + step]
+        )
+        vectors.extend(item.embedding for item in response.data)
+    return vectors
 
 
 @lru_cache(maxsize=1)

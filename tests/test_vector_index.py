@@ -17,11 +17,12 @@ import pytest
 import chemclaw.retrieval.vector_index as vector_index_module
 from chemclaw.core.config import settings
 from chemclaw.core.db import connect
-from chemclaw.core.embeddings import embed_texts, embedding_config_key
+from chemclaw.core.embeddings import embed_texts
 from chemclaw.retrieval.vector_index import (
     InMemoryNoteIndex,
     NoteRecord,
     PostgresNoteIndex,
+    note_embedding_key,
     reindex_notes,
 )
 from tests.pg import migrated_db_or_skip
@@ -45,7 +46,7 @@ def test_inmemory_dense_ranks_by_cosine() -> None:
                 NoteRecord(note_id="partial", text="y", embedding=[0.7, 0.7]),
                 NoteRecord(note_id="orthogonal", text="z", embedding=[0.0, 1.0]),
             ],
-            embedding_config_key(),
+            note_embedding_key(),
         )
         hits = await index.search_dense([1.0, 0.0], top_k=5)
         assert [h.note_id for h in hits] == ["aligned", "partial"]  # orthogonal dropped (cosine 0)
@@ -64,7 +65,7 @@ def test_inmemory_lexical_ranks_by_term_overlap() -> None:
                 NoteRecord(note_id="one", text="amide only here", embedding=[0.0]),
                 NoteRecord(note_id="none", text="distillation reflux", embedding=[0.0]),
             ],
-            embedding_config_key(),
+            note_embedding_key(),
         )
         hits = await index.search_lexical("amide coupling", top_k=5)
         assert [h.note_id for h in hits] == ["both", "one"]  # 'none' shares no terms
@@ -104,7 +105,7 @@ def _count_embed_calls(monkeypatch: pytest.MonkeyPatch, module: types.ModuleType
     calls = {"texts": 0}
     real: Callable[[list[str]], list[list[float]]] = module.embed_texts
 
-    def _counting(texts: list[str]) -> list[list[float]]:
+    def _counting(texts: list[str], **kwargs: object) -> list[list[float]]:
         calls["texts"] += len(texts)
         return real(texts)
 
@@ -185,7 +186,7 @@ def test_reindex_indexes_a_note_whose_filename_does_not_match_its_id(tmp_path: P
     )
     index = InMemoryNoteIndex()
     assert asyncio.run(reindex_notes(index, notes_dir=str(tmp_path))) == 2
-    assert set(asyncio.run(index.fingerprints(embedding_config_key()))) == {"good-note"}
+    assert set(asyncio.run(index.fingerprints(note_embedding_key()))) == {"good-note"}
     # The mismatched note has no fingerprint to store, so it costs an embedding every run — loud in
     # the log, and cheap next to being absent from retrieval.
     assert asyncio.run(reindex_notes(index, notes_dir=str(tmp_path))) == 1
@@ -238,11 +239,11 @@ def test_reindex_against_postgres_heals_a_model_swap_without_full(
         _write_note(tmp_path, "swap-b", "beta body")
         index = PostgresNoteIndex()
         assert await reindex_notes(index, notes_dir=str(tmp_path)) == 2
-        assert await _stored_embedding_keys() == {embedding_config_key()}
+        assert await _stored_embedding_keys() == {note_embedding_key()}
 
         monkeypatch.setattr(settings, "embedding_model", "a-different-model")
         assert await reindex_notes(index, notes_dir=str(tmp_path)) == 2
-        assert await _stored_embedding_keys() == {embedding_config_key()}  # no mixed generations
+        assert await _stored_embedding_keys() == {note_embedding_key()}  # no mixed generations
         assert await reindex_notes(index, notes_dir=str(tmp_path)) == 0  # and then it is free
 
     asyncio.run(_run())
@@ -282,7 +283,7 @@ def test_postgres_index_within_is_a_predicate_not_a_filter_over_the_result() -> 
                 NoteRecord(note_id="rxn-1", text="amide coupling epimerization", embedding=close),
                 NoteRecord(note_id="play-1", text="amide coupling workup", embedding=far),
             ],
-            embedding_config_key(),
+            note_embedding_key(),
         )
         (query_embedding,) = await asyncio.to_thread(embed_texts, ["amide coupling epimerization"])
         # Unrestricted, the single top slot goes to the nearest note (rxn-1)...
@@ -314,7 +315,7 @@ def test_postgres_note_index_round_trip() -> None:
                     note_id="note-001", text="amide coupling epimerization", embedding=embedding
                 )
             ],
-            embedding_config_key(),
+            note_embedding_key(),
         )
         (query_embedding,) = await asyncio.to_thread(embed_texts, ["epimerization amide coupling"])
         dense = await index.search_dense(query_embedding, top_k=5)
@@ -345,9 +346,9 @@ def test_postgres_fingerprints_round_trip_and_omit_unset_rows() -> None:
                 NoteRecord(note_id="fp-set", text="t", embedding=set_emb, fingerprint="123:45"),
                 NoteRecord(note_id="fp-unset", text="t", embedding=unset_emb),  # no fingerprint
             ],
-            embedding_config_key(),
+            note_embedding_key(),
         )
-        stored = await index.fingerprints(embedding_config_key())
+        stored = await index.fingerprints(note_embedding_key())
         assert stored == {"fp-set": "123:45"}  # the unset row is absent, not an empty string
         assert await index.fingerprints("some-other-model") == {}  # a superseded vector is not one
 
@@ -414,12 +415,12 @@ def test_a_vector_from_a_superseded_configuration_is_not_ranked_as_evidence() ->
 
     async def _run(monkeypatch: pytest.MonkeyPatch) -> None:
         index = InMemoryNoteIndex()
-        stale = embedding_config_key()
+        stale = note_embedding_key()
         await index.upsert(
             [NoteRecord(note_id="n1", text="x", embedding=[1.0, 0.1], fingerprint="fp")], stale
         )
         monkeypatch.setattr(settings, "embedding_model", "another-model-of-the-same-width")
-        current = embedding_config_key()
+        current = note_embedding_key()
         assert current != stale, "sanity: the configuration really changed"
 
         assert await index.fingerprints(current) == {}, "sanity: the rebuild sees it as absent"
@@ -442,7 +443,7 @@ def test_postgres_dense_search_is_scoped_to_the_live_embedding_configuration() -
             await conn.execute("TRUNCATE note_index")
             await conn.commit()
         index = PostgresNoteIndex()
-        stale = embedding_config_key()
+        stale = note_embedding_key()
         vector = embed_texts(["a nitration of toluene"])[0]
         await index.upsert(
             [NoteRecord(note_id="n1", text="a nitration of toluene", embedding=vector)], stale
@@ -450,7 +451,7 @@ def test_postgres_dense_search_is_scoped_to_the_live_embedding_configuration() -
         assert await index.search_dense(vector, top_k=5), "sanity: it is findable under its own key"
 
         monkeypatch.setattr(settings, "embedding_model", "another-model-of-the-same-width")
-        assert embedding_config_key() != stale
+        assert note_embedding_key() != stale
         hits = await index.search_dense(vector, top_k=5)
         assert hits == [], f"pgvector ranked a superseded generation as evidence: {hits}"
 

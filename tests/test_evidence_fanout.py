@@ -65,7 +65,7 @@ def _swept(sources: list[_Retriever]) -> list[list[EvidenceChunk]]:
     the order and cap tests below keep asking exactly what they asked before that channel existed.
     The failure channel has its own tests; folding it in here would make every test depend on it.
     """
-    lists, _failed = asyncio.run(sweep_sources([(s.name, s) for s in sources], "q", {}))
+    lists, _failed, _skipped = asyncio.run(sweep_sources([(s.name, s) for s in sources], "q", {}))
     return lists
 
 
@@ -300,7 +300,7 @@ def test_a_branch_report_reaches_the_turn_event_stream() -> None:
             _Retriever("lexical", 0),
             _Retriever("dense", 3, fails=True),
         )
-        lists, _failed = await sweep_sources([(s.name, s) for s in legs], query, {})
+        lists, _failed, _skipped = await sweep_sources([(s.name, s) for s in legs], query, {})
         return f"{sum(len(chunks) for chunks in lists)} chunks"
 
     class _Usage:
@@ -346,7 +346,7 @@ def test_a_failed_source_is_named_on_the_channel_the_caller_reads() -> None:
     source with nothing to say were the same empty list. That is what let an outage be handed to the
     model under a docstring promising "nothing on file, never invented".
     """
-    lists, failed = asyncio.run(
+    lists, failed, _skipped = asyncio.run(
         sweep_sources(
             [
                 (s.name, s)
@@ -369,7 +369,7 @@ def test_a_failed_source_is_named_on_the_channel_the_caller_reads() -> None:
 
 def test_a_sweep_where_nothing_failed_names_nothing() -> None:
     """The control: an all-healthy sweep must not report a phantom degradation."""
-    lists, failed = asyncio.run(
+    lists, failed, _skipped = asyncio.run(
         sweep_sources(
             [(s.name, s) for s in (_Retriever("graph", 1), _Retriever("dense", 0))], "q", {}
         )
@@ -377,3 +377,32 @@ def test_a_sweep_where_nothing_failed_names_nothing() -> None:
 
     assert [len(chunks) for chunks in lists] == [1, 0]
     assert failed == []
+
+
+def test_a_declined_source_is_a_skip_not_a_failure_and_not_a_zero() -> None:
+    """The third channel: a `RetrieverSkip` travels as a reason, never as a bare `[]`.
+
+    The D-2026-08-01 class one category over: "asked, found nothing", "could not ask" and
+    "declined, and said why" used to collapse into one indistinguishable empty list on every
+    path that was not an exception.
+    """
+    from chemclaw.retrieval.evidence import RetrieverSkip
+
+    class _Declining:
+        name = "sharedrive"
+
+        async def retrieve(self, query: str, filters: dict[str, object]) -> list[EvidenceChunk]:
+            raise RetrieverSkip("the sharedrive share requires an entitled actor")
+
+    class _Healthy:
+        name = "graph"
+
+        async def retrieve(self, query: str, filters: dict[str, object]) -> list[EvidenceChunk]:
+            return [EvidenceChunk(content="hit", source_note_id="n-1", retriever="graph")]
+
+    lists, failed, skipped = asyncio.run(
+        sweep_sources([("graph", _Healthy()), ("sharedrive", _Declining())], "q", {})
+    )
+    assert [len(chunks) for chunks in lists] == [1, 0]
+    assert failed == [], "a decline is not an outage"
+    assert skipped == {"sharedrive": "the sharedrive share requires an entitled actor"}

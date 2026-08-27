@@ -13,6 +13,8 @@ distilled rule's prose is the `playbook-distillation` skill's judgment, layered 
 note, derived from the id rather than asserted by the caller — see the function's docstring.
 """
 
+import logging
+
 from pydantic import BaseModel
 
 from chemclaw.core.config import settings
@@ -21,6 +23,8 @@ from chemclaw.ingest.eln.ord import OrdReaction, OutcomeClass
 from chemclaw.kg.note import Note
 from chemclaw.memory.ids import is_cluster_anchored
 from chemclaw.memory.similarity import cluster_by_similarity, reaction_fingerprints
+
+logger = logging.getLogger(__name__)
 
 # The two things that mint a `playbook` note, told apart on the note itself. A reader of the merged
 # file — and every retrieval path that surfaces `source` — deserves to know which one wrote it: a
@@ -68,10 +72,27 @@ def find_playbook_candidates(
     # one from runs nobody has assessed is a claim built on silence. The visible consequence is that
     # a source recording no outcome distils nothing — which is the honest answer, and the reason the
     # ADR names supplying the outcome as the thing such a site has to do.
-    reactions = [r for r in reactions if r.outcome_class is OutcomeClass.SUCCESS]
+    successes = [r for r in reactions if r.outcome_class is OutcomeClass.SUCCESS]
     # Only *projected*, fingerprintable reactions can evidence cross-project recurrence, so
     # scope to those before clustering (a degenerate reaction is dropped by the fingerprinter).
-    projected = [r for r in reactions if r.project]
+    projected = [r for r in successes if r.project]
+    # The same one-line silent drop the observation miner had: a binding that maps no
+    # `outcome_class` (or no `project`) means this system never generates a single playbook, and
+    # nothing anywhere said so. Name the field, because the field is the fix.
+    if reactions and not successes:
+        logger.warning(
+            "playbook mining saw %d reaction(s) and none carried a stated success outcome_class "
+            "— if the source records outcomes, the binding is not mapping them, and no playbook "
+            "will ever be distilled",
+            len(reactions),
+        )
+    elif successes and not projected:
+        logger.warning(
+            "playbook mining saw %d successful reaction(s) and none carried a project — "
+            "cross-project recurrence cannot be counted without one",
+            len(successes),
+        )
+    reactions = successes
     fingerprints = reaction_fingerprints(projected)
     project_of = {r.reaction_id: r.project for r in projected if r.reaction_id in fingerprints}
 

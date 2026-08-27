@@ -50,6 +50,28 @@ KNOWN_RELATIONS: frozenset[str] = frozenset(
 )
 
 
+# The direction each typed relation runs in, as the note types allowed at each end. `None` leaves
+# an end unconstrained. Only the relations whose comments above state a direction are listed —
+# `analogue-of`, `contradicts` or `cites` legitimately connect anything to anything, and inventing
+# a constraint the vocabulary never stated would refuse notes the vocabulary allows.
+#
+# Why this exists: the vocabulary's directions lived only in comments, and the shipped corpus wrote
+# twelve edges backwards against them — `product-of` pointing both ways in one graph, campaigns
+# `part-of` their own member reactions — all of it green under a validator that checked relation
+# *names* only. A direction nothing enforces is a direction half the corpus will eventually invert
+# (`docs/archive/REVIEW-2026-08-27-knowledge-system-analysis.md` §1). Enforced by
+# `chemclaw.kg.validate` against notes whose endpoints both resolve in the corpus; dangling and
+# external targets are other checks' business.
+RELATION_SIGNATURES: dict[str, tuple[frozenset[str] | None, frozenset[str] | None]] = {
+    "precursor-of": (frozenset({"compound"}), frozenset({"compound"})),
+    "product-of": (frozenset({"compound"}), frozenset({"reaction"})),
+    "reagent-in": (frozenset({"compound"}), frozenset({"reaction"})),
+    "catalyzes": (frozenset({"compound"}), frozenset({"reaction"})),
+    "solvent-for": (frozenset({"compound"}), frozenset({"reaction"})),
+    "part-of": (None, frozenset({"campaign", "optimization-campaign", "report"})),
+}
+
+
 def known_relations() -> frozenset[str]:
     """The adopted vocabulary plus the relations the enabled connector bundles declare.
 

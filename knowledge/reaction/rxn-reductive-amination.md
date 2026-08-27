@@ -12,6 +12,7 @@ source: seed-corpus
 tags:
 - reduction
 type: reaction
+valid_from: 2026-04-07
 ---
 
 Reductive amination of benzaldehyde with morpholine, NaBH(OAc)3, DCE, rt, 4 h. Isolated 89%.

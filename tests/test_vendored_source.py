@@ -143,7 +143,7 @@ def test_a_missing_dataset_costs_its_own_leg_of_the_sweep_and_no_other(tmp_path:
     with pytest.raises(VendoredDatasetError):
         asyncio.run(retriever.retrieve("acetonitrile", {}))
 
-    ranked, failed = asyncio.run(
+    ranked, failed, _skipped = asyncio.run(
         sweep_sources([("graph", _Graph()), ("vendored", retriever)], "acetonitrile", {})
     )
     assert [len(chunks) for chunks in ranked] == [1, 0]

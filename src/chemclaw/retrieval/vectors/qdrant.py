@@ -247,5 +247,13 @@ def _matches(response: Any) -> list[VectorMatch]:
         if not reference:
             logger.warning("qdrant returned a point with no 'ref' payload; skipping it")
             continue
-        matches.append(VectorMatch(id=str(reference), score=min(1.0, max(0.0, float(point.score)))))
+        # The `> 0` floor the base contract states and both Postgres-backed indexes apply.
+        # The clamp alone did not enforce it: a negative cosine became `0.0` and *stayed a hit*,
+        # and the server-side `score_threshold=0.0` is a minimum a zero score satisfies — so this
+        # was the one backend that could surface an anti-correlated document as cited evidence
+        # on a narrow corpus, which is exactly the case the floor exists for.
+        score = float(point.score)
+        if score <= 0.0:
+            continue
+        matches.append(VectorMatch(id=str(reference), score=min(1.0, score)))
     return matches

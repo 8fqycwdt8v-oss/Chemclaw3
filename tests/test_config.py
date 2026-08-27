@@ -723,6 +723,29 @@ def test_no_calculator_setting_is_declared_without_a_reader() -> None:
     )
 
 
+def test_note_reindex_is_derived_from_the_source_list_unless_overridden() -> None:
+    """Enabling an index-backed leg must enable the reindex that builds what it queries.
+
+    As an independent switch defaulting to off, `vector`/`lexical` could be enabled with the
+    index never built — both legs then reported `chunks: 0, failed: false` forever, and the
+    deployment believed it ran hybrid retrieval. The same derivation move
+    `D-2026-08-26-a-knob-that-renders-nothing-is-not-a-knob` made for connectors.
+    """
+    derived_on = Settings(_env_file=None, data_sources="graph,vector,lexical")  # type: ignore[call-arg]
+    assert derived_on.note_reindex_effective is True
+    derived_off = Settings(_env_file=None, data_sources="graph")  # type: ignore[call-arg]
+    assert derived_off.note_reindex_effective is False
+    # An explicit choice still wins in both directions.
+    opted_out = Settings(  # type: ignore[call-arg]
+        _env_file=None, data_sources="graph,vector,lexical", note_reindex_enabled=False
+    )
+    assert opted_out.note_reindex_effective is False
+    forced = Settings(  # type: ignore[call-arg]
+        _env_file=None, data_sources="graph", note_reindex_enabled=True
+    )
+    assert forced.note_reindex_effective is True
+
+
 def test_the_connector_job_ceiling_covers_every_activity_a_bundle_child_can_run() -> None:
     """The ceiling rule has to name the longest activity, not the one the author remembered.
 

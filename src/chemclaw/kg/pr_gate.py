@@ -26,15 +26,26 @@ from chemclaw.kg.render import render_note
 from chemclaw.kg.submission import NoteFile, NoteSubmission, NoteSubmitter
 
 
-def _note_file(note: Note, directory: str) -> NoteFile:
-    """Where one note lands in the knowledge tree, and what is written there."""
+def _note_file(note: Note, directory: str, *, overwrite: bool = True) -> NoteFile:
+    """Where one note lands in the knowledge tree, and what is written there.
+
+    Dependencies come through with `overwrite=False`: they are re-rendered from source data on
+    every proposal that links them, and an unconditional write silently reverted a chemist's
+    post-merge edits to a compound note inside a PR titled as an addition (`NoteFile` carries
+    the full argument).
+    """
     return NoteFile(
-        path=f"{directory}/{note_relative_path(note.type, note.id)}", content=render_note(note)
+        path=f"{directory}/{note_relative_path(note.type, note.id)}",
+        content=render_note(note),
+        overwrite=overwrite,
     )
 
 
 def _build_submission(
-    note: Note, directory: str, dependencies: list[Note] | None
+    note: Note,
+    directory: str,
+    dependencies: list[Note] | None,
+    superseded: list[Note] | None = None,
 ) -> NoteSubmission:
     """The branch, files and PR text one proposal writes — the whole of what git will see.
 
@@ -52,7 +63,18 @@ def _build_submission(
         if dependency.id in seen:
             continue
         seen.add(dependency.id)
-        files.append(_note_file(dependency, directory))
+        files.append(_note_file(dependency, directory, overwrite=False))
+    # Retirements *do* overwrite: each is the merged file's own content (human edits included)
+    # with `valid_to` closed and the successor named, and rewriting the merged copy is the point.
+    # Riding in the subject note's submission is what lets the retired note carry a real
+    # `superseded-by` edge instead of plain text — the pair lands in one PR, so the link resolves
+    # on the branch `kg-validate` checks, and a reviewer merges the replacement and the
+    # retirement as the single decision they actually are.
+    for retired in superseded or ():
+        if retired.id in seen:
+            continue
+        seen.add(retired.id)
+        files.append(_note_file(retired, directory))
 
     extra = f" with {len(files) - 1} supporting note(s)" if len(files) > 1 else ""
     return NoteSubmission(
@@ -73,6 +95,7 @@ async def propose_note(
     submitter: NoteSubmitter,
     knowledge_dir: str | None = None,
     dependencies: list[Note] | None = None,
+    superseded: list[Note] | None = None,
 ) -> str:
     """Propose an agent-authored note, with anything it links to, through the PR-gate.
 
@@ -84,15 +107,23 @@ async def propose_note(
     `dependencies` are notes that must exist for `note`'s links to resolve — a computed result's
     compound note, say. They ride in the same PR, which is what lets a machine-written note cite
     the thing it is about instead of naming it in prose (STO-7). Including one that is already
-    merged is harmless: it renders byte-identically, so it produces no diff and the submission
-    stays idempotent. A dependency that is itself `human`-authored is allowed — the gate constrains
-    who may write into the graph unreviewed, and everything here is being reviewed.
+    merged is harmless: it is written only where the base branch has no copy (`NoteFile.overwrite`
+    says why), so a human's post-merge edit survives. A dependency that is itself
+    `human`-authored is allowed — the gate constrains who may write into the graph unreviewed,
+    and everything here is being reviewed.
+
+    `superseded` are retired copies of merged notes this note replaces (`memory.supersede`). They
+    ride in the same PR too, and unlike dependencies they *overwrite* — the retirement rewrites
+    the merged file with its window closed — which is also what lets the retired note point
+    forward with a real `superseded-by` edge: replacement and retirement land as one reviewable
+    decision, and neither can merge without the other.
 
     Args:
         note: The note to propose; must be `created_by == "agent"`.
         submitter: How the PR is actually created (injected for testability).
         knowledge_dir: Override the configured notes directory.
         dependencies: Notes to include alongside it so its links resolve.
+        superseded: Retired copies of merged notes this note replaces; overwritten in place.
 
     Returns:
         The submitter's reference for the opened PR. The branch is always named
@@ -103,7 +134,7 @@ async def propose_note(
         raise ValueError("PR-gate is for agent-authored notes; human notes commit directly")
 
     directory = knowledge_dir if knowledge_dir is not None else settings.knowledge_dir
-    submission = _build_submission(note, directory, dependencies)
+    submission = _build_submission(note, directory, dependencies, superseded)
     # The durable record, built here rather than at the eight call sites: an obligation that must
     # hold for every proposal belongs to the one wrapper they all run inside, which is the
     # placement rule the actor stamp and the job record already follow. Recording happens on *both*
@@ -124,7 +155,7 @@ async def propose_note(
         correlation_id=correlation_id,
     )
     try:
-        reference = await submitter.submit(submission)
+        outcome = await submitter.submit(submission)
     except Exception as exc:
         # A submission that never reached git is the case `chemclaw_notes_publish_failures_total`
         # made countable and still left unrecoverable: the note itself was gone, with nothing to
@@ -141,6 +172,12 @@ async def propose_note(
         failure = proposal.model_copy(update={"reason": reason})
         await record_proposal_failed(failure)
         raise
+    if not outcome.pushed:
+        # Nothing reached the branch — the note is byte-identical to what the base already holds.
+        # No metric (its comment says "a note reached the branch", which would be false) and no
+        # open record: the review queue must not show an item whose reference points at a branch
+        # that may not exist.
+        return outcome.reference
     # Counted after the submitter returns, so the number means "a note reached the branch", not "we
     # tried". A failing submitter raises, and a metric incremented before it would have reported a
     # healthy PR-gate while every write was failing — which is the exact condition this counter was
@@ -148,5 +185,5 @@ async def propose_note(
     record_metric(lambda m: m.increment("chemclaw_notes_proposed_total"))
     # Never raises: the note has already reached the branch, and losing the record must not undo
     # the thing the record is about.
-    await record_proposal_submitted(proposal.model_copy(update={"reference": reference}))
-    return reference
+    await record_proposal_submitted(proposal.model_copy(update={"reference": outcome.reference}))
+    return outcome.reference

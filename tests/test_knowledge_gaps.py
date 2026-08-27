@@ -344,3 +344,147 @@ def test_a_non_positive_source_weight_is_refused_by_the_config() -> None:
     with pytest.raises(ValidationError, match="must be positive"):
         RetrievalSettings(retrieval_source_weights={"graph": 0.0})
     assert RetrievalSettings(retrieval_source_weights={"graph": 1.5}).retrieval_source_weights
+
+
+# --- STO-8, second half: relation direction and note-shape hardening -------------------------
+#
+# The shipped corpus once held twelve edges written backwards against the vocabulary's declared
+# directions, all green under a gate that checked relation *names* only, with a seed-corpus test
+# pinning the inversion as correct (`docs/archive/REVIEW-2026-08-27-knowledge-system-analysis.md`
+# §1). These tests are the checks that would have refused it.
+
+
+def test_an_inverted_edge_fails_the_gate(tmp_path: Path) -> None:
+    """`product-of` runs compound → reaction; a reaction asserting it is the classic inversion."""
+    _write(tmp_path, Note(id="rxn-x", type="reaction", body="[[product-of:compound-y]]"))
+    _write(tmp_path, Note(id="compound-y", type="compound", body="the product"))
+    problems = validate(tmp_path)
+    assert any("inverse direction" in p and "rxn-x" in p for p in problems)
+
+
+def test_a_correctly_directed_edge_passes_the_gate(tmp_path: Path) -> None:
+    """The same pair the right way round is clean — the check must not cry wolf."""
+    _write(tmp_path, Note(id="rxn-x", type="reaction", body="made [[compound-y]]"))
+    _write(tmp_path, Note(id="compound-y", type="compound", body="[[product-of:rxn-x]]"))
+    assert validate(tmp_path) == []
+
+
+def test_a_signature_never_fires_on_a_dangling_target(tmp_path: Path) -> None:
+    """A dangling target is the dangling-link check's finding.
+
+    Reporting it twice would send a reader two ways about one problem.
+    """
+    _write(tmp_path, Note(id="compound-y", type="compound", body="[[product-of:rxn-ghost]]"))
+    problems = validate(tmp_path)
+    assert any("unknown note" in p for p in problems)
+    assert not any("inverse direction" in p for p in problems)
+
+
+def test_a_note_filed_under_the_wrong_type_directory_fails_the_gate(tmp_path: Path) -> None:
+    """The directory is an index key like the filename.
+
+    The PR-gate derives a note's path from its type, so a mis-filed note means the next proposal
+    for the same id writes a second file — and first-in-path-order then serves the stale one.
+    """
+    path = tmp_path / "compound" / "pb-x.md"
+    path.parent.mkdir(parents=True)
+    path.write_text(render_note(Note(id="pb-x", type="playbook", body="misfiled")))
+    problems = validate(tmp_path)
+    assert any("second file" in p and "pb-x" in p for p in problems)
+
+
+def test_a_typo_in_a_frontmatter_key_fails_the_gate(tmp_path: Path) -> None:
+    """Pydantic's default `extra="ignore"` silently dropped a mistyped key.
+
+    The note then sat outside every query keyed on the field the author thought they had set.
+    """
+    path = tmp_path / "compound" / "compound-w.md"
+    path.parent.mkdir(parents=True)
+    path.write_text("---\nid: compound-w\ntype: compound\nvalid-from: 2026-01-01\n---\nbody\n")
+    problems = validate(tmp_path)
+    assert any("compound-w" in p and "valid-from" in p for p in problems)
+
+
+def test_a_malformed_link_target_is_named_as_such(tmp_path: Path) -> None:
+    """`[[a:b:c]]` used to surface only as `unknown note 'b:c'`.
+
+    That tells the author the wrong thing — the id is not missing, the syntax is broken.
+    """
+    _write(tmp_path, Note(id="compound-z", type="compound", body="[[a:b:c]]"))
+    problems = validate(tmp_path)
+    assert any("not a valid note id" in p and "b:c" in p for p in problems)
+
+
+def test_a_corpus_note_in_the_external_namespace_is_not_reported_missing(tmp_path: Path) -> None:
+    """`reaction-` is a namespace, not a reservation.
+
+    A real note under that name must not be sent to the record store and reported as an absent
+    ELN transcription.
+    """
+    from chemclaw.kg.validate import external_citations, validate_with_notes
+
+    _write(tmp_path, Note(id="reaction-abc", type="reaction", body="a real note"))
+    _write(
+        tmp_path,
+        Note(id="compound-q", type="compound", body="[[reaction-abc]] and [[reaction-missing]]"),
+    )
+    assert external_citations(validate_with_notes(tmp_path)[1]) == [
+        ("compound-q", "reaction-missing")
+    ]
+
+
+def test_a_surrogate_in_a_nested_conditions_field_is_refused_at_the_note() -> None:
+    """`_text_is_writable` once walked only top-level strings.
+
+    A surrogate in `conditions.major_impurity` therefore built a Note that raised
+    `UnicodeEncodeError` in the PR-gate's commit — the exact late failure the validator exists
+    to prevent.
+    """
+    from chemclaw.kg.note import ProcessConditions
+
+    with pytest.raises(ValidationError, match="conditions.major_impurity"):
+        Note(
+            id="rxn-s",
+            type="reaction",
+            conditions=ProcessConditions(major_impurity="bad\ud800"),
+        )
+
+
+def test_a_calc_ref_the_store_never_produced_is_reported() -> None:
+    """The calc half of the citation-existence gate (2026-08-27 review §5).
+
+    `_calc_ref_shape` validates a key's *form* and its own comment concedes that existence "is a
+    question only a database can answer" — and nothing asked it, so a transposed digit merged
+    silently and `calc_ref_index` indexed a key no calculation ever produced. The store is a
+    parameter (`CalculationExistence`), so this needs no patching, exactly like the reaction check.
+    """
+    import asyncio
+
+    from chemclaw.kg.validate import calc_citations, unresolved_calc_refs
+    from chemclaw.science.calc.store import (
+        CalculationKey,
+        InMemoryStore,
+        StoredResult,
+    )
+
+    async def _run() -> list[str]:
+        store = InMemoryStore()
+        real = CalculationKey.build("xtb", "gfn2", inputs={"smiles": "CCO"})
+        await store.put(StoredResult(key=real, result={"energy": -1.0}, provenance="computed"))
+        typo = real.as_str()[:-1] + ("0" if not real.as_str().endswith("0") else "1")
+        note = Note(
+            id="job-result-x",
+            type="job-result",
+            created_by="agent",
+            calc_refs=[real.as_str(), typo],
+            body="two refs, one real",
+        )
+        citations = calc_citations([note])
+        assert citations == [("job-result-x", real.as_str()), ("job-result-x", typo)] or (
+            citations == [("job-result-x", typo), ("job-result-x", real.as_str())]
+        )
+        return await unresolved_calc_refs(citations, store)
+
+    problems = asyncio.run(_run())
+    assert len(problems) == 1
+    assert "job-result-x" in problems[0] and "calc_refs" in problems[0]

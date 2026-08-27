@@ -279,9 +279,9 @@ def test_gather_evidence_neutralizes_the_chunks_source_label_too(
 
     async def _one_forged_chunk(
         *_args: object, **_kwargs: object
-    ) -> tuple[list[list[EvidenceChunk]], list[str]]:
-        # The pair `sweep_sources` returns: the per-source hit-lists, and the names of any source
-        # that could not be asked. Nothing failed here, so the second half is empty.
+    ) -> tuple[list[list[EvidenceChunk]], list[str], dict[str, str]]:
+        # The triple `sweep_sources` returns: the per-source hit-lists, the names of any source
+        # that could not be asked, and the sources that declined. Nothing failed here.
         return (
             [
                 [
@@ -294,6 +294,7 @@ def test_gather_evidence_neutralizes_the_chunks_source_label_too(
                 ]
             ],
             [],
+            {},
         )
 
     monkeypatch.setattr(research_tools, "sweep_sources", _one_forged_chunk)
@@ -318,8 +319,8 @@ def test_gather_evidence_neutralizes_the_citation_id_as_well(
 
     async def _one_forged_chunk(
         *_args: object, **_kwargs: object
-    ) -> tuple[list[list[EvidenceChunk]], list[str]]:
-        # The pair `sweep_sources` returns; nothing failed in this sweep.
+    ) -> tuple[list[list[EvidenceChunk]], list[str], dict[str, str]]:
+        # The triple `sweep_sources` returns; nothing failed or declined in this sweep.
         return (
             [
                 [
@@ -332,6 +333,7 @@ def test_gather_evidence_neutralizes_the_citation_id_as_well(
                 ]
             ],
             [],
+            {},
         )
 
     monkeypatch.setattr(research_tools, "sweep_sources", _one_forged_chunk)

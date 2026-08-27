@@ -17,3 +17,6 @@ most of why this route survived a century of alternatives.
 
 - also written: Ac2O, ethanoic anhydride
 - role: reagent
+
+The acetyl donor in [[reagent-in:rxn-aspirin-acetylation]] — and, run neat, also that run's
+medium: [[solvent-for:rxn-aspirin-acetylation]].

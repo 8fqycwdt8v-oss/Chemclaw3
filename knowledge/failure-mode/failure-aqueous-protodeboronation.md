@@ -1,6 +1,9 @@
 ---
 artifact_refs: []
 calc_refs: []
+conditions:
+  outcome: failure
+  temperature_c: 100.0
 confidence: 0.8
 created_by: human
 id: failure-aqueous-protodeboronation

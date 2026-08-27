@@ -96,7 +96,9 @@ def test_job_pr_gates_one_note_per_campaign() -> None:
     async def _run() -> None:
         reactions = [_ester("run-1", 80, 85), _ester("run-2", 100, 92), _suzuki()]
         submitter = FakeSubmitter()
-        refs = [await propose_note(note, submitter) for note in build_optimization_notes(reactions)]
+        refs = [
+            await propose_note(unit.note, submitter) for unit in build_optimization_notes(reactions)
+        ]
         assert len(refs) == 1
         assert len(submitter.submissions) == 1
         assert submitter.submissions[0].files[0].path.startswith("knowledge/optimization-campaign/")

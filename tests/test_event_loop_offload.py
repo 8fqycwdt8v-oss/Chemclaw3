@@ -214,10 +214,10 @@ def test_the_memory_note_builders_run_off_the_event_loop(
         time.sleep(_BLOCK_SECONDS)
         return []
 
-    async def _no_reactions() -> list[Any]:
-        return []
+    async def _no_reactions() -> memory_jobs.CorpusRead:
+        return memory_jobs.CorpusRead(reactions=[], complete=True)
 
-    monkeypatch.setattr(memory_jobs, "all_reactions", _no_reactions)
+    monkeypatch.setattr(memory_jobs, "read_corpus", _no_reactions)
     monkeypatch.setattr(
         memory_jobs, activity_name.removesuffix("_activity"), _slow_build, raising=True
     )

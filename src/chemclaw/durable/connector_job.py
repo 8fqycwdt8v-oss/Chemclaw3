@@ -56,6 +56,7 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.durable.notify import notify_session_best_effort
     from chemclaw.durable.publish_results import JobPublishInput, publish_job_result
     from chemclaw.kg.note import Note
+    from chemclaw.memory.jobs import SynthesisUnit
 
 from chemclaw.durable.publish import (
     BAD_DATA_RETRY,
@@ -528,7 +529,12 @@ class ConnectorJobWorkflow:
             # frame above, required and unused.
             await publish_note_best_effort(
                 publish_memory_note_activity,
-                [note_with_run_provenance(result.note, record), job.requested_by],
+                [
+                    # A connector job never retires anything — retirement is the synthesis
+                    # miners' judgment — so its unit carries the note alone.
+                    SynthesisUnit(note=note_with_run_provenance(result.note, record)),
+                    job.requested_by,
+                ],
                 label=f"{job.connector}:{job.job}",
             )
         if job.session_id:

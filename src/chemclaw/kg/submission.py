@@ -17,12 +17,22 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class NoteFile(BaseModel):
-    """One file a submission writes: where it goes and what it contains."""
+    """One file a submission writes: where it goes, what it contains, and whether it may replace.
+
+    `overwrite=False` marks a *dependency* — a file included so the subject note's links resolve,
+    re-rendered from source data on every proposal that touches it. Such a file is written only
+    when the base branch does not already have one: the machine rendering is byte-identical to
+    what it minted before, so writing it is normally a no-op, but the moment a human has edited
+    the merged copy (hazard prose on a compound note, a tag) the unconditional write silently
+    reverted their edit inside a PR titled as an addition. The subject note keeps the default —
+    replacing it is what a re-proposal *is*.
+    """
 
     model_config = ConfigDict(frozen=True)
 
     path: str
     content: str
+    overwrite: bool = True
 
 
 class NoteSubmission(BaseModel):
@@ -51,19 +61,36 @@ class NoteSubmission(BaseModel):
     body: str
 
 
+class SubmissionOutcome(BaseModel):
+    """What a submit actually did: the reference, and whether anything was pushed.
+
+    `pushed=False` is the idempotent no-op — the note was byte-identical to what the base branch
+    already holds, so no ref was (re)created. The flag exists because the caller acts on the
+    difference: `propose_note` used to record an *open* proposal and increment the proposed-notes
+    counter for this case too, so the review queue showed an item whose reference pointed at a
+    branch that does not exist, and the metric's own comment ("a note reached the branch") was
+    false for it.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    reference: str
+    pushed: bool = True
+
+
 class NoteSubmitter(Protocol):
-    """Submits a note as a reviewable PR and returns a reference (e.g. the PR URL).
+    """Submits a note as a reviewable PR and returns what happened.
 
     Contract nuance: when the note is byte-identical to what the base branch
-    already contains, an implementation may return the reference *without*
+    already contains, an implementation returns `pushed=False` without
     creating anything new — there is nothing to review, so re-proposing an
     unchanged note is an idempotent no-op, not an error.
     """
 
-    async def submit(self, submission: NoteSubmission) -> str:
-        """Create the branch + PR for `submission`; return a human-visible reference.
+    async def submit(self, submission: NoteSubmission) -> SubmissionOutcome:
+        """Create the branch + PR for `submission`; return the outcome.
 
-        For an unchanged note this may be the branch name without a fresh push
-        (see the class docstring).
+        For an unchanged note this is the branch name with `pushed=False`
+        (see `SubmissionOutcome`).
         """
         ...

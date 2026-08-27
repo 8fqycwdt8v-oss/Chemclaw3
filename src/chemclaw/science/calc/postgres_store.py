@@ -8,7 +8,7 @@ The DSN comes from the one config source.
 """
 
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 
 import psycopg
@@ -134,6 +134,23 @@ class PostgresStore:
                     ),
                 )
             await conn.commit()
+
+    async def known(self, keys: Sequence[str]) -> set[str]:
+        """Which of `keys` the cache holds — the `kg.validate.CalculationExistence` answer.
+
+        One indexed `= ANY` probe rather than a `get` per key, because `make kg-validate` asks
+        for a whole corpus's `calc_refs` at once. Returns keys, not rows: existence is the whole
+        question, and the payloads would be dead weight on a gate that only prints ids.
+        """
+        if not keys:
+            return set()
+        async with self._connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT key FROM calculation_results WHERE key = ANY(%s)", (list(keys),)
+                )
+                rows = await cur.fetchall()
+        return {row[0] for row in rows}
 
     async def find(self, query: CalculationQuery) -> list[StoredResult]:
         """Return results matching `query`, newest first, capped at `query.limit`.

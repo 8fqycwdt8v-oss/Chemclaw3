@@ -26,10 +26,13 @@ may only be distilled from successes.
 
 The human gate does not disappear; it moves. An observation that crosses both promotion thresholds
 opens one ordinary playbook PR through the ordinary `kg.pr_gate`. Two rules keep that safe and both
-are enforced rather than documented: support counts distinct *merged* notes (so an observation can
-never corroborate itself into a promotion — migration `025` makes that a CHECK), and an observation
-never enters the evidence list (`recall_observations` is its own tool, not a bucket inside
-`gather_evidence`).
+are enforced rather than documented: support counts distinct *cited runs* — `reaction-<id>`
+references into the ungated transcription store since D-2026-08-25, plus merged `interaction`
+notes — and an observation can never corroborate itself into a promotion (migration `025` makes
+the self-reference a CHECK). The promotion PR says which kind of evidence the count is, because
+the reviewer at that gate is the first human in the loop for the transcription half. And an
+observation never enters the evidence list (`recall_observations` is its own tool, not a bucket
+inside `gather_evidence`).
 
 ## Nothing here writes to the graph directly
 

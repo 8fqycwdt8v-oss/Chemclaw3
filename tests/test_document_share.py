@@ -57,7 +57,7 @@ from chemclaw.ingest.documents.sync import (
     reembed_stale,
     sync_share,
 )
-from chemclaw.retrieval.evidence import EvidenceChunk
+from chemclaw.retrieval.evidence import EvidenceChunk, RetrieverSkip
 from chemclaw.retrieval.fanout import sweep_sources
 from chemclaw.retrieval.vectors.base import stored_embedding_key
 from chemclaw.retrieval.vectors.memory import InMemoryVectorStore
@@ -143,7 +143,7 @@ def counted_embeddings(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[int]]:
     calls: list[int] = []
     real = embed_texts
 
-    def counting(texts: list[str]) -> list[list[float]]:
+    def counting(texts: list[str], **kwargs: object) -> list[list[float]]:
         calls.append(len(texts))
         return real(texts)
 
@@ -824,7 +824,8 @@ def test_a_caller_outside_the_group_gets_nothing(
     retriever = _entitled_retriever(share, index)
 
     as_user("user-2", {"some.other.role"})
-    assert asyncio.run(retriever.retrieve("palladium catalyst", {})) == []
+    with pytest.raises(RetrieverSkip, match="entitled actor"):
+        asyncio.run(retriever.retrieve("palladium catalyst", {}))
 
 
 def test_a_gated_share_refuses_when_there_is_no_identity_to_check(share: dict[str, Any]) -> None:
@@ -837,7 +838,8 @@ def test_a_gated_share_refuses_when_there_is_no_identity_to_check(share: dict[st
     asyncio.run(sync_share(SOURCE, load_binding(share), index))
     retriever = _entitled_retriever(share, index)
 
-    assert asyncio.run(retriever.retrieve("palladium catalyst", {})) == []
+    with pytest.raises(RetrieverSkip, match="entitled actor"):
+        asyncio.run(retriever.retrieve("palladium catalyst", {}))
 
 
 def test_an_ungated_share_needs_no_identity(share: dict[str, Any]) -> None:
@@ -871,7 +873,7 @@ def test_a_backend_failure_raises_so_the_sweep_can_report_it(
     with pytest.raises(ConnectionError):
         asyncio.run(retriever.retrieve("anything", {}))
 
-    ranked, failed = asyncio.run(sweep_sources([(SOURCE, retriever)], "anything", {}))
+    ranked, failed, _skipped = asyncio.run(sweep_sources([(SOURCE, retriever)], "anything", {}))
     assert ranked == [[]] and failed == [SOURCE], (
         "the branch must report a failure, not the zero-chunk answer of a healthy quiet source"
     )
@@ -892,7 +894,7 @@ def test_an_embedding_provider_failure_costs_this_leg_and_no_other(
     class _ProviderError(Exception):
         """Stands in for a vendor client's own error type, which no handler here enumerates."""
 
-    def _refusing(texts: list[str]) -> list[list[float]]:
+    def _refusing(texts: list[str], **kwargs: object) -> list[list[float]]:
         raise _ProviderError("429 rate limited")
 
     index = InMemoryDocumentIndex()
@@ -904,7 +906,7 @@ def test_an_embedding_provider_failure_costs_this_leg_and_no_other(
     with pytest.raises(_ProviderError):
         asyncio.run(retriever.retrieve("yield", {}))
 
-    ranked, failed = asyncio.run(sweep_sources([(SOURCE, retriever)], "yield", {}))
+    ranked, failed, _skipped = asyncio.run(sweep_sources([(SOURCE, retriever)], "yield", {}))
     assert ranked == [[]] and failed == [SOURCE]
 
 
@@ -917,7 +919,8 @@ def test_a_note_type_filter_returns_nothing_rather_than_ignoring_it(
     retriever = _entitled_retriever(share, index)
 
     as_user("user-1", {"sharedrive.reader"})
-    assert asyncio.run(retriever.retrieve("palladium", {"type": "reaction"})) == []
+    with pytest.raises(RetrieverSkip, match="note-type filter"):
+        asyncio.run(retriever.retrieve("palladium", {"type": "reaction"}))
 
 
 def test_a_tag_filter_scopes_to_one_project(
@@ -1237,7 +1240,7 @@ def test_a_statement_timeout_degrades_this_leg_and_leaves_the_others_answering(
     retriever = ShareDocumentRetriever(
         {**share, "required_roles": [], "public": True}, name=SOURCE, index=Exploding()
     )
-    ranked, failed = asyncio.run(
+    ranked, failed, _skipped = asyncio.run(
         sweep_sources([("graph", _Graph()), (SOURCE, retriever)], "catalyst", {})
     )
 
@@ -1298,7 +1301,7 @@ def test_one_unembeddable_chunk_does_not_starve_the_corpus(
     poison = stale[0].content
     real = embed_texts
 
-    def refusing(texts: list[str]) -> Any:
+    def refusing(texts: list[str], **kwargs: object) -> Any:
         if poison in texts:
             raise ValueError("content refused by the provider")
         return real(texts)

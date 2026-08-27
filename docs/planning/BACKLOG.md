@@ -419,12 +419,14 @@ it happens.
       same build listed neither, and a gate whose last word contradicts the artifact it scanned
       makes every red build ambiguous. Re-check that against a current trivy before merging.
 
-- [ ] **The background worker is a hard singleton** — [M]. `workers.background.replicas: 1` owns ELN
-      sync, memory synthesis, retention and eval drift, and cannot be scaled because the PR-gate
-      checkout lock is host-local (`kg/git_submitter.py:101`, `fcntl.flock`, D-069). This row used
-      to say the distributed lock "is its own `DEFERRED.md` row" — **there is no such row**, there
-      never was, and the cross-reference defeated the rule that a row must name a real anchor. The
-      lock is buildable here: a Postgres advisory lock on the pool that already exists, ~60 lines.
+- [ ] **The background worker is a hard singleton** — [S], narrowed. The PR-gate half is closed:
+      `kg/git_submitter.py::_cluster_lock` serializes submissions to one remote across pods through
+      a Postgres session-level advisory lock whenever `session_store="postgres"`
+      (`D-2026-08-27-the-gate-tells-the-truth-about-what-it-pushed`), and the host-local `flock`
+      stays for the per-clone worktree sweep. What remains before `workers.background.replicas`
+      can exceed 1 is an audit of the *other* activities that queue owns — ELN sync's cursor
+      advance and retention's prune batches were written under a one-worker assumption and nobody
+      has argued they are safe under two.
 
 - [ ] **A durable deployment with no `framing_envelope_secret` silently loses the injection
       marking on its oldest content, and nothing says so** — [S]. `agent/framing.py::_envelope_nonce`

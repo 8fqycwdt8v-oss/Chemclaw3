@@ -20,7 +20,7 @@ from chemclaw.kg.conflicts import NoteConflicts, conflict_index
 from chemclaw.kg.graph import load_notes
 from chemclaw.kg.note import Note, note_id_for_reaction, strip_links
 from chemclaw.kg.search import query_terms, term_coverage
-from chemclaw.retrieval.evidence import EvidenceChunk
+from chemclaw.retrieval.evidence import EvidenceChunk, RetrieverSkip
 from chemclaw.retrieval.vector_index import IndexHit, NoteIndex, default_note_index
 from chemclaw.science.fingerprints.rxnfp.search import find_similar_reactions
 from chemclaw.science.fingerprints.store import FingerprintInputError, FingerprintStore, Match
@@ -99,6 +99,12 @@ async def _eligible_notes(directory: Path, filters: dict[str, Any]) -> dict[str,
     `since`/`until` window the notes by `valid_from` — for a reaction note, the day the
     experiment was run (D-162). "What have I tried on this step in the last two weeks" was
     unanswerable without it: the dates were on the notes and no filter could reach them.
+
+    Deliberately not cached, though a three-source sweep runs it three times: the parse behind it
+    is cached (`load_notes`), so the repeated work is this filter loop — a few milliseconds per
+    leg at 10⁴ notes — and a cache over it would need the corpus fingerprint, the filter dict
+    *and* the current date in its key (`is_current(today)` makes the answer date-sensitive).
+    Three cheap loops beat one cache with a three-part invalidation story.
     """
     want_type = filters.get("type")
     want_tag = filters.get("tag")
@@ -124,8 +130,18 @@ async def _eligible_notes(directory: Path, filters: dict[str, Any]) -> dict[str,
 
 
 def _load_if_present(directory: Path) -> list[Note]:
-    """Every note under `directory`, or none when it does not exist — both off the event loop."""
-    return load_notes(directory) if directory.exists() else []
+    """Every note under `directory`, raising `RetrieverSkip` when there are none at all.
+
+    A tree with zero parseable notes is a deployment fact, not a corpus answer: a mis-pointed
+    `knowledge_path` (or an unmounted volume) used to zero the graph, dense and lexical legs at
+    once with nothing anywhere saying so — three sources reporting "found nothing" about a corpus
+    they never saw. Filters that exclude everything are the legitimate empty answer and do not
+    come through here.
+    """
+    notes = load_notes(directory) if directory.exists() else []
+    if not notes:
+        raise RetrieverSkip(f"no notes found under {directory}")
+    return notes
 
 
 def _in_window(note: Note, since: date | None, until: date | None) -> bool:
@@ -200,8 +216,7 @@ class GraphRetriever:
         only guarantees the note exists, not that it answers the question.
         """
         terms = query_terms(query)
-        conflicts = await _conflict_index(self._dir)
-        scored: list[tuple[int, EvidenceChunk]] = []
+        scored: list[tuple[int, float, Note]] = []
         for note in (await _eligible_notes(self._dir, filters)).values():
             coverage = term_coverage(note, terms)
             if not coverage:
@@ -214,20 +229,28 @@ class GraphRetriever:
                 if note.confidence is not None
                 else settings.retrieval_default_confidence
             )
-            scored.append(
-                (coverage, _chunk_for(note, self.name, score, conflicts.get(note.id), terms))
-            )
-        complete = [pair for pair in scored if pair[0] == len(terms)]
+            scored.append((coverage, score, note))
+        complete = [entry for entry in scored if entry[0] == len(terms)]
         # RRF reads each source's list as ranked best-first, so the list must be ordered by this
         # retriever's own relevance signal — disk order is not a ranking. Coverage leads only on
         # the widened search (on the complete one it is the same for every hit, so this reduces
         # to confidence exactly as before). Note id breaks ties deterministically.
+        #
+        # Ranked *then* cut *then* materialized, bounded by the `retrieval_top_k` every sibling
+        # leg honours. This was the one unbounded retriever: a broad query on a large corpus
+        # built an `EvidenceChunk` (an excerpt scan plus a conflicts lookup each) for every
+        # scored note before the merge budget threw all but a handful away — and the graph leg
+        # then arrived at the round-robin with thousands of entries against every other leg's k,
+        # which is the crowding-out asymmetry D-2026-08-01 was written about, relocated from the
+        # cut to the input.
+        chosen = sorted(
+            complete or scored,
+            key=lambda entry: (-entry[0], -entry[1], entry[2].id),
+        )[: settings.retrieval_top_k]
+        conflicts = await _conflict_index(self._dir)
         return [
-            chunk
-            for _, chunk in sorted(
-                complete or scored,
-                key=lambda pair: (-pair[0], -pair[1].score, pair[1].source_note_id),
-            )
+            _chunk_for(note, self.name, score, conflicts.get(note.id), terms)
+            for _, score, note in chosen
         ]
 
 

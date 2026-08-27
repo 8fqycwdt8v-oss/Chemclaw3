@@ -67,10 +67,14 @@ def analyze(graph: nx.DiGraph, notes: list[Note], *, top_n: int | None = None) -
     by_type = Counter(note.type for note in notes)
     return GraphGaps(
         total_notes=len(notes),
+        # A self-link is not a connection: a note whose only edge points at itself is exactly as
+        # invisible to traversal as one with no edges, and counting the loop as degree hid it
+        # from the report this module exists to produce.
         isolated_note_ids=sorted(
             node
             for node in graph.nodes
-            if graph.in_degree(node) == 0 and graph.out_degree(node) == 0
+            if all(neighbour == node for neighbour in graph.predecessors(node))
+            and all(neighbour == node for neighbour in graph.successors(node))
         ),
         type_counts=dict(sorted(by_type.items())),
         tags_without_distillation=_undistilled_tags(notes),

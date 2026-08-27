@@ -83,12 +83,12 @@ def test_provenance_is_not_a_filter(tmp_path: Path) -> None:
 
     async def _run() -> None:
         _write(
-            tmp_path, Note(id="a", type="playbook", created_by="agent", confidence=0.1, body="X")
+            tmp_path, Note(id="a", type="playbook", created_by="agent", confidence=0.1, body="XX")
         )
         _write(
-            tmp_path, Note(id="b", type="playbook", created_by="human", confidence=1.0, body="X")
+            tmp_path, Note(id="b", type="playbook", created_by="human", confidence=1.0, body="XX")
         )
-        chunks = await GraphRetriever(str(tmp_path)).retrieve("X", {})
+        chunks = await GraphRetriever(str(tmp_path)).retrieve("XX", {})
         assert {c.source_note_id for c in chunks} == {"a", "b"}
         # ...but the trusted one is ranked first, so it survives truncation.
         assert chunks[0].source_note_id == "b"

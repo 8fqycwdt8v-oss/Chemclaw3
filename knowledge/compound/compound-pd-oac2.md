@@ -17,3 +17,5 @@ Palladium(II) acetate. A pre-catalyst rather than a catalyst: it is reduced in s
 is the species that actually enters the cycle. Loading is quoted as mol% of palladium.
 
 - also written: Pd(OAc)2, palladium diacetate
+
+Pre-catalyst for [[catalyzes:rxn-suzuki-biaryl]] and [[catalyzes:rxn-buchwald-amination]].

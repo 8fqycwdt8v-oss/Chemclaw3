@@ -230,6 +230,9 @@ def test_the_sweep_is_bounded_by_characters_and_not_only_by_a_chunk_count(
             f"---\nid: reaction-{i}\ntype: reaction\n---\n{body}\n", encoding="utf-8"
         )
     monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
+    # The graph leg is bounded by retrieval_top_k like every sibling; raised so the sweep-level
+    # budgets under test are the binding ones.
+    monkeypatch.setattr(settings, "retrieval_top_k", 40)
     monkeypatch.setattr(settings, "gather_evidence_max_chunks", 20)
     monkeypatch.setattr(settings, "gather_evidence_max_chars", 1_000)
 
@@ -252,6 +255,9 @@ def test_hitting_the_chunk_count_says_so_rather_than_looking_like_a_small_corpus
             f"---\nid: reaction-{i}\ntype: reaction\n---\nyield noted.\n", encoding="utf-8"
         )
     monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
+    # Raised past the fixture size so the sweep-level count cap is the truncation under test,
+    # not the graph leg's own retrieval_top_k bound.
+    monkeypatch.setattr(settings, "retrieval_top_k", 40)
     monkeypatch.setattr(settings, "gather_evidence_max_chunks", 5)
 
     sweep = asyncio.run(gather_evidence("yield"))
@@ -376,3 +382,23 @@ def test_the_budget_charges_the_whole_chunk_and_not_only_its_content(
         "growing a non-content field did not cost the budget anything, so the budget is measuring "
         f"content alone: {len(lean.chunks)} chunks before, {len(padded.chunks)} after"
     )
+
+
+def test_the_sweep_reports_what_each_source_contributed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`sources` carries the per-branch counts the fan-out used to drop at this boundary.
+
+    Without them the model could not tell "the share found nothing", "the share isn't
+    configured" and "the share declined" apart — three different answers rendered identically.
+    """
+    (tmp_path / "reaction").mkdir()
+    (tmp_path / "reaction" / "reaction-a.md").write_text(
+        "---\nid: reaction-a\ntype: reaction\n---\nyield noted.\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
+
+    sweep = asyncio.run(gather_evidence("yield"))
+
+    assert sweep.sources.get("graph") == 1
+    assert sweep.sources_skipped == {}
