@@ -254,7 +254,7 @@ def test_a_corrupt_fingerprint_index_is_a_failure_while_a_prose_anchor_is_an_ans
     anchor = "CC(=O)O.OCC>>CC(=O)OCC"
 
     prose = FingerprintReactionRetriever(InMemoryFingerprintStore(), records)
-    ranked, failed = asyncio.run(
+    ranked, failed, _skipped = asyncio.run(
         sweep_sources([("reaction-fingerprint", prose)], "how do we work up a nitration?", {})
     )
     assert [len(chunks) for chunks in ranked] == [0]
@@ -273,7 +273,9 @@ def test_a_corrupt_fingerprint_index_is_a_failure_while_a_prose_anchor_is_an_ans
         )
     )
     broken = FingerprintReactionRetriever(corrupt, records)
-    ranked, failed = asyncio.run(sweep_sources([("reaction-fingerprint", broken)], anchor, {}))
+    ranked, failed, _skipped = asyncio.run(
+        sweep_sources([("reaction-fingerprint", broken)], anchor, {})
+    )
     assert [len(chunks) for chunks in ranked] == [0]
     assert failed == ["reaction-fingerprint"], (
         "an index that cannot be compared with its own query is an outage; the sweep reported "

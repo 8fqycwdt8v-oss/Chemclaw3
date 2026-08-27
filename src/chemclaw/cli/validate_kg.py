@@ -37,13 +37,8 @@ from chemclaw.kg.validate import (
 from chemclaw.science.calc.postgres_store import PostgresStore
 
 
-<<<<<<< HEAD
-def main() -> int:
-    """Validate the graph, then its store-backed citations; print problems; return an exit code."""
-    notes_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else settings.knowledge_path
-=======
 def main(argv: Sequence[str] | None = None) -> int:
-    """Validate the graph, then its external citations; print problems; return an exit code.
+    """Validate the graph, then its store-backed citations; print problems; return an exit code.
 
     The notes directory is a real positional and stays one — this gate is genuinely run against a
     dedicated note checkout (`CHEMCLAW_NOTE_REPO_DIR`) as well as the shipped tree. What it did not
@@ -53,7 +48,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m chemclaw.cli.validate_kg",
         description="Validate a knowledge-graph notes directory: schema, duplicate ids, broken "
-        "links, and reaction citations against the record store.",
+        "links, and reaction and calculation citations against their stores.",
     )
     parser.add_argument(
         "notes_dir",
@@ -63,7 +58,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     options = parser.parse_args(argv)
     notes_dir = Path(options.notes_dir) if options.notes_dir else settings.knowledge_path
->>>>>>> origin/main
     if not notes_dir.exists():
         print(f"notes directory does not exist: {notes_dir}")
         return 1
