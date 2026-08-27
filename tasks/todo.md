@@ -66,8 +66,11 @@ decision record is
 ## Verification
 
 - `make lint` / `ruff format --check` / `mypy --strict` — clean (398 source files).
-- Backend BO suite + touched neighbours — see the review section below for the real numbers,
-  including what skipped.
+- Backend BO suite + touched neighbours (23 files: every `test_bo_*`, plus retention, the schema
+  inventory, the leaver, the layering and repo-map guards, the Postgres campaign store, `molfp` and
+  the decision log) — **486 passed, 0 failed, 0 skipped** in 7m58s. Nothing sat out: neither the
+  Postgres nor the new Temporal skip epilogue printed, which is what makes that number evidence
+  rather than a green line.
 - `Chemclaw3_ui`: 548 tests, typecheck and lint clean.
 - Postgres and Temporal both **started and used** (`dockerd`, `make up`, `make db-migrate`), so the
   durable and store-backed tests genuinely ran rather than skipping.
