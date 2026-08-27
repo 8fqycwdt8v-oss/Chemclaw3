@@ -164,7 +164,7 @@ async def record_campaign_run(
     Returns:
         The campaign id, so the workflow can report the handle a chemist quotes back.
     """
-    return await record_suggestion(
+    recorded = await record_suggestion(
         problem,
         candidates=candidates,
         observations=observations,
@@ -180,3 +180,4 @@ async def record_campaign_run(
         provenance=(actor, "", correlation_id),
         job_id=job_id,
     )
+    return recorded.campaign_id

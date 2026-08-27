@@ -48,7 +48,10 @@ from chemclaw.durable.registry import durable_workflow
 
 
 def _carry_on_if_history_is_filling_up(
-    payload: dict[str, object], history: list[Observation], rounds_remaining: int
+    payload: dict[str, object],
+    history: list[Observation],
+    rounds_remaining: int,
+    rounds_done: int,
 ) -> None:
     """Continue this campaign in a fresh run before Temporal's event history runs out.
 
@@ -69,15 +72,19 @@ def _carry_on_if_history_is_filling_up(
     is immutable and travels as the unread `payload`, and the observations are the only thing a
     round adds. Called *after* a round completes, never between the propose and the evaluate, so no
     already-paid evaluation is ever abandoned.
+
+    `rounds_done` travels with it because the per-round campaign-record write keys its idempotency
+    on the round index, and a continued run that restarted the count at zero would collide with the
+    previous run's rows and silently drop them.
     """
     if rounds_remaining <= 0 or not workflow.info().is_continue_as_new_suggested():
         return
     workflow.continue_as_new(
         args=[
             payload,
-            CampaignCarryOver(history=history, rounds_remaining=rounds_remaining).model_dump(
-                mode="json"
-            ),
+            CampaignCarryOver(
+                history=history, rounds_remaining=rounds_remaining, rounds_done=rounds_done
+            ).model_dump(mode="json"),
         ]
     )
 
@@ -132,15 +139,20 @@ class BoCampaignWorkflow:
                 retry_policy=BAD_DATA_RETRY,
             )
             rounds_remaining = spec.n_rounds
+            rounds_done = 0
         else:
             resumed = CampaignCarryOver.model_validate(carried)
             history = resumed.history
             rounds_remaining = resumed.rounds_remaining
+            rounds_done = resumed.rounds_done
+
+        actor = workflow.memo_value("requested_by", settings.service_actor_id)
+        correlation_id = workflow.memo_value("correlation_id", "")
 
         space = discrete_candidate_count(spec.problem)
         while rounds_remaining > 0:
             # Stop early if a purely discrete candidate set is exhausted.
-            if space_exhausted(space, history, spec.batch):
+            if space_exhausted(spec.problem, space, history, spec.batch):
                 break
             proposed = await workflow.execute_activity(
                 propose_next,
@@ -156,8 +168,42 @@ class BoCampaignWorkflow:
                 heartbeat_timeout=heartbeat_timeout,
                 retry_policy=BAD_DATA_RETRY,
             )
+            rounds_done += 1
             rounds_remaining -= 1
-            _carry_on_if_history_is_filling_up(payload, history, rounds_remaining)
+            # Record the round *as it completes*, not only when the campaign does.
+            #
+            # The write used to happen once, after this loop. Everything a running campaign had
+            # already paid for lived only in Temporal's own event history until then, so a campaign
+            # cancelled, terminated, or failed non-retryably mid-run answered `resume_campaign`
+            # with "no such campaign" about hours of real evaluation — the same gap the terminal
+            # write closed for a campaign that *finishes*, left open for every other ending. It
+            # also made cancellation lossy in a way that mattered: "pause this campaign" has no
+            # signal handler and does not need one, because cancel-then-resume is the same thing
+            # when the history survives the cancel. Now it does.
+            #
+            # Keyed on the round rather than the run, because `record_suggestion`'s idempotency is
+            # `(campaign_id, job_id)` — a per-round write under the bare workflow id would dedupe
+            # against round 1 and silently discard every round after it.
+            #
+            # The candidates recorded here are the ones actually proposed, carrying their
+            # `predicted_value`/`predicted_sd`. The terminal write below records the *best* point
+            # instead, which is a different statement and has no surrogate belief attached to it —
+            # so the per-round rows are also the only place a campaign's predictions survive.
+            await workflow.execute_activity(
+                record_campaign_run,
+                args=[
+                    spec.problem,
+                    proposed,
+                    history,
+                    actor,
+                    correlation_id,
+                    f"{workflow.info().workflow_id}:r{rounds_done}",
+                ],
+                start_to_close_timeout=timeout,
+                heartbeat_timeout=heartbeat_timeout,
+                retry_policy=BAD_DATA_RETRY,
+            )
+            _carry_on_if_history_is_filling_up(payload, history, rounds_remaining, rounds_done)
 
         result = CampaignResult(best=best_of(spec.problem, history), history=history)
 
@@ -180,8 +226,8 @@ class BoCampaignWorkflow:
                 spec.problem,
                 [Candidate(params=result.best.params)],
                 history,
-                workflow.memo_value("requested_by", settings.service_actor_id),
-                workflow.memo_value("correlation_id", ""),
+                actor,
+                correlation_id,
                 workflow.info().workflow_id,
             ],
             start_to_close_timeout=timeout,

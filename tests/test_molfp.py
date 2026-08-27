@@ -554,6 +554,43 @@ def test_agent_supplied_threshold_is_clamped() -> None:
     asyncio.run(_run())
 
 
+def test_agent_supplied_nan_threshold_is_refused_rather_than_emptying_the_search() -> None:
+    """A NaN `threshold` is refused, because clamping it silently returned "no precedent".
+
+    The clamp above is total only over *ordered* values. Every comparison with NaN is False, so
+    `min(max(nan, 0.0), 1.0)` keeps the NaN, and it reached the similarity comparison where each
+    candidate compares False. Measured before this guard, the search below — whose query is an
+    exact match for a molecule sitting in the index — returned `hits: []` with
+    `index_empty: false`, so `verdict` called it "a genuine negative result". That is precisely
+    the conflation `FingerprintSearch` exists to prevent, produced by the guard meant to prevent
+    it, and a wrong answer that looks like an answer is worse than an error.
+
+    Pins the *behaviour*, not the clamp expression: that the search refuses instead of coming
+    back empty, that the refusal is not a `FingerprintError` (`retrieval.retrievers` catches that
+    family to mean "a bad query is an empty answer", which would restore the silence), and that
+    nothing but NaN was narrowed — a merely out-of-range threshold still answers.
+    """
+
+    async def _run() -> None:
+        store = InMemoryFingerprintStore()
+        await store.add(record_for("ethanol", "CCO"))
+
+        with pytest.raises(ValueError, match="NaN") as excinfo:
+            await find_similar_molecules(store, "CCO", threshold=float("nan"))
+        # Not the domain family: catching that one is how a caller says "answer this empty".
+        assert not isinstance(excinfo.value, FingerprintError)
+
+        # ±inf has a nearest bound, so it still clamps rather than refusing...
+        for unbounded in (float("inf"), float("-inf")):
+            assert (await find_similar_molecules(store, "CCO", threshold=unbounded)).hits
+
+        # ...and the ordinary out-of-range threshold keeps the behaviour merged before this.
+        hits = (await find_similar_molecules(store, "CCO", threshold=99.0)).hits
+        assert [h.smiles for h in hits] == ["CCO"]
+
+    asyncio.run(_run())
+
+
 def test_all_records_limit_is_bounded_and_deterministic() -> None:
     """`all_records(limit=n)` returns the first n records in id order (bounded scan)."""
 

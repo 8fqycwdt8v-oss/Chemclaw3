@@ -118,9 +118,12 @@ def test_every_bo_activity_call_declares_a_heartbeat_timeout() -> None:
         and isinstance(node.func, ast.Attribute)
         and node.func.attr == "execute_activity"
     ]
-    # Seed, propose, evaluate, and the campaign-record write the durable path gained when it
-    # stopped leaving `resume_campaign` with nothing to find.
-    assert len(calls) == 5, f"expected 5 execute_activity calls, found {len(calls)}"
+    # Seed, propose, evaluate (twice — the seed round and the loop), and *two* campaign-record
+    # writes: one per completed round, and the terminal one. The per-round write is what stops a
+    # cancelled or killed campaign from answering `resume_campaign` with nothing about hours of
+    # evaluation it already paid for, and it needs a heartbeat timeout for the same reason every
+    # other call here does.
+    assert len(calls) == 6, f"expected 6 execute_activity calls, found {len(calls)}"
     for call in calls:
         heartbeat_kwarg = next((kw for kw in call.keywords if kw.arg == "heartbeat_timeout"), None)
         assert heartbeat_kwarg is not None, (

@@ -25,6 +25,11 @@ from chemclaw.core.config import settings
 from chemclaw.durable.registry import registered_activities
 from chemclaw.science.bo.benchmarks.reizman_suzuki import build_problem, load_dataset
 from chemclaw.science.bo.campaign import optimize
+from chemclaw.science.bo.campaign_record import (
+    InMemoryCampaignStore,
+    campaign_id_for,
+    campaign_store,
+)
 from chemclaw.science.bo.objectives import (
     MOLECULE_KEY,
     get_objective,
@@ -370,6 +375,44 @@ def test_round_ceiling_is_enforced_at_creation_not_in_the_model(
     assert CampaignSpec.model_validate(spec.model_dump()).n_rounds == 4
 
 
+def test_the_evaluation_budget_is_bounded_and_not_only_the_round_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A round is not a unit of cost, and the round ceiling was read as though it were.
+
+    `require_rounds_within_ceiling` says, correctly, that "every round costs a real evaluation" —
+    but a round costs `batch` of them, and `batch` has no upper bound. So a spec sitting *inside*
+    the round ceiling could ask for arbitrarily many evaluations, each one a registered objective
+    that may call an uncached calculator. The ceiling written to refuse "a spec that would spend
+    thousands of evaluations" permitted exactly that, because it never multiplied.
+
+    Pinned here at both ends: the round count alone passes, and the same spec is refused once the
+    batch is what makes it expensive.
+    """
+    monkeypatch.setattr(settings, "bo_max_rounds", 500)
+    monkeypatch.setattr(settings, "bo_max_evaluations", 100)
+    problem = build_problem(load_dataset())
+
+    # Inside the round ceiling — 10 rounds of 50 is 505 evaluations, five times the budget.
+    with pytest.raises(ValueError, match="objective evaluation"):
+        require_campaign_startable(
+            CampaignSpec(
+                problem=problem,
+                objective_name="reizman_suzuki",
+                n_initial=5,
+                n_rounds=10,
+                batch=50,
+            )
+        )
+    # The same round count at batch 1 is 15 evaluations and is fine, which is what makes the
+    # assertion above about the budget rather than about the rounds.
+    require_campaign_startable(
+        CampaignSpec(
+            problem=problem, objective_name="reizman_suzuki", n_initial=5, n_rounds=10, batch=1
+        )
+    )
+
+
 def test_optimize_rejects_rounds_beyond_the_ceiling(monkeypatch: pytest.MonkeyPatch) -> None:
     """The in-process campaign entry point enforces the config ceiling before spending budget."""
     monkeypatch.setattr(settings, "bo_max_rounds", 3)
@@ -602,3 +645,75 @@ def test_every_registered_objective_declares_a_direction_the_vocabulary_allows()
             f"objective {name!r} declares direction {registered_direction(name)!r}, which no "
             "`ObjectiveSpec` can equal — every campaign naming it would be refused"
         )
+
+
+def test_a_running_campaign_records_each_round_not_only_its_ending(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Everything a running campaign has paid for must be recoverable before it ends.
+
+    The write used to happen once, after the round loop. Until then every completed round lived
+    only in Temporal's event history, so a campaign cancelled, terminated, or failed
+    non-retryably mid-run answered `resume_campaign` with "no such campaign" about hours of real
+    evaluation — the same gap the terminal write closed for a campaign that *finishes*, left open
+    for every other ending.
+
+    Driven through the real workflow rather than by calling the activity in a loop, because the
+    property under test is the workflow's own sequencing: the record has to land *between* rounds,
+    and an activity called directly cannot show that it does.
+
+    Two rounds, so the assertion distinguishes per-round from once-at-the-end. Three suggestions
+    result: one per round, plus the terminal recommendation. The round rows are keyed
+    `"{workflow_id}:r{n}"`, because `record_suggestion` dedupes on `(campaign_id, job_id)` and a
+    per-round write under the bare workflow id would collide with round 1 and drop the rest.
+    """
+    store = InMemoryCampaignStore()
+    monkeypatch.setattr("chemclaw.science.bo.campaign_record.campaign_store", lambda: store)
+    campaign_store.cache_clear()
+
+    async def _drive() -> None:
+        spec = CampaignSpec(
+            problem=build_problem(load_dataset()),
+            objective_name="reizman_suzuki",
+            n_initial=4,
+            n_rounds=2,
+        )
+        async with await start_env_or_skip() as env:
+            client: Client = pydantic_client(env)
+            async with Worker(
+                client,
+                task_queue="test-bo-rounds",
+                workflows=[BoCampaignWorkflow],
+                activities=_BO_ACTIVITIES,
+            ):
+                await client.execute_workflow(
+                    BoCampaignWorkflow.run,
+                    spec.model_dump(mode="json"),
+                    id="bo-campaign-rounds",
+                    task_queue="test-bo-rounds",
+                )
+
+    asyncio.run(_drive())
+
+    campaign_id = campaign_id_for(build_problem(load_dataset()))
+    recorded = asyncio.run(store.suggestions_for(campaign_id, limit=10))
+    job_ids = {suggestion.job_id for suggestion in recorded}
+    assert job_ids == {
+        "bo-campaign-rounds:r1",
+        "bo-campaign-rounds:r2",
+        "bo-campaign-rounds",
+    }, "one row per completed round, plus the terminal recommendation"
+
+    # Each round's row carries the history as it stood *then*, which is what makes a resume from a
+    # killed campaign pick up where the evaluation actually got to rather than at the seed.
+    by_job = {suggestion.job_id: suggestion for suggestion in recorded}
+    assert len(by_job["bo-campaign-rounds:r1"].observations) == 5  # 4 seed + round 1
+    assert len(by_job["bo-campaign-rounds:r2"].observations) == 6  # + round 2
+
+    # The round rows are the only place a campaign's surrogate belief reaches the database: the
+    # terminal row records the best *point*, which has no prediction attached to it.
+    assert any(
+        candidate.predicted_value is not None
+        for row in ("bo-campaign-rounds:r1", "bo-campaign-rounds:r2")
+        for candidate in by_job[row].candidates
+    ), "a proposed candidate carries what the surrogate expected of it"

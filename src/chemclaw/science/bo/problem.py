@@ -821,6 +821,69 @@ def require_direction_matches_objective(spec: CampaignSpec) -> None:
         )
 
 
+def require_problem_yields_one_best_point(problem: OptimizationProblem) -> None:
+    """Every rule a loop that returns a single best observation needs of its problem.
+
+    The three checks were written out twice — once in `science.bo.campaign.optimize`, once in
+    `require_campaign_startable` — with two different wordings of the same multi-objective refusal.
+    Two statements of one rule is one rule that can drift, and the drift is silent: whichever
+    caller is edited second keeps the old message while both claim to enforce the same thing.
+
+    The multi-objective refusal is the substantive one. A trade-off has no single best point
+    (`best_of` raises rather than quietly picking the lead objective's winner), so a loop shaped to
+    return one cannot run a multi-objective problem — and discovering that *after* the campaign has
+    spent its evaluation budget would be the most expensive possible way to find out.
+
+    Raises:
+        ValueError: When a parameter and an objective share a name, two categories carry identical
+            descriptors, or the problem names more than one objective.
+    """
+    require_names_do_not_clash(problem)
+    require_descriptors_distinguish_categories(problem)
+    if len(problem.objectives) > 1:
+        named = ", ".join(objective.name for objective in problem.objectives)
+        raise ValueError(
+            f"this campaign returns one best point and this problem has "
+            f"{len(problem.objectives)} objectives ({named}), which have no single best point — a "
+            "trade-off has a front, not a winner. Optimize one of them alone, or use the inline "
+            "`suggest_next_experiment`, which does multi-objective and returns the Pareto front of "
+            "the runs it is given."
+        )
+
+
+def require_evaluations_within_budget(spec: CampaignSpec) -> None:
+    """Reject a spec whose whole evaluation budget exceeds `bo_max_evaluations`.
+
+    **A round is not a unit of cost, and the round ceiling was read as though it were.**
+    `require_rounds_within_ceiling` bounds how many *rounds* a campaign runs and says, correctly,
+    that "every round costs a real evaluation" — but a round costs `batch` of them, and `batch` is
+    unbounded above 1. A spec of `n_rounds=400, batch=50` sits inside the 500-round ceiling and
+    asks for 20 000 objective evaluations, each one a registered objective that may call an
+    uncached calculator. The ceiling that exists to refuse "a spec that would spend thousands of
+    evaluations" permits exactly that, because it never multiplied.
+
+    So this is the same intent applied to the quantity it was always about: seed points plus every
+    round's batch, which is the number of times the objective will actually be called.
+
+    Enforced at spec *creation* beside its sibling and never on the model, for that function's
+    reason: `CampaignSpec`'s validators re-run on deserialization at workflow replay, where a
+    lowered ceiling must not fail an in-flight campaign's own input.
+
+    Raises:
+        ValueError: When the spec's total evaluation budget exceeds `bo_max_evaluations`.
+    """
+    budget = spec.n_initial + spec.n_rounds * spec.batch
+    if budget > settings.bo_max_evaluations:
+        raise ValueError(
+            f"this campaign would run {budget} objective evaluation(s) "
+            f"(n_initial={spec.n_initial} + n_rounds={spec.n_rounds} x batch={spec.batch}), "
+            f"beyond the configured ceiling of {settings.bo_max_evaluations}. Every one is a real "
+            "measurement or calculation, so the cost is paid whether or not the campaign converges "
+            "— reduce the rounds or the batch, or raise `CHEMCLAW_BO_MAX_EVALUATIONS` if this "
+            "deployment genuinely has that budget."
+        )
+
+
 def require_campaign_startable(spec: CampaignSpec) -> None:
     """Every launch-time rule for a durable campaign, in the shape `precondition` is called with.
 
@@ -850,22 +913,15 @@ def require_campaign_startable(spec: CampaignSpec) -> None:
     in-flight campaign's own input.
 
     Raises:
-        ValueError: When the round count exceeds `bo_max_rounds`, the problem names more than one
-            objective, a parameter and an objective share a name, two categories carry the same
-            descriptor row, or the declared direction disagrees with the registered objective's.
+        ValueError: When the round count exceeds `bo_max_rounds`, the total evaluation budget
+            exceeds `bo_max_evaluations`, the problem names more than one objective, a parameter
+            and an objective share a name, two categories carry the same descriptor row, or the
+            declared direction disagrees with the registered objective's.
     """
     require_rounds_within_ceiling(spec.n_rounds)
-    require_names_do_not_clash(spec.problem)
-    require_descriptors_distinguish_categories(spec.problem)
+    require_evaluations_within_budget(spec)
+    require_problem_yields_one_best_point(spec.problem)
     require_direction_matches_objective(spec)
-    if len(spec.problem.objectives) > 1:
-        named = ", ".join(objective.name for objective in spec.problem.objectives)
-        raise ValueError(
-            f"the durable campaign evaluates one registered objective per round, so it cannot run "
-            f"this {len(spec.problem.objectives)}-objective problem ({named}). Use "
-            "`suggest_next_experiment`, which does multi-objective inline with a human evaluating "
-            "each round, or start a campaign over one of these objectives alone."
-        )
 
 
 class CampaignResult(BaseModel):
@@ -878,10 +934,16 @@ class CampaignResult(BaseModel):
 class CampaignCarryOver(BaseModel):
     """What one durable run hands the next when it continues-as-new.
 
-    A campaign's whole mutable state is these two numbers-and-a-list: what has been measured, and
-    how many rounds are still owed. Everything else — the problem, the objective name, the batch,
-    the seed — is in the `CampaignSpec` the payload already carries and never changes, so it is
-    passed through unread rather than copied in here.
+    A campaign's whole mutable state is these numbers-and-a-list: what has been measured, how many
+    rounds are still owed, and how many have been run. Everything else — the problem, the objective
+    name, the batch, the seed — is in the `CampaignSpec` the payload already carries and never
+    changes, so it is passed through unread rather than copied in here.
+
+    `rounds_done` is carried for one reason: the per-round campaign-record write keys its
+    idempotency on `(campaign_id, job_id)` with the round index in the `job_id`, so a continued run
+    that restarted the count would write rows colliding with the previous run's and lose them to
+    the `ON CONFLICT DO NOTHING`. It defaults to 0 so a carry-over written by an older worker
+    mid-upgrade still deserializes.
 
     Exists because the round ceiling used to be a promise the workflow could not keep: the history
     is re-sent to the propose activity every round, so event-history bytes grow quadratically and a
@@ -892,6 +954,7 @@ class CampaignCarryOver(BaseModel):
 
     history: list[Observation]
     rounds_remaining: int = Field(ge=0)
+    rounds_done: int = Field(default=0, ge=0)
 
 
 def observed_value(
@@ -1058,9 +1121,19 @@ def discrete_candidate_count(problem: OptimizationProblem) -> int | None:
     acts on it — the seeding guard refuses `n` above it, and `space_exhausted` decides a campaign is
     finished by it — so an over-count would let a loop keep asking for points that cannot exist.
     The feasible cells are counted by enumeration rather than by inclusion–exclusion, because
-    exclusions can overlap and this space is small by construction: it is the space a unique-seeding
-    loop already walks one point at a time. The enumeration is skipped entirely when there is
-    nothing to exclude, so the cost appears only where the exclusion does.
+    exclusions can overlap. The enumeration is skipped entirely when there is nothing to exclude,
+    so the cost appears only where the exclusion does.
+
+    **The enumeration is bounded, and it did not used to be.** "This space is small by
+    construction" was the original justification and it was an assumption about the caller, not a
+    property of the input: every category list here is model-supplied, the product of their lengths
+    is exponential in the parameter count, and `campaign_progress` reaches this function
+    synchronously on a request. Ten categorical parameters of ten options each is 10^10 cells —
+    a walk that never returns, on a decision space a model can write in one line. Above
+    `bo_max_enumerated_cells` the answer is `None` ("effectively unbounded") rather than a count.
+    That is the honest degradation and not a silent one: every caller already handles `None` for a
+    continuous space, the exhaustion guards it feeds simply do not fire, and a space of that size
+    cannot be exhausted by any campaign this system can run.
     """
     counts: list[tuple[str, list[str]]] = []
     total = 1
@@ -1073,11 +1146,35 @@ def discrete_candidate_count(problem: OptimizationProblem) -> int | None:
     exclusions = [c for c in problem.constraints if isinstance(c, ExcludeConstraint)]
     if not exclusions:
         return total
+    if total > settings.bo_max_enumerated_cells:
+        return None
     names = [name for name, _ in counts]
     return sum(
         1
         for cell in product(*(options for _, options in counts))
         if not any(x.forbids(dict(zip(names, cell, strict=True))) for x in exclusions)
+    )
+
+
+def point_is_feasible(problem: OptimizationProblem, params: dict[str, ParamValue]) -> bool:
+    """Whether one point is a cell `discrete_candidate_count` would actually count.
+
+    The single definition of "this run occupies one of the design space's cells", so the space
+    accounting and the enumeration that produced the space cannot drift apart. A point counts when
+    it is inside the declared domain *and* no exclusion forbids it — exactly the two filters the
+    enumeration applies.
+
+    **Separate from `point_in_domain`, which is a label rather than a filter.** That one answers
+    "should this prediction be marked an extrapolation" and deliberately ignores constraints,
+    because a chemist may legitimately ask what the model expects at a point they may not run. This
+    one answers "does this run consume a cell", where the constraint is the whole question.
+    """
+    if not point_in_domain(problem, params):
+        return False
+    return not any(
+        constraint.forbids(params)
+        for constraint in problem.constraints
+        if isinstance(constraint, ExcludeConstraint)
     )
 
 
@@ -1113,16 +1210,50 @@ def params_key(params: dict[str, ParamValue]) -> tuple[tuple[str, ParamValue], .
 
 
 def distinct_candidate_count(observations: list[Observation]) -> int:
-    """How many distinct parameter combinations appear in the observations."""
+    """How many distinct parameter combinations appear in the observations.
+
+    The plain count of what was *run*, which is what a progress report states. It deliberately does
+    not filter by feasibility: a chemist who ran a condition later excluded still ran it, and
+    reporting otherwise would deny an experiment that happened. The accounting against the design
+    space uses `distinct_feasible_candidate_count` instead, for the reason given there.
+    """
     return len({params_key(o.params) for o in observations})
 
 
-def space_exhausted(space: int | None, history: list[Observation], batch: int) -> bool:
+def distinct_feasible_candidate_count(
+    problem: OptimizationProblem, observations: list[Observation]
+) -> int:
+    """How many distinct observed points occupy a cell of the *feasible* design space.
+
+    **The two sides of the exhaustion comparison used to be counted differently, and that was a
+    bug.** `discrete_candidate_count` counts feasible cells — W4 made it exclusion-aware, so a
+    2×2×2 space minus one forbidden pairing is six, not eight. The history it was compared against
+    was counted with no such filter, so an observation of an *excluded* point consumed one of six
+    cells it was never part of. Both consumers get this wrong in the same direction: `space` is
+    reached sooner than it should be, so `space_exhausted` stops a durable campaign that still has
+    fresh points, and `_require_fresh_points_exist` refuses an inline ask with "the screen is
+    complete" while cells remain.
+
+    The trigger is ordinary rather than adversarial, which is why it matters: a chemist learns that
+    a pairing decomposes *after* running it, adds the exclusion, and keeps the run in the history —
+    which is the correct thing to do with a real measurement, and is exactly the input that skews
+    the count. Every campaign carrying prior lab work under a later-added exclusion hits it.
+    """
+    return len({params_key(o.params) for o in observations if point_is_feasible(problem, o.params)})
+
+
+def space_exhausted(
+    problem: OptimizationProblem, space: int | None, history: list[Observation], batch: int
+) -> bool:
     """Whether a purely discrete space is too exhausted to propose a full batch.
 
     A finite (all-categorical) space runs out of fresh points: once fewer than
     `batch` distinct candidates remain, BoFire's discrete acquisition cannot
     return one and would crash, so a campaign loop must stop cleanly instead.
     `space` is None for an infinite (any-continuous) space, which never exhausts.
+
+    Takes the `problem` as well as the `space` it was counted from, because the history has to be
+    counted under the same feasibility filter the space was — see
+    `distinct_feasible_candidate_count` for the defect that asymmetry caused.
     """
-    return space is not None and distinct_candidate_count(history) + batch > space
+    return space is not None and distinct_feasible_candidate_count(problem, history) + batch > space

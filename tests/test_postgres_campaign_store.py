@@ -102,8 +102,12 @@ def test_record_is_append_only_and_returns_increasing_ids() -> None:
         campaign_id = "pgcamp-append-1"
         # No separate campaign-creation call: `record` upserts the campaign as part of the same
         # transaction, so a setup line here would be a third suggestion row, not a fixture.
-        first_id = await store.record(_campaign(campaign_id), Suggestion(campaign_id=campaign_id))
-        second_id = await store.record(_campaign(campaign_id), Suggestion(campaign_id=campaign_id))
+        first_id, _ = await store.record(
+            _campaign(campaign_id), Suggestion(campaign_id=campaign_id)
+        )
+        second_id, _ = await store.record(
+            _campaign(campaign_id), Suggestion(campaign_id=campaign_id)
+        )
 
         assert first_id != second_id
         assert len(await store.suggestions_for(campaign_id, 10)) == 2
@@ -219,9 +223,14 @@ def test_a_retried_durable_write_hits_the_unique_index_instead_of_appending() ->
             problem={"parameters": [], "objective": {"name": "yield", "direction": "maximize"}},
             job_id="bo-start_optimization_campaign-deadbeef",
         )
-        first = await store.record(_campaign(campaign_id), suggestion)
-        again = await store.record(_campaign(campaign_id), suggestion)
+        first, created = await store.record(_campaign(campaign_id), suggestion)
+        again, created_again = await store.record(_campaign(campaign_id), suggestion)
         assert again == first, "a retry must return the id the first attempt got, not a new row"
+        # The other half of the same write, and it must *not* be idempotent in the same direction:
+        # the first call created the campaign row and the retry found it, which is precisely the
+        # signal `suggest_next_experiment` reports as `opened_new_campaign`. Reading it off a
+        # `SELECT` before the write could not distinguish these two calls under concurrency.
+        assert (created, created_again) == (True, False)
         assert len(await store.suggestions_for(campaign_id, limit=10)) == 1
 
         other_run = suggestion.model_copy(update={"job_id": "bo-start_optimization_campaign-cafe"})

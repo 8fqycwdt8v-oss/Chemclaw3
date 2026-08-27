@@ -24,12 +24,20 @@ from chemclaw.core import db
 from chemclaw.core.config import settings
 from chemclaw.science.bo.campaign_record import Campaign, Suggestion
 
+# `xmax = 0` is Postgres's own answer to "did this upsert insert, or update?" — on a freshly
+# inserted tuple the system column is zero, on one updated by this statement it carries the
+# updating transaction's id. It is read here because the alternative is a `SELECT` before the
+# `INSERT`, and that read is a race: two turns opening the same decision space concurrently both
+# see no row and both report having opened a new campaign. The upsert already serializes on the
+# primary key, so asking *it* what happened is the only answer that cannot disagree with what was
+# written.
 _UPSERT_CAMPAIGN = """
     INSERT INTO bo_campaigns (campaign_id, objective, direction, problem, opened_by)
     VALUES (%s, %s, %s, %s, %s)
     ON CONFLICT (campaign_id) DO UPDATE SET
         problem = EXCLUDED.problem,
         last_asked_at = now()
+    RETURNING (xmax = 0) AS inserted
 """
 
 _INSERT_SUGGESTION = """
@@ -92,8 +100,10 @@ def _json(value: Any) -> Jsonb:
 class PostgresCampaignStore:
     """The durable `CampaignStore`: one short-lived connection per call (the house choice)."""
 
-    async def record(self, campaign: Campaign, suggestion: Suggestion) -> int:
-        """Upsert the campaign and append its suggestion **atomically**; return the suggestion id.
+    async def record(self, campaign: Campaign, suggestion: Suggestion) -> tuple[int, bool]:
+        """Upsert the campaign and append its suggestion **atomically**.
+
+        Returns the suggestion id and whether this call is what *created* the campaign.
 
         One method, one connection, one transaction — because the two writes were never
         independent. The upsert sets `problem = EXCLUDED.problem`, so a failure between them left
@@ -104,9 +114,12 @@ class PostgresCampaignStore:
 
         This is atomicity, not an abstraction, so the Rule of Three does not gate it: two
         statements that must both land or neither belong in one transaction.
+
+        The created flag comes out of the upsert rather than from a `SELECT` before it, because
+        that read was a race — see `_UPSERT_CAMPAIGN`.
         """
         async with _connect() as conn, conn.transaction():
-            await conn.execute(
+            cursor = await conn.execute(
                 _UPSERT_CAMPAIGN,
                 (
                     campaign.campaign_id,
@@ -116,6 +129,8 @@ class PostgresCampaignStore:
                     campaign.opened_by,
                 ),
             )
+            created_row = await cursor.fetchone()
+            created = bool(created_row[0]) if created_row else False
             cursor = await conn.execute(
                 _INSERT_SUGGESTION,
                 (
@@ -149,7 +164,7 @@ class PostgresCampaignStore:
                 )
                 row = await cursor.fetchone()
             (suggestion_id,) = row  # type: ignore[misc]
-        return int(suggestion_id)
+        return int(suggestion_id), created
 
     async def read_campaign(self, campaign_id: str) -> Campaign | None:
         """One campaign, or None when it has never been asked about."""

@@ -85,10 +85,14 @@ def test_best_of_empty_raises() -> None:
 
 def test_space_exhausted_predicate() -> None:
     """Exhaustion: finite space with too few fresh candidates left for a full batch."""
+    problem = OptimizationProblem(
+        parameters=[CategoricalParameter(name="c", categories=["a", "b"])],
+        objectives=[Objective(name="y", direction="maximize")],
+    )
     history = [Observation(params={"c": "a"}, value=1.0)]
-    assert space_exhausted(None, history, 5) is False  # infinite space never exhausts
-    assert space_exhausted(2, history, 1) is False  # 1 seen + 1 <= 2
-    assert space_exhausted(2, history, 2) is True  # 1 seen + 2 > 2
+    assert space_exhausted(problem, None, history, 5) is False  # infinite space never exhausts
+    assert space_exhausted(problem, 2, history, 1) is False  # 1 seen + 1 <= 2
+    assert space_exhausted(problem, 2, history, 2) is True  # 1 seen + 2 > 2
 
 
 @pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])

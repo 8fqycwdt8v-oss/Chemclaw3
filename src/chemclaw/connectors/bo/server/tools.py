@@ -41,8 +41,6 @@ from chemclaw.connectors.bo.calculators import properties_for
 from chemclaw.connectors.caller import caller_provenance
 from chemclaw.science.bo.campaign_record import (
     CampaignThread,
-    campaign_id_for,
-    campaign_is_known,
     read_campaign_thread,
     record_suggestion,
 )
@@ -573,17 +571,19 @@ async def suggest_next_experiment(
     # `_recorded_provenance`, not `caller_provenance`: this path's actor is an unauthenticated
     # header, and the row it writes is the record of who proposed an experiment. See that
     # function for why the name is marked rather than replaced by a validated one.
-    # Asked *before* the write, because after it every campaign has a suggestion. A read on the
-    # suggestion path is one indexed lookup against a table this same call is about to write, and
-    # it buys the one signal a silent fork produces.
-    was_known = await campaign_is_known(campaign_id_for(featurized.problem))
-    campaign_id = await record_suggestion(
+    #
+    # The fork signal comes out of the write itself. It used to be a `campaign_is_known` read taken
+    # just before it, which could not answer the question: two turns opening the same decision
+    # space concurrently both read no campaign and both claimed to have opened one, while the
+    # upsert underneath serialized them so exactly one was right. See `RecordedSuggestion`.
+    recorded = await record_suggestion(
         problem=featurized.problem,
         candidates=candidates,
         observations=history,
         calc_refs=featurized.calc_refs,
         provenance=_recorded_provenance(),
     )
+    campaign_id = recorded.campaign_id
     scales = [_objective_scale(problem, history, obj) for obj in problem.objectives]
     return ExperimentSuggestion(
         campaign_id=campaign_id,
@@ -601,7 +601,7 @@ async def suggest_next_experiment(
             else []
         ),
         front_tolerance=assay_noise,
-        opened_new_campaign=bool(history) and not was_known,
+        opened_new_campaign=bool(history) and recorded.opened_new_campaign,
     )
 
 
@@ -659,7 +659,14 @@ async def campaign_progress(
     require_names_do_not_clash(problem)
     _require_observed_params_match(problem, history)
     require_observations_cover_objectives(problem, history)
-    return read_progress(problem, history, assay_noise, window, objective)
+    # Off the event loop, like every other compute-bearing tool on this surface. `read_progress`
+    # looks like arithmetic over a list and is not: `discrete_candidate_count` walks the whole
+    # categorical cross product whenever the space carries an exclusion, and both that space and
+    # the observation list arrive from the model. Run inline, a wide decision space stalled every
+    # other request this server was serving — the one tool here that did its work on the loop
+    # thread while `suggest_next_experiment` and `predict_outcome` beside it already offloaded.
+    # The walk is bounded too, at `bo_max_enumerated_cells`; this is the other half.
+    return await asyncio.to_thread(read_progress, problem, history, assay_noise, window, objective)
 
 
 @server.tool()
