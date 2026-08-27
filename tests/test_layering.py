@@ -317,6 +317,11 @@ _ALLOWED_MODULE_EDGES: set[Edge] = {
     ("chemclaw.cli", "chemclaw.evals"),
     ("chemclaw.cli", "chemclaw.ingest"),
     ("chemclaw.cli", "chemclaw.kg"),
+    # `cli/verifier_margin.py` measures the judge's roll-to-roll margin
+    # (D-2026-08-27-a-verdict-at-the-margin-is-a-coin-toss), and the judge's input type is
+    # `retrieval.evidence.EvidenceChunk` — building the pairs from anything else would measure a
+    # different call than the one the turn makes.
+    ("chemclaw.cli", "chemclaw.retrieval"),
     # `cli/rekey_campaigns.py` re-keys recorded BO campaigns after a change to how a campaign id is
     # derived (D-2026-08-21). The derivation is `science.bo.campaign_record.campaign_id_for` over an
     # `OptimizationProblem`, so a re-key that did not import it would be a second copy of the rule

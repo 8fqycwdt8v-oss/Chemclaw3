@@ -133,6 +133,17 @@ class LlmSettings(BaseSettings):
     # verdict is one cheap structured call, and on expiry the verifier degrades to the offline
     # deterministic citation gate rather than holding the finished answer hostage.
     verifier_timeout_seconds: float = Field(default=30.0, gt=0)
+    # The review band around the threshold, inside which a verdict is re-rolled and decided by
+    # the median (D-2026-08-27-a-verdict-at-the-margin-is-a-coin-toss). Measured, not chosen: the
+    # judge's roll-to-roll spread is a margin effect — 0.000 over 32 rolls on grounded answers,
+    # up to 0.167 deviation from the median exactly where the threshold lives — so the default is
+    # that measured 0.167 rounded up to 0.2 (`make live-verifier-margin`, 2026-08-27, artifact in
+    # docs/archive/). Re-fitting it on a deployment's own answers is the same command. `0`
+    # switches the band off and restores the single-roll verdict. The cost is
+    # `verifier_band_rerolls` extra judge calls only on answers that land inside the band, each
+    # under its own `verifier_timeout_seconds`.
+    verifier_review_band: float = Field(default=0.2, ge=0, le=0.5)
+    verifier_band_rerolls: int = Field(default=2, ge=1)
     # The per-protocol condensation call's own deadline (`agent.condense`). Per *map unit*, so
     # one stalled extraction costs one row of the comparison and never the turn — the same
     # degrade-per-item rule the verifier applies to the whole answer, one level down. Larger than
