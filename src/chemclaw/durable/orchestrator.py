@@ -182,12 +182,17 @@ async def fan_out(
                 # `/schedules` shows runs climbing and no failures. `metrics_bridge` is already
                 # proven callable from workflow code (`durable/publish.py`).
                 #
-                # Guarded on `is_replaying` like both its siblings (`durable/publish.py`,
-                # `durable/notify.py`), and this was the one workflow-side increment in the tree
-                # that was not: `record_metric` adds no guard of its own, so a replayed history
-                # re-counted every child this workflow has ever dropped. A counter whose value
-                # depends on how often a worker was restarted is not a rate anyone can alert on,
-                # which is exactly what this one was declared for.
+                # Guarded on `is_replaying` for the same reason `publish.py`'s two counters are: a
+                # replayed history (a worker restart, a sticky-cache eviction, a query) would
+                # otherwise re-count every dropped child this workflow has ever seen, and
+                # `record_metric` adds no guard of its own. A counter whose value depends on how
+                # often a worker was restarted is not a rate anyone can alert on, which is exactly
+                # what this one was declared for.
+                #
+                # Found twice, independently and on the same day: by the review this comment came
+                # from and by the sweep merged as #256, which is worth recording because both
+                # arrived at it the same way — by asking which workflow-side increments lacked the
+                # guard their siblings had, rather than by observing a wrong number.
                 if not workflow.unsafe.is_replaying():
                     record_metric(lambda m: m.increment("chemclaw_fan_out_children_dropped_total"))
                 workflow.logger.warning(
