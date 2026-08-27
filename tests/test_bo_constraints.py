@@ -26,8 +26,10 @@ from chemclaw.science.bo.problem import (
     Observation,
     OptimizationProblem,
     discrete_candidate_count,
+    discrete_space_size,
     distinct_candidate_count,
     distinct_feasible_candidate_count,
+    params_key,
     space_exhausted,
 )
 
@@ -499,3 +501,71 @@ def test_counting_a_huge_excluded_space_is_bounded_rather_than_enumerated(
     # excluded pairing removes.
     monkeypatch.setattr(settings, "bo_max_enumerated_cells", 1_000_000)
     assert discrete_candidate_count(problem) == 3**8 - 3**6
+
+
+def test_the_enumeration_bound_counts_the_work_not_just_the_cells(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The walk costs cells x exclusions, and a cells-only ceiling bounded the wrong product.
+
+    Every cell is tested against every exclusion and `constraints` has no length bound, so a space
+    inside a cells-only ceiling could still take tens of seconds — measured on this tree, one
+    exclusion over 10^6 cells walks in 2.18 s and fifteen over the same cells in 26.06 s. That
+    matters twice: `campaign_progress` is `read_only`, so the plan gate never sees the cost, and
+    `BoCampaignWorkflow` calls this on the *workflow* thread on every replay, where Temporal's
+    10 s workflow-task timeout turns a slow answer into a task-failure loop.
+
+    Pinned at the ceiling rather than by timing, because a wall-clock assertion is a flake: the
+    same cell count is counted under one exclusion and declined under several.
+    """
+    problem = OptimizationProblem(
+        parameters=[
+            CategoricalParameter(name=f"p{i}", categories=["a", "b", "c"]) for i in range(4)
+        ],
+        objectives=[Objective(name="yield", direction="maximize")],
+        constraints=[ExcludeConstraint(parameters=["p0", "p1"], options=[["a"], ["a"]])],
+    )
+    # 3^4 = 81 cells. One exclusion is 81 units of work and fits a ceiling of 100.
+    monkeypatch.setattr(settings, "bo_max_enumerated_cells", 100)
+    assert discrete_candidate_count(problem) == 81 - 9
+
+    # The same 81 cells against two exclusions is 162 units, and is declined.
+    problem = problem.model_copy(
+        update={
+            "constraints": [
+                *problem.constraints,
+                ExcludeConstraint(parameters=["p2", "p3"], options=[["b"], ["b"]]),
+            ]
+        }
+    )
+    assert discrete_candidate_count(problem) is None
+
+
+def test_a_space_too_large_to_count_still_seeds_distinctly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Declining the exclusion walk must not cost seeding its two guarantees.
+
+    `discrete_candidate_count` returns `None` both for a genuinely infinite space and for a finite
+    one it declined to enumerate. `initial_candidates` read that single `None` and took the branch
+    written for infinity — one `ask(n)`, no deduplication, no refusal of an `n` the space cannot
+    hold. Measured before the fix on a 27-cell space with the ceiling lowered: 40 requested, 40
+    returned, **20 distinct**, and no refusal. The ceiling is ENV-overridable, so a deployment
+    lowering it to bound the walk would have got that on ordinary spaces.
+    """
+    problem = OptimizationProblem(
+        parameters=[
+            CategoricalParameter(name=f"p{i}", categories=["a", "b", "c"]) for i in range(3)
+        ],
+        objectives=[Objective(name="yield", direction="maximize")],
+        constraints=[ExcludeConstraint(parameters=["p0", "p1"], options=[["a"], ["a"]])],
+    )
+    monkeypatch.setattr(settings, "bo_max_enumerated_cells", 10)
+    assert discrete_candidate_count(problem) is None  # the walk is declined...
+    assert discrete_space_size(problem) == 27  # ...but the size is never in doubt
+
+    with pytest.raises(ValueError, match="only 27"):
+        initial_candidates(problem, 40)
+
+    candidates = initial_candidates(problem, 12)
+    assert len({params_key(c.params) for c in candidates}) == 12, "seeds must stay distinct"
