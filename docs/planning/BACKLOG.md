@@ -73,6 +73,11 @@ topic).
       so what is open is that a caller still chooses the string. A bearer on the row above proves
       *core called*, not *which chemist*, so full closure needs an actor assertion bound to the call
       (OBO or a signed memo) — which is the `DEFERRED.md` warehouse row's blocker too.
+      **Narrowed 2026-08-27** (`D-2026-08-27-a-bound-that-multiplies-…`): the claim no longer
+      travels back out as provenance — `CampaignThread` dropped `opened_by`, because a reader of a
+      resumed campaign cannot tell a marked actor from a verified one. Both columns keep the value
+      for the audit trail, where that question can be answered. What stays open is unchanged: the
+      string is still the caller's to choose.
 
 - [ ] **`fetch_artifact` is a tool that can only refuse** — [S]. `list_artifacts` and
       `fetch_artifact` promise "the relaxed coordinates, the second derivatives, the raw vibrational

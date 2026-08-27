@@ -1,82 +1,89 @@
-# Agent engine deep audit → implementation pass (2026-08-27)
+# BoFire deep audit — fixes
 
-A four-agent investigation of the agent engine (tool-call path, long-turn state, durable delivery,
-decision record) produced 14 defects, ~20 risks and 12 opportunities; this pass implements the
-findings. Every declined/reverted approach in the decision record was honored — nothing here
-re-litigates stream_events v3, `ModelCallLimitMiddleware`, `RubricMiddleware`, summarization, the
-retry middlewares, LangSmith or the harness profile.
+Six parallel research passes over the BO layer (engine, connector, persistence, decision history,
+tests, frontend), then every finding either fixed, or refused with the reason written down. The
+decision record is
+`docs/decisions/D-2026-08-27-a-bound-that-multiplies-and-a-record-that-survives-the-cancel.md`.
 
-## Plan (all done unless marked)
+## Fixed
 
-- [x] Baseline: Docker up, `make up`, `db-migrate`, full suite green with Postgres (4891 passed).
-- [x] **A — config/validators**: `agent_max_parallel_tool_calls` → `max_concurrency` (measured:
-      8-call batch bounded to 2 on the compiled graph); `xtb_job_timeout_seconds` 14400→15000 +
-      validator over `calc_sampling_timeout_seconds` (equality was the defect); calc manifest
-      `request_timeout` 60→600 (a 60 s bound cancelled real work the server was allowed 900 s
-      for, uncached); connector open (15 s) and teardown (5 s) bounds in `transport.py`.
-- [x] **B — middleware**: loop cap unconditional (ADR: the-cap-is-a-property-of-the-loop…);
-      transport failures worded transient via `connectors.transport.transport_failure` (layering:
-      the predicate lives where mcp/httpx are legal imports); audit rows batched off the
-      tool-call path in `PostgresAuditSink` + runner turn-end flush; `_truncate` bounded via
-      reprlib; `side_effecting_tools` `@cache`d (cleared beside the discovery caches);
-      repeat-guard forgiveness keyed by cleared *call id*, once per turn (it was re-fired every
-      model call past 30k tokens, disarming the guard); compaction metrics high-water-marked;
-      plan gate judges a batched call against the plan the batch writes; approval consumption
-      session-wide + on abandonment when the turn acted (ADR: the-approval-follows-the-turn…);
-      verifier evidence budget (`verifier_evidence_max_chars`, newest-first, omitted ids named).
-- [x] **B declined in-flight**: a first-party orphaned-`tool_use` repair — deepagents'
-      `PatchToolCallsMiddleware` already heals dangling and invalid calls in `before_agent`;
-      pinned in `test_upstream_surface.py` instead of duplicated. Found and fixed en route: the
-      parallel-batch false positive in `calls_without_adjacent_results`.
-- [x] **C — runner/durable**: Temporal probe gathered with the connector open;
-      `job_completed`/`job_failed` mailbox claimed at turn start and framed into the model's
-      input (ADR: the-mailbox-reaches-the-model…); tailer restores an undelivered claim;
-      `chemclaw_pushback_dropped_total` + `chemclaw_rejoin_describe_failed_total`;
-      `get_durable_job_status` long-polls `job_status_wait_seconds`; astream 3-tuple arity pinned
-      in `test_upstream_surface.py`; `cached_compute` in-process single-flight (8 misses → 1
-      compute; DEFERRED row narrowed to the cross-process half).
-- [x] **D — identity under parallel batches**: measured, not guarded — two concurrent
-      `tools/call`s on one MCP session each read their own caller on this SDK; pinned in both
-      repos (`tests/test_connector_identity.py` here, `tests/test_identity_contract.py` in the
-      fleet) rather than defended with dead code.
-- [x] **E — detach ≠ stop** (ADR: a-disconnect-is-a-detach-not-a-stop): `api/detach.py` pump +
-      registry, `POST /sessions/{id}/turn/stop` (owner-gated, in the session-route inventory),
-      `service_turn_survives_disconnect`; end-to-end tests over a real uvicorn socket (TestClient
-      and the ASGI transport buffer, so they cannot express a mid-stream drop — recorded in the
-      test's own docstring). UI: Stop posts the stop route then aborts; an accidental drop polls
-      the transcript back instead of a dead-end banner.
-- [x] **Chart**: retention posture must be stated to render (`retention.windows` xor
-      `retention.unboundedGrowthAccepted`), mirroring the egress refusal — the code defaults
-      stay 0/off deliberately (a disposal policy is a deployment's statement, per
-      `core/config/memory.py`'s own argument), so the chart is where the silence had to stop.
-- [x] Docs: four ADRs + ledger rows; DEFERRED rows narrowed/added; CLAUDE.md + ARCHITECTURE.md
-      race prose updated; `.env.example` for every new setting.
-- [x] Final gate: `make lint type test` + prose validators, then push all three repos.
+- [x] **Evaluation budget is bounded** — `require_evaluations_within_budget` over
+      `n_initial + n_rounds * batch` against the new `bo_max_evaluations`. `bo_max_rounds` bounded a
+      loop counter while `batch` was unbounded, so a spec *inside* the 500-round ceiling could ask
+      for 20 000 objective evaluations.
+- [x] **Exhaustion counts both sides the same way** — `point_is_feasible` +
+      `distinct_feasible_candidate_count`. `discrete_candidate_count` counts feasible cells;
+      the history it was compared against did not, so a run an exclusion later forbade consumed a
+      cell it was never part of and stopped a campaign early.
+- [x] **The same asymmetry in the progress *report*** — found while fixing the above, not in the
+      audit. `n_distinct / design_space` could render "7 distinct out of the 6 the grid holds".
+      New `n_distinct_in_space` field; `n_distinct` keeps meaning what was run.
+- [x] **`campaign_progress` off the event loop** — the one compute-bearing tool on the surface
+      still doing its work on the loop thread.
+- [x] **The cross-product walk is bounded** — `bo_max_enumerated_cells`; ten categorical parameters
+      of ten options is 10^10 cells, reached synchronously from a request.
+- [x] **Screening-design size is bounded** — `_require_design_fits_the_ceiling`,
+      `bo_max_design_runs`. **My first version of this guard had the very bug class it was written
+      to prevent** (an early break made the product partial, so a reduced design could shift back
+      under the ceiling: measured, 40 factors at 1 generator passed on 8 192 against a true 2^39).
+      Fixed and pinned by its own test.
+- [x] **The durable campaign records per round** — was one write after the loop, so a cancelled,
+      terminated or non-retryably failed campaign answered `resume_campaign` with "no such
+      campaign" about hours of paid evaluation. Keyed `"{workflow_id}:r{n}"`; `CampaignCarryOver`
+      carries `rounds_done` so a continue-as-new does not collide. Proven end to end against a real
+      Temporal server.
+- [x] **The fork flag comes from the write** — `RETURNING (xmax = 0)` instead of a `SELECT` before
+      the upsert that raced it. `campaign_is_known` deleted (no other caller).
+- [x] **`CampaignThread` drops `opened_by`** — the column stays for the audit trail; an
+      `unverified:` self-assertion must not travel back out as provenance.
+- [x] **One statement of the single-best-point rules** — `require_problem_yields_one_best_point`,
+      shared by `optimize` and `require_campaign_startable`, which had two wordings of one refusal.
+- [x] **Retention names every table** — the docstring implied an exhaustive refusal list and named
+      3 against 33. `_NOT_PRUNED` plus a test derived from the migrations on disk.
+- [x] **NaN threshold refused in fingerprint search** — `min(max(nan, 0), 1)` is `nan`; an exact
+      self-match came back empty *with a verdict announcing a genuine negative*.
+- [x] **Temporal skips are counted** — `_report_temporal_skips`, mirroring the Postgres epilogue.
+      Three real-workflow tests skipped silently when the test-server binary can't be fetched.
+- [x] **The frontend renders a campaign** (`Chemclaw3_ui`) — best-so-far step chart with the assay
+      noise band, Pareto scatter for exactly two objectives, candidate cards with `predicted_sd`
+      tied to its value, extrapolation marked. Three verdict states, never two: a withheld plateau
+      verdict is not "still improving".
 
-## Deliberately not done, and why
+## Refused, with the reason
 
-- **Compaction estimator memoization / upstream's per-call deep copy**: [risk]-grade cost
-  (char/4 over ≤100k tokens per call, milliseconds); the behavioural harms that made it matter
-  (repeat-guard reset, metric inflation) are fixed. Re-open if a profile measures model-call
-  overhead worth it.
-- **Turn-scoped caching of the plan-gate's checkpoint fallback**: the fallback only fires inside
-  subagents/pre-first-write turns, and caching a plan across a batch is a race against
-  `write_todos` that a security gate should not run. The turn-end read is deleted outright
-  instead (consume_all needs no hash).
-- **Lazy compile of the `task` helper (61 ms/turn)**: upstream consumes the compiled runnable
-  directly; a lazy proxy is a coupling to how `SubAgentMiddleware` invokes it — measured cost
-  does not justify a new unpromised-shape dependency.
-- **`invalid_tool_calls` surfacing and the prompt-prefix ceiling rows**: pre-existing BACKLOG
-  rows with their own constraints (live-lane gates); not claimed here. Note upstream's
-  `PatchToolCallsMiddleware` now answers dangling invalid calls at the *next turn's* start,
-  which partially narrows the first row.
+- [x] **Multi-objective on the durable path** — not an oversight. `bo.objectives` maps a name to a
+      scalar-returning callable and holds two entries, both scalar; a multi-output registry would
+      be an abstraction with zero callers, built to make a refusal message unnecessary. The
+      refusal already names the inline tool that does do it. ADR §"What was deliberately not done".
+- [x] **A pause signal on the workflow** — cancel-then-resume *is* pause once the history survives
+      the cancel, and Temporal's cancellation is already exposed through core's `cancel_job`.
+- [x] **Deleting `science/bo/campaign.py`** — three test callers carry real weight
+      (`test_reizman.py`'s beat-the-median bar); deleting it inlines one loop into three files. The
+      defect it was flagged for was the triplicated preconditions, fixed above.
+- [x] **NChooseK constraints** — `bo-capability-map.md` already records `REFUSED — no story`.
+      Building it would be capability with no caller.
+
+## Verification
+
+- `make lint` / `ruff format --check` / `mypy --strict` — clean (398 source files).
+- Backend BO suite + touched neighbours (23 files: every `test_bo_*`, plus retention, the schema
+  inventory, the leaver, the layering and repo-map guards, the Postgres campaign store, `molfp` and
+  the decision log) — **486 passed, 0 failed, 0 skipped** in 7m58s. Nothing sat out: neither the
+  Postgres nor the new Temporal skip epilogue printed, which is what makes that number evidence
+  rather than a green line.
+- `Chemclaw3_ui`: 548 tests, typecheck and lint clean.
+- Postgres and Temporal both **started and used** (`dockerd`, `make up`, `make db-migrate`), so the
+  durable and store-backed tests genuinely ran rather than skipping.
 
 ## Review
 
-The audit's ranked list is implemented 14/15 with one reshaped (orphan repair → upstream pin) and
-one consciously partial (per-request latency work under #15: probe gathered + handshake/teardown
-bounds + audit off-path; cross-turn MCP session pooling stays declined until the per-turn-session
-rationale is re-argued). Everything landed with a failing-first or mutation-checked test; the two
-measurement-first rules paid off twice — `max_concurrency` was verified against the installed
-LangGraph before the setting existed, and the caller re-binding "risk" dissolved under its own
-test and shipped as a pin instead of a guard.
+Four of the seven backend fixes are one mistake wearing different clothes: a quantity that is
+checked and a quantity that is spent, differing by a factor nobody multiplied. Rounds against
+evaluations. Feasible cells against distinct runs. A ceiling on a count against the product it came
+from. The progress report's coverage sentence. That is worth carrying beyond this branch, and it is
+why the ADR ends on it rather than on a list of files.
+
+The sharpest evidence for it: **the guard I wrote to bound design size shipped, in its first
+version, with exactly that defect inside it** — a partial product compared against a ceiling. It was
+caught by writing the arithmetic out and running it, not by reading it. Same lesson the repo already
+states about prose; a bound's name is prose too.

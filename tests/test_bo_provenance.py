@@ -127,9 +127,12 @@ def test_the_unverified_marker_still_carries_the_name_that_was_claimed(
     """Marked, not discarded — the claim is evidence even when the claimant is not authenticated.
 
     Dropping the actor entirely would have closed the same hole and cost the record the one thing
-    it is for: `resume_campaign` returns `opened_by` so a later turn can say whose campaign this is,
-    and a column that is always empty answers nobody. The marker keeps the trail and removes only
-    the false confidence.
+    it is for: the column is how an audit answers "who framed this campaign", and one that is
+    always empty answers nobody. The marker keeps the trail and removes only the false confidence.
+
+    What the marker does *not* license is handing the claim back out as provenance, which is why
+    `CampaignThread` no longer carries `opened_by` — a reader of a resumed campaign cannot tell a
+    marked actor from a verified one, so the audit trail is where that question gets answered.
     """
     campaign, suggestion = _recorded(store, _suggest_as(FORGED_ACTOR))
 

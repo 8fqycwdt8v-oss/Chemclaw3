@@ -291,12 +291,16 @@ class Suggestion(BaseModel):
 class CampaignStore(Protocol):
     """Reads and writes campaigns and their suggestions, whichever backend holds them."""
 
-    async def record(self, campaign: Campaign, suggestion: Suggestion) -> int:
-        """Upsert the campaign and append its suggestion **atomically**; return the suggestion id.
+    async def record(self, campaign: Campaign, suggestion: Suggestion) -> tuple[int, bool]:
+        """Upsert the campaign and append its suggestion **atomically**.
+
+        Returns the suggestion id and whether this call created the campaign, in that order.
 
         One method rather than two, because the two writes are not independent: the upsert replaces
         the stored `problem`, so a failure between them joins the new decision space to the old
-        evidence.
+        evidence. The created flag is returned by the write rather than read before it, because a
+        read-then-write cannot answer "did I open this campaign" without racing another turn that
+        is opening the same one.
         """
         ...
 
@@ -324,29 +328,35 @@ class InMemoryCampaignStore:
         self._suggestions: list[Suggestion] = []
         self._next_id = 1
 
-    async def record(self, campaign: Campaign, suggestion: Suggestion) -> int:
+    async def record(self, campaign: Campaign, suggestion: Suggestion) -> tuple[int, bool]:
         """Both writes or neither, as the Postgres sibling does.
 
         Atomic here for free — nothing between the two statements can fail — but written as one
-        method so the two backends cannot drift into different contracts.
+        method so the two backends cannot drift into different contracts. The created flag comes
+        out of the upsert for the same reason it does there: it is a property of what the write
+        did, not of what a prior read saw.
         """
-        await self._upsert_campaign(campaign)
-        return await self._add_suggestion(suggestion)
+        created = await self._upsert_campaign(campaign)
+        return await self._add_suggestion(suggestion), created
 
-    async def _upsert_campaign(self, campaign: Campaign) -> None:
-        """Record the campaign, keeping the original opener and refreshing `last_asked_at`."""
+    async def _upsert_campaign(self, campaign: Campaign) -> bool:
+        """Record the campaign, keeping the original opener and refreshing `last_asked_at`.
+
+        Returns whether the campaign did not exist before this call.
+        """
         now = datetime.now(UTC)
         existing = self._campaigns.get(campaign.campaign_id)
         if existing is None:
             self._campaigns[campaign.campaign_id] = campaign.model_copy(
                 update={"created_at": now, "last_asked_at": now}
             )
-            return
+            return True
         # `opened_by` and `created_at` are deliberately not refreshed: whoever framed the campaign
         # framed it, and a later asker does not become its author.
         self._campaigns[campaign.campaign_id] = existing.model_copy(
             update={"problem": campaign.problem, "last_asked_at": now}
         )
+        return False
 
     async def _add_suggestion(self, suggestion: Suggestion) -> int:
         """Append one proposal; return its id — or the existing id when a durable run is retried.
@@ -396,29 +406,24 @@ def campaign_store() -> CampaignStore:
     return InMemoryCampaignStore()
 
 
-async def campaign_is_known(campaign_id: str) -> bool:
-    """Whether anything has ever been recorded under `campaign_id`.
-
-    The read behind `ExperimentSuggestion.opened_new_campaign`: a fork of a campaign's history is
-    silent by construction, because `record_suggestion` upserts and a forked ask cannot be told
-    apart from a first one. Runs supplied against a campaign with no record is the signature of one.
-
-    Swallows a store failure as `False`-shaped ignorance rather than raising, on
-    `record_suggestion`'s argument: a database blip must not cost a chemist the suggestion that was
-    already computed. It returns `True` in that case — "assume known" — because the flag's whole
-    purpose is to raise a question, and raising one on the strength of a failed read would send a
-    chemist looking for a fork that a database outage invented.
-    """
-    try:
-        return await campaign_store().read_campaign(campaign_id) is not None
-    except _TRANSIENT_WRITE_FAILURES:
-        logger.warning("could not read campaign %s; not reporting a fork", campaign_id)
-        return True
-
-
 # The failures that are the *database's*, not ours: a blip here must not fail a computed
 # suggestion. A programming error must, which is why this is a tuple and not `Exception`.
 _TRANSIENT_WRITE_FAILURES = (ConnectionError, OSError, TimeoutError, psycopg.Error)
+
+
+class RecordedSuggestion(BaseModel):
+    """What a write tells the caller: the campaign's handle, and whether it just came into being.
+
+    The second half used to be a separate `campaign_is_known` read taken *before* the write, and
+    that read could not answer the question it was asked. Two turns opening the same decision space
+    concurrently both saw no campaign and both reported opening one; the upsert then serialized
+    them, so exactly one was right and nothing could tell which. The write knows, so the write says.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    campaign_id: str = Field(min_length=1)
+    opened_new_campaign: bool = False
 
 
 async def record_suggestion(
@@ -428,8 +433,8 @@ async def record_suggestion(
     calc_refs: list[str],
     provenance: tuple[str, str, str],
     job_id: str = "",
-) -> str:
-    """Persist one suggestion against the campaign its problem defines; return the campaign id.
+) -> "RecordedSuggestion":
+    """Persist one suggestion against the campaign its problem defines.
 
     **Never raises on a database failure**, and always raises on ours. The candidates are already
     computed and are what the chemist asked for, so a blip must not turn a successful suggestion
@@ -439,6 +444,9 @@ async def record_suggestion(
 
     Returns the campaign id either way, because the id is a pure function of the problem: it is
     still the right handle for the agent to quote back, even on the turn where the write failed.
+    `opened_new_campaign` is `False` on that turn — not because the campaign is known, but because
+    a failed write is ignorance, and announcing a fork on the strength of one would send a chemist
+    looking for a problem a database outage invented. Same direction the read it replaced erred in.
 
     Args:
         problem: The decision space, which both identifies the campaign and is snapshotted onto the
@@ -456,7 +464,7 @@ async def record_suggestion(
     campaign_id = campaign_id_for(problem)
     try:
         store = campaign_store()
-        await store.record(
+        _, created = await store.record(
             Campaign(
                 campaign_id=campaign_id,
                 objective=problem.objective.name,
@@ -483,7 +491,8 @@ async def record_suggestion(
         # defect in this code, and swallowing it made a deployment where 100% of BO writes fail
         # indistinguishable from one where none do.
         logger.warning("could not record BO suggestion for %s", campaign_id, exc_info=True)
-    return campaign_id
+        return RecordedSuggestion(campaign_id=campaign_id, opened_new_campaign=False)
+    return RecordedSuggestion(campaign_id=campaign_id, opened_new_campaign=created)
 
 
 class CampaignThread(BaseModel):
@@ -498,6 +507,17 @@ class CampaignThread(BaseModel):
     Only the **latest** suggestion's observations are carried, and that is complete rather than a
     truncation: each turn passes the campaign's whole run history, so the newest suggestion holds
     everything known when it was made.
+
+    **There is deliberately no `opened_by` here, and the column it would have come from stays.**
+    `bo_campaigns.opened_by` is an audit column and keeps doing that job. What it must not do is
+    travel back out to a model and thence to a chemist as provenance, because on the inline path
+    it holds whatever `X-Chemclaw-Actor` claimed — recorded as `unverified:<id>` precisely because
+    nothing authenticated it. Rendering an unauthenticated self-assertion beside a campaign as
+    "opened by" is the shape
+    `D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution` deleted elsewhere in this
+    tree: an identity claim the system cannot stand behind is worse than no claim, because a reader
+    has no way to see which one they are looking at. Who opened a campaign is answerable from the
+    audit trail, by someone who can see whether the actor was verified.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -508,7 +528,6 @@ class CampaignThread(BaseModel):
     problem: OptimizationProblem
     observations: list[Observation] = Field(default_factory=list)
     last_candidates: list[Candidate] = Field(default_factory=list)
-    opened_by: str = ""
     last_asked_at: datetime | None = None
 
 
@@ -545,6 +564,5 @@ async def read_campaign_thread(campaign_id: str) -> CampaignThread:
         problem=OptimizationProblem.model_validate(campaign.problem),
         observations=latest[0].observations if latest else [],
         last_candidates=latest[0].candidates if latest else [],
-        opened_by=campaign.opened_by,
         last_asked_at=campaign.last_asked_at,
     )

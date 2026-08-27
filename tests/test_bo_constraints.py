@@ -13,6 +13,7 @@ from typing import Literal
 import pytest
 
 from chemclaw.connectors.bo.server.tools import generate_screening_design, suggest_next_experiment
+from chemclaw.core.config import settings
 from chemclaw.science.bo.campaign_record import campaign_id_for
 from chemclaw.science.bo.engine import factorial_design, initial_candidates, propose_candidates
 from chemclaw.science.bo.problem import (
@@ -25,6 +26,8 @@ from chemclaw.science.bo.problem import (
     Observation,
     OptimizationProblem,
     discrete_candidate_count,
+    distinct_candidate_count,
+    distinct_feasible_candidate_count,
     space_exhausted,
 )
 
@@ -360,10 +363,49 @@ def test_an_exclusion_shrinks_the_space_every_caller_counts() -> None:
     """
     problem = _excluding_problem()
     assert discrete_candidate_count(problem) == 6
-    assert not space_exhausted(discrete_candidate_count(problem), [], batch=6)
-    assert space_exhausted(discrete_candidate_count(problem), [], batch=7)
+    assert not space_exhausted(problem, discrete_candidate_count(problem), [], batch=6)
+    assert space_exhausted(problem, discrete_candidate_count(problem), [], batch=7)
     with pytest.raises(ValueError, match="only 6"):
         initial_candidates(problem, 7)
+
+
+def test_an_excluded_run_in_the_history_does_not_consume_a_feasible_cell() -> None:
+    """The other half of the same count, which was wrong in the opposite direction.
+
+    `discrete_candidate_count` counts *feasible* cells — six of the eight, after the exclusion. The
+    history it is compared against was counted with no such filter, so an observation of an
+    excluded pairing consumed one of six cells it was never part of, and both consumers reached the
+    ceiling early: `space_exhausted` stops a durable campaign with fresh points left, and
+    `_require_fresh_points_exist` refuses an inline ask with "the screen is complete".
+
+    The trigger is ordinary rather than adversarial, which is why it is worth a test: a chemist
+    learns a pairing decomposes *after* running it, adds the exclusion, and keeps the measurement —
+    which is the correct thing to do with a real run, and is exactly this input.
+
+    Six feasible cells, six feasible runs recorded, plus one excluded run. Counting the excluded
+    one makes seven and reports a space with one cell left as over-full.
+    """
+    problem = _excluding_problem()
+    feasible = [
+        Observation(params={"catalyst": catalyst, "solvent": solvent, "base": base}, value=1.0)
+        for catalyst, solvent, base in (
+            ("Pd(OAc)2", "toluene", "K2CO3"),
+            ("Pd(OAc)2", "toluene", "Cs2CO3"),
+            ("Pd2dba3", "DMSO", "K2CO3"),
+            ("Pd2dba3", "DMSO", "Cs2CO3"),
+            ("Pd2dba3", "toluene", "K2CO3"),
+        )
+    ]
+    # The pairing the constraint forbids — run before anybody knew it decomposed.
+    excluded = Observation(
+        params={"catalyst": "Pd(OAc)2", "solvent": "DMSO", "base": "K2CO3"}, value=0.1
+    )
+    assert distinct_feasible_candidate_count(problem, feasible) == 5
+    # The excluded run is real and was performed — the plain count still sees six.
+    assert distinct_candidate_count([*feasible, excluded]) == 6
+    # ...but it occupies none of the six feasible cells, so five of six are spent, not six.
+    assert distinct_feasible_candidate_count(problem, [*feasible, excluded]) == 5
+    assert not space_exhausted(problem, 6, [*feasible, excluded], batch=1)
 
 
 def test_an_exclusion_round_trips_through_the_discriminated_union() -> None:
@@ -418,3 +460,42 @@ def test_a_space_with_room_left_is_still_answered() -> None:
     proposed = propose_candidates(problem, two_run, n=1)
     assert len(proposed) == 1
     assert proposed[0].params["catalyst"] in {"Cu", "Fe"}
+
+
+def test_counting_a_huge_excluded_space_is_bounded_rather_than_enumerated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The exclusion-aware count walks the cross product, and nothing bounded that walk.
+
+    `discrete_candidate_count` enumerates cell by cell when an exclusion is present, because
+    exclusions can overlap and inclusion-exclusion would over-subtract. The justification for
+    walking was that "this space is small by construction" — which is an assumption about the
+    caller, not a property of the input. Every category list here is model-supplied, so the product
+    is exponential in the parameter count, and `campaign_progress` reaches this function
+    synchronously on a request: ten parameters of ten options is 10^10 cells and a walk that never
+    returns.
+
+    Above the ceiling the answer is `None` — the same "effectively unbounded" every continuous
+    space already returns — so the exhaustion guards simply do not fire. That is the safe
+    degradation: a space this size cannot be exhausted by any campaign this system can run.
+
+    The ceiling is lowered here rather than building a 10^10-cell problem, which is the point: the
+    guard must decide from the *count*, before the walk.
+    """
+    problem = OptimizationProblem(
+        parameters=[
+            CategoricalParameter(name=f"p{i}", categories=[f"a{i}", f"b{i}", f"c{i}"])
+            for i in range(8)
+        ],
+        objectives=[Objective(name="yield", direction="maximize")],
+        constraints=[ExcludeConstraint(parameters=["p0", "p1"], options=[["a0"], ["a1"]])],
+    )
+    # 3^8 = 6561 cells; under a ceiling of 10 the walk is declined outright.
+    monkeypatch.setattr(settings, "bo_max_enumerated_cells", 10)
+    assert discrete_candidate_count(problem) is None
+    assert not space_exhausted(problem, discrete_candidate_count(problem), [], batch=99)
+
+    # Raised above the product, the exact feasible count comes back: 6561 less the 3^6 cells the
+    # excluded pairing removes.
+    monkeypatch.setattr(settings, "bo_max_enumerated_cells", 1_000_000)
+    assert discrete_candidate_count(problem) == 3**8 - 3**6

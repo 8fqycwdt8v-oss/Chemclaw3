@@ -1117,3 +1117,49 @@ where the argument's value is decided — a default, a fixture, a parametrisatio
 is a validation rule, run the whole suite before pushing rather than the suites
 that obviously relate to it: four of the five files that broke had nothing to do
 with connectors.
+
+## 2026-08-27 — a bound's name is prose, and my own guard proved it
+
+**The pattern.** Four defects fixed in the BO layer this session were one shape: *a quantity that is
+checked and a quantity that is spent, differing by a factor nobody multiplied.* `bo_max_rounds`
+bounded rounds while `batch` made a round cost N evaluations. The exhaustion test counted feasible
+cells on one side and every distinct run on the other. The progress report divided those same two
+mismatched counts and could print "7 out of 6". Each one reads correctly at the call site; each one
+is wrong by a factor that lives somewhere else.
+
+**The correction I had to apply to myself.** The guard I wrote to bound screening-design size — the
+fix for one of those four — shipped in its first version with the same defect *inside it*: it
+stopped multiplying once the running product passed the ceiling, and a partial product shifted right
+by `n_generators` lands back under the ceiling. Measured: 40 two-level factors at one generator
+passed a 4 096 ceiling on a partial product of 8 192, against a true design of 2^39 rows. I did not
+catch it by re-reading the code. I caught it by writing the arithmetic into a script and running it.
+
+**The rule for next time.** When a fix introduces a bound, compute the bounded quantity out loud —
+in a script, with a real adversarial input — before believing the guard. Reading a bound tells you
+what its author meant; running it tells you what it does. This repo already says that about prose
+and docstrings. A bound's *name* is prose too: `bo_max_rounds` reads as a cost ceiling and is a loop
+counter, and the gap between those two readings survived for as long as batching existed.
+
+**Second rule, from the same session.** Three of my six audit findings were partly or wholly wrong
+when checked against the code — a "missing" `TOOL_METHOD` entry that was present, a "never fixed"
+MOBO gap that was a deliberate argued refusal, a retention premise that understated the problem
+tenfold. A research pass produces hypotheses, not findings. Verify each against the source before
+fixing it, and be willing to report "this one was wrong" — the subagents that did exactly that
+produced the most useful work of the session.
+
+## 2026-08-27 — run the gate, not a subset of it (twice in one branch)
+
+Two CI/full-suite failures on this branch, same shape both times: **I verified with a narrower
+command than the one that decides.**
+
+1. `mypy --strict src/` was clean; `make type` runs `mypy src examples tests` and found a
+   `tuple[int, bool] == int` left over from a signature change, *in a test file*.
+2. A 486-test scoped run was clean; the whole-repo run found three new settings undocumented in
+   `.env.example`, which no BO test could have seen.
+
+Both were caught downstream, both were trivial to fix, and both were avoidable by typing eight
+more characters. The rule: **before pushing, run the repo's own gate target verbatim** — here
+`make lint type test` — rather than the scoped equivalent I reached for while iterating. A scoped
+run is the right tool *while* iterating and the wrong evidence for "this is done". CLAUDE.md
+already says a step is done only when `make lint type test` is green; the failure was reading that
+as a description of CI rather than as an instruction to me.

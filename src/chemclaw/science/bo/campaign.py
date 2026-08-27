@@ -19,8 +19,7 @@ from chemclaw.science.bo.problem import (
     ParamValue,
     best_of,
     discrete_candidate_count,
-    require_descriptors_distinguish_categories,
-    require_names_do_not_clash,
+    require_problem_yields_one_best_point,
     require_rounds_within_ceiling,
     space_exhausted,
 )
@@ -81,23 +80,16 @@ async def optimize(
     require_rounds_within_ceiling(n_rounds)
     # Checked here, not at the `best_of` call below: this loop returns a single best observation, so
     # a trade-off has no answer for it — and discovering that *after* n_initial + n_rounds*batch
-    # evaluations would spend the whole budget to raise. Same reason the two rules above are here.
-    require_names_do_not_clash(problem)
-    require_descriptors_distinguish_categories(problem)
-    if len(problem.objectives) > 1:
-        named = ", ".join(objective.name for objective in problem.objectives)
-        raise ValueError(
-            f"this loop returns one best observation and this problem has "
-            f"{len(problem.objectives)} objectives ({named}), which have no single best point. "
-            "Optimize one of them, or use the inline `suggest_next_experiment`, which returns the "
-            "Pareto front of the runs it is given."
-        )
+    # evaluations would spend the whole budget to raise. Same reason the rule above is here. Shared
+    # with `require_campaign_startable` rather than restated, because this loop and the durable
+    # workflow need the same three things of a problem and used to say so in two different wordings.
+    require_problem_yields_one_best_point(problem)
     history = await _evaluate(initial_candidates(problem, n_initial, seed), evaluate, provenance)
     space = discrete_candidate_count(problem)
     for _ in range(n_rounds):
         # A purely discrete space can be exhausted: once too few distinct candidates
         # remain to propose a full batch, stop rather than crash inside BoFire.
-        if space_exhausted(space, history, batch):
+        if space_exhausted(problem, space, history, batch):
             break
         proposed = propose_candidates(problem, history, batch, seed)
         history.extend(await _evaluate(proposed, evaluate, provenance))

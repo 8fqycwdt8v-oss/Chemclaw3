@@ -35,6 +35,7 @@ from chemclaw.science.bo.problem import (
     OptimizationProblem,
     discrete_candidate_count,
     distinct_candidate_count,
+    distinct_feasible_candidate_count,
     observed_value,
 )
 
@@ -73,11 +74,19 @@ class CampaignProgress(BaseModel):
     window: int = Field(ge=1)
 
     n_observations: int = Field(ge=0)
-    # Distinct parameter combinations, which is what a design-space efficiency claim divides by:
-    # re-running one condition three times is one point of the grid, not three.
+    # Distinct parameter combinations *run*: re-running one condition three times is one point of
+    # the grid, not three. Counts every distinct condition performed, including one an exclusion
+    # later forbade — a chemist who ran it still ran it, and this number is the record of that.
     n_distinct: int = Field(ge=0)
+    # How many of those occupy a cell of the *feasible* grid, which is what a coverage claim may
+    # divide by. The two differ only under an `ExcludeConstraint`, and only when the history holds
+    # a run the exclusion forbids — the ordinary case where a pairing is excluded *after* being
+    # run once. `design_space` counts feasible cells, so dividing `n_distinct` by it compared two
+    # different quantities and could print "7 distinct out of the 6 the full grid holds", which is
+    # not a rounding error but a visibly impossible sentence.
+    n_distinct_in_space: int = Field(ge=0)
     # The full grid size for an all-categorical problem; None when any parameter is continuous and
-    # the space is therefore infinite.
+    # the space is therefore infinite. Feasible cells only, so an exclusion shrinks it (W4).
     design_space: int | None = None
 
     best_value: float | None = None
@@ -156,9 +165,12 @@ class CampaignProgress(BaseModel):
         """The design-space efficiency claim, when the space is finite enough to have one."""
         if self.design_space is None:
             return ""
+        # Both sides feasible: `design_space` counts the cells an exclusion leaves, so the
+        # numerator has to be the runs that occupy one. `n_distinct` is still reported beside it
+        # as what was actually run.
         return (
-            f" ({self.n_distinct} distinct condition(s) out of the {self.design_space} "
-            "the full grid holds)"
+            f" ({self.n_distinct_in_space} distinct condition(s) out of the {self.design_space} "
+            "the feasible grid holds)"
         )
 
 
@@ -235,6 +247,7 @@ def campaign_progress(
         window=span_window,
         n_observations=len(values),
         n_distinct=distinct_candidate_count(observations),
+        n_distinct_in_space=distinct_feasible_candidate_count(problem, observations),
         design_space=discrete_candidate_count(problem),
         best_value=best,
         best_so_far=best_so_far,

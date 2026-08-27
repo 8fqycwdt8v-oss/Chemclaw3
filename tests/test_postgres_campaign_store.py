@@ -102,8 +102,12 @@ def test_record_is_append_only_and_returns_increasing_ids() -> None:
         campaign_id = "pgcamp-append-1"
         # No separate campaign-creation call: `record` upserts the campaign as part of the same
         # transaction, so a setup line here would be a third suggestion row, not a fixture.
-        first_id = await store.record(_campaign(campaign_id), Suggestion(campaign_id=campaign_id))
-        second_id = await store.record(_campaign(campaign_id), Suggestion(campaign_id=campaign_id))
+        first_id, _ = await store.record(
+            _campaign(campaign_id), Suggestion(campaign_id=campaign_id)
+        )
+        second_id, _ = await store.record(
+            _campaign(campaign_id), Suggestion(campaign_id=campaign_id)
+        )
 
         assert first_id != second_id
         assert len(await store.suggestions_for(campaign_id, 10)) == 2
@@ -219,13 +223,19 @@ def test_a_retried_durable_write_hits_the_unique_index_instead_of_appending() ->
             problem={"parameters": [], "objective": {"name": "yield", "direction": "maximize"}},
             job_id="bo-start_optimization_campaign-deadbeef",
         )
-        first = await store.record(_campaign(campaign_id), suggestion)
-        again = await store.record(_campaign(campaign_id), suggestion)
+        first, created = await store.record(_campaign(campaign_id), suggestion)
+        again, created_again = await store.record(_campaign(campaign_id), suggestion)
         assert again == first, "a retry must return the id the first attempt got, not a new row"
+        # The other half of the same write, and it must *not* be idempotent in the same direction:
+        # the first call created the campaign row and the retry found it, which is precisely the
+        # signal `suggest_next_experiment` reports as `opened_new_campaign`. Reading it off a
+        # `SELECT` before the write could not distinguish these two calls under concurrency.
+        assert (created, created_again) == (True, False)
         assert len(await store.suggestions_for(campaign_id, limit=10)) == 1
 
         other_run = suggestion.model_copy(update={"job_id": "bo-start_optimization_campaign-cafe"})
-        assert await store.record(_campaign(campaign_id), other_run) != first
+        other_id, _ = await store.record(_campaign(campaign_id), other_run)
+        assert other_id != first
         assert len(await store.suggestions_for(campaign_id, limit=10)) == 2
 
     asyncio.run(_run())
@@ -264,5 +274,42 @@ def test_a_suggestion_round_trips_the_space_it_was_proposed_against() -> None:
         (recorded,) = await store.suggestions_for(campaign_id, limit=1)
         assert recorded.problem == space
         assert recorded.job_id == "bo-job-snapshot"
+
+    asyncio.run(_run())
+
+
+def test_two_turns_opening_one_campaign_at_once_agree_on_who_opened_it() -> None:
+    """The race the `xmax` read replaced a `SELECT` to close, driven concurrently for real.
+
+    `suggest_next_experiment` reports `opened_new_campaign` so a chemist who supplied runs against
+    a campaign with no record is told they may have forked one. It used to be answered by a
+    `campaign_is_known` read taken just before the write — and under two turns opening the same
+    decision space at once, both reads see nothing, both report having opened a campaign, and the
+    upsert underneath then serializes them so exactly one is right with nothing able to say which.
+
+    Postgres answers it instead: `ON CONFLICT ... RETURNING (xmax = 0)` is true only for the
+    statement that actually inserted the row. Two concurrent transactions must therefore return
+    exactly one `True` between them, whichever wins.
+
+    Driven with `asyncio.gather` over the real store rather than the in-memory one, because the
+    property under test *is* the database's concurrency control: the in-memory backend has no
+    contention to lose and would pass this test while proving nothing about a deployment.
+    """
+
+    async def _run() -> None:
+        store = await _store_or_skip()
+        campaign_id = "campaign-concurrent-open"
+        results = await asyncio.gather(
+            *(
+                store.record(_campaign(campaign_id), Suggestion(campaign_id=campaign_id))
+                for _ in range(2)
+            )
+        )
+        created = [was_created for _, was_created in results]
+        assert sum(created) == 1, f"exactly one writer opened the campaign, got {created}"
+        # Both suggestions still land — the inline path has no job id, so two asks are two
+        # entries. Only the *campaign* is created once.
+        assert len({suggestion_id for suggestion_id, _ in results}) == 2
+        assert len(await store.suggestions_for(campaign_id, 10)) == 2
 
     asyncio.run(_run())
