@@ -133,6 +133,15 @@ class LlmSettings(BaseSettings):
     # verdict is one cheap structured call, and on expiry the verifier degrades to the offline
     # deterministic citation gate rather than holding the finished answer hostage.
     verifier_timeout_seconds: float = Field(default=30.0, gt=0)
+    # Ceiling on the evidence rendered into one judge prompt, in characters (~a quarter of it in
+    # tokens). The prompt used to embed every distinct tool output of the turn whole, so a 30-step
+    # turn with ~20 kB results built a ~600 kB prompt — a judge call costing more than the turn it
+    # graded, and past some length exceeding the judge model's own context, where the failure is
+    # hard. The newest outputs are kept (they are what the answer was written from) and the
+    # omitted ones are named to the judge so a claim resting on unrendered evidence is not marked
+    # unsupported; the deterministic citation gate still checks every output regardless. Sized
+    # like `gather_evidence_max_chars`, the same instrument one layer down.
+    verifier_evidence_max_chars: int = Field(default=60_000, ge=1)
     # The review band around the threshold, inside which a verdict is re-rolled and decided by
     # the median (D-2026-08-27-a-verdict-at-the-margin-is-a-coin-toss). Measured, not chosen: the
     # judge's roll-to-roll spread is a margin effect — 0.000 over 32 rolls on grounded answers,

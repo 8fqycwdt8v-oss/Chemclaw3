@@ -41,6 +41,7 @@ contain PII. `agent_audit_max_arg_chars` bounds what is stored; treat the trail 
 
 import asyncio
 import logging
+import reprlib
 import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
@@ -194,9 +195,24 @@ def _truncate(value: object) -> str:
     A tool argument or result can be a large object (a full optimization problem, an
     evidence sweep); truncating keeps one audit record from ballooning while still
     identifying the call and its effect.
+
+    **The bound applies to the work, not only to the answer.** `repr(value)[:limit]` builds the
+    whole repr first — a 100 kB MCP payload fully materialized on the event loop, twice per tool
+    call, to keep 200 characters. A string is sliced before it is repr'd, and everything else goes
+    through `reprlib` with its per-string budget set to this one; the container counts are raised
+    far above `reprlib`'s defaults so an ordinary argument dict still renders whole, because the
+    audit row's `arguments` is what a reviewer reads as *what was asked*.
     """
-    text = repr(value)
     limit = settings.agent_audit_max_arg_chars
+    if isinstance(value, str):
+        text = repr(value if len(value) <= limit else value[:limit])
+    else:
+        shaper = reprlib.Repr()
+        shaper.maxstring = limit + 1
+        shaper.maxother = limit + 1
+        shaper.maxdict = shaper.maxlist = shaper.maxtuple = shaper.maxset = 64
+        shaper.maxlevel = 6
+        text = shaper.repr(value)
     return text if len(text) <= limit else text[:limit] + "…"
 
 

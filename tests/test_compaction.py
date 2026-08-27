@@ -527,5 +527,9 @@ def test_only_the_cleared_results_are_reported_to_the_repeat_guard() -> None:
         messages, count_tokens=count_tokens_approximately
     )
 
-    # `keep=2` preserves the two newest, so the two oldest are what the guard must be told about.
-    assert _cleared_calls(messages) == [("tool_0", {"n": 0}), ("tool_1", {"n": 1})]
+    # `keep=2` preserves the two newest, so the two oldest are what the guard must be told about —
+    # each under its call id, which is what lets the guard forgive it exactly once per turn.
+    assert _cleared_calls(messages) == [
+        ("call_0", "tool_0", {"n": 0}),
+        ("call_1", "tool_1", {"n": 1}),
+    ]

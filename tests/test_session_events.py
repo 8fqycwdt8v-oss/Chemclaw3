@@ -6,6 +6,8 @@ no-double-claim guarantee — is proven against a real database when one is pres
 """
 
 import asyncio
+from collections.abc import AsyncGenerator
+from typing import cast
 from uuid import uuid4
 
 import pytest
@@ -233,3 +235,62 @@ def test_dedupe_key_derivation_is_stable_and_event_specific() -> None:
     assert base != _dedupe_key("wf-1", "run-2", "job_completed", {"job_id": "j", "energy": -1.5})
     assert base != _dedupe_key("wf-1", "run-1", "eval_drift", {"job_id": "j", "energy": -1.5})
     assert base != _dedupe_key("wf-1", "run-1", "job_completed", {"job_id": "k", "energy": -1.5})
+
+
+def test_a_claim_whose_delivery_never_completed_is_restored(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The at-most-once window shrinks to the transport: an undelivered claim goes back.
+
+    The claim used to be destructive across the whole claim-commit-to-SSE-write gap, so a client
+    dropping in it silently destroyed the one signal that a chemist's long search had finished.
+    A stream torn down while suspended at the yield now restores the row on a task of its own,
+    and the next poll — this tailer's or another's — delivers it again. A fully consumed stream
+    restores nothing.
+    """
+    from chemclaw.agent import session_events as module
+
+    restored: list[int] = []
+
+    async def _restore(event_id: int, *, dsn: str | None = None) -> None:
+        restored.append(event_id)
+
+    monkeypatch.setattr(module, "restore_unconsumed", _restore)
+
+    async def _claim(session_id: str) -> list[SessionEvent]:
+        return [
+            SessionEvent(event_id=7, session_id="s", kind="job_completed", payload={"job_id": "j"})
+        ]
+
+    async def _run_torn_down() -> None:
+        # The declared type is `AsyncIterator`, whose protocol has no `aclose`; the concrete
+        # object is the generator, and closing it is exactly the teardown a dropped SSE stream
+        # performs — hence the cast rather than a wider public annotation.
+        stream = cast(
+            AsyncGenerator[SessionEvent, None],
+            stream_new_events("s", poll_seconds=0, max_polls=1, claim=_claim),
+        )
+        event = await stream.__anext__()
+        assert event.event_id == 7
+        # The consumer vanishes while the generator is suspended at the yield — a dropped SSE
+        # stream. The restore runs on its own task; drain the loop before asserting.
+        await stream.aclose()
+        await asyncio.sleep(0)
+
+    asyncio.run(_run_torn_down())
+    assert restored == [7], "an undelivered claim was destroyed instead of restored"
+
+    restored.clear()
+
+    async def _one_batch(session_id: str) -> list[SessionEvent]:
+        return [
+            SessionEvent(event_id=8, session_id="s", kind="job_completed", payload={"job_id": "k"})
+        ]
+
+    async def _run_consumed() -> None:
+        async for _event in stream_new_events("s", poll_seconds=0, max_polls=1, claim=_one_batch):
+            pass
+        await asyncio.sleep(0)
+
+    asyncio.run(_run_consumed())
+    assert restored == [], "a delivered event was restored; every stream close would duplicate it"

@@ -153,7 +153,15 @@ class CalculatorSettings(BaseSettings):
     # and take a Hessian, so a multi-species reaction at 100+ atoms is genuinely hours.
     # The store makes a retry cheap rather than a restart from zero, and the heartbeat
     # below — not this timeout — is what detects a dead worker.
-    xtb_job_timeout_seconds: int = 14400
+    #
+    # Strictly above `calc_sampling_timeout_seconds` (14400), not equal to it, and a validator in
+    # `Settings` holds the ordering. The two were equal, which is the same "equality is the defect"
+    # shape `_the_job_ceiling_covers_the_activity_it_bounds` refuses one level up: a sampling call
+    # that ran to its own client bound exhausted this activity's whole budget at the same instant,
+    # so the activity died as a bare timeout instead of surfacing the sampler's error, and
+    # `activity_max_attempts` could never be reached. The margin is the activity's own overhead
+    # around the search (key probe, embed, cache write), bounded by `activity_timeout_seconds`.
+    xtb_job_timeout_seconds: int = 15000
     # How long the durable job may go without a heartbeat before Temporal declares the
     # worker dead and retries. Comfortably longer than the slowest single unit of work
     # (one species' optimization plus Hessian on a large molecule), short enough that a

@@ -416,6 +416,34 @@ class Settings(
             )
         return self
 
+    @model_validator(mode="after")
+    def _the_activity_budget_covers_the_search_it_awaits(self) -> Self:
+        """The same rule one level down: the activity must outlive its longest single client call.
+
+        Inside the xTB activity the longest await is the sampler's —
+        `calc_sampling_timeout_seconds`, deliberately matched to the server's own CREST ceiling so
+        the *server* bounds a search. The two budgets shipped equal (14400 s each), and equality is
+        the defect here exactly as it is for the parent above: a search that ran to its client
+        bound exhausted the activity's `start_to_close` at the same instant, so Temporal killed the
+        activity as a bare timeout instead of letting the client's own timeout surface as an error,
+        and `activity_max_attempts` was a number that could never be reached. The margin is the
+        activity's other work around the search — key probe, embed, cache write — bounded by
+        `activity_timeout_seconds`, mirroring the parent ceiling's allowance.
+        """
+        needed = self.calc_sampling_timeout_seconds + self.activity_timeout_seconds
+        if self.xtb_job_timeout_seconds <= needed:
+            raise ValueError(
+                f"xtb_job_timeout_seconds={self.xtb_job_timeout_seconds} does not cover the "
+                f"search it awaits: one sampling call may take "
+                f"{self.calc_sampling_timeout_seconds}s (calc_sampling_timeout_seconds) and the "
+                f"activity's own overhead up to {self.activity_timeout_seconds}s more "
+                f"(activity_timeout_seconds). Raise xtb_job_timeout_seconds above {needed}, or "
+                "lower calc_sampling_timeout_seconds together with the server's own CREST "
+                "ceiling — shortening the client bound alone only abandons work the server "
+                "finishes anyway."
+            )
+        return self
+
 
 settings = Settings()
 """Process-wide configuration singleton. Import this, not the class."""

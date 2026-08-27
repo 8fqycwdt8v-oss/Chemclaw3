@@ -14,6 +14,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage, messag
 import chemclaw
 from chemclaw.agent.message_migration import LANGCHAIN_SHAPE, MAF_SHAPE
 from chemclaw.agent.message_pairing import (
+    calls_without_adjacent_results,
     droppable_rows,
     stored_call_ids,
     unmatched_call_ids,
@@ -165,6 +166,50 @@ def test_an_unreadable_row_takes_its_whole_session_out_of_the_sweep() -> None:
     rows = [(1, frozenset({"c1"})), (2, None), (3, frozenset({"c1"}))]
     assert unreadable_rows(rows) == [2]
     assert droppable_rows(rows, {1, 3}) == set(), "a session with an unreadable row was pruned"
+
+
+def test_a_complete_parallel_batch_is_not_flagged_as_unadjacent() -> None:
+    """A complete parallel batch must pass the adjacency rule; a split one must not.
+
+    "Immediately after" is a wire rule about the following *message*, which on the wire holds
+    every result of the batch — here that is several consecutive `ToolMessage`s.
+
+    The single-slot reading (`messages[index + 1]` only) flagged every legitimate parallel batch
+    past its first result: three calls answered by three adjacent results reported two of them
+    missing, so any consumer of this checker would have "repaired" or refused a thread the
+    provider accepts as-is. The answering window is the contiguous run of tool messages.
+    """
+    from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+
+    batch = AIMessage(
+        content="",
+        tool_calls=[
+            {"name": "a", "args": {}, "id": "c-1"},
+            {"name": "b", "args": {}, "id": "c-2"},
+            {"name": "c", "args": {}, "id": "c-3"},
+        ],
+    )
+    thread = [
+        HumanMessage("go"),
+        batch,
+        ToolMessage("r1", tool_call_id="c-1"),
+        ToolMessage("r2", tool_call_id="c-2"),
+        ToolMessage("r3", tool_call_id="c-3"),
+        AIMessage("done"),
+    ]
+    assert calls_without_adjacent_results(thread) == set()
+
+    # And the window is the *contiguous* run: a result parked past an intervening message is
+    # exactly what the wire rejects, so it must still be flagged.
+    broken = [
+        HumanMessage("go"),
+        batch,
+        ToolMessage("r1", tool_call_id="c-1"),
+        AIMessage("interlude"),
+        ToolMessage("r2", tool_call_id="c-2"),
+        ToolMessage("r3", tool_call_id="c-3"),
+    ]
+    assert calls_without_adjacent_results(broken) == {"c-2", "c-3"}
 
 
 def test_each_stored_shape_stamp_is_defined_exactly_once_in_the_tree() -> None:

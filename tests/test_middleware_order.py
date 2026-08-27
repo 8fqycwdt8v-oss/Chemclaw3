@@ -56,11 +56,16 @@ from tests.fakes import scripted
 # - `AnthropicPromptCachingMiddleware` is last because it too replaces an upstream entry in place,
 #   and upstream's sits in the tail after the compaction group. The two do not contend: caching
 #   marks the system prompt and tool schemas, which compaction never touches.
+# - `enforce_loop_cap` appears on *every* build, harness or not
+#   (`D-2026-08-27-the-cap-is-a-property-of-the-loop-not-of-the-mode`): the runaway it bounds is
+#   the model-call loop itself, which exists in both modes. Its position carries no nesting
+#   argument — it is a model-call hook, not a tool gate.
 _EXPECTED_ORDER = (
     "FilesystemMiddleware",
     "SubAgentMiddleware",
     "SummarizationMiddleware",
     "PatchToolCallsMiddleware",
+    "enforce_loop_cap",
     "ReloadingSkillsMiddleware",
     "surface_authorization_denials",
     "surface_domain_errors",

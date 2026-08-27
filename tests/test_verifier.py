@@ -332,6 +332,41 @@ def test_one_tool_result_reaches_the_judge_once_however_many_ids_it_grounds() ->
     )
 
 
+def test_the_judge_prompt_is_budgeted_newest_first(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The evidence in one judge prompt is capped; past the cap the oldest are named, not shown.
+
+    The prompt used to embed every distinct output whole, so its size was the *turn's* — a 30-step
+    turn with ~20 kB results built a ~600 kB judge prompt, one call costing more than the turn it
+    graded and past some length exceeding the judge's own context. The newest outputs are what the
+    answer was written from, so they are what the judge reads; the omitted ids are named so a
+    claim resting on them reads as unverifiable rather than unsupported. At least the newest
+    always survives, whatever the budget — the same one-chunk floor `gather_evidence` holds.
+    """
+    from chemclaw.core.config import settings
+
+    old = "old_tool: [[reaction-1]] " + "x" * 200
+    new = "new_tool: [[reaction-2]] " + "y" * 200
+    answer = "Both [[reaction-1]] [[reaction-2]]."
+    evidence = turn_evidence(answer, [old, new])
+
+    monkeypatch.setattr(settings, "verifier_evidence_max_chars", 250)
+    prompt = _verifier_prompt(answer, evidence)
+    assert new in prompt, "the newest output was dropped; the budget cut the wrong end"
+    assert old not in prompt, "the budget rendered past its cap"
+    assert "reaction-1" in prompt, "an omitted output's ids must still be named to the judge"
+    assert "not shown here for length" in prompt
+
+    # The floor: a budget smaller than any single output still renders the newest one whole.
+    monkeypatch.setattr(settings, "verifier_evidence_max_chars", 10)
+    floor = _verifier_prompt(answer, evidence)
+    assert new in floor, "an over-budget newest output must be sent over budget, not omitted"
+
+    # And under the default budget nothing is omitted — the cap is for pathological turns.
+    monkeypatch.setattr(settings, "verifier_evidence_max_chars", 60_000)
+    whole = _verifier_prompt(answer, evidence)
+    assert old in whole and new in whole and "not shown" not in whole
+
+
 def test_distinct_tool_results_each_get_their_own_envelope() -> None:
     """Grouping is by content, so two different results must not be collapsed into one."""
     first, second = (

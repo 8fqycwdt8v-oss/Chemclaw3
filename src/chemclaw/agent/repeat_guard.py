@@ -31,6 +31,7 @@ import logging
 from collections import Counter
 from collections.abc import Callable, Iterable
 from contextvars import ContextVar
+from dataclasses import dataclass, field
 from typing import Any
 
 from langchain.agents.middleware import wrap_tool_call
@@ -41,9 +42,38 @@ from chemclaw.core.metrics_bridge import record_metric
 
 logger = logging.getLogger(__name__)
 
-_calls: ContextVar[Counter[tuple[str, str]] | None] = ContextVar(
-    "chemclaw_repeated_calls", default=None
-)
+
+@dataclass(slots=True)
+class TurnCallWatch:
+    """One turn's repeat bookkeeping: the counters, and what compaction already forgave.
+
+    `forgiven` holds *tool call ids*, not `(name, arguments)` keys, and that difference is the fix
+    for a defect that disarmed the guard on every long turn. Compaction's observer runs on every
+    model call and re-derives "which results are cleared" from the freshly re-edited request — the
+    edits are non-destructive, so the same old results read as cleared on every call after the
+    first. Forgiving by call *identity* therefore reset the same counter once per model call, and
+    past the clearing trigger the guard was effectively off for the rest of the turn: the exact
+    7-8-identical-calls loop it was measured to stop (128-142 s vs 16.9 s) came back with the
+    counters being wiped as fast as they accumulated. A call id names one *invocation*, so each
+    cleared result forgives exactly one repeat, once.
+
+    `peak_reclaimed` is the same per-model-call re-derivation problem on the metrics side: one
+    reduction re-reported on every subsequent call inflated `chemclaw_context_compactions_total`
+    by the turn's model-call count and multiple-counted every reclaimed token. The high-water mark
+    is what lets `agent/compaction.py` report each token once and each turn's compaction once.
+    """
+
+    counts: Counter[tuple[str, str]] = field(default_factory=Counter)
+    forgiven: set[str] = field(default_factory=set)
+    peak_reclaimed: float = 0.0
+
+
+_calls: ContextVar[TurnCallWatch | None] = ContextVar("chemclaw_repeated_calls", default=None)
+
+
+def current_watch() -> TurnCallWatch | None:
+    """This turn's watch, or `None` off the request path — the seam `agent/compaction.py` reads."""
+    return _calls.get()
 
 
 class RepeatedCallRefusal(ChemclawError):
@@ -58,7 +88,7 @@ class RepeatedCallRefusal(ChemclawError):
 
 def begin_call_watch() -> object:
     """Start counting this turn's tool calls; returns a token for `end_call_watch`."""
-    return _calls.set(Counter())
+    return _calls.set(TurnCallWatch())
 
 
 def end_call_watch(token: object) -> None:
@@ -82,7 +112,7 @@ def _key(name: str, arguments: Any) -> tuple[str, str]:
     return (name, json.dumps(arguments, sort_keys=True, default=str))
 
 
-def forget_calls(cleared: Iterable[tuple[str, Any]]) -> None:
+def forget_calls(cleared: Iterable[tuple[str, str, Any]]) -> int:
     """Clear the repeat counters for calls whose answers compaction just took away.
 
     **The dead end this removes.** The guard's whole justification is that a repeat "will not
@@ -110,20 +140,37 @@ def forget_calls(cleared: Iterable[tuple[str, Any]]) -> None:
     removing rather than documenting. Passing the calls that lost their answers keeps the premise
     exact: a call is forgiven when, and only when, its own result is gone.
 
+    **And each cleared result forgives exactly once.** The caller re-derives the cleared set from
+    the freshly re-edited request on every model call — the edits are non-destructive, so an old
+    result reads as cleared on every call after the first — and forgiving it again each time reset
+    the counter as fast as repeats accumulated: past the clearing trigger the guard was off for
+    the rest of the turn. The watch's `forgiven` set of call ids is what makes a second sighting
+    of the same cleared result a no-op (see `TurnCallWatch`).
+
     A no-op off the request path, like every other function in this module.
 
     Args:
-        cleared: The `(tool name, arguments)` pairs whose results were replaced by a placeholder.
+        cleared: `(tool call id, tool name, arguments)` per result replaced by a placeholder.
+
+    Returns:
+        How many of these results were forgiven for the first time — the caller's signal that this
+        model call saw a *new* reduction rather than the standing one re-derived.
     """
-    counts = _calls.get()
-    if counts is None or not counts:
-        return
+    watch = _calls.get()
+    if watch is None:
+        return 0
     forgotten = 0
-    for name, arguments in cleared:
-        if counts.pop(_key(name, arguments), None) is not None:
+    newly_seen = 0
+    for call_id, name, arguments in cleared:
+        if call_id in watch.forgiven:
+            continue
+        watch.forgiven.add(call_id)
+        newly_seen += 1
+        if watch.counts.pop(_key(name, arguments), None) is not None:
             forgotten += 1
     if forgotten:
         logger.info("context was compacted; %d repeat counter(s) cleared", forgotten)
+    return newly_seen
 
 
 def count_call(name: str, arguments: Any) -> RepeatedCallRefusal | None:
@@ -139,9 +186,10 @@ def count_call(name: str, arguments: Any) -> RepeatedCallRefusal | None:
     let through is still recorded against the next one. Off the request path there is no counter
     and this is a no-op — the CLI, the tests and the classic agent all take that branch.
     """
-    counts = _calls.get()
-    if counts is None:
+    watch = _calls.get()
+    if watch is None:
         return None
+    counts = watch.counts
     key = _key(name, arguments)
     counts[key] += 1
     seen = counts[key]

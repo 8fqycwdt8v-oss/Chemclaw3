@@ -22,6 +22,7 @@ from temporalio.exceptions import ActivityError
 with workflow.unsafe.imports_passed_through():
     from chemclaw.agent.session_events import record_session_event
     from chemclaw.core.config import settings
+    from chemclaw.core.metrics_bridge import record_metric
     from chemclaw.durable.publish import BAD_DATA_RETRY
     from chemclaw.durable.registry import durable_activity
 
@@ -120,5 +121,11 @@ async def notify_session_best_effort(session_id: str, kind: str, payload: dict[s
         await notify_session(session_id, kind, payload)
     except ActivityError:
         workflow.logger.warning("session push-back failed for %s", session_id)
+        # Counted, because the log line above is workflow-scoped and swallowed by every caller: a
+        # fleet-wide push-back outage — a dead background queue, a full mailbox table — was
+        # invisible on any dashboard while every job's completion silently reached nobody. Guarded
+        # against replay so a workflow history rebuild does not re-count a drop that happened once.
+        if not workflow.unsafe.is_replaying():
+            record_metric(lambda m: m.increment("chemclaw_pushback_dropped_total"))
         return False
     return True

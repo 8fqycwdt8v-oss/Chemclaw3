@@ -1019,7 +1019,8 @@ docker image inspect "${REGISTRY}/chemclaw:${VERSION}" --format '{{ index .RepoD
 # 3. Deploy by digest. The tag is ignored entirely when this is set.
 helm upgrade --install chemclaw deploy/helm/chemclaw \
   --set image.digest="sha256:<the digest from step 2>" \
-  --set networkPolicy.allowAnyDestination=true   # or list networkPolicy.egressDestinations
+  --set networkPolicy.allowAnyDestination=true \  # or list networkPolicy.egressDestinations
+  --set retention.unboundedGrowthAccepted=true   # or state retention.windows
 ```
 
 **The pipeline does exactly the three steps above.** `Jenkinsfile` builds with

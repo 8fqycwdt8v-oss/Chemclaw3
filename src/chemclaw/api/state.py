@@ -29,6 +29,7 @@ from fastapi import FastAPI, Request
 
 from chemclaw.agent.plan_approval_store import ApprovalStore
 from chemclaw.api.budget import BudgetTracker
+from chemclaw.api.detach import RunningTurns
 from chemclaw.connectors.health import ConnectorHealth
 from chemclaw.core.bounded import BoundedLru
 from chemclaw.core.config import settings
@@ -487,6 +488,12 @@ class FrontDoorState:
         """The durable cross-process turn claim, or None under the in-memory session store."""
         claims: SessionTurns | None = self._app.state.turn_claims
         return claims
+
+    @property
+    def running_turns(self) -> "RunningTurns":
+        """The live turns themselves — what the explicit stop route resolves a session against."""
+        turns: RunningTurns = self._app.state.running_turns
+        return turns
 
     @property
     def event_streams(self) -> dict[str, int]:

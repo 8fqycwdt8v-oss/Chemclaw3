@@ -27,7 +27,13 @@ endpoint:
   # A loopback dev default; a cluster address is set per deployment via CHEMCLAW_CONNECTOR_URLS.
   url: http://127.0.0.1:8815/mcp
   health_url: http://127.0.0.1:8815/healthz
-  request_timeout: 60
+  # The turn's own ceiling (`service_turn_timeout_seconds`), not the 60 s the other bundles use.
+  # The inline tools here compose remote primitives the backend is allowed 900 s for
+  # (`calc_server_timeout_seconds`), and a 60 s bound cancelled a running relaxation mid-primitive
+  # on every real substrate — the work was killed before `cached_compute` could store it, so the
+  # identical retry recomputed from zero. Each completed primitive is cached as it lands, so a
+  # long wait here is productive; anything past the turn deadline is cancelled by the turn anyway.
+  request_timeout: 600
   auth:
     # **Bearer, and the token is this bundle's own `/mcp` credential — not the one core presents to
     # anything downstream.** `connectors/server.py`'s `BearerAuthMiddleware` reads the mode from this

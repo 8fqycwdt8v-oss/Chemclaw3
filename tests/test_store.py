@@ -172,6 +172,82 @@ def key_str_present(text: str) -> bool:
     return "xtb@gfn2" in text
 
 
+def test_concurrent_misses_on_one_key_share_one_computation() -> None:
+    """The in-process half of the check-then-act race, closed with a single-flight ledger.
+
+    The measured shape this replaces: 8 concurrent misses on one key → 8 computes (CLAUDE.md's own
+    number), benign while a compute was milliseconds and not once a CREST search is 19 minutes of
+    CPU. The first miss computes; every concurrent second miss awaits the same future and reports
+    `was_cached=True`, because from its side the answer arrived with no computation started. The
+    cross-process half stays deferred with its own trigger (`docs/planning/DEFERRED.md`).
+    """
+    computes = 0
+    release = asyncio.Event()
+
+    async def compute() -> dict[str, int]:
+        nonlocal computes
+        computes += 1
+        await release.wait()
+        return {"energy": 7}
+
+    async def _run() -> list[tuple[dict[str, int], bool]]:
+        store = InMemoryStore()
+        key = CalculationKey.build("xtb", "gfn2", inputs={"smiles": "CCO"})
+
+        async def one() -> tuple[dict[str, int], bool]:
+            return await cached_compute(store, key, compute)
+
+        tasks = [asyncio.create_task(one()) for _ in range(8)]
+        await asyncio.sleep(0)  # let every task reach its await
+        release.set()
+        return await asyncio.gather(*tasks)
+
+    results = asyncio.run(_run())
+
+    assert computes == 1, f"8 concurrent misses ran {computes} computations; the race is back"
+    assert all(result == {"energy": 7} for result, _cached in results)
+    assert sum(1 for _r, cached in results if not cached) == 1, (
+        "exactly one caller computed; the waiters report was_cached=True"
+    )
+
+
+def test_a_failed_shared_computation_fails_every_waiter_and_clears_the_slot() -> None:
+    """A corpse in the in-flight ledger must not wedge the key forever."""
+    attempts = 0
+    release = asyncio.Event()
+
+    async def compute() -> dict[str, int]:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            await release.wait()
+            raise RuntimeError("SCF did not converge")
+        return {"energy": 7}
+
+    async def _run() -> dict[str, int]:
+        store = InMemoryStore()
+        key = CalculationKey.build("xtb", "gfn2", inputs={"smiles": "CCO"})
+
+        async def one() -> tuple[dict[str, int], bool]:
+            return await cached_compute(store, key, compute)
+
+        first = asyncio.create_task(one())
+        second = asyncio.create_task(one())
+        await asyncio.sleep(0)
+        release.set()
+        with pytest.raises(RuntimeError):
+            await first
+        with pytest.raises(RuntimeError):
+            await second
+        # The slot is clear: a fresh call computes anew rather than awaiting the corpse.
+        result, cached = await cached_compute(store, key, compute)
+        assert not cached
+        return result
+
+    assert asyncio.run(_run()) == {"energy": 7}
+    assert attempts == 2
+
+
 def test_two_calculations_cannot_flatten_to_one_cache_key() -> None:
     """`as_str()` is the `calculation_results` primary key, so its encoding has to be a bijection.
 

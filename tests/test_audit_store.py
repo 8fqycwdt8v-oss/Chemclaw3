@@ -49,7 +49,12 @@ def test_postgres_audit_sink_persists_an_event() -> None:
             # are `TEXT NOT NULL DEFAULT ''`.
             tool_revision="calc@server-9f3c1d",
         )
-        await PostgresAuditSink().record(event)
+        sink = PostgresAuditSink()
+        await sink.record(event)
+        # `record` buffers and returns — the write is off the tool-call path — so the drain seam
+        # is what a reader awaits before asserting rows. Production's reader is the runner's
+        # turn-end flush; this is the test-side use of the same seam.
+        await sink.flush()
 
         # Read the row back and assert every field survived the insert.
         conn = await psycopg.AsyncConnection.connect(settings.postgres_dsn)
@@ -101,9 +106,9 @@ def test_concurrent_appends_all_arrive() -> None:
     async def _run() -> None:
         await migrated_db_or_skip()
 
-        await asyncio.gather(
-            *(PostgresAuditSink().record(_race_event(index)) for index in range(_WRITERS))
-        )
+        sinks = [PostgresAuditSink() for _ in range(_WRITERS)]
+        await asyncio.gather(*(sink.record(_race_event(index)) for index, sink in enumerate(sinks)))
+        await asyncio.gather(*(sink.flush() for sink in sinks))
 
         async with await connect(settings.postgres_dsn) as conn:
             cursor = await conn.execute(

@@ -290,8 +290,9 @@ Four layers, each with a single responsibility. **Never merge their concerns.**
    connector-job wrapper) plus one derived `connector-<name>` queue per bundle that owns durable
    work (D-118/D-150), so there is no second *core* queue.
    Every result is persisted once via the calculation store, and a *persisted* result is never
-   recomputed (D-011) — `cached_compute` is a check-then-act, so concurrent misses on one key each
-   compute (measured: 8 together → 8 computes; 4 after the write → 0). Per-key in-flight dedup is a
+   recomputed (D-011). Concurrent misses on one key in one process share one computation
+   (`cached_compute` single-flights them; `tests/test_store.py` drives 8 together → 1 compute);
+   misses in *different processes* still each compute, and that cross-process half is a
    `docs/planning/DEFERRED.md` row with its own trigger.
 3. **Agent Skills** (`SKILL.md`) — "how do I do X" (judgment), loaded on demand.
 4. **Markdown knowledge graph in Git** (NetworkX indexer) — "what do we know" (data + relations).

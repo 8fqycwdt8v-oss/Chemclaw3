@@ -55,6 +55,18 @@ class ConnectorSettings(BaseSettings):
     # ready, and a blackholed host must not delay readiness by more than a couple of seconds.
     connector_health_timeout_seconds: float = Field(default=2.0, gt=0)
 
+    # Bound on one connector's whole *open* — TCP dial, `initialize`, `tools/list` — per turn
+    # (`connectors.transport.HeldConnectorSession.__aenter__`). Not redundant with the 5 s connect
+    # timeout, which covers only the dial: the handshake is otherwise bounded by the session's
+    # read timeout, sized for the slowest tool call (600 s for `calc`), so a connector that
+    # accepted the socket and then went mute held every turn for that long before the first token.
+    # Generous against a healthy fleet (a handshake is two round trips) and small against a turn.
+    connector_open_timeout_seconds: float = Field(default=15.0, gt=0)
+    # Bound on one connector session's close at turn teardown (`_shut_down`). Past it the holder
+    # task is cancelled rather than awaited, so the slowest session close cannot hold the end of
+    # every turn — the unbounded form made teardown hostage to a session that would not unwind.
+    connector_teardown_timeout_seconds: float = Field(default=5.0, gt=0)
+
     # Whole-run ceiling for one connector job's child workflow (`ConnectorJobWorkflow`).
     # Generous, because a connector job is by definition the long-running kind, but bounded so a
     # wedged connector workflow eventually fails instead of pinning a run forever. Deliberately
@@ -92,6 +104,13 @@ class ConnectorSettings(BaseSettings):
     # upsert of a row the job has already earned, and a database that cannot take it in this long
     # is down — in which case the retries, and then the log line, are the right outcome.
     job_record_timeout_seconds: float = Field(default=30.0, gt=0)
+    # How long the *model's* `get_durable_job_status` poll long-polls before answering `running`.
+    # A poll from the model costs a whole conversation turn (connector open, graph compile, model
+    # call), so answering `running` for a job finishing two seconds later spends another full turn
+    # learning what this short wait delivers now. Temporal's own long-poll, never a sleep loop;
+    # the HTTP job route deliberately does not wait (a browser's poll is cheap). Below the calc
+    # bundle's 20 s inline wait, because this is a *re*-check, not the first wait. 0 disables.
+    job_status_wait_seconds: float = Field(default=10.0, ge=0)
     # How many past runs `find_past_jobs` returns by default. Bounded because the results land in
     # the model's context: enough to recognise the campaign being looked for, not a table dump.
     job_record_search_limit: int = Field(default=20, ge=1)

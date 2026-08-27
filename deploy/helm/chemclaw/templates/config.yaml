@@ -12,9 +12,25 @@ metadata:
     "helm.sh/hook": pre-install,pre-upgrade
     "helm.sh/hook-weight": "-10"
     "helm.sh/hook-delete-policy": before-hook-creation
+{{- /* The retention posture must be stated, exactly as the egress posture must
+       (D-2026-08-26-a-knob-that-renders-nothing-is-not-a-knob): every window in `Settings`
+       defaults to disabled, so a chart that rendered without asking shipped tables that grow for
+       the deployment's lifetime under a comment naming retention as the bound. */ -}}
+{{- if eq (empty .Values.retention.windows) (empty .Values.retention.unboundedGrowthAccepted) }}
+{{- fail "retention: set exactly one of `retention.windows` (the CHEMCLAW_RETENTION_* day windows this release keeps history for) or `retention.unboundedGrowthAccepted: true` (the durable tables grow forever, which is not a safe end state but is now a stated one). Neither is set, or both are." }}
+{{- end }}
 data:
   {{- range $key, $value := .Values.config }}
   {{ $key }}: {{ $value | quote }}
+  {{- end }}
+  {{- /* Derived from `retention.windows` rather than hand-written in `config`, so stating a
+         window and forgetting the enable switch cannot happen — the switch exists only as a
+         consequence of a stated window. */}}
+  {{- if .Values.retention.windows }}
+  CHEMCLAW_RETENTION_ENABLED: "true"
+  {{- range $key, $value := .Values.retention.windows }}
+  {{ $key }}: {{ $value | quote }}
+  {{- end }}
   {{- end }}
   {{- /* Derived from the knowledge volume layout rather than hand-written in `config`, so the
          path the PR-gate submitter writes to can never drift from the volume it is mounted on

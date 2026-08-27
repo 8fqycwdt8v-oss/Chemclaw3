@@ -352,26 +352,30 @@ class _StallingTurn(ScriptedTurn):
             yield "tok "
 
 
-def test_a_client_that_stops_reading_is_torn_down_in_its_own_task(
+def test_a_client_that_stops_reading_detaches_the_stream_and_the_turn_still_cleans_up(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A stalled *transport* must end the turn deterministically, not leave it to the GC.
+    """A stalled *transport* detaches the view; the turn ends deterministically, never via the GC.
 
     `asyncio.timeout` cancels the task that entered it. When the model stalls that task is
     executing inside the generator and the conversion to `TimeoutError` works (the suite covers
     it). When the stall is in the transport — `await send(...)` blocked on a client that has
-    stopped reading — the generator is parked at a `yield`, the cancellation lands in
-    `sse_starlette._stream_response`, and sse-starlette does not `aclose()` the body iterator on
-    that path: the permit, the lease and the token booking are left to asyncio's async-generator
-    GC finalizer, which runs `aclose()` in a *new task with a different `Context`*. The audit
-    measured the result — `ValueError: <Token ...> was created in a different Context` out of
-    `_turn_ambient`, an unretrieved-task traceback with nothing tying it to a session.
+    stopped reading — the response task is parked in the send, `sse_starlette`'s `send_timeout`
+    ends the stream in the task serving it, and under
+    `D-2026-08-27-a-disconnect-is-a-detach-not-a-stop` that closes the *view only*: the pump task
+    keeps driving the turn, so the permit, the lease and the ambients are released in the pump's
+    own context at the turn's true end — never by asyncio's async-generator GC finalizer, whose
+    different-`Context` `aclose()` is what the audit measured
+    (`ValueError: <Token ...> was created in a different Context` out of `_turn_ambient`).
+
+    So the assertion is in two halves: the ASGI call returns while the turn is still *held* (the
+    detach), and once the pump finishes every guard is back (the deterministic teardown).
 
     Driven at the raw ASGI level because the property *is* the ASGI contract: no test client can
     express "the client took the headers and then stopped reading".
     """
     monkeypatch.setattr(settings, "service_sse_send_timeout_seconds", 1.0)
-    # Far above the send deadline, so what ends this turn is unambiguously the transport bound —
+    # Far above the send deadline, so what ends the stream is unambiguously the transport bound —
     # the case the turn deadline cannot answer.
     monkeypatch.setattr(settings, "service_turn_timeout_seconds", 30.0)
 
@@ -413,13 +417,29 @@ def test_a_client_that_stops_reading_is_torn_down_in_its_own_task(
         )
         async with asyncio.timeout(20):
             await stalled.wait()
-            # The send deadline, not the turn deadline, is what ends this — and it ends it
-            # cleanly: the app returns rather than raising out of the ASGI callable.
+            # The send deadline, not the turn deadline, is what ends the *stream* — and it ends
+            # it cleanly: the app returns rather than raising out of the ASGI callable.
             await turn
 
-        assert app.state.active_turns == {}, "the stalled client kept the session's turn slot"
+            # First half: the stream is gone but the turn is not. The session stays 409-locked
+            # and the permit stays taken for exactly as long as the model is still working —
+            # a detach is not a teardown.
+            running = app.state.running_turns.get(session_id)
+            assert running is not None and running.detached, (
+                "the stalled client's turn should continue detached, not die with the stream"
+            )
+            assert session_id in app.state.active_turns, (
+                "a detached turn must keep its session lease until it actually ends"
+            )
+
+            # Second half: the turn ends on its own (the scripted stream is ~2s), and the pump's
+            # completion — not a garbage collector — is what releases everything.
+            while app.state.running_turns.get(session_id) is not None:
+                await asyncio.sleep(0.05)
+
+        assert app.state.active_turns == {}, "the finished turn kept the session's turn slot"
         assert app.state.turn_semaphore._value == settings.service_max_concurrent_turns, (
-            "the stalled client kept its admission permit"
+            "the finished turn kept its admission permit"
         )
         # The ambients the turn stamped are gone, which is the half the GC finalizer used to
         # abandon at its first `ValueError`.

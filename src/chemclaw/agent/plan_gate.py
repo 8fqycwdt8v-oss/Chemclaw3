@@ -34,6 +34,7 @@ off, which is the worst outcome available. The line is drawn at state change
 session can research and propose and can do nothing else.
 """
 
+import asyncio
 import logging
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, Final, Literal
@@ -47,7 +48,7 @@ from chemclaw.agent.profiles import AgentProfile
 from chemclaw.core.config import settings
 from chemclaw.core.config.agent import HarnessAutonomy
 from chemclaw.core.ids import stable_hash
-from chemclaw.core.metrics_bridge import degraded, record_metric
+from chemclaw.core.metrics_bridge import degraded
 from chemclaw.core.session_context import get_current_session_id
 
 logger = logging.getLogger(__name__)
@@ -246,8 +247,17 @@ async def consume_turn_approval(session_id: str) -> None:
     the *only* one, since the write itself is durable (`plan_approvals.consumed_at`) rather than a
     session-state marker an eviction could drop long afterwards.
 
+    **Session-wide, not hash-targeted, and that closes a leak the targeted form had.** Spending
+    only the approval matching the plan *as it stands at turn end* left a hole a mid-turn reword
+    opened: the turn hashes plan B, finds no decision for it, and returns — while plan A's
+    approval stays live indefinitely, re-authorizing any future turn whose todo list hashes back
+    to A. "The turn used its authorization" is a fact about the session's turn, whatever identity
+    the plan drifted to, so every live approval the session holds is spent. That also removes the
+    checkpoint read this function used to pay to recompute a hash it no longer needs — and with
+    it the unreadable-plan branch, since there is nothing left to fail to read.
+
     Idempotent, because it is called on two paths that can both run for one turn and because the
-    store spends only a live approval: asking twice costs a no-op UPDATE, not a second plan's worth
+    store spends only live approvals: asking twice costs a no-op UPDATE, not a second plan's worth
     of authorization.
 
     Never raises. A store that cannot be reached must not turn a completed turn into a failed one;
@@ -255,29 +265,12 @@ async def consume_turn_approval(session_id: str) -> None:
     an approval.
     """
     try:
-        todos = await session_todos(session_id)
-        if todos is None:
-            # Unreadable, not absent. Returning here would leave a live one-shot approval unspent
-            # for every later turn, which is the direction this must never fail in — so it is
-            # logged and counted rather than passing silently as "this session proposed nothing".
-            logger.warning(
-                "could not read session %s's plan to spend its approval; the approval stays live "
-                "and the gate will refuse on the next call, which is the safe direction",
-                session_id,
-            )
-            record_metric(lambda m: m.increment("chemclaw_plan_unreadable_total", 1))
-            return
-        plan_hash = plan_identity(todos)
-        if plan_hash is None:
-            return
-        decision = await plan_approval_store().decision(session_id, plan_hash)
-        if decision and decision[0]:
-            await plan_approval_store().consume(session_id, plan_hash)
-            # Nothing else to un-set. There used to be a session *mode* representing the same
-            # authorization, which had to be revoked here or the surface kept reporting `execute`
-            # for a session whose every state-changing call would now be refused — the same
-            # disagreement between the displayed state and the enforced one that let DARK-1 go
-            # unnoticed. The mode is gone; the route derives what it displays from this row.
+        await plan_approval_store().consume_all(session_id)
+        # Nothing else to un-set. There used to be a session *mode* representing the same
+        # authorization, which had to be revoked here or the surface kept reporting `execute`
+        # for a session whose every state-changing call would now be refused — the same
+        # disagreement between the displayed state and the enforced one that let DARK-1 go
+        # unnoticed. The mode is gone; the route derives what it displays from this row.
     except Exception:
         degraded(
             logger,
@@ -288,6 +281,48 @@ async def consume_turn_approval(session_id: str) -> None:
         )
 
 
+#: Strong references to in-flight teardown spends, exactly `agent/turn_cost.py`'s `_PENDING`
+#: shape and for the same reason: a bare `create_task` is garbage-collectable mid-write.
+_PENDING_SPENDS: set[Any] = set()
+
+
+def spend_approval_after_teardown(session_id: str) -> None:
+    """Spend the session's approvals from a teardown path where awaiting is forbidden.
+
+    The abandoned-turn half of D-167's rule. A turn torn down mid-flight used to keep its approval
+    armed on the argument that "a turn that was undone has not used its authorization" — and that
+    premise is false the moment the turn has *issued a state-changing call*: durable jobs, note
+    proposals and calibration rows are not rolled back by the teardown, so the authorization was
+    used. Leaving it live made "drop the connection after the tools ran" a way to act under one
+    approval twice, the same shape as the token-budget bypass that vetoed stream_events v3.
+
+    Synchronous by the same contract as `turn_cost.record_turn_cost`: the caller is a
+    cancellation path in which an `await` re-raises immediately and skips everything after it. The
+    write runs on its own task, swallows its own failure, and is held in `_PENDING_SPENDS` until
+    it finishes. The caller decides *whether* the turn acted; this only spends.
+    """
+
+    async def _spend() -> None:
+        try:
+            await plan_approval_store().consume_all(session_id)
+        except Exception:
+            degraded(
+                logger,
+                "plan_approval",
+                "could not spend session %s's approval after an abandoned turn; the gate still "
+                "refuses an unreadable decision, so this risks an extra approval, never a free one",
+                session_id,
+            )
+
+    try:
+        task = asyncio.get_running_loop().create_task(_spend())
+    except RuntimeError:  # no running loop — a synchronous caller has nowhere to schedule
+        logger.warning("no event loop to spend session %s's approval after teardown", session_id)
+        return
+    _PENDING_SPENDS.add(task)
+    task.add_done_callback(_PENDING_SPENDS.discard)
+
+
 # --- the LangGraph wiring ------------------------------------------------------------------------
 
 
@@ -296,25 +331,57 @@ async def consume_turn_approval(session_id: str) -> None:
 # as a literal too — a rename upstream must fail this file's test, not silently reopen the hole.
 _PLAN_WRITE_TOOL = "write_todos"
 
+# The sentinel `plan_after_batch` returns when the batch's rewrite is unanswerable — two rewrites
+# in one message, or one whose arguments do not parse. Its own object rather than `None`, which
+# already means "no rewrite in this batch".
+_UNANSWERABLE: Final = object()
 
-def rewrites_the_plan_in_this_batch(request: Any) -> bool:
-    """Whether the assistant message carrying this call also rewrites the plan.
+
+def plan_after_batch(request: Any) -> Any:
+    """The plan this batch atomically produces: `None` (no rewrite), a list, or `_UNANSWERABLE`.
 
     The batch is read off the *message*, not the state, because that is the only place the other
-    calls in it are visible: `ToolNode` hands each call a runtime built from one pre-batch snapshot,
-    so state cannot answer "what else is running right now" by construction.
+    calls in it are visible: `ToolNode` hands each call a runtime built from one pre-batch
+    snapshot, so state cannot answer "what else is running right now" by construction.
 
-    Returns `False` when the message cannot be found rather than guessing. That is not a hole: the
-    approval check still runs, so the worst case is the behaviour this function was added to
-    correct, not a new one.
+    **This is what replaced refusing every gated call batched with a rewrite, and the difference
+    is the canonical harness shape.** "Tick the completed step and do the next one" is
+    `TodoListMiddleware`'s own pattern — one message carrying `write_todos` (status flip) beside
+    the step's tool call — and the blanket refusal denied it on *every* step of a plan: the model
+    retried, an identical retry then tripped `refuse_repeated_calls`, and a fully approved
+    multi-step plan could burn its whole loop allowance making no progress. A status flip does not
+    perturb `plan_identity` (the hash reads `content` only, which is what lets an approved plan
+    start a job without revoking itself), so judging the call against the plan the batch *writes*
+    lets the canonical shape through — while the DARK-1 batch (`write_todos(plan B)` beside a
+    write, under plan A's approval) still refuses, because plan B has no approval. Fails closed on
+    anything unanswerable: two rewrites in one message, or arguments the middleware itself would
+    reject.
+
+    Returns `None` when the message cannot be found rather than guessing. That is not a hole: the
+    approval check then runs against the pre-batch plan, which is the behaviour this function's
+    predecessor was added to tighten, not a new one.
     """
     messages = (request.state or {}).get("messages") or []
     this_call = request.tool_call.get("id")
     for message in reversed(messages):
         calls = getattr(message, "tool_calls", None) or []
-        if any(call.get("id") == this_call for call in calls):
-            return any(call.get("name") == _PLAN_WRITE_TOOL for call in calls)
-    return False
+        if not any(call.get("id") == this_call for call in calls):
+            continue
+        rewrites = [call for call in calls if call.get("name") == _PLAN_WRITE_TOOL]
+        if not rewrites:
+            return None
+        if len(rewrites) > 1:
+            # Two rewrites gathered concurrently: which one lands last is a race, so "the plan
+            # this batch produces" has no answer.
+            return _UNANSWERABLE
+        items = (rewrites[0].get("args") or {}).get("todos")
+        if not isinstance(items, list):
+            return _UNANSWERABLE
+        contents = [item.get("content") for item in items if isinstance(item, Mapping)]
+        if len(contents) != len(items) or not all(isinstance(c, str) for c in contents):
+            return _UNANSWERABLE
+        return contents
+    return None
 
 
 async def _plan_behind(request: Any, session_id: str) -> list[str] | None:
@@ -361,15 +428,19 @@ async def enforce_plan_approval(request: Any, handler: Callable[[Any], Any]) -> 
     when this runs. Reproduced against the real graph: turn 1 writes plan A and a chemist approves
     it; turn 2 emits `write_todos(plan B)` and `propose_knowledge_note(...)` together; the gate sees
     plan A, the approval stands, and the write executes under an approval given for a different
-    plan. That is the DARK-1 sequence this module exists to prevent, and the same batch then leaves
-    the approval *unspent*, because `consume_turn_approval` hashes the new plan and finds no
-    decision for it.
+    plan. That is the DARK-1 sequence this module exists to prevent.
 
-    So a gated call that arrives beside a plan rewrite is **refused**, without asking the store. It
-    is the one shape in which "the plan this call was approved against" is unanswerable: the batch
-    is atomic to the model and the two orders are indistinguishable from here. Refusing fails
-    closed, costs a legitimate turn one retry (the model re-issues the call in the next message,
-    against the plan it just wrote, and a human approves that plan), and needs no cross-call state.
+    So a gated call that arrives beside a plan rewrite is judged against the plan the batch
+    *writes* — read from the `write_todos` arguments in the same message (`plan_after_batch`) —
+    because the batch is atomic to the model and its post-state is the one answer to "which plan
+    is this call part of" that holds under either execution order. An earlier version refused the
+    whole shape outright, which failed closed and also failed the canonical harness pattern:
+    "tick the completed step, do the next one" batches a status-flip `write_todos` beside every
+    step's tool call, and refusing it livelocked approved multi-step plans against the repeat
+    guard. A status flip hashes identically (`plan_identity` reads `content` only), so the
+    canonical shape passes on its standing approval; a genuine rewrite is approved or refused on
+    *its own* hash, which is exactly D-167's question. Anything unanswerable — two rewrites in one
+    batch, unparseable arguments — still refuses without asking the store.
 
     **Waiting jobs need no exclusion here.** Under MAF a todo waiting on a durable job was marked by
     prefixing its description, and the identity had to filter those out or an approved plan revoked
@@ -391,9 +462,10 @@ async def enforce_plan_approval(request: Any, handler: Callable[[Any], Any]) -> 
     # `enforce_tool_authz` and `authorize_trigger`, which is what governs them.
     if not session_id:
         return await handler(request)
-    if rewrites_the_plan_in_this_batch(request):
+    rewritten = plan_after_batch(request)
+    if rewritten is _UNANSWERABLE:
         raise plan_approval_refusal(name)
-    lines = await _plan_behind(request, session_id)
+    lines = rewritten if rewritten is not None else await _plan_behind(request, session_id)
     if lines is not None and await approval_stands(session_id, plan_identity(lines)):
         return await handler(request)
     raise plan_approval_refusal(name)

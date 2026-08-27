@@ -31,6 +31,7 @@ from typing import Any
 import psycopg
 from langchain_core.messages import AIMessage, HumanMessage
 
+from chemclaw.agent.audit import default_audit_sink
 from chemclaw.agent.checkpointer import checkpointer
 from chemclaw.agent.chemclaw_agent import connector_specs
 from chemclaw.agent.framing import frame_untrusted
@@ -43,12 +44,14 @@ from chemclaw.agent.plan_gate import (
     consume_turn_approval,
     gate_applies,
     plan_identity,
+    spend_approval_after_teardown,
 )
 from chemclaw.agent.plan_state import session_todos
 from chemclaw.agent.profiles import get_profile
 from chemclaw.agent.repeat_guard import begin_call_watch, end_call_watch
 from chemclaw.agent.scratchpad import memory_store
 from chemclaw.agent.session import TurnSession
+from chemclaw.agent.session_events import claim_unconsumed
 from chemclaw.agent.state import turn_config
 from chemclaw.agent.turn_cost import TurnCost, record_turn_cost
 from chemclaw.agent.turn_flags import reset_dry_run, set_dry_run
@@ -178,6 +181,9 @@ async def run_turn(
     # (ISSUE-B-10). What the snapshot is for, and why only `session.state` is in it, is in
     # `_roll_back_unfinished`.
     state_snapshot = copy.deepcopy(session.state)
+    # Bound before the try so the teardown clause below can read it whatever point the turn died
+    # at — a cancellation during the connector open arrives before the real trace is built.
+    tool_trace: ToolCallTrace | None = None
     with _turn_ambient(
         session.session_id, actor, roles, dry_run, ledger.correlation_id, ledger.usage
     ):
@@ -211,10 +217,16 @@ async def run_turn(
                 # would bind a second set of connector sessions and start the continuation from an
                 # empty conversation. Compiled *inside* the turn because it binds this turn's
                 # connector tools at construction (M7).
+                # Built here rather than left to `build_langgraph_agent`'s own default for one
+                # reason: the durable sink batches its writes off the tool-call path, and the
+                # turn-end flush below needs the object to drain. Same sink either way —
+                # `default_audit_sink()` is exactly what the builder would have called.
+                audit_sink = default_audit_sink()
                 graph = graph_factory(
                     profile=profile,
                     actor=actor or "",
                     correlation_id=ledger.correlation_id,
+                    audit_sink=audit_sink,
                     connectors=turn_tools,
                     checkpointer=await _turn_checkpointer(),
                     store=await _turn_store(),
@@ -232,10 +244,18 @@ async def run_turn(
                 # metrics — because none of it was ever a property of which framework produced the
                 # tokens, which is what made deleting the other engine a deletion rather than a
                 # rewrite.
+                # What finished while nobody was looking reaches the *model*, not only a browser
+                # tab that may not be open. `claim_unconsumed` had exactly one consumer — the SSE
+                # push-back stream — so a chemist who closed the tab lost the notification and the
+                # model never learned its own job finished: the flagship "compute then reason"
+                # exchange required the user to re-prompt and the model to remember the job id.
+                # The claim is atomic, so a live tab's tailer and this turn cannot both deliver
+                # one row; whichever asks first wins, and both audiences are told the same way.
+                user_input = await _with_pushed_job_results(session.session_id, user_message)
                 async for event in _stream_into(
                     graph_events(
                         graph,
-                        user_message,
+                        user_input,
                         config=graph_config,
                         trace=tool_trace,
                         on_signal=ledger.note_signal,
@@ -298,6 +318,15 @@ async def run_turn(
             await _record_transcript(
                 history, session, user_message, ledger.answer_text, ledger.exchanges
             )
+            # Drain the turn's buffered audit rows before answering, so "the turn is done" also
+            # means "its trail is queryable" — the off-path batching in `PostgresAuditSink` makes
+            # the write eventually-consistent otherwise, and one batched write here costs
+            # milliseconds where ninety inline ones cost the turn. Duck-typed because the
+            # `AuditSink` protocol is `record` alone and only the batching sink has anything to
+            # drain; on the disconnect path the flusher task simply finishes on its own.
+            sink_flush = getattr(audit_sink, "flush", None)
+            if sink_flush is not None:
+                await sink_flush()
             # **Before the yield, not after it.** The turn's rows are committed by now and they are
             # a complete, paired exchange — there is nothing half-written left to undo. The
             # cancellation that reaches a finished turn is delivered *while suspended in the yield
@@ -313,6 +342,14 @@ async def run_turn(
                 await consume_turn_approval(session.session_id)
         except (GeneratorExit, asyncio.CancelledError):
             _roll_back_unfinished(session, state_snapshot, ledger)
+            # A torn-down turn that already *acted* has used its authorization: durable jobs, note
+            # proposals and calibration rows are not rolled back by the teardown, so leaving the
+            # approval live made "drop the connection after the tools ran" a way to act under one
+            # approval twice. Spent on a task of its own because an `await` here re-raises the
+            # cancellation and skips the teardown after it (`spend_approval_after_teardown`). A
+            # turn that only *read* still keeps its approval — the one-turn residual D-167 accepts.
+            if plan_gated and tool_trace is not None and _turn_acted(tool_trace):
+                spend_approval_after_teardown(session.session_id)
             raise
         except Exception as exc:
             yield _failure_event(exc, session, ledger)
@@ -495,10 +532,14 @@ async def _open_turn_surface(
     Returns:
         The turn's bound tools, and the names of every capability that did not answer.
     """
-    turn_tools, unreachable = await open_connector_specs(
-        stack, connectors if connectors is not None else connector_specs()
+    # Gathered, not sequential: the connector open and the Temporal probe share nothing, and both
+    # sit on the pre-first-token path of every turn — run one after the other they *add*, so a
+    # slow broker taxed even a turn whose connectors answered instantly.
+    (turn_tools, unreachable), durable_up = await asyncio.gather(
+        open_connector_specs(stack, connectors if connectors is not None else connector_specs()),
+        _durable_subsystem_reachable(),
     )
-    if not await _durable_subsystem_reachable():
+    if not durable_up:
         unreachable = [*unreachable, _DURABLE_SUBSYSTEM]
     return turn_tools, unreachable
 
@@ -721,6 +762,20 @@ def _failure_event(exc: Exception, session: TurnSession, ledger: _TurnLedger) ->
     """`failure_event` for a turn that is already running, with this turn's log line beside it."""
     logger.exception("turn failed for session %s", session.session_id)
     return failure_event(exc, session.session_id, ledger.correlation_id)
+
+
+def _turn_acted(trace: ToolCallTrace) -> bool:
+    """Whether this turn issued any state-changing call — what decides if a teardown spends.
+
+    `called_tools` counts attempts, refused ones included, and that is the right set here: the
+    conservative direction for an authorization is to spend it, and the cost of over-spending is
+    one extra approval click where the cost of under-spending is a free second turn under a
+    decision a person made once.
+    """
+    from chemclaw.agent.authz import side_effecting_tools
+
+    acting = side_effecting_tools()
+    return any(name in acting for name in trace.called_tools)
 
 
 def _roll_back_unfinished(
@@ -947,6 +1002,44 @@ async def _durable_subsystem_reachable() -> bool:
         logger.debug("the durable subsystem did not answer its health probe", exc_info=True)
         METRICS.increment("chemclaw_durable_unreachable_total")
         return False
+
+
+async def _with_pushed_job_results(session_id: str, user_message: str) -> str:
+    """The turn's input, with any waiting job push-back appended as framed data.
+
+    The mailbox half of "compute then reason": a job that outlived its turn writes a
+    `session_events` row, and until this existed the row's only consumer was the browser's SSE
+    stream — so with the tab closed the completion reached nobody, and the model started its next
+    turn not knowing work it launched had finished. Claimed with the same atomic claim the stream
+    uses, scoped to the same two kinds, so the two consumers cannot double-deliver one row and
+    neither can starve the other of kinds it does not handle.
+
+    The chemist's words lead and the push-back follows, framed
+    (`chemclaw.agent.framing.frame_untrusted`) because a job summary is workflow output, not an
+    instruction. Best-effort in both directions: a mailbox that cannot be read must not fail the
+    turn, and a memory-backed deployment has no mailbox to read.
+    """
+    if settings.session_store != "postgres":
+        return user_message
+    try:
+        pushed = await claim_unconsumed(session_id, kinds=("job_completed", "job_failed"))
+    except Exception:
+        logger.debug("could not read session %s's job push-back mailbox", session_id, exc_info=True)
+        return user_message
+    if not pushed:
+        return user_message
+    summary = "\n".join(
+        f"- {event.kind}: {json.dumps(event.payload, sort_keys=True, default=str)}"
+        for event in pushed
+    )
+    return (
+        f"{user_message}\n\n"
+        "Since your previous turn, durable job(s) this session started have finished. Some may "
+        "have failed: report any entry whose kind is 'job_failed' to the chemist rather than "
+        "describing that work as done. Their outcomes follow as data; use "
+        "get_durable_job_status for full results where needed.\n"
+        + frame_untrusted(summary, note_id="job-results")
+    )
 
 
 def _job_results_message(results: dict[str, dict[str, Any]]) -> str:

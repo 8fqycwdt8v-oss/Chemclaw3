@@ -102,16 +102,18 @@ class ScriptedTurn(ABC):
         test cannot have.
 
         `build_kwargs` is whatever `run_turn` passes (profile, actor, correlation id, the turn's
-        connectors, the checkpointer), forwarded untouched so the graph a test drives is the graph
-        production builds. The audit sink is the one thing overridden: a test process has no
-        database, and `default_audit_sink()` would reach for one on every tool call.
+        connectors, the checkpointer, its audit sink), forwarded untouched so the graph a test
+        drives is the graph production builds. The audit sink is the one thing overridden: a test
+        process has no database, and a durable sink would reach for one on every tool call. The
+        runner now passes its own (`default_audit_sink()`, so it can flush the batching sink at
+        turn end); under the test settings that resolves to a `NullAuditSink`, and this override
+        keeps the graph on a null sink even for a test that flips `session_store`.
         """
         from chemclaw.agent.audit import NullAuditSink
         from chemclaw.agent.langgraph_agent import build_langgraph_agent
 
-        return build_langgraph_agent(
-            _ReplayingChatModel(turn=self), audit_sink=NullAuditSink(), **build_kwargs
-        )
+        build_kwargs["audit_sink"] = NullAuditSink()
+        return build_langgraph_agent(_ReplayingChatModel(turn=self), **build_kwargs)
 
 
 def _graph_chunk(chunk: Chunk) -> AIMessageChunk:

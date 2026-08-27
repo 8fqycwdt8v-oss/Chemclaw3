@@ -73,14 +73,16 @@ _LATEST = (
     "ORDER BY decided_at DESC, id DESC LIMIT 1"
 )
 
-# Spend the latest still-unspent approval for this plan. Scoped by `approved AND consumed_at IS
-# NULL` so it is idempotent (a second call matches nothing) and so it can never stamp a rejection or
-# reach back past a newer decision — the subquery picks exactly the row `_LATEST` reads.
-_CONSUME = (
-    "UPDATE plan_approvals SET consumed_at = now() WHERE id = ("
-    "SELECT id FROM plan_approvals "
-    "WHERE session_id = %s AND plan_hash = %s AND approved AND consumed_at IS NULL "
-    "ORDER BY decided_at DESC, id DESC LIMIT 1)"
+# Spend every still-unspent approval this session holds, whatever plan each was recorded against.
+# Session-wide rather than hash-targeted, because hash-targeted consumption leaked: a turn that
+# reworded its plan mid-flight hashed the *new* plan at turn end, found no decision for it, and
+# left the *old* plan's approval live — re-authorizing any future turn whose todo list hashed back
+# to it, outside D-167's one-turn limit. "The turn used its authorization" is a fact about the
+# session's turn, not about whichever plan identity survived to the end of it. Scoped by
+# `approved AND consumed_at IS NULL` so it is idempotent and can never stamp a rejection.
+_CONSUME_ALL = (
+    "UPDATE plan_approvals SET consumed_at = now() "
+    "WHERE session_id = %s AND approved AND consumed_at IS NULL"
 )
 
 
@@ -92,8 +94,8 @@ class ApprovalStore(Protocol):
         """Record one human decision about one specific plan."""
         ...
 
-    async def consume(self, session_id: str, plan_hash: str) -> None:
-        """Spend this plan's live approval, so it stops authorizing anything."""
+    async def consume_all(self, session_id: str) -> None:
+        """Spend every live approval this session holds, so the next turn needs its own."""
         ...
 
     async def decision(self, session_id: str, plan_hash: str) -> tuple[bool, str] | None:
@@ -119,16 +121,17 @@ class PlanApprovalStore:
                 await cur.execute(_INSERT, (session_id, plan_hash, actor, approved))
             await conn.commit()
 
-    async def consume(self, session_id: str, plan_hash: str) -> None:
-        """Stamp this plan's live approval as spent — durably, unlike the marker this replaces.
+    async def consume_all(self, session_id: str) -> None:
+        """Stamp every live approval this session holds as spent — durably.
 
-        Idempotent by construction (`_CONSUME` matches only an unspent approval), because the
+        Idempotent by construction (`_CONSUME_ALL` matches only unspent approvals), because the
         callers cannot guarantee they run once: a turn that answers and is then torn down, and a
-        turn that fails after running tools, both spend the same approval.
+        turn that fails after running tools, both spend the same approvals. Session-wide for the
+        drift-leak reason the SQL's own comment carries.
         """
         async with self._connection() as conn:
             async with conn.cursor() as cur:
-                await cur.execute(_CONSUME, (session_id, plan_hash))
+                await cur.execute(_CONSUME_ALL, (session_id,))
             await conn.commit()
 
     async def decision(self, session_id: str, plan_hash: str) -> tuple[bool, str] | None:
@@ -191,11 +194,15 @@ class InMemoryPlanApprovalStore:
         """Append one human decision about one specific plan."""
         self._decisions.append(_Decision(session_id, plan_hash, actor, approved))
 
-    async def consume(self, session_id: str, plan_hash: str) -> None:
-        """Spend this plan's live approval, if it has one that has not been spent already."""
-        latest = self._latest(session_id, plan_hash)
-        if latest is not None and latest.approved and latest.consumed_at is None:
-            latest.consumed_at = datetime.now(UTC)
+    async def consume_all(self, session_id: str) -> None:
+        """Spend every live approval this session holds, mirroring `_CONSUME_ALL` exactly."""
+        for decision in self._decisions:
+            if (
+                decision.session_id == session_id
+                and decision.approved
+                and decision.consumed_at is None
+            ):
+                decision.consumed_at = datetime.now(UTC)
 
     async def decision(self, session_id: str, plan_hash: str) -> tuple[bool, str] | None:
         """The latest *effective* `(approved, actor)`, or None if nobody has decided."""

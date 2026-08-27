@@ -797,6 +797,93 @@ def test_the_callers_entitlements_are_not_sent_to_a_connector() -> None:
     )
 
 
+def test_two_concurrent_calls_on_one_session_each_read_their_own_caller() -> None:
+    """Parallel tool use puts two `tools/call`s in flight on one `mcp-session-id`.
+
+    The per-call re-binding above was measured strictly sequentially — alice's handshake, then
+    one call as bob. `ToolNode` gathers a whole batch, so two calls can be in flight on the same
+    session at once, and if the SDK served them from one task the bind/reset pairs would
+    interleave: records mis-attributed, and `reset_caller`'s token reuse raising out of a
+    `finally` would fail the call outright. This pins that each in-flight call reads its own
+    headers — the property the fleet's whole identity story rests on under parallel batches.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    from fastapi.testclient import TestClient
+
+    from chemclaw.connectors.caller import caller_provenance
+    from chemclaw.connectors.server import connector_app
+
+    seen: list[tuple[str, str, str]] = []
+    server = FastMCP("probe2")
+
+    @server.tool()
+    async def slow_whoami() -> str:
+        """Dawdle long enough that the two calls overlap, then record the caller."""
+        await asyncio.sleep(0.25)
+        seen.append(caller_provenance())
+        return "ok"
+
+    def who(name: str) -> dict[str, str]:
+        return {
+            HEADER_ACTOR: f"{name}-oid",
+            HEADER_SESSION: f"sess-{name}",
+            HEADER_CORRELATION: f"corr-{name}",
+            "Accept": "application/json, text/event-stream",
+            "Content-Type": "application/json",
+        }
+
+    with TestClient(
+        connector_app(server, name="probe2"), base_url="http://127.0.0.1:8000"
+    ) as client:
+        opened = client.post(
+            "/mcp",
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-03-26",
+                    "capabilities": {},
+                    "clientInfo": {"name": "probe2", "version": "1"},
+                },
+            },
+            headers=who("opener"),
+        )
+        session_id = opened.headers["mcp-session-id"]
+        client.post(
+            "/mcp",
+            json={"jsonrpc": "2.0", "method": "notifications/initialized"},
+            headers={**who("opener"), "mcp-session-id": session_id},
+        )
+
+        def call(name: str, request_id: int) -> None:
+            client.post(
+                "/mcp",
+                json={
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "method": "tools/call",
+                    "params": {"name": "slow_whoami", "arguments": {}},
+                },
+                headers={**who(name), "mcp-session-id": session_id},
+            )
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            first = pool.submit(call, "alice", 2)
+            second = pool.submit(call, "bob", 3)
+            first.result()
+            second.result()
+
+    assert sorted(seen) == [
+        ("alice-oid", "sess-alice", "corr-alice"),
+        ("bob-oid", "sess-bob", "corr-bob"),
+    ], (
+        f"two concurrent calls on one session read {seen}; the per-call binding interleaved "
+        "and a durable row would be stamped with the other caller's identity"
+    )
+
+
 def test_the_dev_banner_does_not_echo_a_credential_the_operator_already_exported(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

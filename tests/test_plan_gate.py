@@ -508,7 +508,7 @@ def test_a_spent_approval_stays_spent_across_a_rehydrate(
 async def _call_with_messages(tool: str, session: _Session, messages: list[Any]) -> bool:
     """`_call`, but with the assistant messages this call arrives among.
 
-    `rewrites_the_plan_in_this_batch` reads the *batch* off `state["messages"]` rather than off the
+    `plan_after_batch` reads the *batch* off `state["messages"]` rather than off the
     state's `todos`, because that is the only place the other calls in the same assistant message
     are visible — `ToolNode` builds every call's runtime from one pre-batch snapshot, so state
     cannot answer "what else is running right now" by construction. So a test of that rule has to
@@ -577,6 +577,98 @@ def test_a_gated_call_beside_a_plan_rewrite_is_refused_even_with_a_live_approval
     asyncio.run(_run())
 
 
+def test_a_drifted_plans_old_approval_is_spent_at_turn_end(
+    approvals: InMemoryPlanApprovalStore,
+) -> None:
+    """Consumption is session-wide, so a mid-turn reword cannot leave the old approval armed.
+
+    The hash-targeted form leaked: the turn ends holding plan B, hashes it, finds no decision,
+    and returns — while plan A's approval stays live indefinitely, re-authorizing any future turn
+    whose todo list hashes back to A. D-167's limit is one turn, whatever the plan drifted to.
+    """
+
+    async def _run() -> bool:
+        session = _Session("drift-leak")
+        await _set_plan(session, ["plan A step"])
+        await _approve(approvals, session)
+        # The model rewords the plan mid-turn; the turn ends holding plan B.
+        await _set_plan(session, ["plan B step"])
+        await consume_turn_approval(session.session_id)
+        # A later turn drifts back to plan A. Its old approval must be spent, not waiting.
+        await _set_plan(session, ["plan A step"])
+        return await _try_call("propose_knowledge_note", session)
+
+    assert not asyncio.run(_run()), (
+        "a mid-turn reword left the old plan's approval live past the turn that ran under it"
+    )
+
+
+def test_ticking_a_step_beside_the_steps_own_call_is_allowed(
+    approvals: InMemoryPlanApprovalStore,
+) -> None:
+    """The canonical harness shape must pass on its standing approval — the livelock this closes.
+
+    "Tick the completed step and do the next one" is `TodoListMiddleware`'s own pattern: one
+    assistant message carrying `write_todos` (a status flip, same `content` list) beside the next
+    step's tool call. The blanket batch refusal denied it on *every* step — the model retried, an
+    identical retry tripped `refuse_repeated_calls`, and a fully approved multi-step plan could
+    burn its loop allowance making no progress. A status flip does not perturb `plan_identity`
+    (the hash reads `content` only), so judging against the plan the batch *writes* lets this
+    through while the DARK-1 rewrite above still refuses on its own unapproved hash.
+    """
+
+    async def _run() -> None:
+        session = _Session("tick-and-act")
+        plan = ["compute the barrier", "propose the note"]
+        await _set_plan(session, plan)
+        await _approve(approvals, session)
+        tick = {
+            "name": "write_todos",
+            "args": {
+                "todos": [
+                    {"content": "compute the barrier", "status": "completed"},
+                    {"content": "propose the note", "status": "in_progress"},
+                ]
+            },
+            "id": "c-plan",
+        }
+        assert await _call_with_messages(
+            "propose_knowledge_note", session, [_batch(tick, _GATED)]
+        ), "a status-flip write_todos beside the step's own call was refused — the livelock shape"
+
+        # A *content* rewrite in the same shape is a different plan, and refuses on its own hash.
+        reword = {
+            "name": "write_todos",
+            "args": {"todos": [{"content": "something else entirely", "status": "pending"}]},
+            "id": "c-plan-2",
+        }
+        with pytest.raises(PlanNotApprovedError):
+            await _call_with_messages("propose_knowledge_note", session, [_batch(reword, _GATED)])
+
+    asyncio.run(_run())
+
+
+def test_an_unanswerable_batch_rewrite_still_refuses(
+    approvals: InMemoryPlanApprovalStore,
+) -> None:
+    """Two rewrites in one batch, or unparseable arguments, fail closed without asking the store."""
+
+    async def _run() -> None:
+        session = _Session("unanswerable-batch")
+        await _set_plan(session, ["step one"])
+        await _approve(approvals, session)
+        two = {"name": "write_todos", "args": {"todos": []}, "id": "c-plan-b"}
+        with pytest.raises(PlanNotApprovedError):
+            await _call_with_messages(
+                "propose_knowledge_note", session, [_batch(_WRITE_TODOS, two, _GATED)]
+            )
+        garbled = {"name": "write_todos", "args": {"todos": "not-a-list"}, "id": "c-plan-c"}
+        with pytest.raises(PlanNotApprovedError):
+            await _call_with_messages("propose_knowledge_note", session, [_batch(garbled, _GATED)])
+
+    asyncio.run(_run())
+
+
 def test_the_same_call_is_allowed_in_the_message_after_the_plan_was_rewritten(
     approvals: InMemoryPlanApprovalStore,
 ) -> None:
@@ -599,3 +691,31 @@ def test_the_same_call_is_allowed_in_the_message_after_the_plan_was_rewritten(
         )
 
     asyncio.run(_run())
+
+
+def test_a_teardown_spend_lands_without_awaiting(
+    approvals: InMemoryPlanApprovalStore,
+) -> None:
+    """The abandonment half of D-167: a torn-down turn that acted has used its authorization.
+
+    The runner's cancellation path may not await (an `await` re-raises the cancellation and skips
+    the teardown after it), so the spend runs on a task of its own — the `turn_cost` pattern. The
+    assertion drains the loop before reading the store, exactly as the runner's own teardown
+    allows the write to finish after the turn is gone.
+    """
+    from chemclaw.agent.plan_gate import spend_approval_after_teardown
+
+    async def _run() -> bool:
+        session = _Session("torn-down")
+        await _set_plan(session, ["start the screen"])
+        await _approve(approvals, session)
+        spend_approval_after_teardown(session.session_id)
+        # Let the spend task run; the caller never awaits it, the loop does.
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        return await _try_call("propose_knowledge_note", session)
+
+    assert not asyncio.run(_run()), (
+        "an abandoned turn's approval stayed live; 'drop the connection after the tools ran' "
+        "re-authorizes a second turn under one human decision"
+    )

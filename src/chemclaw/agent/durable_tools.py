@@ -38,6 +38,7 @@ tool. What is genuinely single is the *decode*:
 an error, and all three go through it.
 """
 
+import asyncio
 import logging
 from datetime import UTC, datetime
 from typing import Any, Literal
@@ -374,15 +375,23 @@ async def get_durable_job_status(job_id: str) -> DurableJobStatus:
             "completed" with an empty result would tell a chemist their calculation is done while
             silently withholding it.
     """
-    return await job_status(job_id)
+    return await job_status(job_id, wait_seconds=settings.job_status_wait_seconds)
 
 
-async def job_status(job_id: str) -> DurableJobStatus:
+async def job_status(job_id: str, *, wait_seconds: float = 0.0) -> DurableJobStatus:
     """One durable job's status, from Temporal while it remembers and the record afterwards.
 
     The tool above and the front door's `GET /jobs/{id}` are the same question asked by different
     surfaces, so they are one function: a chemist polling in chat and a chemist refreshing a page
     must not be able to get different answers about the same run.
+
+    `wait_seconds` is where the two surfaces legitimately differ, and it is a parameter for that
+    reason rather than a fork: a poll from the *model* costs a whole conversation turn — connector
+    open, graph compile, model call — so answering `running` for a job finishing two seconds later
+    spends another full turn learning what a short long-poll would have delivered now. The tool
+    passes `job_status_wait_seconds`; the HTTP route passes nothing, because a browser's poll is
+    cheap and holding its request open is not. The wait is Temporal's own long-poll
+    (`handle.result()`), not a sleep loop.
     """
     client = await connect()
     handle = client.get_workflow_handle(job_id)
@@ -406,6 +415,19 @@ async def job_status(job_id: str) -> DurableJobStatus:
             raise ValueError(f"no durable job with id {job_id!r}") from exc
         return recorded
     status = _TERMINAL.get(description.status, "running") if description.status else "running"
+    if status == "running" and wait_seconds > 0:
+        try:
+            result = await asyncio.wait_for(handle.result(), wait_seconds)
+        except TimeoutError:
+            return DurableJobStatus(job_id=job_id, status="running")
+        except Exception:
+            # The run reached a terminal state that is not success while we waited (failed,
+            # cancelled, timed out) — `handle.result()` raises for those. Re-describe once and
+            # report the state by the same mapping the no-wait path uses.
+            refreshed = await handle.describe()
+            ended = _TERMINAL.get(refreshed.status, "running") if refreshed.status else "running"
+            return DurableJobStatus(job_id=job_id, status=ended)
+        return completed_job_status(job_id, result)
     if status != "completed":
         return DurableJobStatus(job_id=job_id, status=status)
     return completed_job_status(job_id, await handle.result())

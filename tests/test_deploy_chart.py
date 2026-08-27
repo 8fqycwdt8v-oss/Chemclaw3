@@ -1705,6 +1705,42 @@ def test_an_unstated_egress_posture_refuses_to_render() -> None:
     )
 
 
+def test_an_unstated_retention_posture_refuses_to_render() -> None:
+    """The sibling of the egress guard, for the same reason: a knob nobody set is a wrong default.
+
+    Every `CHEMCLAW_RETENTION_*` window in `Settings` defaults to `0` (disabled) — a deliberate
+    policy stated in `core/config/memory.py`, not a code default this chart should silently ship —
+    so a release that never states its retention posture would run with every durable table
+    growing forever under a `values.yaml` comment nobody re-reads. The render now fails unless
+    exactly one of `retention.windows` or `retention.unboundedGrowthAccepted: true` is stated.
+
+    Asserted on the template text, exactly like the egress guard above and for the same reason:
+    `helm` is a live-edge dependency this suite does not have.
+    """
+    config = (CHART / "templates" / "config.yaml").read_text()
+    guard = "eq (empty .Values.retention.windows) (empty .Values.retention.unboundedGrowthAccepted)"
+    assert guard in config, "the retention posture can be left unstated"
+    assert "{{- fail " in config, "the guard warns rather than refusing"
+    assert _values()["retention"]["windows"] == {}, (
+        "the shipped default states a retention policy the release never wrote down"
+    )
+    assert _values()["retention"]["unboundedGrowthAccepted"] is False, (
+        "the shipped default grants a permission the release never wrote down"
+    )
+    # Every render of the shipped defaults must carry the escape hatch, or it cannot render at all
+    # — the same two renders the egress test counts, now each paying both flags.
+    makefile = (DEPLOY.parent / "Makefile").read_text()
+    flagged = [
+        line
+        for line in makefile.splitlines()
+        if "--set retention.unboundedGrowthAccepted=true" in line
+        and not line.lstrip().startswith("@#")
+    ]
+    assert len(flagged) == 2, (
+        "a shipped-defaults render is missing the flag it cannot render without"
+    )
+
+
 def test_dns_egress_survives_narrowing_the_destinations() -> None:
     """DNS is its own rule, so scoping the destinations cannot take name resolution with it.
 
@@ -1922,11 +1958,15 @@ def test_every_supply_chain_gate_the_runbook_names_actually_runs() -> None:
 
 
 def _render(*overrides: str) -> subprocess.CompletedProcess[str]:
-    """`helm template` on the chart, with the egress posture stated and `--set` overrides applied.
+    """`helm template` on the chart, with the egress and retention postures stated.
 
     `networkPolicy.allowAnyDestination=true` is the same flag the Makefile's two renders, the
     runbook and `deploy/README.md` all pass: the chart refuses to render until a release states
     where its pods may talk, and a validation render has no destinations to enumerate.
+    `retention.unboundedGrowthAccepted=true` is the same shape for the sibling guard
+    (`D-2026-08-26-a-knob-that-renders-nothing-is-not-a-knob`'s retention half): a validation
+    render states no disposal policy either, and both flags are what every other caller of this
+    chart pays too — see `test_the_shipped_defaults_still_render`.
     """
     return subprocess.run(
         [
@@ -1936,6 +1976,8 @@ def _render(*overrides: str) -> subprocess.CompletedProcess[str]:
             str(CHART),
             "--set",
             "networkPolicy.allowAnyDestination=true",
+            "--set",
+            "retention.unboundedGrowthAccepted=true",
             *overrides,
         ],
         capture_output=True,
