@@ -536,8 +536,13 @@
         },
         {
           "expr": "sum(rate(chemclaw_turn_send_timeouts_total[5m]))",
-          "legendFormat": "SSE send timeout",
+          "legendFormat": "turn SSE send timeout",
           "refId": "F"
+        },
+        {
+          "expr": "sum(rate(chemclaw_event_stream_send_timeouts_total[5m]))",
+          "legendFormat": "push-back SSE send timeout",
+          "refId": "I"
         },
         {
           "expr": "sum(rate(chemclaw_turns_failed_total[5m]))",

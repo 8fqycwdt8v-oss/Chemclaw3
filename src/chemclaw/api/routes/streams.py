@@ -82,16 +82,18 @@ class _SlotBoundEventStream(EventSourceResponse):
         where the session id is still in scope to name. The slot is returned either way — that is
         what the `finally` below has always been for.
 
-        **Logged and not counted, which is a gap rather than a decision.** `_TurnStream` has
+        **Counted as well as logged, on its own series.** `_TurnStream` has
         `chemclaw_turn_send_timeouts_total` beside its identical log line, and that declaration's
         own comment forbids the obvious shortcut: reusing it here would put two populations —
         turns cut mid-answer and push-back streams cut mid-poll — under one denominator nobody can
-        interpret. A `chemclaw_event_stream_send_timeouts_total` belongs in `core/metrics.py`
-        beside it; until it is declared, this line is the whole record.
+        interpret. So this has `chemclaw_event_stream_send_timeouts_total` instead, which is the
+        counter that makes "clients keep dropping off the push-back channel" a rate an operator can
+        watch rather than a log line somebody has to think to grep for.
         """
         try:
             await super().__call__(scope, receive, send)
         except SendTimeoutError:
+            METRICS.increment("chemclaw_event_stream_send_timeouts_total")
             logger.warning(
                 "the push-back client of session %s stopped reading for %ss; the stream was closed",
                 self._session_id,

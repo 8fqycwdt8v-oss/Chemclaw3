@@ -298,6 +298,15 @@ _COUNTERS: dict[str, str] = {
     "chemclaw_event_streams_rejected_total": (
         "Push-back event streams rejected with 429 at the per-user or per-process cap."
     ),
+    # The push-back stream's own send timeout, and a separate series from
+    # `chemclaw_turn_send_timeouts_total` because that declaration's comment forbids exactly this
+    # merge: two populations in one counter is a denominator nobody can interpret. A turn stream cut
+    # for a stalled reader and a push-back stream cut for one are different streams with different
+    # lifetimes — the push-back stream is long-lived and holds a per-user slot, so a half-open
+    # connection parks it invisibly until the kernel gives up on the socket.
+    "chemclaw_event_stream_send_timeouts_total": (
+        "Push-back event streams closed because a client stopped reading past the SSE send timeout."
+    ),
     # A pooled checkout that times out is indistinguishable, from the route's point of view, from
     # an unreachable database — both arrive as `ConnectionError` and both are retryable. The load
     # run turned 16 of them into HTTP 500s because no route caught them, and the pool they came
@@ -778,8 +787,19 @@ _COUNTER_LABELS: dict[str, tuple[str, ...]] = {
 # keyed on it is the same slow leak this codebase has already fixed three times (the budget
 # tracker's per-user counters, the front door's live sessions, the note index). Past the cap the new
 # series is refused and said so once, rather than being accepted quietly until the pod runs out of
-# memory. Generous: `profile` is a handful of names, so reaching this means something is wrong.
-_MAX_SERIES_PER_COUNTER = 64
+# memory.
+#
+# **64 until the HTTP surface arrived, and the margin was one series.** Measured across the front
+# door's 158 tests, `chemclaw_http_requests_total{route,status_class}` grew 35 series over 20 route
+# templates plus `<unmatched>`, with no route producing more than three status classes — a worst
+# case of 63 against a cap of 64. That is not a cardinality problem, it is a *sizing* one: the label
+# domain is the route table, enumerable from `app.routes`, and it grows by one whenever somebody
+# adds a route. 128 is sized against that table with room for it to double.
+#
+# Still generous for every other counter here: `profile` is a handful of names, so a *different*
+# metric reaching this means something is generating values it should not — which is the case this
+# cap exists for, and the reason it is raised rather than removed.
+_MAX_SERIES_PER_COUNTER = 128
 
 _GAUGES: dict[str, str] = {
     "chemclaw_turns_in_flight": "Turns currently streaming.",
