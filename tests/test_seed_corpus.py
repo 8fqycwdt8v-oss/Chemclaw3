@@ -128,14 +128,20 @@ def test_the_corpus_contains_a_declared_conflict() -> None:
     assert any(conflict.kind == "declared" for conflict in conflicts)
 
 
-def test_a_computed_note_cites_the_calculation_behind_it() -> None:
-    """The crosslink (STO-7) with real content on both ends of it."""
-    notes = {note.id: note for note in _notes()}
-    computed = notes["job-aspirin-thermo"]
-    assert computed.calc_refs
-    assert computed.artifact_refs
-    # An artifact citation implies the run that produced it, so both keys resolve from one note.
-    assert len(cited_calculations(computed)) == 2
+def test_the_seed_corpus_cites_no_calculation_the_store_cannot_back() -> None:
+    """A seed `calc_ref` is a fabricated key, and `kg-validate` now checks every key exists.
+
+    The corpus used to demonstrate the STO-7 crosslink with invented hex — exactly the "key
+    nothing produced" the existence gate (`unresolved_calc_refs`) was built to catch, so the
+    demonstration failed the gate on every fresh database. The crosslink itself is proven with
+    real stored keys in `tests/test_crosslink.py`; here, every seed job-result must instead say
+    in prose why its refs are empty, which is the discipline a real note is held to.
+    """
+    for note in _notes():
+        assert cited_calculations(note) == [], (
+            f"seed note {note.id!r} cites a calculation no store holds; "
+            "kg-validate fails on it against any fresh database"
+        )
 
 
 def test_the_seed_corpus_and_the_eval_corpus_stay_separate() -> None:

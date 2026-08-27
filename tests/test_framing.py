@@ -279,7 +279,7 @@ def test_gather_evidence_neutralizes_the_chunks_source_label_too(
 
     async def _one_forged_chunk(
         *_args: object, **_kwargs: object
-    ) -> tuple[list[list[EvidenceChunk]], list[str]]:
+    ) -> tuple[list[list[EvidenceChunk]], list[str], dict[str, str]]:
         # The triple `sweep_sources` returns: the per-source hit-lists, the names of any source
         # that could not be asked, and the sources that declined. Nothing failed here.
         return (

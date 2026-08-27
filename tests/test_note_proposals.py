@@ -40,6 +40,7 @@ from chemclaw.kg.proposal import (
     proposal_store,
     record_proposal_submitted,
 )
+from chemclaw.kg.submission import SubmissionOutcome
 from tests.conftest import FakeSubmitter
 
 _SECRET = "webhook-secret"
@@ -133,7 +134,7 @@ def test_a_failed_submission_keeps_the_note_it_could_not_push(
     """The half a counter could not give: a lost note is replayable, not merely tallied."""
 
     class DeadRemote:
-        async def submit(self, submission: object) -> str:
+        async def submit(self, submission: object) -> SubmissionOutcome:
             raise RuntimeError("could not push to origin")
 
     with pytest.raises(RuntimeError):
@@ -158,7 +159,7 @@ def test_a_multi_file_submission_records_every_file_it_would_have_written(
     """
 
     class DeadRemote:
-        async def submit(self, submission: object) -> str:
+        async def submit(self, submission: object) -> SubmissionOutcome:
             raise RuntimeError("could not push to origin")
 
     compound = Note(id="compound-ethanol", type="compound", created_by="agent", body="the compound")
@@ -195,7 +196,7 @@ def test_a_credential_in_a_git_error_is_redacted_before_it_is_stored(
     secret = "ghp_S3cretTokenValue"
 
     class UnauthenticatedRemote:
-        async def submit(self, submission: object) -> str:
+        async def submit(self, submission: object) -> SubmissionOutcome:
             raise RuntimeError(
                 "fatal: could not read Username for "
                 f"'https://x-access-token:{secret}@git.example.invalid': No such device"
@@ -651,8 +652,8 @@ def test_a_changed_reproposal_supersedes_the_open_predecessor(
 
     # The webhook moves only the live version.
     assert _run(store.mark_merged(["reaction-1"], "webhook")) == 1
-    assert _run(store.read(first)).state is ProposalState.SUPERSEDED  # type: ignore[union-attr]
-    assert _run(store.read(second)).state is ProposalState.MERGED  # type: ignore[union-attr]
+    assert _run(store.read(first)).state is ProposalState.SUPERSEDED
+    assert _run(store.read(second)).state is ProposalState.MERGED
 
 
 def test_a_failed_record_does_not_supersede_a_reviewable_version(
@@ -661,7 +662,7 @@ def test_a_failed_record_does_not_supersede_a_reviewable_version(
     """A `failed` upsert must not push an older, genuinely open version out of the queue."""
     live = _run(store.upsert(_proposal(content="v1")))
     _run(store.upsert(_proposal(content="v2", state=ProposalState.FAILED, reason="dead remote")))
-    assert _run(store.read(live)).state is ProposalState.OPEN  # type: ignore[union-attr]
+    assert _run(store.read(live)).state is ProposalState.OPEN
 
 
 def test_reconcile_names_a_merged_row_the_corpus_does_not_hold(

@@ -20,5 +20,5 @@ Semiempirical prediction with an uncertainty of roughly ±1 unit — enough to s
 significant at pH 9 and not enough to quote a number in a report.
 
 Seed content: no calculation row backs this figure, which is why `calc_refs` is empty here — a
-real job-result cites the calculation keys its numbers came from, as [[job-aspirin-thermo]]
-does.
+real job-result cites the calculation keys its numbers came from, and `make kg-validate` checks
+every cited key against the calculation store.

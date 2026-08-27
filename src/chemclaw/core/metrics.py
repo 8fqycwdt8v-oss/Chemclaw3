@@ -72,6 +72,12 @@ _COUNTERS: dict[str, str] = {
         "against the chunk counter above, which is the only way to tell a dark leg from a broken "
         "one."
     ),
+    "chemclaw_evidence_source_skips_total": (
+        "Evidence sources that declined a sweep (RetrieverSkip), by source — a stated refusal "
+        "(unentitled caller, unsupported filter, absent index), distinct from both a zero-chunk "
+        "answer and a failure. The third channel D-2026-08-01's class needed: without it a leg "
+        "that always declines is indistinguishable from a healthy leg that never matches."
+    ),
     # "emitted", not "ended in": a turn stopped by the harness loop's iteration cap emits an error
     # event and then still delivers its partial answer, so it is counted here and, more precisely,
     # by `chemclaw_turn_loop_caps_total` below.
@@ -453,6 +459,9 @@ _COUNTER_LABELS: dict[str, tuple[str, ...]] = {
     # event, which is precisely the correlation an operator needs to tell a dark leg from a broken
     # one. Same bound, same reason — a retriever's registry name, never a caller's string.
     "chemclaw_evidence_source_failures_total": ("source",),
+    # The decline counter completes the triple: chunks, failures, skips, one `source` label each,
+    # so the three series join on the same key.
+    "chemclaw_evidence_source_skips_total": ("source",),
     # The tightest bound of any label here: a subsystem name is a string literal at a `degraded()`
     # call site, so the whole value set is enumerable from the source and `tests/test_degraded.py`
     # enumerates it — across both call spellings (`degraded(...)` and `<module>.degraded(...)`) and

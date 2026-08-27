@@ -18,8 +18,9 @@ from typing import Any
 import pytest
 
 from chemclaw.core.config import settings
-from chemclaw.durable.memory_jobs import SynthesisUnit, _slice_for_this_run
+from chemclaw.durable.memory_jobs import _slice_for_this_run
 from chemclaw.kg.note import Note
+from chemclaw.memory.jobs import SynthesisUnit
 
 
 class _FakeWorkflowClock:
@@ -40,7 +41,7 @@ class _FakeWorkflowClock:
         self.warnings.append(args)
 
 
-def _corpus(n: int) -> list[Note]:
+def _corpus(n: int) -> list[SynthesisUnit]:
     """`n` distinct proposable notes, ids zero-padded so id order is numeric order."""
     return [
         SynthesisUnit(

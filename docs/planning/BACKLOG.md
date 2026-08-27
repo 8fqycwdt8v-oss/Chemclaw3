@@ -135,47 +135,6 @@ topic).
 
 ## 2 — Answers that are wrong without saying so
 
-- [ ] **Twelve corpus edges are inverted against the relation vocabulary, and `kg-validate`
-      cannot see direction at all** — [M]. `kg/relations.py` declares `product-of` as
-      compound→reaction; `knowledge/reaction/rxn-suzuki-biaryl.md:21-26` writes `product-of`,
-      `precursor-of`, `catalyzes`, `reagent-in` and `solvent-for` all *from the reaction*, and
-      `knowledge/campaign/campaign-biaryl-scope.md:18-19` writes `part-of` campaign→reaction —
-      while `compound-4-methoxybiphenyl.md:17` uses the correct direction, so `related(g, x,
-      "product-of")` returns a mix of both readings. `tests/test_seed_corpus.py:79` pins the
-      inversion as correct. `kg/validate.py::_registry_problems` checks relation *names* only;
-      the fix is a per-relation `(source types, target types)` table enforced by `validate()`,
-      plus the corpus pass and the test. Full measurement:
-      `docs/archive/REVIEW-2026-08-27-knowledge-system-analysis.md` §1.
-
-- [ ] **A typo'd frontmatter key is silently dropped and the note validates green** — [S].
-      `Note` (`kg/note.py:341`) sets only `frozen=True`, so pydantic's `extra="ignore"` applies:
-      `valid-from:`, `conditons:`, `tag:` all parse clean and the data is gone — the same failure
-      `KNOWN_NOTE_TYPES` exists to prevent for the *value* of `type`, unhandled for field names.
-      `publish/record.py:473` already models the fix (`extra="forbid"`); the `body` key is
-      handled separately in `read_note` and stays. Two siblings in the same class, same review:
-      `validate()` never checks a note's `type` against its directory (a mismatch makes the next
-      proposal for that id a second file claiming it, and first-in-path-order keeps the *old*
-      one), and `_text_is_writable` (`kg/note.py:541`) does not descend into `conditions`, so a
-      surrogate in `major_impurity` raises `UnicodeEncodeError` in the PR-gate's commit.
-
-- [ ] **An observation's "merged notes" support is auto-ingested rows since D-2026-08-25** — [M].
-      `memory/observations.py:151` states evidence ids are "merged note ids, so an observation
-      always points at knowledge a human already signed off";
-      `memory/observation_mining.py:98` mints `reaction-<id>` ids, which are ungated
-      `reaction_records` rows since the transcription un-gating. A promotion PR's "supported by N
-      runs across M projects" therefore counts evidence no human reviewed, and the D-161
-      inflation argument no longer holds. Either the docstrings/PR body say "record-backed" or
-      the thresholds get re-argued against ungated evidence — both are decisions, so this wants a
-      short ADR, not a quiet edit.
-
-- [ ] **`report_note` discards the evidence `gather_section` deliberately preserved** — [S].
-      `retrieval/harness.py:293` `continue`s past `section.evidence` whenever
-      `retrieval_failed` is set, and `retrieval_failed` is now set by *any* failed leg — so one
-      dead share still throws away three working sources' chunks in the rendered report, one
-      layer below the fix the `gather_section` docstring describes. Render the incomplete-marker
-      *and* the evidence. No test constructs `retrieval_failed=True` with non-empty evidence,
-      which is why it held.
-
 - [ ] **Every structured tool result reaches the model as pydantic repr, not JSON** — [M].
       `langchain_core.tools.base._stringify` prefers `json.dumps(content)` and falls back to
       `str(content)`, which is what happens for every `BaseModel` this repo returns —
@@ -279,36 +238,6 @@ it happens.
 
 ## 3 — Work that is lost, dropped or invisible
 
-- [ ] **The PR-gate's `--force-with-lease` is a plain force, its lock is one pod wide, and every
-      git failure is non-retryable** — [M], three defects that compound.
-      `kg/git_submitter.py:469-481` fetches `note/<id>` into the remote-tracking ref immediately
-      before the leased push, so the lease can never fail and a reviewer's fixup commit on a
-      proposal branch is silently discarded (`tests/test_knowledge.py:291` pins the overwrite as
-      desired). The `flock` lives in each pod's `emptyDir` clone
-      (`deploy/helm/chemclaw/templates/_helpers.tpl:424`) while `service.replicas: 2` autoscales
-      to 6, so concurrent same-id proposals across pods are last-writer-wins with no error — the
-      Postgres advisory lock the singleton-worker row below already sizes at ~60 lines closes
-      this half too. And `durable/publish.py:62` lists `GitSubmitError` in `_BAD_DATA_TYPES`
-      while `note_publish_retry`'s docstring says a transient one "is retried, up to the bound" —
-      a 30 s network blip drops a note from a synthesis batch on attempt one, `fan_out` logs and
-      omits it, and nothing anywhere replays a `failed` proposal row (`ProposalState.FAILED` has
-      no reader). Splitting transient from permanent is the fix the docstring already describes.
-      Full trace: `docs/archive/REVIEW-2026-08-27-knowledge-system-analysis.md` §3.
-
-- [ ] **A retrieval leg that contributes zero, silently, is still reachable four ways** — [M],
-      the D-2026-08-01 class one category over. `note_reindex_enabled`
-      (`core/config/retrieval.py:244`) defaults off and nothing couples it to `vector`/`lexical`
-      being in `CHEMCLAW_DATA_SOURCES`, so those legs can query a never-built `note_index`
-      forever, reporting `chunks: 0, failed: false` — derive it from the source list, the move
-      `D-2026-08-26-a-knob-that-renders-nothing-is-not-a-knob` already made for connectors.
-      `ingest/documents/retriever.py:151,156` returns `[]` for an un-entitled caller and for
-      *any* `note_type` filter; `retrieval/retrievers.py:450,494` returns `[]` on a mis-pointed
-      `knowledge_path` — none reaches `sources_failed`. The structural fix is per-source
-      asked/contributed counts in `EvidenceSweep` itself (the fan-out already computes them per
-      branch and drops them at the boundary, `agent/research_tools.py:233`), which also closes
-      `find_notes`' silent alphabetical truncation (`agent/graph_tools.py:143` — the defect
-      `truncated_by` fixed for its sibling).
-
 - [ ] **A Hessian is cached and never published, and neither is the thermochemistry built from
       it** — [M], and the two halves are one question. `xtb.hess` is a `calc_type` the server
       stamps and `_CALC_TYPE_PROJECTORS` has no prefix for it, so vibrational frequencies never
@@ -390,20 +319,6 @@ it happens.
       `_the_job_ceiling_covers_the_poll_it_bounds` untouched.
 
 ## 4 — Operating it
-
-- [ ] **The conflict scan is quadratic exactly when the corpus is dated** — [S], measured.
-      `kg/conflicts.py:187-190`: the early-`break` is reached only through candidates that pass
-      `_overlaps`; a candidate with a non-overlapping validity window `continue`s without
-      consuming the walk's budget, so closed `valid_from`/`valid_to` pairs — the structure
-      `knowledge/README.md` advertises as designed — restore the O(N²) the docstring says the cap
-      removed. One substrate, one note per day: 500 notes 14 ms → 1,000 170 ms → 2,000 714 ms →
-      4,000 3.1 s, clean 4× per doubling, on the retrieval hot path (`conflict_index` per
-      `retrieve`), returning zero conflicts for the work. Every perf test in
-      `tests/test_conflicts.py` builds windowless notes, which is why it held. Hoist the overlap
-      test into the group partition, and add one dated-corpus perf test. Second, smaller cache
-      defect in the same review: `kg/graph.py:290` stamps `_LAST_SCAN` *before* the parse, so a
-      concurrent reader inside the TTL fast path is served the pre-change corpus without waiting
-      — stamp it when `_NOTES_CACHE` is written.
 
 - [ ] **Settle `pytest-xdist` on a real runner** — [S].
       The `check` job is 87% one step: `make lint type cov` was **12m06s of a 13m56s job** on
@@ -509,12 +424,14 @@ it happens.
       same build listed neither, and a gate whose last word contradicts the artifact it scanned
       makes every red build ambiguous. Re-check that against a current trivy before merging.
 
-- [ ] **The background worker is a hard singleton** — [M]. `workers.background.replicas: 1` owns ELN
-      sync, memory synthesis, retention and eval drift, and cannot be scaled because the PR-gate
-      checkout lock is host-local (`kg/git_submitter.py:101`, `fcntl.flock`, D-069). This row used
-      to say the distributed lock "is its own `DEFERRED.md` row" — **there is no such row**, there
-      never was, and the cross-reference defeated the rule that a row must name a real anchor. The
-      lock is buildable here: a Postgres advisory lock on the pool that already exists, ~60 lines.
+- [ ] **The background worker is a hard singleton** — [S], narrowed. The PR-gate half is closed:
+      `kg/git_submitter.py::_cluster_lock` serializes submissions to one remote across pods through
+      a Postgres session-level advisory lock whenever `session_store="postgres"`
+      (`D-2026-08-27-the-gate-tells-the-truth-about-what-it-pushed`), and the host-local `flock`
+      stays for the per-clone worktree sweep. What remains before `workers.background.replicas`
+      can exceed 1 is an audit of the *other* activities that queue owns — ELN sync's cursor
+      advance and retention's prune batches were written under a one-worker assumption and nobody
+      has argued they are safe under two.
 
 - [ ] **A durable deployment with no `framing_envelope_secret` silently loses the injection
       marking on its oldest content, and nothing says so** — [S]. `agent/framing.py::_envelope_nonce`

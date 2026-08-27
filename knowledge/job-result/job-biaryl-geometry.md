@@ -1,7 +1,6 @@
 ---
 artifact_refs: []
-calc_refs:
-- xtb.opt@GFN2-xTB+tblite+0.4.0:7f3a91c4d2b8:0a1b2c3d4e5f
+calc_refs: []
 compound_smiles: COc1ccc(cc1)-c1ccccc1
 confidence: 0.7
 created_by: human
@@ -20,3 +19,7 @@ GFN2-xTB optimised geometry for [[computed-from:compound-4-methoxybiphenyl]].
 - relaxation from the MMFF starting geometry: 4.2 kcal/mol
 
 The twist is the point: a planar biaryl would conjugate through, and this one does not.
+
+Seed content: no calculation row backs these figures, so `calc_refs` is empty — a real
+job-result cites the keys its numbers came from, and `make kg-validate` checks each one against
+the calculation store.

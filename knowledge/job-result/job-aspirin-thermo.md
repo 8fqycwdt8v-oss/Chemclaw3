@@ -1,9 +1,6 @@
 ---
-artifact_refs:
-- xtb.hess@GFN2-xTB+tblite+0.4.0:7f3a91c4d2b8:9e8d7c6b5a41#hessian.npy
-calc_refs:
-- xtb.opt@GFN2-xTB+tblite+0.4.0:7f3a91c4d2b8:0a1b2c3d4e5f
-- xtb.hess@GFN2-xTB+tblite+0.4.0:7f3a91c4d2b8:9e8d7c6b5a41
+artifact_refs: []
+calc_refs: []
 compound_smiles: CC(=O)Oc1ccccc1C(=O)O
 confidence: 0.7
 created_by: human
@@ -22,5 +19,9 @@ GFN2-xTB thermochemistry for [[computed-from:compound-acetylsalicylic-acid]] at 
 - Gibbs correction: +71.84 kcal/mol
 - lowest mode: 38.2 cm^-1 (a real minimum)
 
-Computed from a converged optimisation; the Hessian behind it is stored, so the same geometry at
-another temperature is arithmetic rather than a recomputation.
+Computed from a converged optimisation; when the Hessian behind a run like this is stored, the
+same geometry at another temperature is arithmetic rather than a recomputation.
+
+Seed content: no calculation row backs these figures, which is why `calc_refs` and
+`artifact_refs` are empty here — a real job-result cites the calculation keys its numbers came
+from, and `make kg-validate` checks every cited key against the calculation store.

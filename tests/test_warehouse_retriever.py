@@ -26,6 +26,24 @@ from tests import warehouse_fake
 _DRIVER = "tests.warehouse_fake:open_fake"
 
 
+@pytest.fixture(autouse=True)
+def _no_real_record_store(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every test here runs against an in-memory transcription store, never Postgres.
+
+    The retriever's suppression check calls `default_record_store()` on every retrieval, so with
+    the database down these tests *failed* rather than skipped — 10 of them, measured — which
+    buried real regressions in a wall of connection errors on any offline run. Nothing in this
+    file is about the durable store: the suppression rule itself is proven against
+    `InMemoryReactionRecordStore` (`_ingested`), and the backends' agreement is
+    `test_reaction_records.py`'s job. `_ingested` overrides this with a seeded store; everything
+    else gets an empty one, which answers "nothing ingested" exactly as a fresh deployment would.
+    """
+    store = InMemoryReactionRecordStore()
+    monkeypatch.setattr(
+        "chemclaw.ingest.eln.warehouse.retriever.default_record_store", lambda: store
+    )
+
+
 def _binding(**vector: Any) -> dict[str, Any]:
     """A retrieve-only binding; `vector` overrides individual keys of its `vector:` section."""
     section: dict[str, Any] = {

@@ -31,7 +31,7 @@ class _Submitter:
 class _FailingSubmitter:
     """A submitter that raises, standing in for a broken token or unreachable remote."""
 
-    async def submit(self, submission: NoteSubmission) -> str:
+    async def submit(self, submission: NoteSubmission) -> SubmissionOutcome:
         """Fail the way a real submitter fails."""
         raise RuntimeError("git push rejected")
 

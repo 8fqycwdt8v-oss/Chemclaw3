@@ -21,7 +21,7 @@ from chemclaw.memory.campaign import campaign_note_from_chain
 from chemclaw.memory.chains import detect_chains
 from chemclaw.memory.ids import stable_id
 from chemclaw.memory.interaction import note_from_confirmed_answer
-from chemclaw.memory.jobs import build_campaign_notes, build_playbook_notes
+from chemclaw.memory.jobs import SynthesisUnit, build_campaign_notes, build_playbook_notes
 from chemclaw.memory.observations import Observation
 from chemclaw.memory.playbook import (
     SOURCE_DISTILLATION,
@@ -397,7 +397,7 @@ def test_a_playbook_states_which_of_its_two_producers_wrote_it() -> None:
 # --- jobs (5.3/5.4 wiring) ------------------------------------------------------------
 
 
-async def _build_and_propose(units, submitter) -> list[str]:
+async def _build_and_propose(units: list[SynthesisUnit], submitter: FakeSubmitter) -> list[str]:
     """Publish built notes the way the durable job does: one PR-gate proposal each.
 
     These three tests used to call `synthesize_campaigns` / `distill_playbooks`, which built and

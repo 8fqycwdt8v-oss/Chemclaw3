@@ -634,14 +634,16 @@ def test_note_reindex_is_derived_from_the_source_list_unless_overridden() -> Non
     deployment believed it ran hybrid retrieval. The same derivation move
     `D-2026-08-26-a-knob-that-renders-nothing-is-not-a-knob` made for connectors.
     """
-    derived_on = Settings(_env_file=None, data_sources="graph,vector,lexical")
+    derived_on = Settings(_env_file=None, data_sources="graph,vector,lexical")  # type: ignore[call-arg]
     assert derived_on.note_reindex_effective is True
-    derived_off = Settings(_env_file=None, data_sources="graph")
+    derived_off = Settings(_env_file=None, data_sources="graph")  # type: ignore[call-arg]
     assert derived_off.note_reindex_effective is False
     # An explicit choice still wins in both directions.
-    opted_out = Settings(
+    opted_out = Settings(  # type: ignore[call-arg]
         _env_file=None, data_sources="graph,vector,lexical", note_reindex_enabled=False
     )
     assert opted_out.note_reindex_effective is False
-    forced = Settings(_env_file=None, data_sources="graph", note_reindex_enabled=True)
+    forced = Settings(  # type: ignore[call-arg]
+        _env_file=None, data_sources="graph", note_reindex_enabled=True
+    )
     assert forced.note_reindex_effective is True
