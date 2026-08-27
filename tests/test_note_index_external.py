@@ -52,10 +52,15 @@ def _record(note_id: str, vector: list[float], text: str = "ester formation") ->
 
 
 def _write_note(directory: Path, note_id: str, title: str) -> None:
-    """A minimal note the graph indexer will load, so `reindex_notes` sees a real corpus."""
+    """A minimal note the graph indexer will load, so `reindex_notes` sees a real corpus.
+
+    The title lives in the body: `Note` has no `title` field, and since `extra="forbid"` a
+    frontmatter key the schema does not know is a refused note rather than silently dropped
+    metadata — this helper used to write one, which is the finding in miniature.
+    """
     (directory / "reaction").mkdir(parents=True, exist_ok=True)
     (directory / "reaction" / f"{note_id}.md").write_text(
-        f"---\nid: {note_id}\ntype: reaction\ntitle: {title}\n---\n\n{title} notes.\n",
+        f"---\nid: {note_id}\ntype: reaction\n---\n\n# {title}\n\n{title} notes.\n",
         encoding="utf-8",
     )
 

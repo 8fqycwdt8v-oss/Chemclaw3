@@ -20,4 +20,4 @@ esterification this corpus uses as its worked example.
 - role: API
 - melting point: 135 °C (literature)
 
-Made from [[precursor-of:compound-salicylic-acid]] by acetylation; see [[rxn-aspirin-acetylation]].
+Made from [[compound-salicylic-acid]] by acetylation; see [[rxn-aspirin-acetylation]].

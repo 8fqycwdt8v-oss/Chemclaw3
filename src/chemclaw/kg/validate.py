@@ -22,8 +22,17 @@ from typing import Protocol, runtime_checkable
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.kg.graph import dangling_links, scan_notes_dir
-from chemclaw.kg.note import Note, NoteError, known_note_types, read_note, resolves_outside_graph
-from chemclaw.kg.relations import known_relations
+from chemclaw.kg.note import (
+    Note,
+    NoteError,
+    external_record_id,
+    known_note_types,
+    note_relative_path,
+    read_note,
+    require_note_slug,
+    resolves_outside_graph,
+)
+from chemclaw.kg.relations import RELATION_SIGNATURES, known_relations
 
 
 def validate(notes_dir: Path) -> list[str]:
@@ -64,6 +73,21 @@ def validate(notes_dir: Path) -> list[str]:
                 f"the file must be named {note.id + '.md'!r} "
                 "(the note index keys on the filename and would skip this note)"
             )
+        # The directory is an index key exactly as the filename is: the PR-gate derives a note's
+        # path from its *type* (`pr_gate._note_file` -> `note_relative_path`), so a note filed
+        # under the wrong type directory means the next proposal for the same id writes a second
+        # file claiming it — and `_parse_notes`' first-in-path-order rule then keeps the mis-filed
+        # one and silently drops the freshly merged note.
+        expected = note_relative_path(note.type, note.id)
+        try:
+            actual = path.relative_to(notes_dir).as_posix()
+        except ValueError:
+            actual = path.as_posix()
+        if actual != expected:
+            problems.append(
+                f"note {note.id!r} of type {note.type!r} is at {actual}, but the PR-gate files "
+                f"that type at {expected} — a re-proposal would create a second file for this id"
+            )
         located.append((note, path))
 
     notes = [note for note, _ in located]
@@ -100,6 +124,65 @@ def validate(notes_dir: Path) -> list[str]:
             "chemclaw.kg.relations.KNOWN_RELATIONS or a bundle's `relations:`",
         )
     )
+    problems.extend(_signature_problems(located))
+    problems.extend(_malformed_targets(located))
+    return problems
+
+
+def _signature_problems(located: list[tuple[Note, Path]]) -> list[str]:
+    """Flag every typed edge whose endpoints contradict the relation's declared direction.
+
+    Only edges whose relation appears in `RELATION_SIGNATURES` are checked, and a target end is
+    checked only when the target resolves to a note in this corpus — a dangling or external target
+    is another check's finding, and reporting it twice under two names would send a reader two
+    ways. The failure this closes: the corpus held `product-of` edges pointing both ways at once,
+    so `related(graph, x, "product-of")` mixed "reactions that produced x" with "compounds x
+    produced" and no caller could tell which reading a row was.
+    """
+    type_by_id = {note.id: note.type for note, _ in located}
+    problems: list[str] = []
+    for note, path in located:
+        for relation in note.outgoing_relations():
+            signature = RELATION_SIGNATURES.get(relation.rel)
+            if signature is None:
+                continue
+            sources, targets = signature
+            if sources is not None and note.type not in sources:
+                problems.append(
+                    f"note {note.id!r} in {path} asserts {relation.rel!r}, which runs from "
+                    f"{sorted(sources)} notes — this note is a {note.type!r} "
+                    "(the edge is probably written in the inverse direction)"
+                )
+            target_type = type_by_id.get(relation.to)
+            if targets is not None and target_type is not None and target_type not in targets:
+                problems.append(
+                    f"note {note.id!r} in {path} asserts {relation.rel!r} toward "
+                    f"{relation.to!r}, a {target_type!r} note — that relation targets "
+                    f"{sorted(targets)} (the edge is probably written in the inverse direction)"
+                )
+    return problems
+
+
+def _malformed_targets(located: list[tuple[Note, Path]]) -> list[str]:
+    """Flag every link whose target is not a legal note slug.
+
+    `split_link` returns whatever text follows the colon, so `[[a:b:c]]` yields target `b:c` and
+    `[[:x]]` yields `:x` — names the indexer will happily mint graph nodes under while the `Note`
+    schema would refuse them as an id. They were caught only incidentally, as dangling links,
+    which told the author "unknown note" instead of "that is not a note id".
+    """
+    problems: list[str] = []
+    for note, path in located:
+        for target in note.outgoing_links():
+            if resolves_outside_graph(target):
+                continue
+            try:
+                require_note_slug(target)
+            except ValueError:
+                problems.append(
+                    f"note {note.id!r} in {path} links to {target!r}, which is not a valid "
+                    "note id (check the [[...]] syntax — one colon separates relation from id)"
+                )
     return problems
 
 
@@ -111,12 +194,19 @@ def external_citations(notes: list[Note]) -> list[tuple[str, str]]:
     it cannot see the store. That leaves the citations campaigns and playbooks are built from
     unchecked by anything, which is how a typo'd run id would merge. This is the other half: the
     links a *store* has to answer for.
+
+    A target that is defined *in the corpus* is not external, whatever its prefix: `reaction-` is
+    a namespace, not a reservation (`agent.graph_tools.expand_note` says a human-authored note
+    under that name must still win), and `reaction` is a `KNOWN_NOTE_TYPES` entry. Without the
+    subtraction, a correct corpus whose reaction notes were named `reaction-*` failed
+    `make kg-validate` for citing notes sitting in the same list.
     """
+    defined = {note.id for note in notes}
     return sorted(
         (note.id, target)
         for note in notes
         for target in note.outgoing_links()
-        if resolves_outside_graph(target)
+        if resolves_outside_graph(target) and target not in defined
     )
 
 
@@ -143,12 +233,13 @@ async def unresolved_citations(
     unrunnable check means, because a validator that silently passes when it could not look is a
     claim that a control exists.
     """
-    wanted = [target.removeprefix("reaction-") for _, target in citations]
+    wanted = [external_record_id(target) for _, target in citations]
     known = await records.known(wanted)
     return [
-        f"note {source!r} cites reaction record {target!r}, which the corpus does not hold"
+        f"note {source!r} cites {target!r}, and the record store does not hold "
+        f"{external_record_id(target)!r} (the id the store was asked for)"
         for source, target in citations
-        if target.removeprefix("reaction-") not in known
+        if external_record_id(target) not in known
     ]
 
 

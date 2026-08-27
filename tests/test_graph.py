@@ -21,10 +21,12 @@ def _note(id_: str, links: list[str], type_: str = "compound") -> str:
 
 
 def _make_graph_dir(tmp_path: Path) -> Path:
-    # a -> b -> c ; a -> c. Plus a README that must be ignored.
-    (tmp_path / "a.md").write_text(_note("a", ["b", "c"]), encoding="utf-8")
-    (tmp_path / "b.md").write_text(_note("b", ["c"]), encoding="utf-8")
-    (tmp_path / "c.md").write_text(_note("c", []), encoding="utf-8")
+    # a -> b -> c ; a -> c. Plus a README that must be ignored. Filed under the type directory,
+    # because `validate` now checks the layout the PR-gate writes (`note_relative_path`).
+    (tmp_path / "compound").mkdir(exist_ok=True)
+    (tmp_path / "compound" / "a.md").write_text(_note("a", ["b", "c"]), encoding="utf-8")
+    (tmp_path / "compound" / "b.md").write_text(_note("b", ["c"]), encoding="utf-8")
+    (tmp_path / "compound" / "c.md").write_text(_note("c", []), encoding="utf-8")
     (tmp_path / "README.md").write_text("# notes\nno frontmatter here\n", encoding="utf-8")
     return tmp_path
 

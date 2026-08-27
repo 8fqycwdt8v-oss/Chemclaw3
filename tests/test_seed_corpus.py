@@ -75,10 +75,18 @@ def test_the_graph_is_connected_enough_to_traverse() -> None:
     """A corpus of islands would validate perfectly and exercise no graph query at all."""
     graph = build_graph(_KNOWLEDGE)
     assert graph.number_of_edges() >= 40
-    # The query typed edges were added for, against real content rather than a fixture.
-    assert related(graph, "rxn-suzuki-biaryl", "precursor-of") == [
-        "compound-4-bromoanisole",
-        "compound-phenylboronic-acid",
+    # The queries typed edges were added for, against real content rather than a fixture — in the
+    # direction the vocabulary declares. This test used to pin the *inverse* (`precursor-of`
+    # asserted from the reaction toward its starting materials), which is how twelve backwards
+    # edges merged green and `product-of` came to point both ways in one graph
+    # (`docs/archive/REVIEW-2026-08-27-knowledge-system-analysis.md` §1).
+    assert related(graph, "compound-4-bromoanisole", "precursor-of") == [
+        "compound-4-methoxybiphenyl",
+    ]
+    assert related(graph, "rxn-suzuki-biaryl", "part-of") == ["campaign-biaryl-scope"]
+    assert related(graph, "compound-pd-oac2", "catalyzes") == [
+        "rxn-buchwald-amination",
+        "rxn-suzuki-biaryl",
     ]
 
 
