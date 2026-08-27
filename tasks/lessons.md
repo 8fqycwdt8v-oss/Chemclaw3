@@ -1146,3 +1146,20 @@ MOBO gap that was a deliberate argued refusal, a retention premise that understa
 tenfold. A research pass produces hypotheses, not findings. Verify each against the source before
 fixing it, and be willing to report "this one was wrong" — the subagents that did exactly that
 produced the most useful work of the session.
+
+## 2026-08-27 — run the gate, not a subset of it (twice in one branch)
+
+Two CI/full-suite failures on this branch, same shape both times: **I verified with a narrower
+command than the one that decides.**
+
+1. `mypy --strict src/` was clean; `make type` runs `mypy src examples tests` and found a
+   `tuple[int, bool] == int` left over from a signature change, *in a test file*.
+2. A 486-test scoped run was clean; the whole-repo run found three new settings undocumented in
+   `.env.example`, which no BO test could have seen.
+
+Both were caught downstream, both were trivial to fix, and both were avoidable by typing eight
+more characters. The rule: **before pushing, run the repo's own gate target verbatim** — here
+`make lint type test` — rather than the scoped equivalent I reached for while iterating. A scoped
+run is the right tool *while* iterating and the wrong evidence for "this is done". CLAUDE.md
+already says a step is done only when `make lint type test` is green; the failure was reading that
+as a description of CI rather than as an instruction to me.
