@@ -79,6 +79,21 @@ topic).
       for the audit trail, where that question can be answered. What stays open is unchanged: the
       string is still the caller's to choose.
 
+- [ ] **The per-round campaign record is unbounded and best-effort** — [S], both halves found by
+      reviewing `D-2026-08-27-a-bound-that-multiplies-…` after it merged. (a) Each round's row
+      snapshots the *cumulative* history, so N rounds store a triangular number of observations:
+      measured at 173 B/observation, a 500-round batch-1 campaign holds **22.19 MB** against the
+      terminal write's 87.4 kB (254x), and 87.45 MB at batch 4. `retention.py` refuses to prune
+      `bo_campaigns` and `bo_suggestions` cascades from it, so nothing reclaims it. The snapshot is
+      what makes an interrupted campaign resumable, so the fix is not "store less per row" but
+      "record every Nth round", trading a bounded number of lost rounds for an N-fold reduction.
+      **Trigger:** the first deployment that runs durable campaigns at all — the capability map
+      records that none ever has, which is why this is [S] and not urgent. (b) The write is
+      best-effort: `record_suggestion` swallows `_TRANSIENT_WRITE_FAILURES` and returns normally,
+      so the activity succeeds on a round that never landed and Temporal never retries it. Making
+      the durable path's guarantee unconditional means letting that caller opt out of the swallow,
+      which is a change to a contract the inline tool depends on.
+
 - [ ] **`fetch_artifact` is a tool that can only refuse** — [S]. `list_artifacts` and
       `fetch_artifact` promise "the relaxed coordinates, the second derivatives, the raw vibrational
       spectrum" and "a conformer search seeded from a known structure", and two agent profiles

@@ -434,3 +434,23 @@ def test_a_reduced_design_is_measured_after_the_reduction_not_before() -> None:
     # 2^40 >> 1 is still half a trillion rows.
     with pytest.raises(ValueError, match="beyond the configured ceiling"):
         factorial_design(problem, n_generators=1)
+
+
+def test_a_reduced_design_over_a_three_level_factor_reports_the_real_error() -> None:
+    """The size guard must not answer ahead of the error that actually applies.
+
+    `_require_design_fits_the_ceiling` runs before `_fractional_design`'s two-level check, and its
+    arithmetic (`corners >> n_generators`) models a design that cannot be built at all. On five
+    ten-level factors at three generators it therefore reported "this screen would generate 12500
+    runs" — a fictional number — and offered two remedies that were both wrong for the input:
+    "screen fewer factors", and "ask for a reduced design with `n_generators`", to a caller who
+    had already asked for one.
+    """
+    problem = OptimizationProblem(
+        parameters=[
+            CategoricalParameter(name=f"f{i}", categories=list("abcdefghij")) for i in range(5)
+        ],
+        objectives=[Objective(name="yield", direction="maximize")],
+    )
+    with pytest.raises(ValueError, match="two-level design"):
+        factorial_design(problem, n_generators=3)
