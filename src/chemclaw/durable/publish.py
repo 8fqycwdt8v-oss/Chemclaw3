@@ -11,7 +11,9 @@ publish shipped with no retry bound at all).
 `BAD_DATA_RETRY` is the same idea for ordinary activities: a `ValueError` means
 bad/corrupt data that will never succeed on retry, so fail fast (`ChemclawError`
 subclasses inherit from `ValueError` but Temporal matches non-retryable types by
-exact class name, so the concrete names are listed too).
+exact class name, so the concrete names are listed too). `queue_wait_timeout` is the
+third shared bound and the newest: the one place that says how long a core activity may
+wait for a worker to pick it up.
 """
 
 from datetime import timedelta
@@ -239,6 +241,35 @@ def agent_step_retry() -> RetryPolicy:
     )
 
 
+def queue_wait_timeout() -> timedelta:
+    """How long a core activity may sit unclaimed on its queue, as `schedule_to_start_timeout`.
+
+    **`start_to_close_timeout` is not a bound on a call, and reading it as one left every durable
+    job here able to hang forever.** It starts counting when a worker *picks the task up*, so a
+    queue nobody polls — the background fleet scaled to zero, a rolling update, a queue named in
+    config but served by no pod — is an activity that never times out and a workflow that never
+    ends. Most of these workflows are Temporal Schedules under `ScheduleOverlapPolicy.SKIP`, so one
+    wedged run then skips every subsequent fire of that job family, indefinitely, with no error
+    anywhere. `durable/notify.py` measured the shape on one call (a workflow still RUNNING after
+    75 s against a 30 s start-to-close); it is a property of the timeout rather than of that call,
+    which is why the bound is stated once here and passed at every call site.
+
+    **Schedule-to-start rather than schedule-to-close, and the difference was measured**: a
+    ScheduleToStart timeout is not retried (against the test server, `maximum_attempts=3` and a 10 s
+    bound on an unserved queue failed once, at 10.028 s), while `schedule_to_close_timeout` caps
+    every attempt *together* — generalising `notify.py`'s tighter bound would therefore have
+    deleted the retry budget at 31 call sites, silently. `notify.py` keeps its own
+    `schedule_to_close_timeout` precisely because it is best-effort and wants the stricter thing.
+
+    A function, not a module constant, so the setting is read when the workflow runs rather than
+    when the module is imported.
+
+    Returns:
+        The `schedule_to_start_timeout` every core activity call passes.
+    """
+    return timedelta(seconds=settings.activity_queue_wait_seconds)
+
+
 async def publish_note(activity: Any, args: list[Any]) -> str:
     """Run a note-publish activity with the shared queue/timeout/retry discipline."""
     result: str = await workflow.execute_activity(
@@ -246,6 +277,7 @@ async def publish_note(activity: Any, args: list[Any]) -> str:
         args=args,
         task_queue=settings.background_task_queue,
         start_to_close_timeout=timedelta(seconds=settings.note_write_timeout_seconds),
+        schedule_to_start_timeout=queue_wait_timeout(),
         retry_policy=note_publish_retry(),
     )
     return result
@@ -294,6 +326,7 @@ async def publish_result_best_effort(activity: Any, args: list[Any], label: str)
             args=args,
             task_queue=settings.background_task_queue,
             start_to_close_timeout=timedelta(seconds=settings.result_publish_timeout_seconds),
+            schedule_to_start_timeout=queue_wait_timeout(),
             retry_policy=BAD_DATA_RETRY,
         )
     except ActivityError:

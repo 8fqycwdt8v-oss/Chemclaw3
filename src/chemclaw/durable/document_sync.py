@@ -51,7 +51,7 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.ingest.sources.registry import active_retrieve_sources
 
 from chemclaw.durable.heartbeat import beating
-from chemclaw.durable.publish import BAD_DATA_RETRY
+from chemclaw.durable.publish import BAD_DATA_RETRY, queue_wait_timeout
 
 # Module-level indirection so tests swap the Postgres backend for the in-memory one.
 _document_index = default_document_index
@@ -222,7 +222,10 @@ class DocumentShareSyncWorkflow:
         timeout = timedelta(seconds=settings.document_sync_timeout_seconds)
         if state is None:
             plan: DocumentSyncPlan = await workflow.execute_activity(
-                plan_document_sync, start_to_close_timeout=timeout, retry_policy=BAD_DATA_RETRY
+                plan_document_sync,
+                start_to_close_timeout=timeout,
+                schedule_to_start_timeout=queue_wait_timeout(),
+                retry_policy=BAD_DATA_RETRY,
             )
             state = DocumentSyncState(
                 started_at=plan.started_at,
@@ -237,6 +240,7 @@ class DocumentShareSyncWorkflow:
             refresh: ReembedReport = await workflow.execute_activity(
                 reembed_stale_documents,
                 start_to_close_timeout=timeout,
+                schedule_to_start_timeout=queue_wait_timeout(),
                 heartbeat_timeout=timedelta(
                     seconds=settings.document_sync_heartbeat_timeout_seconds
                 ),
@@ -256,6 +260,7 @@ class DocumentShareSyncWorkflow:
                 sync_document_share,
                 args=[source, state.after],
                 start_to_close_timeout=timeout,
+                schedule_to_start_timeout=queue_wait_timeout(),
                 heartbeat_timeout=timedelta(
                     seconds=settings.document_sync_heartbeat_timeout_seconds
                 ),
@@ -289,6 +294,7 @@ class DocumentShareSyncWorkflow:
                 prune_document_share,
                 args=[source, state.started_at, drained],
                 start_to_close_timeout=timeout,
+                schedule_to_start_timeout=queue_wait_timeout(),
                 retry_policy=BAD_DATA_RETRY,
             )
             state.reports[-1].pruned = pruned

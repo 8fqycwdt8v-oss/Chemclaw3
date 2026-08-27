@@ -62,6 +62,7 @@ from chemclaw.durable.publish import (
     BAD_DATA_RETRY,
     publish_note_best_effort,
     publish_result_best_effort,
+    queue_wait_timeout,
 )
 from chemclaw.durable.registry import durable_workflow
 
@@ -567,6 +568,7 @@ class ConnectorJobWorkflow:
                 # loss, discovered when an id expires months later.
                 task_queue=settings.background_task_queue,
                 start_to_close_timeout=timedelta(seconds=settings.job_record_timeout_seconds),
+                schedule_to_start_timeout=queue_wait_timeout(),
                 retry_policy=BAD_DATA_RETRY,
             )
         except ActivityError:

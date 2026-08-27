@@ -58,6 +58,45 @@ class TemporalSettings(BaseSettings):
     # activities are longer than this states its own budget in its own workflow, as `calc` does.
     activity_timeout_seconds: float = Field(default=30.0, gt=0)
 
+    # How long an activity task may sit on a queue *before a worker picks it up*, as
+    # `schedule_to_start_timeout` on every core activity (`durable/publish.py::queue_wait_timeout`).
+    #
+    # `start_to_close_timeout` does not bound this and reading it as if it did is what left every
+    # durable job unbounded: it starts counting at the *first attempt*, so a task nobody polls — the
+    # background fleet scaled to zero, a rolling update, a queue named in config but served by no
+    # pod — waits forever. `durable/notify.py` measured that shape (a workflow still RUNNING after
+    # 75 s against a 30 s start-to-close) for one call; it is a property of the timeout, not of that
+    # call.
+    #
+    # **Measured against the test server, because the retry interaction decides whether this is
+    # safe:** a ScheduleToStart timeout is *not* retried. An activity with `maximum_attempts=3` and
+    # a 10 s bound against an unserved queue failed once, at 10.028 s — so this bound converts an
+    # infinite wait into one loud failure and leaves `start_to_close` and the retry policy to mean
+    # exactly what they meant before. That is why it is this timeout rather than
+    # `schedule_to_close_timeout`, which would have capped every attempt *together* and silently
+    # deleted the retries at 31 call sites.
+    #
+    # An hour, deliberately far above any healthy queue delay: a wait on `background-jobs` is
+    # ordinary backpressure — eight concurrent slots, activities that hold one for up to a quarter
+    # of an hour — and turning backpressure into a non-retryable failure would be worse than the
+    # wedge this exists to end. What an hour cannot be is normal, so a run that hits it is a fleet
+    # fault and now says so.
+    activity_queue_wait_seconds: float = Field(default=3600.0, gt=0)
+
+    # Execution ceiling on one *scheduled* run (`durable/schedules.py`).
+    #
+    # Every Schedule here is `ScheduleOverlapPolicy.SKIP`, which is right — a re-scan that overruns
+    # its interval must finish rather than queue a redundant twin — and is exactly why a run that
+    # never finishes is worse than a failed one: it skips every subsequent fire of that job family,
+    # indefinitely, and a skipped fire is not an error anywhere. This is the backstop that turns
+    # "silently stopped running" into a failed run visible in `describe_schedules`.
+    #
+    # A day, because none of these jobs legitimately runs for one and each is resumable: the ELN and
+    # corpus syncs are cursored, retention and the reindex are idempotent, the digest advances a
+    # watermark. So a terminated run loses at most the chunk in flight, and the next fire picks it
+    # up — which is what makes a ceiling safe to state at all.
+    schedule_run_timeout_seconds: float = Field(default=86400.0, gt=0)
+
     # Bound on retries for ordinary activities under the shared bad-data retry policy
     # (`workflows.publish.BAD_DATA_RETRY`). Bad data is non-retryable by type; this caps the
     # *transient* retries so an unclassified deterministic failure (a bug, not a network blip)

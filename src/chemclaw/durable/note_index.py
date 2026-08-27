@@ -23,7 +23,7 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.durable.registry import durable_activity, durable_workflow
     from chemclaw.retrieval.vector_index import default_note_index, reindex_notes
 
-from chemclaw.durable.publish import BAD_DATA_RETRY
+from chemclaw.durable.publish import BAD_DATA_RETRY, queue_wait_timeout
 
 
 @durable_activity("background")
@@ -49,5 +49,6 @@ class NoteReindexWorkflow:
         return await workflow.execute_activity(
             reindex_notes_activity,
             start_to_close_timeout=timedelta(seconds=settings.note_reindex_timeout_seconds),
+            schedule_to_start_timeout=queue_wait_timeout(),
             retry_policy=BAD_DATA_RETRY,
         )

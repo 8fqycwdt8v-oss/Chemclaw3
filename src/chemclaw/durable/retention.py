@@ -113,7 +113,7 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.core.db import connection, existing_tables
     from chemclaw.durable.registry import durable_activity, durable_workflow
 
-from chemclaw.durable.publish import BAD_DATA_RETRY
+from chemclaw.durable.publish import BAD_DATA_RETRY, queue_wait_timeout
 
 logger = logging.getLogger(__name__)
 
@@ -552,5 +552,6 @@ class RetentionWorkflow:
         return await workflow.execute_activity(
             prune_expired_rows,
             start_to_close_timeout=timedelta(seconds=settings.retention_timeout_seconds),
+            schedule_to_start_timeout=queue_wait_timeout(),
             retry_policy=BAD_DATA_RETRY,
         )

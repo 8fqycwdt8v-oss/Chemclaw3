@@ -49,7 +49,7 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.templates.manifest import AgentStep, JobStep, Template, ToolStep
     from chemclaw.templates.resolve import resolve
 
-from chemclaw.durable.publish import BAD_DATA_RETRY, agent_step_retry
+from chemclaw.durable.publish import BAD_DATA_RETRY, agent_step_retry, queue_wait_timeout
 from chemclaw.durable.registry import durable_workflow
 
 
@@ -210,6 +210,7 @@ class TemplateWorkflow:
                     tool=step.tool, arguments=resolve(step.arguments, scope), identity=identity
                 ),
                 start_to_close_timeout=timeout,
+                schedule_to_start_timeout=queue_wait_timeout(),
                 heartbeat_timeout=heartbeat,
                 retry_policy=BAD_DATA_RETRY,
             )
@@ -239,6 +240,7 @@ class TemplateWorkflow:
                     step_id=step.id,
                 ),
                 start_to_close_timeout=timeout,
+                schedule_to_start_timeout=queue_wait_timeout(),
                 heartbeat_timeout=heartbeat,
                 retry_policy=agent_step_retry(),
             )
