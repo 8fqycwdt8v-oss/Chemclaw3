@@ -130,58 +130,7 @@ topic).
       conversion out of the `pre-upgrade` Job into a `post-upgrade` one while the schema DDL stays
       where it is (~25 lines). Needs an ADR.
 
-- [ ] **The four-repo lane puts the fleet's manifests on `CHEMCLAW_CONNECTORS_DIR`, which one
-      manifest forbids** — [S], and it is the half of the now-closed live-lane row that did not
-      close with it. `infra/live/e2e-full-stack/up.sh:185` adds `$MCP_REPO/manifests` to that path
-      while `connectors/calc/connector.yaml:13` explicitly forbids it. It works only because
-      `connectors/registry.py:124` is first-dir-wins (`found.setdefault`), and **that behaviour is
-      pinned**: `tests/test_connector_registry.py:293` builds two directories each holding a bundle
-      named `alpha`, on ports 7777 and 8888, and asserts the first directory's endpoint is what
-      `enabled()` returns. So this is latent rather than broken — the lane depends on an ordering
-      guarantee nothing in the lane states. Either the manifest stops forbidding it or the lane
-      stops relying on the order.
-
-- [ ] **`CalculationKey`'s primary key is an unescaped concatenation of caller-shaped strings** —
-      [M]. `science/calc/store.py:122` (`CalculationKey.as_str`) builds the literal
-      `calculation_results` primary key as `f"{calc_type}@{calc_version}:{input_hash}:{params_hash}"`
-      (`infra/sql/001_calculation_results.sql:7`), and `calc_version` is not guaranteed free of `@`
-      or `:` — `docs/decisions/D-2026-08-16-the-physics-leaves-the-cache-stays.md` gives real
-      examples (`esol-delaney@2004`, `cal-0.28733:-29.3116`). Two different `(calc_type,
-      calc_version)` pairs can serialise to the identical string (`calc_type="a", calc_version="b@c"`
-      vs. `calc_type="a@b", calc_version="c"`); if the hash pair also matched, one calculator's
-      `ON CONFLICT (key) DO UPDATE` (`science/calc/postgres_store.py:32`) would silently overwrite
-      another calculator's cached row with a different `result`. The fix — deriving the key from
-      `stable_hash` over the four components as a mapping, the way `molecule_hash`/`input_hash`
-      already do — changes every existing row's key, which under D-011 ("never recomputed") is a
-      full-cache invalidation on deploy; that trade needs an ADR and a migration plan, not a quiet
-      change to `as_str`.
-
 ## 2 — Answers that are wrong without saying so
-
-- [ ] **Two `Chemclaw3-mcp` changes this repository's half already landed against** — [S] each,
-      and neither is fixable from here.
-      `D-2026-08-27-a-gradient-is-the-evidence-a-frequency-set-cannot-carry` closed the Chemclaw3
-      half of both; these are the halves that live in the other tree.
-      1. `servers/calc/src/chemclaw_mcp_calc/engine/xtb_hessian.py::compute_hessian`'s size refusal
-         ends *"Submit it through Chemclaw3's durable QM job path instead"* — a route
-         `D-2026-08-26-semiempirical-is-the-whole-tier` deleted, and one that could not have helped
-         anyway, since every durable job here composes that same primitive under the same ceiling.
-         The same function's own docstring and the comment on `xtb_hessian_max_atoms` both say in
-         the present tense that the wording was changed *because* there is no such path; only the
-         message was not. It should state the server's own limit and stop naming a route — this side
-         now refuses first and names `level="quick"` and a truncated model system. Paired change:
-         `servers/calc/tests/test_engine.py::test_a_molecule_over_the_atom_limit_is_refused_and_says_where_to_go`
-         matches on `"durable QM job path"` and its docstring says the refusal "names Chemclaw3's
-         durable job path"; both have to change with it.
-      2. `servers/calc/tests/test_key_contract.py` pins `CHEMCLAW3_EPOCH = "2"` and asserts
-         `CALCULATION_EPOCH == CHEMCLAW3_EPOCH` under a docstring calling it "one constant with two
-         homes". It is not one constant: `connectors/calc/remote.py::remote_key` **composes** the
-         two — `H({"epoch": ours, "remote_params": <the server's params_hash, which already carries
-         theirs>})` — so either may move alone and neither addresses the other's rows. The assertion
-         is a coupling the code does not have and goes red on a legitimate one-sided bump; it should
-         become a statement about the composition, or be dropped. This side's
-         `tests/test_calc_remote.py::test_the_two_epochs_compose_rather_than_having_to_match` is the
-         relationship that does hold.
 
 - [ ] **Every structured tool result reaches the model as pydantic repr, not JSON** — [M].
       `langchain_core.tools.base._stringify` prefers `json.dumps(content)` and falls back to
@@ -199,15 +148,17 @@ topic).
       payloads be JSON, or should each tool render its own boundary as `condense_protocols` now does
       — deserves deciding rather than defaulting.
 
-- [ ] **The `chem` enumerations and `compute_fukui_at` are served, pending that PR's merge** —
-      [S], and what is left is a version bump rather than an implementation.
-      `Chemclaw3-mcp#18` adds the six enumerations this repository's `chem` manifest declares plus
-      the `compute_fukui_at` that `connectors/calc/compose.py::ensemble_property` calls, so the six
-      templates `D-2026-08-25-the-loop-is-a-composite-not-a-template` added can complete. Delete
-      this row once that PR is merged **and the live lane has run one of those templates end to
-      end** — `make template-validate` cannot see the difference (`chem` is a bundle this
+- [ ] **The `chem` enumerations and `compute_fukui_at` are served; the merge has landed and what
+      remains is a live-lane confirmation** — [S]. `Chemclaw3-mcp#18` merged 2026-08-27 (commit
+      `90e7486`): `enumerate_tautomers`, `enumerate_protonation_states`, `enumerate_stereoisomers`,
+      `enumerate_bond_cleavages` and their siblings now exist in `servers/chem/.../tools.py`, and
+      `compute_fukui_at` (which `connectors/calc/compose.py::ensemble_property` calls) exists in
+      `servers/calc/.../tools.py`, so the six templates `D-2026-08-25-the-loop-is-a-composite-not-a-template`
+      added can complete. Delete this row once the live lane has actually run one of those templates
+      end to end — `make template-validate` still cannot see the difference (`chem` is a bundle this
       repository declares and does not run, so its tools are name-checked and argument-unchecked),
-      and `make connector-validate` against a running server is what would.
+      and `make connector-validate` against a running server is what would; no live-lane transcript
+      postdating the merge exists yet.
       **`transform_structure` was the seventh name and is now gone from the manifest** rather than
       implemented: it had no caller, no template, no skill reference and no documented signature in
       either repository, so serving it would have meant inventing its contract.
@@ -239,11 +190,12 @@ topic).
 
 - [ ] **A retracted ELN entry stays current evidence** — [M]. A withdrawn entry that simply
       disappears from the export is invisible to a cursor-based sync, so the note it produced keeps
-      answering as current. `RawEntry` has no tombstone and the `ElnAdapter` protocol's two methods
-      cannot express one. The *amendment* half already works (`ingest/eln/sync.py:201` — a body that
-      is not byte-identical to the merged note falls through and is re-proposed); only disappearance
-      is invisible. **The receiving end is already built** — `Note.valid_to`
-      + `is_current(as_of)` — and `ingest/documents/sync.py:428 prune_share` is the same problem
+      answering as current. `RawEntry` has no tombstone and the `ElnAdapter` protocol's **three**
+      methods (`fetch_new_entries`, `map_to_ord`, and `fetch_truncated`, added since this row was
+      written) cannot express one. The *amendment* half already works (`ingest/eln/sync.py:~190` — a
+      body that is not byte-identical to the merged note falls through and is re-proposed); only
+      disappearance is invisible. **The receiving end is already built** — `Note.valid_to`
+      + `is_current(as_of)` — and `ingest/documents/sync.py:472 prune_share` is the same problem
       already solved for the share, including the three refusals that make a sweep safe ("an
       unreachable share and an empty one look identical"). Port that shape. Testable offline against
       a fake adapter; a real ELN is needed only to decide *which* mechanism the tenant offers.
@@ -253,7 +205,7 @@ topic).
       no caller". It has no *definition*: `uncertainty.py` records its deletion, and `Method` is
       `reported | propagated | none`. The row's framing is also wrong — it says wiring it must
       answer whether the interval attaches on the server, "which cannot see the ledger". It attaches
-      here: `predict_solubility` (`connectors/calc/server/tools.py:660`) runs in this repo, holds
+      here: `predict_solubility` (`connectors/calc/server/tools.py:745`) runs in this repo, holds
       the server's payload, and already calls `_log_prediction`; `reconciled_for` is one await away.
       So this is a re-add plus a call site (~100 lines), not a cross-repo decision. What it really
       needs is a policy answer: which predictors are calibrated enough to override their published
@@ -298,9 +250,10 @@ it happens.
       `agent/attachments.py:284` shields the future deliberately, so the timeout bounds the caller
       and the slot, never the thread — a hostile document holds a worker forever. The only real fix
       is a killable subprocess, with pickling and a new child-OOM failure mode to classify
-      (~150-250 lines). **The cheap, honest half is separable**: `ingest/documents/sync.py:204` calls
-      `asyncio.to_thread` with no `wait_for` at all, so one pathological file can hold the sync
-      activity indefinitely; giving it the bound the front door already has is ~10 lines.
+      (~150-250 lines). **The cheap, honest half is separable**: `ingest/documents/sync.py:230`
+      (inside `_parse_changed`) calls `asyncio.to_thread` with no `wait_for` at all, so one
+      pathological file can hold the sync activity indefinitely; giving it the bound the front door
+      already has is ~10 lines.
 
 - [ ] **The digest is written to a mailbox with no reader, and the watermark advances anyway** —
       [L]. `durable/digest.py:146-166` writes to `session_events` under session id `digest-<owner>`
@@ -325,13 +278,16 @@ it happens.
       test — retention and the memory jobs are the ones worth arguing about, since a parked run
       there is invisible in exactly the way the fan-out drop was.
 
-- [ ] **`connector_job_timeout_seconds` bounds a 20-second job and a 24-hour job identically** —
-      [M]. `core/config/connectors.py:71`: one global 90,000 s ceiling is the child's
-      `execution_timeout` for every bundle, so if the `calc` worker is down a 20 s xTB job sits
-      `running` for a day with no signal, while the setting is sized entirely by the QM path. An
-      optional `JobSpec.timeout_seconds` applied as `min(declared, setting)` would let a bundle
-      lower its own ceiling while the deployment keeps the maximum, leaving
-      `_the_job_ceiling_covers_the_poll_it_bounds` untouched.
+- [ ] **`connector_job_timeout_seconds` bounds a 20-second job and a 4-hour job identically** —
+      [M]. `core/config/connectors.py:91`: one global **18,000 s (5h)** ceiling is the child's
+      `execution_timeout` for every bundle — sized off the CREST/xTB path (`xtb_job_timeout_seconds`,
+      4h) after `D-2026-08-26-semiempirical-is-the-whole-tier` removed the DFT tier the old
+      90,000s/24h ceiling was sized for. So if the `calc` worker is down, a 20 s xTB job now sits
+      `running` for up to 5 hours with no signal instead of a day — smaller, but the underlying
+      defect (one setting for every bundle, no per-job override) is unchanged. An optional
+      `JobSpec.timeout_seconds` applied as `min(declared, setting)` would let a bundle lower its own
+      ceiling while the deployment keeps the maximum; `connectors/manifest.py`'s `JobSpec` has no
+      such field yet.
 
 ## 4 — Operating it
 
@@ -377,8 +333,8 @@ it happens.
       `main`-only too.
 
 - [ ] **`read_corpus` re-reads the entire ELN from `datetime.min` on every call** — [M].
-      `durable/memory_jobs.py:63` calls `fetch_new_entries(datetime.min)` on every ingest half, so
-      each of the three memory jobs (`build_campaign_notes_activity`,
+      `durable/memory_jobs.py:82-86` calls `fetch_new_entries(datetime.min.replace(tzinfo=UTC))` on
+      every ingest half inside `read_corpus`, so each of the three memory jobs (`build_campaign_notes_activity`,
       `build_playbook_notes_activity`, `build_optimization_notes_activity`) walks the whole record
       from the beginning of time, and `all_reactions()` is called once per activity. On the two
       file-drop exports this costs nothing; against a real warehouse ELN it is a full table scan
@@ -414,8 +370,9 @@ it happens.
       what — a partition key chosen before the row count is known would be a guess.
 - [ ] **Postgres and Temporal are neither deployed nor owned** — [L]. The chart dials
       `chemclaw-temporal-frontend.temporal.svc:7233` and namespace `chemclaw`; there is no subchart
-      and no statement of who runs either. `docs/guides/runbook.md:925` states what this system
-      *requires* of those stores and documents a Postgres restore procedure — what does not exist
+      and no statement of who runs either. `docs/guides/runbook.md:972-997` (§ xiii, "Restore a
+      store") states what this system *requires* of those stores and documents a Postgres restore
+      procedure — what does not exist
       anywhere is tooling that performs or **verifies** a restore, and that cannot be built against
       a store this repo does not own. (The former separate "no backup tooling" row is folded in
       here; it was downstream of this one and overcounted the stores.)
@@ -462,22 +419,6 @@ it happens.
       needs a warning mechanism that section does not have — and a decision about whether the
       combination is an error at all.
 
-- [ ] **Two credentials cannot be set through the chart at all** — [S], and the half of the
-      settings-secret row that did **not** close with
-      `D-2026-08-26-a-credential-is-a-type-not-a-convention`. `llm_fallback_api_key` and
-      `temporal_api_key` are `SecretStr` fields with readers
-      (`agent/llm_provider.py:251`, `core/temporal_client.py:74`) and no entry under
-      `secrets.keys` or `secrets.optionalKeys` in `deploy/helm/chemclaw/values.yaml`, so
-      `chemclaw.env` renders no `secretKeyRef` and a deployment has no supported way to provide
-      them. The consequence differs per credential and that is what makes it a judgement rather
-      than two identical additions: `llm_fallback_api_key` unset silently reuses the primary's
-      key, which is correct for the common case (a second replica of one deployment) and wrong for
-      a second vendor; `temporal_api_key` is Temporal Cloud only and the chart ships self-hosted
-      with mTLS, so it may be right that it has no key — but nothing says so. Both go under
-      `optionalKeys`, for the upgrade reason `framingEnvelopeSecret` already records.
-      (`hpc_artifact_store_token` was the third and is gone with the tier that read it,
-      `D-2026-08-26-semiempirical-is-the-whole-tier`.)
-
 - [ ] **No session pagination and no per-session delete** — [M], **corrected**. This row claimed a
       data-subject erasure request "has no route across the seven tables". It does:
       `agent/leaver.py:161` (`_ERASE`) erases across **twelve** tables in one transaction with
@@ -489,16 +430,23 @@ it happens.
       pagination — `session_store.list_for_owner` truncates at `service_max_listed_sessions` with no
       cursor, so older sessions are unreachable, and (b) `DELETE /sessions/{id}`, which `leaver`
       does not offer because it is actor-scoped, not session-scoped.
-- [ ] **`session_owners` and `session_turns` grow without any age-based disposal** — [S].
-      `infra/sql/README.md`'s own `session_owners` row already flags this ("survives its session's
-      pruned history; BACKLOG") but no row existed here to match it — this closes that dangling
-      cross-reference. Neither table is in `durable/retention.py`'s `_PRUNABLE` set, and the only
-      `DELETE` against either is `agent/leaver.py`'s manual, actor-scoped erasure — so every session a
-      client ever created (the companion UI creates one on the first keystroke, before any message is
-      sent) leaves a `session_owners` row forever, even after `session_messages` for that session is
-      fully pruned by age. Needs a policy decision — prune once a session has no remaining
-      `session_messages` and is past the retention window, or explicitly accept unbounded growth and
-      say so — not a code change made unilaterally.
+- [ ] **`session_owners` grows without any age-based disposal, and `session_turns` only partially
+      does** — [S]. `infra/sql/README.md`'s own `session_owners` row already flags this ("survives
+      its session's pruned history; BACKLOG") but no row existed here to match it — this closes that
+      dangling cross-reference. Neither table is in `durable/retention.py`'s `_PRUNABLE` set, and the
+      only `DELETE` against `session_owners` is `agent/leaver.py`'s manual, actor-scoped erasure — so
+      every session a client ever created (the companion UI creates one on the first keystroke,
+      before any message is sent) leaves a `session_owners` row forever, even after
+      `session_messages` for that session is fully pruned by age. `session_turns` is different:
+      `agent/session_store.py::_TURN_RELEASE` deletes its row on every clean turn release (it is a
+      lease keyed by `session_id PRIMARY KEY`, not an append-only log), so it does not accumulate
+      under normal operation — only a lease abandoned by a crashed/SIGKILLed worker before release
+      survives, and even then it is overwritten in place next time that session claims a turn. So the
+      real gap for `session_turns` is narrower: an orphaned-lease row with no age-based cleanup, not
+      unconditional growth. Needs a policy decision — prune `session_owners` (and any stale
+      `session_turns` lease) once a session has no remaining `session_messages` and is past the
+      retention window, or explicitly accept the growth and say so — not a code change made
+      unilaterally.
 
 - [ ] **`observations_status_idx` does not cover the query it was built for** — [S].
       `infra/sql/025_observations.sql` indexes it `(status, last_seen DESC)`, with a comment saying
@@ -562,26 +510,36 @@ only holds defects can only ever restore the system to what it already intended 
       lane can show every probe still reaching its tool**, because a cheaper prompt that stops
       finding tools is a regression with a good-looking metric. Blocked on the live-lane row in § 1.
 
-- [ ] **Half the probe corpus tests one tool** — [S]. `gather_evidence` is in `expects_tools` for 116
-      of 232 probes; `find_notes` 91; `expand_note` 60; the tail is thin. Two consequences worth
-      separating: the corpus mostly measures one retrieval path, and ChemToolAgent's finding — that
-      tool augmentation **does not consistently beat the base LLM**, and hurts on general chemistry
-      questions — cannot be reproduced here. Bucket C (51 probes) scores restraint but never runs the
-      same question tool-free for comparison. `evals/ab.py::compare_tool_utility` is already written
-      and already registered as `plan_execute_utility`; an A/B arm over bucket A is mostly wiring.
+- [ ] **Half the probe corpus tests one tool** — [S]. `gather_evidence` is in `expects_tools` for
+      124 of 261 probes (re-counted 2026-08-27; the corpus has grown by 29 probes since the
+      2026-08-25 figures of 116/232); `find_notes` 95; `expand_note` 60; bucket C is 53 probes; the
+      tail is thin. Two consequences worth separating: the corpus mostly measures one retrieval path,
+      and ChemToolAgent's finding — that tool augmentation **does not consistently beat the base
+      LLM**, and hurts on general chemistry questions — cannot be reproduced here. Bucket C scores
+      restraint but never runs the same question tool-free for comparison. `evals/ab.py::compare_tool_utility`
+      is already written and already registered as `plan_execute_utility`; an A/B arm over bucket A
+      is mostly wiring.
 
-      **Blocked on a working model credential** (see §4), and the mock cannot stand in: `cli.mock_llm` emits scripted tool calls without *choosing* them in response to a question, so both arms of any comparison would measure the script. Measured 2026-08-25 through the real lane: expected-tool-reached 0/3.
+      **Blocked on a working model credential** — see "This environment's `API-KEY` comes and goes"
+      below in this section, not §4 (which has no credential row) — and the mock cannot stand in:
+      `cli.mock_llm` emits scripted tool calls without *choosing* them in response to a question, so
+      both arms of any comparison would measure the script. Measured 2026-08-25 through the real
+      lane: expected-tool-reached 0/3.
 
-- [ ] **No external benchmark has ever been run** — [M]. `make eval` gates 23 metric values over 14
-      case files, a **7-document** retrieval corpus and a **39-note** knowledge graph, with the
-      science half resting on one solubility value, one BO regret replay and two mass balances. It is
-      honest and it is not comparable to anything. ChemRAG-Bench (1,932 expert-curated chemistry QA
-      pairs) is the best first target because it scores the retrieval half — where this system's
-      science actually lives — and it runs against an OpenAI-compatible endpoint, which is exactly the
-      seam `agent/llm_provider.py` already has. ChemBench and AstaBench are the follow-ups. A number
+- [ ] **No external benchmark has ever been run** — [M]. `make eval` gates 23 metric values over 15
+      case files (re-counted 2026-08-27; one has been added since the 2026-08-25 figure of 14), a
+      **7-document** retrieval corpus and a **39-note** knowledge graph, with the science half
+      resting on one solubility value, one BO regret replay and two mass balances. It is honest and
+      it is not comparable to anything. ChemRAG-Bench (1,932 expert-curated chemistry QA pairs) is the
+      best first target because it scores the retrieval half — where this system's science actually
+      lives — and it runs against an OpenAI-compatible endpoint, which is exactly the seam
+      `agent/llm_provider.py` already has. ChemBench and AstaBench are the follow-ups. A number
       somebody else can also produce is the only kind that survives an argument with a chemist.
 
-      **Blocked on a working model credential** (see the row in §4), and the mock cannot stand in: `cli.mock_llm` emits scripted tool calls without *choosing* them in response to a question, so both arms of any comparison would measure the script. Measured 2026-08-25 through the real lane: expected-tool-reached 0/3.
+      **Blocked on a working model credential** — see "This environment's `API-KEY` comes and goes"
+      below in this section, not §4 — and the mock cannot stand in: `cli.mock_llm` emits scripted
+      tool calls without *choosing* them in response to a question, so both arms of any comparison
+      would measure the script. Measured 2026-08-25 through the real lane: expected-tool-reached 0/3.
 
 - [ ] **`deep-research` has no index behind it** — [M]. `agent/research_tools.py::gather_evidence`
       sweeps the knowledge graph, the ELN, the mounted document share and the fingerprint store —
@@ -609,13 +567,17 @@ only holds defects can only ever restore the system to what it already intended 
       `connectors_enabled` loads every discovered bundle — so shipping that stub would:
 
       1. put `run_python` on the agent surface of **every fresh checkout**, by default;
-      2. make the front door dial `127.0.0.1:8899`, which under the `connectors_required=true` the
-         chart ships means **it refuses to boot** unless somebody is running the sandbox;
+      2. make the front door dial `127.0.0.1:8899` — a hard boot failure only for a deployment that
+         has separately set `connectors_required`/`CHEMCLAW_CONNECTORS_REQUIRED=true`, since the
+         chart itself sets neither and the setting's own default is `False` (corrected 2026-08-27:
+         the row previously claimed the chart ships `connectors_required=true`, which is not true of
+         `deploy/helm/` or `deploy/jenkins/` today — an operator has to opt into fail-fast
+         separately for this consequence to bite);
       3. trip `tests/test_probe_coverage.py` (no probe names `run_python`) and raise the context
          floor.
 
-      Turning a code-execution tool on by default is a decision, not a wiring change, and (2) makes
-      it a breaking one for every existing deployment. **So this needs an ADR about the default
+      Turning a code-execution tool on by default is still a decision, not a wiring change, and (1)
+      and (3) alone are enough to make it one. **So this needs an ADR about the default
       before it needs a diff**, and the branch point is whether `CHEMCLAW_CONNECTORS_ENABLED` stops
       meaning "empty loads everything" — which is a chart-wide behavioural change with its own
       blast radius. Whichever way it goes, the change also owes a `run_python` probe, an
@@ -686,7 +648,7 @@ Pinned at the time of writing: `temporalio` 1.31.0 · `langchain` 1.3.15 · `lan
 | `SummarizationMiddleware` | construct it switched off (`disabled_summarizer`) | **declined** — a summary is new model prose over content `agent/framing.py` marked untrusted, and the envelope does not survive it |
 | `ModelCallLimitMiddleware` | subclass our own cap | **reverted**, `D-2026-08-15-an-after-model-counter-is-a-counter-that-can-be-skipped` — measured, a cap of 2 ran 4 model calls |
 | `ToolErrorMiddleware`, `ToolRetryMiddleware` | neither | **declined** — both trigger on raised exceptions and MCP tools never raise |
-| `HumanInTheLoopMiddleware` | our own plan gate | **open** — its own row; the gate predates it and the shapes have not been compared |
+| `HumanInTheLoopMiddleware` | our own plan gate | **declined for plan approval**, `D-2026-08-15-the-plan-gate-stays-a-refusal-because-an-interrupt-cannot-ask-the-question` — an async `when` cannot be awaited (fails closed, silently), a new user message discards a pending interrupt and corrupts the thread, a mismatched resume bypasses the gate, and retention prunes an unresolved interrupt; **not** declined for per-call approval of an irreversible action, which is a different, still-open question. Restart condition is monitored by `tests/test_upstream_surface.py::test_the_interrupt_on_predicate_is_still_synchronous`: upstream shipping an async `when` |
 | `deepagents.SkillsMiddleware` | use it, narrowed at the backend | **adopted**, with the narrowing on the backend because deepagents publishes skill *paths* into the prompt |
 | `deepagents` `execute` filesystem verb | withhold it | **declined**, and answered elsewhere — `D-2026-08-25-a-sandbox-is-a-server-not-a-verb` puts the capability in the fleet instead |
 | LangSmith tracing | first-party OTel + OpenInference | **declined** — proprietary, no OSS self-host, and its core value is prompt/response content in a third party |
@@ -695,15 +657,6 @@ Pinned at the time of writing: `temporalio` 1.31.0 · `langchain` 1.3.15 · `lan
 one question per row: *does upstream now do this, and better?* A row that changes answer needs an
 ADR, not an edit here. A capability upstream ships that this table does not mention is the gap this
 register exists to catch — add the row in the same pull request that notices it.
-
-- [ ] **Nothing watches for upstream shipping a decision we made ourselves** — [S], and it is the
-      meta-row the four above are instances of. `make upstream-check` guards the six *shapes* this
-      repo borrows against a dependency bump — the coupling that breaks. Nothing guards its
-      *decisions* against upstream shipping the thing: the Temporal LangGraph plugin row above is five
-      weeks old and reached no list here. `tests/test_upstream_surface.py` is the right precedent
-      (two of its assertions are *absences*, so upstream fixing something turns the workaround red).
-      The cheap version is a dated section in this file, re-derived when a dependency is bumped,
-      listing what each pinned upstream now ships that this repository implements itself.
 
 ---
 
@@ -811,20 +764,6 @@ note repository. A real deployment's first sync is a decade of records, where th
 repository nobody can list. Nothing is broken — every proposal genuinely is a reviewable unit — but
 a backfill and an incremental sync arguably want different submission shapes (one branch per batch,
 or a bulk proposal a reviewer expands). Found by the 2026-08-18 corpus-fidelity pass.
-
-## A revoked credential fails the two live prompt-caching tests opaquely
-
-`tests/test_prompt_caching.py` guards its two live tests on `"API-KEY" in os.environ` — that the
-variable is *set*, not that it *works*. With a revoked key both fail several frames deep inside the
-Anthropic client with a raw `AuthenticationError`, so `make test` goes red in a way that reads as a
-prompt-caching regression. Observed 2026-08-18: the environment's key is well-formed, present, and
-answered `401` by the API.
-
-Skipping on an auth error is the wrong fix — it would hide a real outage, and these tests exist
-because a belief about caching was measurably wrong once. The right one is a message that names the
-cause, so a reader learns the credential is dead rather than that the cache broke. Same distinction
-`D-2026-08-17-a-harness-that-starts-two-of-five-servers-is-a-harness-that-tests-two` draws about
-`/readyz`: holding a credential is not the same as holding one the other side accepts.
 
 ## Surface `invalid_tool_calls` — an unparseable tool call is currently a silent no-op
 
