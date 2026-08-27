@@ -44,6 +44,7 @@ from chemclaw.agent.plan_approval_store import plan_approval_store
 from chemclaw.agent.profile_discovery import load_profiles
 from chemclaw.agent.scratchpad import close_memory_store
 from chemclaw.agent.session_events import stream_new_events
+from chemclaw.agent.verifier import require_verifier_capability
 from chemclaw.api.budget import BudgetTracker
 from chemclaw.api.middleware import (
     _add_body_size_limit,
@@ -161,6 +162,12 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         component="front-door",
         reserved=settings.service_max_concurrent_turns + settings.attachment_max_concurrent_parses,
     )
+
+    # Before serving, for the reason `connectors_required` raises here: a judge endpoint that
+    # cannot enforce structured output degrades *every* verified answer silently, and refusing to
+    # start is the only way to keep that pod out of a rollout. A no-op unless `verifier_enabled`
+    # on the `openai_compatible` provider — see `require_verifier_capability`.
+    await require_verifier_capability()
     async with db.pooling():
         app.state.connector_health = await check_connectors_at_startup()
         app.state.connector_health_at = time.monotonic()

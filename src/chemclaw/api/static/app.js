@@ -123,6 +123,14 @@ function applyEvent(evt, answerEl) {
     case "note_proposed":
       add("trace", `📝 proposed ${evt.note_id} for review — ${evt.reference}`);
       return answerEl;
+    case "approval_request":
+      // A trace line and nothing else. This carried Yes/No buttons that POSTed to
+      // `/approvals/{id}/decision`, which only ever made sense for the durable interaction hold —
+      // deleted, because nothing could open one. A plan approval is answered by the *next turn*
+      // through `POST /sessions/{id}/plan/decision`, so a button here would have to know a session
+      // this renderer is not given. The reference surface shows the ask; a real one wires it.
+      add("trace", `⏸ ${evt.prompt}`);
+      return answerEl;
     case "tool_failed":
       // In the trace, not the error lane: the step failed, the turn did not. Without this the
       // transcript showed a silent gap wherever a tool raised.

@@ -27,6 +27,7 @@ from chemclaw.agent.verifier import (
     VerificationResult,
     _verifier_prompt,
     promised_uncalled_tools,
+    require_verifier_capability,
     turn_evidence,
     ungrounded_parameter_shapes,
     verify_answer,
@@ -1132,3 +1133,73 @@ def test_the_runner_publishes_the_ledger_the_judge_books_into() -> None:
     with _turn_ambient("s-1", "oid-abc", frozenset({"chemist"}), False, "cid-1", ledger):
         assert _ledger.get() is ledger, "the turn's ledger is not what an off-stream call finds"
     assert _ledger.get() is None, "the ledger outlived the turn that owned it"
+
+
+# --- the startup capability probe: a judge that cannot enforce structured output must refuse ---
+# --- to start, not degrade every answer for the life of the deployment -------------------------
+
+
+def test_the_probe_is_a_no_op_while_verification_is_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With the judge off, the degradation it guards against cannot happen — no call, no cost.
+
+    The injected client would fail on any use, which is what proves the probe never touched it.
+    """
+    monkeypatch.setattr(settings, "verifier_enabled", False)
+    monkeypatch.setattr(settings, "llm_provider", "openai_compatible")
+    asyncio.run(require_verifier_capability(client=object()))
+
+
+def test_the_probe_is_a_no_op_on_anthropic(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Anthropic is unaffected: no `response_format` seam, so nothing to probe.
+
+    A startup must not buy a model call to establish a failure mode that does not exist on that
+    provider.
+    """
+    monkeypatch.setattr(settings, "verifier_enabled", True)
+    monkeypatch.setattr(settings, "llm_provider", "anthropic")
+    asyncio.run(require_verifier_capability(client=object()))
+
+
+def test_the_probe_passes_a_server_that_honours_response_format(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A compliant endpoint starts cleanly, and the probe really posted `response_format`."""
+    monkeypatch.setattr(settings, "verifier_enabled", True)
+    verdict_json = '{"claims": [], "confidence": 1.0, "verified_by": "judge"}'
+    with _FakeOpenAiEndpoint(status=200, content=verdict_json) as server:
+        client = _openai_compatible_client(monkeypatch, f"http://127.0.0.1:{server.port}/v1")
+        asyncio.run(require_verifier_capability(client=client))
+        assert "response_format" in server.requests[0], "the probe never sent response_format"
+
+
+def test_the_probe_refuses_a_server_rejecting_response_format(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """(b) of the measured server behaviours, turned from silent degradation into a refusal.
+
+    The 400 that degraded every judged answer for the deployment's life is now a startup failure
+    that names the knob and the fix.
+    """
+    monkeypatch.setattr(settings, "verifier_enabled", True)
+    with _FakeOpenAiEndpoint(
+        status=400, error="response_format is not a supported parameter"
+    ) as server:
+        client = _openai_compatible_client(monkeypatch, f"http://127.0.0.1:{server.port}/v1")
+        with pytest.raises(RuntimeError, match="verifier_enabled"):
+            asyncio.run(require_verifier_capability(client=client))
+
+
+def test_the_probe_refuses_a_server_ignoring_response_format(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """(c): a 200 of prose fails schema validation client-side — also a startup refusal.
+
+    The alternative was a lifetime of silently certified answers.
+    """
+    monkeypatch.setattr(settings, "verifier_enabled", True)
+    with _FakeOpenAiEndpoint(
+        status=200, content="Sure, a 99% yield for that step looks about right to me."
+    ) as server:
+        client = _openai_compatible_client(monkeypatch, f"http://127.0.0.1:{server.port}/v1")
+        with pytest.raises(RuntimeError, match="verifier_enabled"):
+            asyncio.run(require_verifier_capability(client=client))

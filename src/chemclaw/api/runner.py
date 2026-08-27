@@ -37,7 +37,14 @@ from chemclaw.agent.framing import frame_untrusted
 from chemclaw.agent.job_results import await_job_results
 from chemclaw.agent.langgraph_agent import build_langgraph_agent
 from chemclaw.agent.loop_cap import begin_loop_watch, end_loop_watch, loop_hit_cap
-from chemclaw.agent.plan_gate import consume_turn_approval, gate_applies
+from chemclaw.agent.plan_gate import (
+    PLAN_APPROVAL_PROMPT,
+    approval_stands,
+    consume_turn_approval,
+    gate_applies,
+    plan_identity,
+)
+from chemclaw.agent.plan_state import session_todos
 from chemclaw.agent.profiles import get_profile
 from chemclaw.agent.repeat_guard import begin_call_watch, end_call_watch
 from chemclaw.agent.scratchpad import memory_store
@@ -48,6 +55,7 @@ from chemclaw.agent.turn_flags import reset_dry_run, set_dry_run
 from chemclaw.agent.turn_usage import TurnUsage, reset_turn_usage, set_turn_usage
 from chemclaw.api.budget import BudgetTracker
 from chemclaw.api.events import (
+    ApprovalRequestEvent,
     CapabilityDegradedEvent,
     ErrorCode,
     ErrorEvent,
@@ -274,6 +282,14 @@ async def run_turn(
                 # name. The teardown below still books the spend and the duration, which is right:
                 # the turn cost what it cost.
                 return
+            # Before the answer, because the answer is the turn's final event: a chemist reading
+            # "review the plan and approve it" in the answer text used to have nothing to act on —
+            # the decision routes and the surface's approval card both existed, and no turn ever
+            # emitted the event that connects them.
+            if plan_gated:
+                pending = await _pending_plan_approval(session.session_id)
+                if pending is not None:
+                    yield pending
             answer = await build_answer_event(
                 ledger.answer_text,
                 tool_trace.outputs,
@@ -631,6 +647,48 @@ def _empty_answer_event(
         retryable=True,
         correlation_id=ledger.correlation_id,
     )
+
+
+async def _pending_plan_approval(session_id: str) -> ApprovalRequestEvent | None:
+    """The approval this session is waiting on, or `None` when it is not waiting on one.
+
+    Emitted at the end of a plan-gated turn — the moment the plan is settled and committed —
+    whenever the session's current plan is non-empty and holds no live approval. That is the exact
+    condition under which the gate will refuse every state-changing call of the next turn, so it is
+    the moment a surface owes the chemist the decision card: `ApprovalRequestEvent` documented an
+    empty `approval_id` as the plan-approval shape and the reference surface mounts its card on it,
+    but nothing ever produced the event, so under `plan_only` the chemist saw a plan and a refusal
+    and no way to act on either.
+
+    Reads the same sources the gate and `consume_turn_approval` read — `session_todos` for the
+    plan, `plan_identity` for its hash, `approval_stands` for the decision — so the prompt cannot
+    disagree with the enforcement about whether the session is actually blocked. An *approved*
+    plan whose turn just executed does not prompt: the check runs before the turn's approval is
+    consumed, and the next turn re-prompts if the chemist asks for more work under the now-spent
+    decision.
+
+    Never raises, mirroring `consume_turn_approval`: an unreadable plan must not fail a turn that
+    already has its answer. The gate still refuses on the next call regardless, so the cost of
+    staying silent here is one missing card, not one missing control.
+    """
+    try:
+        todos = await session_todos(session_id)
+        if todos is None:
+            return None
+        plan_hash = plan_identity(todos)
+        if plan_hash is None:
+            return None
+        if await approval_stands(session_id, plan_hash):
+            return None
+        return ApprovalRequestEvent(prompt=PLAN_APPROVAL_PROMPT, approval_id="")
+    except Exception:
+        logger.warning(
+            "could not determine whether session %s's plan awaits approval; the decision card is "
+            "not shown this turn and the gate still refuses unapproved work",
+            session_id,
+            exc_info=True,
+        )
+        return None
 
 
 def failure_event(exc: Exception, session_id: str, correlation_id: str) -> ErrorEvent:
