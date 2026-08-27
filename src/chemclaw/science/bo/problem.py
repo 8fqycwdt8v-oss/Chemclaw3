@@ -706,10 +706,16 @@ def require_rounds_within_ceiling(n_rounds: int) -> None:
     **Not an event-history bound**, though it was documented as one. The durable campaign re-sends
     its whole observation history to the propose activity every round, so history bytes grow
     quadratically and a campaign well inside this ceiling would have been terminated by the server
-    mid-run (measured: round 441 at batch 1). That is fixed where it lives — the workflow
-    continues-as-new on the server's own suggestion — not by a number here, which could never
-    account for batch size or problem width. What this ceiling refuses is a spec that would spend
-    thousands of evaluations, which is a mistake worth catching before the first one is paid for.
+    mid-run (measured: round 441 at batch 1 — and roughly 1/sqrt(2) of that since the per-round
+    campaign-record write doubled the bytes each round carries). That is fixed where it lives — the
+    workflow continues-as-new on the server's own suggestion — not by a number here, which could
+    never account for batch size or problem width.
+
+    **What this refuses is a long campaign, not an expensive one**, and it used to claim the
+    second. The sentence here read "what this ceiling refuses is a spec that would spend thousands
+    of evaluations", which is false whenever `batch > 1`: rounds times batch is the cost, and this
+    function never sees `batch`. `require_evaluations_within_budget` is the one that bounds the
+    spend, and it exists because this claim was wrong.
 
     Enforced at campaign/spec *creation* — never inside the `CampaignSpec` model, whose validators
     re-run on deserialization at workflow replay, where a lowered ceiling must not fail an
@@ -1146,7 +1152,15 @@ def discrete_candidate_count(problem: OptimizationProblem) -> int | None:
     exclusions = [c for c in problem.constraints if isinstance(c, ExcludeConstraint)]
     if not exclusions:
         return total
-    if total > settings.bo_max_enumerated_cells:
+    # **The cost is cells times exclusions, not cells** — every cell is tested against every
+    # exclusion, and `constraints` has no length bound of its own. Measured on this tree, both
+    # inside a cells-only ceiling of 1 000 000: one exclusion over 10^6 cells walks in 2.18 s,
+    # fifteen over the same cells in **26.06 s**. A cells-only bound therefore bounded the wrong
+    # product, and 26 s matters twice over — `campaign_progress` is classified `read_only`, so the
+    # plan gate never sees it, and `BoCampaignWorkflow` calls this on the *workflow* thread on
+    # every replay, where Temporal's 10 s workflow-task timeout turns it into a task-failure loop
+    # rather than a slow answer.
+    if total * len(exclusions) > settings.bo_max_enumerated_cells:
         return None
     names = [name for name, _ in counts]
     return sum(
@@ -1154,6 +1168,30 @@ def discrete_candidate_count(problem: OptimizationProblem) -> int | None:
         for cell in product(*(options for _, options in counts))
         if not any(x.forbids(dict(zip(names, cell, strict=True))) for x in exclusions)
     )
+
+
+def discrete_space_size(problem: OptimizationProblem) -> int | None:
+    """The product of the category counts — the grid *before* any exclusion removes cells.
+
+    `None` means one thing only: a continuous parameter makes the space genuinely infinite. That
+    is the difference from `discrete_candidate_count`, whose `None` now carries two meanings, and
+    the reason this exists.
+
+    **A count is cheap at any magnitude; an enumeration is not.** This is one multiplication per
+    parameter over Python integers, so a 10^10-cell space costs the same as a 10-cell one. Only
+    the exclusion-aware count has to walk, which is why only that one has a ceiling.
+
+    Callers that need "is this space finite, and how big" — seeding, which deduplicates and
+    refuses an `n` the space cannot hold — must use this rather than the feasible count, because
+    routing a merely-large space into the branch written for an infinite one silently drops both
+    of those guarantees.
+    """
+    total = 1
+    for parameter in problem.parameters:
+        if not isinstance(parameter, CategoricalParameter):
+            return None
+        total *= len(parameter.categories)
+    return total
 
 
 def point_is_feasible(problem: OptimizationProblem, params: dict[str, ParamValue]) -> bool:

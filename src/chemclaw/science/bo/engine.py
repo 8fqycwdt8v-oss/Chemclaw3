@@ -70,6 +70,7 @@ from chemclaw.science.bo.problem import (
     Prediction,
     ScreeningDesign,
     discrete_candidate_count,
+    discrete_space_size,
     distinct_feasible_candidate_count,
     observed_value,
     params_key,
@@ -345,10 +346,24 @@ def initial_candidates(
     distinct points cannot exist.
     """
     strategy = strategies.map(RandomStrategy(domain=_to_domain(problem), seed=_resolve_seed(seed)))
-    space = discrete_candidate_count(problem)
+    # **Two different questions, and one of them must not be answered with `None`.**
+    # `discrete_space_size` is `None` only for a genuinely infinite (any-continuous) space;
+    # `discrete_candidate_count` is *also* `None` for a finite space too large to enumerate under
+    # an exclusion. Reading the second one here routed a merely-large space into the branch
+    # written for an infinite one, which silently dropped both guarantees the docstring above
+    # promises — measured on a 27-cell space with the ceiling lowered: 40 requested, 40 returned,
+    # **20 distinct**, and no refusal for asking 40 points of a 24-cell space. The ceiling is
+    # ENV-overridable, so any deployment that lowers it to bound the walk would have got that on
+    # ordinary spaces.
+    size = discrete_space_size(problem)
+    feasible = discrete_candidate_count(problem)
     with _translating_surrogate_errors("sampling initial candidates"):
-        if space is None:
+        if size is None:
             return _frame_to_candidates(problem, strategy.ask(n))
+        # Refuse against the *feasible* count when it is known, since that is the number of points
+        # that can actually be drawn; fall back to the raw size when the exclusion walk was
+        # declined, where the rejection loop's own bound is what stops an impossible ask.
+        space = feasible if feasible is not None else size
         if n > space:
             raise ValueError(
                 f"cannot seed {n} distinct points: the discrete space has only {space}"
@@ -930,6 +945,16 @@ def _require_design_fits_the_ceiling(
     Raises:
         ValueError: Naming the run count, the ceiling, and the two ways to get under it.
     """
+    if n_generators and any(
+        len(p.categories) != 2 for p in problem.parameters if isinstance(p, CategoricalParameter)
+    ):
+        # Say nothing about size here: a reduced design over a three-level factor is refused by
+        # `_fractional_design` a few lines later, and this guard's arithmetic (`corners >>
+        # n_generators`) models a design that cannot be built. It reported a fictional run count
+        # and then offered two remedies that were both wrong for the input — "screen fewer
+        # factors" and "ask for a reduced design with n_generators", to a caller who had already
+        # asked for one. The real error is the caller's to act on, so let it through.
+        return
     corners = 1
     categorical_combinations = 1
     for parameter in problem.parameters:

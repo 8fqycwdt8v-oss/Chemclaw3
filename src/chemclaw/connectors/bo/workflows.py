@@ -62,6 +62,12 @@ def _carry_on_if_history_is_filling_up(
     server would terminate it there, losing every already-paid evaluation: exactly the failure the
     ceiling was written to prevent, at a round count the ceiling permits.
 
+    That 441 is now optimistic by about sqrt(2): the per-round campaign-record write sends the same
+    history to a second activity, so the quadratic term doubled (measured 17.25 MB -> 34.79 MB over
+    441 rounds). The number is left as it was measured rather than re-derived, because it is cited
+    as the *finding* that motivated this function, and the function does not depend on it — the
+    trigger below is the server's own signal, which is the whole point.
+
     **The trigger is Temporal's own signal, not a round count.** `is_continue_as_new_suggested()`
     flips when the server sees history approaching its configured threshold, which is the only
     number that accounts for what this campaign actually carries — batch size, parameter count and
@@ -179,7 +185,18 @@ class BoCampaignWorkflow:
             # write closed for a campaign that *finishes*, left open for every other ending. It
             # also made cancellation lossy in a way that mattered: "pause this campaign" has no
             # signal handler and does not need one, because cancel-then-resume is the same thing
-            # when the history survives the cancel. Now it does.
+            # when the history survives the cancel.
+            #
+            # **Best-effort, and the guarantee has to be stated that way.** `record_suggestion`
+            # catches `_TRANSIENT_WRITE_FAILURES` and returns normally, so this activity *succeeds*
+            # on a round that was never persisted — no exception escapes, so `BAD_DATA_RETRY`
+            # never fires and Temporal never re-runs it. That trade is right for the inline tool
+            # (a database blip must not cost a chemist the suggestion already computed) and it is
+            # inherited here rather than chosen, so a blip during a round loses that round's
+            # observations and predictions permanently, with a WARNING and nothing else. The claim
+            # is therefore "the history usually survives the cancel", not "always"; making it
+            # always means letting the durable caller opt out of the swallow, which is a change to
+            # `record_suggestion`'s contract and is on the backlog.
             #
             # Keyed on the round rather than the run, because `record_suggestion`'s idempotency is
             # `(campaign_id, job_id)` — a per-round write under the bare workflow id would dedupe
@@ -189,6 +206,28 @@ class BoCampaignWorkflow:
             # `predicted_value`/`predicted_sd`. The terminal write below records the *best* point
             # instead, which is a different statement and has no surrogate belief attached to it —
             # so the per-round rows are also the only place a campaign's predictions survive.
+            #
+            # **This doubles event-history growth, and that is the price of the guarantee.**
+            # The history is now sent to two activities per round rather than one, so the
+            # quadratic term doubles: measured on the Reizman problem at 173 B/observation
+            # (the same order as the 178 B behind `_carry_on_if_history_is_filling_up`), a
+            # batch-1 campaign books 17.25 MB of activity input over 441 rounds before this and
+            # 34.79 MB after — 2.02x. It is a cost rather than a regression because the
+            # continue-as-new trigger is Temporal's own dynamic signal and not a round count:
+            # the campaign continues roughly twice as often and never approaches the limit. If
+            # that frequency ever becomes the problem, the fix is to record every Nth round
+            # rather than to send less history, because a row holding only one round's
+            # observations would leave a resume with no evidence before it.
+            #
+            # **It costs stored bytes on the same argument, by a much larger factor.** Each row
+            # snapshots the *cumulative* history, so N rounds store a triangular number of
+            # observations rather than one final list: measured at 173 B/observation, a 500-round
+            # batch-1 campaign stores 22.19 MB against the terminal write's 87.4 kB — **254x** —
+            # and 87.45 MB at batch 4. `durable/retention.py` refuses to prune `bo_campaigns` and
+            # `bo_suggestions` cascades from it, so nothing reclaims that. The snapshot is what
+            # makes an interrupted campaign resumable at all, so it is the price of the guarantee
+            # rather than an oversight — but it is a real number, unbounded over a deployment's
+            # lifetime, and `docs/planning/BACKLOG.md` carries it with a trigger to revisit.
             await workflow.execute_activity(
                 record_campaign_run,
                 args=[
