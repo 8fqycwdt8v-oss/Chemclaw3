@@ -650,3 +650,24 @@ def test_no_secret_is_carried_in_the_plaintext_config_map() -> None:
         f".Values.config, which renders into a plaintext ConfigMap: {exposed}. Move each to "
         "secrets.keys and argue it in test_chart_declares_only_the_documented_secrets."
     )
+
+
+def test_the_verifier_opt_in_is_documented_in_the_values_file() -> None:
+    """The commented-out `CHEMCLAW_VERIFIER_*` block is the chart's opt-in surface — pinned as text.
+
+    The verifier ships off (code default and chart alike), so the chart cannot *render* anything
+    to assert; what a deployer has instead is the documented block in `values.yaml` naming the two
+    facts that make the flip safe — the startup capability probe, and the review band. Prose in a
+    values file is exactly the kind of claim that silently vanishes in a refactor, which is what
+    this pin exists to make loud. It checks the raw text because the keys are comments: parsed
+    YAML deliberately does not carry them, and that they are NOT in the parsed config is asserted
+    too — an uncommented default would switch every deployment's judge on from a values edit that
+    read like documentation.
+    """
+    text = (_CHART / "values.yaml").read_text(encoding="utf-8")
+    for key in ("CHEMCLAW_VERIFIER_ENABLED", "CHEMCLAW_VERIFIER_CONFIDENCE_THRESHOLD"):
+        assert f"# {key}" in text, f"the commented opt-in for {key} left values.yaml"
+        assert key not in _VALUES["config"], f"{key} must stay a documented opt-in, not a default"
+    assert "require_verifier_capability" in text, (
+        "the comment must name the startup probe a deployer will hit"
+    )

@@ -346,6 +346,20 @@ config:
   CHEMCLAW_LLM_MODEL: "gpt-oss"
   CHEMCLAW_HARNESS_ENABLED: "true"
   CHEMCLAW_HARNESS_AUTONOMY: "plan_only"
+  # The LLM-as-judge over every answer's citation faithfulness is a **deployment opt-in**, off by
+  # default here as in code, and switching it on is two facts, not one flag:
+  #   1. Startup then runs `require_verifier_capability()` — one structured-output probe against
+  #      the routed `"verifier"` model — and **refuses to serve** if that endpoint rejects or
+  #      ignores `response_format` (json_schema). On `openai_compatible` that support is the whole
+  #      feature: without it the judge degrades to the offline citation gate on every turn while
+  #      looking enabled, which is the silent posture the probe exists to end.
+  #   2. Near `CHEMCLAW_VERIFIER_CONFIDENCE_THRESHOLD` the verdict is re-rolled and the median
+  #      decides, within `CHEMCLAW_VERIFIER_REVIEW_BAND` (default 0.2 — measured, not chosen:
+  #      D-2026-08-27-a-verdict-at-the-margin-is-a-coin-toss); the band costs extra judge calls
+  #      only on answers that land inside it, counted by chemclaw_verifier_band_rerolls_total.
+  # Uncomment to opt in; the model it runs on comes from CHEMCLAW_MODEL_ROUTES' "verifier" entry.
+  # CHEMCLAW_VERIFIER_ENABLED: "true"
+  # CHEMCLAW_VERIFIER_CONFIDENCE_THRESHOLD: "0.7"
   CHEMCLAW_SESSION_STORE: "postgres"
   # Stated rather than left to the code default (16), because the code default was chosen for one
   # process and this chart runs seventeen of them. 8 matches the front door's own admission cap

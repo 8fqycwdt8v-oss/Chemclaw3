@@ -1203,3 +1203,102 @@ def test_the_probe_refuses_a_server_ignoring_response_format(
         client = _openai_compatible_client(monkeypatch, f"http://127.0.0.1:{server.port}/v1")
         with pytest.raises(RuntimeError, match="verifier_enabled"):
             asyncio.run(require_verifier_capability(client=client))
+
+
+# --- the review band (D-2026-08-27): a verdict at the margin is re-rolled ------------------------
+
+
+class _SequencedVerifierClient:
+    """A fake judge that answers each roll from a script — a verdict, or an exception to raise.
+
+    The band's whole subject is what happens *across* rolls, which the single-value fake above
+    cannot express: it replays one verdict forever, so a test against it would show the median of
+    three identical rolls and prove nothing about the re-roll at all.
+    """
+
+    def __init__(self, script: list[Any]) -> None:
+        self._script = list(script)
+        self.calls = 0
+
+    def with_structured_output(self, schema: Any, **kwargs: Any) -> "_SequencedVerifierClient":
+        return self
+
+    async def ainvoke(self, prompt: str, config: Any = None) -> Any:
+        self.calls += 1
+        step = self._script.pop(0)
+        if isinstance(step, Exception):
+            raise step
+        return step
+
+
+def _judged(confidence: float, claim: str = "") -> VerificationResult:
+    claims = [ClaimCheck(text=claim, supported=False, cited_note_id="n1")] if claim else []
+    return VerificationResult(claims=claims, confidence=confidence)
+
+
+def test_a_verdict_at_the_margin_is_rerolled_and_the_median_roll_wins(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """In-band first roll: two more rolls, and the median roll — claims and all — is the verdict."""
+    monkeypatch.setattr(settings, "verifier_enabled", True)
+    monkeypatch.setattr(settings, "verifier_review_band", 0.1)
+    monkeypatch.setattr(settings, "verifier_band_rerolls", 2)
+    client = _SequencedVerifierClient(
+        [_judged(0.65, "low roll"), _judged(0.9, "high roll"), _judged(0.72, "median roll")]
+    )
+    result = asyncio.run(verify_answer("An answer [[n1]].", [_chunk("n1")], client=client))
+    assert client.calls == 3
+    assert result.confidence == 0.72
+    # The claims belong to the roll whose confidence is reported — never a splice of rolls.
+    assert [c.text for c in result.claims] == ["median roll"]
+    assert result.verified_by == "judge"
+
+
+def test_a_verdict_outside_the_band_stands_on_one_roll(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The band's cost is confined to the answers that need it: a clear verdict is not re-rolled."""
+    monkeypatch.setattr(settings, "verifier_enabled", True)
+    monkeypatch.setattr(settings, "verifier_review_band", 0.1)
+    client = _SequencedVerifierClient([_judged(0.2)])
+    result = asyncio.run(verify_answer("An answer [[n1]].", [_chunk("n1")], client=client))
+    assert client.calls == 1
+    assert result.confidence == 0.2
+
+
+def test_a_zero_band_restores_the_single_roll_verdict(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`verifier_review_band=0` is the off switch, even exactly at the threshold."""
+    monkeypatch.setattr(settings, "verifier_enabled", True)
+    monkeypatch.setattr(settings, "verifier_review_band", 0.0)
+    client = _SequencedVerifierClient([_judged(settings.verifier_confidence_threshold)])
+    result = asyncio.run(verify_answer("An answer [[n1]].", [_chunk("n1")], client=client))
+    assert client.calls == 1
+    assert result.confidence == settings.verifier_confidence_threshold
+
+
+def test_a_failed_reroll_costs_the_roll_not_the_verdict(monkeypatch: pytest.MonkeyPatch) -> None:
+    """One judged roll is in hand; a reroll dying must not degrade the verdict below it."""
+    monkeypatch.setattr(settings, "verifier_enabled", True)
+    monkeypatch.setattr(settings, "verifier_review_band", 0.1)
+    monkeypatch.setattr(settings, "verifier_band_rerolls", 2)
+    before = METRICS.value("chemclaw_verifier_degraded_total")
+    client = _SequencedVerifierClient([_judged(0.68), TimeoutError(), _judged(0.74)])
+    result = asyncio.run(verify_answer("An answer [[n1]].", [_chunk("n1")], client=client))
+    assert client.calls == 3
+    assert result.confidence in (0.68, 0.74)  # the median of the two rolls that answered
+    assert result.verified_by == "judge"
+    assert METRICS.value("chemclaw_verifier_degraded_total") == before, (
+        "a failed reroll is the band's business, not a degradation to the citation gate"
+    )
+
+
+def test_the_bands_rerolls_are_counted(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`chemclaw_verifier_band_rerolls_total` is what makes the band's cost checkable."""
+    monkeypatch.setattr(settings, "verifier_enabled", True)
+    monkeypatch.setattr(settings, "verifier_review_band", 0.1)
+    monkeypatch.setattr(settings, "verifier_band_rerolls", 2)
+    try:
+        before = METRICS.value("chemclaw_verifier_band_rerolls_total")
+    except KeyError:
+        before = 0.0  # the counter registers on its first increment
+    client = _SequencedVerifierClient([_judged(0.7), _judged(0.7), _judged(0.7)])
+    asyncio.run(verify_answer("An answer [[n1]].", [_chunk("n1")], client=client))
+    assert METRICS.value("chemclaw_verifier_band_rerolls_total") == before + 2

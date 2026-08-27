@@ -583,15 +583,18 @@ only holds defects can only ever restore the system to what it already intended 
       list, so a destination with no matching port still drops), and the token obligation in the
       comment `chem` already models.
 
-- [ ] **This environment's `API-KEY` is present and rejected, which blocks three rows** — [S], and
-      it is operational rather than code. Measured 2026-08-25: `anthropic.AuthenticationError: 401`
-      from `api.anthropic.com`, with and without the session's `ANTHROPIC_BASE_URL` cleared.
-      `CLAUDE.md` documents the variable as "may not exist in every environment"; present-and-stale
-      is the case it does not cover and the worse one, because it reads as a defect rather than as a
-      missing credential. `tests/test_prompt_caching.py` now probes reachability and skips with a
-      reason naming which case it is, so the suite is honest about it — but the *live* half of the
-      eval plan (the bucket-C control arm, any external benchmark, and grading any probe on the
-      model's judgement rather than on the harness) needs a working one and nothing else.
+- [ ] **This environment's `API-KEY` comes and goes, and three rows are blocked exactly while it is
+      down** — [S], and it is operational rather than code. Measured 2026-08-25:
+      `anthropic.AuthenticationError: 401` with and without the session's `ANTHROPIC_BASE_URL`
+      cleared. **Re-measured 2026-08-27: the same variable answers** (a haiku call returned 200; the
+      day's verifier-margin run spent ~120 calls through it), so present-and-rejected is a *state*
+      of this environment rather than a fact about it, and the worse case remains the stale one —
+      it reads as a defect rather than as a missing credential.
+      `tests/test_prompt_caching.py` probes reachability and skips with a reason naming which case
+      it is, so the suite is honest about it. The *live* half of the eval plan (the bucket-C control
+      arm, any external benchmark, grading any probe on the model's judgement) needs the working
+      state and nothing else — probe first (`printenv 'API-KEY'`, one cheap call), then run the
+      measurement in the same session, because tomorrow's state is not evidence about today's.
 
 - [ ] **Memory records; it does not change what the next turn does** — [L], and it needs an ADR
       before it needs code. Six tiers exist and all six are *read on request*:
@@ -617,6 +620,13 @@ only holds defects can only ever restore the system to what it already intended 
       served a user. Its trigger is therefore a deployment with real sessions in it, and until then
       building the generator would be building against an imagined corpus, which is the row's own
       objection.
+
+      **The measurement itself is no longer owed — the corpus is.**
+      `D-2026-08-27-count-the-trajectories-before-building-the-distiller` defines the recurring
+      trajectory, ships `make trajectory-census` (`chemclaw.cli.trajectory_census`), and states the
+      greenlight numbers (≥5 recurring classes across ≥3 sessions, ≥1 would-have-helped multi-tool
+      class); the command prints the verdict itself. Run 2026-08-27: 0 sessions, 0 turns, not
+      greenlit. The day a deployment has sessions, this row is one command to check.
 
 ### The upstream-capability register — what our pinned dependencies now ship that we build ourselves
 
@@ -645,22 +655,6 @@ Pinned at the time of writing: `temporalio` 1.31.0 · `langchain` 1.3.15 · `lan
 one question per row: *does upstream now do this, and better?* A row that changes answer needs an
 ADR, not an edit here. A capability upstream ships that this table does not mention is the gap this
 register exists to catch — add the row in the same pull request that notices it.
-
-- [ ] **Memory records; it does not change what the next turn does** — [L], and it needs an ADR
-      before it needs code. Six tiers exist and all six are *read on request*:
-      `memory/campaign.py`, `interaction.py`, `failure.py`, `playbook.py`, `progression.py`,
-      `observations.py`, surfaced by `recall_observations`, `find_past_jobs` and `record_failure`.
-      Nothing in that set changes the agent's behaviour on the next turn unless a human writes a
-      `SKILL.md`: `skills/playbook-distillation/SKILL.md` is the distillation *judgment*, and the
-      PR-gate is where a distilled playbook becomes knowledge — but the loop is manual end to end and
-      nobody has measured how often it closes. The 2026 work (SkillRL, SkillForge and the
-      self-evolving surveys) is specifically about abstracting recurring trajectories into reusable
-      procedure automatically. **The PR-gate is the right control for that, not an argument against
-      it** — a proposed skill is exactly the shape the gate already carries. What is owed first is a
-      measurement rather than a mechanism: over the sessions on disk, how many recurring trajectories
-      *are* there, and would a distilled one have changed a later answer? A generator built before
-      that number is a routing hypothesis nobody measured, which is the mistake
-      `D-2026-08-15` already made once here.
 
 - [ ] **Nothing watches for upstream shipping a decision we made ourselves** — [S], and it is the
       meta-row the four above are instances of. `make upstream-check` guards the six *shapes* this

@@ -39,7 +39,7 @@ SHELL := bash
 
 .DEFAULT_GOAL := help
 
-.PHONY: help install lint type test cov check ci chat db-migrate db-grants schedules-apply kg-validate eval eval-strict eval-baseline eval-baseline-check eln-validate skill-validate connector-validate datasource-validate sink-validate sink-schema template-validate connectors prose-validate helm-validate explain user-erase reindex reindex-full up down phoenix-up phoenix-down phoenix-publish deps-audit live-infra live-infra-down live-up live-down live-status live-jobs live-probes live-data live-plan-gate live-degradation live-storm live-soak live-soak-report leak-probe mutants mutant-results
+.PHONY: help install lint type test cov check ci chat db-migrate db-grants schedules-apply kg-validate eval eval-strict eval-baseline eval-baseline-check eln-validate skill-validate connector-validate datasource-validate sink-validate sink-schema template-validate connectors prose-validate helm-validate explain user-erase reindex reindex-full up down phoenix-up phoenix-down phoenix-publish deps-audit live-infra live-infra-down live-up live-down live-status live-jobs live-probes live-verifier-margin trajectory-census live-data live-plan-gate live-degradation live-storm live-soak live-soak-report leak-probe mutants mutant-results
 
 help:  ## List every target with its one-line description (the default).
 	@# Reads the `## ` comments beside each target, so a new target documents itself the day it is
@@ -338,6 +338,12 @@ live-jobs:  ## Run a real durable job end to end (Temporal + connector worker + 
 
 live-probes:  ## Ask the running front door the live probe set (needs ANTHROPIC_API_KEY).
 	uv run python -m chemclaw.cli.live_probes $(ARGS)
+
+live-verifier-margin:  ## Re-roll the raw judge and measure its margin at the threshold (needs a model credential).
+	uv run python -m chemclaw.cli.verifier_margin $(ARGS)
+
+trajectory-census:  ## Count recurring tool-call trajectories over the stored sessions (the distiller's trigger).
+	uv run python -m chemclaw.cli.trajectory_census $(ARGS)
 
 # The corpus half of the same question `live-probes` asks of the model: not "did a tool answer"
 # but "is the number in the answer the number in the paper". Checks every published measurement
