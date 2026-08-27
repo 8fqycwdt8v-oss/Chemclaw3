@@ -334,7 +334,7 @@ def test_a_denied_connector_tool_never_runs_and_is_still_audited(
 
     recorded = {event.tool: event for event in sink.events}
     denial = recorded["echo_subject"]
-    assert denial.outcome == "error"
+    assert denial.outcome == "refused"
     assert "AuthorizationError" in denial.detail
     # The message names *who* was refused and *which* tool, which is what an auditor reads; the
     # exact wording is `agents.authz`'s to own, so this asserts the parts that must not drift.

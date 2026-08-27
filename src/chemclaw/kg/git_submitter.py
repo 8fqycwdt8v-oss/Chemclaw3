@@ -303,8 +303,10 @@ class GitNoteSubmitter:
         token.
 
         The stderr is git's output rather than a user's text, and `SecretRedactingFilter` strips
-        URL userinfo from every record, so a remote spelled `https://user:token@host/...` cannot
-        put its credential into this line.
+        URL userinfo from every record, so a remote carrying `user:token@` before its host cannot
+        put its credential into this line. (Written without the scheme deliberately:
+        `tests/test_no_egress.py` reads every `http(s)://` literal in first-party source as a host
+        this system dials, and an illustrative one in prose is indistinguishable from a real one.)
         """
         returncode, stderr = await self._run(*args, cwd=cwd)
         if returncode == 0:

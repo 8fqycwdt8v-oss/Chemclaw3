@@ -327,7 +327,7 @@ _CORRELATION_ID = re.compile(r"\A[A-Za-z0-9_-]{8,64}\Z")
 # How many pydantic error objects a 422 body may carry. Pydantic materialises one per bad list
 # element, so an unbounded render turns a linear body into a linear response: measured at 683,520
 # errors and ~32 MB from a 2 MB body, on the pod's single uvicorn worker, reachable by any
-# authenticated caller (`docs/archive/lessons-2026-08.md`). `routes/proposals.py` already answers
+# authenticated caller (`docs/archive/lessons-2026-08.md`). `api/routes/proposals.py` already answers
 # its own webhook body for exactly this reason; this bounds every other route the same way,
 # without changing the shape a client reads (`detail` is still a list of error objects).
 _MAX_VALIDATION_ERRORS = 20

@@ -2245,7 +2245,7 @@ def test_a_connector_server_is_not_sigkilled_before_it_finishes_starting() -> No
     `molfp` import RDKit and open a Postgres pool during FastAPI lifespan and uvicorn accepts
     nothing until lifespan returns, so a cold start on a throttled node crash-loops forever with
     nothing wrong anywhere in it. The workers were never exposed to it because
-    `chemclaw.workerProbes` states its thresholds and argues for them.
+    `define "chemclaw.workerProbes"` states its thresholds and argues for them.
 
     Pinned as "a startup probe exists and buys more than a minute", not as the exact numbers: the
     budget is a deployment's to tune and the invariant is that a cold start is not a restart.
@@ -2506,7 +2506,7 @@ def test_no_ingress_policy_reaches_another_release_s_pods() -> None:
     namespace holding a second Chemclaw release — a staging copy beside production is the ordinary
     case — it applied to *their* connector pods as well, imposing an ingress rule naming our pods as
     the permitted peer and cutting theirs off from their own front door. Its three sibling policies
-    in the same file all carry `chemclaw.selectorLabels`.
+    in the same file all carry the `define "chemclaw.selectorLabels"` helper.
     """
     text = (CHART / "templates" / "networkpolicy.yaml").read_text()
     documents = [d for d in text.split("\n---\n") if "kind: NetworkPolicy" in d]

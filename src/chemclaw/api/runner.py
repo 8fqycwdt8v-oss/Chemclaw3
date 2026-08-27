@@ -1006,9 +1006,19 @@ def _settle_outcome(ledger: _TurnLedger) -> str:
     `errored` first: a turn that raised has an `error_code`, and nothing after that is a better
     description of what happened to it.
 
-    Then the two cancellations, told apart by the caller's deadline (see `_TurnLedger.deadline`).
-    They come before the answer tests because a turn torn down mid-stream may well have produced
-    prose, and "the wall clock killed it" is what an operator needs to read — not "it answered".
+    Then the wall-clock kill, told apart from the other cancellation by the caller's deadline (see
+    `_TurnLedger.deadline`). It comes before the answer tests because a turn the clock killed may
+    well have produced prose, and "the wall clock killed it" is what an operator needs to read.
+
+    **A client disconnect does not, and that asymmetry is a billing rule rather than a taxonomy
+    preference.** A turn that produced its answer and then lost its reader is `answered`: the model
+    ran, the tokens were spent, and the answer exists — `completed` is derived from this outcome, so
+    ranking the disconnect first billed such a turn as incomplete. That is the same under-reporting
+    that got `stream_events(version="v3")` declined, where a turn abandoned mid-message booked 0
+    tokens and made "drop the connection just before the answer" a free bypass of the token budget.
+    So `abandoned` keeps its meaning — the turn reached no answer *and* no named ending — and a
+    cancellation is only what distinguishes it from `empty_answer`, which is the same absence with
+    a reader still attached.
 
     `loop_capped` before `empty_answer`, because the cap is the *cause* and an empty answer is one
     of its symptoms. That ordering is what makes `empty_answer` mean something: it names the silent
@@ -1025,7 +1035,7 @@ def _settle_outcome(ledger: _TurnLedger) -> str:
     """
     if ledger.error_code:
         return "errored"
-    if ledger.cancelled:
+    if ledger.cancelled and _deadline_passed(ledger.deadline):
         # `>=`, against the same event-loop clock `asyncio.timeout` schedules itself on, so this is
         # an exact test rather than a tolerance: at the moment the timeout delivers its cancellation
         # the loop clock has reached the deadline by construction, and a Stop or a torn-down pump
@@ -1035,12 +1045,15 @@ def _settle_outcome(ledger: _TurnLedger) -> str:
         # ledger settled off the loop is a caller that set no deadline anyway (a test, a synchronous
         # teardown), and raising `RuntimeError` out of the one function that books what a turn cost
         # would lose the row to save a comparison.
-        return "timed_out" if _deadline_passed(ledger.deadline) else "abandoned"
+        return "timed_out"
     if ledger.loop_capped:
         return "loop_capped"
     if not ledger.answer_text.strip():
-        return "empty_answer"
-    return "answered" if ledger.answered else "abandoned"
+        # The same absence, told apart by whether anyone was still reading: a turn cut short with
+        # nothing to show is `abandoned`, while one that ran to its own end and said nothing is the
+        # silent death `empty_answer` names.
+        return "abandoned" if ledger.cancelled else "empty_answer"
+    return "answered"
 
 
 def _deadline_passed(deadline: float | None) -> bool:
