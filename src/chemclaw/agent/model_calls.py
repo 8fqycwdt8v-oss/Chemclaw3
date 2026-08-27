@@ -54,6 +54,7 @@ the discarded attempt, and the state it does see holds exactly one assistant mes
 import logging
 import time
 from collections.abc import Awaitable, Callable, Sequence
+from functools import partial
 from typing import Any
 
 from langchain.agents.middleware import AgentMiddleware, ModelRequest
@@ -62,6 +63,7 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from chemclaw.agent.llm_provider import classify_model_failure
 from chemclaw.core.config import settings
 from chemclaw.core.logging import log_event
+from chemclaw.core.metrics import Metrics
 from chemclaw.core.metrics_bridge import record_metric
 
 logger = logging.getLogger(__name__)
@@ -257,14 +259,20 @@ def _retry_request(
     return request.override(messages=[*request.messages, HumanMessage(content=correction)])
 
 
+def _bump_invalid(tool: str, metrics: Metrics) -> None:
+    """Increment the unparseable-call counter for one tool.
+
+    A named function bound with `partial` rather than a closure over the loop variable, which is
+    the idiom `agent/audit_store.py` already uses: a `lambda` capturing `name` in a loop captures
+    the *variable*, so every deferred update would book the last tool in the list.
+    """
+    metrics.increment("chemclaw_invalid_tool_calls_total", labels={"tool": tool})
+
+
 def _count_invalid(failures: list[tuple[str, str]], *, attempt: str) -> None:
     """Count each unparseable call under its tool, and say so once per model call."""
     for name, _error in failures:
-        record_metric(
-            lambda metrics, tool=name: metrics.increment(  # type: ignore[misc]
-                "chemclaw_invalid_tool_calls_total", labels={"tool": tool}
-            )
-        )
+        record_metric(partial(_bump_invalid, name))
     log_event(
         logger,
         "model.invalid_tool_calls",

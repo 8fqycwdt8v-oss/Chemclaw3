@@ -29,10 +29,11 @@ from chemclaw.core.identity_context import (
     reset_current_correlation_id,
     reset_current_identity,
     set_current_correlation_id,
+    set_current_identity,
 )
 from chemclaw.core.logging import log_event
 from chemclaw.core.metrics import METRICS
-from chemclaw.core.session_context import reset_current_session_id
+from chemclaw.core.session_context import reset_current_session_id, set_current_session_id
 
 logger = logging.getLogger(__name__)
 
@@ -275,7 +276,6 @@ class _RequestObservability:
             except Exception:
                 # Not `BaseException`: a cancelled request — a client that hung up, a pod draining
                 # — is an ended connection, not a server error, and must stay one.
-                status = 500
                 logger.exception(
                     "unhandled error serving %s %s (correlation %s)",
                     scope.get("method", ""),
@@ -283,12 +283,14 @@ class _RequestObservability:
                     correlation,
                     extra={"correlation_id": correlation},
                 )
-                if not answered:
-                    await _answer_internal_error(send, correlation)
-                else:
-                    # The response is already on the wire (an SSE stream that died mid-answer);
-                    # there is no status left to change and nothing truthful left to send.
+                if answered:
+                    # The response is already on the wire (an SSE stream that died mid-answer), so
+                    # there is nothing truthful left to send — and **`status` is left alone**:
+                    # the client was told 200 and booking a 500 here would put a status on the
+                    # counter that nothing ever answered with. The log line above is the record.
                     raise
+                status = 500
+                await _answer_internal_error(send, correlation)
         finally:
             _record_request(
                 scope, status, time.perf_counter() - started, response_bytes, correlation
@@ -344,8 +346,6 @@ def bind_request_actor(request: Request, actor: str, roles: frozenset[str]) -> N
     """
     if not request.scope.get(_SCOPE_BOUND):
         return
-    from chemclaw.core.identity_context import set_current_identity
-
     request.scope[_SCOPE_ACTOR] = actor
     request.scope[_SCOPE_IDENTITY_TOKEN] = set_current_identity(actor, roles)
 
@@ -360,8 +360,6 @@ def bind_request_session(request: Request, session_id: str) -> None:
     """
     if not request.scope.get(_SCOPE_BOUND):
         return
-    from chemclaw.core.session_context import set_current_session_id
-
     request.scope[_SCOPE_SESSION_TOKEN] = set_current_session_id(session_id)
 
 

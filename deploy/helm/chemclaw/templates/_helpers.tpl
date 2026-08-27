@@ -167,6 +167,16 @@ imagePullSecrets:
 {{- define "chemclaw.workerMetricsEnv" -}}
 - name: CHEMCLAW_WORKER_METRICS_PORT
   value: {{ .Values.workerMetricsPort | quote }}
+{{- if .Values.monitoring.temporalSdkMetrics.enabled }}
+{{- /* The Temporal SDK's own Prometheus exporter, and it is bound *here* rather than only
+       declared. The chart already opened a `temporal-metrics` container port and pointed a
+       PodMonitor endpoint at it, and nothing set the variable that makes the SDK listen on it —
+       so turning the switch on gave every worker a declared, scraped, permanently-down target,
+       which `ChemclawTargetDown` would then report forever. A port with nothing behind it is
+       worse than no port: it manufactures the alert it was added to make possible. */}}
+- name: CHEMCLAW_TEMPORAL_METRICS_PORT
+  value: {{ .Values.monitoring.temporalSdkMetrics.port | quote }}
+{{- end }}
 {{- end -}}
 
 {{- /* A worker's container port and its two probes, written once for core's worker and every

@@ -339,7 +339,7 @@ def test_a_refused_launch_is_audited_as_an_error_before_it_raises(
     with pytest.raises(AuthorizationError):
         asyncio.run(authorize_job_step(_step(costly_bundle, subject="toluene")))
     (event,) = events
-    assert (event.tool, event.actor, event.outcome) == (costly_bundle, "chemist-1", "error")
+    assert (event.tool, event.actor, event.outcome) == (costly_bundle, "chemist-1", "refused")
 
 
 def test_a_step_with_bad_arguments_fails_before_any_workflow_starts(fixture_bundle: str) -> None:

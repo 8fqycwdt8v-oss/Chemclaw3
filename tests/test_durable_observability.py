@@ -376,7 +376,16 @@ def test_a_failed_run_round_trips_through_postgres() -> None:
 
     async def _run() -> None:
         await migrated_db_or_skip()
-        record = failed_job_record("pg-job-failed", _JOB, "unknown ALPB solvent '2-MeTHF'", 4.5)
+        # A connector name no other test's filter can match. `job_records` is not truncated
+        # between tests, and `test_job_record_postgres.py` asserts an *exact* listing for
+        # `connector="calc"` — so a row this file leaves behind under a shared name is a failure
+        # in somebody else's test, which is the worst kind to debug.
+        record = failed_job_record(
+            "pg-job-failed",
+            _JOB.model_copy(update={"connector": "durable-observability-probe"}),
+            "unknown ALPB solvent '2-MeTHF'",
+            4.5,
+        )
         await PostgresJobRecordSink().record(record)
         stored = await read_job_record("pg-job-failed")
         assert stored is not None

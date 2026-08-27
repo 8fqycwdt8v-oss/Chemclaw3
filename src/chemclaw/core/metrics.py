@@ -468,7 +468,13 @@ _COUNTERS: dict[str, str] = {
     # --- the tool chain ------------------------------------------------------------------------
     # A refusal and a crash were one `outcome='error'` and one identically-worded log line, so
     # "why did the agent not do the thing" required a LIKE scan of an unindexed free-text column.
-    "chemclaw_tool_calls_total": "Tool invocations, by tool and outcome (ok / refused / error).",
+    # Four outcomes, not three. `cancelled` is here because the alternative is under-counting
+    # attempted calls: a turn abandoned mid-tool still made the call, and dropping it would make
+    # this counter disagree with `audit_events`, which has recorded a `cancelled` outcome since
+    # long before this metric existed.
+    "chemclaw_tool_calls_total": (
+        "Tool invocations, by tool and outcome (ok / refused / error / cancelled)."
+    ),
     "chemclaw_tool_refusals_total": (
         "Tool calls stopped by a governance gate, by reason (authz / dry_run / undeclared_write / "
         "plan_gate / repeat) — four of the five moved no metric at all before this."
@@ -812,7 +818,11 @@ _GAUGES: dict[str, str] = {
     "chemclaw_event_stream_capacity": "Configured maximum concurrent push-back streams.",
     # In-flight durable work. `chemclaw_jobs_started_total` minus a completion counter would have
     # given this, except the completion counter did not exist until now.
-    "chemclaw_jobs_in_flight": "Durable jobs launched from this process and not yet finished.",
+    # "carried by", not "launched from", and the difference is which pod you are looking at: a job
+    # is launched by an agent tool in the front door and executed by a connector worker, so a
+    # per-process subtraction of starts from finishes would be a number nobody can take. What this
+    # reads is the durable work *this* process is currently carrying.
+    "chemclaw_jobs_in_flight": "Durable jobs this process is currently carrying.",
 }
 
 # Gauges that carry **one** label, read as a whole family from a single callable returning
