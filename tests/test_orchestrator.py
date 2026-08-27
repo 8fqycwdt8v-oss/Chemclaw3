@@ -7,7 +7,11 @@ while its siblings still return.
 """
 
 import asyncio
+import logging
+import types
+from typing import Any
 
+import pytest
 from temporalio import workflow
 
 # This module *defines* a workflow (`_FanOutParent`), so Temporal's sandbox re-imports it — and
@@ -112,3 +116,59 @@ def test_background_worker_registers_fan_out_limit_activity() -> None:
     from chemclaw.durable.orchestrator import resolve_fan_out_limit
 
     assert resolve_fan_out_limit in BACKGROUND_ACTIVITIES
+
+
+def _fake_workflow(*, replaying: bool = False) -> types.SimpleNamespace:
+    """A stand-in for `temporalio.workflow` inside `orchestrator`, mirroring `test_publish.py`'s.
+
+    `fan_out` itself needs a real Temporal server for the child-workflow round trip
+    (`test_fan_out_runs_children_in_order_and_isolates_failures` above), but the dropped-child
+    counting logic does not — it only reads `workflow.info()`, `workflow.logger` and
+    `workflow.unsafe.is_replaying()`. Substituting the module's `workflow` reference (and
+    `_run_child`, so no child workflow is actually started) tests that logic offline, the same way
+    `test_publish.py::_fake_workflow` tests `publish_note_best_effort`'s replay guard.
+    """
+    return types.SimpleNamespace(
+        logger=logging.getLogger("test.workflow"),
+        unsafe=types.SimpleNamespace(is_replaying=lambda: replaying),
+        info=lambda: types.SimpleNamespace(workflow_id="fan-out-parent"),
+    )
+
+
+async def _failing_run_child(*_args: Any, **_kwargs: Any) -> Any:
+    raise ValueError("boom")
+
+
+def test_a_replayed_dropped_child_is_not_counted_again(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Replay re-executes workflow code; counting a dropped child there would inflate the metric.
+
+    The regression this pins: `chemclaw_fan_out_children_dropped_total` used to increment with no
+    `is_replaying` guard, unlike its two siblings in `publish.py` — so a worker restart or
+    sticky-cache eviction mid-fan-out counted every already-seen dropped child again.
+    """
+    import chemclaw.durable.orchestrator as orchestrator_module
+    from chemclaw.core.metrics import METRICS
+
+    monkeypatch.setattr(orchestrator_module, "workflow", _fake_workflow(replaying=True))
+    monkeypatch.setattr(orchestrator_module, "_run_child", _failing_run_child)
+    before = METRICS.value("chemclaw_fan_out_children_dropped_total")
+
+    result = asyncio.run(orchestrator_module.fan_out(object(), [1], id_prefix="t", max_parallel=1))
+
+    assert result == []
+    assert METRICS.value("chemclaw_fan_out_children_dropped_total") == before
+
+
+def test_a_dropped_child_is_counted_when_not_replaying(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The guard is on the replay path only — a real drop during normal execution still counts."""
+    import chemclaw.durable.orchestrator as orchestrator_module
+    from chemclaw.core.metrics import METRICS
+
+    monkeypatch.setattr(orchestrator_module, "workflow", _fake_workflow(replaying=False))
+    monkeypatch.setattr(orchestrator_module, "_run_child", _failing_run_child)
+    before = METRICS.value("chemclaw_fan_out_children_dropped_total")
+
+    result = asyncio.run(orchestrator_module.fan_out(object(), [1], id_prefix="t", max_parallel=1))
+
+    assert result == []
+    assert METRICS.value("chemclaw_fan_out_children_dropped_total") == before + 1

@@ -1196,6 +1196,10 @@ async def reaction_energy(
         ("product", products),
     )
     queue = [(role, smiles) for role, group in roles for smiles in group]
+    require_within_budget(
+        estimate_units(len(queue), level=level),
+        f"a reaction energy over {len(queue)} species",
+    )
     species = []
     for index, (role, smiles) in enumerate(queue, start=1):
         progress(f"species {index}/{len(queue)}: {smiles}")
@@ -1303,6 +1307,15 @@ async def solvent_comparison(
     """
     if not solvents:
         raise ValueError("give at least one solvent to compare")
+    # `calc_screen_max_parallel` bounds only how many media run at once, not how many run in total
+    # (every medium in `solvents` is eventually run via the `gather` below) — the analogue of
+    # `rank_species_across_solvents`'s species x media multiplication, checked the same way here.
+    species_count = len(reactants) + len(products)
+    require_within_budget(
+        estimate_units(species_count, level=level) * (len(solvents) + 1),
+        f"comparing a {species_count}-species reaction across {len(solvents)} solvents "
+        "plus the gas-phase reference",
+    )
     limit = asyncio.Semaphore(settings.calc_screen_max_parallel)
 
     async def one(solvent: str | None) -> ReactionEnergyResult:

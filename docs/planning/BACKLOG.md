@@ -143,31 +143,6 @@ topic).
 
 ## 2 — Answers that are wrong without saying so
 
-- [ ] **Two `Chemclaw3-mcp` changes this repository's half already landed against** — [S] each,
-      and neither is fixable from here.
-      `D-2026-08-27-a-gradient-is-the-evidence-a-frequency-set-cannot-carry` closed the Chemclaw3
-      half of both; these are the halves that live in the other tree.
-      1. `servers/calc/src/chemclaw_mcp_calc/engine/xtb_hessian.py::compute_hessian`'s size refusal
-         ends *"Submit it through Chemclaw3's durable QM job path instead"* — a route
-         `D-2026-08-26-semiempirical-is-the-whole-tier` deleted, and one that could not have helped
-         anyway, since every durable job here composes that same primitive under the same ceiling.
-         The same function's own docstring and the comment on `xtb_hessian_max_atoms` both say in
-         the present tense that the wording was changed *because* there is no such path; only the
-         message was not. It should state the server's own limit and stop naming a route — this side
-         now refuses first and names `level="quick"` and a truncated model system. Paired change:
-         `servers/calc/tests/test_engine.py::test_a_molecule_over_the_atom_limit_is_refused_and_says_where_to_go`
-         matches on `"durable QM job path"` and its docstring says the refusal "names Chemclaw3's
-         durable job path"; both have to change with it.
-      2. `servers/calc/tests/test_key_contract.py` pins `CHEMCLAW3_EPOCH = "2"` and asserts
-         `CALCULATION_EPOCH == CHEMCLAW3_EPOCH` under a docstring calling it "one constant with two
-         homes". It is not one constant: `connectors/calc/remote.py::remote_key` **composes** the
-         two — `H({"epoch": ours, "remote_params": <the server's params_hash, which already carries
-         theirs>})` — so either may move alone and neither addresses the other's rows. The assertion
-         is a coupling the code does not have and goes red on a legitimate one-sided bump; it should
-         become a statement about the composition, or be dropped. This side's
-         `tests/test_calc_remote.py::test_the_two_epochs_compose_rather_than_having_to_match` is the
-         relationship that does hold.
-
 - [ ] **Every structured tool result reaches the model as pydantic repr, not JSON** — [M].
       `langchain_core.tools.base._stringify` prefers `json.dumps(content)` and falls back to
       `str(content)`, which is what happens for every `BaseModel` this repo returns —
@@ -184,15 +159,15 @@ topic).
       payloads be JSON, or should each tool render its own boundary as `condense_protocols` now does
       — deserves deciding rather than defaulting.
 
-- [ ] **The `chem` enumerations and `compute_fukui_at` are served, pending that PR's merge** —
-      [S], and what is left is a version bump rather than an implementation.
-      `Chemclaw3-mcp#18` adds the six enumerations this repository's `chem` manifest declares plus
-      the `compute_fukui_at` that `connectors/calc/compose.py::ensemble_property` calls, so the six
-      templates `D-2026-08-25-the-loop-is-a-composite-not-a-template` added can complete. Delete
-      this row once that PR is merged **and the live lane has run one of those templates end to
-      end** — `make template-validate` cannot see the difference (`chem` is a bundle this
-      repository declares and does not run, so its tools are name-checked and argument-unchecked),
-      and `make connector-validate` against a running server is what would.
+- [ ] **The `chem` enumerations and `compute_fukui_at` need a live-lane run** — [S].
+      `Chemclaw3-mcp#18` (adding the six enumerations this repository's `chem` manifest declares
+      plus the `compute_fukui_at` that `connectors/calc/compose.py::ensemble_property` calls) has
+      merged, so the six templates `D-2026-08-25-the-loop-is-a-composite-not-a-template` added can
+      complete. What is left is not the implementation — delete this row once **the live lane has
+      run one of those templates end to end**. `make template-validate` cannot see the difference
+      (`chem` is a bundle this repository declares and does not run, so its tools are
+      name-checked and argument-unchecked), and `make connector-validate` against a running server
+      is what would.
       **`transform_structure` was the seventh name and is now gone from the manifest** rather than
       implemented: it had no caller, no template, no skill reference and no documented signature in
       either repository, so serving it would have meant inventing its contract.

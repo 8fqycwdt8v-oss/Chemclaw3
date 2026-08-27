@@ -28,22 +28,32 @@ logger = logging.getLogger(__name__)
 
 
 # Oldest first, so a run that is interrupted has made contiguous progress rather than a scatter.
+#
+# `key` breaks ties on `created_at`, which is not unique: microsecond resolution lets concurrent
+# calculator workers share a value, and `_UPSERT` stamps `created_at = now()` on every row of a
+# bulk import in one transaction, giving each of them the identical instant. Postgres does not
+# guarantee LIMIT/OFFSET's relative order for tied rows is stable across the separate queries that
+# fetch consecutive pages, so a tied row could land on a page boundary and never be fetched by
+# either page — silently never queued, with no error and no `skipped` increment. `key` is this
+# table's primary key, so `(created_at, key)` is a total order and every row is fetched once.
 _CACHED = """
     SELECT key, calc_type, calc_version, input_hash, params_hash, result, structure_id,
            compute_seconds, created_at
     FROM calculation_results
-    ORDER BY created_at
+    ORDER BY created_at, key
     LIMIT %s OFFSET %s
 """
 
 # The composites. `job_records.result` is the envelope's own data - the shape that has no cache row
 # and therefore reaches a results store through no other path.
+#
+# `job_id` breaks ties on `completed_at` for the same reason `key` does above — see `_CACHED`.
 _JOBS = """
     SELECT job_id, connector, job, result, calc_refs, requested_by, session_id, correlation_id,
            rationale, completed_at, payload_kind
     FROM job_records
     WHERE result <> '{}'::jsonb
-    ORDER BY completed_at
+    ORDER BY completed_at, job_id
     LIMIT %s OFFSET %s
 """
 

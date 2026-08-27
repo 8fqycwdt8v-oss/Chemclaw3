@@ -226,6 +226,13 @@ class DatabricksWarehouse:
         # a `SET` before every statement would double the round trips to say it once.
         self._options["session_configuration"] = {"statement_timeout": str(query_timeout_seconds)}
         self._connection: Any | None = None
+        # `open_warehouse` caches one `DatabricksWarehouse` per `connection:` block for the life of
+        # the process specifically so concurrent callers share one live session — without this lock,
+        # two overlapping `_connect()` calls both observe `self._connection is None` and both open a
+        # real session, silently orphaning one (this driver has no `close`, so it lives until its
+        # server-side idle timeout: the exact session-exhaustion failure the process-level cache
+        # exists to prevent, reintroduced one layer lower).
+        self._connect_lock = asyncio.Lock()
 
     @property
     def placeholder(self) -> str:
@@ -238,14 +245,20 @@ class DatabricksWarehouse:
         return DatabricksVectorDialect()
 
     async def _connect(self) -> Any:
-        """Open the connection once, or raise `ConnectionError` so the caller can retry."""
-        if self._connection is None:
-            client = _client()
-            try:
-                self._connection = await asyncio.to_thread(client.connect, **self._options)
-            except client.Error as exc:
-                raise ConnectionError(f"cannot connect to the warehouse: {exc}") from exc
-        return self._connection
+        """Open the connection once, or raise `ConnectionError` so the caller can retry.
+
+        Locked end to end: a second coroutine arriving while the first is mid-connect must await
+        the *same* attempt rather than racing it, or the check-then-act on `self._connection` opens
+        two sessions and orphans one (see `self._connect_lock`'s docstring above).
+        """
+        async with self._connect_lock:
+            if self._connection is None:
+                client = _client()
+                try:
+                    self._connection = await asyncio.to_thread(client.connect, **self._options)
+                except client.Error as exc:
+                    raise ConnectionError(f"cannot connect to the warehouse: {exc}") from exc
+            return self._connection
 
     def _session_lost(self) -> None:
         """Forget the open session, so the next call opens a new one.

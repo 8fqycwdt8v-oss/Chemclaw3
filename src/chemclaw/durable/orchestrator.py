@@ -181,7 +181,12 @@ async def fan_out(
                 # child fails, and the memory-synthesis jobs return `[]` every night while
                 # `/schedules` shows runs climbing and no failures. `metrics_bridge` is already
                 # proven callable from workflow code (`durable/publish.py`).
-                record_metric(lambda m: m.increment("chemclaw_fan_out_children_dropped_total"))
+                #
+                # Guarded on `is_replaying` for the same reason `publish.py`'s two counters are: a
+                # replayed history (a worker restart, a sticky-cache eviction, a query) would
+                # otherwise re-count every dropped child this workflow has ever seen.
+                if not workflow.unsafe.is_replaying():
+                    record_metric(lambda m: m.increment("chemclaw_fan_out_children_dropped_total"))
                 workflow.logger.warning(
                     "fan-out child %s-%s-%d failed and was dropped: %s",
                     parent_id,
