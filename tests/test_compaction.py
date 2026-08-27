@@ -342,7 +342,10 @@ def test_the_two_edits_do_not_share_one_threshold(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(settings, "agent_tool_result_clear_trigger", 12_345)
     monkeypatch.setattr(settings, "agent_context_token_budget", 99_999)
     editing = context_compaction_middleware()[0]
-    triggers = [edit.trigger for edit in editing.edits]
+    # Unwrapped, because both edits are wrapped in `GuardedEdit` so a raising edit costs the
+    # reduction rather than the turn (`D-2026-08-27-a-refusal-is-not-a-crash`). The wrapper is
+    # transparent to this claim, which is about which setting each edit was constructed with.
+    triggers = [edit.edit.trigger for edit in editing.edits]
     assert triggers == [12_345, 99_999], (
         f"expected the lossless edit on its own lower trigger, got {triggers}"
     )

@@ -193,7 +193,11 @@ class _ObservedActivity(ActivityInboundInterceptor):
         """Run the activity inside the ambient context its own argument declares."""
         info = activity.info()
         context = activity_context(input.args)
-        fields = {
+        # Typed `Any` rather than `object` because it is splatted into `log_event`'s `**fields`,
+        # which sits beside two typed keyword-only parameters (`level`, `exc_info`) — a
+        # `dict[str, object]` splat is a type error against those, and narrowing the values is the
+        # honest fix rather than adding an ignore.
+        fields: dict[str, Any] = {
             "activity": info.activity_type,
             "attempt": info.attempt,
             "task_queue": info.task_queue,

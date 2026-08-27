@@ -1,0 +1,80 @@
+Chemclaw {{ .Chart.AppVersion }} is installed as release {{ .Release.Name }} in {{ .Release.Namespace }}.
+
+  oc get pods -n {{ .Release.Namespace }} -l app.kubernetes.io/instance={{ .Release.Name }}
+  oc get route -n {{ .Release.Namespace }} {{ include "chemclaw.name" . }}
+{{ if .Values.monitoring.enabled }}
+MONITORING: TWO CLUSTER SWITCHES DECIDE WHETHER ANY OF THIS DOES ANYTHING
+===========================================================================
+
+This release just created a ServiceMonitor, a PodMonitor{{ if .Values.monitoring.alerts.enabled }} and a
+PrometheusRule{{ end }}. **On a stock OpenShift cluster all of them are inert custom
+resources**: `oc get servicemonitor` lists them, nothing scrapes, no alert ever loads, and there is
+no error anywhere to tell you. This is the single most likely way this deployment ships and does
+nothing observable.
+
+1. USER-WORKLOAD MONITORING (without this, nothing is scraped at all)
+
+   Off by default. Turn it on cluster-wide, as cluster-admin:
+
+     oc -n openshift-monitoring edit configmap cluster-monitoring-config
+
+   and set, under `data.config.yaml`:
+
+     enableUserWorkload: true
+
+   (If the ConfigMap does not exist, create it with that one key.) Then confirm the stack came up
+   and that this release's targets are actually being collected:
+
+     oc -n openshift-user-workload-monitoring get pods
+     oc -n {{ .Release.Namespace }} get servicemonitor,podmonitor{{ if .Values.monitoring.alerts.enabled }},prometheusrule{{ end }}
+{{- if .Values.monitoring.alerts.enabled }}
+
+2. ALERT ROUTING (without this, the alerts fire into nothing)
+
+   User-workload alerts go to the platform Alertmanager, whose routes a cluster admin owns and which
+   normally drops what it does not recognise — so every rule can be firing while no human is told.
+   Either have that admin route on `namespace="{{ .Release.Namespace }}"`, or let this namespace
+   supply its own routing, which needs ONE of:
+
+     # the platform Alertmanager reads user AlertmanagerConfigs
+     oc -n openshift-monitoring edit configmap cluster-monitoring-config
+       alertmanagerMain:
+         enableUserAlertmanagerConfig: true
+
+     # or a dedicated user-workload Alertmanager
+     oc -n openshift-user-workload-monitoring edit configmap user-workload-monitoring-config
+       alertmanager:
+         enabled: true
+         enableAlertmanagerConfig: true
+
+{{- if not .Values.monitoring.alertmanager.enabled }}
+
+   Then set `monitoring.alertmanager.enabled=true` with your receivers — this release rendered no
+   AlertmanagerConfig, so it currently relies entirely on the cluster admin's own routes.
+{{- end }}
+{{- end }}
+{{- if .Values.monitoring.dashboards.enabled }}
+
+{{ if .Values.monitoring.alerts.enabled }}3{{ else }}2{{ end }}. DASHBOARDS
+{{- if not .Values.monitoring.dashboards.namespace }}
+
+   The five dashboards were written into THIS namespace. The OpenShift console reads them only from
+   `openshift-config-managed`, so they will not appear under Observe -> Dashboards until you
+   reinstall with:
+
+     --set monitoring.dashboards.namespace=openshift-config-managed
+
+   (needs cluster-admin). For a self-managed Grafana instead, add its sidecar's label:
+
+     --set monitoring.dashboards.labels.grafana_dashboard=1
+{{- else }}
+
+   Written into {{ .Values.monitoring.dashboards.namespace }}. Confirm the console sees them:
+
+     oc -n {{ .Values.monitoring.dashboards.namespace }} get configmap -l console.openshift.io/dashboard=true
+{{- end }}
+{{- end }}
+
+Full procedure, and what every alert means when it fires:
+docs/guides/runbook.md § "Make the monitoring stack actually collect this" and § "When an alert fires".
+{{- end }}

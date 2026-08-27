@@ -1,0 +1,577 @@
+{
+  "__comment": "The conversation layer: what chemists are asking for, how it ends, and how long it takes.",
+  "annotations": {
+    "list": []
+  },
+  "editable": false,
+  "graphTooltip": 1,
+  "panels": [
+    {
+      "id": 1,
+      "type": "singlestat",
+      "title": "Turns in flight",
+      "datasource": "prometheus",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 0,
+        "y": 0
+      },
+      "span": 2,
+      "format": "short",
+      "decimals": 2,
+      "valueName": "current",
+      "sparkline": {
+        "show": true
+      },
+      "targets": [
+        {
+          "expr": "sum(chemclaw_turns_in_flight)",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "singlestat",
+      "title": "Admission capacity",
+      "datasource": "prometheus",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 4,
+        "y": 0
+      },
+      "span": 2,
+      "format": "short",
+      "decimals": 2,
+      "valueName": "current",
+      "sparkline": {
+        "show": true
+      },
+      "targets": [
+        {
+          "expr": "sum(chemclaw_turn_capacity)",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "singlestat",
+      "title": "Fleet ceiling (0 = undeclared)",
+      "datasource": "prometheus",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 8,
+        "y": 0
+      },
+      "span": 2,
+      "format": "short",
+      "decimals": 2,
+      "valueName": "current",
+      "sparkline": {
+        "show": true
+      },
+      "targets": [
+        {
+          "expr": "max(chemclaw_fleet_turn_ceiling)",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "singlestat",
+      "title": "Turn p95",
+      "datasource": "prometheus",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 12,
+        "y": 0
+      },
+      "span": 2,
+      "format": "s",
+      "decimals": 2,
+      "valueName": "current",
+      "sparkline": {
+        "show": true
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(chemclaw_turn_duration_seconds_bucket[5m])))",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "singlestat",
+      "title": "Tokens/second",
+      "datasource": "prometheus",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 16,
+        "y": 0
+      },
+      "span": 2,
+      "format": "short",
+      "decimals": 2,
+      "valueName": "current",
+      "sparkline": {
+        "show": true
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(chemclaw_tokens_total[5m]))",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "singlestat",
+      "title": "Live sessions",
+      "datasource": "prometheus",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 20,
+        "y": 0
+      },
+      "span": 2,
+      "format": "short",
+      "decimals": 2,
+      "valueName": "current",
+      "sparkline": {
+        "show": true
+      },
+      "targets": [
+        {
+          "expr": "sum(chemclaw_live_sessions)",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "graph",
+      "title": "Turn rate",
+      "datasource": "prometheus",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 4
+      },
+      "span": 6,
+      "fill": 0,
+      "stack": false,
+      "linewidth": 2,
+      "nullPointMode": "null",
+      "legend": {
+        "show": true,
+        "current": true,
+        "max": true,
+        "values": true
+      },
+      "tooltip": {
+        "shared": true,
+        "sort": 2,
+        "value_type": "individual"
+      },
+      "yaxes": [
+        {
+          "format": "reqps",
+          "show": true,
+          "min": 0
+        },
+        {
+          "format": "short",
+          "show": false
+        }
+      ],
+      "xaxis": {
+        "mode": "time",
+        "show": true
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(chemclaw_turns_started_total[5m]))",
+          "legendFormat": "started",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate(chemclaw_turns_queued_total[5m]))",
+          "legendFormat": "queued",
+          "refId": "B"
+        },
+        {
+          "expr": "sum(rate(chemclaw_turns_shed_total[5m]))",
+          "legendFormat": "shed",
+          "refId": "C"
+        },
+        {
+          "expr": "sum(rate(chemclaw_turns_refused_budget_total[5m]))",
+          "legendFormat": "refused (budget)",
+          "refId": "D"
+        },
+        {
+          "expr": "sum(rate(chemclaw_turns_conflict_total[5m]))",
+          "legendFormat": "conflict (409)",
+          "refId": "E"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "graph",
+      "title": "How turns end",
+      "datasource": "prometheus",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 4
+      },
+      "span": 6,
+      "fill": 1,
+      "stack": true,
+      "linewidth": 2,
+      "nullPointMode": "null",
+      "legend": {
+        "show": true,
+        "current": true,
+        "max": true,
+        "values": true
+      },
+      "tooltip": {
+        "shared": true,
+        "sort": 2,
+        "value_type": "individual"
+      },
+      "yaxes": [
+        {
+          "format": "reqps",
+          "show": true,
+          "min": 0
+        },
+        {
+          "format": "short",
+          "show": false
+        }
+      ],
+      "xaxis": {
+        "mode": "time",
+        "show": true
+      },
+      "targets": [
+        {
+          "expr": "sum by (outcome) (rate(chemclaw_turns_finished_total[5m]))",
+          "legendFormat": "{{outcome}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "type": "graph",
+      "title": "Turn duration percentiles",
+      "datasource": "prometheus",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 12
+      },
+      "span": 6,
+      "fill": 0,
+      "stack": false,
+      "linewidth": 2,
+      "nullPointMode": "null",
+      "legend": {
+        "show": true,
+        "current": true,
+        "max": true,
+        "values": true
+      },
+      "tooltip": {
+        "shared": true,
+        "sort": 2,
+        "value_type": "individual"
+      },
+      "yaxes": [
+        {
+          "format": "s",
+          "show": true,
+          "min": 0
+        },
+        {
+          "format": "short",
+          "show": false
+        }
+      ],
+      "xaxis": {
+        "mode": "time",
+        "show": true
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(chemclaw_turn_duration_seconds_bucket[5m])))",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(chemclaw_turn_duration_seconds_bucket[5m])))",
+          "legendFormat": "p95",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(chemclaw_turn_duration_seconds_bucket[5m])))",
+          "legendFormat": "p99",
+          "refId": "C"
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "type": "graph",
+      "title": "In-flight against capacity",
+      "datasource": "prometheus",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 12
+      },
+      "span": 6,
+      "fill": 0,
+      "stack": false,
+      "linewidth": 2,
+      "nullPointMode": "null",
+      "legend": {
+        "show": true,
+        "current": true,
+        "max": true,
+        "values": true
+      },
+      "tooltip": {
+        "shared": true,
+        "sort": 2,
+        "value_type": "individual"
+      },
+      "yaxes": [
+        {
+          "format": "short",
+          "show": true,
+          "min": 0
+        },
+        {
+          "format": "short",
+          "show": false
+        }
+      ],
+      "xaxis": {
+        "mode": "time",
+        "show": true
+      },
+      "targets": [
+        {
+          "expr": "sum(chemclaw_turns_in_flight)",
+          "legendFormat": "in flight",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(chemclaw_turn_capacity)",
+          "legendFormat": "admission capacity",
+          "refId": "B"
+        },
+        {
+          "expr": "max(chemclaw_fleet_turn_ceiling)",
+          "legendFormat": "declared fleet ceiling",
+          "refId": "C"
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "type": "graph",
+      "title": "Token consumption by profile",
+      "datasource": "prometheus",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 20
+      },
+      "span": 6,
+      "fill": 0,
+      "stack": false,
+      "linewidth": 2,
+      "nullPointMode": "null",
+      "legend": {
+        "show": true,
+        "current": true,
+        "max": true,
+        "values": true
+      },
+      "tooltip": {
+        "shared": true,
+        "sort": 2,
+        "value_type": "individual"
+      },
+      "yaxes": [
+        {
+          "format": "short",
+          "show": true,
+          "min": 0
+        },
+        {
+          "format": "short",
+          "show": false
+        }
+      ],
+      "xaxis": {
+        "mode": "time",
+        "show": true
+      },
+      "targets": [
+        {
+          "expr": "sum by (profile) (rate(chemclaw_tokens_total[5m]))",
+          "legendFormat": "{{profile}} total",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate(chemclaw_input_tokens_total[5m]))",
+          "legendFormat": "input",
+          "refId": "B"
+        },
+        {
+          "expr": "sum(rate(chemclaw_output_tokens_total[5m]))",
+          "legendFormat": "output",
+          "refId": "C"
+        },
+        {
+          "expr": "sum(rate(chemclaw_cache_read_tokens_total[5m]))",
+          "legendFormat": "cache read",
+          "refId": "D"
+        },
+        {
+          "expr": "sum(rate(chemclaw_cache_write_tokens_total[5m]))",
+          "legendFormat": "cache write",
+          "refId": "E"
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "type": "graph",
+      "title": "Turn endings nothing else reports",
+      "datasource": "prometheus",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 20
+      },
+      "span": 6,
+      "fill": 0,
+      "stack": false,
+      "linewidth": 2,
+      "nullPointMode": "null",
+      "legend": {
+        "show": true,
+        "current": true,
+        "max": true,
+        "values": true
+      },
+      "tooltip": {
+        "shared": true,
+        "sort": 2,
+        "value_type": "individual"
+      },
+      "yaxes": [
+        {
+          "format": "short",
+          "show": true,
+          "min": 0
+        },
+        {
+          "format": "short",
+          "show": false
+        }
+      ],
+      "xaxis": {
+        "mode": "time",
+        "show": true
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(chemclaw_turn_timeouts_total[5m]))",
+          "legendFormat": "wall-clock timeout",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate(chemclaw_turn_loop_caps_total[5m]))",
+          "legendFormat": "loop cap",
+          "refId": "B"
+        },
+        {
+          "expr": "sum(rate(chemclaw_turn_empty_answers_total[5m]))",
+          "legendFormat": "empty answer",
+          "refId": "C"
+        },
+        {
+          "expr": "sum(rate(chemclaw_turns_detached_total[5m]))",
+          "legendFormat": "client detached",
+          "refId": "D"
+        },
+        {
+          "expr": "sum(rate(chemclaw_turns_stopped_total[5m]))",
+          "legendFormat": "user stopped",
+          "refId": "E"
+        },
+        {
+          "expr": "sum(rate(chemclaw_turn_send_timeouts_total[5m]))",
+          "legendFormat": "SSE send timeout",
+          "refId": "F"
+        },
+        {
+          "expr": "sum(rate(chemclaw_turns_failed_total[5m]))",
+          "legendFormat": "emitted an error event",
+          "refId": "G"
+        },
+        {
+          "expr": "sum(rate(chemclaw_turn_claim_refresh_failures_total[5m]))",
+          "legendFormat": "lease refresh failed",
+          "refId": "H"
+        },
+        {
+          "expr": "sum(rate(chemclaw_turn_claims_lost_total[5m]))",
+          "legendFormat": "claim lost",
+          "refId": "I"
+        }
+      ]
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 16,
+  "style": "dark",
+  "tags": [
+    "chemclaw"
+  ],
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "timezone": "utc",
+  "title": "Chemclaw turns",
+  "uid": "chemclaw-turns",
+  "version": 1
+}

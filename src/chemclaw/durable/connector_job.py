@@ -41,6 +41,7 @@ change"; the 2026-08-05 review measured `task_queue` at zero occurrences in
 `connectors/manifest.py`, so the offer had been false since D-150 landed.
 """
 
+import logging
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -51,6 +52,7 @@ from temporalio.exceptions import ActivityError, ChildWorkflowError
 
 with workflow.unsafe.imports_passed_through():
     from chemclaw.core.config import settings
+    from chemclaw.core.metrics_bridge import degraded
     from chemclaw.durable.job_metrics import job_ended, job_running
     from chemclaw.durable.job_record import JobRecord, note_with_run_provenance, record_job
     from chemclaw.durable.memory_jobs import publish_memory_note_activity
@@ -65,6 +67,13 @@ from chemclaw.durable.publish import (
     publish_result_best_effort,
 )
 from chemclaw.durable.registry import durable_workflow
+
+# A plain module logger rather than `workflow.logger`, used only inside an `is_replaying` guard.
+# `workflow.logger` exists to suppress duplicate lines on replay, and the one place below that
+# needs it is already guarded — because the *metric* beside the line must not be re-counted either,
+# and no adapter can do that half. One guard covering both keeps the count and the line describing
+# the same event, which is the property `metrics_bridge.degraded` exists to give.
+logger = logging.getLogger(__name__)
 
 
 def failure_reason(exc: BaseException) -> str:
@@ -631,7 +640,16 @@ class ConnectorJobWorkflow:
                 retry_policy=BAD_DATA_RETRY,
             )
         except ActivityError:
-            workflow.logger.error(
-                "job record write failed for %s; this run survives only in Temporal's history",
-                record.job_id,
-            )
+            # **Counted, not just logged.** The line below has always said this run "survives only
+            # in Temporal's history", i.e. that the swallow loses data nothing else holds — and it
+            # was one of the ~30 modules whose deliberate swallows were invisible to anything but a
+            # log search nobody runs (`metrics_bridge.degraded`). A fleet-wide loss of the durable
+            # record — a dead background queue, a full table — produced exactly what a quiet
+            # deployment produces.
+            if not workflow.unsafe.is_replaying():
+                degraded(
+                    logger,
+                    "job_record",
+                    "job record write failed for %s; this run survives only in Temporal's history",
+                    record.job_id,
+                )

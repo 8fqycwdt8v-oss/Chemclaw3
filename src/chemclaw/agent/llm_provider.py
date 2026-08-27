@@ -17,12 +17,17 @@ TLS, timeout, retry budget) come from config so a firewalled internal endpoint w
 change.
 """
 
+import logging
 from functools import cache
 from typing import Any
 
 from langchain.agents.middleware import AgentMiddleware
+from langchain_core.callbacks import BaseCallbackHandler
 
 from chemclaw.core.config import settings
+from chemclaw.core.metrics_bridge import record_metric
+
+logger = logging.getLogger(__name__)
 
 # A non-empty placeholder for endpoints that accept any bearer (some internal OpenAI-compatible
 # servers ignore the key): the OpenAI SDK refuses to construct with an empty api_key, so a keyless
@@ -84,9 +89,45 @@ def _with_failover(primary: Any, model: str | None) -> Any:
     if not settings.llm_fallback_base_url:
         return primary
     return primary.with_fallbacks(
-        [_openai_compatible_model(model, fallback=True)],
+        [_openai_compatible_model(model, fallback=True, observer=_FallbackObserved())],
         exceptions_to_handle=_failover_exceptions(),
     )
+
+
+class _FallbackObserved(BaseCallbackHandler):
+    """Notice that the *fallback* endpoint was asked — the only observable this failover has.
+
+    **`RunnableWithFallbacks` tells nobody.** Its `ainvoke` catches the primary's exception and
+    moves to the next runnable with no log line, no metric and no callback for the attempt that
+    failed. So the primary internal endpoint dying and the fallback silently absorbing 100% of the
+    fleet's traffic looked exactly like a healthy deployment — for a feature whose entire
+    operational value is knowing whether it has fired.
+
+    Nothing can be hooked on the *failure*, so this hooks the consequence instead: the fallback
+    model is constructed with this handler attached, and the fallback model is invoked only after
+    the primary raised. One `on_chat_model_start` therefore *is* one failover, exactly, with no
+    inference. It rides on the model instance rather than on a run config because `bind_tools`
+    rebuilds the wrapper and keeps the constructor's callbacks — which is what makes it survive
+    `create_agent`'s binding.
+
+    Beside the counter is a WARNING, because the two audiences differ: the series answers "how much
+    of today ran on the fallback", and the line is what someone reading logs at 03:00 needs in order
+    to stop looking at the fallback endpoint for the cause of the outage.
+    """
+
+    def on_chat_model_start(self, serialized: Any, messages: Any, **kwargs: Any) -> None:
+        """Count and log one failover; never touch the call itself."""
+        provider = settings.llm_provider
+        record_metric(
+            lambda metrics: metrics.increment(
+                "chemclaw_model_fallbacks_total", labels={"provider": provider}
+            )
+        )
+        logger.warning(
+            "model failover: the primary %s endpoint did not answer, so this call was served by "
+            "the configured fallback endpoint",
+            provider,
+        )
 
 
 def _failover_exceptions() -> tuple[type[BaseException], ...]:
@@ -125,6 +166,7 @@ _CONTEXT_LENGTH_MARKERS: tuple[str, ...] = (
 )
 
 
+@cache
 def _sdk_exceptions(module_name: str, *names: str) -> tuple[type[BaseException], ...]:
     """The named exception classes from a provider SDK, or nothing when it is not installed.
 
@@ -334,7 +376,9 @@ def prompt_caching_middleware() -> list[Any]:
     return [AnthropicPromptCachingMiddleware(unsupported_model_behavior="ignore")]
 
 
-def _openai_compatible_model(model: str | None = None, *, fallback: bool = False) -> Any:
+def _openai_compatible_model(
+    model: str | None = None, *, fallback: bool = False, observer: Any = None
+) -> Any:
     """`ChatOpenAI` against the internal endpoint — same base URL, credential and transport.
 
     `http_async_client` is where the private-CA bundle goes: `ChatOpenAI` builds its own
@@ -376,6 +420,9 @@ def _openai_compatible_model(model: str | None = None, *, fallback: bool = False
     return ChatOpenAI(
         model=chosen,
         base_url=base_url,
+        # Only the fallback instance gets one, and that asymmetry is the whole signal: this
+        # endpoint is asked only after the primary raised (`_FallbackObserved`).
+        callbacks=[observer] if observer is not None else None,
         # `ChatOpenAI` takes the credential as a `SecretStr`, which keeps the key out of a repr
         # and out of any log line that prints the model object — the same guarantee `Settings` now
         # makes, so the value is a `SecretStr` on both sides of this call and plain only between.

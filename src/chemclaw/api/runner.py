@@ -63,7 +63,10 @@ from chemclaw.api.events import (
     ErrorCode,
     ErrorEvent,
     Event,
+    JobStartedEvent,
     TokenEvent,
+    ToolCallEvent,
+    ToolFailedEvent,
 )
 from chemclaw.api.graph_stream import graph_events
 from chemclaw.api.runner_answer import build_answer_event
@@ -73,11 +76,13 @@ from chemclaw.connectors.registry import open_connector_specs
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.core.identity_context import (
+    get_current_correlation_id,
     reset_current_correlation_id,
     reset_current_identity,
     set_current_correlation_id,
     set_current_identity,
 )
+from chemclaw.core.logging import log_event
 from chemclaw.core.metrics import METRICS
 from chemclaw.core.metrics_bridge import degraded
 from chemclaw.core.session_context import (
@@ -97,6 +102,31 @@ logger = logging.getLogger(__name__)
 # second event type for one more unreachable capability would be a contract change for no
 # additional meaning. The name is prefixed so it cannot be mistaken for a bundle in the registry.
 _DURABLE_SUBSYSTEM = "durable-jobs (Temporal)"
+
+#: How a turn ended, as a closed set with exactly one producer (`_settle_outcome`).
+#:
+#: **The record it replaces was one boolean.** `turn_costs.completed` is `answered`, so six endings
+#: collapsed into two: a turn that hit the runaway cap, one that produced no prose at all, one that
+#: raised, one the wall clock killed and one the client abandoned were all simply "not completed",
+#: and a turn that answered partially after the cap was "completed" beside a clean one. `completed`
+#: stays and is derived from this (see `TurnCost.completed` at the call site), because it is what a
+#: shipped dashboard already reads.
+#:
+#: **Six values and not nine, and the three that are missing are missing on purpose.** A turn
+#: refused for budget, shed by admission, or 409'd by a concurrent turn never reaches `run_turn` at
+#: all — nothing was spent, so there is no cost row for them to be the outcome *of* — and each
+#: already has its own counter (`chemclaw_turns_refused_budget_total`,
+#: `chemclaw_turns_shed_total`, `chemclaw_turns_conflict_total`). Adding them here would publish a
+#: second answer to a question already answered, and would break the pairing an operator reads
+#: `chemclaw_turns_started_total` against, since all three happen *before* a turn is started.
+_OUTCOMES = (
+    "answered",
+    "loop_capped",
+    "empty_answer",
+    "errored",
+    "timed_out",
+    "abandoned",
+)
 
 
 def _classify(error: BaseException) -> tuple[ErrorCode, bool]:
@@ -134,6 +164,7 @@ async def run_turn(
     history: Any | None = None,
     profile: str | None = None,
     graph_factory: Callable[..., Any] = build_langgraph_agent,
+    deadline: float | None = None,
 ) -> AsyncIterator[Event]:
     """Run one turn and yield its events (tokens, tool calls, jobs, then the answer).
 
@@ -167,12 +198,33 @@ async def run_turn(
             `create_app(graph_factory=…)`. It is the *only* such seam now that the agent argument
             is gone, which is why it exists: 67 tests broke the first time the engine was flipped,
             for want of it.
+        deadline: The event-loop clock reading the caller's whole-turn `asyncio.timeout` will fire
+            at (`asyncio.timeout(...) as t` → `t.when()`), used for one thing: telling a turn the
+            wall clock killed from one somebody stopped. Both cancellations arrive here as the same
+            `CancelledError`, and the caller learns which it was only in its own
+            `except TimeoutError` — which runs *after* this turn's cost row is booked, so it cannot
+            tell us afterwards. Comparing against the same loop clock the timeout itself uses makes
+            the answer exact rather than a tolerance. `None` off the front door, where nothing sets
+            a whole-turn deadline and every cancellation is genuinely an abandonment.
 
     Yields:
         `chemclaw.api.events.Event` values in the order the model produced them, ending with an
         `AnswerEvent` on success or an `ErrorEvent` on failure.
     """
-    ledger = _TurnLedger(correlation_id=uuid.uuid4().hex, usage=TurnUsage())
+    # **The request's id where there is one, a fresh one where there is not.** This used to mint
+    # unconditionally, so a turn ran under an id nothing outside the process had ever seen: the
+    # front door now returns `X-Chemclaw-Correlation-Id` on every response, and a chemist quoting it
+    # would have found no `turn_costs` row, no `audit_events` row and no matching log line — two
+    # ids for one event, which is the failure a correlation id exists to prevent. The pump task the
+    # turn runs on copies the request's context at creation (`api/detach.DetachableTurn`), so the
+    # ambient id is the *request's*, and adopting it makes the header, the access log, the audit
+    # trail and the cost ledger one join. `None` off the request path (the CLI, a test, a template
+    # step) mints as before.
+    ledger = _TurnLedger(
+        correlation_id=get_current_correlation_id() or uuid.uuid4().hex,
+        usage=TurnUsage(),
+        deadline=deadline,
+    )
     # Whether this turn's approval is spendable, asked exactly as `build_langgraph_agent` asks
     # whether to attach the gate — one predicate, so the two cannot disagree about a profile that
     # overrides the deployment's autonomy.
@@ -184,23 +236,50 @@ async def run_turn(
     # Bound before the try so the teardown clause below can read it whatever point the turn died
     # at — a cancellation during the connector open arrives before the real trace is built.
     tool_trace: ToolCallTrace | None = None
-    with _turn_ambient(
-        session.session_id, actor, roles, dry_run, ledger.correlation_id, ledger.usage
+    with (
+        _turn_ambient(
+            session.session_id, actor, roles, dry_run, ledger.correlation_id, ledger.usage
+        ),
+        start_span(
+            "chemclaw.turn",
+            **{
+                "session.id": session.session_id,
+                "profile": profile or "",
+                # **The join key, and the one attribute that was missing.** `correlation.id`
+                # ties this span to `audit_events`, `turn_costs` and `session_messages`, and to
+                # every log line the turn emits; without it a trace and the rows describing one
+                # turn could only be matched by timestamp. `actor` is the other half of "whose
+                # turn was this" — an identifier, not content, the rule `start_span` states.
+                "correlation.id": ledger.correlation_id,
+                "actor": actor or "",
+            },
+        ),
     ):
+        # **The span wraps the whole body, and it used to end before the turn did.** It was pushed
+        # onto the `AsyncExitStack` below with a comment claiming "the span's lifetime is exactly
+        # the turn's teardown"; the stack closes when the model stream is exhausted, and everything
+        # after that ran outside it — the loop-cap and empty-answer guards, the plan-approval read,
+        # `build_answer_event` (which under `verifier_enabled` makes a *second LLM call*),
+        # `_record_transcript`, the audit flush, and the `yield` where a client disconnect actually
+        # lands. Measured with the shipped chart's settings (`OTEL_LLM_SPANS=true` + the verifier):
+        # the judge call opened its own **root span with a different trace id**, so every turn
+        # emitted a second orphan trace, and the turn's traced duration understated the chemist's
+        # wait by the length of the judge call. A `with` around the body rather than a stack entry,
+        # because the body is what the span is measuring.
         try:
+            log_event(
+                logger,
+                "turn.started",
+                "turn started for session %s",
+                session.session_id,
+                session_id=session.session_id,
+                actor=actor or "",
+                correlation_id=ledger.correlation_id,
+                profile=profile or "default",
+                model=_resolved_model(),
+                dry_run=dry_run,
+            )
             async with AsyncExitStack() as stack:
-                # The turn span, which is the parent every other span in this request hangs from —
-                # the model calls the graph emits, the tool spans `agent/audit.py` opens, and
-                # (through `traceparent`) whatever a connector does on our behalf. Pushed onto the
-                # stack that is already here rather than wrapping the body, so the span's lifetime
-                # is exactly the turn's teardown and there is no second place that has to remember
-                # to close it.
-                stack.enter_context(
-                    start_span(
-                        "chemclaw.turn",
-                        **{"session.id": session.session_id, "profile": profile or ""},
-                    )
-                )
                 turn_tools, unreachable = await _open_turn_surface(stack, connectors)
                 if unreachable:
                     yield CapabilityDegradedEvent(connectors=unreachable)
@@ -276,6 +355,11 @@ async def run_turn(
                 # the same treatment and no longer do: they ride the stream itself, so the last one
                 # is yielded by the same loop as every other.)
                 for call in tool_trace.flush():
+                    # Counted here as well as yielded, because this is the one path a tool call
+                    # reaches the surface on without passing through `_stream_into` — the trace's
+                    # tail, for a call whose arguments finished on the final update. Left out, the
+                    # turn record would under-count exactly the calls that ran last.
+                    ledger.note_event(call)
                     yield call
                 async for event in _resume_on_job_results(
                     graph,
@@ -341,6 +425,10 @@ async def run_turn(
             if plan_gated:
                 await consume_turn_approval(session.session_id)
         except (GeneratorExit, asyncio.CancelledError):
+            # Marked before anything else in this clause, because `_book_turn_spend` in the
+            # `finally` is what turns it into `timed_out` or `abandoned` and it must not depend on
+            # the rollback below having run.
+            ledger.cancelled = True
             _roll_back_unfinished(session, state_snapshot, ledger)
             # A torn-down turn that already *acted* has used its authorization: durable jobs, note
             # proposals and calibration rows are not rolled back by the teardown, so leaving the
@@ -393,11 +481,66 @@ class _TurnLedger:
     # The tool-bearing messages this turn produced, for the transcript projection: the events carry
     # no call id, so a projection rebuilt from them could not pair a result with its call.
     exchanges: list[Any] = field(default_factory=list)
+    # --- what the turn record is made of (`_settle_outcome`, `_book_turn_spend`) ---------------
+    # Set by the failure branch, from the same `_classify` that words the client's error event. It
+    # was computed, sent to the user, and thrown away server-side: a chemist could quote a code the
+    # deployment had no record of.
+    error_code: str = ""
+    # Set by the runaway guard as it emits its event, so the teardown does not have to re-ask a
+    # contextvar whose watch is torn down one frame later.
+    loop_capped: bool = False
+    # Set by the cancellation clause. Distinguishing the two cancellations is what `deadline` is
+    # for; without it a wall-clock kill and a stop are the same ending.
+    cancelled: bool = False
+    # The event-loop clock reading the caller's whole-turn `asyncio.timeout` fires at, or `None`
+    # when the caller set none (the CLI, a test). Not a duration and not a heuristic: the timeout
+    # and this comparison read the *same* clock, so at the instant the cancellation is delivered
+    # `loop.time() >= deadline` is true for a timeout and false for a Stop. The caller cannot
+    # simply tell us afterwards — its own `except TimeoutError` runs after this ledger is booked.
+    deadline: float | None = None
+    # When the chemist first saw prose, as a `perf_counter` reading. **The number a chemist
+    # actually experiences**, and nothing measured it: `chemclaw_turn_duration_seconds` is the whole
+    # turn, so a turn that spent 40 s on tools and then streamed instantly and one that stalled for
+    # 40 s before its first word were the same sample. `None` means no token was ever produced,
+    # which is a different fact from "0 seconds" and is stored as one.
+    first_token: float | None = None
+    tool_calls: int = 0
+    tool_failures: int = 0
+    tool_refusals: int = 0
+    jobs_started: int = 0
 
     @property
     def answer_text(self) -> str:
         """The supervisor's own prose, which is both the answer and what the transcript stores."""
         return "".join(self.answer_parts)
+
+    @property
+    def ttft_seconds(self) -> float | None:
+        """Seconds from the turn's first statement to its first streamed token, or `None`."""
+        return None if self.first_token is None else self.first_token - self.started
+
+    def note_event(self, event: Event) -> None:
+        """Count one streamed event into the turn record — the one place the counts are taken.
+
+        Off the events rather than off the trace or the graph, because the events are the only
+        thing every path shares: the model run, the mid-turn resume and a subagent's work all pass
+        through here, and `ToolCallTrace` deliberately knows nothing about refusals. A refusal is a
+        `ToolFailedEvent` carrying `reason`, which `agent/plan_gate.plan_gate_failure_reason`
+        already classifies from the exception *class* — so counting it here reuses that decision
+        instead of making a second one.
+        """
+        if isinstance(event, TokenEvent):
+            if self.first_token is None and event.text:
+                self.first_token = time.perf_counter()
+        elif isinstance(event, ToolCallEvent):
+            self.tool_calls += 1
+        elif isinstance(event, ToolFailedEvent):
+            if event.reason is None:
+                self.tool_failures += 1
+            else:
+                self.tool_refusals += 1
+        elif isinstance(event, JobStartedEvent):
+            self.jobs_started += 1
 
     def note_signal(self, signal: Any) -> None:
         """Record a durable job launch, so the resume below knows what to wait for.
@@ -558,6 +701,9 @@ async def _stream_into(events: AsyncIterator[Event], ledger: _TurnLedger) -> Asy
     async for event in events:
         if isinstance(event, TokenEvent) and not event.agent:
             ledger.answer_parts.append(event.text)
+        # The turn record's counts and its time-to-first-token, taken here because this is the one
+        # point every event of both streams passes through — see `_TurnLedger.note_event`.
+        ledger.note_event(event)
         yield event
 
 
@@ -629,6 +775,9 @@ def _loop_cap_event(session: TurnSession, ledger: _TurnLedger) -> ErrorEvent | N
     """
     if not loop_hit_cap():
         return None
+    # Marked on the ledger as well as counted, because the teardown reads it after
+    # `_turn_ambient` has torn the watch down — `loop_hit_cap()` would answer False by then.
+    ledger.loop_capped = True
     METRICS.increment("chemclaw_turn_loop_caps_total")
     logger.warning(
         "the harness loop for session %s hit its %d-iteration cap with work still open",
@@ -759,9 +908,17 @@ def failure_event(exc: Exception, session_id: str, correlation_id: str) -> Error
 
 
 def _failure_event(exc: Exception, session: TurnSession, ledger: _TurnLedger) -> ErrorEvent:
-    """`failure_event` for a turn that is already running, with this turn's log line beside it."""
+    """`failure_event` for a turn that is already running, with this turn's log line beside it.
+
+    The classification is kept on the ledger as well as sent, which it was not: `_classify` ran,
+    its code went to the chemist, and the server-side record of the turn had no idea the turn had
+    failed at all — let alone how. So a chemist quoting `storage_unavailable` named something the
+    deployment could not look up.
+    """
     logger.exception("turn failed for session %s", session.session_id)
-    return failure_event(exc, session.session_id, ledger.correlation_id)
+    event = failure_event(exc, session.session_id, ledger.correlation_id)
+    ledger.error_code = event.code
+    return event
 
 
 def _turn_acted(trace: ToolCallTrace) -> bool:
@@ -841,6 +998,85 @@ def _roll_back_unfinished(
     session.state.update(snapshot)
 
 
+def _settle_outcome(ledger: _TurnLedger) -> str:
+    """How this turn ended, as one value of `_OUTCOMES` — the one producer of that enum.
+
+    **The order is a precedence, and each step of it is an argument.**
+
+    `errored` first: a turn that raised has an `error_code`, and nothing after that is a better
+    description of what happened to it.
+
+    Then the two cancellations, told apart by the caller's deadline (see `_TurnLedger.deadline`).
+    They come before the answer tests because a turn torn down mid-stream may well have produced
+    prose, and "the wall clock killed it" is what an operator needs to read — not "it answered".
+
+    `loop_capped` before `empty_answer`, because the cap is the *cause* and an empty answer is one
+    of its symptoms. That ordering is what makes `empty_answer` mean something: it names the silent
+    death nothing explained — the shape `_empty_answer_event`'s docstring is about, measured with
+    the harness off, 29 tool calls, no cap fired and 197 seconds of nothing.
+
+    `loop_capped` also comes before `answered`, even though a capped turn does deliver its partial
+    answer and `events.py` names `loop_cap_reached` as the one error that shares its turn with one.
+    Ranking `answered` first would make `loop_capped` unreachable, which is the same collapse
+    `turn_costs.completed` already performed.
+
+    `abandoned` is the floor: the turn reached neither an answer nor any of the named endings, which
+    is what a teardown outside the cancellation clause leaves behind.
+    """
+    if ledger.error_code:
+        return "errored"
+    if ledger.cancelled:
+        # `>=`, against the same event-loop clock `asyncio.timeout` schedules itself on, so this is
+        # an exact test rather than a tolerance: at the moment the timeout delivers its cancellation
+        # the loop clock has reached the deadline by construction, and a Stop or a torn-down pump
+        # arrives at an arbitrary earlier reading.
+        #
+        # `get_running_loop`, not `get_event_loop`, and the `None` arm is not defensive padding: a
+        # ledger settled off the loop is a caller that set no deadline anyway (a test, a synchronous
+        # teardown), and raising `RuntimeError` out of the one function that books what a turn cost
+        # would lose the row to save a comparison.
+        return "timed_out" if _deadline_passed(ledger.deadline) else "abandoned"
+    if ledger.loop_capped:
+        return "loop_capped"
+    if not ledger.answer_text.strip():
+        return "empty_answer"
+    return "answered" if ledger.answered else "abandoned"
+
+
+def _deadline_passed(deadline: float | None) -> bool:
+    """Whether the event loop has reached `deadline` — `False` when there is none, or no loop."""
+    if deadline is None:
+        return False
+    try:
+        return asyncio.get_running_loop().time() >= deadline
+    except RuntimeError:
+        return False
+
+
+def _resolved_model() -> str:
+    """The model id this deployment's *agent* route resolves to, for the turn record.
+
+    **A documented attribution that had no producer.** `core/metrics.py` and
+    `docs/guides/runbook.md` both say `turn_costs` carries model attribution — it is the stated
+    reason the metric label set deliberately omits `model` (D-2026-08-01-spend-is-a-ledger-not-a-
+    label) — and the table had no such column and no writer. So the one place model attribution was
+    said to live was the one place it did not.
+
+    Read from config rather than off the built model, and derived in one expression rather than by
+    re-walking `build_chat_model`'s provider branch: `model_routes["agent"]` wins where a deployment
+    routes per task, `llm_model` is required and non-empty under `openai_compatible` and empty
+    otherwise, and `agent_model` is the Anthropic default. So this resolves exactly what that
+    function would build, for both providers, without a second copy of the branch.
+
+    **One turn can span models and this column names the agent's**, deliberately: the verifier's
+    judge runs on the `verifier` route (F10-E), which may be a different, cheaper model, and its
+    tokens are metered into the same turn. A column per route would be a schema that grows with the
+    route table; the agent route is the one that produced the answer, and this is a comment saying
+    so rather than a claim that the turn used exactly one model.
+    """
+    return settings.model_routes.get("agent") or settings.llm_model or settings.agent_model
+
+
 def _book_turn_spend(
     ledger: _TurnLedger,
     *,
@@ -871,11 +1107,20 @@ def _book_turn_spend(
     needs a table, and the fleet-wide rate needs a counter. Booked here rather than on the success
     path so a turn torn down by a disconnect is billed too: that is the runaway this ledger exists
     to find, not an edge case to drop. It does not await — see its own docstring.
+
+    **It is also the one producer of the turn record** (`_settle_outcome`, `_OUTCOMES`): the
+    outcome, the classified error code, the resolved model, the tool/job counts and the
+    time-to-first-token all land here, in the one function that runs on every path a turn can take.
+    Anywhere else would be a second place that has to remember, and the disconnect path is exactly
+    the one such a place would forget.
     """
     elapsed = time.perf_counter() - ledger.started
+    outcome = _settle_outcome(ledger)
+    model = _resolved_model()
     if budget is not None:
         budget.record(session.session_id, actor, ledger.usage.total)
     METRICS.observe("chemclaw_turn_duration_seconds", elapsed)
+    METRICS.increment("chemclaw_turns_finished_total", labels={"outcome": outcome})
     spend_labels = {"profile": profile or "default"}
     record_turn_cost(
         TurnCost(
@@ -888,8 +1133,47 @@ def _book_turn_spend(
             cache_read_tokens=ledger.usage.cache_read,
             cache_write_tokens=ledger.usage.cache_write,
             duration_seconds=elapsed,
-            completed=ledger.answered,
+            # **Derived, and kept only for compatibility.** It is `outcome == "answered"` — one
+            # boolean over a six-value enum — and every dashboard and eval that already reads it
+            # keeps reading the same thing. `outcome` is what a new reader should ask.
+            completed=outcome == "answered",
+            outcome=outcome,
+            error_code=ledger.error_code,
+            model=model,
+            tool_calls=ledger.tool_calls,
+            tool_failures=ledger.tool_failures,
+            tool_refusals=ledger.tool_refusals,
+            jobs_started=ledger.jobs_started,
+            ttft_seconds=ledger.ttft_seconds,
         )
+    )
+    # **The same record as a log line, because a deployment may have no ledger to read.** The cost
+    # row needs Postgres (`session_store="postgres"`); the log stack is always there. Measured
+    # before this existed: `grep -c logger.info api/runner.py` was **0** — a healthy turn produced
+    # no log record of any kind, so "what happened in this turn" was answerable only from the
+    # chemist's screen. `turn.started` above and this pair the way `job.started`/`job.finished` do.
+    log_event(
+        logger,
+        "turn.finished",
+        "turn %s for session %s in %.1fs",
+        outcome,
+        session.session_id,
+        elapsed,
+        session_id=session.session_id,
+        actor=actor or "",
+        correlation_id=ledger.correlation_id,
+        outcome=outcome,
+        error_code=ledger.error_code,
+        profile=profile or "default",
+        model=model,
+        duration_seconds=round(elapsed, 3),
+        ttft_seconds=None if ledger.ttft_seconds is None else round(ledger.ttft_seconds, 3),
+        input_tokens=ledger.usage.input,
+        output_tokens=ledger.usage.output,
+        tool_calls=ledger.tool_calls,
+        tool_failures=ledger.tool_failures,
+        tool_refusals=ledger.tool_refusals,
+        jobs_started=ledger.jobs_started,
     )
     if ledger.usage.unreadable:
         # The provider reported usage and we could not read it, which is not the same as a provider

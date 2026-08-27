@@ -126,6 +126,40 @@ imagePullSecrets:
 {{- end }}
 {{- end -}}
 
+{{- /* Which component a trace came from, per Deployment.
+
+       `configure_telemetry` builds one `Resource` for the whole process and names the service
+       `chemclaw` unless `OTEL_SERVICE_NAME` says otherwise — a decision `core/logging.py` argues
+       for explicitly ("a deployment that wants the front door and each worker to appear as separate
+       services sets `OTEL_SERVICE_NAME` per Deployment"). **The chart never set it.** So all four
+       process roles reported `service.name=chemclaw`, and a span could not say whether the front
+       door, a connector server, core's worker or a bundle's worker emitted it — which is most of
+       what a trace is for once a turn crosses a process.
+
+       `OTEL_RESOURCE_ATTRIBUTES` adds the pod and namespace on top, and it works for a reason worth
+       stating: `Resource.create(...)` merges the SDK's own env detector *under* the attributes
+       passed to it, so what this variable carries survives while `service.name` stays the explicit
+       one above. Read from the downward API rather than templated, because a pod name is only known
+       to the pod.
+
+       Ordering is load-bearing. Kubernetes expands `$(VAR)` only against variables declared
+       *earlier in the same container*, so `POD_NAME` and `POD_NAMESPACE` must precede the attribute
+       string — reversed, the pod exports the two literals and nothing errors. */ -}}
+{{- define "chemclaw.otelResourceEnv" -}}
+- name: POD_NAME
+  valueFrom:
+    fieldRef:
+      fieldPath: metadata.name
+- name: POD_NAMESPACE
+  valueFrom:
+    fieldRef:
+      fieldPath: metadata.namespace
+- name: OTEL_SERVICE_NAME
+  value: "chemclaw-{{ .component }}"
+- name: OTEL_RESOURCE_ATTRIBUTES
+  value: "k8s.pod.name=$(POD_NAME),k8s.namespace.name=$(POD_NAMESPACE),chemclaw.component={{ .component }}"
+{{- end -}}
+
 {{- /* The port a worker serves its probes and its scrape on. Env, so `chemclaw.core.worker_http`
        binds the same number the container port and the PodMonitor name — one value, no third place
        for it to drift. Worker-only: the front door and the connector servers already have an HTTP
@@ -157,6 +191,15 @@ imagePullSecrets:
 ports:
   - name: metrics
     containerPort: {{ .Values.workerMetricsPort }}
+{{- if .Values.monitoring.temporalSdkMetrics.enabled }}
+  {{- /* The Temporal SDK's own Prometheus exporter, which is a listener inside the SDK core rather
+         than a route on `chemclaw.core.worker_http` — so it cannot share the port above. Declared
+         here and scraped by the second `podMetricsEndpoint` in `podmonitor.yaml`, both under the
+         one switch, because a port declared with nothing bound to it is a permanently-down scrape
+         target and `ChemclawTargetDown` would then report it forever. */}}
+  - name: temporal-metrics
+    containerPort: {{ .Values.monitoring.temporalSdkMetrics.port }}
+{{- end }}
 readinessProbe:
   httpGet:
     path: /readyz
@@ -336,7 +379,25 @@ readOnlyRootFilesystem: {{ .Values.securityContext.readOnlyRootFilesystem }}
 {{- end }}
 {{- end -}}
 
-{{- /* Sidecar: refresh on a cadence so a merged note reaches a *live* pod without a redeploy. */ -}}
+{{- /* Sidecar: refresh on a cadence so a merged note reaches a *live* pod without a redeploy.
+
+       **With a liveness probe, because a wedged one used to be invisible.** `loop` catches a failing
+       refresh deliberately — a dead git remote must not kill the pod — and the consequence was that
+       an expired push credential left the container logging one WARNING per interval forever while
+       serving a frozen corpus. Nothing measured it: no metric, no probe, no alert.
+       `ChemclawKnowledgeNotesLost` covers notes going *out*; the graph coming *in* had nothing.
+
+       The script now stamps a heartbeat on each *successful* refresh and `staleness` reads its age,
+       so a stopped loop becomes a restarting container — a restart count and a `Warning` event an
+       operator and `kube_pod_container_status_restarts_total` can both see. A restart does not
+       repair a bad credential and is not meant to; what it buys is that the failure stops looking
+       like health. Deliberately liveness and not readiness: a sidecar's readiness is the pod's, and
+       a three-hour-old corpus is a better answer to a chemist than a connection error.
+
+       The budget is three intervals plus the initial clone, so a single slow or failed tick is not a
+       restart — the same "generous because a false restart costs more than a slow true one"
+       reasoning as `chemclaw.workerProbes`. `failureThreshold: 3` over a one-interval period adds
+       three more ticks on top of that before the kubelet acts. */ -}}
 {{- define "chemclaw.knowledgeSidecar" -}}
 {{- if .Values.knowledge.sync.enabled }}
 - name: knowledge-sync
@@ -345,6 +406,16 @@ readOnlyRootFilesystem: {{ .Values.securityContext.readOnlyRootFilesystem }}
   securityContext:
     {{- include "chemclaw.containerSecurityContext" . | nindent 4 }}
   command: ["/usr/local/bin/chemclaw-knowledge-sync", "loop"]
+  livenessProbe:
+    exec:
+      command:
+        - /usr/local/bin/chemclaw-knowledge-sync
+        - staleness
+        - {{ mul (int .Values.knowledge.sync.intervalSeconds) 3 | quote }}
+    initialDelaySeconds: {{ .Values.knowledge.sync.intervalSeconds }}
+    periodSeconds: {{ .Values.knowledge.sync.intervalSeconds }}
+    timeoutSeconds: 10
+    failureThreshold: 3
   env:
     {{- include "chemclaw.knowledgeSyncEnv" . | nindent 4 }}
     {{- include "chemclaw.env" . | nindent 4 }}

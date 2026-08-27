@@ -15,7 +15,7 @@ import logging
 from collections.abc import AsyncIterator, Callable
 
 from fastapi import Depends, FastAPI, HTTPException, Request
-from sse_starlette.sse import EventSourceResponse
+from sse_starlette.sse import EventSourceResponse, SendTimeoutError
 from starlette.types import Receive, Scope, Send
 
 from chemclaw.api import app as front_door
@@ -49,19 +49,54 @@ class _SlotBoundEventStream(EventSourceResponse):
     live turn. A push-back stream is deliberately unbounded — it polls until the client leaves —
     so any deadline short enough to clear a leak would also evict a healthy stream's accounting
     and let one user exceed the cap the ledger exists to enforce.
+
+    **It is unbounded in *time*, and it was also unbounded in one *send*, which is a different
+    thing and was an oversight.** `EventSourceResponse` defaults `send_timeout` to `None`
+    (verified against sse-starlette 3.4.8), so a half-open connection — a laptop closed mid-poll,
+    a proxy that stopped reading without closing — parked this generator on a write that would
+    never complete, holding one of the user's five slots and one poller on the loop with no
+    deadline of any kind above it. The turn stream has passed one since D-159 for exactly this
+    reason (`routes/turns._TurnStream`); this one had the identical hole and none of the turn
+    stream's other bounds to catch it, since a push-back stream has no wall clock at all.
     """
 
     def __init__(
-        self, content: AsyncIterator[dict[str, str]], *, release: Callable[[], None], ping: int
+        self,
+        content: AsyncIterator[dict[str, str]],
+        *,
+        release: Callable[[], None],
+        ping: int,
+        send_timeout: float,
+        session_id: str,
     ) -> None:
-        """Wrap `content`, calling `release` once the response has finished being served."""
-        super().__init__(content, ping=ping)
+        """Wrap `content`, bounding each send and releasing the slot when the response ends."""
+        super().__init__(content, ping=ping, send_timeout=send_timeout)
         self._release = release
+        self._session_id = session_id
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        """Serve the stream, returning the admission slot however it ends."""
+        """Serve the stream, returning the admission slot however it ends.
+
+        `SendTimeoutError` is caught here rather than allowed to escape, mirroring `_TurnStream`:
+        letting it out would trade a parked generator for an unhandled-ASGI traceback, and here is
+        where the session id is still in scope to name. The slot is returned either way — that is
+        what the `finally` below has always been for.
+
+        **Logged and not counted, which is a gap rather than a decision.** `_TurnStream` has
+        `chemclaw_turn_send_timeouts_total` beside its identical log line, and that declaration's
+        own comment forbids the obvious shortcut: reusing it here would put two populations —
+        turns cut mid-answer and push-back streams cut mid-poll — under one denominator nobody can
+        interpret. A `chemclaw_event_stream_send_timeouts_total` belongs in `core/metrics.py`
+        beside it; until it is declared, this line is the whole record.
+        """
         try:
             await super().__call__(scope, receive, send)
+        except SendTimeoutError:
+            logger.warning(
+                "the push-back client of session %s stopped reading for %ss; the stream was closed",
+                self._session_id,
+                settings.service_sse_send_timeout_seconds,
+            )
         finally:
             self._release()
 
@@ -167,6 +202,8 @@ async def session_events(
             _events(),
             release=_release_stream_slot,
             ping=settings.service_sse_ping_seconds,
+            send_timeout=settings.service_sse_send_timeout_seconds,
+            session_id=session_id,
         )
         handed_off = True
         return response

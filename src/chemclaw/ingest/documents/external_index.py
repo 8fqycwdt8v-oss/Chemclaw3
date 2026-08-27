@@ -34,6 +34,7 @@ import logging
 from datetime import datetime
 
 from chemclaw.core.config import settings
+from chemclaw.core.metrics_bridge import record_metric
 from chemclaw.ingest.documents.index import (
     CITATION_SQL,
     CLAIMED_SQL,
@@ -122,6 +123,39 @@ def group_key(doc_id: str, chunking_key: str) -> str:
     its *superseded* cutting's points.
     """
     return f"{doc_id}@{chunking_key}"
+
+
+def _report_unresolved(addressed: int, rows: int, hits: int) -> None:
+    """Say so when the store ranked points the catalogue could not turn into evidence.
+
+    **These were three different numbers and nothing compared them.** The store returns `top_k`
+    ranked point ids, the catalogue joins them against `document_chunks`, and the citation filter
+    drops what resolves to no openable path — so a collection holding points whose rows were swept,
+    or whose `chunking_key` was superseded by a re-chunk, gives `top_k` matches in and zero hits
+    out, with no log, no counter, and a fan-out that books an honest `chunks=0`. That is precisely
+    the `D-2026-08-01-a-cap-that-starves-a-source` shape, on the one store in this system that can
+    drift from the catalogue because nothing writes them in the same transaction.
+
+    Both gaps are reported because they are different faults: `addressed - rows` is a point whose
+    chunk row is **gone** (drift — the store needs re-syncing), while `rows - hits` is a chunk
+    whose citation resolves to nothing under these filters (the row is there, the file that cited
+    it is not). One counter, since the operator action is the same — re-sync the collection — and
+    the line carries the split.
+    """
+    if hits >= addressed:
+        return
+    record_metric(
+        lambda m: m.increment("chemclaw_vector_unresolved_points_total", addressed - hits)
+    )
+    logger.warning(
+        "vector store returned %d ranked point(s); %d resolved to a chunk row and %d to a citable "
+        "hit (%.0f%% usable). Points with no chunk row mean the collection has drifted from "
+        "`document_chunks` — a sweep or a re-chunk the store was not told about",
+        addressed,
+        rows,
+        hits,
+        100.0 * hits / addressed,
+    )
 
 
 class ExternalVectorDocumentIndex(PostgresDocumentIndex):
@@ -368,7 +402,8 @@ class ExternalVectorDocumentIndex(PostgresDocumentIndex):
 
         Anything the catalogue cannot resolve is dropped: a point whose chunk was swept, or whose
         citation resolves to no path under these filters, is not evidence a reader could check, and
-        the contract is that a hit cites something openable.
+        the contract is that a hit cites something openable. **Dropped, and now said** — see
+        `_report_unresolved` for why silence here is indistinguishable from an empty corpus.
         """
         addressed: dict[tuple[str, str, int], float] = {}
         for match in matches:
@@ -414,6 +449,7 @@ class ExternalVectorDocumentIndex(PostgresDocumentIndex):
             for row in rows
             if row[5]
         ]
+        _report_unresolved(len(addressed), len(rows), len(hits))
         # The store ranked them; the catalogue only added text. Re-sorted because a SQL result set
         # has no order of its own, and the tie-break matches every other index here.
         hits.sort(key=lambda hit: (-hit.score, hit.doc_id, hit.ordinal))

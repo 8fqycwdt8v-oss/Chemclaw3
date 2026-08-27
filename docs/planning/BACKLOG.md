@@ -504,6 +504,38 @@ it happens.
       in the same sweep, reported as `unpolled` and counted like `unreachable`, is the runtime twin
       of the manifest check `connector-validate` now does — and it catches the row above too.
 
+- [ ] **The knowledge graph coming *in* has no signal, only the graph going *out*** — [S].
+      `ChemclawKnowledgeNotesLost` alerts on a note that failed to reach the PR-gate. Nothing covers
+      the other direction: `deploy/knowledge-sync.sh`'s `loop` catches a failed refresh so a dead
+      remote cannot kill the pod (correct), and the pod then serves a frozen corpus indefinitely
+      while logging one WARNING per interval into a stream nobody tails. On an expired push
+      credential — the exact cause `templates/prometheusrule.yaml` names for the notes alert — the
+      graph silently stops moving and every answer keeps citing it.
+      **The deploy half shipped**: the script stamps a heartbeat on each successful refresh and the
+      sidecar has an `exec` liveness probe reading its age, so a wedged loop becomes a restarting
+      container instead of a quiet one (`tests/test_deploy_chart.py`). That is a degraded
+      substitute and says so — a container restart is not a metric, it needs kube-state-metrics to
+      alert on, and those series are not in the user-workload Prometheus that evaluates our rules.
+      **What is left is in `src/`**: a `chemclaw_knowledge_sync_age_seconds` gauge bound through
+      `Metrics.bind_gauge_family` on the process that *reads* the tree — it already resolves
+      `settings.knowledge_path`, so the age of the newest note there is one `stat()` — plus its
+      rule, which then works on any cluster because it reads a first-party series. The sidecar's
+      heartbeat and that gauge answer the same question from the two sides of one volume; ship the
+      gauge and the probe becomes belt-and-braces rather than the only signal.
+
+- [ ] **The background worker is a singleton with no PDB, and the PDB is not the fix** — [M].
+      `poddisruptionbudget.yaml` covers the front door alone and argues that correctly in the
+      template: `minAvailable: 1` over a one-replica Deployment makes the pod un-evictable and
+      blocks every node drain forever, which is worse than no policy. So the row is not "add a PDB".
+      It is that core's background worker cannot safely run two replicas — the schedules, the
+      re-index and the sync jobs assume one holder — so a node drain ends whatever it was running
+      and Temporal re-delivers only after the activity's start-to-close timeout elapses.
+      What it needs is a distributed checkout lock so a second replica is safe, at which point a
+      `maxUnavailable: 1` PDB becomes meaningful. Until then the honest state is one replica, a
+      derived grace period long enough to drain (`chemclaw.workerGracePeriod`, shipped), and this
+      row. Raised by the 2026-08-27 deployment-monitoring review, which checked the PDB's argument
+      and found it sound; the singleton underneath it is the defect.
+
 ---
 
 ## 5 — Where the field moved past us
@@ -810,22 +842,3 @@ because a belief about caching was measurably wrong once. The right one is a mes
 cause, so a reader learns the credential is dead rather than that the cache broke. Same distinction
 `D-2026-08-17-a-harness-that-starts-two-of-five-servers-is-a-harness-that-tests-two` draws about
 `/readyz`: holding a credential is not the same as holding one the other side accepts.
-
-## Surface `invalid_tool_calls` — an unparseable tool call is currently a silent no-op
-
-LangChain puts a tool call whose arguments do not parse into `AIMessage.invalid_tool_calls` rather
-than `tool_calls`. Nothing in `src/` reads that field, so the agent — which iterates `tool_calls` —
-drops the call without a `tool_failed`, a `tool_result`, or any other trace. Proven outside the
-stack via `langchain_openai.chat_models.base._convert_dict_to_message`: truncated arguments yield
-`tool_calls: []` and a populated `invalid_tool_calls` carrying the parse error.
-
-A truncated argument document is what a real model emits when a stream is cut or a token budget
-runs out, so this is reachable in production, not only under the storm's mock. With no prose the
-turn ends as `empty_answer`; **with prose it proceeds as though no tool were needed**, which is
-`D-2026-08-04-a-failure-that-says-nothing-is-read-as-proceed` exactly.
-
-Fix in the middleware chain: after the model call, convert each `invalid_tool_calls` entry into a
-visible failure the model can also correct from. Do not jump from `after_model` — see
-`D-2026-08-15-an-after-model-counter-is-a-counter-that-can-be-skipped`. Verify with
-`make live-storm`'s `f-malformed-json` check, which currently fails. Found by the 2026-08-17
-full-stack run — see `tasks/live-test/full-stack-e2e-2026-08-17.md`.

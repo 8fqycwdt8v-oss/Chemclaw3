@@ -874,6 +874,20 @@ def declared_metric_names() -> frozenset[str]:
     )
 
 
+def declared_histogram_names() -> frozenset[str]:
+    """Just the histograms, for readers that must reason about their derived series.
+
+    A histogram is the one metric kind whose *declared* name is not the name anybody queries:
+    Prometheus derives `_bucket`, `_sum` and `_count` from it, and real PromQL — every
+    `histogram_quantile` an operator will ever write — cites the derived name. A reader checking
+    prose or a dashboard against `declared_metric_names()` therefore has to fold those three
+    suffixes back, and folding them against every declared name would accept
+    `chemclaw_turns_started_total_bucket` as well. Exposed as its own set so that fold can be
+    exact rather than approximate.
+    """
+    return frozenset(_HISTOGRAMS)
+
+
 class Metrics:
     """A tiny, thread-safe counter/gauge/histogram registry rendering Prometheus exposition text.
 

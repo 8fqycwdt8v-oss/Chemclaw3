@@ -228,7 +228,14 @@ class _RequestObservability:
     What that ordering deliberately leaves out is the 413 from `BodySizeLimit`, which runs above
     this and answers without ever calling down. It is counted by its own
     `chemclaw_requests_too_large_total` and logged where it is refused, so the fact survives — it
-    just is not in this log line.
+    just is not in this log line. A CORS preflight is outside it for the same reason.
+
+    **The label set is inside the registry's cap, measured rather than assumed.** `core/metrics`
+    refuses a counter past 64 label series (D-152). Across 158 front-door tests this counter grew
+    **35** series and no route produced more than three status classes, so three per route is the
+    worst case: 20 templates plus `<unmatched>` is 63 against 64 — safe, and one route away from
+    not being. `tests/test_api_observability.py` asserts that arithmetic, so the route that would
+    make it start dropping series fails a test instead of silently under-reporting in production.
     """
 
     def __init__(self, app: ASGIApp) -> None:
@@ -283,7 +290,9 @@ class _RequestObservability:
                     # there is no status left to change and nothing truthful left to send.
                     raise
         finally:
-            _record_request(scope, status, time.perf_counter() - started, response_bytes)
+            _record_request(
+                scope, status, time.perf_counter() - started, response_bytes, correlation
+            )
             _reset_request_identity(scope)
             reset_current_correlation_id(token)
 
@@ -412,7 +421,9 @@ async def _answer_internal_error(send: Send, correlation: str) -> None:
     await send({"type": "http.response.body", "body": body})
 
 
-def _record_request(scope: Scope, status: int, elapsed: float, response_bytes: int) -> None:
+def _record_request(
+    scope: Scope, status: int, elapsed: float, response_bytes: int, correlation: str
+) -> None:
     """One INFO record and the two RED series for one served request.
 
     Skipped entirely for a request that produced no response at all — a disconnect during
@@ -438,9 +449,11 @@ def _record_request(scope: Scope, status: int, elapsed: float, response_bytes: i
         status=status,
         duration_ms=round(elapsed * 1000.0, 1),
         response_bytes=response_bytes,
-        # The three context keys, passed explicitly so `ContextFilter`'s `setdefault` keeps them:
-        # they are what this line is *for*, and the ambient session is already unbound by the time
-        # a turn's own teardown has run.
+        # The three context keys, passed explicitly so `ContextFilter`'s `setdefault` keeps them.
+        # Explicit rather than left to the ambient stamp, because the filter lives on the *handler*
+        # — so a process that has not run `configure_logging`, or a handler somebody added later,
+        # would drop the one field this record exists to be joined on.
+        correlation_id=correlation,
         actor=str(scope.get(_SCOPE_ACTOR, "")),
         session_id=str((scope.get("path_params") or {}).get("session_id", "")),
     )

@@ -241,7 +241,9 @@ async def require_principal(request: Request) -> Principal:
     them all.
     """
     if not settings.entra_required:
-        return _bind(request, _within_budget(Principal(oid=_DEV_PRINCIPAL_OID, upn="dev@localhost")))
+        return _bind(
+            request, _within_budget(Principal(oid=_DEV_PRINCIPAL_OID, upn="dev@localhost"))
+        )
     header = request.headers.get("Authorization", "")
     if not header.startswith("Bearer "):
         # **Counted and said out loud, and it used to be neither.** The invalid-token path below

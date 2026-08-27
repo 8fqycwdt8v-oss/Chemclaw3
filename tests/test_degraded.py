@@ -34,12 +34,43 @@ _COUNTER = "chemclaw_degraded_total"
 # failure message names what changed, and pinned at all because this is the metric's label value
 # space: a label whose values are not enumerable is how a registry ends up with unbounded series.
 _EXPECTED_SUBSYSTEMS = {
+    # `core/db.py`, on the two branches where a DSN libpq cannot parse is swallowed: the error
+    # message degrades to a bare `<postgres>`, and any `options` the DSN carried (a `search_path`,
+    # an `application_name`) are dropped from the connection. Both are invisible from the connect's
+    # own failure, and the second is invisible even on a connect that succeeds.
+    "db_dsn",
+    # `kg/git_submitter._repair_parked_checkout`, whose `.git/HEAD` read is swallowed. The repair it
+    # skips is what a *later* submission depends on, so the degradation surfaces as git's "already
+    # used by worktree" on the next attempt — an error naming neither the file nor the repair.
+    "note_repo",
+    # `connectors/calc/remote.py`, on the three paths that raise `CalcServerError` — the
+    # calculation backend unreachable, answering with an internal error, or dropping mid-call. Its
+    # sibling `CalcToolError` (a *refusal*: an unparameterised solvent, a bad atom index) is
+    # deliberately not counted here: that is the server working and a chemist's input being wrong,
+    # and putting it on the same series would make a typo indistinguishable from a down pod. Added
+    # because that module imported no `logging` at all, so every calculation in the system crossed
+    # a wire whose outage produced no first-party signal.
+    "calc_server",
+    # `agent/checkpointer.SchemaStampedSaver.aput`. The one site here that does **not** swallow: the
+    # checkpoint write did not happen, so the caller must still fail — what the counter buys is that
+    # a checkpointer outage is visible at all. Nothing counted a checkpoint write failure before,
+    # and mid-turn it is silent loss of the turn's state.
+    "checkpointer",
+    # `agent/compaction`. A raising context edit used to kill the turn as a generic internal error;
+    # it now continues uncompacted, which is the safe direction — a request over budget still has a
+    # chance of being answered, where a failed turn has none.
+    "compaction",
     "cost_ledger",
     # A retrieval source that could not be asked. Added when `fanout._sweep`'s swallow was moved
     # onto `degraded()` — it had been a bare `logger.exception` plus a private counter, so the one
     # degradation a chemist actually feels (evidence missing from an answer) was the one missing
     # from `chemclaw_degraded_total`.
     "evidence_source",
+    # `durable/connector_job.py::_record_run`, whose log line has always said the swallowed write
+    # means the run "survives only in Temporal's history" — i.e. that it loses data nothing else
+    # holds. A fleet-wide loss of the durable record produced exactly what a quiet deployment
+    # produces.
+    "job_record",
     "job_resume",
     "log_redaction",
     "plan_approval",

@@ -21,6 +21,8 @@ from fastapi.testclient import TestClient
 from chemclaw.api.app import create_app
 from chemclaw.core.metrics import (
     _COUNTER_LABELS,
+    _GAUGE_FAMILY_LABELS,
+    _HISTOGRAM_LABELS,
     _MAX_SERIES_PER_COUNTER,
     CONTENT_TYPE,
     Metrics,
@@ -114,7 +116,18 @@ def test_metrics_carry_no_identifiers_or_turn_content() -> None:
     with TestClient(create_app()) as client:
         client.post("/sessions")
         body = client.get("/metrics").text
-    permitted = {"le"} | {label for labels in _COUNTER_LABELS.values() for label in labels}
+    # **All three declaration tables, not just the counters'.** The allowlist is "the label names
+    # actually declared", and for as long as only counters carried labels those were the same set.
+    # They no longer are: `operation` on `chemclaw_db_query_duration_seconds` is declared, bounded
+    # by a source literal at each `db.connection()` call site, and appears in no counter — so
+    # reading one table would refuse a label this registry declares, which is the opposite of the
+    # guard's purpose. The gauge families are here on the same terms.
+    permitted = (
+        {"le"}
+        | {label for labels in _COUNTER_LABELS.values() for label in labels}
+        | {label for labels in _HISTOGRAM_LABELS.values() for label in labels}
+        | set(_GAUGE_FAMILY_LABELS.values())
+    )
     for line in body.splitlines():
         if line.startswith("#"):
             continue

@@ -25,24 +25,38 @@ from chemclaw.agent.turn_cost import TurnCost
 from chemclaw.core import db
 from chemclaw.core.config import settings
 
+# Every column the writer sets, in one tuple so the INSERT list, the placeholder count and the
+# `DO UPDATE` list below are derived from it rather than being three hand-kept copies — the shape
+# in which the previous ten-column version was already one edit away from a mismatch.
 _COLUMNS = (
-    "correlation_id, session_id, actor, profile, input_tokens, output_tokens, "
-    "cache_read_tokens, cache_write_tokens, duration_seconds, completed"
+    "correlation_id",
+    "session_id",
+    "actor",
+    "profile",
+    "input_tokens",
+    "output_tokens",
+    "cache_read_tokens",
+    "cache_write_tokens",
+    "duration_seconds",
+    "completed",
+    "outcome",
+    "error_code",
+    "model",
+    "tool_calls",
+    "tool_failures",
+    "tool_refusals",
+    "jobs_started",
+    "ttft_seconds",
 )
 
+# `correlation_id` is the conflict target, so it is the one column the update must not re-set.
+_UPDATED = ",\n        ".join(f"{name} = EXCLUDED.{name}" for name in _COLUMNS[1:])
+
 _UPSERT = f"""
-    INSERT INTO turn_costs ({_COLUMNS})
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    INSERT INTO turn_costs ({", ".join(_COLUMNS)})
+    VALUES ({", ".join(["%s"] * len(_COLUMNS))})
     ON CONFLICT (correlation_id) DO UPDATE SET
-        session_id = EXCLUDED.session_id,
-        actor = EXCLUDED.actor,
-        profile = EXCLUDED.profile,
-        input_tokens = EXCLUDED.input_tokens,
-        output_tokens = EXCLUDED.output_tokens,
-        cache_read_tokens = EXCLUDED.cache_read_tokens,
-        cache_write_tokens = EXCLUDED.cache_write_tokens,
-        duration_seconds = EXCLUDED.duration_seconds,
-        completed = EXCLUDED.completed,
+        {_UPDATED},
         recorded_at = now()
 """
 
@@ -60,17 +74,6 @@ class PostgresTurnCostSink:
         async with _connect() as conn:
             await conn.execute(
                 _UPSERT,
-                (
-                    cost.correlation_id,
-                    cost.session_id,
-                    cost.actor,
-                    cost.profile,
-                    cost.input_tokens,
-                    cost.output_tokens,
-                    cost.cache_read_tokens,
-                    cost.cache_write_tokens,
-                    cost.duration_seconds,
-                    cost.completed,
-                ),
+                tuple(getattr(cost, name) for name in _COLUMNS),
             )
             await conn.commit()

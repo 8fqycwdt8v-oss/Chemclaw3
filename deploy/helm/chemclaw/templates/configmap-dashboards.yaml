@@ -1,0 +1,39 @@
+{{- if and .Values.monitoring.enabled .Values.monitoring.dashboards.enabled }}
+{{- /* The consumer the other eighty-eight series never had.
+
+       This chart declares over a hundred metrics; sixteen of them had an alert and the rest had no
+       reader of any kind — `deploy/README.md` said so outright ("there are no dashboards in this
+       repo to track anything"). That is the same failure the ServiceMonitor fixed one level down,
+       one level up: the number is computed, exposed, collected, retained, and nobody has ever seen
+       it. An alert answers "is something wrong now"; these answer the question an operator actually
+       arrives with, which is "what is this deployment doing".
+
+       Five dashboards rather than one, split the way the questions split — a turn, a tool call, a
+       durable job, an HTTP request, a stored byte — because a single sixty-panel page is a page
+       nobody opens twice. The JSON lives beside the chart in `dashboards/` and is inserted
+       verbatim: `.Files.Glob | .AsConfig` does not template its contents, which is what lets a
+       panel legend carry Grafana's own `{{"{{"}}label{{"}}"}}` syntax without Helm reading it.
+
+       **A dashboard is only a dashboard to something that reads it, and the two readers disagree
+       about where to look.** The OpenShift console reads ConfigMaps labelled
+       `console.openshift.io/dashboard: "true"` **in `openshift-config-managed` and nowhere else**; a
+       self-managed Grafana's sidecar reads `grafana_dashboard: "1"` in the namespace it watches,
+       which is normally the release's own. `monitoring.dashboards.namespace` is empty by default —
+       the release namespace — because writing into `openshift-config-managed` needs permissions a
+       release installer usually does not have, and a chart whose *install* fails on a dashboard is
+       worse than one whose dashboards need one more `--set`. The runbook says which value to set
+       for which reader; this comment is here so the default is not mistaken for the finished
+       state. */ -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "chemclaw.name" . }}-dashboards
+  {{- with .Values.monitoring.dashboards.namespace }}
+  namespace: {{ . | quote }}
+  {{- end }}
+  labels:
+    {{- include "chemclaw.labels" . | nindent 4 }}
+    {{- toYaml .Values.monitoring.dashboards.labels | nindent 4 }}
+data:
+  {{- (.Files.Glob "dashboards/*.json").AsConfig | nindent 2 }}
+{{- end }}

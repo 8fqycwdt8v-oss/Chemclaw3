@@ -950,6 +950,14 @@ networkPolicy:
   #   - ipBlock: {cidr: 10.0.1.0/24}                     # the database subnet
   #   - namespaceSelector: {matchLabels: {name: temporal}}
   #   - namespaceSelector: {matchLabels: {name: llm-serving}}
+  #   # The collector `CHEMCLAW_OTEL_ENDPOINT` points at. **Enumerate this or lose tracing
+  #   # silently**: `egressPorts.otel: 4317` permits nothing on its own — a port is only reachable
+  #   # where some `to:` also matches — so an operator who follows this example and lists the three
+  #   # obvious destinations ends up with an OTLP exporter whose every export is dropped by the
+  #   # policy, which presents as an empty trace backend rather than as an error. The three
+  #   # sibling MCP servers (`egressPorts.chem`/`safety`/`calc`) and the labeller need the same
+  #   # treatment for the same reason.
+  #   - namespaceSelector: {matchLabels: {name: observability}}
   egressDestinations: []
   # The escape hatch, and the reason the guard above is a `fail` rather than a broken default: a
   # deployment that genuinely cannot enumerate its destinations yet says so here, in its own values

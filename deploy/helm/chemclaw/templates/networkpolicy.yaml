@@ -161,6 +161,16 @@ metadata:
     {{- include "chemclaw.labels" . | nindent 4 }}
 spec:
   podSelector:
+    {{- /* The release labels beside the component, which this selector alone was missing. A
+           `podSelector` is namespace-scoped and `app.kubernetes.io/component: connector-calc` is not
+           a name this release owns — a second Chemclaw release, or a staging copy, in the same
+           namespace has pods carrying it too, and this policy would have applied to them as well:
+           an ingress rule naming *our* pods as the permitted peer, imposed on somebody else's pod,
+           which cuts it off from its own front door. The three sibling policies in this file all
+           carry `chemclaw.selectorLabels` here; this one is brought into line with them rather than
+           the other way round. */}}
+    matchLabels:
+      {{- include "chemclaw.selectorLabels" . | nindent 6 }}
     matchExpressions:
       - key: app.kubernetes.io/component
         operator: In
@@ -217,6 +227,10 @@ metadata:
     {{- include "chemclaw.labels" . | nindent 4 }}
 spec:
   podSelector:
+    {{- /* Same reason as the connector policy above: `component` alone is not a name this release
+           owns, so without the release labels this rule reaches another release's workers. */}}
+    matchLabels:
+      {{- include "chemclaw.selectorLabels" . | nindent 6 }}
     matchExpressions:
       - key: app.kubernetes.io/component
         operator: In
@@ -242,4 +256,11 @@ spec:
       ports:
         - protocol: TCP
           port: {{ .Values.workerMetricsPort }}
+        {{- if .Values.monitoring.temporalSdkMetrics.enabled }}
+        {{- /* The SDK exporter's port, admitted on the same terms and under the same switch that
+               declares it. Rendering the PodMonitor endpoint without this would have produced a
+               scrape target the policy drops — a `down` target that reads as a broken worker. */}}
+        - protocol: TCP
+          port: {{ .Values.monitoring.temporalSdkMetrics.port }}
+        {{- end }}
 {{- end }}

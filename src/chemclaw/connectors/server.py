@@ -346,9 +346,17 @@ def _bind_caller_per_tool_call(server: FastMCP) -> None:
             headers.get(HEADER_CORRELATION, ""),
         )
         try:
-            return await wrapped_call_tool(
-                tool_name, arguments, context=context, convert_result=convert_result
-            )
+            # **The caller's trace, adopted for the same reason the caller's identity is.**
+            # `CallerLogMiddleware.dispatch` also attaches `continue_trace`, and that attachment is
+            # in the ASGI task — the same task a tool body does *not* run in. So a span opened
+            # inside a tool would have been rooted at nothing rather than parented to the turn that
+            # asked for it, which is the exact defect measured one function up for the contextvars.
+            # Latent today (no tool body in this repository opens a span) and pre-emptied here,
+            # because the first one to do so would produce an orphan and nothing would say why.
+            with continue_trace(headers):
+                return await wrapped_call_tool(
+                    tool_name, arguments, context=context, convert_result=convert_result
+                )
         finally:
             reset_caller(tokens)
 
