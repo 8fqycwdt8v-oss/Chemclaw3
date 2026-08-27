@@ -64,7 +64,9 @@ advertising a capability this engine does not have reads as coverage while provi
 advertising a mechanism after the mechanism is gone.
 """
 
+import logging
 import uuid
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Annotated, Any, NotRequired
 
@@ -92,6 +94,7 @@ from chemclaw.agent.chemclaw_agent import (
 from chemclaw.agent.compaction import context_compaction_middleware, disabled_summarizer
 from chemclaw.agent.llm_provider import build_chat_model, prompt_caching_middleware
 from chemclaw.agent.loop_cap import enforce_loop_cap
+from chemclaw.agent.model_calls import model_call_middleware
 from chemclaw.agent.plan_gate import enforce_plan_approval, gate_applies, harness_enabled_for
 from chemclaw.agent.plan_link import stamp_plan_link
 from chemclaw.agent.profiles import AgentProfile, get_profile
@@ -116,6 +119,9 @@ from chemclaw.agent.tool_authz import (
 )
 from chemclaw.connectors.registry import skills_dirs
 from chemclaw.core.config import settings
+from chemclaw.core.logging import log_event
+
+logger = logging.getLogger(__name__)
 
 
 def build_langgraph_agent(
@@ -348,6 +354,13 @@ def _middleware(
         # of a session, not of the plan/execute mode, and the single-turn agent accumulates one just
         # as fast. Last, so the reduction sees everything the middleware above it added.
         *context_compaction_middleware(),
+        # Innermost of everything, and both entries are observers of the *provider call itself*.
+        # Below the compaction group deliberately: the context edits also run in `wrap_model_call`,
+        # so recording from above them would fold this repository's own token counting into
+        # `chemclaw_model_call_duration_seconds` — the histogram an operator reads as "how slow is
+        # the endpoint". `agent/model_calls.py` carries the rest, including why the repair for an
+        # unparseable tool call is taken here rather than by jumping from `after_model`.
+        *model_call_middleware(),
     ]
 
 
@@ -549,17 +562,60 @@ def skills_backend(
     """
     labelled = labelled if labelled is not None else _labelled(_skill_dirs())
     dirs = [directory for _label, directory in labelled]
+    declared = declared_tools(dirs)
     permits = skill_permits(
         enabled=settings.skills_enabled_list,
-        declared=declared_tools(dirs),
+        declared=declared,
         available=_advertised_names(profile, tools),
         gates=settings.skill_role_gates,
     )
+    _log_narrowing(profile, declared, permits)
     return CompositeBackend(
         default=StateBackend(),
         routes={
             f"/{label}/": NarrowedSkillsBackend(directory, permits) for label, directory in labelled
         },
+    )
+
+
+def _log_narrowing(
+    profile: AgentProfile, declared: Mapping[str, frozenset[str]], permits: Callable[[str], bool]
+) -> None:
+    """Record which skills this build will offer, and how many the three predicates removed.
+
+    **"Was the skill even offered?" had no answer at all.** `agent/skill_backend.py` and
+    `agent/skill_access.py` between them contained zero log calls and zero metric calls, so the
+    first question anyone asks about "the agent is not following the procedure" — did this profile,
+    for this caller, advertise that skill — could only be answered by re-deriving the three
+    predicates by hand against a deployment's configuration.
+
+    DEBUG rather than INFO because a graph is compiled **per turn** (M7), so this is per turn per
+    subagent: at INFO it would be the loudest line in the process, and the question it answers is
+    asked while debugging one session rather than while watching a fleet. The names are the skills'
+    own directory names — configuration, not content.
+
+    `declared` is the walk of the trees this build already made, so the listing names exactly what
+    the backend routes: deriving the set a second way here is how a listing and a gate come to
+    disagree, which is the whole failure `skill_access.skill_permits` exists to prevent.
+    """
+    if not logger.isEnabledFor(logging.DEBUG):
+        # The predicate is evaluated per skill and the role gate reads a contextvar each time, so
+        # the loop is skipped rather than computed and thrown away — this runs on every turn.
+        return
+    offered = sorted(name for name in declared if permits(name))
+    log_event(
+        logger,
+        "skills.narrowed",
+        "profile %s offers %d of %d discovered skill(s): %s",
+        profile.name,
+        len(offered),
+        len(declared),
+        ", ".join(offered) or "none",
+        level=logging.DEBUG,
+        profile=profile.name,
+        offered=len(offered),
+        denied=len(declared) - len(offered),
+        skills=", ".join(offered),
     )
 
 

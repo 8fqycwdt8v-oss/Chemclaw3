@@ -11,11 +11,14 @@ edge in the dependency graph.
 """
 
 import json
+import logging
 
 from starlette.datastructures import Headers
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from chemclaw.core.metrics_bridge import record_metric
+
+logger = logging.getLogger(__name__)
 
 
 class BodySizeLimit:
@@ -96,8 +99,20 @@ class BodySizeLimit:
         await self._app(scope, _receive, _send)
 
     async def _refuse(self, send: Send) -> None:
-        """Answer 413, either before the app runs or in place of what it produced."""
+        """Answer 413, either before the app runs or in place of what it produced.
+
+        **Counted *and* said, and it used to be only counted.** A refusal here happens above the
+        front door's access log — this middleware answers without ever calling down, deliberately,
+        which is the whole point of refusing before the body is read — so a 413 appeared in no log
+        line anywhere in this process. An operator watching `chemclaw_requests_too_large_total`
+        rise had a rate and nothing to look at: not the method, not the path, not which of the two
+        arms fired. `warning`, because the caller is being refused and somebody has to decide
+        whether it is an attack or an attachment cap set too low; no path and no header is
+        included, for the reason `_route_template` gives in `api/middleware.py` — a request line is
+        attacker-controlled and the redaction filter is where that becomes a pod stall.
+        """
         record_metric(lambda m: m.increment("chemclaw_requests_too_large_total"))
+        logger.warning("refused a request body over the %d byte limit with 413", self._max_bytes)
         body = json.dumps(
             {"detail": f"request body exceeds the {self._max_bytes} byte limit"}
         ).encode()

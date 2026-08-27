@@ -31,15 +31,63 @@ privilege a session has no analogue for, and its dev-mode opening comes from `_i
 than `_owner_authorizes` — see `_visible_proposal` before you are tempted to unify it.
 """
 
+import logging
 from typing import Annotated
 
 from fastapi import Depends, HTTPException, Request
 
 from chemclaw.agent.session import TurnSession
 from chemclaw.api.auth import Principal, require_principal
+from chemclaw.api.middleware import bind_request_session
 from chemclaw.api.state import LiveSession, SessionOwners, state
 from chemclaw.core.config import settings
+from chemclaw.core.logging import log_event
+from chemclaw.core.metrics import METRICS
 from chemclaw.kg.proposal import NoteProposal, read_proposal
+
+logger = logging.getLogger(__name__)
+
+# The resources this module can refuse, as a closed label set. Two, because two is how many kinds
+# of row it gates: a conversation and a knowledge proposal. A source literal at every call site, so
+# `chemclaw_authz_refusals_total` can never grow a series from anything a caller sends.
+_SESSION = "session"
+_PROPOSAL = "proposal"
+
+
+def _refuse(
+    resource: str, reason: str, principal: Principal, target: str, detail: str
+) -> HTTPException:
+    """Record one authorization refusal, then build the 404 that discloses none of it.
+
+    **404-not-403 is right and is exactly why this exists.** Answering 403 would confirm the id
+    exists, so the response is deliberately indistinguishable from "no such thing" — which leaves
+    the server-side record as the *only* place the distinction can survive, and until now that
+    record was not written at all: five raise sites, zero log lines, zero metrics. A session-id
+    enumeration scan was therefore indistinguishable from ordinary 404 traffic, on the one surface
+    where it matters.
+
+    `reason` is a source literal naming which of the gate's arms fired, so an operator reading the
+    trail can tell "someone else's session" from "no such session" without re-deriving it from the
+    route and the actor.
+    """
+    METRICS.increment("chemclaw_authz_refusals_total", labels={"resource": resource})
+    log_event(
+        logger,
+        "authz.refused",
+        "refused %s access to %s %s (%s); answered 404",
+        principal.oid or "-",
+        resource,
+        target,
+        reason,
+        level=logging.WARNING,
+        resource=resource,
+        reason=reason,
+        target=target,
+        actor=principal.oid,
+    )
+
+    return HTTPException(status_code=404, detail=detail)
+
 
 # The authenticated caller for this request (401/429 handled inside `require_principal`). Every
 # route that is not in the health/metrics probe allowlist takes this — see
@@ -64,7 +112,9 @@ def _owner_authorizes(owner: str | None, principal: Principal) -> bool:
     return owner == principal.oid
 
 
-def _refuse_unless_owner(owner: str | None, principal: Principal, detail: str) -> None:
+def _refuse_unless_owner(
+    owner: str | None, principal: Principal, detail: str, target: str = ""
+) -> None:
     """404 unless the stored owner authorizes `principal` — the shared no-existence-leak gate (S3).
 
     One helper for the two session-resolution paths, whose rule is identical (`_owner_authorizes`
@@ -74,7 +124,7 @@ def _refuse_unless_owner(owner: str | None, principal: Principal, detail: str) -
     response body.
     """
     if not _owner_authorizes(owner, principal):
-        raise HTTPException(status_code=404, detail=detail)
+        raise _refuse(_SESSION, "not the owner", principal, target, detail)
 
 
 def _is_reviewer(principal: Principal) -> bool:
@@ -104,7 +154,7 @@ async def _resolve_session(request: Request, session_id: str, principal: Princip
     """
     entry = state(request).live_sessions.get(session_id)
     if entry is not None:
-        _refuse_unless_owner(entry.owner, principal, "unknown session")
+        _refuse_unless_owner(entry.owner, principal, "unknown session", session_id)
         return entry
     return await _rehydrate_session(request, session_id, principal)
 
@@ -116,11 +166,13 @@ async def _rehydrate_session(
     front = state(request)
     owners: SessionOwners | None = front.session_owners
     if owners is None:
-        raise HTTPException(status_code=404, detail="unknown session")
+        raise _refuse(
+            _SESSION, "no durable ownership store", principal, session_id, "unknown session"
+        )
     found, owner, profile = await owners.lookup(session_id)
     if not found:
-        raise HTTPException(status_code=404, detail="unknown session")
-    _refuse_unless_owner(owner, principal, "unknown session")
+        raise _refuse(_SESSION, "no such session", principal, session_id, "unknown session")
+    _refuse_unless_owner(owner, principal, "unknown session", session_id)
     # Re-check the cache after the awaited lookup: two racing requests would otherwise each
     # mint a live handle over the same durable thread, and the loser's handle would keep
     # writing outside the cache. The first rehydrator's handle wins; both callers share it.
@@ -150,7 +202,14 @@ async def resolve_session(request: Request, session_id: str, principal: CurrentU
     `tests/test_route_auth_coverage.py` resolves the gate through this dependency exactly as it
     did through the handler's own parameter.
     """
-    return await _resolve_session(request, session_id, principal)
+    live = await _resolve_session(request, session_id, principal)
+    # The session becomes ambient here rather than at request entry, because it is a *routed* path
+    # parameter: the router runs below `_RequestObservability`, so at entry there is no session to
+    # bind and the raw path is the wrong place to look for one. Every session-scoped route resolves
+    # through this dependency, so this is the funnel — the same argument that puts the actor's bind
+    # inside `require_principal`. The reset is the middleware's (see `bind_request_session`).
+    bind_request_session(request, session_id)
+    return live
 
 
 # The caller's own live session for a `{session_id}` route — resolved (and rehydrated if durable
@@ -169,9 +228,17 @@ async def _visible_proposal(proposal_id: int, principal: Principal) -> NotePropo
     """
     proposal = await read_proposal(proposal_id)
     if proposal is None:
-        raise HTTPException(status_code=404, detail="no such proposal")
+        raise _refuse(
+            _PROPOSAL, "no such proposal", principal, str(proposal_id), "no such proposal"
+        )
     if not _is_reviewer(principal) and proposal.actor != principal.oid:
-        raise HTTPException(status_code=404, detail="no such proposal")
+        raise _refuse(
+            _PROPOSAL,
+            "not the author and not a reviewer",
+            principal,
+            str(proposal_id),
+            "no such proposal",
+        )
     return proposal
 
 

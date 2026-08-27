@@ -148,6 +148,15 @@ async def post_message(
             else asyncio.create_task(_hold_turn_claim(claims, session_id, lease))
         )
         permit = False
+        # **The turn, not its error events** (M7). This used to be one increment per `error` event
+        # inside the loop below, and `runner.py` can yield *two* for one turn: the loop cap and the
+        # empty answer are independent predicates and a runaway turn satisfies both — so
+        # `chemclaw_turns_failed_total / chemclaw_turns_started_total`, which reads as a failure
+        # *rate*, could exceed 1.0. A flag plus one increment in the `finally` counts each turn
+        # once, and the `finally` is also what makes the timeout branch below count at all: it is
+        # outside the `async for`, so a timed-out turn moved this counter zero times and an
+        # all-timeout deployment showed a **zero** failure ratio (M8).
+        turn_failed = False
         try:
             # Admission, inside the stream (D-166). `locked()` is the whole reason the common
             # case costs nothing: it is false exactly when `acquire()` will return without
@@ -212,7 +221,7 @@ async def post_message(
                 # pooled agent had to be leased exclusively. A graph is compiled per turn around
                 # that turn's own connectors, so there is no shared object to lease: the defect
                 # has no surface left to occur on.
-                async with asyncio.timeout(settings.service_turn_timeout_seconds):
+                async with asyncio.timeout(settings.service_turn_timeout_seconds) as deadline:
                     async for event in run_turn(
                         live.session,
                         body.message,
@@ -228,11 +237,18 @@ async def post_message(
                         history=front.history,
                         profile=live.profile,
                         graph_factory=front.graph_factory,
+                        # The reading this scope will fire at, so the turn's own cost row can say
+                        # `timed_out` rather than `abandoned`. The cancellation is indistinguishable
+                        # from a Stop inside `run_turn`, and this route learns which it was only in
+                        # the `except TimeoutError` below — which runs *after* the turn has booked
+                        # itself. See `run_turn`'s `deadline` argument.
+                        deadline=deadline.when(),
                     ):
                         if event.type == "error":
-                            METRICS.increment("chemclaw_turns_failed_total")
+                            turn_failed = True
                         yield {"event": event.type, "data": event.model_dump_json()}
             except TimeoutError:
+                turn_failed = True
                 METRICS.increment("chemclaw_turn_timeouts_total")
                 logger.warning(
                     "turn timed out after %ss for session %s",
@@ -267,11 +283,13 @@ async def post_message(
             # So the invariant `events.py` states — a stream ends with an answer or an error — is
             # the *stream's*, not only `run_turn`'s. `failure_event` is the same classifier the
             # runner uses, so a client cannot get two different accounts of one kind of failure.
-            METRICS.increment("chemclaw_turns_failed_total")
+            turn_failed = True
             logger.exception("turn stream failed for session %s", session_id)
             failed = failure_event(exc, session_id, uuid.uuid4().hex)
             yield {"event": failed.type, "data": failed.model_dump_json()}
         finally:
+            if turn_failed:
+                METRICS.increment("chemclaw_turns_failed_total")
             if heartbeat is not None:
                 heartbeat.cancel()
             if permit:

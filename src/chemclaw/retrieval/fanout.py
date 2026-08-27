@@ -39,6 +39,9 @@ the index of the source it ran, and the fan-in restores that order before return
 
 import logging
 import operator
+import time
+from collections import Counter
+from collections.abc import Iterable
 from typing import Annotated, Any
 
 from langchain_core.runnables import RunnableConfig
@@ -112,9 +115,11 @@ async def _sweep(state: BranchState, config: RunnableConfig) -> dict[str, Any]:
     sources: list[tuple[str, SourceRetriever]] = configurable[_SOURCES]
     index = state["index"]
     name, retriever = sources[index]
+    started = time.perf_counter()
     try:
         chunks = await retriever.retrieve(configurable[_QUERY], configurable[_FILTERS])
     except RetrieverSkip as skip:
+        _record_seconds(name, time.perf_counter() - started)
         # A decline, not an outage: no failure counter, no degradation record — but never a bare
         # zero either. The reason travels to the caller so the model can render "the share leg
         # requires an entitled actor" instead of "nothing on file".
@@ -124,6 +129,7 @@ async def _sweep(state: BranchState, config: RunnableConfig) -> dict[str, Any]:
         _report(name, 0, failed=False, skipped=skip.reason)
         return {"ranked": [(index, [])], "failed": [], "skipped": [(name, skip.reason)]}
     except Exception as exc:
+        _record_seconds(name, time.perf_counter() - started)
         # Through `degraded()` rather than a bare `logger.exception` plus a private counter: this is
         # the repository's chokepoint for "we continued with less", and a swallow that does not go
         # through it is invisible to `chemclaw_degraded_total` and to `tests/test_degraded.py`,
@@ -148,8 +154,65 @@ async def _sweep(state: BranchState, config: RunnableConfig) -> dict[str, Any]:
         )
         _report(name, 0, failed=True)
         return {"ranked": [(index, [])], "failed": [name], "skipped": []}
+    _record_seconds(name, time.perf_counter() - started)
     _report(name, len(chunks), failed=False)
     return {"ranked": [(index, list(chunks))], "failed": [], "skipped": []}
+
+
+def _record_seconds(name: str, seconds: float) -> None:
+    """Record how long one source took to answer — on every path, including the ones that failed.
+
+    **There was no retrieval latency anywhere in this system**, which leaves the two states a
+    chemist most needs told apart looking identical from outside: a vector store that is timing out
+    and a vector store that is empty both return `[]`, and both booked an honest `chunks=0`. The
+    duration is the field that separates them, and it is only informative if the failing path
+    records it too — a leg that raises after twenty seconds and one that raises immediately are a
+    different fault with a different fix.
+    """
+    record_metric(
+        lambda m: m.observe("chemclaw_evidence_source_seconds", seconds, {"source": name})
+    )
+
+
+def record_kept_chunks(kept: Iterable[EvidenceChunk], asked: Iterable[str]) -> None:
+    """Count the chunks that **survived** the merge and both caps, per source.
+
+    `chemclaw_evidence_source_chunks_total` counts what a retriever *handed over* — `EvidenceSweep`
+    says so in as many words ("Counts are pre-merge") — which is measured before RRF or the
+    round-robin interleave and before the budget cap. So it does not cover the defect its own ADR
+    names: `D-2026-08-01-a-cap-that-starves-a-source` measured *surviving* chunks (graph 38,
+    lexical 0, vector 2), and under a pre-merge counter a leg that contributes thirty chunks and
+    survives none reads as perfectly healthy. Reintroduce `retrieval_source_weights` at the value
+    that ADR itself measured and not one series here moves.
+
+    The alert is the ratio `kept / chunks` going to zero for one source, which is that ADR's table
+    expressed as a number a dashboard can hold.
+
+    **Every asked source is seeded at zero**, and that is a deliberate exception to this registry's
+    rule against invented zero series. It is not invented: a source that was asked and kept nothing
+    is an *observation*, and without the seeded series the ratio has no denominator at exactly the
+    moment it matters — a starved leg would be absent from the metric rather than reading zero.
+
+    Args:
+        kept: The chunks that reached the caller, after merging and both budget caps.
+        asked: Every source name this sweep asked, so a starved one is present as a zero.
+    """
+    surviving: Counter[str] = Counter(chunk.retriever for chunk in kept)
+    named = set(asked)
+    for name in named:
+        _record_kept(name, surviving.get(name, 0))
+    # A chunk whose `retriever` is not among the asked names would otherwise be dropped silently;
+    # counting it keeps the two series comparable rather than quietly under-reporting the numerator.
+    for name in surviving:
+        if name not in named:
+            _record_kept(name, surviving[name])
+
+
+def _record_kept(name: str, count: int) -> None:
+    """Add one source's surviving-chunk count — named, so the loop above cannot capture late."""
+    record_metric(
+        lambda m: m.increment("chemclaw_evidence_source_kept_total", count, {"source": name})
+    )
 
 
 def _report(name: str, found: int, *, failed: bool, skipped: str | None = None) -> None:

@@ -68,23 +68,77 @@ def _tracer() -> Any:
         return None
 
 
+class SpanHandle:
+    """The span the block is running in — or nothing at all, when tracing is off.
+
+    **It exists so the OpenTelemetry API stays inside this module**, which is the promise the
+    module docstring already makes for `start_span` and `trace_headers`: the agent and connector
+    layers run in processes where the observability extras may be absent, so a caller that wanted
+    to mark a span would otherwise need its own `Status`/`StatusCode` import with its own
+    tolerance for that import failing — a second copy of the degradation logic here, at the one
+    call site that must never break a tool call.
+
+    Both methods are no-ops on the untraced path, so a caller writes the same two lines whether or
+    not a collector is configured. That is the same "one boolean read on the ordinary path" cost
+    `start_span` already promises.
+    """
+
+    __slots__ = ("_span",)
+
+    def __init__(self, span: Any | None) -> None:
+        """Hold the live span, or `None` when tracing is off."""
+        self._span = span
+
+    def set_attribute(self, key: str, value: str | int | float | bool) -> None:
+        """Stamp one attribute, under the rule `start_span` states: identifiers and counts only."""
+        if self._span is not None:
+            self._span.set_attribute(key, value)
+
+    def failed(self, description: str) -> None:
+        """Mark the span `ERROR` with `description` — for a failure that does not *raise*.
+
+        **The whole reason this method exists**: OpenTelemetry sets a span's status from an
+        exception that escapes the `with` block, and two of this system's failures never escape
+        one. An MCP tool *returns* its failure (CLAUDE.md: "an MCP tool never raises"), so the
+        largest family of production tool failures left its span `UNSET` while the audit row said
+        `error`; and a cancellation is a `BaseException`, which `use_span` does not catch at all.
+        Both were measured. An operator filtering a collector by `status=ERROR` saw neither.
+
+        Swallowing here rather than at the call site, for the reason `record_metric` swallows: this
+        is called from inside an `except` block on the tool path, and a tracing failure must not
+        replace the failure being reported.
+        """
+        if self._span is None:
+            return
+        try:
+            from opentelemetry.trace import Status, StatusCode
+
+            self._span.set_status(Status(StatusCode.ERROR, description))
+        except Exception:  # pragma: no cover - defensive; tracing must never break the caller
+            logger.debug("could not set an error status on the current span", exc_info=True)
+
+
 @contextmanager
-def start_span(name: str, **attributes: str | int | float | bool) -> Iterator[None]:
+def start_span(name: str, **attributes: str | int | float | bool) -> Iterator[SpanHandle]:
     """Run the block inside a span named `name`, or unchanged when tracing is off.
 
     Attributes are keyword arguments rather than a dict because every call site here passes a
     handful of literals, and the keyword form is what makes an accidental turn *content* attribute
     visible in review — a span attribute travels to the collector, so the rule is the one
     `/metrics` follows: identifiers and counts, never a question, an argument or an answer.
+
+    Yields a `SpanHandle` so a block can also mark what it *learned* — an outcome attribute, or an
+    `ERROR` status for a failure that was returned rather than raised. A caller with nothing to add
+    still writes `with start_span(...):` and ignores it.
     """
     tracer = _tracer()
     if tracer is None:
-        yield
+        yield SpanHandle(None)
         return
     with tracer.start_as_current_span(name) as span:
         for key, value in attributes.items():
             span.set_attribute(key, value)
-        yield
+        yield SpanHandle(span)
 
 
 def trace_headers() -> dict[str, str]:

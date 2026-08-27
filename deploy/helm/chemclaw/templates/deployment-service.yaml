@@ -47,11 +47,26 @@ spec:
           env:
             - name: CHEMCLAW_COMPONENT
               value: "service"
+            {{- include "chemclaw.otelResourceEnv" (dict "component" "service") | nindent 12 }}
             {{- include "chemclaw.env" . | nindent 12 }}
           envFrom:
             {{- include "chemclaw.envFrom" . | nindent 12 }}
           ports:
             - containerPort: {{ .Values.service.port }}
+          {{- /* The same gap the connector servers had, one process bigger: this one imports
+                 langchain, deepagents and RDKit and runs a connector sweep before uvicorn accepts
+                 anything. `initialDelaySeconds: 10` with the default `failureThreshold: 3` and a
+                 20 s period put the first liveness restart at ~70 s, which a cold or throttled node
+                 spends inside the import. A `startupProbe` removes the guess: liveness and
+                 readiness are suspended until the process answers once, and the two periods below
+                 stay tuned for a running process. */}}
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: {{ .Values.service.port }}
+            periodSeconds: {{ .Values.probes.service.startup.periodSeconds }}
+            failureThreshold: {{ .Values.probes.service.startup.failureThreshold }}
+            timeoutSeconds: {{ .Values.probes.service.startup.timeoutSeconds }}
           readinessProbe:
             httpGet:
               path: /readyz

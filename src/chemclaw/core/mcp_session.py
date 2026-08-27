@@ -36,7 +36,7 @@ one that knows which of its two error classes a given failure belongs in.
 import json
 import logging
 import os
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import timedelta
 from typing import Any
@@ -62,6 +62,11 @@ from mcp.types import (
 # Deliberately not a config field: it is a property of "is this host there at all", the same for
 # every server, and a deployment that needs a longer one has a network problem a setting would only
 # hide. Short, because a dark server must degrade quickly.
+# An `httpx` request hook: one coroutine taking the outbound request, called on every hop of a
+# redirect chain. Named here so both this module's two seams and their callers spell one type, and
+# so the parameter reads as what it is rather than as an opaque callable.
+RequestHook = Callable[[httpx.Request], Awaitable[None]]
+
 CONNECT_TIMEOUT_SECONDS = 5.0
 
 # How much looser the HTTP read timeout is than the MCP session's own bound. The two must not be
@@ -256,7 +261,9 @@ def bearer_from_env(variable: str) -> str | None:
     return os.environ.get(variable) or None
 
 
-def short_connect_client(read_bound_seconds: float) -> Callable[..., httpx.AsyncClient]:
+def short_connect_client(
+    read_bound_seconds: float, request_hook: RequestHook | None = None
+) -> Callable[..., httpx.AsyncClient]:
     """A `httpx_client_factory` whose *connect* bound is short however long the read bound is.
 
     `streamablehttp_client(timeout=…)` composes one `httpx.Timeout` for connect, write and pool
@@ -268,6 +275,17 @@ def short_connect_client(read_bound_seconds: float) -> Callable[..., httpx.Async
     private-import allow-list deliberately empty. What that factory adds over a plain client is
     `follow_redirects=True`, so that is what is restated: an MCP endpoint behind an ingress that
     redirects `/mcp` to `/mcp/` is ordinary, and httpx does not follow by default.
+
+    Args:
+        read_bound_seconds: The read budget to fall back to when the SDK passes no timeout.
+        request_hook: An `httpx` request hook to stamp every outbound request — in practice
+            `connectors.identity.turn_identity_hook`, which attaches the turn's actor, session,
+            correlation id and W3C `traceparent`, and strips them again on a foreign origin. It is
+            a *parameter* rather than an import because `chemclaw.core` may not depend on a sibling
+            package (`tests/test_layering.py`), and it is deliberately the same hook the connector
+            registry installs rather than a second one: the origin-strip guard it carries is a
+            security control, and two copies is how one of them stops matching
+            `connectors.identity.STAMPED_HEADERS`.
     """
 
     def factory(
@@ -280,6 +298,7 @@ def short_connect_client(read_bound_seconds: float) -> Callable[..., httpx.Async
             headers=headers,
             auth=auth,
             follow_redirects=True,
+            event_hooks={"request": [request_hook]} if request_hook is not None else {},
             timeout=httpx.Timeout(
                 bound.read,
                 connect=CONNECT_TIMEOUT_SECONDS,
@@ -324,9 +343,17 @@ def auth_rejection(exc: BaseException) -> int | None:
 
 @asynccontextmanager
 async def open_session(
-    url: str, *, token_env: str, timeout_seconds: float
+    url: str, *, token_env: str, timeout_seconds: float, request_hook: RequestHook | None = None
 ) -> AsyncIterator[ClientSession]:
     """Open one MCP session to `url` with the bearer from `token_env` attached.
+
+    **`request_hook` is how this connection stops being anonymous.** The header dict built below
+    carried `Authorization` and nothing else, so the calculation backend — which is every
+    calculation this system runs, on the `cached_compute` miss path, minute-scale work with every
+    minute inside a remote call — received no `traceparent`, no `X-Chemclaw-Correlation-Id`, no
+    actor and no session. A trace stopped dead at that boundary and a log line on either side had
+    nothing to join on. Passing `connectors.identity.turn_identity_hook(url)` closes both at once,
+    because that hook already produces exactly this set; see `short_connect_client`.
 
     The credential is a *connection* header rather than a per-call one, for the reason
     `connectors.identity` records: MCP's per-call header callback is not applied to the
@@ -351,7 +378,7 @@ async def open_session(
             headers=headers,
             timeout=timedelta(seconds=timeout_seconds),
             sse_read_timeout=timedelta(seconds=timeout_seconds + READ_TIMEOUT_GRACE_SECONDS),
-            httpx_client_factory=short_connect_client(timeout_seconds),
+            httpx_client_factory=short_connect_client(timeout_seconds, request_hook),
         ) as (read, write, _):
             async with ClientSession(
                 read, write, read_timeout_seconds=timedelta(seconds=timeout_seconds)

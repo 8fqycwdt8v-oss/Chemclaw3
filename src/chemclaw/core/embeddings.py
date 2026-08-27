@@ -24,11 +24,14 @@ import logging
 import math
 import re
 import threading
+import time
 from functools import lru_cache
 from typing import Any
 
 from chemclaw.core.config import settings
 from chemclaw.core.ids import stable_hash
+from chemclaw.core.logging import log_event
+from chemclaw.core.metrics_bridge import record_metric
 
 log = logging.getLogger(__name__)
 
@@ -209,10 +212,61 @@ def embed_texts(texts: list[str], *, cache: bool = True) -> list[list[float]]:
 
 
 def _embed_uncached(texts: list[str]) -> list[list[float]]:
-    """Embed `texts` through the configured provider, with no cache in the way."""
-    if settings.embedding_provider == "openai_compatible":
-        return _openai_compatible_embeddings(texts)
-    return [_hash_embedding(text) for text in texts]
+    """Embed `texts` through the configured provider, with no cache in the way — and measure it.
+
+    **This module had one log call in 301 lines and no measurement of any kind**, which made an
+    embedding provider the one dependency in this system whose health was unobservable: retries are
+    delegated to the OpenAI SDK (`llm_max_retries`), so they happen inside the client with no
+    callback, and a provider degraded enough to need three attempts per call showed up only as
+    latency nobody was recording. A failure was worse than invisible — it propagated as a bare
+    exception into whichever caller happened to be embedding, where `reembed_stale` logged a count
+    and `gather_evidence` logged a source name, neither of them saying that the *embedder* was what
+    failed.
+
+    Instrumented here rather than in `_openai_compatible_embeddings` because this is the one place
+    every provider goes through: a deployment on the `hash` embedder still books calls and
+    durations, so the series exist in dev and CI and a test can prove them with no network. The
+    unit is one **provider call for a batch**, which is the unit that fails and the unit that is
+    retried; `texts` rides on the log line so a slow call can be read against how much was in it.
+    """
+    started = time.perf_counter()
+    try:
+        if settings.embedding_provider == "openai_compatible":
+            vectors = _openai_compatible_embeddings(texts)
+        else:
+            vectors = [_hash_embedding(text) for text in texts]
+    except Exception as exc:
+        record_metric(
+            lambda m: m.increment("chemclaw_embedding_calls_total", 1, {"outcome": "failure"})
+        )
+        record_metric(
+            lambda m: m.observe(
+                "chemclaw_embedding_duration_seconds", time.perf_counter() - started
+            )
+        )
+        # WARNING and re-raise, not `degraded`: nothing continues with less here — the caller gets
+        # the exception and decides. What was missing is that the *embedder* is named at all, with
+        # the exception type, the batch size and the configuration that produced it, none of which
+        # survives into any caller's own handler.
+        log_event(
+            log,
+            "embedding.failed",
+            "embedding %d text(s) failed with %s: %s",
+            len(texts),
+            type(exc).__name__,
+            exc,
+            level=logging.WARNING,
+            texts=len(texts),
+            provider=settings.embedding_provider,
+            config_key=embedding_config_key(),
+            error=type(exc).__name__,
+        )
+        raise
+    record_metric(lambda m: m.increment("chemclaw_embedding_calls_total", 1, {"outcome": "ok"}))
+    record_metric(
+        lambda m: m.observe("chemclaw_embedding_duration_seconds", time.perf_counter() - started)
+    )
+    return vectors
 
 
 def clear_embedding_cache() -> None:

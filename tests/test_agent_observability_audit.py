@@ -1,0 +1,282 @@
+"""A refused tool call, a crashed one and an abandoned one are three events, not one.
+
+The decision is `D-2026-08-27-a-refusal-is-not-a-crash`. Measured before it: a dry-run refusal and a
+repeat-guard trip both produced `outcome='error'` and a log line reading `tool X failed after N
+ms: <prose>` — `agent/audit.py` interpolated `%s` on the exception *instance*, so the class was gone
+from the log while `_truncate`'s repr kept it in the row. The database was strictly more diagnostic
+than the log, inverting that module's own opening rule that the log is the floor.
+
+The span half was measured the same way: clean `UNSET`, raised `ERROR`, `CancelledError` `UNSET`,
+**returned error `UNSET`** — and CLAUDE.md records that an MCP tool never raises, so essentially
+every connector-tool failure in production was a span an operator filtering `status=ERROR` could not
+see.
+
+Everything here drives the real middleware against the real metrics registry and a real in-memory
+OTel exporter. A refusal that is classified correctly and counted wrongly is exactly the failure
+this file exists to catch, so nothing is asserted through a double.
+"""
+
+import asyncio
+import logging
+from collections.abc import Callable, Iterator
+from datetime import UTC, datetime
+from typing import Any
+
+import pytest
+
+from chemclaw.agent.audit import AuditEvent, make_audit_middleware, refusal_reason
+from chemclaw.agent.plan_gate import plan_approval_refusal
+from chemclaw.agent.repeat_guard import RepeatedCallRefusal
+from chemclaw.agent.skill_backend import SkillsReadOnlyRefusal
+from chemclaw.agent.tool_authz import DryRunRefusal, UndeclaredWriteRefusal
+from chemclaw.core.metrics import METRICS
+from tests.middleware import run_middleware, tool_request
+
+_TODOS = [
+    {"content": "look the solvent up", "status": "completed"},
+    {"content": "run the conformer search", "status": "in_progress"},
+]
+
+
+class _Sink:
+    """An `AuditSink` that keeps what the middleware decided to write."""
+
+    def __init__(self) -> None:
+        self.events: list[AuditEvent] = []
+
+    async def record(self, event: AuditEvent) -> None:
+        """Keep the event."""
+        self.events.append(event)
+
+
+def _drive(
+    name: str,
+    *,
+    raises: BaseException | None = None,
+    returns: Any = None,
+    todos: list[dict[str, Any]] | None = None,
+) -> tuple[_Sink, BaseException | None]:
+    """Run one tool call through the audit middleware; return its sink and whatever escaped.
+
+    The handler raises `raises` if given, otherwise returns `returns` — which covers the three ways
+    a tool ends that the trail must tell apart, plus the cancellation case a caller drives by
+    passing `asyncio.CancelledError()`.
+
+    The escaping exception is **returned rather than left to `pytest.raises`** because both halves
+    are claims: the row is written *and* the exception reaches the caller unchanged. Catching it
+    here lets one test assert `raised is refusal` — object identity, so a middleware that re-raised
+    a re-wrapped copy would fail — while still reading the sink the call filled on its way out.
+    """
+    sink = _Sink()
+    middleware = make_audit_middleware(correlation_id="cid-1", actor="alice@corp", sink=sink)
+    request = tool_request(name, {"q": "x"})
+    if todos is not None:
+        request = request.override(state={"todos": todos})
+
+    async def _handler(_request: Any) -> Any:
+        if raises is not None:
+            raise raises
+        return returns
+
+    escaped: BaseException | None = None
+    try:
+        asyncio.run(run_middleware(middleware, request, _handler))
+    except BaseException as exc:  # the point of this helper is to inspect whatever escaped
+        escaped = exc
+    return sink, escaped
+
+
+@pytest.fixture
+def spans(monkeypatch: pytest.MonkeyPatch) -> Iterator[Callable[[], Any]]:
+    """A real tracer provider exporting into a list, with tracing switched on.
+
+    The same arrangement `tests/test_tracing.py` uses and for the same reason: the property under
+    test is what a *collector* would receive, and a mock that records calls would assert this module
+    invoked an API rather than that the span said what it should.
+    """
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    monkeypatch.setattr("chemclaw.core.config.settings.otel_enabled", True)
+    monkeypatch.setattr(
+        "chemclaw.core.tracing._tracer", lambda: provider.get_tracer("chemclaw-test")
+    )
+    yield exporter.get_finished_spans
+
+
+def test_each_gate_classifies_as_its_own_reason_and_a_bug_classifies_as_none() -> None:
+    """The five reasons `chemclaw_tool_refusals_total` declares, and the negative case.
+
+    Order is the classification: four of the five types are `AuthorizationError` subclasses, so a
+    scan that tested the base first would report every refusal as `authz`. The negative case is the
+    point of the whole exercise — a `KeyError` in a parser must not become a governance decision.
+    """
+    assert refusal_reason(DryRunRefusal("no")) == "dry_run"
+    assert refusal_reason(UndeclaredWriteRefusal("no")) == "undeclared_write"
+    assert refusal_reason(plan_approval_refusal("propose_note")) == "plan_gate"
+    assert refusal_reason(RepeatedCallRefusal("again")) == "repeat"
+    # The base, reached by a plain role denial and by the skills tree's write refusal.
+    assert refusal_reason(SkillsReadOnlyRefusal("read-only")) == "authz"
+    assert refusal_reason(KeyError("solvent")) is None
+    assert refusal_reason(TimeoutError()) is None
+
+
+def test_a_refusal_is_recorded_as_refused_and_counted_by_its_reason(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The row says `refused`, the log names the class, and the reason counter moves.
+
+    All three, because each was its own half-measure: the outcome is what an auditor reads, the
+    class is what a log query filters on, and the counter is what a dashboard shows without anybody
+    reading either.
+    """
+    before = METRICS.value("chemclaw_tool_refusals_total")
+    refusal = DryRunRefusal("DRY RUN — propose_note changes stored data, so it was not called.")
+
+    with caplog.at_level(logging.WARNING):
+        sink, escaped = _drive("propose_note", raises=refusal)
+
+    assert escaped is refusal  # observe-only: the refusal reaches the gate above unchanged
+    assert [event.outcome for event in sink.events] == ["refused"]
+    assert "was refused" in caplog.text
+    # The class name, which `%s` on the exception instance threw away.
+    assert "DryRunRefusal" in caplog.text
+    assert METRICS.value("chemclaw_tool_refusals_total") == before + 1
+    assert 'chemclaw_tool_refusals_total{reason="dry_run"}' in METRICS.render()
+
+
+def test_a_genuine_failure_stays_an_error_and_moves_no_refusal_counter(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The other half of the separation: a parser bug is not a policy decision.
+
+    Without this, the fix would be free to classify everything as a refusal and still pass the test
+    above — which is the shape of the defect it corrects.
+    """
+    before = METRICS.value("chemclaw_tool_refusals_total")
+
+    with caplog.at_level(logging.WARNING):
+        sink, escaped = _drive("predict_pka", raises=KeyError("solvent"))
+
+    assert isinstance(escaped, KeyError)
+    assert [event.outcome for event in sink.events] == ["error"]
+    assert "KeyError" in caplog.text
+    assert METRICS.value("chemclaw_tool_refusals_total") == before
+
+
+def test_every_call_is_counted_by_tool_and_outcome_and_timed_under_its_own_name() -> None:
+    """`chemclaw_tool_calls_total{tool,outcome}` and the per-tool latency label.
+
+    One distribution used to pool a minutes-long xTB call through the calc connector with a
+    sub-millisecond `read_attachment`, so "why is this turn slow" could not be attributed to a
+    tool — the question the histogram's own docstring says it exists to answer.
+    """
+    before = METRICS.observations("chemclaw_tool_duration_seconds")[0]
+
+    _drive("predict_solubility", returns="0.4 g/L")
+
+    exposition = METRICS.render()
+    assert 'chemclaw_tool_calls_total{outcome="ok",tool="predict_solubility"}' in exposition
+    assert 'chemclaw_tool_duration_seconds_count{tool="predict_solubility"}' in exposition
+    assert METRICS.observations("chemclaw_tool_duration_seconds")[0] == before + 1
+
+
+def test_the_row_names_the_plan_step_the_call_served() -> None:
+    """`audit_events.plan_step` — the join `job_records` had and the trail did not.
+
+    Read from `request.state["todos"]` through the same `plan_link_from_todos` a job is stamped
+    with, because the ambient link `stamp_plan_link` binds is *reset* by the time the row is
+    written: that middleware is innermost and resets in a `finally` while this one is outermost.
+    Measured before the fix — `get_current_plan_link()` read `("", "")` at this point.
+    """
+    sink, _ = _drive("compute_xtb_energy", todos=_TODOS)
+    assert sink.events[0].plan_step == "run the conformer search"
+
+
+def test_a_call_outside_a_plan_stamps_the_empty_step_rather_than_a_guess() -> None:
+    """No todo list reads as "this call was not made from a plan step" — 057's contract."""
+    assert _drive("compute_xtb_energy")[0].events[0].plan_step == ""
+
+
+def test_the_row_is_dated_when_the_call_started_not_when_the_sink_flushed() -> None:
+    """`ts` is stamped in the middleware, so a batching sink cannot re-date the trail.
+
+    `record` buffers and returns, `ts` defaulted to `now()` at INSERT and `id` is a `BIGSERIAL`
+    assigned at the same moment — so under load both the timestamps and the ordering
+    `chemclaw explain` reconstructs a turn from belonged to the flusher.
+    """
+    before = datetime.now(UTC)
+    sink, _ = _drive("find_notes")
+    assert before <= sink.events[0].ts <= datetime.now(UTC)
+
+
+def test_a_returned_failure_marks_the_span_error_where_it_used_to_say_nothing(
+    spans: Callable[[], Any],
+) -> None:
+    """The T1 fix, and the case that covers most production tool failures.
+
+    An MCP tool never raises: `langchain_mcp_adapters` converts an `isError=True` result inside
+    `StructuredTool.ainvoke` and it comes back as a *return*. So the `with start_span(...)` block
+    exited cleanly and OpenTelemetry had nothing to set a status from — measured `UNSET` while the
+    audit row said `error`, two artifacts about one event that disagreed.
+    """
+    from langchain_core.messages import ToolMessage
+    from opentelemetry.trace import StatusCode
+
+    failure = ToolMessage(content="no such solvent", tool_call_id="call-1", status="error")
+    sink, escaped = _drive("predict_solubility", returns=failure)
+
+    assert escaped is None  # it *returned* the failure; nothing raised, which is the whole point
+    assert [event.outcome for event in sink.events] == ["error"]
+    span = spans()[0]
+    assert span.status.status_code is StatusCode.ERROR
+    assert span.attributes["outcome"] == "error"
+    assert span.attributes["tool.name"] == "predict_solubility"
+    # The join to the audit trail, in the direction a trace is read.
+    assert span.attributes["correlation.id"] == "cid-1"
+
+
+def test_a_cancelled_call_marks_the_span_too(spans: Callable[[], Any]) -> None:
+    """`use_span` catches `Exception`, and a teardown delivers a `BaseException`.
+
+    So a tool interrupted by a client disconnect or the turn deadline left an `UNSET` span while
+    the trail recorded a `cancelled` row on a shielded write — the same disagreement as above,
+    reached through the one exception family OpenTelemetry's own helper does not see.
+    """
+    from opentelemetry.trace import StatusCode
+
+    _sink, escaped = _drive("compute_xtb_energy", raises=asyncio.CancelledError())
+
+    assert isinstance(escaped, asyncio.CancelledError)
+    span = spans()[0]
+    assert span.status.status_code is StatusCode.ERROR
+    assert span.attributes["outcome"] == "cancelled"
+
+
+def test_a_clean_call_leaves_the_span_unset_and_says_so(spans: Callable[[], Any]) -> None:
+    """The negative case: marking everything ERROR would pass both tests above and help nobody."""
+    from opentelemetry.trace import StatusCode
+
+    _drive("find_notes", returns="two notes")
+
+    span = spans()[0]
+    assert span.status.status_code is StatusCode.UNSET
+    assert span.attributes["outcome"] == "ok"
+
+
+def test_a_refusal_is_distinguishable_on_the_span_without_flooding_the_error_view(
+    spans: Callable[[], Any],
+) -> None:
+    """A refusal raises, so OpenTelemetry marks it — the `outcome` attribute is what separates it.
+
+    Nothing here sets `ERROR` for a refusal deliberately: a policy decision is not a fault, and an
+    error view full of them is an error view nobody reads. What makes the distinction available is
+    the attribute, beside `chemclaw_tool_refusals_total{reason}`.
+    """
+    _drive("propose_note", raises=UndeclaredWriteRefusal("not given to this agent"))
+
+    assert spans()[0].attributes["outcome"] == "refused"

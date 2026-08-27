@@ -180,6 +180,16 @@ def _counted(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, float, dict[str
         ) -> None:
             booked.append((name, value, dict(labels or {})))
 
+        def observe(self, name: str, seconds: float, labels: dict[str, str] | None = None) -> None:
+            """The duration histogram is booked beside the counters and lands in the same list.
+
+            Recorded here rather than ignored: it is subject to the identical rule the two tests
+            below assert — a run's *cost* must be booked once the record is durable, never once
+            per attempt — so a stub that silently dropped it would leave that rule unchecked for
+            the one series an operator reads a p95 off.
+            """
+            booked.append((name, seconds, dict(labels or {})))
+
     monkeypatch.setattr(
         "chemclaw.durable.job_record.record_metric",
         lambda update: update(_Registry()),
@@ -212,7 +222,16 @@ def test_the_runtime_counter_is_booked_only_once_the_record_is_durable(
 
     asyncio.run(record_job(record))
 
-    assert booked == [("chemclaw_job_runtime_seconds_total", 21600.0, {"connector": "bo"})]
+    # All three, in booking order: the outcome counter (the counterpart
+    # `chemclaw_jobs_started_total` never had), the accumulating cluster-time total, and the
+    # distribution behind it. They share this test rather than getting one each because they share
+    # the property under test — every one of them is booked *after* the awaited write, so a run
+    # with no durable record is a run nothing counts.
+    assert booked == [
+        ("chemclaw_jobs_finished_total", 1.0, {"connector": "bo", "outcome": "completed"}),
+        ("chemclaw_job_runtime_seconds_total", 21600.0, {"connector": "bo"}),
+        ("chemclaw_job_duration_seconds", 21600.0, {"connector": "bo"}),
+    ]
 
 
 def test_a_run_with_no_durable_record_is_not_counted_as_compute(

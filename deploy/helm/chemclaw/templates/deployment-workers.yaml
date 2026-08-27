@@ -40,6 +40,7 @@ spec:
           env:
             - name: CHEMCLAW_COMPONENT
               value: "background-worker"
+            {{- include "chemclaw.otelResourceEnv" (dict "component" "background-worker") | nindent 12 }}
             {{- include "chemclaw.workerMetricsEnv" . | nindent 12 }}
             {{- include "chemclaw.env" . | nindent 12 }}
           envFrom:

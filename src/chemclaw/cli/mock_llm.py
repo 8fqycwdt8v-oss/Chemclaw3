@@ -48,6 +48,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from chemclaw.core.bounded import BoundedLru
+from chemclaw.core.logging import configure_logging
 
 logger = logging.getLogger(__name__)
 
@@ -596,7 +597,9 @@ def main(argv: list[str] | None = None) -> int:
 
     from chemclaw.cli.storm_behaviours import BEHAVIOURS
 
-    logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(message)s")
+    # The configured logging path rather than a bare `basicConfig`, so this process is swept by
+    # the same redaction filter as every other entrypoint (`tests/test_logging.py` pins it).
+    configure_logging()
     mock = MockLlm(BEHAVIOURS)
     print(f"mock LLM serving {len(BEHAVIOURS)} behaviour(s) on http://{MOCK_HOST}:{args.port}/v1")
     uvicorn.run(build_app(mock), host=MOCK_HOST, port=args.port, log_level="warning")

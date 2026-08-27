@@ -11,12 +11,15 @@ with production stores and adapter.
 
 import logging
 import re
+import time
 from datetime import UTC, datetime, timedelta
 
 from pydantic import BaseModel, Field, ValidationError
 
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
+from chemclaw.core.logging import log_event
+from chemclaw.core.metrics_bridge import record_metric
 from chemclaw.ingest.eln.adapter import ElnAdapter, RawEntry, entry_window
 from chemclaw.ingest.eln.ingest import ingest_reaction
 from chemclaw.ingest.eln.record import record_from_ord_reaction
@@ -125,6 +128,7 @@ async def sync_entries(
     through and re-records, which is what re-derives the labels — `labeller_version` is left
     untouched by the record upsert only when the record smiles is unchanged.
     """
+    started = time.perf_counter()
     entries = await adapter.fetch_new_entries(_fetch_floor(since) if apply_overlap else since)
     ingested: list[str] = []
     skipped_existing: list[str] = []
@@ -222,11 +226,23 @@ async def sync_entries(
     # The summary is a return value the scheduler stores; also log the outcome so an admin
     # running this under a Temporal Schedule sees it without opening the workflow result, and
     # gets a WARNING trail of exactly which entries were rejected and why.
-    logger.info(
-        "eln sync: ingested=%d rejected=%d skipped_existing=%d",
-        len(ingested),
-        len(rejected),
-        len(skipped_existing),
+    #
+    # **`source` is the field this line most needed and did not have**, and it is a parameter of
+    # this very function: with two ELN sources enabled, two identical `eln sync: ingested=…` lines
+    # arrived per run and nothing said which was which. `fetched` and `duration_s` are the other
+    # two the old line could not be read without — a pass that fetched 500 entries and ingested 0
+    # is a corpus already up to date, while one that fetched 0 is a source that answered nothing,
+    # and both used to render as `ingested=0`. `next_cursor` is here because the *cursor* is what
+    # this run's progress actually is: the wedge this loop documents at length advances no cursor
+    # while reporting `ingested=N rejected=0`, and this is the field that shows it standing still.
+    _record_pass(
+        source,
+        ingested=len(ingested),
+        rejected=len(rejected),
+        skipped_existing=len(skipped_existing),
+        fetched=len(entries),
+        next_cursor=cursor,
+        duration_s=time.perf_counter() - started,
     )
     for entry in rejected:
         # An overlap-window rejection (`created_at <= since`) is a replay: the cursor advances
@@ -246,6 +262,62 @@ async def sync_entries(
         skipped_existing=skipped_existing,
         rejected=rejected,
         next_cursor=cursor,
+    )
+
+
+def _record_pass(
+    source: str,
+    *,
+    ingested: int,
+    rejected: int,
+    skipped_existing: int,
+    fetched: int,
+    next_cursor: datetime,
+    duration_s: float,
+) -> None:
+    """Emit the one record a sync pass leaves behind, and tally what it did to the corpus.
+
+    One line per pass — the volume rule the rejection trail below already follows, and the reason
+    it is a `log_event` rather than a sentence is that every number here used to be text inside a
+    message: an operator could grep it and could not filter or aggregate it, so "is this source
+    still ingesting?" was a question no dashboard could answer.
+
+    The outcomes partition what the fetch returned: `ingested` wrote a record, `rejected` is
+    deterministic bad data the cursor advances past, `skipped` is an overlap replay whose stored
+    body is byte-identical, so there was nothing to write.
+    """
+    for outcome, count in (
+        ("ingested", ingested),
+        ("rejected", rejected),
+        ("skipped", skipped_existing),
+    ):
+        _count_records(source, outcome, count)
+    log_event(
+        logger,
+        "ingest.finished",
+        "%s: fetched=%d ingested=%d rejected=%d skipped_existing=%d in %.3fs",
+        source,
+        fetched,
+        ingested,
+        rejected,
+        skipped_existing,
+        duration_s,
+        source=source,
+        fetched=fetched,
+        ingested=ingested,
+        rejected=rejected,
+        skipped_existing=skipped_existing,
+        next_cursor=next_cursor.isoformat(),
+        duration_s=round(duration_s, 3),
+    )
+
+
+def _count_records(source: str, outcome: str, count: int) -> None:
+    """Add `count` to this source's tally of one outcome (a named function; see `sync.py`'s)."""
+    record_metric(
+        lambda m: m.increment(
+            "chemclaw_ingest_records_total", count, {"source": source, "outcome": outcome}
+        )
     )
 
 

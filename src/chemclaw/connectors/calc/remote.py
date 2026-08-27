@@ -28,6 +28,7 @@ noise against an SCF and measurable against a cache hit — `calculation_key` is
 the hit path, so that is the one worth watching.
 """
 
+import logging
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
@@ -36,6 +37,7 @@ from typing import Any
 from mcp import ClientSession
 from pydantic import BaseModel, ConfigDict
 
+from chemclaw.connectors.identity import turn_identity_hook
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError, SubsystemUnavailableError
 from chemclaw.core.ids import stable_hash
@@ -47,6 +49,7 @@ from chemclaw.core.mcp_session import (
     invoke,
     open_session,
 )
+from chemclaw.core.metrics_bridge import degraded
 from chemclaw.science.calc.store import (
     CALCULATION_EPOCH,
     CalculationKey,
@@ -54,6 +57,26 @@ from chemclaw.science.calc.store import (
     ResultStore,
     cached_compute,
 )
+
+logger = logging.getLogger(__name__)
+
+# Every calculation in this system now crosses this wire, and until this module imported `logging`
+# at all — it did not — an outage of the calculation backend produced **no first-party signal of
+# any kind**: not a log line, not a counter. The classification here is already exactly right
+# (`CalcServerError` for an outage, `CalcToolError` for a refusal, split across
+# `durable/publish.py`'s `_BAD_DATA_TYPES` so one is retried and the other is not), and neither
+# half was observable — so a dead backend burned `activity_max_attempts` on every job with only
+# the Temporal SDK's own WARNING to show for it.
+#
+# Only the **outage** paths are counted, and that is the distinction rather than an omission. A
+# refusal is the server working: an unparameterised solvent or an atom index past the molecule is
+# bad data, it reaches the chemist as a written sentence, and counting it under a degradation
+# marker would put a user's typo on the same series as a down pod. One subsystem name for all
+# three outage sites, because to an operator they are one thing — the calculation backend is not
+# answering — and three labels would split one alert into three.
+# Written out at each call site rather than shared through a constant, deliberately:
+# `tests/test_degraded.py` reads these arguments out of the source to bound the
+# metric's label value space, and it can only do that for a literal.
 
 
 class CalcServerError(SubsystemUnavailableError):
@@ -115,6 +138,13 @@ async def calc_session(timeout_seconds: float | None = None) -> AsyncIterator[Cl
             settings.calc_server_url,
             token_env=settings.calc_server_token_env,
             timeout_seconds=timeout_seconds or settings.calc_server_timeout_seconds,
+            # The same hook every other connector's client carries
+            # (`connectors/registry.connector_http_client`), and deliberately not a second one: it
+            # brings the W3C `traceparent`, the correlation id, the actor and the session, *and*
+            # the origin-strip guard that removes them again if a redirect leaves the endpoint's
+            # origin. Without it this connection sent `Authorization` alone — so the most expensive
+            # work in the system was the one call nobody could trace or correlate.
+            request_hook=turn_identity_hook(settings.calc_server_url),
         ) as session:
             yield session
     except McpCredentialRefused as exc:
@@ -126,6 +156,12 @@ async def calc_session(timeout_seconds: float | None = None) -> AsyncIterator[Cl
             f"verifies — retrying will not help."
         ) from exc
     except McpConnectFailed as exc:
+        degraded(
+            logger,
+            "calc_server",
+            "cannot reach the calculation server at %s; no calculation was run",
+            settings.calc_server_url,
+        )
         raise CalcServerError(
             "the calculation service is not answering, so no calculation was run. This is an "
             "outage rather than a problem with what was asked; the same request will work once "
@@ -148,11 +184,23 @@ async def _call(session: ClientSession, tool: str, arguments: dict[str, Any]) ->
         raise CalcToolError(str(exc)) from exc
     except McpServerFault as exc:
         if exc.internal:
+            degraded(
+                logger,
+                "calc_server",
+                "the calculation server raised an internal error running %s",
+                tool,
+            )
             raise CalcServerError(
                 f"the calculation service hit an internal error running {tool}, so no result was "
                 "produced. This is a fault on the calculation service rather than a problem with "
                 "what was asked; the same request may work on a retry."
             ) from exc
+        degraded(
+            logger,
+            "calc_server",
+            "the calculation server stopped answering during %s",
+            tool,
+        )
         raise CalcServerError(
             f"the calculation service stopped answering during {tool}, so no result was produced. "
             "This is an outage rather than a problem with what was asked."

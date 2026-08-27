@@ -44,6 +44,7 @@ from pathlib import Path
 from typing import Any
 
 from chemclaw.cli.soak_report import describe, fit
+from chemclaw.core.logging import configure_logging
 
 logger = logging.getLogger(__name__)
 
@@ -244,7 +245,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--report", type=Path, default=Path("tasks/live-test/leak-probe.md"))
     args = parser.parse_args(argv)
 
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    # The configured logging path, so this probe's own output is redacted and context-stamped
+    # like every other process's. A leak probe printing an unredacted credential would be the
+    # sharpest possible version of this file's own point.
+    configure_logging()
     # The lane's configuration, not a lighter one. LIVE-8's lesson is that a configuration only
     # production sets is a configuration nothing tests, and this probe's whole claim is that it
     # drives the same path the soak measured — so it pins what `infra/live/processes.sh` pins:

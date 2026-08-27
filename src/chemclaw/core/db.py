@@ -39,6 +39,7 @@ parameters a dense search runs under — is the other.
 
 import asyncio
 import logging
+import time
 from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
 from typing import Any
@@ -49,8 +50,15 @@ from psycopg.rows import TupleRow
 from psycopg_pool import AsyncConnectionPool, PoolClosed, PoolTimeout
 
 from chemclaw.core.config import settings
+from chemclaw.core.logging import log_event
+from chemclaw.core.metrics_bridge import degraded, record_metric
 
 logger = logging.getLogger(__name__)
+
+# What `operation` says when a call site does not name itself. Every borrowed connection is
+# measured, so the alternative to a default is an unlabelled hole in the distribution exactly where
+# an unaudited call site is — which is the one place a slow query is most likely to hide.
+_UNNAMED_OPERATION = "unspecified"
 
 # One pool per (event loop, dsn, merged libpq options). The options string carries the statement
 # timeout, so keying on it keeps the `/readyz` probe's 2s-bounded connection out of the stores'
@@ -92,6 +100,17 @@ def _redact(dsn: str) -> str:
     try:
         parts = conninfo.conninfo_to_dict(dsn)
     except psycopg.ProgrammingError:
+        # Counted, because this is the one branch whose whole output is `<postgres>`: an operator
+        # reading "Postgres unreachable at <postgres>" cannot tell a redacted DSN from an
+        # unparseable one, and the second means the configured DSN is malformed rather than the
+        # server being down. WARNING rather than ERROR — the caller is already reporting a failure
+        # and this only says the address in that report is uninformative.
+        degraded(
+            logger,
+            "db_dsn",
+            "the configured DSN cannot be parsed by libpq; reporting it as <postgres>",
+            level=logging.WARNING,
+        )
         return "<postgres>"
     parts.pop("password", None)
     return conninfo.make_conninfo("", **parts)
@@ -116,7 +135,17 @@ def _merged_options(dsn: str, statement_timeout_seconds: float | None) -> str | 
     try:
         existing = conninfo.conninfo_to_dict(dsn).get("options")
     except psycopg.ProgrammingError:
-        return ours  # unparseable DSN: let the connect itself report it, don't mask the error
+        # The connect below will fail and say so, but *this* branch silently drops whatever
+        # `options` the DSN carried — a `search_path`, an `application_name`, a `work_mem` — and
+        # that loss is invisible in the connect's own error. Said once, here, where it happens.
+        degraded(
+            logger,
+            "db_dsn",
+            "the configured DSN cannot be parsed by libpq; any `options` it carries are dropped "
+            "and only the statement timeout is applied",
+            level=logging.WARNING,
+        )
+        return ours
     return f"{existing} {ours}" if isinstance(existing, str) and existing else ours
 
 
@@ -191,9 +220,97 @@ def _pool_for(dsn: str, options: str | None) -> _Pool:
     return pool
 
 
+def _failure_kind(exc: BaseException) -> str | None:
+    """Which of the four database failure classes `exc` is, or `None` if it is not one.
+
+    The four are separated because the operator response differs and nothing could tell them
+    apart: before this, a `statement_timeout` firing raised `QueryCanceled` that no handler in this
+    repository caught, counted or named — `grep deadlock|40001|40P01` over `src/` returned prose
+    only — so a database cancelling a runaway query looked, from every dashboard, exactly like a
+    database that was down.
+
+    Order is load-bearing, because these are not siblings: `QueryCanceled`, `DeadlockDetected` and
+    `SerializationFailure` are all `OperationalError` subclasses in psycopg 3, so a broad
+    `OperationalError` test first would collapse all of them into "unavailable".
+
+    `deadlock` covers a serialization failure too. The label names the *class* — a transaction the
+    server aborted because of a concurrent one — rather than the SQLSTATE, which the log line
+    carries; two label values for one operator response (retry the unit of work) would split the
+    series without splitting the decision.
+
+    Anything that is not a database error at all returns `None` and is not counted: the block a
+    caller runs inside `connection()` is its own code, and a `ValueError` from it is not a fact
+    about Postgres.
+    """
+    if isinstance(exc, ConnectionError):
+        return "unavailable"
+    if isinstance(exc, psycopg.errors.QueryCanceled):
+        return "cancelled"
+    if isinstance(exc, psycopg.errors.DeadlockDetected | psycopg.errors.SerializationFailure):
+        return "deadlock"
+    if isinstance(exc, psycopg.OperationalError):
+        return "unavailable"
+    if isinstance(exc, psycopg.Error):
+        return "error"
+    return None
+
+
+def _record_failure(operation: str, dsn: str, exc: BaseException) -> None:
+    """Count and name one database failure, once, at the seam every call site already goes through.
+
+    Named as well as counted because the counter says a kind and the line says which `operation`,
+    which database, and what the server called it — and a `sqlstate` is the difference between
+    "the statement timeout fired" and "somebody cancelled it".
+    """
+    kind = _failure_kind(exc)
+    if kind is None:
+        return
+    record_metric(lambda m: m.increment("chemclaw_db_query_failures_total", 1, {"kind": kind}))
+    log_event(
+        logger,
+        "db.failed",
+        "database operation %r failed (%s) at %s: %s",
+        operation,
+        kind,
+        _redact(dsn),
+        exc,
+        level=logging.WARNING,
+        operation=operation,
+        kind=kind,
+        sqlstate=getattr(exc, "sqlstate", "") or "",
+    )
+
+
+def _record_duration(operation: str, seconds: float) -> None:
+    """Record how long one unit of work held a connection, and say so when it was slow.
+
+    **The unit is the block, not the statement**, and that is what `connection()` can honestly
+    measure: it hands out a connection and the caller runs one statement or twenty on it. That is
+    also the quantity a pool cares about — `chemclaw_pg_pool_requests_waiting` rises because
+    somebody *held* a connection, not because one statement was slow — so this is the number that
+    joins the pool gauges to a call site.
+    """
+    record_metric(
+        lambda m: m.observe("chemclaw_db_query_duration_seconds", seconds, {"operation": operation})
+    )
+    threshold = settings.pg_slow_query_seconds
+    if threshold and seconds >= threshold:
+        log_event(
+            logger,
+            "db.slow",
+            "database operation %r held a connection for %.3fs (threshold %.3fs)",
+            operation,
+            seconds,
+            threshold,
+            level=logging.WARNING,
+            operation=operation,
+            duration_s=round(seconds, 3),
+        )
+
+
 @asynccontextmanager
 async def connection(
-    dsn: str, *, statement_timeout_seconds: float | None = None
+    dsn: str, *, statement_timeout_seconds: float | None = None, operation: str = _UNNAMED_OPERATION
 ) -> AsyncIterator[psycopg.AsyncConnection[TupleRow]]:
     """Borrow a connection for the duration of the block — pooled when this process pools.
 
@@ -215,24 +332,51 @@ async def connection(
     Pass a number to bound a call site differently (`/readyz` bounds its `SELECT 1` at two
     seconds), or `0` to opt out — but a connection borrowed from a shared pool wanting no bound at
     all is a dedicated connection, which is what `connect()` is for.
+
+    **`operation` is what the measurement is *about*.** It labels
+    `chemclaw_db_query_duration_seconds` and names the call site in the slow-query and failure
+    lines, so it must be a literal at the call site and low-cardinality — a table, a job, a store
+    method — never a value derived from a request. It defaults rather than being required because
+    thirty call sites in twenty-two modules predate it and an unlabelled hole in the distribution
+    is worse than a coarse label: `unspecified` is a true statement about a call site nobody has
+    named yet, and it is greppable.
+
+    **Every borrowed connection is timed and every database failure it raises is classified here**,
+    which is the only place that can see both. `chemclaw_db_unavailable_total` is incremented at
+    two front-door sites, so a `ConnectionError` inside an ingest activity, the outbox drain or the
+    retention sweep incremented nothing at all; `statement_timeout` — 30 s by default — raised a
+    `QueryCanceled` that nothing in this repository caught, counted or named. Both are counted now
+    on `chemclaw_db_query_failures_total{kind}`, from the seam every store already goes through, so
+    a new call site cannot forget to.
     """
     if statement_timeout_seconds is None:
         statement_timeout_seconds = settings.pg_statement_timeout_seconds
     options = _merged_options(dsn, statement_timeout_seconds)
-    if not _POOLING:
-        conn = await connect(dsn, statement_timeout_seconds=statement_timeout_seconds)
-        async with conn:
-            yield conn
-        return
-    pool = _pool_for(dsn, options)
-    await pool.open()  # idempotent; the first caller starts the pool's background workers
+    started = time.perf_counter()
     try:
-        async with pool.connection() as conn:
-            yield conn
-    except (PoolTimeout, PoolClosed) as exc:
-        # Both are `psycopg.OperationalError` subclasses raised only by the checkout itself, so
-        # catching them here cannot swallow an error from the caller's block.
-        raise ConnectionError(f"Postgres unreachable at {_redact(dsn)}: {exc}") from exc
+        if not _POOLING:
+            conn = await connect(dsn, statement_timeout_seconds=statement_timeout_seconds)
+            async with conn:
+                yield conn
+            return
+        pool = _pool_for(dsn, options)
+        await pool.open()  # idempotent; the first caller starts the pool's background workers
+        try:
+            async with pool.connection() as conn:
+                yield conn
+        except (PoolTimeout, PoolClosed) as exc:
+            # Both are `psycopg.OperationalError` subclasses raised only by the checkout itself, so
+            # catching them here cannot swallow an error from the caller's block.
+            raise ConnectionError(f"Postgres unreachable at {_redact(dsn)}: {exc}") from exc
+    except Exception as exc:
+        # `Exception`, not `BaseException`: a cancelled task (Temporal cancelling an activity, a
+        # dropped SSE connection) is not a database failure, and counting it as one would put the
+        # ordinary shutdown path into the metric an operator pages on. Re-raised untouched — this
+        # observes, it never decides.
+        _record_failure(operation, dsn, exc)
+        raise
+    finally:
+        _record_duration(operation, time.perf_counter() - started)
 
 
 def bind_pool_metrics() -> None:

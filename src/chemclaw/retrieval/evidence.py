@@ -105,6 +105,14 @@ class EvidenceSweep(BaseModel):
     # leg found nothing", "the share leg isn't configured" and "the share leg declined" apart:
     # three different answers rendered identically as an absence. Counts are pre-merge (what the
     # source handed the sweep), so a source out-competed at the cap still shows its work.
+    #
+    # **Pre-merge is right for this field and wrong as the only measurement**, which is why
+    # `fanout.record_kept_chunks` exists: a leg that hands over thirty chunks and survives the
+    # merge with none reads as healthy here, and that is exactly the shape
+    # `D-2026-08-01-a-cap-that-starves-a-source` measured. The metric pair
+    # (`chemclaw_evidence_source_chunks_total` and `chemclaw_evidence_source_kept_total`) carries
+    # both halves, so the ratio is alertable across turns while this field stays what a single
+    # answer's reader needs.
     sources: dict[str, int] = Field(default_factory=dict)
     # Sources that declined the question, by name -> the reason they gave (`RetrieverSkip`).
     # Distinct from `sources_failed` because the fixes differ: a failure is an outage, a skip is

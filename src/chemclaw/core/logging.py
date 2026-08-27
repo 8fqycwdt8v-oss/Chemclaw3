@@ -35,6 +35,7 @@ import logging
 import os
 import re
 from collections.abc import Mapping
+from datetime import UTC, datetime
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any
 
@@ -79,16 +80,80 @@ def configure_logging() -> None:
         # them clean — but a non-propagating logger's handlers are not ours to reset and would
         # otherwise accumulate a pair per call, running redaction N times per record on the front
         # door's hot path. Measured 2 -> 4 -> 6 filters over three calls before this guard.
-        if not any(isinstance(existing, SecretRedactingFilter) for existing in handler.filters):
+        installed = next((f for f in handler.filters if isinstance(f, SecretRedactingFilter)), None)
+        if installed is None:
             handler.addFilter(context)
             handler.addFilter(redaction)
+            installed = redaction
         # The filter is fail-open by design, so a record it could not redact still reaches
         # logging's own error path with its original text. That path prints to stderr; this makes
         # it print a redacted copy. Unconditional because it is idempotent by construction — see
         # the function.
-        _install_redacting_handle_error(handler, redaction)
+        #
+        # `installed`, not `redaction`, and the two differ on every call after the first. The guard
+        # above keeps the *first* filter on the handler while this line used to hand the error path
+        # the newly-constructed one — so a second `configure_logging()` left one handler holding two
+        # different filter objects, which is the exact defect `_install_redacting_handle_error`'s
+        # docstring says it fixed. Measured: the ordinary path's filter was identical across calls,
+        # the error path's was not. Harmless while both resolve the connector registry the same way,
+        # and not harmless in the one case that matters — if the first construction degraded
+        # (`degraded[log_redaction]`) and a later one succeeded, the ordinary path would keep an
+        # empty connector-token inventory for the life of the process while only the error path
+        # held the full one.
+        _install_redacting_handle_error(handler, installed)
         if settings.log_json:
             handler.setFormatter(JsonFormatter())
+
+
+def log_event(
+    logger: logging.Logger,
+    event: str,
+    message: str,
+    *args: object,
+    level: int = logging.INFO,
+    exc_info: bool = False,
+    **fields: object,
+) -> None:
+    """Emit one record that is both readable prose and a queryable row.
+
+    The gap this closes is not verbosity — it is *shape*. Every log line in this system was a
+    rendered English sentence, so an operator could grep and could never filter or aggregate: a
+    turn's duration, a job's outcome and an activity's attempt number were all present as text
+    inside a message and absent as fields. Measured before this existed: one `extra=` call in the
+    whole tree, and `JsonFormatter` discarded even that one.
+
+    `event` is the discriminator a query starts from — a short dotted name (`turn.finished`,
+    `job.failed`, `http.request`) that is a literal at the call site, so the whole vocabulary is
+    enumerable from the source the way `degraded`'s `subsystem` is. It lands both in `fields.event`
+    and, under the `%`-format, as the message's own prefix, so the two renderings carry it alike.
+
+    `logger` is the **caller's**, for the reason `degraded` takes one: a helper logging under its
+    own name would put `chemclaw.core.logging` on every lifecycle line and throw away the field
+    that says where it happened.
+
+    Args:
+        logger: the calling module's logger.
+        event: the dotted event name; must be a literal at the call site.
+        message: a `%`-style format string. Lazy, as every log call here is.
+        *args: the format arguments for `message`.
+        level: the log level; INFO, since a lifecycle record is not a fault.
+        exc_info: attach the active exception (for a `*.failed` event inside an `except`).
+        **fields: the structured payload. Values should be scalars — a log stack indexes those.
+    """
+    # G003 is suppressed for the reason `metrics_bridge.degraded` suppresses it, and the reason is
+    # the same one: the rule's fix is to interpolate (`"%s", message % args`), which formats
+    # *eagerly* at the call site — so a caller whose format string and arguments disagree would get
+    # a `TypeError` raised out of the logging call instead of logging's own error path handling it,
+    # which is how every other log call in this codebase behaves. Concatenating the prefix keeps one
+    # lazy format string.
+    logger.log(
+        level,
+        "%s: " + message,  # noqa: G003
+        event,
+        *args,
+        exc_info=exc_info,
+        extra={"event": event, **fields},
+    )
 
 
 def _handlers_that_reach_an_output_stream() -> list[logging.Handler]:
@@ -759,11 +824,41 @@ _STRUCTURAL_SECRETS: tuple["re.Pattern[str]", ...] = (
     # A credential in a query string, a header, or a rendered dict. Anchored on the key name so the
     # bare words "token" or "secret" in prose cannot trigger it, and on the value's shape so an
     # assignment in a source line cannot.
+    # `token`/`secret`/`private_key`/`passwd`/`pwd` are here beside the four compound names because
+    # the compound list only ever covered credentials *this* repository names. `core/connect.py`
+    # resolves a driver's own keyword arguments, so a warehouse binding chooses its own spellings
+    # and a driver's error text quotes them back — measured, `token=` and `secret=` both reached a
+    # log line intact. The digit and opacity requirements are what keep the bare English words
+    # "token" and "secret" in prose from matching.
     re.compile(
-        r"(?P<keep>\b(?:access_token|refresh_token|api[_-]?key|client_secret)"
+        r"(?P<keep>\b\w*?(?:access_token|refresh_token|api[_-]?key|client_secret|token|secret"
+        r"|private_key|passwd|pwd)"
         r"[\"']?\s*[=:]\s*[\"']?)" + _HAS_DIGIT + _OPAQUE + r"{8,255}",
         re.IGNORECASE,
     ),
+    # `Authorization: Basic <base64>`. The scheme was left out when the `Bearer|Token` rule was
+    # written, on the argument that "Basic" is an ordinary English word — true of the word, false
+    # of `Authorization:\s*Basic\s+`, which is unambiguous. Base64 of `user:password` need not
+    # contain a digit, so this rule deliberately does not require one; the header anchor carries
+    # the whole specificity.
+    re.compile(r"(?P<keep>\bAuthorization:\s*Basic\s+)[A-Za-z0-9+/=]{8,4096}", re.IGNORECASE),
+    # The environment-variable spelling, which the key-name rule above structurally cannot reach:
+    # `_` is a word character, so `\bsecret` does not match inside `AWS_SECRET_ACCESS_KEY`, and the
+    # credential word is rarely the last segment (`..._ACCESS_KEY`, `..._TOKEN_ENV`). Measured: the
+    # AWS key was the one shape that survived the rule above. SCREAMING_CASE is the anchor — it is
+    # what an environment dump, an `os.environ` repr and a `docker run -e` line all look like, and
+    # it cannot fire on prose. Deliberately does not require a digit: an operator-chosen password
+    # need not have one, and the casing plus the `=` carries the specificity here.
+    re.compile(
+        r"(?P<keep>\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*"
+        r"_?(?:SECRET|TOKEN|PASSWORD|PASSWD|APIKEY|CREDENTIAL)"
+        r"[A-Z0-9_]*[\"']?\s*[=:]\s*[\"']?)" + _OPAQUE + r"{8,255}"
+    ),
+    # Two vendor-issued shapes whose prefix *is* the anchor, so neither needs a key name beside it:
+    # AWS access-key ids and Slack tokens. Both are minted elsewhere and pasted into environments
+    # and error messages, which is exactly the path a key-name anchor cannot see.
+    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
+    re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,255}"),
     # `Authorization: Bearer <opaque>` / `Token <opaque>` — the JWT rule covers the structured case;
     # an opaque bearer has no internal structure, so the scheme is the anchor and the digit
     # requirement is what keeps "Bearer token was rejected" intact.
@@ -883,6 +978,15 @@ def _secret_values(connector_token_envs: tuple[str, ...] = ()) -> tuple[str, ...
     function stays free of the lazy `connectors` import that resolving them requires (see the
     filter's `__init__`). Read fresh from `os.environ` on every call, exactly like the `Settings`
     values below: none of these are expected to rotate mid-process, but nothing here assumes it.
+
+    **Deliberately not memoised**, and that was measured rather than assumed. This runs once per
+    record per redaction pass and costs ~11 us of the ~116 us a JSON record took, so a cache looks
+    worthwhile — but a one-second TTL failed three of this module's own tests, each of which
+    registers a credential and logs it immediately. They are encoding the invariant
+    `_RUNTIME_SECRET_ENVS` states: a value that becomes secret mid-process must be redacted on the
+    *next* line, not on the next line after a window expires. The cost was addressed where it was
+    actually largest instead — `_REDACTED_MARK` removes the second, duplicate redaction pass the
+    formatter used to make over every record (~27 us of that 116 us).
     """
     values = set()
     published = _published_values()
@@ -1054,6 +1158,87 @@ class SecretRedactingFilter(logging.Filter):
             record.exc_text = redact_secrets(record.exc_text, self._connector_token_envs)
         if record.stack_info:
             record.stack_info = redact_secrets(record.stack_info, self._connector_token_envs)
+        # The `extra=` fields, which nothing swept until now. Latent while `JsonFormatter` dropped
+        # them and a live leak the moment it stopped: measured, a handler whose format string
+        # referenced `%(dsn)s` printed `postgresql://u:supersecret123@h/db` verbatim. This class's
+        # own docstring argues it is a filter rather than a formatter "because a deployment may
+        # install its own formatter, and redaction must not be something a formatting choice can
+        # switch off" — that guarantee did not hold for this one field.
+        #
+        # Strings only. A non-string extra is rendered by `json.dumps(default=str)` downstream, and
+        # walking arbitrary nested structures per record is work this hot path cannot afford; the
+        # rendered form is swept by the formatter's own fallback pass instead.
+        for key, value in structured_fields(record).items():
+            if isinstance(value, str):
+                redacted = redact_secrets(value, self._connector_token_envs)
+                if redacted != value:
+                    setattr(record, key, redacted)
+        record.__dict__[_REDACTED_MARK] = True
+
+
+# Every attribute `logging` itself puts on a record. Anything else in `record.__dict__` arrived
+# through `extra=` (or from a filter like `ContextFilter`), which is precisely what
+# `structured_fields` below exists to find.
+#
+# Written as a literal rather than derived from a probe record, because a probe would miss the
+# attributes `logging` adds conditionally (`exc_text`, `stack_info`, `taskName` on 3.12+) and
+# the failure mode of missing one is that an internal attribute is published as if it were a
+# caller's field. `taskName` is listed unconditionally so this file does not branch on the
+# interpreter version.
+_LOGRECORD_RESERVED = frozenset(
+    {
+        "args",
+        "asctime",
+        "created",
+        "exc_info",
+        "exc_text",
+        "filename",
+        "funcName",
+        "levelname",
+        "levelno",
+        "lineno",
+        "module",
+        "msecs",
+        "message",
+        "msg",
+        "name",
+        "pathname",
+        "process",
+        "processName",
+        "relativeCreated",
+        "stack_info",
+        "thread",
+        "threadName",
+        "taskName",
+    }
+    # `ContextFilter`'s own three. They are not a caller's fields: they are stamped by this module
+    # onto every record and promoted to top-level keys by `JsonFormatter`, so leaving them in here
+    # made the redaction sweep call `redact_secrets` three extra times per record for values that
+    # are a uuid hex, an email and a session id. Measured: 234 us/record with them, 88 us without.
+    | {"correlation_id", "actor", "session_id"}
+)
+
+# Set by `SecretRedactingFilter._redact` once it has swept a record, and read by `JsonFormatter`
+# so the formatter does not redact the same strings a second time. Measured at 20,000 records:
+# the double pass was ~27 us of the ~116 us this path cost per record, and every microsecond of
+# it is spent under the stdlib logging lock. The formatter keeps its own pass for the case the
+# sentinel is absent — a handler carrying no filter, which is the case that fallback was added
+# for and which must not become a leak because this optimisation exists.
+_REDACTED_MARK = "_chemclaw_redacted"
+
+
+def structured_fields(record: logging.LogRecord) -> dict[str, object]:
+    """The fields a caller attached with `extra=`, and nothing `logging` put there itself.
+
+    One definition, used by both the redaction filter (which must scrub them) and the JSON
+    formatter (which must publish them). Two spellings of "which keys are the caller's" is
+    exactly how one of them would come to publish an attribute the other never scrubbed.
+    """
+    return {
+        key: value
+        for key, value in record.__dict__.items()
+        if key not in _LOGRECORD_RESERVED and not key.startswith("_")
+    }
 
 
 class ContextFilter(logging.Filter):
@@ -1084,10 +1269,19 @@ class ContextFilter(logging.Filter):
         self._session_id = get_current_session_id
 
     def filter(self, record: logging.LogRecord) -> bool:
-        """Stamp the ambient identity onto the record and always keep it."""
-        record.correlation_id = self._correlation_id() or "-"
-        record.actor = self._actor() or "-"
-        record.session_id = self._session_id() or "-"
+        """Stamp the ambient identity onto the record, without overwriting an explicit one.
+
+        `setdefault`, not assignment, and the difference is load-bearing. A caller that passes
+        `correlation_id` through `extra=` is doing so precisely because the ambient value is
+        *wrong* at that moment: `agent/audit.py`'s `audit_sink_failure` marker is written by a
+        shielded task after the turn's teardown has already reset the contextvars, so an
+        unconditional assignment replaced the id of the turn the record is about with `"-"`.
+        Measured before this change: that record — the one line in the tree designed to be
+        alerted on — carried `correlation_id: "-"`.
+        """
+        record.__dict__.setdefault("correlation_id", self._correlation_id() or "-")
+        record.__dict__.setdefault("actor", self._actor() or "-")
+        record.__dict__.setdefault("session_id", self._session_id() or "-")
         return True
 
 
@@ -1112,15 +1306,48 @@ class JsonFormatter(logging.Formatter):
 
     def format(self, record: logging.LogRecord) -> str:
         """Render one record as a compact JSON object."""
+        swept = record.__dict__.get(_REDACTED_MARK, False)
+        message = record.getMessage()
         payload: dict[str, Any] = {
-            "time": self.formatTime(record),
+            # ISO-8601 in UTC with an explicit offset. `formatTime` gives naive *local* time in a
+            # comma-millisecond format, so every join between a log line, an `audit_events.ts`
+            # (`timestamptz`) and an OTLP span's UTC timestamp went through a lossy parse and a
+            # guess at the pod's zone.
+            "time": datetime.fromtimestamp(record.created, tz=UTC).isoformat(
+                timespec="milliseconds"
+            ),
             "level": record.levelname,
             "logger": record.name,
-            "message": redact_secrets(record.getMessage()),
+            # Where the line was emitted. `logger` names a module, and a module here is routinely
+            # a thousand lines; `source` is what turns a log search into a code location.
+            "source": f"{record.module}.{record.funcName}:{record.lineno}",
+            # Two concurrent turns in one pod are separable by `correlation_id` when it is set and
+            # by nothing at all when it is not — which, in every worker process, is most lines.
+            "process": record.process,
+            "thread": record.threadName,
+            "message": message if swept else redact_secrets(message),
             "correlation_id": getattr(record, "correlation_id", "-"),
             "actor": getattr(record, "actor", "-"),
             "session_id": getattr(record, "session_id", "-"),
         }
+        # The caller's own fields. Until this existed the formatter built a fixed seven-key payload
+        # and never read `record.__dict__`, so **every** `extra=` was silently discarded — which is
+        # why there was exactly one `extra=` logging call in the tree, and why its `event` marker
+        # (the one thing designed to be alerted on) never reached the log stack as a field.
+        #
+        # Nested under `fields` rather than merged at the top level, so a caller cannot shadow
+        # `level`, `time` or `correlation_id` — a field named `level` arriving from a tool result
+        # would otherwise rewrite the severity a log stack routes on.
+        fields = structured_fields(record)
+        if fields:
+            payload["fields"] = (
+                fields
+                if swept
+                else {
+                    key: redact_secrets(value) if isinstance(value, str) else value
+                    for key, value in fields.items()
+                }
+            )
         if record.exc_text:
             payload["exception"] = record.exc_text
         elif record.exc_info:
@@ -1130,5 +1357,5 @@ class JsonFormatter(logging.Formatter):
             # *new* unredacted channel in exactly the no-filter case the `exception` fallback was
             # added for — before this commit `stack_info` was dropped entirely, so the fix would
             # have introduced the leak it was closing.
-            payload["stack"] = redact_secrets(record.stack_info)
+            payload["stack"] = record.stack_info if swept else redact_secrets(record.stack_info)
         return json.dumps(payload, default=str)

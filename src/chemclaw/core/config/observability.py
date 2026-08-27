@@ -21,7 +21,17 @@ class ObservabilitySettings(BaseSettings):
 
     # The format carries the timestamp, level, and logger name every diagnosis needs.
     log_level: str = "INFO"
-    log_format: str = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+    # The three identifiers are in the default format, not only in the JSON one. `ContextFilter`
+    # stamps `correlation_id`/`actor`/`session_id` onto every record that reaches a swept handler,
+    # and until this line carried them the only way to see them was `log_json`, which is set in the
+    # chart and nowhere else — so `make chat`, `make connectors`, a hand-started worker, CI and
+    # every local reproduction ran with the join key invisible. The earlier reasoning here ("two
+    # formats to keep in step is how one of them goes stale") is right about the risk and had the
+    # cost backwards: the format a developer actually reads was the one with no way to join a line
+    # to a turn.
+    log_format: str = (
+        "%(asctime)s %(levelname)s %(name)s [%(correlation_id)s/%(session_id)s]: %(message)s"
+    )
     # One JSON object per line instead of the `%`-format string above. Off in code and on in the
     # chart, the same split `budget_enabled` uses: a developer reading a terminal wants the string,
     # and a cluster log stack wants to parse rather than guess. The `%`-format is left as the
@@ -142,6 +152,28 @@ class ObservabilitySettings(BaseSettings):
     # test pins that it does.
     worker_metrics_host: str = "0.0.0.0"
     worker_metrics_port: int = Field(default=9000, ge=0)
+    # Where the **Temporal SDK's own** Prometheus exposition is served, in every process that opens
+    # a Temporal client. Beside `worker_metrics_port` because it is the same question — which port
+    # does a PodMonitor scrape — and giving the two different answers is how one of them gets left
+    # out of the chart.
+    #
+    # A second endpoint rather than a merge into `chemclaw_*`, because these are the SDK's series
+    # and not this registry's: the SDK owns their names, their labels and their cardinality, and
+    # `core/metrics.py` is deliberately strict about all three. `Client.connect` takes a `runtime=`
+    # and nothing in `src/` passed one, so **none of them existed**: no `temporal_num_pollers`, no
+    # `temporal_worker_task_slots_available` / `_used`, no `activity_schedule_to_start_latency`, no
+    # `activity_execution_failed`, no sticky-cache size or miss rate. Verified live: building the
+    # runtime below exposed nine series immediately and the failure/latency families under load.
+    #
+    # The one that decides a deployment: `worker_max_concurrent_activities` is a pod's throughput
+    # ceiling, and a CREST search holds a slot for hours — so a `connector-calc` worker with every
+    # slot taken and a growing schedule-to-start queue looked exactly like an idle one.
+    #
+    # 0 disables, the same shape and for the same reason `worker_metrics_port` uses: two workers on
+    # one developer machine cannot both bind. Off by default, because a process that binds a port
+    # nobody asked it to is a surprise in every environment that is not a cluster.
+    temporal_metrics_host: str = "0.0.0.0"
+    temporal_metrics_port: int = Field(default=0, ge=0)
     # How long an in-flight Temporal activity gets to finish after a stop signal before the worker
     # cancels it (`durable/serve.py`). Bounded on both sides and neither bound is arbitrary: below
     # it, a drain that cancels everything is a hard kill with extra steps; above it, a node drain is

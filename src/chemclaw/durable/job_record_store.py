@@ -25,7 +25,7 @@ from chemclaw.durable.job_record import JobRecord, JobRecordSummary
 _COLUMNS = (
     "job_id, connector, job, rationale, requested_by, session_id, correlation_id, "
     "plan_step, plan_hash, payload, summary, result, note_id, calc_refs, runtime_seconds, "
-    "payload_kind"
+    "payload_kind, state, failure_reason"
 )
 
 # Every mutable column is refreshed, **including the attribution**. Updating the reason and the
@@ -36,7 +36,7 @@ _COLUMNS = (
 # answer for the field an audit joins on. The row describes the latest run, whole.
 _UPSERT = f"""
     INSERT INTO job_records ({_COLUMNS})
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     ON CONFLICT (job_id) DO UPDATE SET
         rationale = EXCLUDED.rationale,
         requested_by = EXCLUDED.requested_by,
@@ -51,6 +51,8 @@ _UPSERT = f"""
         calc_refs = EXCLUDED.calc_refs,
         runtime_seconds = EXCLUDED.runtime_seconds,
         payload_kind = EXCLUDED.payload_kind,
+        state = EXCLUDED.state,
+        failure_reason = EXCLUDED.failure_reason,
         completed_at = now()
 """
 
@@ -63,7 +65,7 @@ _SELECT_ONE = f"SELECT {_COLUMNS}, completed_at FROM job_records WHERE job_id = 
 # reason is a sentence rather than a document, and a search index would be machinery to maintain
 # for a scan the database does in milliseconds.
 _SEARCH = """
-    SELECT job_id, connector, job, rationale, summary, note_id, plan_step, completed_at
+    SELECT job_id, connector, job, rationale, summary, note_id, plan_step, state, completed_at
     FROM job_records
     WHERE (%s = '' OR connector = %s)
       AND (%s = '' OR rationale ILIKE %s OR summary ILIKE %s OR job ILIKE %s)
@@ -104,6 +106,8 @@ class PostgresJobRecordSink:
                     record.calc_refs,
                     record.runtime_seconds,
                     record.payload_kind,
+                    record.state,
+                    record.failure_reason,
                 ),
             )
             await conn.commit()
@@ -133,7 +137,9 @@ async def read_job_record(job_id: str) -> JobRecord | None:
         calc_refs=list(row[13] or []),
         runtime_seconds=row[14],
         payload_kind=row[15],
-        completed_at=row[16],
+        state=row[16],
+        failure_reason=row[17],
+        completed_at=row[18],
     )
 
 
@@ -156,7 +162,8 @@ async def read_job_record_summaries(
             summary=row[4],
             note_id=row[5],
             plan_step=row[6],
-            completed_at=row[7],
+            state=row[7],
+            completed_at=row[8],
         )
         for row in rows
     ]

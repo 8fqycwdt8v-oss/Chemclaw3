@@ -132,6 +132,11 @@ class _Walk:
         # The identity — `(st_dev, st_ino)` — of every directory this pass has already walked, so
         # a link back into the mount is followed once instead of forever. See `enter`.
         self.visited: set[tuple[int, int]] = set()
+        # Entries whose type could not be read while sorting. Not `CrawlResult.unreadable`, which
+        # has a specific meaning the sync acts on ("observed to exist, restamp it"): this is a
+        # weaker fact — the sort key for this entry is a guess — and conflating them would restamp
+        # paths on evidence that does not support it. See `_order`.
+        self.unstattable: list[str] = []
 
     def enter(self, directory: Path, relative: str) -> bool:
         """Claim `directory` for this walk; False when it is one already walked.
@@ -227,6 +232,14 @@ class _Walk:
         try:
             is_dir = entry.is_dir(follow_symlinks=self.binding.follow_symlinks)
         except OSError:
+            # **An entry that cannot be stat'ed is sorted as a file, and that is a guess with a
+            # cost.** If it is really a directory it sorts under the wrong key, the stream stops
+            # being monotonic, and the resume cursor then skips whatever sorts between the two
+            # positions — permanently, since the next pass starts past it. Nothing else in this
+            # module can see that happen, so it is recorded here and summarised once per pass by
+            # `crawl_share`: a subtree whose permissions changed produces one line rather than one
+            # per entry, which is the rule `_summarise_skips` states one module over.
+            self.unstattable.append(entry.path)
             is_dir = False
         return entry.name + "/" if is_dir else entry.name
 
@@ -328,4 +341,23 @@ def crawl_share(
             logger.error("root %r could not be walked; nothing will be pruned", root.path)
             logger.debug("walk failure detail for %r", root.path, exc_info=True)
             walk.result.failed_roots.append(root.path)
+    _report_unstattable(walk.unstattable)
     return walk.result
+
+
+def _report_unstattable(paths: list[str]) -> None:
+    """One line per pass for entries whose type the sort could not read; nothing when none were.
+
+    The count is what makes this actionable: one such entry is a file being written while the walk
+    passed it, and a thousand is a subtree whose permissions changed — and in the second case the
+    resume cursor may be stepping over files that will never be indexed.
+    """
+    if not paths:
+        return
+    logger.warning(
+        "%d entr(ies) could not be typed while sorting (e.g. %s); each was sorted as a file, so "
+        "a directory among them shifts the resume cursor and the files it sorts past are skipped "
+        "until the next full pass",
+        len(paths),
+        paths[0],
+    )

@@ -24,7 +24,9 @@ from pathlib import Path
 from typing import Any
 
 from temporalio.client import Client, TLSConfig
+from temporalio.contrib.opentelemetry import TracingInterceptor
 from temporalio.contrib.pydantic import pydantic_data_converter
+from temporalio.runtime import PrometheusConfig, Runtime, TelemetryConfig
 
 from chemclaw.core.config import settings
 from chemclaw.core.errors import SubsystemUnavailableError
@@ -36,6 +38,47 @@ _CLIENT: Client | None = None
 # Serialises the first connect so a burst of concurrent tool calls opens one channel, not N. One
 # lock per process is correct because one event loop per process is the deployment shape.
 _CONNECT_LOCK = asyncio.Lock()
+# The SDK's own telemetry runtime, built at most once per process (below). A `Runtime` owns a Rust
+# core and a bound socket, so a second one is either a bind failure or a second exposition nobody
+# scrapes — which is why this is a module singleton beside the client rather than a per-connect
+# object.
+_RUNTIME: Runtime | None = None
+
+
+def telemetry_runtime() -> Runtime | None:
+    """The Temporal SDK runtime exporting its own metrics, or `None` when that is switched off.
+
+    **What this closes.** `Client.connect` takes a `runtime=` and nothing in `src/` ever passed
+    one, so the SDK's entire metric surface was absent: no poller count, no worker slot
+    saturation, no sticky-cache size or miss rate, no `activity_schedule_to_start_latency`, no
+    `activity_execution_failed`, no `workflow_task_execution_failed`. None of those is derivable
+    from anything this repository counts — they are facts about the *worker*, and the first two
+    are the only reading of whether `worker_max_concurrent_activities` is the bottleneck. A CREST
+    search holds one of eight slots for hours, so a saturated `connector-calc` worker and an idle
+    one produced identical dashboards.
+
+    Exposed on its own port rather than folded into `chemclaw_*`: the names, labels and
+    cardinality are the SDK's, and `core/metrics.py` is a registry that refuses an undeclared
+    label set by design. Two ports, one scrape config each.
+
+    Returns `None` when `temporal_metrics_port` is 0, which is the default — a process that binds
+    a port nobody asked for is a surprise outside a cluster, and two workers on one developer
+    machine cannot both bind.
+    """
+    global _RUNTIME
+    if not settings.temporal_metrics_port:
+        return None
+    if _RUNTIME is None:
+        _RUNTIME = Runtime(
+            telemetry=TelemetryConfig(
+                metrics=PrometheusConfig(
+                    bind_address=(
+                        f"{settings.temporal_metrics_host}:{settings.temporal_metrics_port}"
+                    )
+                )
+            )
+        )
+    return _RUNTIME
 
 
 def _tls_config() -> TLSConfig | None:
@@ -60,14 +103,35 @@ def _tls_config() -> TLSConfig | None:
 def connect_options() -> dict[str, Any]:
     """The keyword args for `Client.connect`, so transport security is testable without a broker.
 
-    Returns the namespace + pydantic converter always, plus `tls` when mTLS is configured and
-    `api_key` when a Temporal Cloud key is configured. In local dev (none set) the client connects
-    plaintext, exactly as before F4-T6.
+    Returns the namespace + pydantic converter always, plus `tls` when mTLS is configured,
+    `api_key` when a Temporal Cloud key is configured, `runtime` when the SDK's own metrics port
+    is set, and the OpenTelemetry interceptor when span export is on. In local dev (none set) the
+    client connects plaintext, exactly as before F4-T6.
     """
     options: dict[str, Any] = {
         "namespace": settings.temporal_namespace,
         "data_converter": pydantic_data_converter,
     }
+    # The SDK's own metrics, when a deployment asked for them. `None` is not passed through as
+    # `runtime=None` — that is the SDK's "use the lazy default runtime" value and means the same
+    # thing, but leaving the key out keeps `connect_options()` a description of what was
+    # *configured*, which is what the tests read it as.
+    runtime = telemetry_runtime()
+    if runtime is not None:
+        options["runtime"] = runtime
+    # W3C trace context across the durable boundary. Without it a trace stopped dead at every
+    # durable job: the correlation id already rode in the payload (`ConnectorJobInput`) and in the
+    # workflow memo, so log lines could be joined by grep, and no span could — a six-hour job was
+    # an orphan root with no link to the turn that asked for it. The client half propagates the
+    # context on `start_workflow`; `Worker` carries the matching half (`durable/serve.py`'s two
+    # callers), and both are needed because the context has to be written on one side and read on
+    # the other.
+    #
+    # Behind `otel_enabled` for the same reason the tracer provider is: with tracing off the
+    # global provider is a no-op, so this would attach an empty header to every workflow start to
+    # no purpose.
+    if settings.otel_enabled:
+        options["interceptors"] = [TracingInterceptor()]
     tls = _tls_config()
     if tls is not None:
         options["tls"] = tls

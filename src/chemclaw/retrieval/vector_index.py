@@ -638,6 +638,22 @@ async def reindex_notes(
     await asyncio.to_thread(invalidate_cache, directory)
     notes = await asyncio.to_thread(load_notes, directory) if directory.exists() else []
     if not notes:
+        # **A silent 0 here is what a mis-mounted knowledge volume looks like**, and it is also
+        # what an empty corpus looks like, and the hourly job reports success for both — forever,
+        # while the dense and lexical legs keep serving whatever the index last held. So the two
+        # are separated by the one thing that distinguishes them: whether the directory is there.
+        # A missing directory is a deployment fault (a volume that did not mount, a
+        # `knowledge_path` pointing at nothing); a present but empty one is a fresh corpus, which
+        # is a real state and stays at DEBUG.
+        if not directory.exists():
+            log.warning(
+                "note re-index found no notes: %s does not exist. Nothing is re-embedded and the "
+                "index keeps whatever it last held, so retrieval will answer from a frozen corpus "
+                "until the path or the mount is fixed",
+                directory,
+            )
+        else:
+            log.debug("note re-index found no notes under %s; nothing to do", directory)
         return 0
     current_fingerprints = await asyncio.to_thread(note_file_fingerprints, directory)
     # Guarded twice over against wiping the index: `notes` is non-empty by the return above, and

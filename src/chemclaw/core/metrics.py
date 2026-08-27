@@ -298,6 +298,15 @@ _COUNTERS: dict[str, str] = {
     "chemclaw_event_streams_rejected_total": (
         "Push-back event streams rejected with 429 at the per-user or per-process cap."
     ),
+    # The push-back stream's own send timeout, and a separate series from
+    # `chemclaw_turn_send_timeouts_total` because that declaration's comment forbids exactly this
+    # merge: two populations in one counter is a denominator nobody can interpret. A turn stream cut
+    # for a stalled reader and a push-back stream cut for one are different streams with different
+    # lifetimes — the push-back stream is long-lived and holds a per-user slot, so a half-open
+    # connection parks it invisibly until the kernel gives up on the socket.
+    "chemclaw_event_stream_send_timeouts_total": (
+        "Push-back event streams closed because a client stopped reading past the SSE send timeout."
+    ),
     # A pooled checkout that times out is indistinguishable, from the route's point of view, from
     # an unreachable database — both arrive as `ConnectionError` and both are retryable. The load
     # run turned 16 of them into HTTP 500s because no route caught them, and the pool they came
@@ -418,13 +427,265 @@ _COUNTERS: dict[str, str] = {
     "chemclaw_degraded_total": (
         "Operations that failed and were continued past with reduced function, by subsystem."
     ),
+    # --- the registry's own health -------------------------------------------------------------
+    # Both of these count a failure *of the metrics surface*, which nothing could see before: a
+    # bound gauge that raises, and a label set refused at the cardinality cap. Each used to leave
+    # only a log line, and a log line about telemetry is the one nobody greps for.
+    "chemclaw_gauge_read_failures_total": (
+        "Gauge reads that raised and were omitted from a scrape, by metric — the reading is "
+        "missing, and without this the omission is indistinguishable from an unbound gauge."
+    ),
+    "chemclaw_metric_series_dropped_total": (
+        "Samples discarded because their metric had already reached the per-metric label-set cap; "
+        "that metric is undercounting from this point on."
+    ),
+    # --- the HTTP surface ----------------------------------------------------------------------
+    # There was no request-level metric of any kind: 23 routes and no way to answer "which route
+    # is throwing 5xx", "what is p95 on /jobs", or "is this slowness the model or the database".
+    # `route` is the *template*, never the raw path.
+    "chemclaw_http_requests_total": "HTTP requests served, by route template and status class.",
+    # Two refusals that happen before any handler and were therefore invisible to every counter
+    # above, and one that happens inside `deps.py` and was invisible because it is deliberately a
+    # 404. An authorization refusal returning 404-not-403 is right (it leaks no existence), and it
+    # means the server-side record is the *only* place the distinction can survive — so a session
+    # enumeration scan was indistinguishable from ordinary 404 traffic.
+    "chemclaw_authz_refusals_total": (
+        "Requests refused because the caller does not own the resource, by resource kind "
+        "(answered 404 to avoid an existence leak, so this counter is the only trace)."
+    ),
+    "chemclaw_auth_failures_total": (
+        "Requests refused at authentication, by reason (missing / invalid / provider_unavailable) "
+        "— a client sending no header at all used to be indistinguishable from a healthy service."
+    ),
+    "chemclaw_request_validation_failures_total": (
+        "Requests rejected with 422 by request-body validation, by route template. Nothing logged "
+        "or counted these, so a client looping on a malformed body looked exactly like silence."
+    ),
+    # --- the model call ------------------------------------------------------------------------
+    # The provider seam recorded nothing at all: a deployment retrying every call three times
+    # inside the SDK looked identical to one retrying none, a provider rate-limiting us had no
+    # counter distinct from the front door's own limiter, and `RunnableWithFallbacks` absorbing
+    # 100% of traffic onto the fallback endpoint produced no log line and no metric.
+    "chemclaw_model_calls_total": (
+        "Model calls, by provider and outcome (ok / rate_limited / context_length / timeout / "
+        "transport / error)."
+    ),
+    "chemclaw_model_fallbacks_total": (
+        "Model calls served by the fallback endpoint after the primary raised, by provider — the "
+        "signal that makes provider failover something an operator knows about rather than infers."
+    ),
+    # --- the tool chain ------------------------------------------------------------------------
+    # A refusal and a crash were one `outcome='error'` and one identically-worded log line, so
+    # "why did the agent not do the thing" required a LIKE scan of an unindexed free-text column.
+    # Four outcomes, not three. `cancelled` is here because the alternative is under-counting
+    # attempted calls: a turn abandoned mid-tool still made the call, and dropping it would make
+    # this counter disagree with `audit_events`, which has recorded a `cancelled` outcome since
+    # long before this metric existed.
+    "chemclaw_tool_calls_total": (
+        "Tool invocations, by tool and outcome (ok / refused / error / cancelled)."
+    ),
+    "chemclaw_tool_refusals_total": (
+        "Tool calls stopped by a governance gate, by reason (authz / dry_run / undeclared_write / "
+        "plan_gate / repeat) — four of the five moved no metric at all before this."
+    ),
+    "chemclaw_invalid_tool_calls_total": (
+        "Tool calls the model emitted with unparseable arguments, by tool. LangChain puts these on "
+        "`AIMessage.invalid_tool_calls` rather than `tool_calls`, and nothing read that field — so "
+        "the call vanished with no `tool_failed`, no `tool_result` and no trace of any kind."
+    ),
+    "chemclaw_skill_reads_denied_total": (
+        "Skill body reads refused by the role gate. The gate lives on the skills backend because "
+        "that is the enforcement point, and a refusal there was entirely silent."
+    ),
+    # --- the turn ------------------------------------------------------------------------------
+    "chemclaw_turns_finished_total": (
+        "Turns that ended, by outcome — the one series that separates `answered` from "
+        "`loop_capped`, `empty_answer`, `errored`, `timed_out` and `abandoned`, which "
+        "`turn_costs.completed` collapsed into a boolean."
+    ),
+    # --- the durable tier ----------------------------------------------------------------------
+    # Measured on a live broker: a successful job emitted zero log lines and a failed job emitted
+    # zero first-party lines and moved no metric. `chemclaw_jobs_started_total` had no counterpart
+    # of any kind, so a connector whose every job failed was indistinguishable from an idle one.
+    "chemclaw_jobs_finished_total": (
+        "Durable jobs that ended, by connector and outcome (completed / failed) — the counterpart "
+        "`chemclaw_jobs_started_total` never had."
+    ),
+    "chemclaw_activity_failures_total": (
+        "Temporal activity attempts that failed, by activity — one row per attempt, so a retry "
+        "storm is visible as a rate rather than only in the broker's own history."
+    ),
+    "chemclaw_worker_activities_cancelled_on_drain_total": (
+        "In-flight activities cancelled because a worker's graceful-shutdown budget expired. Not "
+        "lost — Temporal redelivers — but paid for twice, which is the cost `durable/serve.py` "
+        "names and nothing measured."
+    ),
+    # --- the calculation cache -----------------------------------------------------------------
+    # D-011 ("a persisted result is never recomputed") is the largest cost lever in the system and
+    # `science/calc/store.py` has promised this counter to "the metrics layer (Phase 2b)" since it
+    # was written. Until now the only way to see the cache working was DEBUG on a hot path.
+    "chemclaw_calc_cache_total": (
+        "Calculation-cache lookups, by outcome (hit / shared / miss) — `shared` is a concurrent "
+        "miss on one key that `cached_compute` single-flighted onto another caller's computation."
+    ),
+    # --- ingest and retrieval ------------------------------------------------------------------
+    "chemclaw_ingest_records_total": (
+        "Records seen by an ingest pass, by source and outcome (ingested / rejected / skipped)."
+    ),
+    "chemclaw_evidence_source_kept_total": (
+        "Chunks from each source that survived merge and the evidence budget. Read against "
+        "`chemclaw_evidence_source_chunks_total`, which counts what a leg *handed over* before "
+        "RRF and the cap — so a leg contributing 30 and surviving 0, which is exactly the state "
+        "D-2026-08-01 was written about, still read as healthy on the pre-merge counter alone."
+    ),
+    "chemclaw_vector_unresolved_points_total": (
+        "Ranked points an external vector store returned that no `document_chunks` row could "
+        "resolve. Non-zero means the store and its catalogue have drifted, which otherwise "
+        "presents as an honest zero-chunk answer from a healthy-looking leg."
+    ),
+    "chemclaw_embedding_calls_total": "Embedding provider calls, by outcome (ok / error).",
+    "chemclaw_db_query_failures_total": (
+        "Pooled database operations that failed, by kind (unavailable / cancelled / deadlock / "
+        "error) — statement timeouts and serialization failures had no handler and no counter."
+    ),
+    "chemclaw_results_dead_lettered_total": (
+        "Result publications retired to `failed` after exhausting their attempts. Distinct from "
+        "`chemclaw_result_publish_failures_total`, which counts one row per *attempt*, so a "
+        "permanent retirement was indistinguishable from a transient blip."
+    ),
 }
 
 # Latency histograms. Two, not more: a turn is the unit a chemist waits on, and a tool call is the
 # unit that explains a slow turn. Anything finer is what the trace pipeline is for.
+# **Two sets, not one, and the single set was measurably wrong for both populations.** A turn and
+# a tool call are different distributions — a turn is tens of seconds, a tool call is milliseconds
+# to hours — and one shared set could only be a compromise that resolved neither.
+#
+# The old set topped out at 300 s while `service_turn_timeout_seconds` defaults to 600, so every
+# turn between the two reported as 300 s: `histogram_quantile` cannot interpolate into `+Inf` and
+# returns the highest finite boundary, which means p95 *saturated* precisely as turns got slow.
+# Measured on the old set with samples at 450 s and 599 s, both landed in `+Inf`. The load test's
+# p50 of 37 s at 50 users also sat in the 30-60 bucket with a 5x hole above it, so the busiest
+# part of the range was the coarsest.
+#
+# `_TURN_BUCKETS` brackets the timeout on both sides, so a saturating deployment is visible as
+# mass moving into the 600 bucket rather than as a quantile that stops moving.
+_TURN_BUCKETS: tuple[float, ...] = (
+    1.0,
+    2.5,
+    5.0,
+    10.0,
+    20.0,
+    30.0,
+    45.0,
+    60.0,
+    90.0,
+    120.0,
+    180.0,
+    300.0,
+    450.0,
+    600.0,
+    900.0,
+)
+# `_TOOL_BUCKETS` spans six orders of magnitude because the tool surface genuinely does: a
+# `load_skill` is sub-millisecond, `inline_wait_seconds` is 20, and a graph step reaching the calc
+# server is bounded by `calc_server_timeout_seconds` at 900.
+_TOOL_BUCKETS: tuple[float, ...] = (
+    0.01,
+    0.025,
+    0.05,
+    0.1,
+    0.25,
+    0.5,
+    1.0,
+    2.5,
+    5.0,
+    10.0,
+    20.0,
+    30.0,
+    60.0,
+    120.0,
+    300.0,
+    900.0,
+)
+# A generic set for the histograms added since, whose range is "a network call": an embedding
+# batch, a database statement, one delivery to a result sink, one model call.
+_CALL_BUCKETS: tuple[float, ...] = (
+    0.005,
+    0.01,
+    0.025,
+    0.05,
+    0.1,
+    0.25,
+    0.5,
+    1.0,
+    2.5,
+    5.0,
+    10.0,
+    30.0,
+    60.0,
+    300.0,
+)
+
 _HISTOGRAMS: dict[str, str] = {
     "chemclaw_turn_duration_seconds": "Wall-clock duration of one streamed agent turn.",
     "chemclaw_tool_duration_seconds": "Wall-clock duration of one tool invocation.",
+    "chemclaw_http_request_duration_seconds": (
+        "Wall-clock duration of one HTTP request, by route template."
+    ),
+    "chemclaw_model_call_duration_seconds": "Wall-clock duration of one model call, by provider.",
+    "chemclaw_evidence_source_seconds": (
+        "Wall-clock duration of one retrieval leg within an evidence sweep, by source."
+    ),
+    "chemclaw_embedding_duration_seconds": "Wall-clock duration of one embedding provider call.",
+    "chemclaw_db_query_duration_seconds": (
+        "Wall-clock duration of one pooled database operation, by operation name."
+    ),
+    "chemclaw_job_duration_seconds": (
+        "Wall-clock duration of one finished durable job, by connector — the distribution "
+        "`chemclaw_job_runtime_seconds_total` deliberately does not give, so a p95 exists for the "
+        "most expensive work in the system."
+    ),
+    "chemclaw_sink_delivery_seconds": "Wall-clock duration of one delivery to a result sink.",
+}
+
+# Per-histogram bucket boundaries. A histogram's buckets are part of its Prometheus identity, so
+# this is a property of the declaration exactly as the HELP text is — see `_TURN_BUCKETS` above for
+# why one shared set was wrong.
+_HISTOGRAM_BUCKETS: dict[str, tuple[float, ...]] = {
+    "chemclaw_turn_duration_seconds": _TURN_BUCKETS,
+    "chemclaw_tool_duration_seconds": _TOOL_BUCKETS,
+    "chemclaw_job_duration_seconds": _TOOL_BUCKETS,
+    "chemclaw_http_request_duration_seconds": _CALL_BUCKETS,
+    "chemclaw_model_call_duration_seconds": _CALL_BUCKETS,
+    "chemclaw_evidence_source_seconds": _CALL_BUCKETS,
+    "chemclaw_embedding_duration_seconds": _CALL_BUCKETS,
+    "chemclaw_db_query_duration_seconds": _CALL_BUCKETS,
+    "chemclaw_sink_delivery_seconds": _CALL_BUCKETS,
+}
+
+# Histograms that carry labels, and the label names each accepts — the same declaration in both
+# directions that `_COUNTER_LABELS` is, and enforced by the same code path.
+#
+# **`observe` took no labels at all until this existed**, which was the single most consequential
+# limitation in this registry. `chemclaw_tool_duration_seconds` pooled an xTB call through the calc
+# connector and a `read_attachment` into one distribution, so "why is this turn slow" could not be
+# attributed to a tool — the one question the histogram's own docstring says it was added to
+# answer. The same absence blocked per-route request latency, per-source retrieval latency and
+# per-sink delivery latency, each of which is a separate finding elsewhere.
+#
+# Every label here is bounded by configuration or by a source literal, never by a caller's string,
+# which is the same rule `_COUNTER_LABELS` documents at length. `route` is the FastAPI *route
+# template* (`/sessions/{session_id}/messages`), enumerable from `app.routes` — never the raw path,
+# which is attacker-controlled and is a cardinality bomb.
+_HISTOGRAM_LABELS: dict[str, tuple[str, ...]] = {
+    "chemclaw_tool_duration_seconds": ("tool",),
+    "chemclaw_http_request_duration_seconds": ("route",),
+    "chemclaw_model_call_duration_seconds": ("provider",),
+    "chemclaw_evidence_source_seconds": ("source",),
+    "chemclaw_db_query_duration_seconds": ("operation",),
+    "chemclaw_job_duration_seconds": ("connector",),
+    "chemclaw_sink_delivery_seconds": ("sink",),
 }
 
 # Bucket boundaries, in seconds. Not a `Settings` field on purpose: Prometheus treats the bucket
@@ -434,8 +695,6 @@ _HISTOGRAMS: dict[str, str] = {
 # model puts a turn near 1 s, the load test's p50 at 50 users was 37 s, and the wall-clock turn
 # timeout is 600 s, so the buckets have to span three orders of magnitude and still resolve the
 # sub-second tool calls that dominate the count.
-_BUCKETS: tuple[float, ...] = (0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 300.0)
-
 # Counters that carry labels, and the label names each accepts. A counter absent from this map is
 # unlabelled and behaves exactly as before — pre-seeded to zero and rendered as one bare line.
 #
@@ -495,6 +754,32 @@ _COUNTER_LABELS: dict[str, tuple[str, ...]] = {
     # both argument forms, since its first version saw only the bare-name positional one and a
     # per-connector f-string label went past it silently. Nothing a request carries reaches here.
     "chemclaw_degraded_total": ("subsystem",),
+    # Bounded by this module's own declarations: the label domain is `declared_metric_names()`.
+    "chemclaw_gauge_read_failures_total": ("metric",),
+    # The route *template* from `request.scope["route"].path`, enumerable from `app.routes` — 23
+    # today. Never `request.url.path`, which is caller-controlled and unbounded, and which is
+    # already the subject of a measured denial of service through the uvicorn access log.
+    "chemclaw_http_requests_total": ("route", "status_class"),
+    "chemclaw_request_validation_failures_total": ("route",),
+    # Four literals in `api/deps.py`, four in `api/auth.py` — source-fixed, like `subsystem`.
+    "chemclaw_authz_refusals_total": ("resource",),
+    "chemclaw_auth_failures_total": ("reason",),
+    # The provider name from the configured seam (`openai_compatible`, `anthropic`), not a model
+    # id: per-model *spend* is `turn_costs`' question and stays there (D-2026-08-01), while
+    # per-provider *health* is this one, and they are not the same question.
+    "chemclaw_model_calls_total": ("provider", "outcome"),
+    "chemclaw_model_fallbacks_total": ("provider",),
+    "chemclaw_tool_calls_total": ("tool", "outcome"),
+    "chemclaw_tool_refusals_total": ("reason",),
+    "chemclaw_invalid_tool_calls_total": ("tool",),
+    "chemclaw_turns_finished_total": ("outcome",),
+    "chemclaw_jobs_finished_total": ("connector", "outcome"),
+    "chemclaw_activity_failures_total": ("activity",),
+    "chemclaw_calc_cache_total": ("outcome",),
+    "chemclaw_ingest_records_total": ("source", "outcome"),
+    "chemclaw_evidence_source_kept_total": ("source",),
+    "chemclaw_embedding_calls_total": ("outcome",),
+    "chemclaw_db_query_failures_total": ("kind",),
 }
 
 # The most label-sets one counter may hold. A label *value* is not bounded by this module — it comes
@@ -502,8 +787,19 @@ _COUNTER_LABELS: dict[str, tuple[str, ...]] = {
 # keyed on it is the same slow leak this codebase has already fixed three times (the budget
 # tracker's per-user counters, the front door's live sessions, the note index). Past the cap the new
 # series is refused and said so once, rather than being accepted quietly until the pod runs out of
-# memory. Generous: `profile` is a handful of names, so reaching this means something is wrong.
-_MAX_SERIES_PER_COUNTER = 64
+# memory.
+#
+# **64 until the HTTP surface arrived, and the margin was one series.** Measured across the front
+# door's 158 tests, `chemclaw_http_requests_total{route,status_class}` grew 35 series over 20 route
+# templates plus `<unmatched>`, with no route producing more than three status classes — a worst
+# case of 63 against a cap of 64. That is not a cardinality problem, it is a *sizing* one: the label
+# domain is the route table, enumerable from `app.routes`, and it grows by one whenever somebody
+# adds a route. 128 is sized against that table with room for it to double.
+#
+# Still generous for every other counter here: `profile` is a handful of names, so a *different*
+# metric reaching this means something is generating values it should not — which is the case this
+# cap exists for, and the reason it is raised rather than removed.
+_MAX_SERIES_PER_COUNTER = 128
 
 _GAUGES: dict[str, str] = {
     "chemclaw_turns_in_flight": "Turns currently streaming.",
@@ -534,6 +830,60 @@ _GAUGES: dict[str, str] = {
     "chemclaw_pg_fleet_max_connections": (
         "Declared fleet-wide ceiling on Postgres connections (0 = none)."
     ),
+    # The event-stream cap's two sides, the same pairing `chemclaw_turns_in_flight` and
+    # `chemclaw_turn_capacity` make for turns — and absent for exactly as long as the stream cap
+    # has existed. Only *rejections* were counted, so "are we near the per-pod cap" was
+    # unanswerable until the cap was already being hit.
+    "chemclaw_event_streams_open": "Push-back event streams currently open on this process.",
+    "chemclaw_event_stream_capacity": "Configured maximum concurrent push-back streams.",
+    # In-flight durable work. `chemclaw_jobs_started_total` minus a completion counter would have
+    # given this, except the completion counter did not exist until now.
+    # "carried by", not "launched from", and the difference is which pod you are looking at: a job
+    # is launched by an agent tool in the front door and executed by a connector worker, so a
+    # per-process subtraction of starts from finishes would be a number nobody can take. What this
+    # reads is the durable work *this* process is currently carrying.
+    "chemclaw_jobs_in_flight": "Durable jobs this process is currently carrying.",
+}
+
+# Gauges that carry **one** label, read as a whole family from a single callable returning
+# `{label value: reading}`.
+#
+# One label, not an arbitrary set, because three real callers wanted exactly one and a general
+# mechanism for a case nobody has is the abstraction this repository's own rules refuse. The
+# callers: an outbox backlog per sink, ingest lag per source, and connector health per connector —
+# each of which was previously either a single summed number that answered nothing ("some sink is
+# behind, which one?") or a `COUNT(*)` the code declined to do per scrape.
+_GAUGE_FAMILIES: dict[str, str] = {
+    "chemclaw_outbox_pending": "Result publications queued and not yet delivered, by sink.",
+    # The number that separates "a backlog of five that turns over every second" from "a backlog
+    # of five that has not moved since Tuesday". The partial index this reads
+    # (`result_publications_pending`) already exists, and `min(enqueued_at)` over it is an
+    # index-only scan on the leading edge — so the "a gauge would need a COUNT(*) on every scrape"
+    # objection that argued against a gauge here does not apply to an age.
+    "chemclaw_outbox_oldest_pending_seconds": (
+        "Age of the oldest undelivered result publication, by sink."
+    ),
+    "chemclaw_outbox_dead_lettered": (
+        "Result publications retired to `failed`, by sink. These never leave the "
+        "queued-minus-published difference, which is why that difference is not a backlog."
+    ),
+    "chemclaw_ingest_cursor_lag_seconds": (
+        "How far behind its source each ingest cursor is, in seconds. A source whose fetch has "
+        "wedged advances no cursor and logs `ingested=0`, which is what a quiet source also does."
+    ),
+    "chemclaw_connector_unhealthy": (
+        "1 per enabled connector that could not be reached, by connector. The unlabelled "
+        "`chemclaw_connectors_unhealthy` says how many; this says which, which is the half "
+        "`open_reachable` had in hand and discarded."
+    ),
+}
+
+_GAUGE_FAMILY_LABELS: dict[str, str] = {
+    "chemclaw_outbox_pending": "sink",
+    "chemclaw_outbox_oldest_pending_seconds": "sink",
+    "chemclaw_outbox_dead_lettered": "sink",
+    "chemclaw_ingest_cursor_lag_seconds": "source",
+    "chemclaw_connector_unhealthy": "connector",
 }
 
 
@@ -546,7 +896,26 @@ def declared_metric_names() -> frozenset[str]:
     against this set (D-2026-08-08). Exposed as one function rather than three tables so a fourth
     kind of metric cannot be added without every reader of "what is declared" seeing it.
     """
-    return frozenset(_COUNTERS) | frozenset(_HISTOGRAMS) | frozenset(_GAUGES)
+    return (
+        frozenset(_COUNTERS)
+        | frozenset(_HISTOGRAMS)
+        | frozenset(_GAUGES)
+        | frozenset(_GAUGE_FAMILIES)
+    )
+
+
+def declared_histogram_names() -> frozenset[str]:
+    """Just the histograms, for readers that must reason about their derived series.
+
+    A histogram is the one metric kind whose *declared* name is not the name anybody queries:
+    Prometheus derives `_bucket`, `_sum` and `_count` from it, and real PromQL — every
+    `histogram_quantile` an operator will ever write — cites the derived name. A reader checking
+    prose or a dashboard against `declared_metric_names()` therefore has to fold those three
+    suffixes back, and folding them against every declared name would accept
+    `chemclaw_turns_started_total_bucket` as well. Exposed as its own set so that fold can be
+    exact rather than approximate.
+    """
+    return frozenset(_HISTOGRAMS)
 
 
 class Metrics:
@@ -563,13 +932,25 @@ class Metrics:
         self._lock = threading.Lock()
         self._counts: dict[str, float] = dict.fromkeys(_COUNTERS, 0.0)
         self._gauges: dict[str, Callable[[], float]] = {}
+        self._gauge_families: dict[str, Callable[[], Mapping[str, float]]] = {}
         # Per histogram: one tally per bucket, plus a final overflow slot for samples past the
         # last boundary, plus the running sum. The *cumulative* counts the exposition format wants
         # are derived at render time, so recording a sample is one index and one increment.
-        self._histograms: dict[str, list[float]] = {
-            name: [0.0] * (len(_BUCKETS) + 1) for name in _HISTOGRAMS
+        # Keyed by histogram, then by label set — `()` for an unlabelled one. An unlabelled
+        # histogram is pre-seeded so it renders as an honest zero from the first scrape (it always
+        # did); a labelled one is not, for the reason the labelled counters are not: an invented
+        # zero series is indistinguishable from an observed one.
+        self._histograms: dict[str, dict[tuple[tuple[str, str], ...], list[float]]] = {
+            name: (
+                {(): [0.0] * (len(_HISTOGRAM_BUCKETS[name]) + 1)}
+                if name not in _HISTOGRAM_LABELS
+                else {}
+            )
+            for name in _HISTOGRAMS
         }
-        self._histogram_sums: dict[str, float] = dict.fromkeys(_HISTOGRAMS, 0.0)
+        self._histogram_sums: dict[str, dict[tuple[tuple[str, str], ...], float]] = {
+            name: ({(): 0.0} if name not in _HISTOGRAM_LABELS else {}) for name in _HISTOGRAMS
+        }
         # Labelled series, per counter, keyed by the sorted label pairs. Not pre-seeded: a series
         # exists once it has been observed, which is the Prometheus convention and the same rule
         # the gauge path states — an invented zero is indistinguishable from a real one.
@@ -603,17 +984,31 @@ class Metrics:
         with self._lock:
             series = self._series.setdefault(name, {})
             if key not in series and len(series) >= _MAX_SERIES_PER_COUNTER:
-                if name not in self._capped:
-                    self._capped.add(name)
-                    log.warning(
-                        "counter %s reached %d label sets; further series are dropped. A label "
-                        "value here is meant to be low-cardinality (a profile name), so this "
-                        "means something is generating values it should not.",
-                        name,
-                        _MAX_SERIES_PER_COUNTER,
-                    )
+                self._note_series_cap(name)
                 return
             series[key] = series.get(key, 0.0) + amount
+
+    def _note_series_cap(self, name: str) -> None:
+        """Record that `name` hit the series cap. Caller holds the lock.
+
+        The cap used to leave nothing behind but one WARNING per metric per process lifetime, so
+        "this metric is undercounting and has been for two days" was a log line nobody re-reads
+        rather than a series anybody can alert on. It counts itself now — into a metric that is
+        deliberately *not* itself capped, since its whole label domain is the declared metric
+        names.
+        """
+        self._counts["chemclaw_metric_series_dropped_total"] = (
+            self._counts.get("chemclaw_metric_series_dropped_total", 0.0) + 1.0
+        )
+        if name not in self._capped:
+            self._capped.add(name)
+            log.warning(
+                "metric %s reached %d label sets; further series are dropped. A label value here "
+                "is meant to be low-cardinality (a profile, a tool, a route template), so this "
+                "means something is generating values it should not.",
+                name,
+                _MAX_SERIES_PER_COUNTER,
+            )
 
     def bind_gauge(self, name: str, source: Callable[[], float]) -> None:
         """Bind a gauge to a live source; reading it always reflects current state."""
@@ -622,17 +1017,52 @@ class Metrics:
         with self._lock:
             self._gauges[name] = source
 
-    def observe(self, name: str, seconds: float) -> None:
-        """Record one latency sample. An undeclared name is a programming error, so it raises."""
+    def bind_gauge_family(self, name: str, source: Callable[[], Mapping[str, float]]) -> None:
+        """Bind a one-label gauge family to a live source returning `{label value: reading}`.
+
+        Read on every scrape like an ordinary gauge, and guarded the same way — a source that
+        raises omits its family and increments `chemclaw_gauge_read_failures_total` rather than
+        failing the whole response.
+        """
+        if name not in _GAUGE_FAMILIES:
+            raise KeyError(f"undeclared gauge family {name!r}")
+        with self._lock:
+            self._gauge_families[name] = source
+
+    def observe(self, name: str, seconds: float, labels: Mapping[str, str] | None = None) -> None:
+        """Record one latency sample. An undeclared name or label is a programming error, so raises.
+
+        The declaration binds **in both directions**, exactly as `increment`'s does: a histogram in
+        `_HISTOGRAM_LABELS` must be observed *with* its labels, and one absent from it *without*
+        any. The reason is the same and it is not symmetry for its own sake — a bare sample beside
+        labelled ones is read by a scraper as a further series rather than as their total, so
+        `histogram_quantile` over a `sum by (le)` would silently mix a per-label distribution with
+        a duplicate of the whole.
+        """
         if name not in _HISTOGRAMS:
             raise KeyError(f"undeclared histogram {name!r}")
+        given = dict(labels or {})
+        declared = _HISTOGRAM_LABELS.get(name, ())
+        if set(given) != set(declared):
+            raise KeyError(
+                f"histogram {name!r} takes label(s) {sorted(declared)}, got {sorted(given)}"
+            )
+        key = tuple(sorted((label, str(value)) for label, value in given.items()))
+        boundaries = _HISTOGRAM_BUCKETS[name]
         # `bisect_left` puts a sample exactly on a boundary in that boundary's bucket, which is
         # what Prometheus's `le` ("less than or equal") semantics mean. Past the last boundary it
         # lands in the overflow slot rendered as `le="+Inf"`.
-        index = bisect_left(_BUCKETS, seconds)
+        index = bisect_left(boundaries, seconds)
         with self._lock:
-            self._histograms[name][index] += 1.0
-            self._histogram_sums[name] += seconds
+            series = self._histograms[name]
+            if key not in series:
+                if len(series) >= _MAX_SERIES_PER_COUNTER:
+                    self._note_series_cap(name)
+                    return
+                series[key] = [0.0] * (len(boundaries) + 1)
+                self._histogram_sums[name][key] = 0.0
+            series[key][index] += 1.0
+            self._histogram_sums[name][key] += seconds
 
     def value(self, name: str) -> float:
         """A counter's total across every label set (tests assert on this, not on the text).
@@ -645,17 +1075,27 @@ class Metrics:
             return self._counts[name] + sum(self._series.get(name, {}).values())
 
     def observations(self, name: str) -> tuple[int, float]:
-        """A histogram's `(count, sum)` — what tests assert on instead of parsing the text."""
+        """A histogram's `(count, sum)` across every label set.
+
+        Summed rather than per-series for the reason `value()` is: a caller asking for a
+        histogram's totals wants the numbers the unlabelled histogram used to report, and
+        Prometheus aggregates the same way server-side.
+        """
         with self._lock:
-            return int(sum(self._histograms[name])), self._histogram_sums[name]
+            count = sum(sum(buckets) for buckets in self._histograms[name].values())
+            return int(count), sum(self._histogram_sums[name].values())
 
     def render(self) -> str:
         """Render the Prometheus text exposition format (one HELP/TYPE/value block per metric)."""
         with self._lock:
             counts = dict(self._counts)
             gauges = dict(self._gauges)
-            histograms = {name: list(values) for name, values in self._histograms.items()}
-            histogram_sums = dict(self._histogram_sums)
+            histograms = {
+                name: {key: list(buckets) for key, buckets in series.items()}
+                for name, series in self._histograms.items()
+            }
+            histogram_sums = {name: dict(sums) for name, sums in self._histogram_sums.items()}
+            families = dict(self._gauge_families)
             series = {name: dict(values) for name, values in self._series.items()}
         lines: list[str] = []
         for name, help_text in _COUNTERS.items():
@@ -676,26 +1116,64 @@ class Metrics:
                 # A gauge whose source is not bound is omitted rather than reported as 0 — a
                 # fabricated zero would be indistinguishable from a genuinely idle service.
                 continue
+            # **One failing source must not take the scrape down with it.** Until this guard
+            # existed, `render()` invoked every bound callable bare, so a `pool.get_stats()` that
+            # raised during a shutdown or a pool-registry race turned `/metrics` into an HTTP 500
+            # — losing all of this process's metrics, from this pod, at exactly the moment the
+            # incident they exist for was happening. Proven by binding a raising callable to
+            # `chemclaw_pg_pool_size`: the whole response was lost.
+            #
+            # Omitting the one gauge is the same rule the branch above states for an unbound one,
+            # applied to a source that cannot answer rather than one that is absent — and the
+            # counter is what stops that omission being silent.
+            try:
+                reading = float(source())
+            except Exception:
+                self.increment("chemclaw_gauge_read_failures_total", labels={"metric": name})
+                log.warning("gauge %s could not be read; it is absent from this scrape", name)
+                continue
             lines += [
                 f"# HELP {name} {help_text}",
                 f"# TYPE {name} gauge",
-                f"{name} {float(source()):g}",
+                f"{name} {reading:g}",
             ]
+        for name, help_text in _GAUGE_FAMILIES.items():
+            family = families.get(name)
+            if family is None:
+                continue
+            label = _GAUGE_FAMILY_LABELS[name]
+            try:
+                readings = dict(family())
+            except Exception:
+                self.increment("chemclaw_gauge_read_failures_total", labels={"metric": name})
+                log.warning("gauge %s could not be read; it is absent from this scrape", name)
+                continue
+            lines += [f"# HELP {name} {help_text}", f"# TYPE {name} gauge"]
+            for value, reading in sorted(readings.items()):
+                lines.append(f'{name}{{{label}="{_escape(str(value))}"}} {float(reading):g}')
         for name, help_text in _HISTOGRAMS.items():
-            buckets = histograms[name]
             lines += [f"# HELP {name} {help_text}", f"# TYPE {name} histogram"]
-            # Prometheus buckets are cumulative ("how many samples were <= le"), so the per-bucket
-            # tallies are summed as they are emitted; the final `+Inf` bucket equals the count.
-            cumulative = 0.0
-            for boundary, tally in zip(_BUCKETS, buckets[:-1], strict=True):
-                cumulative += tally
-                lines.append(f'{name}_bucket{{le="{boundary:g}"}} {cumulative:g}')
-            cumulative += buckets[-1]  # the overflow slot: samples past the last boundary
-            lines += [
-                f'{name}_bucket{{le="+Inf"}} {cumulative:g}',
-                f"{name}_sum {histogram_sums[name]:g}",
-                f"{name}_count {cumulative:g}",
-            ]
+            boundaries = _HISTOGRAM_BUCKETS[name]
+            for key, buckets in sorted(histograms[name].items()):
+                # The label pairs a bucket line carries, with `le` appended — `le` must sit inside
+                # the same brace group as the rest, which is why this is built as a prefix rather
+                # than by formatting two separate groups.
+                declared = "".join(f'{label}="{_escape(value)}",' for label, value in key)
+                suffix = "".join(f'{label}="{_escape(value)}"' for label, value in key)
+                braced = f"{{{suffix}}}" if suffix else ""
+                # Prometheus buckets are cumulative ("how many samples were <= le"), so the
+                # per-bucket tallies are summed as they are emitted; the final `+Inf` bucket
+                # equals the count.
+                cumulative = 0.0
+                for boundary, tally in zip(boundaries, buckets[:-1], strict=True):
+                    cumulative += tally
+                    lines.append(f'{name}_bucket{{{declared}le="{boundary:g}"}} {cumulative:g}')
+                cumulative += buckets[-1]  # the overflow slot: samples past the last boundary
+                lines += [
+                    f'{name}_bucket{{{declared}le="+Inf"}} {cumulative:g}',
+                    f"{name}_sum{braced} {histogram_sums[name][key]:g}",
+                    f"{name}_count{braced} {cumulative:g}",
+                ]
         return "\n".join(lines) + "\n"
 
 

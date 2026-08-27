@@ -130,6 +130,16 @@ def _metric_name_literals() -> dict[str, list[str]]:
     return found
 
 
+# The metrics the registry emits about *itself*, and so the only names the scan below cannot see:
+# `core/metrics.py` is excluded from it (that is where every name is declared), and these two have
+# no call site outside it by construction — one is incremented when a bound gauge source raises
+# during `render`, the other when a sample is refused at the per-metric label-set cap. Both are
+# held to a producer by `test_the_registry_really_does_emit_the_metrics_it_is_exempted_for`, so
+# this is a redirected check rather than a waiver.
+_SELF_EMITTED = frozenset(
+    {"chemclaw_gauge_read_failures_total", "chemclaw_metric_series_dropped_total"}
+)
+
 _CALLS = _collect_calls()
 
 
@@ -155,10 +165,46 @@ def test_every_declared_metric_is_named_somewhere_in_the_source() -> None:
     and shows up here as the correct name losing its last mention in the tree.
     """
     literals = _metric_name_literals()
-    unnamed = sorted((set(_COUNTERS) | set(_GAUGES) | set(_HISTOGRAMS)) - set(literals))
+    declared = set(_COUNTERS) | set(_GAUGES) | set(_HISTOGRAMS)
+    unnamed = sorted(declared - set(literals) - _SELF_EMITTED)
     assert not unnamed, (
         "declared metric(s) that no source file names, so nothing can ever emit them — either "
         f"wire them up or delete the declaration: {unnamed}"
+    )
+
+
+def test_the_registry_really_does_emit_the_metrics_it_is_exempted_for() -> None:
+    """`_SELF_EMITTED` is an exemption from the scan, so it needs its own producer check.
+
+    The scan above skips `core/metrics.py`, because that is where every name is *declared* and
+    counting a declaration as a mention would make the backward direction vacuous. That exclusion
+    is right for every metric an ordinary call site emits and wrong for the two the registry emits
+    about *itself* — a gauge whose source raised, and a sample dropped at the cardinality cap —
+    which have no call site anywhere else by construction.
+
+    Exempting them without checking anything would hand the next self-emitted metric a free pass,
+    which is the shape of hole this whole file exists to close. So the exemption is paid for here:
+    each name must appear as a literal inside `core/metrics.py` at a line that is not part of a
+    declaration table, i.e. somewhere the module actually records it.
+    """
+    tree = ast.parse(_METRICS_MODULE.read_text(encoding="utf-8"), filename=str(_METRICS_MODULE))
+    # The declaration tables are dict literals mapping a name to help text or to labels. A name
+    # emitted by the module appears somewhere that is *not* a dict key, so collect those.
+    declared_keys: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Dict):
+            declared_keys.update(id(key) for key in node.keys if key is not None)
+    emitted = {
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and id(node) not in declared_keys
+    }
+    missing = sorted(_SELF_EMITTED - emitted)
+    assert not missing, (
+        "metric(s) exempted from the backward scan as self-emitted, but `core/metrics.py` never "
+        f"names them outside a declaration table — so nothing emits them at all: {missing}"
     )
 
 

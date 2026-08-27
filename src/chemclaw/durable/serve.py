@@ -30,12 +30,16 @@ import asyncio
 import logging
 import signal
 
-from temporalio.worker import Worker
+from temporalio.contrib.opentelemetry import TracingInterceptor
+from temporalio.worker import Interceptor, Worker
 
 from chemclaw.core import db
 from chemclaw.core.config import settings
 from chemclaw.core.executor import install_default_executor
+from chemclaw.core.logging import log_event
 from chemclaw.core.worker_http import worker_http
+from chemclaw.durable.interceptor import ChemclawWorkerInterceptor, activities_in_flight, draining
+from chemclaw.durable.job_metrics import bind_job_gauges, jobs_in_flight
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +47,26 @@ logger = logging.getLogger(__name__)
 # before the grace period; SIGINT is Ctrl-C, so a developer's local worker drains the same way the
 # cluster's does rather than through a different code path that has never been exercised.
 _STOP_SIGNALS = (signal.SIGINT, signal.SIGTERM)
+
+
+def worker_interceptors() -> list[Interceptor]:
+    """The interceptor chain every `Worker` in this system is built with.
+
+    One function rather than a literal at each constructor, for the reason this module exists at
+    all: two entrypoints wiring different subsets of the cross-cutting concerns is a pod that looks
+    healthy while doing less than the other one. A third worker gets the whole chain by calling
+    this, or gets none of it visibly.
+
+    Order matters and is the same order the client uses: the observability interceptor is outermost
+    so its log line and its failure counter bracket everything, including whatever the tracing
+    interceptor does. The tracing half is present only when span export is on, matching
+    `core/temporal_client.py` — with tracing off the global provider is a no-op and this would be
+    machinery around nothing.
+    """
+    interceptors: list[Interceptor] = [ChemclawWorkerInterceptor()]
+    if settings.otel_enabled:
+        interceptors.append(TracingInterceptor())
+    return interceptors
 
 
 async def serve_worker(worker: Worker, *, component: str) -> None:
@@ -70,6 +94,11 @@ async def serve_worker(worker: Worker, *, component: str) -> None:
     install_default_executor(
         component=component, reserved=settings.worker_max_concurrent_activities
     )
+    # Before the probe surface opens, so the first scrape already has a reading rather than a
+    # missing series. Here for the same reason the pool and the probes are: this is the one tail
+    # every worker's `main()` runs through, so no entrypoint can wire the drain and forget the
+    # gauge.
+    bind_job_gauges()
     stop = asyncio.Event()
     for sig in _STOP_SIGNALS:
         loop.add_signal_handler(sig, stop.set)
@@ -86,10 +115,36 @@ async def serve_worker(worker: Worker, *, component: str) -> None:
             if running.done():  # a fatal worker error, or a shutdown from somewhere else
                 await running
                 return
-            logger.info("%s: draining (stop signal received)", component)
-            await worker.shutdown()
-            await running
-            logger.info("%s: drained", component)
+            # **The count, not just the fact.** This module's own docstring names the cost of a
+            # hard kill — a long activity re-run from the beginning, paid for twice — and the two
+            # log lines said only "draining" and "drained", so nothing anywhere reported what the
+            # drain was actually carrying. Work is not *lost* (Temporal redelivers), which is
+            # exactly why it needs a number: a silent second payment leaves no other trace.
+            log_event(
+                logger,
+                "worker.draining",
+                "%s: draining with %d activity/activities and %d durable job(s) in flight",
+                component,
+                activities_in_flight(),
+                int(jobs_in_flight()),
+                component=component,
+                activities_in_flight=activities_in_flight(),
+                jobs_in_flight=int(jobs_in_flight()),
+                budget_seconds=settings.worker_graceful_shutdown_seconds,
+            )
+            # Whatever `graceful_shutdown_timeout` does not cover is cancelled by `shutdown()`,
+            # and each cancellation is counted where it is observed: inside the interceptor, the
+            # only frame that sees one. See `durable/interceptor.py::draining`.
+            with draining():
+                await worker.shutdown()
+                await running
+            log_event(
+                logger,
+                "worker.drained",
+                "%s: drained",
+                component,
+                component=component,
+            )
     finally:
         for sig in _STOP_SIGNALS:
             loop.remove_signal_handler(sig)

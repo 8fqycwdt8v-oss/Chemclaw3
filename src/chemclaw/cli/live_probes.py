@@ -35,6 +35,7 @@ import yaml
 
 from chemclaw.connectors.registry import job_names
 from chemclaw.core.config import settings
+from chemclaw.core.logging import configure_logging
 from chemclaw.evals.live import (
     Finding,
     PlanGateRun,
@@ -459,7 +460,12 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     door — which is why the empty-selection defect below had no test.
     """
     """Parse arguments and run the selected suite."""
-    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    # `configure_logging()`, not `basicConfig`: this probe builds an `Authorization: Bearer`
+    # header from `live_probe_token` (added to the redaction inventory on 2026-08-27 precisely so
+    # it would be scrubbed), and a bare `basicConfig` installs no `SecretRedactingFilter` — so an
+    # httpx error quoting the request headers, or any traceback holding the header dict in a frame,
+    # printed the credential verbatim. `tests/test_logging.py` now fails any CLI that does this.
+    configure_logging()
     parser = argparse.ArgumentParser(
         description="Run the live probe set against a running front door."
     )

@@ -16,12 +16,15 @@ carries is a row with nothing derived, which the coverage report counts honestly
 """
 
 import logging
+import time
 from collections.abc import Awaitable, Callable
 from typing import TypeVar
 
 from pydantic import BaseModel, Field
 
 from chemclaw.core.errors import ChemclawError
+from chemclaw.core.logging import log_event
+from chemclaw.core.metrics_bridge import record_metric
 from chemclaw.ingest.labels.labeller import Labeller, ReactionNaming, ReactionRepresentation
 from chemclaw.ingest.labels.merge import merge
 from chemclaw.science.labels.policy import LabelPolicy
@@ -45,6 +48,13 @@ _T = TypeVar("_T")
 # (`D-2026-08-25-a-label-is-derived-not-recorded`: `provides` is read for the coverage report and
 # the `override` subset check, and nothing else).
 _DERIVE_EVERYTHING = LabelPolicy()
+
+# What this drain calls itself on `chemclaw_ingest_records_total{source}` and on its own
+# `ingest.finished` record. Deliberately **not** the corpus source each row came from: those rows
+# were already counted under that name when the ELN sync ingested them, and counting them again
+# here would make one series mean two different passes over the same records. The labelling drain
+# is its own ingest stage — it reads the labelling server, not a corpus — so it is its own source.
+_LABEL_PASS = "labels"
 
 
 # The index key of a row. The reaction id alone is not one, and that is the whole of why these
@@ -109,8 +119,15 @@ async def label_stale(
     Returns:
         What was written, and whether more stale rows remain.
     """
+    started = time.perf_counter()
     stale = await index.stale(version, limit)
     if not stale:
+        # Reported, not returned in silence. "Nothing was stale" is the steady state and it is also
+        # what a broken `stale()` predicate looks like, and until this the two were the same
+        # absence of output — a clean pass logged nothing at all.
+        _record_pass(
+            labelled=0, unlabelled=0, has_more=False, duration_s=time.perf_counter() - started
+        )
         return LabelReport()
 
     representations, namings = await _label(labeller, stale)
@@ -135,7 +152,49 @@ async def label_stale(
             unlabelled,
             labelled,
         )
-    return LabelReport(labelled=labelled, unlabelled=unlabelled, has_more=len(stale) == limit)
+    report = LabelReport(labelled=labelled, unlabelled=unlabelled, has_more=len(stale) == limit)
+    _record_pass(
+        labelled=report.labelled,
+        unlabelled=report.unlabelled,
+        has_more=report.has_more,
+        duration_s=time.perf_counter() - started,
+    )
+    return report
+
+
+def _record_pass(*, labelled: int, unlabelled: int, has_more: bool, duration_s: float) -> None:
+    """Emit the one record this drain leaves behind, whatever the pass did.
+
+    **A clean pass used to log nothing**: only the two failure paths spoke, so "the drain is
+    keeping up" and "the drain has not run since Tuesday" were the same silence. The outcomes split
+    the stamped rows by whether anything was actually derived — `rejected` is a row the server
+    answered for with neither half, which the module's own docstring calls out as the population a
+    `labelled` count alone cannot report.
+    """
+    _count_records("ingested", labelled - unlabelled)
+    _count_records("rejected", unlabelled)
+    log_event(
+        logger,
+        "ingest.finished",
+        "labels: labelled=%d unlabelled=%d in %.3fs",
+        labelled,
+        unlabelled,
+        duration_s,
+        source=_LABEL_PASS,
+        labelled=labelled,
+        unlabelled=unlabelled,
+        has_more=has_more,
+        duration_s=round(duration_s, 3),
+    )
+
+
+def _count_records(outcome: str, count: int) -> None:
+    """Add `count` to the label drain's tally of one outcome (a named function; see `sync.py`'s)."""
+    record_metric(
+        lambda m: m.increment(
+            "chemclaw_ingest_records_total", count, {"source": _LABEL_PASS, "outcome": outcome}
+        )
+    )
 
 
 async def _label(

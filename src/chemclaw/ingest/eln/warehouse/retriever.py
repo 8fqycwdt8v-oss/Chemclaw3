@@ -345,7 +345,23 @@ async def _ingested_keys(keys: list[str]) -> set[str]:
         try:
             askable.append(require_note_slug(key))
         except ValueError:
-            continue  # cannot be a record id, so it has no record — no query needed
+            # Sound per row and silent in the one case that is not per row. A binding whose key
+            # column names the wrong column rejects **every** key on **every** query, so the
+            # suppression this function exists to perform never happens — and the symptom is not an
+            # error but a warehouse hit served beside the ELN record of the same reaction, read by
+            # a chemist as two sources agreeing. That is the same silent-no-op D-2026-08-25 found
+            # here when the check stat'd a file ingestion had stopped writing, so it is said out
+            # loud this time.
+            logger.debug("warehouse key %r cannot be a record id; not asked about", key)
+            continue
     if not askable:
+        if keys:
+            logger.warning(
+                "none of %d warehouse key(s) can be a record id (e.g. %r), so no hit can be "
+                "suppressed as already ingested. This is what a binding whose `entry.key` names "
+                "the wrong column looks like: reactions already in the corpus are served twice",
+                len(keys),
+                keys[0],
+            )
         return set()
     return await default_record_store().known(askable)
