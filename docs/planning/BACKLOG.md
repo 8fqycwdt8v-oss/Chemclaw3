@@ -189,20 +189,6 @@ topic).
       keeps the tartrate on nicotine bitartrate, which is arguably a salt; consulting the existing
       solvent table (`science/calc/solvents.py:44`) is the stricter variant.
 
-- [ ] **On `openai_compatible`, one unsupported `response_format` degrades every judged answer for
-      the life of the deployment** — [S]. Measured against a real loopback server: a server that
-      rejects `response_format` with a 400, or ignores it and returns prose, lands in
-      `agent/verifier.py:372`'s bare `except` and degrades to the citation gate on *every* call. The
-      same contradicted-citation answer a working judge scores `confidence=0.0, unsupported=True`
-      comes back `confidence=1.0, unsupported=False`. `score_answer` catches it
-      (`agent/verifier.py:467` forces `review_required` whenever `verified_by != "judge"`), and
-      today it is the *only* caller of `verify_turn_answer` — so the danger is a future direct
-      reader, not a live path. Fix is a pre-flight capability probe when `verifier_enabled` turns
-      on, failing loudly at startup the way `_require_anthropic_key()`
-      (`agent/llm_provider.py:305`) does, at the seam `api/app.py:166`
-      (`check_connectors_at_startup`, inside `_lifespan`) already uses. Anthropic is unaffected.
-      Both failure modes are already covered by loopback tests.
-
 - [ ] **A retracted ELN entry stays current evidence** — [M]. A withdrawn entry that simply
       disappears from the export is invisible to a cursor-based sync, so the note it produced keeps
       answering as current. `RawEntry` has no tombstone and the `ElnAdapter` protocol's two methods

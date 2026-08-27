@@ -310,6 +310,56 @@ def _default_client() -> Any:
     return build_chat_model("verifier")
 
 
+async def require_verifier_capability(*, client: Any | None = None) -> None:
+    """Refuse to start a deployment whose judge endpoint cannot enforce structured output.
+
+    On `openai_compatible`, a server that rejects `response_format` with a 400 — or accepts it and
+    returns prose — lands in `verify_answer`'s broad `except` and silently degrades **every**
+    judged answer to the deterministic citation gate for the life of the deployment. Measured
+    against a real loopback server (`tests/test_verifier.py`): the same contradicted-citation
+    answer a working judge scores `confidence=0.0, unsupported=True` comes back
+    `confidence=1.0, unsupported=False` degraded. `score_answer` flags the substitution per turn,
+    but a misconfiguration that is permanent deserves the `_require_anthropic_key` treatment: fail
+    at startup, naming what to fix, rather than as a counter that climbs quietly in production.
+
+    So this makes one real structured-output call against the routed `"verifier"` model before the
+    front door serves, and raises when the call fails or returns nothing parseable. Called from
+    `api/app.py::_lifespan` beside `check_connectors_at_startup` — the seam that already exists
+    because refusing to *start* is the only way to keep a misconfigured pod out of a rollout.
+
+    A no-op unless `verifier_enabled`, because the probe costs a model call and the degradation it
+    guards against cannot happen with the judge off. A no-op on `anthropic` too: `ChatAnthropic`
+    does not implement structured output via `response_format`, so the failure mode this probes for
+    does not exist there — and probing would make a startup depend on a paid external call.
+    """
+    if not settings.verifier_enabled or settings.llm_provider != "openai_compatible":
+        return
+    if client is None:
+        # The same cached client every verified turn will use, so the probe exercises the exact
+        # transport and binding the answers will — injected in tests, like `verify_answer`'s.
+        client = _default_client()
+    try:
+        async with asyncio.timeout(settings.verifier_timeout_seconds):
+            response = await client.with_structured_output(
+                VerificationResult, method="json_schema"
+            ).ainvoke(_verifier_prompt("capability probe", []))
+    except Exception as exc:
+        raise RuntimeError(
+            "verifier_enabled is on, but the configured openai_compatible endpoint failed a "
+            "structured-output probe (response_format json_schema) — every judged answer would "
+            "silently degrade to the deterministic citation gate, which certifies answers the "
+            "judge exists to catch. Fix the endpoint (or its model), or disable verifier_enabled."
+        ) from exc
+    if not isinstance(response, VerificationResult):
+        raise RuntimeError(
+            "verifier_enabled is on, but the configured openai_compatible endpoint accepted "
+            "response_format and returned prose instead of the requested JSON schema — the judge "
+            "cannot enforce structured output there, and every judged answer would silently "
+            "degrade to the deterministic citation gate. Fix the endpoint (or its model), or "
+            "disable verifier_enabled."
+        )
+
+
 async def verify_answer(
     answer: str, evidence: list[EvidenceChunk], *, client: Any | None = None
 ) -> VerificationResult:

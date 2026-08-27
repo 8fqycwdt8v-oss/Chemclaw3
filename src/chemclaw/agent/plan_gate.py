@@ -113,6 +113,17 @@ def plan_approval_refusal(tool_name: str) -> PlanNotApprovedError:
     )
 
 
+# What a turn that ends holding an unapproved plan asks the chemist, carried by the
+# `approval_request` event whose empty `approval_id` marks it as the plan-approval shape
+# (`api/events.ApprovalRequestEvent` documents exactly that discriminator). Beside the refusal
+# above because they are two sentences about one gate, and a surface shows them in sequence:
+# the refusal says why a step did not run, this says what to do about it.
+PLAN_APPROVAL_PROMPT: Final = (
+    "This plan is waiting for your decision. Approve it to let the agent carry out its "
+    "state-changing steps on the next request, or reject it and ask for a different approach."
+)
+
+
 # The name a consumer tells this gate's refusal by, once the refusal has left the process as a
 # `tool_failed` event. `api/events.ToolFailedEvent.reason` carries it; `evals/live.py` classifies on
 # it; `api/graph_stream._signal_event` stamps it.
