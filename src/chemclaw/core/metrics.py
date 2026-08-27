@@ -534,6 +534,19 @@ _GAUGES: dict[str, str] = {
     "chemclaw_pg_fleet_max_connections": (
         "Declared fleet-wide ceiling on Postgres connections (0 = none)."
     ),
+    # The calculation backend's admission budget (D-2026-08-27-a-per-worker-cap-is-not-a-backend-
+    # ceiling), the third pair of this shape. Unlike the two above, the left-hand side is *live*
+    # rather than configured, because the two kinds of process that dispatch there do not share a
+    # cap: a `calc` worker is bounded by `worker_max_concurrent_activities`, while that bundle's own
+    # MCP server pods dispatch straight from a tool call and are bounded by nothing local. Counting
+    # the sessions actually held is the only number that covers both, and `sum()` of it across pods
+    # is what `servers/calc` is being asked to serve right now.
+    "chemclaw_calc_requests_in_flight": (
+        "Calculation-backend sessions this process is currently holding open."
+    ),
+    "chemclaw_calc_backend_max_concurrent_requests": (
+        "Declared ceiling on concurrent calculation-backend requests (0 = none)."
+    ),
 }
 
 

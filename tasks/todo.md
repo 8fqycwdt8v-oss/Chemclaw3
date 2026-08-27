@@ -33,10 +33,10 @@ Every fix below either makes the machine enforce the claim or deletes the claim.
 
 ### Resilience
 
-- [ ] **BS-18 (medium)** No circuit breaker: the per-turn connector connect path never consults the
+- [x] **BS-18 (medium)** No circuit breaker: the per-turn connector connect path never consults the
       readiness state `/readyz` already computes, so every turn pays the full connect timeout
       against a connector known to be down.
-- [ ] **BS-07 (medium)** No admission control on the calc backend. Worker concurrency is capped per
+- [x] **BS-07 (medium)** No admission control on the calc backend. Worker concurrency is capped per
       worker; replica count multiplies it against one shared pod. The fleet-ceiling check already
       exists for LLM turns and the Postgres pool — extend it, don't invent a new mechanism.
 
@@ -151,3 +151,29 @@ unfixed code first. Three ADRs:
   send*: `CalcJobWorkflow` now reads the memo core already sets and the activity stamps it. The
   reaction labeller stays anonymous — `ingest` may not import `connectors` — and the ADR records
   what moving the builder into `core` would cost.
+
+**Chemclaw3, BS-18/07 (2026-08-27, resilience).** Both fixed, each with a test run against the
+unfixed tree first. Two ADRs:
+`D-2026-08-27-the-breaker-is-the-readiness-verdict-already-taken`,
+`D-2026-08-27-a-per-worker-cap-is-not-a-backend-ceiling`.
+
+- **BS-18.** The premise held exactly: `probe_connectors` had three consumers and the open path was
+  none of them, and the two halves could not see each other because the snapshot lives on
+  `app.state`. So the fix is a reader, not a mechanism — `connectors/reachability.py` is one dict,
+  a recorder and a predicate, in its own module only because `health → registry → transport` would
+  otherwise be a cycle. **Skip the dial outright rather than shrink the timeout**: a shrunk bound
+  still pays a handshake attempt per connector per turn and needs a second underivable number.
+  Recovery is two independent paths (the sweep records `healthy`; a verdict expires after
+  `connector_breaker_window_seconds`), because a breaker with one path back is an outage amplifier.
+  What a turn *reports* is unchanged — the degradation event and the counter still fire, since how
+  we found out is not the chemist's business.
+- **BS-07.** Extended the existing shape rather than inventing a third: same `Settings` validator,
+  same self-disabling `0`, same derived chart factor (`chemclaw.calcWorkerProcesses`). **The
+  runtime gauge had to be live rather than a configured capacity**, and that is a finding rather
+  than a preference: the `calc` bundle's own MCP server pods dispatch to the same backend straight
+  from a tool call with no per-process cap, so no product covers them —
+  `chemclaw_calc_requests_in_flight` counts held sessions and is the only number that sees both
+  halves. The shipped ceiling is `0` (inert) deliberately: it describes a pod in another release
+  whose CPU this chart cannot see, and a number invented here would be a guess shaped like a
+  statement. Settings live in `temporal.py`, not `calculators.py` — the calculation server reads
+  that section's names under the same env prefix.

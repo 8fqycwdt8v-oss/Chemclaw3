@@ -395,6 +395,21 @@ config:
   # `connectors.safety.url` name their siblings: whatever Service the sibling repo's chart gives
   # its `calc` server in this namespace.
   CHEMCLAW_CALC_SERVER_URL: "http://chemclaw3-mcp-calc:8860/mcp"
+  # What that server will serve concurrently — the right-hand side of a bound nothing computed
+  # (D-2026-08-27-a-per-worker-cap-is-not-a-backend-ceiling). Every calc worker process may run
+  # CHEMCLAW_WORKER_MAX_CONCURRENT_ACTIVITIES activities at once and each holds one session to that
+  # single pod, so what it is offered is that cap times `connectors.calc.workerReplicas` — and
+  # scaling that worker, an ordinary operational lever, multiplied CPU-bound load on it invisibly.
+  # Anything exceeding this fails `Settings` validation at startup, in every pod, naming both sides.
+  #
+  # **Shipped as 0 — undeclared, and therefore inert — deliberately.** The other two budgets ship a
+  # real number because both describe something this release provisions (its own replicas, the
+  # database it is given). This one describes the admission semaphore of a pod in *another* release
+  # (`Chemclaw3-mcp` `servers/calc`), whose CPU allocation this chart cannot see; a number invented
+  # here would be a guess wearing the shape of a statement. Set it to that server's own ceiling.
+  # The runtime half needs no declaration to be useful: `sum(chemclaw_calc_requests_in_flight)` is
+  # the live load, and it also counts the calc *server* pods' dispatches, which no product can.
+  CHEMCLAW_CALC_BACKEND_MAX_CONCURRENT_REQUESTS: "0"
   # Where the reaction labeller answers (`Chemclaw3-mcp`'s `rxnlabel`, port 8865). The same
   # argument as `CHEMCLAW_CALC_SERVER_URL` above and reached the same way — the code default is a
   # loopback address chosen for a dev process, and `durable/schedules.py` creates the

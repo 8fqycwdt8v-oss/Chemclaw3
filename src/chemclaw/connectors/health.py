@@ -15,6 +15,14 @@ A connector with no `health_url` is reported `unprobed`, not `healthy`. We contr
 and give them `/healthz`; a third-party MCP server may expose nothing, and guessing a path there
 would manufacture false alarms. `unprobed` is the truthful third state, and it is deliberately not
 counted as unhealthy.
+
+**And there is a fourth consumer now: the per-turn open path**
+(`D-2026-08-27-the-breaker-is-the-readiness-verdict-already-taken`). Every verdict this sweep
+reaches is recorded in `connectors.reachability`, which `connectors.transport` reads before
+dialling — so a connector this pod has just found unreachable does not cost
+`connector_open_timeout_seconds` again on the next turn. That memory lives in its own module rather
+than here because this one imports `connectors.registry`, which imports `connectors.transport`: a
+reader in the transport would close the cycle.
 """
 
 import asyncio
@@ -24,6 +32,7 @@ from typing import Literal
 import httpx
 from pydantic import BaseModel, ConfigDict
 
+from chemclaw.connectors.reachability import record_reachability
 from chemclaw.connectors.registry import enabled, health_url
 from chemclaw.core.config import settings
 
@@ -63,11 +72,17 @@ async def _probe(client: httpx.AsyncClient, name: str, url: str) -> ConnectorHea
     try:
         response = await client.get(url)
     except httpx.HTTPError as exc:
+        record_reachability(name, reachable=False)
         return ConnectorHealth(
             name=name, state="unreachable", detail=f"{type(exc).__name__}: {exc}"
         )
     if response.is_success:
+        # The readmission half of the breaker: this sweep runs every readiness probe, so a
+        # connector that came back is dialled again on the very next turn rather than waiting out
+        # `connector_breaker_window_seconds`.
+        record_reachability(name, reachable=True)
         return ConnectorHealth(name=name, state="healthy")
+    record_reachability(name, reachable=False)
     return ConnectorHealth(
         name=name, state="unreachable", detail=f"health check returned {response.status_code}"
     )

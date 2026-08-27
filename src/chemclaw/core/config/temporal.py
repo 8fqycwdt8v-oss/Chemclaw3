@@ -149,6 +149,41 @@ class TemporalSettings(BaseSettings):
     # ends, so its ceiling is about memory, not connections, and its chart entry says so.
     worker_max_concurrent_activities: int = Field(default=8, ge=1)
 
+    # **The two halves of the calculation backend's admission budget**
+    # (`D-2026-08-27-a-per-worker-cap-is-not-a-backend-ceiling`). Same shape as the fleet turn
+    # ceiling and the Postgres connection budget one subject over, and for the same reason: the cap
+    # that exists is per *process* — `worker_max_concurrent_activities` — while the thing being
+    # protected is a single shared pod, so `replicas × that cap` is what `servers/calc` actually
+    # sees and nothing computed it. Scaling the `calc` worker, an ordinary operational lever,
+    # multiplied concurrent CPU-bound load on that pod invisibly; `OMP_NUM_THREADS=1` is pinned
+    # there against intra-run contention, so the surplus arrives as thrashing, which trips
+    # heartbeat timeouts, whose retries land back on the same overloaded pod.
+    #
+    # **Declared here rather than in `calculators.py`**, beside the per-process cap they multiply:
+    # this is a budget for the *worker fleet*, and `tests/test_config.py` refuses a calculator
+    # field whose only reader is a config validator — for the sharp reason that the calculation
+    # server reads that section's names under the same env prefix.
+    #
+    # `calc_fleet_worker_processes` is how many worker processes may run `calc` activities at once
+    # — the chart derives it from that bundle's `workerReplicas`, so it is the same number
+    # Kubernetes obeys rather than a second copy of the topology. **0 is legal and means what it
+    # says**: a release with no `calc` worker Deployment dispatches nothing durably, and rendering
+    # a floor of 1 there would refuse a deployment over calculations it never makes.
+    #
+    # `calc_backend_max_concurrent_requests` is what that pod will serve, and it is a **provisioning
+    # statement**, not a preference: it belongs to the server's own admission semaphore
+    # (`Chemclaw3-mcp` `servers/calc`) and is declared here so a deployment that exceeds it fails
+    # `Settings()` in every pod, naming both sides, instead of finding out under load. 0 declares no
+    # ceiling, which makes the startup check and the alert inert — the same self-disabling
+    # convention the other two budgets use, and the reason a dev run needs neither.
+    #
+    # The check covers the *durable* half only, which is the half that can be derived. The `calc`
+    # bundle's own MCP server pods dispatch to the same backend from a tool call, with no
+    # per-process cap to multiply, so the runtime pair — `sum(chemclaw_calc_requests_in_flight)`
+    # against `chemclaw_calc_backend_max_concurrent_requests` — is what sees both.
+    calc_fleet_worker_processes: int = Field(default=1, ge=0)
+    calc_backend_max_concurrent_requests: int = Field(default=0, ge=0)
+
     @model_validator(mode="after")
     def _temporal_mtls_is_complete(self) -> Self:
         """A Temporal client cert without its key (or vice versa) is a silent half-config.

@@ -124,7 +124,7 @@ def _rendered_publish_path() -> str:
 
 
 def _rendered_derived_values() -> dict[str, str]:
-    """What the ConfigMap's two derived keys render to under the chart's own values.
+    """What the ConfigMap's derived keys render to under the chart's own values.
 
     The helper's logic is reproduced here, which is a duplication worth taking: the alternative is
     shelling out to `helm`, and this suite is the *offline* half that runs everywhere (the rendered
@@ -140,11 +140,19 @@ def _rendered_derived_values() -> dict[str, str]:
         if cfg.get("enabled") and cfg.get("server")
     }
     autoscaling = _VALUES["service"]["autoscaling"]
+    calc = _VALUES["connectors"]["calc"]
     return {
         "CHEMCLAW_NOTE_REPO_DIR": _VALUES["knowledge"]["noteRepoPath"],
         "CHEMCLAW_CONNECTOR_URLS": json.dumps(urls),
         "CHEMCLAW_SERVICE_FLEET_REPLICAS": str(
             autoscaling["maxReplicas"] if autoscaling["enabled"] else _VALUES["service"]["replicas"]
+        ),
+        # `0` when this release runs no calc worker: it then dispatches no durable calculation, and
+        # a rendered floor of 1 would refuse a deployment over work it never does.
+        "CHEMCLAW_CALC_FLEET_WORKER_PROCESSES": str(
+            calc.get("workerReplicas", calc.get("replicas"))
+            if calc.get("enabled") and calc.get("worker")
+            else 0
         ),
     }
 

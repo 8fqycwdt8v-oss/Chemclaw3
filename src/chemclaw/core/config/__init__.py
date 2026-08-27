@@ -202,6 +202,13 @@ class Settings(
           of its pods on the default 16 and the fleet ceiling was ~272 against the
           `max_connections=100` D-119 measured against. Same self-disabling convention: undeclared
           means inert.
+        - **A fleet dispatching more concurrent calculations than the backend will serve.** The
+          third instance of the same shape, one subject over again: the activity cap bounds one
+          worker process and `servers/calc` is a single shared pod, so scaling the `calc` worker
+          multiplied CPU-bound load on it with nothing named for the product. Same self-disabling
+          convention: undeclared means inert. The *durable* half only — the bundle's own server
+          pods dispatch there from a tool call with no per-process cap, which no product can see
+          and `chemclaw_calc_requests_in_flight` can.
         - **Mid-turn resume outliving the turn.** A resume wait longer than the turn deadline can
           never complete; it just burns the turn's remaining time holding an admission permit.
         - **Budgets enabled with every cap at zero.** `0` means unlimited for each cap, so this is
@@ -285,6 +292,20 @@ class Settings(
                     f"{self.pg_fleet_max_connections}. Lower pg_pool_max_size or the number of "
                     "pooled processes, or raise pg_fleet_max_connections if the server's "
                     "max_connections can serve it."
+                )
+        if self.calc_backend_max_concurrent_requests:
+            dispatched = self.calc_fleet_worker_processes * self.worker_max_concurrent_activities
+            if dispatched > self.calc_backend_max_concurrent_requests:
+                raise ValueError(
+                    f"this deployment may dispatch {dispatched} concurrent calculations "
+                    f"({self.calc_fleet_worker_processes} calc worker process(es) × "
+                    f"{self.worker_max_concurrent_activities} activities each) against a "
+                    f"calculation backend declaring "
+                    f"{self.calc_backend_max_concurrent_requests}. That backend pins "
+                    "OMP_NUM_THREADS=1 and is CPU-bound, so the surplus arrives as thrashing, then "
+                    "as heartbeat timeouts, then as retries onto the same pod. Lower "
+                    "worker_max_concurrent_activities or the calc worker replica count, or raise "
+                    "calc_backend_max_concurrent_requests if that server can serve it."
                 )
         if self.mid_turn_resume_enabled and (
             self.mid_turn_resume_timeout_seconds >= self.service_turn_timeout_seconds

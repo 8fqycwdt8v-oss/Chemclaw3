@@ -29,6 +29,7 @@ from _pytest.config import UsageError
 from _pytest.terminal import TerminalReporter
 
 from chemclaw.agent.authz import side_effecting_tools as _side_effecting_tools
+from chemclaw.connectors.reachability import forget_reachability as _forget_reachability
 from chemclaw.connectors.registry import discovered as _connectors_discovered
 from chemclaw.core.config import settings
 from chemclaw.ingest.eln.warehouse.connect import forget_open_warehouses as _forget_warehouses
@@ -133,6 +134,22 @@ def _fresh_discovery_caches() -> Iterator[None]:
     _templates_discovered.cache_clear()
     _sources_discovered.cache_clear()
     _side_effecting_tools.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def _fresh_connector_reachability() -> Iterator[None]:
+    """Forget the per-process connector reachability verdicts around every test.
+
+    `chemclaw.connectors.reachability` is what stops a turn dialling a connector this process just
+    found unreachable (`D-2026-08-27-the-breaker-is-the-readiness-verdict-already-taken`), and it is
+    module state for the same reason the pools and discovery caches are: it belongs to the process,
+    not to a request. In a test session that is exactly the hazard the two fixtures above exist for
+    — one test's dark connector would silently stop the *next* test's open from dialling at all, and
+    the failure would be order-dependent.
+    """
+    _forget_reachability()
+    yield
+    _forget_reachability()
 
 
 @pytest.fixture(autouse=True)
