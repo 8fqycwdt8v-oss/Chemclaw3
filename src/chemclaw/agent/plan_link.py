@@ -18,7 +18,7 @@ from typing import Any
 
 from langchain.agents.middleware import wrap_tool_call
 
-from chemclaw.agent.plan_gate import plan_identity
+from chemclaw.agent.plan_gate import plan_identity, rewrite_todos_in_batch
 from chemclaw.core.plan_context import reset_current_plan_link, set_current_plan_link
 
 
@@ -52,6 +52,17 @@ async def stamp_plan_link(request: Any, handler: Callable[[Any], Any]) -> Any:
     leaves `plan_identity` unchanged, and this middleware is why that stays trivially true: the
     link travels on a `contextvar`, not on the state.
 
+    **`request.state["todos"]` is the same pre-batch snapshot `enforce_plan_approval` had to work
+    around.** The canonical "tick the completed step, do the next one" batch carries a `write_todos`
+    status flip beside the tool call it pairs with — step N marked completed, step N+1 in_progress —
+    in the *same* assistant message, so `request.state` still shows step N as `in_progress` when
+    this runs. Stamping from it named the step that had just finished, not the one this call
+    actually serves. So this reads the batch's own rewrite first, the same way
+    `enforce_plan_approval` judges the call against the plan the batch *writes*
+    (`rewrite_todos_in_batch`/`plan_after_batch`), and falls back to `request.state` only when the
+    batch carries no answerable one — no rewrite in this batch, or one this call cannot make sense
+    of (two rewrites gathered concurrently, unparseable arguments).
+
     An absent `todos` key (a profile without the harness would not attach this at all; a subagent
     has the key stripped) binds the empty link rather than reaching for the checkpoint: the
     fallback would be one superstep stale, statusless, and a second answer to "what was the plan"
@@ -61,7 +72,10 @@ async def stamp_plan_link(request: Any, handler: Callable[[Any], Any]) -> Any:
     call's link into the next. This sits innermost in the governed chain — inside the plan gate —
     so a refused call never binds a link at all: nothing launched, nothing to stamp.
     """
-    todos = (request.state or {}).get("todos") or []
+    batch_todos = rewrite_todos_in_batch(request)
+    todos = (
+        batch_todos if isinstance(batch_todos, list) else (request.state or {}).get("todos") or []
+    )
     step, plan_hash = plan_link_from_todos(todos)
     token = set_current_plan_link(step, plan_hash)
     try:

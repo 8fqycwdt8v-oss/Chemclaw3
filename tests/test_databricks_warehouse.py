@@ -17,6 +17,7 @@ import asyncio
 import functools
 import json
 import logging
+import time
 from typing import Any
 
 import pytest
@@ -94,7 +95,9 @@ class _FakeClientModule:
     class OperationalError(Error):
         pass
 
-    def __init__(self, rows: list[dict[str, Any]] | None = None) -> None:
+    def __init__(
+        self, rows: list[dict[str, Any]] | None = None, connect_delay: float = 0.0
+    ) -> None:
         self.rows = [_Row(row) for row in (rows or [])]
         self.executed: list[tuple[str, list[Any]]] = []
         self.connect_options: dict[str, Any] = {}
@@ -103,8 +106,13 @@ class _FakeClientModule:
         # stopped or scaled to zero — so what a test needs to express is "this handle is dead now".
         self.raise_on_cursor: Exception | None = None
         self.connects = 0
+        # A real `connect()` is not instant. Zero by default; a concurrency test widens this so two
+        # `asyncio.to_thread`-dispatched calls have room to interleave on real worker threads.
+        self.connect_delay = connect_delay
 
     def connect(self, **options: Any) -> _FakeConnection:
+        if self.connect_delay:
+            time.sleep(self.connect_delay)
         self.connect_options = options
         self.connects += 1
         return _FakeConnection(self)
@@ -398,6 +406,32 @@ def test_a_dead_session_is_dropped_so_the_next_call_reconnects(
         async with warehouse.cursor() as cursor:
             await cursor.execute("SELECT 1", [])
         assert client.connects == 2, "the dead handle was kept and every later call reused it"
+
+    run()
+
+
+def test_concurrent_callers_share_one_connection_attempt(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Two overlapping `cursor()` calls on one warehouse must open exactly one session.
+
+    `open_warehouse` caches one `DatabricksWarehouse` per `connection:` block for the life of the
+    process precisely so overlapping chat turns/tool calls share a live session instead of each
+    opening a fresh one. Before the lock in `_connect`, two coroutines racing in from that shared
+    cache both saw `self._connection is None` — real concurrency, since `client.connect` runs in a
+    worker thread via `asyncio.to_thread` — and both connected, silently orphaning one (this driver
+    has no `close`, so the orphan lives until its own idle timeout).
+    """
+    client = _FakeClientModule(connect_delay=0.05)
+    _bind(monkeypatch, client)
+    warehouse = _warehouse()
+
+    @_sync
+    async def run() -> None:
+        async def one() -> None:
+            async with warehouse.cursor() as cursor:
+                await cursor.execute("SELECT 1", [])
+
+        await asyncio.gather(one(), one())
+        assert client.connects == 1, "two concurrent callers opened two sessions, not one"
 
     run()
 

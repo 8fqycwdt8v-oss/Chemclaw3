@@ -79,6 +79,38 @@ def test_electronic_properties_tool_returns_the_populated_result(
     assert server.count("compute_electronic_properties") == 1
 
 
+def test_the_two_binary_only_calculators_get_the_binary_s_own_wait_budget(
+    server: FakeCalcServer,
+) -> None:
+    """The client must wait as long as the binary-only calculators' own server-side budget.
+
+    `compute_atomic_descriptors`/`compute_surface_potential` are pinned to the `xtb` binary
+    regardless of `CHEMCLAW_XTB_ENGINE`, whose own server-side timeout can run to 3600 s —
+    `calc_server_timeout_seconds`'s default of 900 s would abandon a calculation the server is
+    still computing, and Temporal then retries the (retryable) activity, doubling the cost while
+    the first, orphaned run keeps burning CPU. See `calc_atomic_timeout_seconds`'s own docstring.
+
+    The fake server does not implement either tool's payload — that is not what this test is
+    about — so both calls are expected to fail; what is asserted is the session's own read bound,
+    which `install()` records before any tool is dispatched.
+    """
+    assert settings.calc_atomic_timeout_seconds >= settings.calc_server_timeout_seconds
+
+    async def _run() -> None:
+        for call in (
+            calc_tools.compute_atomic_descriptors,
+            calc_tools.compute_surface_potential,
+        ):
+            with pytest.raises(Exception):  # noqa: B017 - the fake server has no handler for either
+                await call("O")
+
+    asyncio.run(_run())
+    assert server.timeouts[-2:] == [
+        settings.calc_atomic_timeout_seconds,
+        settings.calc_atomic_timeout_seconds,
+    ]
+
+
 def test_a_second_fukui_mode_re_ranks_the_cached_result_rather_than_serving_the_first(
     server: FakeCalcServer, shared_store: InMemoryStore
 ) -> None:

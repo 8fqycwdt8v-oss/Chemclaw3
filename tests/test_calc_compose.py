@@ -601,6 +601,47 @@ def test_a_screen_that_cannot_distinguish_its_solvents_says_so(
     assert any("does not distinguish" in line for line in result.warnings)
 
 
+def test_a_reaction_energy_over_the_ceiling_refuses_before_it_computes_anything(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`reaction_energy` fans out over every reactant and product with no ceiling of its own.
+
+    Unlike every sibling composite in this module (species_ranking, refined_ensemble, ...), it had
+    no `require_within_budget` call at all — an unprivileged, non-`expensive` job could name an
+    arbitrarily long reactants/products list. The refusal must land before any species is computed.
+    """
+    server = install(monkeypatch, FakeCalcServer())
+    monkeypatch.setattr(calc_settings, "calc_max_primitive_calls", 1)
+
+    with pytest.raises(ValueError, match=r"would run \d+ calculations"):
+        _run(compose.reaction_energy(InMemoryStore(), *_ESTERIFICATION))
+
+    assert server.calls == [], "the refusal came after work had started"
+
+
+def test_a_solvent_screen_counts_species_times_media_against_the_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`solvent_comparison` bounded only *parallelism*; every solvent still ran eventually.
+
+    `calc_screen_max_parallel` throttles concurrency, not the total count — the same gap
+    `rank_species_across_solvents` closes by multiplying species by media before checking the
+    budget. A modest reaction (`_ESTERIFICATION`, 4 species) run across enough solvents must still
+    refuse, and refuse before any solvent's reaction energy is computed.
+    """
+    server = install(monkeypatch, FakeCalcServer())
+    monkeypatch.setattr(calc_settings, "calc_max_primitive_calls", 1)
+
+    with pytest.raises(ValueError, match=r"would run \d+ calculations"):
+        _run(
+            compose.solvent_comparison(
+                InMemoryStore(), *_ESTERIFICATION, ["water", "dmso", "acetonitrile"]
+            )
+        )
+
+    assert server.calls == [], "the refusal came after work had started"
+
+
 # --- what this system offers when a Hessian is out of reach --------------------------------
 
 
