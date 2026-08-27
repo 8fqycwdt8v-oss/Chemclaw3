@@ -33,6 +33,7 @@ from chemclaw.core.config import settings
 from chemclaw.durable.connector_job import failure_reason
 from chemclaw.kg.note import Note
 from chemclaw.kg.pr_gate import propose_note
+from chemclaw.kg.submission import SubmissionOutcome
 from tests.fakes import fed
 from tests.fakes_turn import Chunk, Piece, ScriptedTurn
 
@@ -458,9 +459,9 @@ def test_propose_note_deduplicates_dependencies_and_keeps_the_subject_first() ->
     captured: list[Any] = []
 
     class _Capturing:
-        async def submit(self, submission: Any) -> str:
+        async def submit(self, submission: Any) -> SubmissionOutcome:
             captured.append(submission)
-            return str(submission.branch)
+            return SubmissionOutcome(reference=str(submission.branch))
 
     subject = _agent_note("subject-note", "see [[dep-a]] and [[dep-b]]")
     dep_a = _agent_note("dep-a", "the first dependency")
@@ -488,9 +489,9 @@ def test_propose_note_honours_an_explicit_knowledge_directory() -> None:
     captured: list[Any] = []
 
     class _Capturing:
-        async def submit(self, submission: Any) -> str:
+        async def submit(self, submission: Any) -> SubmissionOutcome:
             captured.append(submission)
-            return str(submission.branch)
+            return SubmissionOutcome(reference=str(submission.branch))
 
     asyncio.run(
         propose_note(_agent_note("scoped-note", "body"), _Capturing(), knowledge_dir="elsewhere")

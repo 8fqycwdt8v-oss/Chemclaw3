@@ -32,15 +32,16 @@ must still point at a dedicated clone of the knowledge repo.
 import asyncio
 import contextlib
 import fcntl
+import hashlib
 import logging
 import shutil
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.kg.graph import invalidate_cache
-from chemclaw.kg.submission import NoteSubmission, NoteSubmitter
+from chemclaw.kg.submission import NoteSubmission, NoteSubmitter, SubmissionOutcome
 
 log = logging.getLogger(__name__)
 
@@ -53,6 +54,15 @@ _SUBMIT_LOCK = asyncio.Lock()
 # `rsync --delete` publishes only into the knowledge directory. `deploy/knowledge-sync.sh`
 # hard-codes this same relative path — the two are the same lock or they are no lock at all.
 _LOCK_FILE_NAME = "chemclaw-submit.lock"
+
+# The trailer every gate commit carries, and the guard that reads it. A proposal branch is the
+# gate's channel: replacing it wholesale is what a re-proposal *is*, and is safe exactly while
+# every commit on it is the gate's own. The moment a human pushes to `note/<id>` — a reviewer's
+# fixup — a force-push would discard work nobody chose to discard, so `_write_and_push` refuses
+# when the remote tip does not carry this trailer. (`--force-with-lease` could never make that
+# distinction: the lease is refreshed by the fetch each submission starts with, so it only guards
+# the fetch-to-push window, not the reviewer's commit that was already there.)
+_GATE_TRAILER = "Chemclaw-PR-Gate: submission"
 
 # Where a submission's private worktree lives, beside the lock file and for the same reason: it is
 # the one location inside the repository that no reader and no sync can see. A module constant
@@ -100,9 +110,11 @@ def _checkout_lock(repo_dir: str) -> Iterator[None]:
         try:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
-            raise GitSubmitError(
+            # Transient: the ordinary holder is the sync sidecar's publish tick or another
+            # in-flight submission, both of which release within seconds — a retry succeeds.
+            raise GitRemoteError(
                 f"note_repo_dir is in use by another process (submit lock {lock_path} "
-                "is held) — every process needs its own dedicated clone"
+                "is held); retrying after the holder releases it"
             ) from exc
         yield
     finally:
@@ -110,7 +122,7 @@ def _checkout_lock(repo_dir: str) -> Iterator[None]:
 
 
 class GitSubmitError(ChemclawError):
-    """A git command in the submission flow failed.
+    """The submission flow refused or failed in a way a retry cannot fix.
 
     A `ChemclawError`, so `agent.tool_authz.surface_domain_errors` shows the reason to the model.
     As a bare `RuntimeError` it did not, and the 2026-08-02 live run measured what that costs:
@@ -118,6 +130,23 @@ class GitSubmitError(ChemclawError):
     it retried five times permuting its *arguments* because nothing said the problem was elsewhere,
     and then printed the ungated document into the chat as a fallback. The PR-gate's failure mode
     was to publish without the gate.
+
+    **This name is registered non-retryable** (`durable.publish._BAD_DATA_TYPES`), so it is
+    raised only for the failures where that is true: a mis-pointed checkout, a path escaping the
+    tree, a proposal branch carrying commits this gate did not author. A dead remote, a timed-out
+    command or a contended lock is `GitRemoteError` below — the split this class used to not
+    have, which made `note_write_max_attempts` dead for exactly the failures it was configured
+    for: a 30-second network blip dropped a note from a synthesis batch on the first attempt
+    while three docstrings said it would be retried.
+    """
+
+
+class GitRemoteError(GitSubmitError):
+    """A transient failure — the remote, the network, or a lock another process holds.
+
+    A *subclass*, so every `except GitSubmitError` caller still catches it; a *different name*,
+    because Temporal's `non_retryable_error_types` matches by class name and the whole point is
+    that this one is not on the list. `note_publish_retry()`'s bound is what limits the retries.
     """
 
 
@@ -213,7 +242,7 @@ class GitNoteSubmitter:
         except TimeoutError as exc:
             process.kill()
             await process.wait()
-            raise GitSubmitError(
+            raise GitRemoteError(
                 f"git {' '.join(args)} timed out after {settings.git_command_timeout_seconds}s"
             ) from exc
         except asyncio.CancelledError:
@@ -224,11 +253,47 @@ class GitNoteSubmitter:
             raise
         return process.returncode or 0, stderr.decode().strip()
 
-    async def _git(self, *args: str, cwd: str | None = None) -> None:
-        """Run one git command, raising GitSubmitError on a non-zero exit."""
+    async def _git(self, *args: str, cwd: str | None = None, transient: bool = False) -> None:
+        """Run one git command, raising on a non-zero exit.
+
+        `transient=True` marks the commands whose ordinary failure is the *network's* — fetch and
+        push — so they raise the retryable `GitRemoteError`. Local operations (worktree, add,
+        commit, checkout) fail for structural reasons a retry replays identically, and keep the
+        non-retryable class.
+        """
         returncode, stderr = await self._run(*args, cwd=cwd)
         if returncode != 0:
-            raise GitSubmitError(f"git {' '.join(args)} failed: {stderr}")
+            error = GitRemoteError if transient else GitSubmitError
+            raise error(f"git {' '.join(args)} failed: {stderr}")
+
+    async def _read(self, *args: str) -> str | None:
+        """One git query's stdout, stripped — or `None` on a non-zero exit.
+
+        `_run` returns stderr because the write path only ever needs the error text; the tip
+        guard needs *answers* (a hash, a commit message), and reading them off stderr is how its
+        first draft compared two empty strings and concluded there was nothing to lose.
+        """
+        # A single argument is a ref to resolve; a full argv is run verbatim.
+        argv = args if len(args) > 1 else ("rev-parse", "--verify", "--quiet", args[0])
+        process = await asyncio.create_subprocess_exec(
+            "git",
+            "-C",
+            self._repo_dir,
+            *argv,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, _ = await asyncio.wait_for(
+                process.communicate(), timeout=settings.git_command_timeout_seconds
+            )
+        except TimeoutError as exc:
+            process.kill()
+            await process.wait()
+            raise GitRemoteError(f"git {' '.join(argv)} timed out") from exc
+        if process.returncode != 0:
+            return None
+        return stdout.decode().strip()
 
     def _contained_note_path(self, relative: str, workdir: Path) -> Path:
         """Resolve the note path inside `workdir` and refuse anything escaping it.
@@ -265,22 +330,69 @@ class GitNoteSubmitter:
         """
         return self._worktree_root() / branch.replace("/", "-")
 
-    async def submit(self, submission: NoteSubmission) -> str:
+    async def submit(self, submission: NoteSubmission) -> SubmissionOutcome:
         """Create the branch off the base, write+commit the note, and push it.
 
-        Returns the pushed branch name — the reference a reviewer turns into a PR.
-        If the note is byte-identical to what the base branch already contains,
-        the branch name is returned *without* a push: there is nothing new to
-        review, so no reviewable ref is (re)created. A `repo_dir` that is the
-        process's own checkout is refused up front (`_require_dedicated_checkout`)
+        Returns the pushed branch name — the reference a reviewer turns into a PR — with
+        `pushed=False` when the note is byte-identical to what the base branch already contains:
+        there is nothing new to review, so no reviewable ref is (re)created. A `repo_dir` that is
+        the process's own checkout is refused up front (`_require_dedicated_checkout`)
         — submissions force-push note branches to its origin and need a dedicated clone.
         """
         _require_dedicated_checkout(self._repo_dir)
         async with _SUBMIT_LOCK:
-            with _checkout_lock(self._repo_dir):
-                return await self._submit_locked(submission)
+            async with self._cluster_lock():
+                with _checkout_lock(self._repo_dir):
+                    return await self._submit_locked(submission)
 
-    async def _submit_locked(self, submission: NoteSubmission) -> str:
+    @contextlib.asynccontextmanager
+    async def _cluster_lock(self) -> AsyncIterator[None]:
+        """Serialize submissions to one remote across pods, via a Postgres advisory lock.
+
+        The `flock` below is host-local: each pod's clone lives in its own `emptyDir`, so N pods
+        held N independent locks against one origin, and two pods proposing the same note id
+        concurrently were last-writer-wins with no error. The database every durable deployment
+        already shares is the one mutual ground, so where it is configured
+        (`session_store="postgres"`), submissions take a session-level advisory lock keyed on the
+        remote URL for the duration of the submit. `pg_advisory_lock` *queues* rather than fails,
+        which is the right shape — a waiting pod waits exactly as long as the submission it would
+        otherwise have raced. The wait is bounded by the connection's statement timeout, and a
+        timeout raises the retryable `GitRemoteError`.
+
+        A memory-store deployment (the CLI, tests) is single-process by construction and skips it.
+        """
+        if settings.session_store != "postgres":
+            yield
+            return
+        from chemclaw.core import db
+
+        returncode, url = await self._run("config", "--get", f"remote.{self._remote}.url")
+        identity = url if returncode == 0 and url else f"{self._repo_dir}:{self._remote}"
+        key = int.from_bytes(hashlib.sha256(identity.encode()).digest()[:8], "big", signed=True)
+        # The acquisition failures are wrapped; the submission body's own exceptions are not —
+        # a broad handler around the `yield` would relabel a genuine submit error as a lock one.
+        connection_ctx = db.connection(settings.postgres_dsn)
+        try:
+            conn = await connection_ctx.__aenter__()
+        except Exception as exc:
+            raise GitRemoteError(
+                f"could not reach Postgres for the cluster submit lock: {exc}"
+            ) from exc
+        try:
+            try:
+                await conn.execute("SELECT pg_advisory_lock(%s)", (key,))
+            except Exception as exc:
+                raise GitRemoteError(f"could not take the cluster submit lock: {exc}") from exc
+            yield
+        finally:
+            # Best effort: the lock is session-scoped, so closing the connection releases it even
+            # when the explicit unlock cannot run.
+            with contextlib.suppress(Exception):
+                await conn.execute("SELECT pg_advisory_unlock(%s)", (key,))
+            with contextlib.suppress(Exception):
+                await connection_ctx.__aexit__(None, None, None)
+
+    async def _submit_locked(self, submission: NoteSubmission) -> SubmissionOutcome:
         """The submission body, called with both the in-process and OS locks held.
 
         The note branch is checked out into a worktree under `.git/`, which no reader is ever
@@ -292,7 +404,18 @@ class GitNoteSubmitter:
         The two steps before the worktree is created are the ones that make this safe to deploy
         into a repository that has already been through the old behaviour.
         """
-        await self._git("fetch", self._remote, self._base)
+        await self._git("fetch", self._remote, self._base, transient=True)
+        # The note branch too, *here* — before anything is written — so the remote-tracking ref
+        # the push's `--force-with-lease` reads is the state of the world this submission started
+        # from. It used to be fetched one line above the push, which set the lease to "whatever
+        # is on the remote right now" and made it a plain `--force` wearing the safe flag's name.
+        # Absence is tolerated: the first submission of a note has no remote branch yet.
+        await self._run(
+            "fetch",
+            self._remote,
+            f"+refs/heads/{submission.branch}:refs/remotes/{self._remote}/{submission.branch}",
+        )
+        await self._require_gate_authored_tip(submission.branch)
         await self._repair_parked_checkout()
         await self._sweep_leftover_worktrees()
         workdir = self._workdir_for(submission.branch)
@@ -308,6 +431,37 @@ class GitNoteSubmitter:
             return await self._write_and_push(submission, workdir)
         finally:
             await self._release_worktree(workdir)
+
+    async def _require_gate_authored_tip(self, branch: str) -> None:
+        """Refuse to replace a proposal branch whose tip this gate did not mint.
+
+        A re-proposal force-pushes `note/<id>`, which is safe exactly while every commit there is
+        the gate's own — and every gate commit carries `_GATE_TRAILER` for this check to read. A
+        tip without it means a human pushed to the proposal branch (a reviewer's fixup is the
+        ordinary case), and discarding their commit silently inside a PR titled as a proposal is
+        the one thing this flow must never do. Non-retryable on purpose: the identical retry
+        would meet the identical foreign commit; resolving it is a decision on the branch, not a
+        second attempt.
+
+        A branch that does not exist on the remote, or whose tip is the base tip, passes — there
+        is nothing there to lose.
+        """
+        ref = f"refs/remotes/{self._remote}/{branch}"
+        branch_tip = await self._read(ref)
+        if branch_tip is None:
+            return
+        base_tip = await self._read(f"refs/remotes/{self._remote}/{self._base}")
+        if base_tip is not None and branch_tip == base_tip:
+            return
+        # `%(trailers…)` would be cleaner, but the message body is what the gate writes and what
+        # survives hosts that rewrite committer identity; a substring over one commit is enough.
+        message = await self._read("log", "-1", "--format=%B", ref)
+        if message is None or _GATE_TRAILER not in message:
+            raise GitSubmitError(
+                f"the remote branch {branch!r} carries a commit this gate did not author — "
+                "someone pushed to the proposal branch, and replacing it would discard their "
+                "work. Resolve the branch in the git host (merge or delete it), then re-propose."
+            )
 
     async def _repair_parked_checkout(self) -> None:
         """Move the shared tree off a `note/` branch a previous version left it on.
@@ -434,7 +588,7 @@ class GitNoteSubmitter:
         shutil.rmtree(workdir, ignore_errors=True)
         await self._run("worktree", "prune", "--expire", "now")
 
-    async def _write_and_push(self, submission: NoteSubmission, workdir: Path) -> str:
+    async def _write_and_push(self, submission: NoteSubmission, workdir: Path) -> SubmissionOutcome:
         """Write the submission's files into its worktree, commit, and push the branch.
 
         Every git command here runs with `-C <workdir>`. Objects, remote-tracking refs and config
@@ -452,34 +606,50 @@ class GitNoteSubmitter:
         # Every file in the submission, not just the subject note: a note and the notes its links
         # depend on land together or the links dangle (STO-7, see `NoteSubmission`). Each path is
         # containment-checked independently — a dependency is no more trusted than the note.
+        # A file marked `overwrite=False` (a machine-rendered dependency) is written only when the
+        # base branch has none: `NoteFile` says why an unconditional write silently reverted a
+        # human's post-merge edits.
+        written: list[str] = []
         for file in submission.files:
             note_path = self._contained_note_path(file.path, workdir)
+            if not file.overwrite and note_path.exists():
+                continue
             note_path.parent.mkdir(parents=True, exist_ok=True)
             note_path.write_text(file.content, encoding="utf-8")
+            written.append(file.path)
+        if not written:
+            return SubmissionOutcome(reference=submission.branch, pushed=False)
         # `--` ends option parsing before the note paths: `_contained_note_path` only checks
         # containment, and a leading-dash relative path (e.g. `-x`) resolves *inside* the worktree
         # and would otherwise reach git as an option rather than a pathspec.
-        await self._git("add", "--", *(file.path for file in submission.files), cwd=work)
+        await self._git("add", "--", *written, cwd=work)
         # Idempotent: if the note is byte-identical to what the base already has,
         # there is nothing to commit — re-proposing it is a no-op, not an error.
         returncode, _ = await self._run("diff", "--cached", "--quiet", cwd=work)
         if returncode == 0:
-            return submission.branch
-        await self._git("commit", "-m", submission.title, cwd=work)
-        # `--force-with-lease` needs a fresh remote-tracking ref: in a fresh
-        # clone that never fetched the note branch, the lease is "stale" and
-        # git rejects the push. Fetch it first, tolerating absence (first
-        # submission of this note has no remote branch yet).
-        await self._run(
-            "fetch",
-            self._remote,
-            f"+refs/heads/{submission.branch}:refs/remotes/{self._remote}/{submission.branch}",
-            cwd=work,
-        )
-        await self._git(
+            return SubmissionOutcome(reference=submission.branch, pushed=False)
+        # The trailer is what `_require_gate_authored_tip` reads on the next re-proposal to tell
+        # this gate's own tip from a human's commit on the branch.
+        await self._git("commit", "-m", submission.title, "-m", _GATE_TRAILER, cwd=work)
+        # The lease was fetched at the start of `_submit_locked`, before anything was written, so
+        # it protects the whole read-decide-push window: a push that lands on the remote between
+        # our fetch and this line fails the lease instead of being clobbered.
+        returncode, stderr = await self._run(
             "push", "--force-with-lease", "-u", self._remote, submission.branch, cwd=work
         )
-        return submission.branch
+        if returncode != 0:
+            if "stale info" in stderr or "[rejected]" in stderr:
+                # The remote moved during the submission window. Transient in the mechanical
+                # sense — but a blind retry would fetch the mover's commit as its new lease and
+                # overwrite it, so this goes through the *tip guard* instead: the retryable error
+                # here re-runs the submission from the top, where `_require_gate_authored_tip`
+                # decides whether what landed is the gate's own (safe to replace) or a human's
+                # (refused with instructions).
+                raise GitRemoteError(
+                    f"the remote moved while submitting {submission.branch!r}: {stderr}"
+                )
+            raise GitRemoteError(f"git push {submission.branch} failed: {stderr}")
+        return SubmissionOutcome(reference=submission.branch)
 
 
 def default_submitter() -> NoteSubmitter:

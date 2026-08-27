@@ -26,10 +26,18 @@ from chemclaw.kg.render import render_note
 from chemclaw.kg.submission import NoteFile, NoteSubmission, NoteSubmitter
 
 
-def _note_file(note: Note, directory: str) -> NoteFile:
-    """Where one note lands in the knowledge tree, and what is written there."""
+def _note_file(note: Note, directory: str, *, overwrite: bool = True) -> NoteFile:
+    """Where one note lands in the knowledge tree, and what is written there.
+
+    Dependencies come through with `overwrite=False`: they are re-rendered from source data on
+    every proposal that links them, and an unconditional write silently reverted a chemist's
+    post-merge edits to a compound note inside a PR titled as an addition (`NoteFile` carries
+    the full argument).
+    """
     return NoteFile(
-        path=f"{directory}/{note_relative_path(note.type, note.id)}", content=render_note(note)
+        path=f"{directory}/{note_relative_path(note.type, note.id)}",
+        content=render_note(note),
+        overwrite=overwrite,
     )
 
 
@@ -52,7 +60,7 @@ def _build_submission(
         if dependency.id in seen:
             continue
         seen.add(dependency.id)
-        files.append(_note_file(dependency, directory))
+        files.append(_note_file(dependency, directory, overwrite=False))
 
     extra = f" with {len(files) - 1} supporting note(s)" if len(files) > 1 else ""
     return NoteSubmission(
@@ -124,7 +132,7 @@ async def propose_note(
         correlation_id=correlation_id,
     )
     try:
-        reference = await submitter.submit(submission)
+        outcome = await submitter.submit(submission)
     except Exception as exc:
         # A submission that never reached git is the case `chemclaw_notes_publish_failures_total`
         # made countable and still left unrecoverable: the note itself was gone, with nothing to
@@ -141,6 +149,12 @@ async def propose_note(
         failure = proposal.model_copy(update={"reason": reason})
         await record_proposal_failed(failure)
         raise
+    if not outcome.pushed:
+        # Nothing reached the branch — the note is byte-identical to what the base already holds.
+        # No metric (its comment says "a note reached the branch", which would be false) and no
+        # open record: the review queue must not show an item whose reference points at a branch
+        # that may not exist.
+        return outcome.reference
     # Counted after the submitter returns, so the number means "a note reached the branch", not "we
     # tried". A failing submitter raises, and a metric incremented before it would have reported a
     # healthy PR-gate while every write was failing — which is the exact condition this counter was
@@ -148,5 +162,5 @@ async def propose_note(
     record_metric(lambda m: m.increment("chemclaw_notes_proposed_total"))
     # Never raises: the note has already reached the branch, and losing the record must not undo
     # the thing the record is about.
-    await record_proposal_submitted(proposal.model_copy(update={"reference": reference}))
-    return reference
+    await record_proposal_submitted(proposal.model_copy(update={"reference": outcome.reference}))
+    return outcome.reference

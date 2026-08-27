@@ -183,3 +183,27 @@ def test_every_file_of_a_multi_file_submission_round_trips_through_the_column() 
         assert refreshed.dependencies[0].content == "the compound v2"
 
     asyncio.run(_run())
+
+
+def test_a_changed_reproposal_supersedes_the_open_predecessor_in_sql() -> None:
+    """The Postgres mirror of the in-memory rule: one open row per note (D-2026-08-27)."""
+
+    async def _run() -> None:
+        store = await _store_or_skip()
+        first_id = await store.upsert(_proposal("pg-superseded", content="v1"))
+        second_id = await store.upsert(_proposal("pg-superseded", content="v2"))
+        assert second_id != first_id
+
+        old = await store.read(first_id)
+        assert old is not None and old.state is ProposalState.SUPERSEDED
+        new = await store.read(second_id)
+        assert new is not None and new.state is ProposalState.OPEN
+
+        # The webhook moves only the live version.
+        assert await store.mark_merged(["pg-superseded"], "webhook") == 1
+        merged = await store.read(second_id)
+        assert merged is not None and merged.state is ProposalState.MERGED
+        untouched = await store.read(first_id)
+        assert untouched is not None and untouched.state is ProposalState.SUPERSEDED
+
+    asyncio.run(_run())

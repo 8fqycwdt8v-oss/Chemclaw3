@@ -81,6 +81,16 @@ _SELECT_MANY = f"""
 
 _SELECT_ONE = f"SELECT {_COLUMNS} FROM note_proposals WHERE id = %s"
 
+# A freshly-upserted version closes the note's previous open versions (migration 057 says why).
+# Scoped by id rather than content hash so the statement is correct on the refresh path too — the
+# row the upsert just returned must never supersede itself.
+_SUPERSEDE_OLDER = """
+    UPDATE note_proposals
+       SET state = 'superseded',
+           reason = 'superseded by a newer proposed version of this note'
+     WHERE note_id = %s AND state = 'open' AND id <> %s
+"""
+
 # `state = 'open'` in the predicate is the concurrency control, not a courtesy: two reviewers
 # deciding at once means the second `UPDATE` matches no row and returns nothing, so the caller
 # learns the decision was already taken instead of overwriting it.
@@ -171,6 +181,10 @@ class PostgresProposalStore:
                 ),
             )
             row = await cursor.fetchone()
+            # Only a live open version closes its predecessors — a `failed` record must not push
+            # an older, genuinely reviewable version out of the queue.
+            if row is not None and proposal.state is ProposalState.OPEN:
+                await cursor.execute(_SUPERSEDE_OLDER, (proposal.note_id, int(row["id"])))
             await conn.commit()
         return int(row["id"]) if row is not None else 0
 

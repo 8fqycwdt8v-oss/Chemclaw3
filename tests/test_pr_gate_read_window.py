@@ -141,7 +141,7 @@ def test_a_reader_never_sees_the_note_at_any_point_during_the_submission(
             _sample()
 
     monkeypatch.setattr(submitter, "_run", _sampling_run)
-    assert asyncio.run(submitter.submit(_submission())) == "note/agent-proposal"
+    assert asyncio.run(submitter.submit(_submission())).reference == "note/agent-proposal"
 
     assert "merged-note" in seen_ids, "the reader saw nothing at all; the sampling is broken"
     assert "agent-proposal" not in seen_ids
@@ -189,7 +189,10 @@ def test_a_leftover_worktree_from_a_crash_is_swept_and_the_note_can_be_repropose
     visible = {note.id for note in load_notes(knowledge_clone / "knowledge")}
     assert visible == {"merged-note"}, "a leftover worktree must not be visible to a reader"
 
-    assert asyncio.run(_submitter(knowledge_clone).submit(_submission())) == "note/agent-proposal"
+    assert (
+        asyncio.run(_submitter(knowledge_clone).submit(_submission())).reference
+        == "note/agent-proposal"
+    )
     assert not list((knowledge_clone / ".git" / "chemclaw-worktrees").iterdir())
 
 
@@ -221,7 +224,7 @@ def test_a_failing_worktree_cleanup_does_not_destroy_a_pushed_submission(
 
     monkeypatch.setattr(submitter, "_remove_worktree", _boom)
 
-    assert asyncio.run(submitter.submit(_submission())) == "note/agent-proposal"
+    assert asyncio.run(submitter.submit(_submission())).reference == "note/agent-proposal"
     assert _push_succeeded(knowledge_clone, "note/agent-proposal")
 
 
