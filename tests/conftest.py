@@ -244,6 +244,12 @@ def _apply_timeout_scale(config: pytest.Config, items: list[pytest.Item]) -> Non
         item.add_marker(pytest.mark.timeout(seconds * scale, **kwargs), append=False)
 
 
+# The `tests/temporal_env.py` helpers whose presence in a module means "this can wait on a
+# broker". Named as a tuple so adding a third starter is one entry rather than a second
+# `hasattr` somebody has to remember.
+_ENV_STARTERS = ("start_env_or_skip", "start_local_env_or_skip")
+
+
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
     """Give Temporal-backed tests a `thread`-method timeout, because `signal` cannot reach them.
 
@@ -264,14 +270,18 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     failure in three minutes.
 
     Selected by module rather than by marker so a new Temporal test is covered the day it is
-    written: importing `start_env_or_skip` is what makes a module able to hang this way.
+    written: importing one of `tests/temporal_env.py`'s starters is what makes a module able to
+    hang this way. **Both** of them — the real-time `start_local_env_or_skip` was added for the
+    tests that drive terminate, eviction and an unserved queue, and those are precisely the ones
+    that can wait forever on a broker, so a check naming only the time-skipping starter would have
+    left the newest hang-capable module uncovered.
 
     `PYTEST_TIMEOUT_SCALE` is applied last, after that marker exists, so the scaled replacement
     can carry `method="thread"` forward.
     """
     for item in items:
         module = getattr(item, "module", None)
-        if module is not None and hasattr(module, "start_env_or_skip"):
+        if module is not None and any(hasattr(module, name) for name in _ENV_STARTERS):
             item.add_marker(pytest.mark.timeout(method="thread"))
     _apply_timeout_scale(config, items)
 
