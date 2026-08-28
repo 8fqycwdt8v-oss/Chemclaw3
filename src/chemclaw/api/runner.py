@@ -1030,8 +1030,10 @@ def _settle_outcome(ledger: _TurnLedger) -> str:
     Ranking `answered` first would make `loop_capped` unreachable, which is the same collapse
     `turn_costs.completed` already performed.
 
-    `abandoned` is the floor: the turn reached neither an answer nor any of the named endings, which
-    is what a teardown outside the cancellation clause leaves behind.
+    `empty_answer` is the floor, not `abandoned`: every route to `abandoned` passes through the
+    cancellation flag, so a teardown *outside* that clause — which is what an ordinary silent death
+    is — lands on `empty_answer`. The docstring said the opposite for as long as the two were
+    decided by the prose rather than by the flag.
     """
     if ledger.error_code:
         return "errored"
@@ -1048,12 +1050,25 @@ def _settle_outcome(ledger: _TurnLedger) -> str:
         return "timed_out"
     if ledger.loop_capped:
         return "loop_capped"
-    if not ledger.answer_text.strip():
-        # The same absence, told apart by whether anyone was still reading: a turn cut short with
-        # nothing to show is `abandoned`, while one that ran to its own end and said nothing is the
-        # silent death `empty_answer` names.
-        return "abandoned" if ledger.cancelled else "empty_answer"
-    return "answered"
+    # **`ledger.answered`, not "some prose was emitted", and the difference is a billing fact.**
+    # The flag is set at exactly one place — immediately before `yield answer` — so it means an
+    # `AnswerEvent` was built and delivered. Testing `answer_text` instead is strictly weaker: a
+    # turn Stopped one token into its answer has prose and no `AnswerEvent`, and booked
+    # `outcome="answered"` and therefore `completed=True`, billed as a delivered answer, while the
+    # same teardown logged "torn down before it answered" one line away. `_empty_answer_event`
+    # returns *before* the flag for the same reason, and its comment records the previous time this
+    # exact substitution was made ("the cost ledger booked 'the user got an answer for the money'
+    # for precisely the silent-death turn that branch exists to name").
+    #
+    # The disconnect-after-answer case this ordering was written for still lands on `answered`:
+    # the flag is set before the yield, and the cancellation that reaches a finished turn is
+    # delivered *while suspended in that yield*.
+    if ledger.answered:
+        return "answered"
+    # The same absence, told apart by whether anyone was still reading: a turn cut short before it
+    # could answer is `abandoned`, while one that ran to its own end and said nothing is the silent
+    # death `empty_answer` names.
+    return "abandoned" if ledger.cancelled else "empty_answer"
 
 
 def _deadline_passed(deadline: float | None) -> bool:

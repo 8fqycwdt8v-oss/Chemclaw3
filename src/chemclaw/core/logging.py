@@ -849,10 +849,30 @@ _STRUCTURAL_SECRETS: tuple["re.Pattern[str]", ...] = (
     # what an environment dump, an `os.environ` repr and a `docker run -e` line all look like, and
     # it cannot fire on prose. Deliberately does not require a digit: an operator-chosen password
     # need not have one, and the casing plus the `=` carries the specificity here.
+    # **One greedy run behind a lookahead, and that shape is the whole point.** The first version of
+    # this rule spelled the identifier as `[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*`, which is two nested
+    # quantifiers over the same alphabet: on input like `AAAAAAAA_TOKEN` repeated, the engine can
+    # split a run between them in exponentially many ways and backtracks through all of them.
+    # Measured, 2x the input cost 4x the time — 10 KB in 0.13 s, 40 KB in 2.2 s, 160 KB in 35.8 s —
+    # and this is reachable *unauthenticated*: uvicorn's access log renders the raw request line,
+    # `_` and uppercase are legal in a path, and a 60 KB line held the stdlib logging lock for
+    # 5.22 s. That is the same incident this module already records at `_NOT_MID_TOKEN`, made new.
+    #
+    # The lookahead asserts a credential word is somewhere in the next bounded run; the capture is
+    # then a single greedy `[A-Z][A-Z0-9_]*`, which has one way to match and cannot backtrack into
+    # itself. Measured on the same input: 160 KB in 0.0081 s, linear. It also fixes a miss the old
+    # form had — `[A-Z][A-Z0-9]*` required a character *before* the credential word, so the bare
+    # `PASSWORD=` and `TOKEN=` spellings, the most common shape of all, never matched.
+    #
+    # `(?![A-Z0-9_]*(?:S|_COUNT|_LIMIT|_BUDGET|_ENV)\b)` is not used, and a digits-only value is
+    # excluded instead: `MAX_TOKENS=40960000` and `PROMPT_TOKENS: 12345678` are token *accounting*,
+    # which is the number this whole change exists to make visible, and redacting it would be this
+    # rule eating the thing it was shipped beside.
     re.compile(
-        r"(?P<keep>\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*"
-        r"_?(?:SECRET|TOKEN|PASSWORD|PASSWD|APIKEY|CREDENTIAL)"
-        r"[A-Z0-9_]*[\"']?\s*[=:]\s*[\"']?)" + _OPAQUE + r"{8,255}"
+        r"(?<![A-Za-z0-9_])"
+        r"(?=[A-Z0-9_]{0,128}?(?:SECRET|TOKEN|PASSWORD|PASSWD|APIKEY|CREDENTIAL))"
+        r"(?P<keep>[A-Z][A-Z0-9_]*[\"']?\s*[=:]\s*[\"']?)"
+        r"(?![0-9]{1,255}(?![A-Za-z0-9_\-]))" + _OPAQUE + r"{8,255}"
     ),
     # Two vendor-issued shapes whose prefix *is* the anchor, so neither needs a key name beside it:
     # AWS access-key ids and Slack tokens. Both are minted elsewhere and pasted into environments
@@ -1165,9 +1185,16 @@ class SecretRedactingFilter(logging.Filter):
         # install its own formatter, and redaction must not be something a formatting choice can
         # switch off" — that guarantee did not hold for this one field.
         #
-        # Strings only. A non-string extra is rendered by `json.dumps(default=str)` downstream, and
-        # walking arbitrary nested structures per record is work this hot path cannot afford; the
-        # rendered form is swept by the formatter's own fallback pass instead.
+        # Strings only, here. A non-string extra is redacted where it is *rendered* rather than
+        # here — see `JsonFormatter.format` — because walking an arbitrary nested structure per
+        # record is work this hot path cannot afford, and because the thing that must be scrubbed
+        # is the text that actually reaches the stream, which does not exist until `json.dumps`
+        # has run `default=str` over it.
+        #
+        # This comment used to say the formatter's *fallback* pass covered them. It did not, twice
+        # over: the fallback only ran when the sentinel was unset, and it also tested `isinstance`.
+        # Measured, a `{"dsn": "postgresql://u:...@h/db"}` extra, a list holding one, and an
+        # exception whose message held one were all emitted verbatim.
         for key, value in structured_fields(record).items():
             if isinstance(value, str):
                 redacted = redact_secrets(value, self._connector_token_envs)
@@ -1285,6 +1312,41 @@ class ContextFilter(logging.Filter):
         return True
 
 
+def _redacted_field(value: object, swept: bool) -> object:
+    """One `extra=` value, scrubbed in whatever form it will actually be written in.
+
+    A string the filter has already swept is passed through — that is what `swept` buys, and the
+    ~27 us per record it saves is why the sentinel exists. Anything else is *rendered first* and
+    scrubbed after, because a credential inside a dict, a list or an exception is not reachable by
+    a string check and is very much reachable by `json.dumps(default=str)`: measured, all three
+    forms reached the stream intact while this module's comment said the formatter covered them.
+
+    Rendering here rather than walking the structure in the filter is deliberate. A walk has to
+    decide how deep to go and what to do about cycles, keys, tuples and objects with a hostile
+    `__repr__`, on the logging hot path, per record — and it would still be scrubbing a form that
+    is not the one written out. `json.dumps` already does exactly that traversal once, for the
+    purpose of writing it, so the redaction goes where the text is.
+
+    The rendered value is returned as a **string** when it had to be rendered, so what the log
+    stack receives is what was scrubbed. A structure that survives redaction unchanged is returned
+    as itself, keeping the nested shape a query can index for the overwhelmingly common case.
+    """
+    if isinstance(value, str):
+        return value if swept else redact_secrets(value)
+    try:
+        rendered = json.dumps(value, default=str)
+    except (TypeError, ValueError):
+        # A value `json.dumps` cannot render at all — a cycle, or a `default=str` that raises.
+        # `repr` is what the payload dump would have fallen back to anyway, and it must not be the
+        # one field that escapes the sweep.
+        rendered = redact_secrets(repr(value))
+        return rendered
+    scrubbed = redact_secrets(rendered)
+    if scrubbed == rendered:
+        return value
+    return scrubbed
+
+
 class JsonFormatter(logging.Formatter):
     """One JSON object per line, so a log stack parses rather than guesses.
 
@@ -1340,14 +1402,9 @@ class JsonFormatter(logging.Formatter):
         # would otherwise rewrite the severity a log stack routes on.
         fields = structured_fields(record)
         if fields:
-            payload["fields"] = (
-                fields
-                if swept
-                else {
-                    key: redact_secrets(value) if isinstance(value, str) else value
-                    for key, value in fields.items()
-                }
-            )
+            payload["fields"] = {
+                key: _redacted_field(value, swept) for key, value in fields.items()
+            }
         if record.exc_text:
             payload["exception"] = record.exc_text
         elif record.exc_info:

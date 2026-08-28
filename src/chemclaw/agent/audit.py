@@ -133,6 +133,32 @@ def refusal_reason(exc: BaseException) -> str | None:
     return None
 
 
+# What an unregistered tool name becomes on a metric label. One bucket, not one series per string.
+UNKNOWN_TOOL = "unknown"
+
+
+def metric_tool_name(request: Any, name: str) -> str:
+    """The tool name safe to use as a metric label — the registered one, or a fixed bucket.
+
+    **`name` is the model's string, and a metric label must not be.** `ToolNode` invokes this chain
+    for a name the graph does not hold — `_served_by` records that it passes `tool=None` there
+    deliberately, so an interceptor can short-circuit an unregistered call — so the raw name
+    reaching `/metrics` mints one time series per string a model invents. Measured on a compiled
+    graph: a single hallucinated call created `chemclaw_tool_calls_total{tool="totally_made_up_…"}`
+    *and* a full fourteen-bucket histogram, and driven directly the label accepted 230 characters of
+    arbitrary text. Model output is attacker-influenceable here — that is the whole reason this tree
+    carries `frame_untrusted` — so an injected document could grow the registry until the pod died.
+
+    The registered tool's **own** name is used rather than the caller's, so the label cannot differ
+    from it by case, whitespace or an invisible character while still resolving.
+
+    The audit *row* keeps the model's raw string (truncated), because what the model actually asked
+    for is the forensic fact; it is only the unbounded *label* that is refused.
+    """
+    registered = getattr(getattr(request, "tool", None), "name", None)
+    return registered if isinstance(registered, str) and registered else UNKNOWN_TOOL
+
+
 def _observe_tool_latency(name: str, elapsed_ms: float) -> None:
     """Record one tool call's duration in the process histogram, under the tool's own name.
 
@@ -144,8 +170,11 @@ def _observe_tool_latency(name: str, elapsed_ms: float) -> None:
     **Labelled by tool, which it was not.** One distribution pooled a minutes-long xTB call through
     the calc connector with a sub-millisecond `read_attachment`, so per-tool p95 — the single most
     useful number for "why is this turn slow", and the question this histogram's own docstring says
-    it exists to answer — could not be read off it. The label space is the registered tool surface,
-    which is bounded by configuration rather than by anything a caller sends.
+    it exists to answer — could not be read off it.
+
+    `name` here is already clamped by `metric_tool_name`; this docstring used to claim the label
+    space "is bounded by configuration rather than by anything a caller sends", which was the
+    assumption rather than the code — see that function for what it actually was.
     """
     record_metric(
         lambda metrics: metrics.observe(
@@ -449,6 +478,7 @@ def make_audit_middleware(
             revision=revision,
             tool_revision=_served_by(request),
             plan_step=_plan_step(request),
+            metric_name=metric_tool_name(request, request.tool_call["name"]),
         ) as recorded:
             result = await handler(request)
             recorded.result = getattr(result, "content", result)
@@ -491,6 +521,7 @@ async def _recording(
     revision: str,
     tool_revision: str = "",
     plan_step: str = "",
+    metric_name: str = "",
 ) -> AsyncIterator[_Recorded]:
     """The trail itself, with no framework in it — both engines' middlewares are wrappers.
 
@@ -561,8 +592,13 @@ async def _recording(
         span.set_attribute("outcome", outcome)
         if outcome in ("error", "cancelled") and detail:
             span.failed(detail)
-        _observe_tool_latency(name, elapsed_ms)
-        _count_outcome(name, outcome, reason)
+        # The clamped name for the two metrics, the model's own for the span and the row: a label
+        # is a cardinality decision and an attribute is not. Passed in rather than derived here,
+        # because deriving it needs `request` and this function's whole point is that no library
+        # object crosses into it — `tool_revision` is passed for the same reason.
+        labelled = metric_name or name
+        _observe_tool_latency(labelled, elapsed_ms)
+        _count_outcome(labelled, outcome, reason)
         return elapsed_ms
 
     recorded = _Recorded()

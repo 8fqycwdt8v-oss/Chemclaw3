@@ -26,7 +26,7 @@ from chemclaw.core.tool_registry import tool
 from chemclaw.ingest.eln.records import default_record_store
 from chemclaw.ingest.sources.registry import active_retrieve_sources
 from chemclaw.retrieval.evidence import EvidenceChunk, EvidenceSweep, SourceRetriever
-from chemclaw.retrieval.fanout import sweep_sources
+from chemclaw.retrieval.fanout import record_kept_chunks, sweep_sources
 from chemclaw.retrieval.hybrid import reciprocal_rank_fusion
 from chemclaw.retrieval.retrievers import FingerprintReactionRetriever
 from chemclaw.science.fingerprints.store import default_reaction_store
@@ -293,6 +293,14 @@ async def gather_evidence(
         for chunk in ranked
     ]
     kept, truncated_by = _within_budget(framed)
+    # The *surviving* count, which is the half `chemclaw_evidence_source_chunks_total` cannot see:
+    # that one is recorded inside `sweep_sources`, before RRF, before the interleave and before the
+    # budget cap. `D-2026-08-01-a-cap-that-starves-a-source` measured survivors (graph 38, lexical
+    # 0, vector 2), so a leg that hands over thirty chunks and keeps none reads as healthy on the
+    # pre-merge counter alone — and this is the only place in the tree where both numbers exist for
+    # the same sweep. `sources` is what was asked, so a starved leg is seeded at zero rather than
+    # being absent from the ratio at the moment it matters.
+    record_kept_chunks(kept, [name for name, _ in sources])
     return EvidenceSweep(
         chunks=kept,
         truncated_by=truncated_by,

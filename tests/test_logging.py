@@ -921,11 +921,48 @@ def test_the_structural_rules_still_catch_the_real_shapes_after_narrowing() -> N
         assert secret not in redact_secrets(sample), sample
 
 
-@pytest.mark.parametrize(
-    "unit",
-    ["-eyJ", "password=", "PGPASSWORD=", "api_key=", "access_token=", "client_secret=", "Bearer "],
-    ids=["jwt", "password", "pgpassword", "api-key", "access-token", "client-secret", "bearer"],
-)
+# One pathological repeating unit per structural rule. A unit is the shortest string that makes the
+# rule's own prefix match over and over, which is what forces the engine to try and re-try the tail.
+#
+# **This list is checked against the rule table rather than trusted**, by the test below it: the
+# docstring here has always said "covered by construction", and it was a hand-written list that sat
+# unchanged while five rules were added — one of which was quadratic (35.8 s for 160 KB) and
+# unauthenticated-reachable. A claim of completeness that nothing verifies is the shape this
+# repository has an ADR about.
+_QUADRATIC_UNITS = {
+    "jwt": "-eyJ",
+    "password": "password=",
+    "pgpassword": "PGPASSWORD=",
+    "api-key": "api_key=",
+    "access-token": "access_token=",
+    "client-secret": "client_secret=",
+    "bearer": "Bearer ",
+    "env-var": "AAAAAAAA_TOKEN",
+    "basic": "Authorization: Basic ",
+    "aws": "AKIAAAAAAAAAAAAAAAAA",
+    "slack": "xoxb-",
+    "url-userinfo": "postgresql://a:b@",
+}
+
+
+def test_every_structural_rule_has_a_pathological_unit() -> None:
+    """The parametrization above must grow with `_STRUCTURAL_SECRETS`, not with who remembers.
+
+    A rule with no unit is a rule whose cost nothing measures, and the one that shipped quadratic
+    got there exactly this way. Counting is the weakest check that still fails on the next
+    addition: a unit cannot be derived from a compiled pattern automatically, so what this asserts
+    is that somebody had to look at the new rule and write one.
+    """
+    from chemclaw.core import logging as chemclaw_logging
+
+    assert len(_QUADRATIC_UNITS) == len(chemclaw_logging._STRUCTURAL_SECRETS), (
+        f"{len(chemclaw_logging._STRUCTURAL_SECRETS)} structural redaction rules but "
+        f"{len(_QUADRATIC_UNITS)} pathological units. A new rule needs a repeating unit here, or "
+        "its cost on a 100 KB unauthenticated request line is unmeasured."
+    )
+
+
+@pytest.mark.parametrize("unit", _QUADRATIC_UNITS.values(), ids=_QUADRATIC_UNITS.keys())
 def test_redaction_cannot_be_made_quadratic_by_a_log_line(unit: str) -> None:
     r"""Every pattern's cost is linear in the line, because this runs holding the logging lock.
 
@@ -941,7 +978,9 @@ def test_redaction_cannot_be_made_quadratic_by_a_log_line(unit: str) -> None:
     and it is the one logger that writes the raw request URL. A 115 KB request line stalled the pod
     for 21 s, unauthenticated, on a 404, before any ASGI middleware ran.
 
-    Parametrized so a new pattern is covered by construction rather than by whoever remembers. The
+    Parametrized so a new pattern is covered by construction rather than by whoever remembers —
+    and the count is asserted against the rule table above, because "by construction" was written
+    here while the list was hand-maintained and five rules went past it. The
     bound is generous rather than tight: the claim is that the cost is not quadratic, not that it is
     fast, so this stays honest on a loaded box.
     """

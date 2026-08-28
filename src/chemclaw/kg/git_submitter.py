@@ -34,6 +34,7 @@ import contextlib
 import fcntl
 import hashlib
 import logging
+import re
 import shutil
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
@@ -205,6 +206,21 @@ def _require_dedicated_checkout(repo_dir: str) -> None:
 # bare status codes: `403` as a substring matches an object hash, and the point of this list is to
 # be wrong in the safe direction — a missed phrase keeps today's behaviour (retried as transient),
 # while a false positive would make a genuine network blip permanent. Lower-cased before matching.
+#
+# **The bare status lines are gone, and that is a correction rather than a trim.** `403` is what a
+# forge returns for a *secondary rate limit* as well as for a denial: GitHub answers
+# `fatal: unable to access '...': The requested URL returned error: 403` for abuse detection and
+# push throttling, both of which clear on their own in seconds to minutes. Classified as auth, that
+# raises `GitSubmitError`, which `durable/publish.py` lists as non-retryable — so a throttle would
+# permanently drop the note proposal instead of backing off, and the PR-gate would quietly stop
+# proposing while every run reported success. The comment above claims this list is "wrong in the
+# safe direction", and those two entries were the only ones that were not.
+#
+# Nothing is lost by removing them: a genuine denial from a forge carries a phrase as well as a
+# status — GitHub's is `remote: Permission to owner/repo.git denied to user.`, matched by
+# `permission denied` — so the credential cases below still classify, and a bare status line with
+# no accompanying phrase stays transient, which is the safe direction for a code that has two
+# meanings.
 _AUTH_FAILURE_MARKERS = (
     "authentication failed",
     "invalid username or password",
@@ -213,22 +229,35 @@ _AUTH_FAILURE_MARKERS = (
     "permission denied",
     "access denied",
     "support for password authentication was removed",
-    "the requested url returned error: 401",
-    "the requested url returned error: 403",
-    "error: 401",
-    "error: 403",
 )
+
+
+# A forge naming the principal it refused. Matched as a pattern rather than a substring because the
+# real wording puts the repository between the two words — GitHub says
+# `remote: Permission to owner/repo.git denied to some-bot.`, which the substring
+# `permission denied` does not match at all. That gap is why the bare status lines looked load-
+# bearing: they were catching this case by accident, and catching a rate limit with it.
+_DENIED_PRINCIPAL = re.compile(r"permission to .{0,200}? denied to ", re.IGNORECASE | re.DOTALL)
 
 
 def _is_auth_failure(stderr: str) -> bool:
     """Whether git's stderr says the remote refused this credential.
 
-    The distinction `durable/publish.py` cannot make and this can: a 401/403 on a push is a fact
-    about the token, and retrying it forever is how an expired PAT becomes an indefinitely retrying
-    workflow whose log says only that a publish failed.
+    The distinction `durable/publish.py` cannot make and this can: a *credential* failure on a push
+    is a fact about the token, and retrying it forever is how an expired PAT becomes an
+    indefinitely retrying workflow whose log says only that a publish failed.
+
+    **A bare status code is deliberately not enough.** `403` is what a forge returns for a
+    secondary rate limit as well as for a denial, and `GitSubmitError` is non-retryable — so
+    classifying a throttle as auth drops the note proposal instead of backing off, and the PR-gate
+    stops proposing while every run still reports success. A genuine denial always says so in
+    words as well, either with one of the credential phrases or by naming the principal it
+    refused, so nothing is lost by requiring the words.
     """
     lowered = stderr.lower()
-    return any(marker in lowered for marker in _AUTH_FAILURE_MARKERS)
+    if any(marker in lowered for marker in _AUTH_FAILURE_MARKERS):
+        return True
+    return _DENIED_PRINCIPAL.search(stderr) is not None
 
 
 class GitNoteSubmitter:

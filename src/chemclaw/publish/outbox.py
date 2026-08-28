@@ -21,6 +21,7 @@ things that happen after a result is durable.
 """
 
 import logging
+import time
 from contextlib import AbstractAsyncContextManager
 from datetime import datetime
 from typing import Any
@@ -105,8 +106,15 @@ _MARK_FAILED = """
 # `min(enqueued_at)` are both served by the partial index `result_publications_pending`
 # (`(sink, enqueued_at) WHERE state = 'pending'`), so this is an index-only scan and the age is one
 # read of its leading edge per sink.
+# `min(enqueued_at)` as an **absolute epoch**, not an age. The age is computed in the gauge
+# callable against the clock at scrape time, so a drain that has stopped shows a backlog that keeps
+# ageing instead of one frozen at its last healthy reading. Computing `now() - min(...)` here put
+# the subtraction at refresh time, which meant the number stood still exactly when the drain did —
+# and a stopped drain is the outage `ChemclawResultOutboxStuck` exists to catch, so the metric was
+# blind to its own headline case. `ingest/eln/cursor.py` had already made this choice and written
+# down why; this is that argument applied to the sibling that got it wrong.
 _PENDING = """
-    SELECT sink, count(*), EXTRACT(EPOCH FROM (now() - min(enqueued_at)))
+    SELECT sink, count(*), EXTRACT(EPOCH FROM min(enqueued_at))
     FROM result_publications WHERE state = 'pending' GROUP BY sink
 """
 
@@ -121,7 +129,7 @@ _DEAD_LETTERED = """
 # read by every scrape — which is the whole point: a gauge that queried per scrape is the objection
 # that argued against having one at all.
 _PENDING_GAUGE: dict[str, float] = {}
-_OLDEST_GAUGE: dict[str, float] = {}
+_OLDEST_ENQUEUED: dict[str, float] = {}
 _DEAD_GAUGE: dict[str, float] = {}
 
 
@@ -376,7 +384,12 @@ async def refresh_backlog(dsn: str | None = None) -> None:
         logger.warning("publish: could not read the outbox backlog; gauges keep their last value")
         return
     _replace(_PENDING_GAUGE, {str(row[0]): float(row[1]) for row in pending})
-    _replace(_OLDEST_GAUGE, {str(row[0]): float(row[2] or 0.0) for row in pending})
+    # The enqueue epoch of each sink's oldest pending row; the gauge turns it into an age. A sink
+    # with nothing pending has no oldest row, and `_replace` zeroes it — which reads as "0 seconds
+    # behind", the honest answer for an empty queue.
+    _replace(
+        _OLDEST_ENQUEUED, {str(row[0]): float(row[2]) for row in pending if row[2] is not None}
+    )
     _replace(_DEAD_GAUGE, {str(row[0]): float(row[1]) for row in dead})
 
 
@@ -384,6 +397,24 @@ def _replace(gauge: dict[str, float], reading: dict[str, float]) -> None:
     """Update a gauge family in place, keeping known sinks that have fallen to zero."""
     gauge.update(dict.fromkeys(gauge, 0.0))
     gauge.update(reading)
+
+
+def _oldest_pending_seconds() -> dict[str, float]:
+    """How long each sink's oldest undelivered row has been waiting, as of *now*.
+
+    Read at scrape time against the stored enqueue epoch rather than stored as an age, and the
+    difference is the whole value of the metric: a drain that stops refreshing leaves the count and
+    the dead-letter families frozen — which is honest, they are counts of a state nobody has
+    re-read — but an *age* that stands still is a lie about the passage of time. Frozen at "120 s
+    behind", `ChemclawResultOutboxStuck` would never cross its threshold no matter how long the
+    drain stayed down, so the rule whose own description says "the drain is not keeping up or has
+    stopped" was blind to the second half.
+
+    Clamped at zero: a row enqueued by a pod whose clock runs ahead of this one would otherwise
+    read as a negative age, which is a nonsense an alert cannot interpret.
+    """
+    now = time.time()
+    return {sink: max(0.0, now - enqueued) for sink, enqueued in _OLDEST_ENQUEUED.items()}
 
 
 def bind_backlog_gauges() -> None:
@@ -396,7 +427,7 @@ def bind_backlog_gauges() -> None:
     record_metric(lambda m: m.bind_gauge_family("chemclaw_outbox_pending", lambda: _PENDING_GAUGE))
     record_metric(
         lambda m: m.bind_gauge_family(
-            "chemclaw_outbox_oldest_pending_seconds", lambda: _OLDEST_GAUGE
+            "chemclaw_outbox_oldest_pending_seconds", _oldest_pending_seconds
         )
     )
     record_metric(

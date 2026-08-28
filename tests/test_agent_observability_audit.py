@@ -20,6 +20,7 @@ import asyncio
 import logging
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -55,6 +56,7 @@ def _drive(
     raises: BaseException | None = None,
     returns: Any = None,
     todos: list[dict[str, Any]] | None = None,
+    registered: bool = True,
 ) -> tuple[_Sink, BaseException | None]:
     """Run one tool call through the audit middleware; return its sink and whatever escaped.
 
@@ -69,7 +71,13 @@ def _drive(
     """
     sink = _Sink()
     middleware = make_audit_middleware(correlation_id="cid-1", actor="alice@corp", sink=sink)
-    request = tool_request(name, {"q": "x"})
+    # A registered tool, because that is what the graph passes for a name it holds — and
+    # `metric_tool_name` reads `.name` off it to decide whether the label is safe to mint.
+    # A registered tool, because that is what the graph passes for a name it holds — and
+    # `metric_tool_name` reads `.name` off it to decide whether the label is safe to mint.
+    # `registered=False` is the `ToolNode` shape for a name the model invented.
+    tool = SimpleNamespace(name=name, metadata={}) if registered else None
+    request = tool_request(name, {"q": "x"}, tool=tool)
     if todos is not None:
         request = request.override(state={"todos": todos})
 
@@ -166,6 +174,31 @@ def test_a_genuine_failure_stays_an_error_and_moves_no_refusal_counter(
     assert [event.outcome for event in sink.events] == ["error"]
     assert "KeyError" in caplog.text
     assert METRICS.value("chemclaw_tool_refusals_total") == before
+
+
+def test_a_name_the_graph_does_not_hold_cannot_mint_a_series() -> None:
+    """A hallucinated tool name is one bucket, not one time series per string.
+
+    `ToolNode` invokes this chain for a name the graph does not hold — that is deliberate, so an
+    interceptor can short-circuit an unregistered call — so the name on `request.tool_call` is the
+    *model's* string, and putting it on a metric label makes `/metrics` grow by one series per
+    thing a model invents. Measured on a compiled graph before the clamp: a single hallucinated
+    call created a `chemclaw_tool_calls_total` series **and** a full fourteen-bucket histogram, and
+    driven directly the label accepted 230 characters of arbitrary text. Model output is
+    attacker-influenceable here — it is why this tree carries `frame_untrusted` — so an injected
+    document could grow the registry until the pod died.
+
+    The audit *row* still carries what the model asked for; only the label is refused.
+    """
+    hallucinated = "totally_made_up_tool_'; DROP TABLE audit_events; --" + "X" * 200
+    sink, _ = _drive(hallucinated, returns="ok", registered=False)
+
+    exposition = METRICS.render()
+    assert hallucinated not in exposition, "a model-authored name reached the metrics surface"
+    assert 'chemclaw_tool_calls_total{outcome="ok",tool="unknown"}' in exposition
+    assert 'chemclaw_tool_duration_seconds_count{tool="unknown"}' in exposition
+    # The trail keeps the real question, because that is the forensic fact.
+    assert sink.events[-1].tool == hallucinated
 
 
 def test_every_call_is_counted_by_tool_and_outcome_and_timed_under_its_own_name() -> None:
