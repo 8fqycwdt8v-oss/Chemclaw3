@@ -23,7 +23,7 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.agent.session_events import record_session_event
     from chemclaw.core.config import settings
     from chemclaw.core.metrics_bridge import record_metric
-    from chemclaw.durable.publish import BAD_DATA_RETRY
+    from chemclaw.durable.publish import BAD_DATA_RETRY, best_effort_close_timeout
     from chemclaw.durable.registry import durable_activity
 
 
@@ -37,6 +37,16 @@ class SessionEventInput(BaseModel):
     # the activity runs at-least-once, so without it a retry after a committed-but-unacked
     # insert would deliver the same notification twice.
     dedupe_key: str | None = None
+
+
+def pushback_bound() -> timedelta:
+    """The whole-call bound on one session push-back — see `publish.best_effort_close_timeout`.
+
+    Named rather than inlined because it has a second reader: `connector_job.wrapper_execution_
+    timeout` sums the four post-child steps' bounds to size its own headroom, and a bound only the
+    call site knows is one the sum cannot see.
+    """
+    return best_effort_close_timeout(settings.activity_timeout_seconds)
 
 
 def _dedupe_key(workflow_id: str, run_id: str, kind: str, payload: dict[str, Any]) -> str:
@@ -97,9 +107,10 @@ async def notify_session(session_id: str, kind: str, payload: dict[str, Any]) ->
         # result is already done" was instead holding it open indefinitely, and the `except
         # ActivityError` below was unreachable in precisely the case it exists for.
         #
-        # Doubled rather than a new setting: the wait is one small insert plus whatever queue delay
-        # a healthy fleet has, and a second knob would be one more pair to keep in step.
-        schedule_to_close_timeout=timedelta(seconds=settings.activity_timeout_seconds * 2),
+        # The doubling itself, and the reason it is not a knob, is `publish.best_effort_close_
+        # timeout` — one rule for all four of a finished job's best-effort steps, extracted once it
+        # had two hand-written copies and two omissions.
+        schedule_to_close_timeout=pushback_bound(),
         retry_policy=BAD_DATA_RETRY,
     )
 

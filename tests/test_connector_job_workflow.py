@@ -44,11 +44,13 @@ from chemclaw.durable.connector_job import (
     ConnectorJobResult,
     ConnectorJobWorkflow,
     child_execution_timeout,
+    record_run_bound,
     wrapper_execution_timeout,
 )
 from chemclaw.durable.job_record import JobRecord, record_job
 from chemclaw.durable.memory_jobs import publish_memory_note_activity
-from chemclaw.durable.notify import record_session_event_activity
+from chemclaw.durable.notify import pushback_bound, record_session_event_activity
+from chemclaw.durable.publish import note_publish_bound, result_publish_bound
 from chemclaw.kg.note import Note
 from chemclaw.kg.pr_gate import propose_note
 from chemclaw.memory.jobs import SynthesisUnit
@@ -533,3 +535,29 @@ def test_the_declared_ceiling_travels_from_the_manifest_to_the_launch(
 
     (started,) = launched
     assert started.timeout_seconds == 20.0
+
+
+def test_the_wrapper_s_headroom_covers_the_four_steps_it_names() -> None:
+    """The tail budget is the four steps' *own* bounds, not four times an unrelated setting.
+
+    `wrapper_execution_timeout` documents its headroom as room for the four things the wrapper does
+    after its child returns, and sized it `_FINISH_STEPS * activity_timeout_seconds`. Not one of
+    those four is bounded by `activity_timeout_seconds`: the record write and the push-back carry
+    their own `schedule_to_close_timeout`, and the two publishes carry none at all — they get
+    `queue_wait_timeout()`, an hour by default, at the front of every attempt. Measured on
+    2026-08-28 against a live broker with the background queue unserved and the settings scaled
+    down (child ceiling 10 s, every step 1 s, queue wait 8 s): the fixture job **completed**, its
+    record was written, and the wrapper was then killed by its own ceiling at 14.1 s — exactly
+    `10 + 4 * 1` — mid-way through the result publish. The run ends `TIMED_OUT` with no completion
+    push-back, which is the failure this function's docstring says it exists to prevent, through
+    the arithmetic rather than through the caller.
+
+    Asserted against the bounds the call sites actually pass, so a step whose bound changes without
+    the sum changing is what turns this red.
+    """
+    headroom = wrapper_execution_timeout() - timedelta(
+        seconds=settings.connector_job_timeout_seconds
+    )
+    assert headroom >= (
+        record_run_bound() + result_publish_bound() + note_publish_bound() + pushback_bound()
+    )

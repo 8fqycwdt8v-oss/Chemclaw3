@@ -25,11 +25,12 @@ import logging
 import socket
 import time
 from collections.abc import Iterator
+from datetime import timedelta
 from typing import Any
 from unittest import mock
 
 import pytest
-from temporalio import activity
+from temporalio import activity, workflow
 from temporalio.client import Client
 from temporalio.contrib.opentelemetry import TracingInterceptor
 from temporalio.runtime import PrometheusConfig
@@ -55,6 +56,7 @@ from chemclaw.durable.connector_job import (
     ConnectorJobWorkflow,
     failed_job_record,
     failure_reason,
+    wrapper_execution_timeout,
 )
 from chemclaw.durable.interceptor import (
     ChemclawWorkerInterceptor,
@@ -1155,3 +1157,253 @@ def test_the_job_duration_histogram_brackets_the_job_ceiling() -> None:
     metrics.observe("chemclaw_job_duration_seconds", 15000.0, {"connector": "calc"})
     rendered = metrics.render()
     assert 'chemclaw_job_duration_seconds_bucket{connector="calc",le="18000"} 1' in rendered
+
+
+def test_a_completed_job_is_not_killed_by_the_ceiling_meant_to_outlast_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The wrapper's own ceiling must outlive its four post-child steps, not four other numbers.
+
+    `wrapper_execution_timeout` exists so the ceiling the *template* path puts on the wrapper
+    leaves room for the record write, the result publish, the note publish and the push-back —
+    "an execution timeout is not delivered to workflow code", so a wrapper killed by one says
+    nothing to anybody. It sized that room as `_FINISH_STEPS * activity_timeout_seconds`, and
+    `activity_timeout_seconds` bounds none of the four steps: two carry their own
+    `schedule_to_close_timeout` and two carry only `queue_wait_timeout()`, an hour by default,
+    at the front of every attempt.
+
+    Measured on 2026-08-28 against a live broker with the background queue unserved: the fixture
+    job **completed**, `_record_run` returned, and the wrapper was then killed at **14.1 s** —
+    exactly `connector_job_timeout_seconds + 4 * activity_timeout_seconds` with the settings below
+    — while `publish_result_best_effort` was still waiting for a worker. `TIMED_OUT`, no
+    `job_completed` push-back, and a template step told a finished job timed out.
+
+    The settings are scaled down so the shape runs in seconds; the arithmetic under test is the
+    ratio between them, which is the shipped one — `activity_queue_wait_seconds` is 3,600 against
+    an `activity_timeout_seconds` of 30, and here 8 against 1.
+    """
+    from tests.fixtures.connectors.fixture.workflows import FixtureJobWorkflow
+
+    monkeypatch.setattr(settings, "background_task_queue", "nobody-serves-this-tail")
+    monkeypatch.setattr(settings, "activity_timeout_seconds", 1.0)
+    monkeypatch.setattr(settings, "activity_queue_wait_seconds", 8.0)
+    monkeypatch.setattr(settings, "job_record_timeout_seconds", 1.0)
+    monkeypatch.setattr(settings, "result_publish_timeout_seconds", 1.0)
+    monkeypatch.setattr(settings, "note_write_timeout_seconds", 1.0)
+    monkeypatch.setattr(settings, "connector_job_timeout_seconds", 10.0)
+
+    async def _run() -> Any:
+        async with await start_local_env_or_skip() as env:
+            client = pydantic_client(env)
+            wrapper = Worker(
+                client,
+                task_queue="tail-wrapper",
+                workflows=[ConnectorJobWorkflow],
+                activities=[],
+                workflow_runner=UnsandboxedWorkflowRunner(),
+            )
+            bundle = Worker(client, task_queue="connector-fixture", workflows=[FixtureJobWorkflow])
+            async with wrapper, bundle:
+                handle = await client.start_workflow(
+                    ConnectorJobWorkflow.run,
+                    _JOB.model_copy(
+                        update={
+                            "workflow": "FixtureJobWorkflow",
+                            "task_queue": "connector-fixture",
+                            "payload": {"subject": "benzene"},
+                            "publish_to_graph": True,
+                        }
+                    ),
+                    id="finish-tail-probe",
+                    task_queue="tail-wrapper",
+                    # The template path's own call, which is the one this ceiling is for.
+                    execution_timeout=wrapper_execution_timeout(),
+                )
+                return await _until_not_running(handle, timeout=120.0)
+
+    description = asyncio.run(_run())
+    # Every one of the four steps fails against the unserved queue and every one is best-effort,
+    # so the run's own ending is `COMPLETED`. `TIMED_OUT` is the wrapper outliving neither.
+    assert description.status.name == "COMPLETED"
+
+
+def test_a_job_whose_bundle_worker_never_answers_still_leaves_a_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The dead-worker ending, through the real record activity rather than the pure function.
+
+    Everything above proves the *pieces*: `failed_job_record` fills the two columns, Postgres
+    round-trips them, and a run that already recorded itself is not recorded twice. What none of
+    them exercises is the path a live failure actually takes — child dies, `except BaseException`,
+    `_record_run`, the `record_job` activity, the sink — and that is the path the 2026-08-28 storm
+    run could not settle, reporting `job_records rows: 1` once and `0` another time for a job whose
+    connector worker had been SIGKILLed.
+
+    So the failure driven here is the one that run produced: **no worker on the bundle's queue at
+    all**. The child never starts, its execution timeout ends it, and the row must exist anyway —
+    which is the version of "what did we run last night" that matters, because a run nobody can
+    reconstruct is exactly the one somebody goes looking for.
+
+    Not the same test as `test_a_failed_job_reaches_its_session_even_with_the_record_queue_unserved`
+    one file-section up: that one has the *record* queue unserved and asserts the run still ends;
+    this one has the record queue served and asserts what it wrote.
+    """
+    recorded: list[JobRecord] = []
+
+    class _CapturingSink:
+        async def record(self, record: JobRecord) -> None:
+            recorded.append(record)
+
+    monkeypatch.setattr(settings, "background_task_queue", "dead-bundle-core")
+    monkeypatch.setattr(settings, "connector_job_timeout_seconds", 3.0)
+    monkeypatch.setattr(settings, "activity_timeout_seconds", 1.0)
+    monkeypatch.setattr(settings, "job_record_timeout_seconds", 1.0)
+
+    async def _run() -> Any:
+        async with await start_local_env_or_skip() as env:
+            client = pydantic_client(env)
+            with mock.patch("chemclaw.durable.job_record.default_job_record_sink", _CapturingSink):
+                # The bundle's queue is named and served by nobody, which is what a SIGKILLed
+                # connector worker looks like to the broker once its activity has timed out.
+                core = Worker(
+                    client,
+                    task_queue="dead-bundle-core",
+                    workflows=[ConnectorJobWorkflow],
+                    activities=[record_job],
+                    workflow_runner=UnsandboxedWorkflowRunner(),
+                )
+                async with core:
+                    handle = await client.start_workflow(
+                        ConnectorJobWorkflow.run,
+                        _JOB.model_copy(
+                            update={
+                                "workflow": "FixtureJobWorkflow",
+                                "task_queue": "nobody-polls-this-bundle",
+                                "payload": {"subject": "benzene"},
+                                "session_id": "",
+                            }
+                        ),
+                        id="dead-bundle-probe",
+                        task_queue="dead-bundle-core",
+                    )
+                    return await _until_not_running(handle, timeout=60.0)
+
+    description = asyncio.run(_run())
+    assert description.status.name == "FAILED"
+    assert [(r.job_id, r.state) for r in recorded] == [("dead-bundle-probe", "failed")]
+    # And the row says what a person reading it months later needs: why the run was asked for, and
+    # what the application's own account of the ending was. `failure_reason` is the first
+    # application-level frame, not Temporal's outermost wrapper.
+    assert recorded[0].rationale == _JOB.rationale
+    assert recorded[0].failure_reason, "a failed row with no reason answers nothing"
+
+
+@activity.defn(name="held_open")
+async def _held_open() -> str:
+    """An activity that stays started and keeps heartbeating until it is cancelled.
+
+    The fixture bundle's own workflow returns immediately, which is right for every other test here
+    and useless for one about what a worker is holding *while* it holds it.
+    """
+    for _ in range(40):
+        activity.heartbeat("still running")
+        await asyncio.sleep(0.25)
+    return "done"
+
+
+@workflow.defn(name="HeldOpenJobWorkflow")
+class _HeldOpenBundleWorkflow:
+    """A bundle workflow that occupies its worker, so the broker has something to name."""
+
+    @workflow.run
+    async def run(self, payload: dict[str, Any]) -> Any:
+        """Hold an activity open and then answer in the connector envelope."""
+        from chemclaw.durable.connector_job import ConnectorJobResult
+
+        await workflow.execute_activity(
+            _held_open,
+            start_to_close_timeout=timedelta(seconds=30),
+            heartbeat_timeout=timedelta(seconds=5),
+        )
+        return ConnectorJobResult(summary="held open", data={})
+
+
+def test_a_wrapper_that_is_running_is_not_a_worker_that_is_working(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The precondition the SIGKILL chaos check reads, and the distinction it used to miss.
+
+    Lives here rather than in `tests/test_live_storm.py`, which says in its first line that it
+    touches no broker: what is under test is a statement the durable tier makes about itself —
+    "is a worker executing this job right now" — and only a broker can answer it.
+
+    Two readings, and their disagreement is the whole finding. `ConnectorJobWorkflow` reports
+    RUNNING from the instant it is started, before the bundle's queue has been polled at all, so
+    `cli/live_storm.py`'s old precondition ("the wrapper is RUNNING") was satisfied by a kill that
+    could interrupt nothing — which is why "a job survives its connector worker being SIGKILLed
+    mid-flight" has never once proved what it says. `running_activity_worker` asks the other
+    question, and the two disagree exactly there: with the bundle worker absent the wrapper is
+    RUNNING and nobody holds the work; once the bundle worker is up and heartbeating, the broker
+    names it, which is also what lets the check record *which* process it then killed.
+    """
+    from chemclaw.cli.live_storm import running_activity_worker
+
+    monkeypatch.setattr(settings, "background_task_queue", "kill-probe-core")
+    monkeypatch.setattr(settings, "connector_job_timeout_seconds", 120.0)
+    # The cancel below reaches the wrapper's failure clause, whose record write has no worker on
+    # this queue; without this the test waits out the shipped bound for a row it is not about.
+    monkeypatch.setattr(settings, "job_record_timeout_seconds", 1.0)
+
+    async def _run() -> tuple[str | None, str | None]:
+        async with await start_local_env_or_skip() as env:
+            client = pydantic_client(env)
+
+            async def _connect() -> Client:
+                return client
+
+            monkeypatch.setattr("chemclaw.cli.live_storm.temporal_connect", _connect)
+            core = Worker(
+                client,
+                task_queue="kill-probe-core",
+                workflows=[ConnectorJobWorkflow],
+                activities=[],
+                workflow_runner=UnsandboxedWorkflowRunner(),
+            )
+            async with core:
+                handle = await client.start_workflow(
+                    ConnectorJobWorkflow.run,
+                    _JOB.model_copy(
+                        update={
+                            "workflow": "HeldOpenJobWorkflow",
+                            "task_queue": "connector-fixture-held",
+                            "payload": {"subject": "benzene"},
+                            "session_id": "",
+                        }
+                    ),
+                    id="kill-probe",
+                    task_queue="kill-probe-core",
+                )
+                await _until_running(handle)
+                # The wrapper is RUNNING and no worker holds anything: the old precondition's
+                # window, in which a kill interrupts nothing.
+                before = await running_activity_worker("kill-probe")
+                bundle = Worker(
+                    client,
+                    task_queue="connector-fixture-held",
+                    workflows=[_HeldOpenBundleWorkflow],
+                    activities=[_held_open],
+                    workflow_runner=UnsandboxedWorkflowRunner(),
+                )
+                async with bundle:
+                    during = None
+                    for _ in range(80):
+                        during = await running_activity_worker("kill-probe")
+                        if during is not None:
+                            break
+                        await asyncio.sleep(0.25)
+                    await handle.cancel()
+                return before, during
+
+    before, during = asyncio.run(_run())
+    assert before is None, "the wrapper was RUNNING while no worker held any of its work"
+    assert during, "the broker names the worker executing a started, heartbeating activity"
