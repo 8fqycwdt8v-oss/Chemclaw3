@@ -105,17 +105,42 @@ _TERMINAL = {
 }
 
 
-# How many turns this process has driven through the front door since `run_storm` reset it. The
-# denominator of the zero-live-model proof: the mock's own counter has to be at least this, or some
-# turn's model call went somewhere else. Deliberately incremented in `run_turn` and nowhere else,
-# so the two families that open their own client (`G`'s stream cap, `E1`'s disconnect) are *not*
-# counted — an undercount can only make the reconciliation easier to satisfy, never falsely fail.
+# How many turns this process has *offered* the front door since `run_storm` reset it, and how many
+# of those it refused before any model call. The denominator of the zero-live-model proof is the
+# difference: the mock's counter has to be at least the turns that actually reached a model.
+#
+# **Offered is the wrong denominator and measuring it proved so.** The first version reconciled
+# against every turn `run_turn` was entered for, and a turn the front door sheds with 429 or 409
+# never reaches a model at all — so on the 2026-08-28 run the check read `607 mock request(s)
+# served against 818 turn(s) driven` and failed, on a lane where every model call really had been
+# served by the mock. Family A alone sheds by design: it holds 48 concurrent against caps of 2, 4,
+# 8, 16 and 32, and shed 173 turns doing exactly what it exists to do. A floor that any admission
+# sweep breaks is not a floor.
+#
+# Deliberately incremented in `run_turn` and nowhere else, so the two families that open their own
+# client (`G`'s stream cap, `E1`'s disconnect) are *not* counted — an undercount can only make the
+# reconciliation easier to satisfy, never falsely fail.
+# The statuses the front door answers when it refuses a turn at admission rather than running it:
+# 429 from the concurrency cap, 409 from a session whose turn claim is still held. Neither reaches
+# a model, so neither belongs in the zero-live-model denominator.
+_SHED_STATUSES = frozenset({409, 429})
+
 _turns_driven = 0
+_turns_shed = 0
 
 
 def turns_driven() -> int:
     """Turns this process has asked the front door for since the last reset."""
     return _turns_driven
+
+
+def turns_reaching_a_model() -> int:
+    """Turns the front door accepted, which is the count that must have produced a model call.
+
+    A shed turn is refused at admission and no model is asked anything, so it belongs in neither
+    side of the reconciliation.
+    """
+    return _turns_driven - _turns_shed
 
 
 @dataclass
@@ -205,6 +230,9 @@ async def run_turn(client: httpx.AsyncClient, message: str, *, dry_run: bool = F
         ) as response:
             result.status = response.status_code
             if response.status_code != 200:
+                if response.status_code in _SHED_STATUSES:
+                    global _turns_shed
+                    _turns_shed += 1
                 await response.aread()
                 return result
             async for line in response.aiter_lines():
@@ -1912,7 +1940,9 @@ def _mock_reconciliation(*, served: int, turns: int) -> Finding:
     how". Nothing reconciled it: the number sat in the report's notes beside `ANTHROPIC_API_KEY
     set: False`, which proves only that one vendor was not reached.
 
-    At least one model call per turn, so `served >= turns` is the floor. It is a floor rather than
+    At least one model call per *accepted* turn, so `served >= turns` is the floor. `turns` here is
+    `turns_reaching_a_model()` — turns offered minus turns shed at admission — because a 429 or a
+    409 is refused before any model is asked anything. It is a floor rather than
     an equality because a turn makes a second call to read its tool results back, an injected HTTP
     500 is retried `llm_max_retries` times, and two families open their own client and are not
     counted — every one of those only makes the true ratio larger.
@@ -2019,6 +2049,7 @@ async def run_storm(
     await _require_mock_lane()
     await asyncio.to_thread(_lane, "processes.sh", "restart", "mock-llm")
     _turns_driven = 0
+    _turns_shed = 0
 
     findings: list[Finding] = []
     sweep: list[dict[str, Any]] = []
@@ -2061,7 +2092,9 @@ async def run_storm(
             )
         )
     # Always, whatever `--families` selected: the claim is about the run, not about a scenario.
-    findings.append(_mock_reconciliation(served=await mock_requests(), turns=turns_driven()))
+    findings.append(
+        _mock_reconciliation(served=await mock_requests(), turns=turns_reaching_a_model())
+    )
     return findings, sweep
 
 
