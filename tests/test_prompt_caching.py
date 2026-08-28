@@ -321,9 +321,12 @@ def _live_credential() -> str | None:
     uses it for its real work. One round trip, cached for the session by `functools.cache`, so a
     suite with thirty guarded tests still costs one call.
 
-    **Only an authentication failure becomes a skip.** A 429 or a 529 is the provider being busy,
-    not the operator being unconfigured, and folding those into "skipped" is how a suite quietly
-    stops testing. They propagate, and the test fails as it should.
+    **Only a credential that does not work becomes a skip** — a rejected key
+    (`AuthenticationError`), or a key on an account with no balance (a 400 whose body is "credit
+    balance is too low"). Both are the operator being unconfigured. A 429 or a 529 is the provider
+    being *busy*, not unconfigured, and folding those into "skipped" is how a suite quietly stops
+    testing; they propagate, and the test fails as it should. Any other 400 is a real fault in this
+    fixed probe and propagates too.
 
     **Called from a fixture, never from `skipif`.** `skipif` evaluates its condition at
     *collection*, and an exception there is not a failing test — it is `Interrupted: N errors
@@ -346,6 +349,14 @@ def _live_credential() -> str | None:
         )
     except anthropic.AuthenticationError:
         return None
+    except anthropic.BadRequestError as exc:
+        # An unfunded account is the operator being unconfigured, not the provider being busy:
+        # `count_tokens` on a zero-balance key answers 400 "credit balance is too low", which is a
+        # credential that does not work in exactly the sense the docstring means. Fold *only* that
+        # one signal into a skip; any other 400 is a real fault in this fixed probe and propagates.
+        if "credit balance is too low" in str(exc).lower():
+            return None
+        raise
     return key
 
 
@@ -370,7 +381,10 @@ def _no_credential_reason() -> str:
     """
     if not os.environ.get(_CREDENTIAL_ENV):
         return f"no {_CREDENTIAL_ENV} in the environment"
-    return f"{_CREDENTIAL_ENV} is set but the provider rejects it — the credential is stale"
+    return (
+        f"{_CREDENTIAL_ENV} is set but the provider will not serve it — the credential is stale "
+        "or its account has no balance"
+    )
 
 
 # --------------------------------------------------------------------------------------------
