@@ -32,6 +32,7 @@ from typing import Any
 from fastapi import FastAPI
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
+from mcp.server.fastmcp.utilities.func_metadata import StrictJsonSchema
 from mcp.server.lowlevel.server import request_ctx
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.requests import Request
@@ -472,6 +473,65 @@ def _publishing(
     return _run
 
 
+def _advertise_what_is_actually_sent(server: FastMCP) -> None:
+    """Re-derive every tool's output schema in *serialization* mode, so it describes the payload.
+
+    **The defect, measured against the running `bo` connector.** `mcp`'s
+    `func_metadata._try_create_model_and_schema` builds a tool's output schema with
+    `model.model_json_schema(schema_generator=StrictJsonSchema)`, and pydantic's default there is
+    `mode="validation"` — which by design omits every `computed_field`, because a computed field is
+    an output and can never be an input. The value the same module then puts on the wire is
+    `validated.model_dump(mode="json", by_alias=True)`, which *includes* them. So the advertised
+    contract is narrower than the payload, and `mcp.server.lowlevel.server` validates the payload
+    against that contract before returning it: `campaign_progress` returns
+    `CampaignProgress`, whose `model_config` sets `extra="forbid"` and therefore
+    `additionalProperties: false`, and every call to it came back
+    `Output validation error: Additional properties are not allowed ('out_of_space', 'summary'
+    were unexpected)`. Fourteen further tools across `bo`, `calc`, `molfp` and `rxnfp` advertised
+    a schema missing a `verdict` or a `summary` and were merely *lucky*: their models do not forbid
+    extras, so a permissive validator let the undeclared field through — a client-side default, not
+    a promise, and one an `extra="forbid"` added later silently converts into the same outage.
+
+    **Fixed here rather than in the models, and rather than per tool.** The two local repairs both
+    lose something real: dropping `computed_field` for a plain property takes the sentence back out
+    of the payload, which is the whole reason those fields exist
+    (`FingerprintSearch.verdict` records the argument — a bare property is not serialized, so the
+    caveat never reaches the model composing the answer), and relaxing `extra="forbid"` gives up a
+    guard that has nothing to do with this. What is actually wrong is the *advertisement*, this is
+    the one place every connector's tool surface is built through, and a tool author has nothing to
+    remember — the same argument `_publish_tool_results` is installed by.
+
+    Serialization mode is the correct description of the wire and not merely a wider one: it is the
+    schema of `model_dump(mode="json", by_alias=True)`, which is exactly the call that produces the
+    structured content. Computed fields appear; so does the fact that a serialized model always
+    carries every field, which is why `required` grows.
+
+    Upstream's `StrictJsonSchema` generator is kept, so a type that cannot be represented still
+    raises here instead of degrading to a warning — and it raises at app-build time, which is
+    import time for a bundle. That is deliberate: a connector that cannot state what it sends
+    should refuse to start rather than serve a contract known to be wrong, the same way
+    `_declared_bearer_env` refuses rather than guesses.
+
+    `Tool.output_schema` is a `cached_property` over `fn_metadata.output_schema`, so the cache is
+    dropped as well — otherwise this would depend on nothing having read it first, which is the
+    kind of ordering coupling that holds until somebody adds a fourth hook above it.
+
+    The upstream shape this reads is pinned in `tests/test_upstream_surface.py`.
+    """
+    for tool in server._tool_manager.list_tools():
+        metadata = tool.fn_metadata
+        if metadata.output_model is None or metadata.output_schema is None:
+            # No structured output at all, which measurement narrowed: a `-> str` return is
+            # *not* this case — upstream wraps a primitive in a generated model under `result` —
+            # only a tool with no return annotation is. Skipped because there is no model to
+            # re-derive a schema from, and nothing is advertised to be wrong about.
+            continue
+        metadata.output_schema = metadata.output_model.model_json_schema(
+            schema_generator=StrictJsonSchema, mode="serialization"
+        )
+        tool.__dict__.pop("output_schema", None)
+
+
 def connector_app(
     server: FastMCP, *, name: str, on_start: Callable[[], Coroutine[Any, Any, None]] | None = None
 ) -> FastAPI:
@@ -497,6 +557,9 @@ def connector_app(
     Returns:
         A FastAPI app exposing `GET /healthz`, `GET /metrics`, and the MCP endpoint at `/mcp`.
     """
+    # Before anything else touches the tool objects: what a tool *advertises* has to describe
+    # what it sends, or the transport refuses the tool's own result. See the docstring.
+    _advertise_what_is_actually_sent(server)
     _sanitize_tool_errors(server, name=name)
     # Outermost, so the identity a tool stamps on a durable row is bound before anything else runs.
     _bind_caller_per_tool_call(server)

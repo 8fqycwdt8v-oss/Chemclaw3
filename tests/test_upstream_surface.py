@@ -633,6 +633,9 @@ def test_the_pinned_versions_are_the_ones_these_assertions_were_measured_against
         "langgraph": (1, 2, 10),
         "deepagents": (0, 7, 5),
         "langchain-mcp-adapters": (0, 3, 2),
+        # `mcp` earns a floor now that three assertions here read its internals: the mutable
+        # `Tool` the publish hook wraps, and the two above that the output-schema repair depends on.
+        "mcp": (1, 29, 0),
     }
     for package, floor in measured.items():
         found = tuple(int(part) for part in version(package).split(".")[:3])
@@ -769,6 +772,138 @@ def test_a_fastmcp_tool_is_still_a_mutable_object_the_manager_will_hand_over() -
     )
     assert "fn" in inspect.signature(Tool).parameters or "fn" in Tool.model_fields, (
         "`Tool.fn` is gone; the publish hook has no place left to wrap the tool's own body"
+    )
+
+
+def test_a_tool_output_schema_is_still_built_in_pydantic_s_validation_mode() -> None:
+    """The **absence** half: upstream still advertises a schema that omits computed fields.
+
+    `connectors/server.py::_advertise_what_is_actually_sent` rebuilds every tool's output schema in
+    `mode="serialization"` because `func_metadata._try_create_model_and_schema` calls
+    `model.model_json_schema(schema_generator=StrictJsonSchema)` and takes pydantic's default,
+    `mode="validation"` — which omits every `computed_field` while the payload
+    `FuncMetadata.convert_result` sends (`model_dump(mode="json", by_alias=True)`) includes them.
+    Measured: `bo.campaign_progress` came back `Output validation error: Additional properties are
+    not allowed ('out_of_space', 'summary' were unexpected)` on every call, refused by
+    `mcp.server.lowlevel.server`'s own `jsonschema.validate` of the payload against the schema it
+    advertised.
+
+    Asserted as an absence so that the day `mcp` builds this schema in serialization mode — or
+    stops omitting computed fields some other way — this goes red and the workaround is *deleted*
+    rather than left to outlive its reason. Failing here means "go and read
+    `chemclaw/connectors/server.py` and take the decision again"; it never means "widen this
+    assertion".
+
+    Probed against a bare `FastMCP`, deliberately: an app built through `connector_app` has already
+    been repaired, so asking it would assert the fix against itself and pass forever.
+    """
+    from mcp.server.fastmcp import FastMCP
+    from pydantic import BaseModel, computed_field
+
+    class _Answer(BaseModel):
+        """A model shaped like every affected one here: a field, and a sentence derived from it."""
+
+        value: int
+
+        @computed_field  # type: ignore[prop-decorator]
+        @property
+        def verdict(self) -> str:
+            """The half a bare property would not serialize — which is why these fields exist."""
+            return "high" if self.value > 1 else "low"
+
+    server = FastMCP("output-schema-probe")
+
+    @server.tool()
+    async def answer() -> _Answer:
+        """A tool whose declared return type carries a computed field."""
+        return _Answer(value=2)
+
+    tool = server._tool_manager.list_tools()[0]
+    schema = tool.output_schema
+    assert schema is not None, (
+        "FastMCP no longer derives an output schema from a BaseModel return annotation; "
+        "chemclaw.connectors.server._advertise_what_is_actually_sent rewrites one that is now gone"
+    )
+    assert "verdict" not in schema.get("properties", {}), (
+        "mcp now advertises computed fields in a tool's output schema — the defect "
+        "chemclaw.connectors.server._advertise_what_is_actually_sent exists for is fixed upstream. "
+        "Delete that function and its call rather than relaxing this assertion"
+    )
+    assert "verdict" in _Answer.model_json_schema(mode="serialization").get("properties", {}), (
+        "pydantic's serialization-mode schema no longer carries computed fields, so the mode "
+        "chemclaw.connectors.server._advertise_what_is_actually_sent switches to is the wrong one"
+    )
+
+
+def test_a_tools_output_schema_is_still_a_writable_attribute_of_its_metadata() -> None:
+    """The **presence** half: the two places the repaired schema has to be written to stick.
+
+    `_advertise_what_is_actually_sent` assigns `Tool.fn_metadata.output_schema` and then drops the
+    `Tool.output_schema` cache. Both are upstream internals and `mcp` promises neither: if
+    `FuncMetadata` became frozen the assignment would raise, and if `Tool.output_schema` stopped
+    being a `functools.cached_property` over that attribute the rewrite would be advertised by
+    `FastMCP.list_tools` and *not* by the lowlevel handler's own cached tool definition, or the
+    reverse — a server advertising one contract and validating against another, which is the exact
+    failure being fixed, inverted.
+
+    `output_model` is read in the same breath, because it is what the replacement schema is derived
+    from; a tool with no structured output has none and is skipped.
+    """
+    from mcp.server.fastmcp import FastMCP
+    from pydantic import BaseModel
+
+    class _Answer(BaseModel):
+        """Any structured return will do; this test is about the attribute, not the schema."""
+
+        value: int
+
+    server = FastMCP("output-schema-write-probe")
+
+    @server.tool()
+    async def answer() -> _Answer:
+        """A tool with a structured return, so `output_model` and `output_schema` are both set."""
+        return _Answer(value=1)
+
+    @server.tool()
+    async def plain():  # type: ignore[no-untyped-def]  # deliberately unannotated; see below
+        """A tool with no return annotation — the only shape that carries no output model.
+
+        Measured while writing this: a `-> str` return does *not* skip. Upstream wraps a primitive
+        in a generated `plainOutput` model with `wrap_output=True`, so it has both a model and a
+        schema, and the rewrite runs over it harmlessly. An unannotated return is what actually
+        produces `output_model is None`, and it is the case the skip exists for.
+        """
+        return "ok"
+
+    tools = {tool.name: tool for tool in server._tool_manager.list_tools()}
+    assert tools["answer"].fn_metadata.output_model is _Answer, (
+        "`FuncMetadata.output_model` is no longer the returned BaseModel; "
+        "chemclaw.connectors.server._advertise_what_is_actually_sent derives the schema from it"
+    )
+    assert tools["plain"].fn_metadata.output_model is None, (
+        "an unannotated return now carries an output model; the rewrite's skip condition, which "
+        "chemclaw.connectors.server._advertise_what_is_actually_sent uses to leave a tool with no "
+        "structured output alone, no longer describes any tool"
+    )
+
+    sentinel = {"type": "object", "properties": {"rewritten": {"type": "string"}}}
+    cached_before = tools["answer"].output_schema  # populate the cache the rewrite invalidates
+    assert cached_before is not None
+    tools["answer"].fn_metadata.output_schema = sentinel
+    tools["answer"].__dict__.pop("output_schema", None)
+    assert tools["answer"].output_schema == sentinel, (
+        "`Tool.output_schema` is no longer a cached_property over `fn_metadata.output_schema`; "
+        "chemclaw.connectors.server._advertise_what_is_actually_sent writes a schema that would "
+        "never be advertised"
+    )
+
+    async def _listed() -> list[Any]:
+        return await server.list_tools()
+
+    advertised = asyncio.run(_listed())
+    assert next(t.outputSchema for t in advertised if t.name == "answer") == sentinel, (
+        "`FastMCP.list_tools` no longer advertises `Tool.output_schema`; the repaired schema "
+        "would not reach a client"
     )
 
 
