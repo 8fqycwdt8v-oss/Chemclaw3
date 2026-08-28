@@ -149,6 +149,27 @@ def _merged_options(dsn: str, statement_timeout_seconds: float | None) -> str | 
     return f"{existing} {ours}" if isinstance(existing, str) and existing else ours
 
 
+class _DatabaseUnavailable(ConnectionError):
+    """This module's own "there is no connection to hand you" — never a caller's socket error.
+
+    A `ConnectionError` subclass, so every caller that already tests `ConnectionError` (Temporal's
+    retry classification, `api/runner.py`, `science/bo/campaign_record.py`) is unaffected: the
+    published contract is still "an unreachable or saturated database raises `ConnectionError`".
+
+    **Private because it exists to be narrower than the builtin, not wider.** `_failure_kind` used
+    to classify `isinstance(exc, ConnectionError)` as `kind="unavailable"`, and `ConnectionError`
+    is the *builtin* base of `ConnectionResetError`, `BrokenPipeError`, `ConnectionAbortedError`
+    and `ConnectionRefusedError` — every one of which a caller's own HTTP client, MCP session or
+    socket can raise from inside the `connection()` block. Measured: raising
+    `ConnectionResetError("my HTTP client died")` inside the block booked
+    `chemclaw_db_query_failures_total{kind="unavailable"}` and logged a `db.failed` WARNING naming
+    the database, for a fault that had nothing to do with Postgres — the exact thing
+    `_failure_kind`'s own docstring says it does not do ("a `ValueError` from it is not a fact
+    about Postgres"). Raised by both sites in this module that mean it, so nothing that *is* a
+    real outage stopped being counted.
+    """
+
+
 async def connect(
     dsn: str, *, statement_timeout_seconds: float | None = None
 ) -> psycopg.AsyncConnection[TupleRow]:
@@ -177,7 +198,7 @@ async def connect(
             dsn, connect_timeout=settings.pg_connect_timeout_seconds, options=options
         )
     except psycopg.OperationalError as exc:
-        raise ConnectionError(f"Postgres unreachable at {_redact(dsn)}: {exc}") from exc
+        raise _DatabaseUnavailable(f"Postgres unreachable at {_redact(dsn)}: {exc}") from exc
 
 
 def _pool_for(dsn: str, options: str | None) -> _Pool:
@@ -241,8 +262,16 @@ def _failure_kind(exc: BaseException) -> str | None:
     Anything that is not a database error at all returns `None` and is not counted: the block a
     caller runs inside `connection()` is its own code, and a `ValueError` from it is not a fact
     about Postgres.
+
+    **That last rule is why the first test names `_DatabaseUnavailable` and not `ConnectionError`.**
+    The builtin is the base of `ConnectionResetError`, `BrokenPipeError`, `ConnectionAbortedError`
+    and `ConnectionRefusedError`, so testing it counted a caller's *own* dead socket — an HTTP
+    client, an MCP session, a sink driver — as a Postgres outage, complete with a WARNING naming
+    this deployment's database. `_DatabaseUnavailable` is raised only by the two places in this
+    module that mean it (`connect`'s wrap, and the pool-checkout handler), so the class of the
+    exception is now the same statement as the label.
     """
-    if isinstance(exc, ConnectionError):
+    if isinstance(exc, _DatabaseUnavailable):
         return "unavailable"
     if isinstance(exc, psycopg.errors.QueryCanceled):
         return "cancelled"
@@ -289,6 +318,24 @@ def _record_duration(operation: str, seconds: float) -> None:
     also the quantity a pool cares about — `chemclaw_pg_pool_requests_waiting` rises because
     somebody *held* a connection, not because one statement was slow — so this is the number that
     joins the pool gauges to a call site.
+
+    **It is therefore not database latency, and reading it as such is a mistake this measurement
+    invited.** The span runs from before the checkout to after the caller's `with` body, so
+    whatever else the caller does while holding the connection is inside it: measured, a block that
+    ran one `SELECT 1` and then slept three seconds booked 3.029 s and emitted `db.slow` at the
+    2 s threshold. That is
+    the honest reading of *hold* time and a false one of *query* time, and one call site made the
+    difference material — `kg/git_submitter._cluster_lock` takes a Postgres advisory lock and
+    `yield`s across an entire note submission, fetch and push included, so every submission booked
+    a git-push-length sample. It is not wrong that the connection was held that long; what was
+    wrong is that it was booked unlabelled, so a dashboard rendered a remote git push as
+    `{operation="unspecified"}` database latency. The fix on that side is a name
+    (`kg_cluster_submit_lock`), which is what makes such a sample readable instead of alarming.
+
+    Both branches of `connection()` are timed, pooled and dedicated alike: a process that never
+    entered `pooling()` still holds a connection for its block, and dropping half the call sites
+    out of the distribution because of how the connection was obtained would make the metric
+    depend on which process is asking.
     """
     record_metric(
         lambda m: m.observe("chemclaw_db_query_duration_seconds", seconds, {"operation": operation})
@@ -341,6 +388,10 @@ async def connection(
     is worse than a coarse label: `unspecified` is a true statement about a call site nobody has
     named yet, and it is greppable.
 
+    **What is timed is the whole block, not a statement** — see `_record_duration`. A call site
+    that holds a connection across work of its own is measured doing exactly that, which is why a
+    long-holding one owes the metric a name more than a short one does.
+
     **Every borrowed connection is timed and every database failure it raises is classified here**,
     which is the only place that can see both. `chemclaw_db_unavailable_total` is incremented at
     two front-door sites, so a `ConnectionError` inside an ingest activity, the outbox drain or the
@@ -367,7 +418,7 @@ async def connection(
         except (PoolTimeout, PoolClosed) as exc:
             # Both are `psycopg.OperationalError` subclasses raised only by the checkout itself, so
             # catching them here cannot swallow an error from the caller's block.
-            raise ConnectionError(f"Postgres unreachable at {_redact(dsn)}: {exc}") from exc
+            raise _DatabaseUnavailable(f"Postgres unreachable at {_redact(dsn)}: {exc}") from exc
     except Exception as exc:
         # `Exception`, not `BaseException`: a cancelled task (Temporal cancelling an activity, a
         # dropped SSE connection) is not a database failure, and counting it as one would put the

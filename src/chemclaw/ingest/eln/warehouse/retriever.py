@@ -156,6 +156,14 @@ class WarehouseVectorRetriever:
         # SSE stream — a stall here freezes conversations that have nothing to do with this source.
         # Measured before this: a 1 s provider call cost the loop its whole second (0 heartbeats
         # where a free loop runs ~20). `ingest.documents.retriever` offloads for the same reason.
+        #
+        # **`server` books nothing on `chemclaw_embedding_*`, and that is a property of where the
+        # embedding happens rather than an oversight.** The raw query goes into the warehouse's own
+        # embedding function inside the SQL, so `core.embeddings` is never entered and there is no
+        # client call to time from this process. `core/embeddings._embed_uncached` used to describe
+        # itself as "the one place every provider goes through"; it is the one place *its own* two
+        # providers go through, and this is the leg that proves the difference. What is measured
+        # about this branch is the leg as a whole, on `chemclaw_evidence_source_seconds{source}`.
         embedded: str | list[float] = (
             query
             if self._vector.embedding == "server"

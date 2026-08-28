@@ -221,6 +221,20 @@ def _require_dedicated_checkout(repo_dir: str) -> None:
 # `permission denied` — so the credential cases below still classify, and a bare status line with
 # no accompanying phrase stays transient, which is the safe direction for a code that has two
 # meanings.
+#
+# **The list was surveyed against four forges on 2026-08-28, and it was GitHub-shaped.** Every
+# unannotated entry below is a phrase GitHub or OpenSSH emits; run against the wordings the other
+# forges actually use, five denials classified as transient and retried forever:
+# GitLab's `remote: You are not allowed to push code to this project.`, Bitbucket Server's
+# `remote: You are not permitted to access this resource.`, Bitbucket Cloud's `remote: Write access
+# to repository not granted.`, Azure DevOps' `remote: TF401027: You need the Git
+# 'GenericContribute' permission to perform this action.`, and GitHub's own SAML-SSO refusal for a
+# token nobody has authorized for the organisation. Each is permanent until a human changes a
+# permission, which is precisely what `GitSubmitError` means.
+#
+# Each addition was checked the other way too — none of them appears in a throttle, a 429, a 503,
+# a DNS failure or a non-fast-forward rejection, which is the property that keeps this list wrong
+# in the safe direction.
 _AUTH_FAILURE_MARKERS = (
     "authentication failed",
     "invalid username or password",
@@ -229,6 +243,21 @@ _AUTH_FAILURE_MARKERS = (
     "permission denied",
     "access denied",
     "support for password authentication was removed",
+    # GitHub: a token that exists and works, for an organisation that will not accept it until it
+    # is SSO-authorized. Retrying installs no authorization.
+    "enabled or enforced saml sso",
+    # GitLab: "You are not allowed to push code to this project." / "... to upload code." / "... to
+    # force push code to a protected branch".
+    "you are not allowed to",
+    # Bitbucket Server / Data Center.
+    "you are not permitted to",
+    # Bitbucket Cloud.
+    "write access to repository not granted",
+    # Azure DevOps: the Git permission refusal, by its stable error id rather than by the prose
+    # around it, which names whichever permission is missing.
+    "tf401027",
+    # Gerrit: a ref-permission refusal from the server's own access control.
+    "prohibited by gerrit",
 )
 
 
@@ -238,6 +267,30 @@ _AUTH_FAILURE_MARKERS = (
 # `permission denied` does not match at all. That gap is why the bare status lines looked load-
 # bearing: they were catching this case by accident, and catching a rate limit with it.
 _DENIED_PRINCIPAL = re.compile(r"permission to .{0,200}? denied to ", re.IGNORECASE | re.DOTALL)
+
+
+# How much of a git invocation may reach one log record. Both halves of the `git.failed` line are
+# unbounded strings: git's stderr, and the arguments.
+#
+# **Neither is this repository's own text.** A `pre-receive` hook prints whatever the forge's
+# administrator wrote, `remote:` lines are the remote server's output, and a chatty CI hook can
+# emit kilobytes per rejected push. The argument list carries `refs/heads/<branch>`, and
+# `NoteSubmission.branch` is a field on a model built from a database row — bounded now
+# (`kg/submission.py`), but bounded there rather than here, and defence in depth is the point.
+#
+# The cost of not capping is not disk: `SecretRedactingFilter` regex-scans every record's message
+# **while holding the logging lock**, so an arbitrarily long field makes an arbitrarily long stall
+# that every thread logging in this process waits behind — the shape of the 21 s stall this
+# review measured on the same filter elsewhere in the tree. The exception keeps the full text: it
+# is raised, caught and inspected, never regex-scanned under a process-wide lock.
+_LOGGED_TEXT_LIMIT = 2000
+
+
+def _for_log(text: str, limit: int = _LOGGED_TEXT_LIMIT) -> str:
+    """`text` bounded for one log record, saying so when it was cut rather than cutting silently."""
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit]}… [{len(text) - limit} more character(s) omitted]"
 
 
 def _is_auth_failure(stderr: str) -> bool:
@@ -331,11 +384,20 @@ class GitNoteSubmitter:
         an authentication failure is raised non-retryable, because no number of retries installs a
         token.
 
-        The stderr is git's output rather than a user's text, and `SecretRedactingFilter` strips
-        URL userinfo from every record, so a remote carrying `user:token@` before its host cannot
-        put its credential into this line. (Written without the scheme deliberately:
+        **Both interpolated strings are bounded (`_for_log`), and the reason is that neither is
+        this repository's text.** The argument that used to stand here — "the stderr is git's
+        output rather than a user's text" — is wrong twice. `remote:` lines are the *remote
+        server's* output, so a `pre-receive` hook or a chatty forge writes straight into this
+        record at whatever length its author chose; and the same format string interpolates
+        `" ".join(args)`, which on a fetch or a push carries `refs/heads/<branch>` from
+        `NoteSubmission.branch`. What is true is the credential half: `SecretRedactingFilter`
+        strips URL userinfo from every record, so a remote carrying `user:token@` before its host
+        cannot put its credential into this line. (Written without the scheme deliberately:
         `tests/test_no_egress.py` reads every `http(s)://` literal in first-party source as a host
         this system dials, and an illustrative one in prose is indistinguishable from a real one.)
+        That filter is also why the cap matters for more than disk — it regex-scans the message
+        holding the logging lock, so an unbounded field is an unbounded stall for every thread
+        logging in this process.
         """
         returncode, stderr = await self._run(*args, cwd=cwd)
         if returncode == 0:
@@ -346,10 +408,10 @@ class GitNoteSubmitter:
             log,
             "git.failed",
             "git %s failed (%d)%s: %s",
-            " ".join(args),
+            _for_log(" ".join(args)),
             returncode,
             " — an authentication failure, which no retry can fix" if auth else "",
-            stderr,
+            _for_log(stderr),
             level=logging.WARNING,
             command=args[0],
             returncode=returncode,
@@ -462,7 +524,15 @@ class GitNoteSubmitter:
         key = int.from_bytes(hashlib.sha256(identity.encode()).digest()[:8], "big", signed=True)
         # The acquisition failures are wrapped; the submission body's own exceptions are not —
         # a broad handler around the `yield` would relabel a genuine submit error as a lock one.
-        connection_ctx = db.connection(settings.postgres_dsn)
+        #
+        # **Named, because this connection is held across a git push.** `db.connection` times the
+        # whole block and this block is the entire submission — fetch, worktree, commit and the
+        # push to the remote — so the sample it books is network-to-a-forge long by construction.
+        # Unnamed it landed in `chemclaw_db_query_duration_seconds{operation="unspecified"}` beside
+        # actual statements and emitted a `db.slow` WARNING per submission, which reads on a
+        # dashboard as database latency. The hold is real and worth measuring; what it needed was a
+        # label saying what it is.
+        connection_ctx = db.connection(settings.postgres_dsn, operation="kg_cluster_submit_lock")
         try:
             conn = await connection_ctx.__aenter__()
         except Exception as exc:

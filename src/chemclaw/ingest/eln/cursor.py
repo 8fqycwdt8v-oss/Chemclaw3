@@ -42,6 +42,10 @@ def _cursor_lags() -> dict[str, float]:
     cursor may legitimately sit a fraction ahead of local wall clock across two machines.
     """
     now = datetime.now(UTC)
+    # No per-source guard, and it does not need one: `observe_cursor` is the only writer of
+    # `_OBSERVED` and it normalizes, so every value here is aware. Guarding *here* instead would
+    # have been the wrong place — one bad source would drop only itself, but the reading would be
+    # silently missing rather than corrected.
     return {
         source: max(0.0, (now - cursor).total_seconds()) for source, cursor in _OBSERVED.items()
     }
@@ -49,6 +53,22 @@ def _cursor_lags() -> dict[str, float]:
 
 def observe_cursor(source: str, cursor: datetime) -> None:
     """Record where `source`'s cursor stands, for `chemclaw_ingest_cursor_lag_seconds`.
+
+    **Normalized to UTC here, because one naive datetime removed the whole family.** `_cursor_lags`
+    subtracts inside a dict comprehension with no per-source guard, so a single tz-naive value
+    raises `TypeError: can't subtract offset-naive and offset-aware datetimes` for *every* source —
+    and a gauge source that raises is dropped whole by the registry's guard, so
+    `ChemclawIngestCursorStalled` loses the data it fires on, permanently and silently. Measured
+    with `observe_cursor("naive-source", datetime(2026, 1, 1))`: the family vanished from the
+    scrape, leaving `chemclaw_gauge_read_failures_total` +1 and one line saying the gauge "could
+    not be read" — neither of which names a cursor, a source, or a lag.
+
+    The load path cannot produce one (`sync_cursors.cursor` is `TIMESTAMPTZ`, so psycopg hands back
+    an aware value), but `store_cursor` persists whatever its caller computed and nothing enforces
+    tz-awareness on the way in — `durable/eln_sync.py` hands it a value derived from an ELN's own
+    timestamps. Normalizing at the one door both paths go through is the fix that cannot be
+    forgotten by a third; a naive value is *read as UTC* rather than rejected, because this is
+    telemetry and refusing to observe a cursor would lose the reading the caller came to give.
 
     **Called on load as well as on store, and the load is the half that matters.** The wedge
     `ingest/eln/sync.py` documents at length — a fetch that keeps returning the same amended page,
@@ -58,7 +78,7 @@ def observe_cursor(source: str, cursor: datetime) -> None:
     no alert on ingest counts can see, because a source that is genuinely quiet produces the same
     counts and a lag that does not climb past its own cadence.
     """
-    _OBSERVED[source] = cursor
+    _OBSERVED[source] = cursor if cursor.tzinfo is not None else cursor.replace(tzinfo=UTC)
 
 
 async def load_cursor(source: str, dsn: str | None = None) -> datetime:

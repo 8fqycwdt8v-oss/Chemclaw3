@@ -248,13 +248,15 @@ def test_points_the_catalogue_cannot_resolve_are_counted_and_named(
     matches in and zero hits out, and the fan-out books an honest `chunks=0`.
     """
     before = _counter("chemclaw_vector_unresolved_points_total")
+    # The WARNING is throttled per collection (`tests/test_datapath_review_metrics.py`), so this
+    # names one nothing else uses — the point here is that drift is *said*, not how often.
     with caplog.at_level(logging.WARNING, logger="chemclaw.ingest.documents.external_index"):
-        _report_unresolved(addressed=5, rows=3, hits=2)
+        _report_unresolved(addressed=5, rows=3, hits=2, collection="observability-drifted")
 
     assert _counter("chemclaw_vector_unresolved_points_total") == before + 3
     assert "drifted" in caplog.text
     caplog.clear()
-    _report_unresolved(addressed=4, rows=4, hits=4)
+    _report_unresolved(addressed=4, rows=4, hits=4, collection="observability-healthy")
     assert not caplog.records  # nothing to say when everything resolved
 
 
@@ -293,7 +295,9 @@ def test_a_failing_embedding_provider_names_itself(
             embeddings.embed_texts(["x"], cache=False)
 
     assert "embedding.failed" in _events(caplog)
-    assert _series("chemclaw_embedding_calls_total", outcome="failure") >= 1.0
+    # `error`, the value the metric's own HELP names — see `tests/test_datapath_review_metrics.py`
+    # for why a rule written from the HELP used to select nothing.
+    assert _series("chemclaw_embedding_calls_total", outcome="error") >= 1.0
 
 
 # --- G12: a re-embed pass that made no progress -----------------------------------------------

@@ -31,6 +31,7 @@ ordering makes it unreachable.
 """
 
 import logging
+import time
 from datetime import datetime
 
 from chemclaw.core.config import settings
@@ -125,7 +126,22 @@ def group_key(doc_id: str, chunking_key: str) -> str:
     return f"{doc_id}@{chunking_key}"
 
 
-def _report_unresolved(addressed: int, rows: int, hits: int) -> None:
+# When each collection last had its drift reported at WARNING, so the line is a function of the
+# *drift* rather than of the query rate. Keyed by collection because that is the unit an operator
+# re-syncs; bounded because `vector_store_document_collection` is configuration, not a caller's
+# string.
+_LAST_UNRESOLVED_WARNING: dict[str, float] = {}
+
+# How long one collection's drift stays reported before it is worth saying again. A module constant
+# rather than a setting: it changes nothing about what this system does or measures — the counter
+# `chemclaw_vector_unresolved_points_total` is unthrottled and is what a rule fires on — it only
+# decides how often the same standing fault reprints. Five minutes is short enough that an operator
+# tailing logs during a re-sync sees it change, and long enough that a busy hour is a handful of
+# lines rather than one per turn.
+_UNRESOLVED_WARN_INTERVAL_SECONDS = 300.0
+
+
+def _report_unresolved(addressed: int, rows: int, hits: int, collection: str) -> None:
     """Say so when the store ranked points the catalogue could not turn into evidence.
 
     **These were three different numbers and nothing compared them.** The store returns `top_k`
@@ -141,21 +157,36 @@ def _report_unresolved(addressed: int, rows: int, hits: int) -> None:
     whose citation resolves to nothing under these filters (the row is there, the file that cited
     it is not). One counter, since the operator action is the same — re-sync the collection — and
     the line carries the split.
+
+    **The counter is per query; the WARNING is per collection per interval, and that asymmetry is
+    the point.** This runs on the *interactive* path — `_resolve` is reached by every external
+    vector search, so once a collection has drifted the condition holds for every search against
+    it, on every turn, indefinitely. Unthrottled that is one WARNING per source per turn for a
+    standing fault an operator has already been told about, which is the exact failure
+    `ingest/documents/sync._summarise_skips` states the rule against one package over: **log volume
+    must be a function of the fault, not of the traffic.** The difference here is that there is no
+    "pass" to summarise at the end of, so the unit of summary is the collection and a clock. The
+    per-query trail stays, at DEBUG, and `chemclaw_vector_unresolved_points_total` is unthrottled —
+    an alert reads the counter, and the counter is what says how *much* drift there is.
     """
     if hits >= addressed:
         return
     record_metric(
         lambda m: m.increment("chemclaw_vector_unresolved_points_total", addressed - hits)
     )
-    logger.warning(
-        "vector store returned %d ranked point(s); %d resolved to a chunk row and %d to a citable "
-        "hit (%.0f%% usable). Points with no chunk row mean the collection has drifted from "
-        "`document_chunks` — a sweep or a re-chunk the store was not told about",
-        addressed,
-        rows,
-        hits,
-        100.0 * hits / addressed,
+    message = (
+        "vector store returned %d ranked point(s) from %r; %d resolved to a chunk row and %d to a "
+        "citable hit (%.0f%% usable). Points with no chunk row mean the collection has drifted "
+        "from `document_chunks` — a sweep or a re-chunk the store was not told about"
     )
+    args = (addressed, collection, rows, hits, 100.0 * hits / addressed)
+    now = time.monotonic()
+    last = _LAST_UNRESOLVED_WARNING.get(collection)
+    if last is not None and now - last < _UNRESOLVED_WARN_INTERVAL_SECONDS:
+        logger.debug(message, *args)
+        return
+    _LAST_UNRESOLVED_WARNING[collection] = now
+    logger.warning(message, *args)
 
 
 class ExternalVectorDocumentIndex(PostgresDocumentIndex):
@@ -449,7 +480,7 @@ class ExternalVectorDocumentIndex(PostgresDocumentIndex):
             for row in rows
             if row[5]
         ]
-        _report_unresolved(len(addressed), len(rows), len(hits))
+        _report_unresolved(len(addressed), len(rows), len(hits), self._collection)
         # The store ranked them; the catalogue only added text. Re-sorted because a SQL result set
         # has no order of its own, and the tie-break matches every other index here.
         hits.sort(key=lambda hit: (-hit.score, hit.doc_id, hit.ordinal))
