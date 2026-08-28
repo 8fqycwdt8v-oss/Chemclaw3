@@ -1370,3 +1370,25 @@ ones a per-branch subset cannot see. They cost seconds; the six-way merge cost 8
 
 The corollary is the one this session already had and applied too narrowly: verify each agent's
 gate yourself. That is not the same as re-running what the agent ran.
+
+## A unit test that passes is not the measurement; the live lane is
+
+**2026-08-28, the backend-refusal fix.** I found that a backend's worded refusal reached the
+chemist as "an internal error occurred", diagnosed it as an `ExceptionGroup` hiding the refusal
+from a type check, wrote a test that raised the refusal inside an `anyio` task group, watched it
+go red, fixed it, watched it go green — and the live lane reported "an internal error occurred",
+unchanged.
+
+The test was wrong in a way only the live shape could show: the group's leaf is *not* the refusal.
+The leaf is the exception the `async with` raised while unwinding, and `McpRequestRefused` hangs
+off its `__cause__`, one link further in. My test constructed the shape I had inferred rather than
+the shape the traceback actually had — and it agreed with me.
+
+**The rule: when a defect was found on the live lane, the fix is verified on the live lane, and the
+unit test is written from the observed structure rather than from the explanation of it.** A test
+built from a hypothesis confirms the hypothesis. Here the log had the answer in it the whole time —
+the nesting was visible in the traceback I had already read — and I modelled the test on my summary
+of it instead of on it.
+
+Corollary, cheap and worth doing every time: after a fix that a live observation motivated, re-run
+the live observation before committing. It cost one restart and caught a fix that did not work.

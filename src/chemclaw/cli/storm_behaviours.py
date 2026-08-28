@@ -509,7 +509,15 @@ BEHAVIOURS: list[Behaviour] = [
             ToolCall(tool="calculator_trust", arguments={"property_name": "pka"}),
             ToolCall(
                 tool="calculator_outliers",
-                arguments={"property_name": "solubility", "matching": "amide", "limit": 5},
+                # `matching` is a **SMARTS/SMILES fragment**, not a class name — the tool's own
+                # docstring gives `C(=O)O` for carboxylic acids. This said `"amide"` and the call
+                # was refused live with `unparseable substructure query: 'amide'`, which `_validate`
+                # cannot catch: it checks that an argument *name* is one the tool takes and that a
+                # generated `params` payload validates, and neither reaches the domain of a
+                # free-form string. The refusal is the product behaving correctly; the catalogue
+                # was wrong, and a behaviour that is refused measures the refusal rather than the
+                # tool body it was written to exercise.
+                arguments={"property_name": "solubility", "matching": "C(=O)N", "limit": 5},
             ),
             # A real measured value (acetic acid, pKa 4.76) rather than a nonce: this appends to
             # the calibration ledger the two reads above consult, and a fabricated residual would

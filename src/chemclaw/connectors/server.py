@@ -48,6 +48,7 @@ from chemclaw.connectors.identity import (
 from chemclaw.core import db
 from chemclaw.core.asgi import BodySizeLimit
 from chemclaw.core.config import settings
+from chemclaw.core.mcp_session import McpRequestRefused
 from chemclaw.core.metrics import CONTENT_TYPE, METRICS
 from chemclaw.core.tracing import continue_trace
 
@@ -403,6 +404,14 @@ def _sanitize_tool_errors(server: FastMCP, *, name: str) -> None:
         except ToolError as exc:
             if isinstance(exc.__cause__, ValueError):
                 raise  # a deliberately-worded domain message (or a validation error) — safe as-is
+            refusal = _worded_refusal(exc.__cause__, tool=tool_name)
+            if refusal is not None:
+                # Logged all the same: a backend refusing is worth an operator line even though
+                # the caller is being told the truth about it.
+                logger.warning(
+                    "connector %s: tool %r was refused by a backend: %s", name, tool_name, refusal
+                )
+                raise ToolError(f"Error executing tool {tool_name}: {refusal}") from exc.__cause__
             logger.exception(
                 "connector %s: tool %r raised an unexpected exception", name, tool_name
             )
@@ -411,6 +420,85 @@ def _sanitize_tool_errors(server: FastMCP, *, name: str) -> None:
             ) from exc.__cause__
 
     manager.call_tool = _call_tool  # type: ignore[method-assign,assignment]
+
+
+# How deep a nested `ExceptionGroup` may be walked looking for a backend's refusal. Not a setting:
+# it describes the structure `anyio` builds around `calc_session` (a group inside a group, so two),
+# with one level of slack, and a deployment cannot change that shape by configuring it. It exists so
+# an unexpected chain cannot make the unwrap walk forever, not so anybody can tune it.
+_REFUSAL_UNWRAP_DEPTH = 4
+
+
+def _strip_restated_prefixes(text: str, tool: str) -> str:
+    """Drop the prefixes each hop restates, so the chemist reads the sentence once.
+
+    Three layers name the tool before the message: this wrapper, `mcp_session.invoke`'s
+    `f"{tool} failed: ..."`, and the remote server's own `Tool.run`. Unfixed, the live lane
+    delivered "Error executing tool compute_surface_potential: compute_surface_potential failed:
+    Error executing tool compute_surface_potential: atomic polarisabilities ..." — the tool named
+    three times before the first word that says anything. Only prefixes naming *this* tool are
+    removed, so nothing that carries information is trimmed.
+    """
+    for _ in range(_REFUSAL_UNWRAP_DEPTH):
+        for prefix in (f"Error executing tool {tool}: ", f"{tool} failed: "):
+            if text.startswith(prefix):
+                text = text[len(prefix) :]
+                break
+        else:
+            break
+    return text
+
+
+def _worded_refusal(cause: BaseException | None, *, tool: str, _depth: int = 0) -> str | None:
+    """A backend's own caller-safe refusal text, if this failure is one, else `None`.
+
+    **A refusal another process wrote for the chemist has already passed a sanitizer, and replacing
+    it a second time keeps nothing back while destroying the only actionable thing in it.**
+    `core/mcp_session.invoke` raises `McpRequestRefused` carrying the remote server's message, and
+    `Chemclaw3-mcp`'s own `connector_app` guarantees that message is caller-safe before it is sent:
+    anything that is not a deliberately-worded `ValueError` there is already replaced by a short
+    `error_id` notice on that side. So the text arriving here is either the server's considered
+    wording or an opaque id — never a traceback, a DSN or a path.
+
+    Measured on the live lane, 2026-08-28: `compute_atomic_descriptors` told the chemist "an
+    internal error occurred", while the message it discarded read "atomic polarisabilities ...
+    require the 'xtb' binary, which is not installed in this deployment ... The partial charges,
+    bond orders and Fukui indices from compute_electronic_properties and predict_site_reactivity do
+    not need it" — a deployment fact plus the two tools to use instead.
+
+    **The recursion is not defensive coding, it is the shape the failure actually has.** The refusal
+    is raised inside `calc_session`'s `anyio` task group, so it arrives wrapped in a nested
+    `ExceptionGroup` whose own `str()` is "unhandled errors in a TaskGroup (1 sub-exception)" — a
+    type check against the cause alone can never see it, however wide the accepted family gets. The
+    depth bound is what keeps a pathological chain from walking forever; groups this tree produces
+    nest two deep.
+
+    Args:
+        cause: The `__cause__` of the `ToolError` the tool manager composed.
+        tool: The tool being called, so a prefix restating its name can be dropped.
+        _depth: Recursion depth, bounded because the structure is untrusted in principle.
+
+    Returns:
+        The refusal's text, or `None` when this failure is not a backend refusal and must therefore
+        be replaced.
+    """
+    if cause is None or _depth > _REFUSAL_UNWRAP_DEPTH:
+        return None
+    if isinstance(cause, McpRequestRefused):
+        return _strip_restated_prefixes(str(cause), tool)
+    if isinstance(cause, BaseExceptionGroup):
+        for inner in cause.exceptions:
+            found = _worded_refusal(inner, tool=tool, _depth=_depth + 1)
+            if found is not None:
+                return found
+        return None
+    # **A group's leaf is not the refusal; the refusal is what caused it.** Measured on the live
+    # lane after the group-unwrapping alone still reported "an internal error occurred": the
+    # innermost member is the exception `calc_session`'s `async with` raised while unwinding, and
+    # `McpRequestRefused` hangs off its `__cause__`. `__context__` is followed too, because an
+    # exception raised *during* handling of the refusal — rather than explicitly `from` it — chains
+    # implicitly and is the same fact about the same failure.
+    return _worded_refusal(cause.__cause__ or cause.__context__, tool=tool, _depth=_depth + 1)
 
 
 def _publish_tool_results(server: FastMCP, *, name: str) -> None:

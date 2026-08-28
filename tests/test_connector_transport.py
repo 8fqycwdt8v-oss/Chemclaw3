@@ -29,6 +29,7 @@ from datetime import timedelta
 from types import SimpleNamespace
 from typing import Any, cast
 
+import anyio
 import httpx
 import pytest
 import uvicorn
@@ -64,7 +65,7 @@ from chemclaw.core.identity_context import (
     set_current_correlation_id,
     set_current_identity,
 )
-from chemclaw.core.mcp_session import cancel_on_timeout, invoke
+from chemclaw.core.mcp_session import McpRequestRefused, cancel_on_timeout, invoke
 from chemclaw.core.session_context import reset_current_session_id, set_current_session_id
 from tests.conftest import _free_port
 
@@ -548,6 +549,102 @@ def test_an_unexpected_tool_exception_reaches_the_caller_sanitized() -> None:
         message = asyncio.run(_call())
     assert secret not in message
     assert "an internal error occurred" in message
+
+
+def test_a_backends_worded_refusal_survives_the_sanitizer() -> None:
+    """A refusal a backend wrote *for the chemist* must not be replaced by "an internal error".
+
+    The sanitizer above is right and its pass-through family was one class too narrow. It admits
+    `ValueError` — "a deliberately-worded domain message" — and `McpRequestRefused` is exactly that
+    for a tool answering from another process: `core/mcp_session.invoke` raises it carrying the
+    remote server's own text, and the fleet guarantees that text is caller-safe before it is sent
+    (`Chemclaw3-mcp`'s `connector_app` replaces any non-`ValueError` with a short `error_id` notice
+    on its side). So the message crossing the wire has already passed a sanitizer; replacing it
+    again destroys the only thing the chemist could act on and keeps nothing back.
+
+    **Measured on the live lane, 2026-08-28.** `compute_atomic_descriptors` reached the chemist as
+    `Error executing tool compute_atomic_descriptors: an internal error occurred`. What the backend
+    had actually said, and what the connector log held: *"atomic polarisabilities, dispersion
+    coefficients and atomic multipoles require the 'xtb' binary, which is not installed in this
+    deployment. Nothing here approximates them ... The partial charges, bond orders and Fukui
+    indices from compute_electronic_properties and predict_site_reactivity do not need it."* — a
+    deployment fact plus the two tools to use instead, thrown away at the last hop.
+
+    **The `ExceptionGroup` half is the reason a type check alone was not enough.** The refusal is
+    raised inside `calc_session`'s `anyio` task group, so what arrives as `__cause__` is a nested
+    `ExceptionGroup` and `isinstance(cause, ValueError)` is `False` however wide the family gets.
+    Both are driven here, in the shape the live failure had: a group is unwrapped, and the wording
+    that survives is the backend's rather than anyio's "unhandled errors in a TaskGroup".
+    """
+    worded = (
+        "atomic polarisabilities require the 'xtb' binary, which is not installed in this "
+        "deployment; compute_electronic_properties does not need it"
+    )
+    server = FastMCP("refusal-probe")
+
+    @server.tool()
+    async def refuse_plainly() -> str:
+        """Raise the backend's worded refusal directly, as an unwrapped cause."""
+        raise McpRequestRefused(worded)
+
+    @server.tool()
+    async def refuse_inside_a_task_group() -> str:
+        """Raise it the way `calc_session` really does — from inside an anyio task group."""
+
+        async def _boom() -> None:
+            raise McpRequestRefused(worded)
+
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(_boom)
+        raise AssertionError("unreachable")  # pragma: no cover
+
+    @server.tool()
+    async def refuse_as_a_cause_inside_a_group() -> str:
+        """The shape the live failure really had, and the one a type check on the leaf misses.
+
+        The refusal is raised inside `calc_session`'s task group and the group's *member* is the
+        exception the `async with` raised while unwinding — `McpRequestRefused` hangs off its
+        `__cause__`, one link further in. Unwrapping groups alone left the live lane still
+        reporting "an internal error occurred" after the first version of this fix, which is how
+        this case was found.
+        """
+
+        async def _boom() -> None:
+            try:
+                raise McpRequestRefused(worded)
+            except McpRequestRefused as exc:
+                raise RuntimeError("session closed while unwinding") from exc
+
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(_boom)
+        raise AssertionError("unreachable")  # pragma: no cover
+
+    app = connector_app(server, name="refusal-probe")
+    port = _free_port()
+
+    async def _call(tool_name: str) -> str:
+        spec = _mcp_connection(
+            cast(ConnectorManifest, SimpleNamespace(name="refusal-probe")),
+            _endpoint(f"http://127.0.0.1:{port}/mcp", tool_name),
+        )
+        async with AsyncExitStack() as stack:
+            tools, unreachable = await open_connector_specs(stack, [spec])
+            assert not unreachable
+            return str(await next(t for t in tools if t.name == tool_name).ainvoke({}))
+        raise AssertionError("unreachable")  # pragma: no cover
+
+    with _Server(app, port):
+        direct = asyncio.run(_call("refuse_plainly"))
+        grouped = asyncio.run(_call("refuse_inside_a_task_group"))
+        chained = asyncio.run(_call("refuse_as_a_cause_inside_a_group"))
+
+    for message in (direct, grouped, chained):
+        assert "xtb" in message, message
+        assert "compute_electronic_properties" in message, message
+        assert "an internal error occurred" not in message, message
+    assert "TaskGroup" not in grouped, grouped
+    # The tool is named once, by this wrapper, not three times over by every hop that restated it.
+    assert direct.count("refuse_plainly") == 1, direct
 
 
 def test_the_connector_server_entrypoint_configures_the_process_before_serving(
