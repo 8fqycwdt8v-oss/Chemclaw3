@@ -1294,3 +1294,35 @@ door when no model is configured — it was asked to bring up whatever the confi
 it was asked for; and separately, a check that disturbs something must verify the disturbance from
 outside. Defect #4 is what it looks like when neither does: a killed process, a printed success, and
 an exit code of 0.
+
+## 2026-08-28 — I read a truncated string and reported it as a measurement
+
+Investigating why family `T` reported tools as "not a valid tool", I needed the set a turn can
+actually call. I took it from the model's own error message — `Error: X is not a valid tool, try one
+of [a, b, c, ...]` — parsed the bracket, counted 17, and reported that **83 of 99 tools are
+unreachable without selecting a profile**.
+
+That message is truncated at 300 characters and does not close its bracket. Asking
+`advertised_tool_names(None)` instead: the default profile advertises **91** of 99. There is no dead
+surface. The finding I reported did not exist.
+
+Two things went wrong and only one of them is about strings.
+
+**I used the system under test as its own instrument.** The error text is a *message to a model* —
+bounded on purpose, by the same budget that bounds every model-facing string in this tree. Treating
+it as a data structure meant my measurement inherited a limit that exists for a different reason
+entirely. When a number has to be right, ask the function that computes it, never the prose that
+reports it.
+
+**And I did not check the instrument before trusting it.** One glance at whether the list closed its
+bracket would have caught it — `msg.rstrip().endswith("]")` is `False`. I ran that check only after
+the number looked surprising. The rule is to run it *first*: before a parsed measurement becomes a
+finding, confirm the parse consumed everything it was supposed to. A truncated list looks exactly
+like a short list.
+
+The sharper form, because this is the third time today the same shape has come up from a different
+direction: **a bound that a wrong answer also satisfies is not a measurement.** A recovery check
+passes over a disturbance that never happened; a coverage count passes over a corpus that is not
+there; a reachability count passes over a list that was cut off. In every case the fix is to ask a
+second, independent question whose answer must agree — and to ask it before publishing, not after
+somebody doubts the first.

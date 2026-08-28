@@ -126,6 +126,18 @@ class TurnResult:
     # needs this: a malformed call that comes back as a *result* is only acceptable if the
     # result says it failed, and 'a tool_result arrived' cannot tell those apart.
     result_previews: list[str] = field(default_factory=list)
+    # Why each failure failed, beside `tools_failed`'s *what*. Read by family T's dry-run check.
+    #
+    # It had only the name, and that cost fourteen checks their meaning on the first run of family
+    # T: a refusal is *raised*, so `announce_tool_failures` emits `tool_failed` and the error
+    # `ToolMessage` beside it is suppressed from the stream on the documented ground that it "is
+    # already reported as tool_failed". A check looking for the refusal text in `result_previews`
+    # therefore finds nothing, and reported `refused=0 failed=['synthesize_memory']` about a turn
+    # whose stream plainly carried `DryRunRefusal: DRY RUN — synthesize_memory changes stored data
+    # or starts work, so it was not called`. Measured against the running front door before it was
+    # believed, because "the control did not fire" and "the check read the wrong field" look
+    # identical from the report and are not remotely the same finding.
+    failure_messages: list[str] = field(default_factory=list)
     error_code: str | None = None
     transport_error: str | None = None
 
@@ -188,6 +200,7 @@ async def run_turn(client: httpx.AsyncClient, message: str, *, dry_run: bool = F
                     result.result_previews.append(str(event.get("preview", "")))
                 elif kind == "tool_failed":
                     result.tools_failed.append(str(event.get("tool", "")))
+                    result.failure_messages.append(str(event.get("message", "")))
                 elif kind == "answer":
                     result.answered = bool(str(event.get("text", "")).strip())
                 elif kind == "error":
@@ -1089,7 +1102,9 @@ async def family_t_tool_surface() -> list[Finding]:
         (result,) = await storm(behaviour, turns=1, concurrency=1, dry_run=True)
         # Matched on the word the refusal itself opens with, so a launcher that slipped past the
         # gate and returned a job id cannot read as a pass.
-        refused = [p for p in result.result_previews if "DRY RUN" in p]
+        # `failure_messages`, not `result_previews`: a refusal is raised, so it arrives as a
+        # `tool_failed` carrying the sentence and no `tool_result` at all. See the field's comment.
+        refused = [m for m in result.failure_messages if "DRY RUN" in m]
         findings.append(
             Finding(
                 family="T",

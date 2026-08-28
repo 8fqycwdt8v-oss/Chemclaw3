@@ -199,6 +199,33 @@ topic).
 
 ## 4 — Operating it
 
+- [ ] **`mock_llm._validate` green-lights behaviours the running agent then rejects as unknown
+      tools** — [M], measured 2026-08-28 by the storm's new `T` family on its first live run.
+      `available_tool_names()` reports 99 and `advertised_tool_names(None)` reports 91, and
+      `compute_electronic_properties`, `compute_atomic_descriptors`, `compute_surface_potential`,
+      `predict_site_reactivity`, `calculator_trust`, `calculator_outliers`, `report_measurement`,
+      `suggest_next_experiment`, `generate_screening_design`, `predict_outcome` and
+      `campaign_progress` are **all in both sets** — yet a live turn against the running front door
+      answers `Error: <name> is not a valid tool, try one of [...]` for every one of them. So the
+      surface the mock validates against at startup and the surface the compiled graph binds at turn
+      time are two different sets, and the validator's whole purpose is to make that impossible: it
+      exists because LOAD-1 published "100 tool calls, the tool path is genuinely exercised" over
+      calls that all died before the tool body ran.
+      Three checks in family `T` fail on this today (`t-calc-electronic`, `t-calc-ledger`,
+      `t-bo-inline`), which is the symptom rather than the row — the row is that a behaviour can pass
+      startup validation and be rejected at call time.
+      **Anchors:** `chemclaw.agent.chemclaw_agent.available_tool_names` /
+      `.advertised_tool_names` / `._capability_tools`, `chemclaw.cli.mock_llm._validate`,
+      `chemclaw.connectors.registry._bundle_dirs`. First thing to check is the `calc` name
+      collision: this repository's in-tree `calc` manifest declares 13 tools and wins the collision
+      against `Chemclaw3-mcp`'s, so a name that resolves through the *losing* manifest would
+      validate and not bind. Do not fix by widening `_validate` — that would remove the guard rather
+      than close the gap.
+      **The instrument matters here.** A first pass read the reachable set out of the model's own
+      "try one of [...]" error string and concluded 17 reachable and 67 dead; that string is
+      truncated at 300 characters and does not close its bracket, so the conclusion was an artifact.
+      Ask `advertised_tool_names`, never the error text.
+
 - [ ] **No deployment declares a context window, and the overrun indicator cannot see the prefix**
       — [M], found reviewing `D-2026-08-28-the-budget-is-the-control-not-the-trigger` after it
       merged, and it is that change that made a latent gap live.
