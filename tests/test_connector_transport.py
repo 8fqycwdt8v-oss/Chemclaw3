@@ -20,6 +20,7 @@ and is covered in CI (`test_molfp_postgres.py`, `test_rxnfp_postgres.py`) agains
 
 import asyncio
 import logging
+import os
 import threading
 import time
 from collections.abc import Iterator
@@ -35,8 +36,12 @@ import pytest
 import uvicorn
 from fastapi import FastAPI
 from langchain_core.tools import BaseTool
+from mcp import ClientSession
+from mcp.client.streamable_http import streamablehttp_client
 from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp.utilities.func_metadata import StrictJsonSchema
 from mcp.shared.exceptions import McpError
+from mcp.types import CallToolResult
 
 from chemclaw.agent.audit import _served_by
 from chemclaw.connectors.calc.remote import calc_session
@@ -46,7 +51,12 @@ from chemclaw.connectors.identity import (
     HEADER_SESSION,
     turn_identity_hook,
 )
-from chemclaw.connectors.manifest import ConnectorManifest, HttpEndpoint, StdioEndpoint
+from chemclaw.connectors.manifest import (
+    BearerAuth,
+    ConnectorManifest,
+    HttpEndpoint,
+    StdioEndpoint,
+)
 from chemclaw.connectors.registry import (
     _mcp_connection,
     connector_http_client,
@@ -67,6 +77,7 @@ from chemclaw.core.identity_context import (
 )
 from chemclaw.core.mcp_session import McpRequestRefused, cancel_on_timeout, invoke
 from chemclaw.core.session_context import reset_current_session_id, set_current_session_id
+from chemclaw.science.bo.progress import CampaignProgress
 from tests.conftest import _free_port
 
 
@@ -1071,3 +1082,142 @@ def _probe_tool() -> BaseTool:
         return "ok"
 
     return probe
+
+
+async def _advertised_and_returned(
+    url: str, tool: str, arguments: dict[str, Any], headers: dict[str, str] | None = None
+) -> tuple[dict[str, Any] | None, CallToolResult]:
+    """One raw MCP session: what `tools/list` advertises for `tool`, and what calling it returns.
+
+    Raw rather than through `open_connector_specs`, because `langchain_mcp_adapters` keeps neither
+    half of what is being compared here — it drops `outputSchema` on the way in and renders an
+    error result as tool *content* on the way out, so both sides of the contract would be invisible.
+    """
+    async with streamablehttp_client(url, headers=headers) as (read, write, _):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            listed = await session.list_tools()
+            advertised = next(t.outputSchema for t in listed.tools if t.name == tool)
+            return advertised, await session.call_tool(tool, arguments)
+
+
+def test_a_tools_output_schema_admits_the_payload_it_actually_returns() -> None:
+    """The advertised output schema must describe what the tool sends, computed fields included.
+
+    **The defect this pins, measured against the live `bo` connector.** `mcp`'s `func_metadata`
+    builds a tool's output schema with `model.model_json_schema(...)`, whose default mode is
+    `"validation"` — and pydantic's validation schema, by design, omits every `computed_field`,
+    because a computed field is an output and never an input. What the tool actually sends is
+    `model_dump(mode="json")`, which includes them. So a model with a computed field advertises a
+    contract narrower than its own payload, and `mcp.server.lowlevel.server` validates the payload
+    against that contract before returning it: with `extra="forbid"` on the model — which is
+    `additionalProperties: false` in the schema — every call to that tool comes back
+    `Output validation error: Additional properties are not allowed`.
+
+    `CampaignProgress` is the real model rather than a fixture of one, because the two properties
+    that make it fail are exactly the two a fixture would have to be given anyway (a computed field
+    and `extra="forbid"`), and using the shipped model is what makes this a test about the
+    connector surface instead of about pydantic. It is returned from a purpose-built server for the
+    same reason the identity tests use one: `bo.campaign_progress` needs Postgres to *reach* its
+    return statement, and the contract under test is settled before any of that.
+
+    Asserted over the wire and against the payload — not by comparing two `model_json_schema()`
+    calls, which agree with each other whatever the server advertises.
+    """
+    progress = CampaignProgress(
+        objective="yield",
+        direction="maximize",
+        assay_noise=2.0,
+        window=4,
+        n_observations=0,
+        n_distinct=0,
+        n_distinct_in_space=0,
+    )
+    server = FastMCP("schema-probe")
+
+    @server.tool()
+    async def campaign_progress() -> CampaignProgress:
+        """Return a model carrying computed fields, so the wire can be compared to the contract."""
+        return progress
+
+    app = connector_app(server, name="schema-probe")
+    port = _free_port()
+    with _Server(app, port):
+        advertised, result = asyncio.run(
+            _advertised_and_returned(f"http://127.0.0.1:{port}/mcp", "campaign_progress", {})
+        )
+
+    assert not result.isError, (
+        "the connector refused its own tool's result: "
+        f"{[getattr(block, 'text', block) for block in result.content]}"
+    )
+    assert advertised is not None, "a model-returning tool advertised no output schema at all"
+    assert result.structuredContent is not None
+    # The contract, against the payload — every key actually sent must be a property the schema
+    # declares. Stronger than the `jsonschema.validate` the lowlevel server already ran on the way
+    # out (which is what `isError` above reports), because that one passes on an under-declared
+    # schema whenever the model happens not to forbid extras — the position fourteen further tools
+    # were in. `out_of_space` and `summary` are named so the assertion cannot pass vacuously if the
+    # payload one day arrives empty.
+    undeclared = sorted(set(result.structuredContent) - set(advertised.get("properties", {})))
+    assert not undeclared, (
+        "the tool sends fields its advertised output schema does not declare, so every consumer "
+        f"of that schema is told they do not exist: {undeclared}"
+    )
+    assert {"out_of_space", "summary"} <= set(result.structuredContent), (
+        "the computed fields left the payload; this test proves nothing: "
+        f"{sorted(result.structuredContent)}"
+    )
+
+
+@pytest.mark.parametrize("name", [name for name, _ in _LOCAL_HTTP])
+def test_every_served_tool_advertises_every_field_it_serializes(name: str, composite: int) -> None:
+    """The same contract, swept over every tool every shipped bundle actually serves.
+
+    The test above proves the mechanism on one model; this is the blast radius. Measured on
+    2026-08-28 over the four bundles that ship a server: 15 of 31 tools returned a model carrying a
+    `computed_field` somewhere, and every one of them advertised a schema without it. Only
+    `bo.campaign_progress` *failed* — it is the one whose model sets `extra="forbid"` — and the
+    other fourteen were passing only because their schemas happened to permit unknown properties,
+    which is a client-side default and not a promise.
+
+    Read off the wire (`tools/list` against the running composite) rather than off the `Tool`
+    object, so this measures what a client is told rather than what the server holds.
+    """
+    manifest = dict(_LOCAL_HTTP)[name]
+    assert isinstance(manifest.endpoint, HttpEndpoint)
+    tools_module = server_tools_module(name)
+    assert tools_module is not None
+    headers = {}
+    if isinstance(manifest.endpoint.auth, BearerAuth):
+        headers["Authorization"] = f"Bearer {os.environ[manifest.endpoint.auth.token_env]}"
+
+    async def _advertised() -> dict[str, dict[str, Any] | None]:
+        url = f"http://127.0.0.1:{composite}/{name}/mcp"
+        async with streamablehttp_client(url, headers=headers) as (read, write, _):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                listed = await session.list_tools()
+                return {tool.name: tool.outputSchema for tool in listed.tools}
+
+    advertised = asyncio.run(_advertised())
+    missing: dict[str, list[str]] = {}
+    for tool in tools_module.server._tool_manager.list_tools():
+        model = tool.fn_metadata.output_model
+        if model is None:
+            continue
+        sent = model.model_json_schema(schema_generator=StrictJsonSchema, mode="serialization")
+        told = advertised[tool.name] or {}
+        absent = sorted(set(sent.get("properties", {})) - set(told.get("properties", {})))
+        # Nested models carry computed fields too, and a `$defs` entry is where they land.
+        for definition, body in (sent.get("$defs") or {}).items():
+            known = ((told.get("$defs") or {}).get(definition) or {}).get("properties", {})
+            absent += [
+                f"{definition}.{field}"
+                for field in sorted(set(body.get("properties", {})) - set(known))
+            ]
+        if absent:
+            missing[tool.name] = absent
+    assert not missing, (
+        f"{name} advertises output schemas that omit fields its tools serialize: {missing}"
+    )
