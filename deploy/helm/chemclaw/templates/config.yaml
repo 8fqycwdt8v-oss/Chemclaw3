@@ -81,6 +81,10 @@ metadata:
     "helm.sh/hook": pre-install,pre-upgrade
     "helm.sh/hook-weight": "-10"
     {{- toYaml .Values.serviceAccount.annotations | nindent 4 }}
+{{- /* No component calls the Kubernetes API, so the projected API token is not mounted into any pod
+       using this account. Explicit `false` rather than an omission: the cluster default is to mount
+       it, so leaving this out is the insecure posture. */}}
+automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
 {{- if .Values.secrets.create }}
 ---
 apiVersion: v1

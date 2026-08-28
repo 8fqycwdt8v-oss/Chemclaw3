@@ -230,7 +230,12 @@ def test_chart_config_values_load_as_settings(monkeypatch: pytest.MonkeyPatch) -
     mount = _VALUES["secrets"]["temporalTls"]["mountPath"]
     for env_key, filename in zip(sorted(_TLS_ENV), ["ca.crt", "tls.crt", "tls.key"], strict=True):
         overrides[_field_for(env_key)] = f"{mount}/{filename}"
-    overrides["postgres_dsn"] = "postgresql://chemclaw:chemclaw@postgres:5432/chemclaw"
+    overrides["postgres_dsn"] = (
+        # sslmode=verify-full because the chart enforces identity (entra_required=true), under which
+        # a non-loopback DSN must state TLS — the security-review guard rejects a plaintext-capable
+        # DSN in that posture. A production secret must carry the same (documented in the runbook).
+        "postgresql://chemclaw:chemclaw@postgres:5432/chemclaw?sslmode=verify-full"
+    )
     # The two keys the ConfigMap derives rather than copies, passed as *environment* — which is
     # how the pod receives them and, for `connector_urls`, the only way the value works at all:
     # pydantic-settings JSON-decodes a complex field from an env var and does not from an init
@@ -496,7 +501,12 @@ def _settings_from_chart(monkeypatch: pytest.MonkeyPatch) -> Settings:
     mount = _VALUES["secrets"]["temporalTls"]["mountPath"]
     for env_key, filename in zip(sorted(_TLS_ENV), ["ca.crt", "tls.crt", "tls.key"], strict=True):
         overrides[_field_for(env_key)] = f"{mount}/{filename}"
-    overrides["postgres_dsn"] = "postgresql://chemclaw:chemclaw@postgres:5432/chemclaw"
+    overrides["postgres_dsn"] = (
+        # sslmode=verify-full because the chart enforces identity (entra_required=true), under which
+        # a non-loopback DSN must state TLS — the security-review guard rejects a plaintext-capable
+        # DSN in that posture. A production secret must carry the same (documented in the runbook).
+        "postgresql://chemclaw:chemclaw@postgres:5432/chemclaw?sslmode=verify-full"
+    )
     for env_key, value in _rendered_derived_values().items():
         monkeypatch.setenv(env_key, value)
     return Settings(_env_file=None, **overrides)  # type: ignore[call-arg, arg-type]

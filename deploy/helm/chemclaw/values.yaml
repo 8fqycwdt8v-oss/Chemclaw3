@@ -764,6 +764,13 @@ serviceAccount:
   name: "chemclaw"
   annotations:
     azure.workload.identity/client-id: "00000000-0000-0000-0000-000000000000"
+  # No component calls the Kubernetes API (there is no in-cluster client anywhere in `src/`), so the
+  # projected API token every pod would otherwise mount is pure attack surface: a compromised pod
+  # could present it to the API server with whatever this SA is granted. Off by default; a release
+  # that genuinely needs the token (a future in-cluster reader) sets this true deliberately. Entra
+  # workload identity uses a *federated* token from the annotation above, not this mount, so turning
+  # it off does not touch identity.
+  automountServiceAccountToken: false
 
 # NetworkPolicy egress **port** allow-list (F6-T2). It bounds the ports, never the destinations —
 # `egressDestinations` below is what bounds those, and the chart refuses to render until a release

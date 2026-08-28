@@ -170,3 +170,29 @@ def test_the_release_job_refuses_a_tag_where_a_digest_belongs() -> None:
     """The one guard that cannot live in the shell: the parameters arrive from a human."""
     release = (_JENKINS_DIR / "Jenkinsfile.release").read_text(encoding="utf-8")
     assert "startsWith('sha256:')" in release, "the release job accepts a tag as a digest"
+
+
+def test_every_free_text_release_parameter_is_allowlist_validated() -> None:
+    """Free-text parameters are interpolated into `sh`, so each must be allowlisted before use.
+
+    A `string(...)` parameter can hold any text, and both pipelines interpolate several of them
+    (`${params.IMAGE_REGISTRY}`, `${params.NAMESPACE}`, ...) into `sh` blocks and image refs, where
+    a shell metacharacter would run on the agent (CWE-78). The choice/boolean parameters cannot —
+    Jenkins fixes their values. So the invariant, for *each* pipeline: every free-text parameter is
+    checked against a conservative allowlist in a `Validate parameters` stage, before any `sh` sees
+    it. A new free-text parameter that skips the stage fails this test, not the next release.
+    """
+    for pipeline in _PIPELINES:
+        text = pipeline.read_text(encoding="utf-8")
+        assert "stage('Validate parameters')" in text, (
+            f"{pipeline.name} lost its parameter-validation stage"
+        )
+        free_text = set(re.findall(r"string\(name: '([^']+)'", text))
+        assert free_text, f"no free-text parameters parsed in {pipeline.name} — parse drifted"
+        validated = set(re.findall(r"\[name: '([^']+)', value: params\.", text))
+        missing = free_text - validated
+        assert not missing, (
+            f"{pipeline.name}: free-text parameters reach sh without validation: {missing}"
+        )
+        # Every validation is an anchored allowlist match, not a loose contains-check.
+        assert "c.value ==~ c.pattern" in text, f"{pipeline.name}: validation is not a regex match"

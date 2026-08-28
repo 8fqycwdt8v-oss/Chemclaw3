@@ -641,3 +641,63 @@ def test_a_dependency_never_overwrites_a_human_edited_file(tmp_path: Path) -> No
         check=True,
     ).stdout
     assert "chemist's hazard note" in on_branch, "the human's edit must survive the proposal"
+
+
+def test_git_child_env_scrubs_app_secrets_but_keeps_git_credential(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`_git_child_env` hands git the environment minus this process's own secret values.
+
+    Least privilege: a git remote, credential helper or hook must not find the LLM key, a DSN or the
+    framing HMAC in its environment. The notes-remote token and PATH are not secrets git can do
+    without, so they survive — that survival is what keeps `push` working.
+    """
+    from chemclaw.kg.git_submitter import _git_child_env
+
+    monkeypatch.setenv("CHEMCLAW_LLM_API_KEY", "llm-secret-value")
+    monkeypatch.setenv("CHEMCLAW_POSTGRES_DSN", "postgresql://u:pw@db/x")
+    monkeypatch.setenv("CHEMCLAW_FRAMING_ENVELOPE_SECRET", "hmac-secret-value")
+    monkeypatch.setenv("CHEMCLAW_KNOWLEDGE_REPO_TOKEN", "git-token-value")
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+
+    env = _git_child_env()
+
+    assert "CHEMCLAW_LLM_API_KEY" not in env
+    assert "CHEMCLAW_POSTGRES_DSN" not in env
+    assert "CHEMCLAW_FRAMING_ENVELOPE_SECRET" not in env
+    assert env["CHEMCLAW_KNOWLEDGE_REPO_TOKEN"] == "git-token-value"
+    assert env["PATH"] == "/usr/bin:/bin"
+
+
+def test_git_subprocess_receives_the_scrubbed_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The scrubbed environment actually reaches `create_subprocess_exec`, not just the helper."""
+    monkeypatch.setenv("CHEMCLAW_LLM_API_KEY", "llm-secret-value")
+    captured: dict[str, object] = {}
+
+    class _FakeProcess:
+        returncode = 0
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            return b"deadbeef\n", b""
+
+        def kill(self) -> None:  # pragma: no cover - not reached on a clean exit
+            pass
+
+        async def wait(self) -> int:  # pragma: no cover
+            return 0
+
+    async def _fake_exec(*_args: object, **kwargs: object) -> _FakeProcess:
+        captured.update(kwargs)
+        return _FakeProcess()
+
+    monkeypatch.setattr("chemclaw.kg.git_submitter.asyncio.create_subprocess_exec", _fake_exec)
+    submitter = GitNoteSubmitter(repo_dir=str(tmp_path), base_branch="main", remote="origin")
+
+    result = asyncio.run(submitter._read("HEAD"))
+
+    assert result == "deadbeef"
+    env = captured["env"]
+    assert isinstance(env, dict)
+    assert "CHEMCLAW_LLM_API_KEY" not in env

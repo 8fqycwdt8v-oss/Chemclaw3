@@ -208,22 +208,28 @@ def activity_context(args: Sequence[Any], fn: Any = None) -> ActivityContext:
     activity, and "the ids the front door stamped reach the worker's log lines" is a property that
     should be checkable without a broker.
 
-    **Roles are taken only where an input actually declares them.** Binding an actor with an empty
-    role set is safe by construction — every gate that reads them fails closed on an empty set
-    (`authz.check_expensive_action`, `documents/retriever._entitled`) — so the widening this could
-    have been is not one. What it buys is that `agent/audit.py` and `kg/proposal.py`, which read
-    the ambient actor and booked `""` for every row a worker ever wrote, now name the person the
-    run was launched for.
+    **Roles are never taken from the payload; the actor is.** A relayed workflow argument is data,
+    not a verified claim, so binding a role from it would let anyone who can enqueue an activity
+    forge a privileged role (security review, `D-2026-08-28`) — authorization binds an *empty* set,
+    which every gate treats as fail-closed (`authz.authorize_trigger`,
+    `documents/retriever._entitled`). Lifting the actor, session and correlation is safe on the same
+    reasoning: they are attribution, not authority, and what it buys is that `agent/audit.py` and
+    `kg/proposal.py`, which read the ambient actor and booked `""` for every row a worker ever
+    wrote, now name the person the run was launched for.
     """
     models = list(_models(args))
-    roles: frozenset[str] = frozenset()
-    for model in models:
-        declared = getattr(model, "roles", None)
-        if isinstance(declared, (list, tuple, frozenset, set)) and declared:
-            roles = frozenset(str(role) for role in declared)
-            break
-    # A model wins over a parameter name: a declared field is the established source and the only
-    # one that can also carry roles, so the fallback only ever fills what the walk left empty.
+    # Roles are NOT taken from the payload. A workflow argument is data the broker relays, not a
+    # verified claim: anyone who can enqueue an activity (a plaintext broker, a compromised worker,
+    # a replay) could otherwise put `roles=["Chemclaw.Privileged"]` in the payload and satisfy the
+    # privileged gate, because `authz._has_required_role` reads exactly the contextvar this binds.
+    # Actor, session and correlation are still lifted, for attribution — the audit trail and job
+    # records name the person a run was launched for — but authorization binds an *empty* set,
+    # which every gate treats as fail-closed (`authz.authorize_trigger`,
+    # `documents/retriever._entitled`). A durable job that legitimately needs a user's entitlements
+    # was already authorized at the front door before the workflow started
+    # (`connectors/jobs.prepare_job_launch`); propagating role-scoped authority *into* the durable
+    # boundary safely needs a signed payload (a Temporal codec), a separate decision — see
+    # `D-2026-08-28`. Until then, fail closed.
     named = _named_strings(fn, args) if fn is not None else {}
 
     def _named(fields: Sequence[str]) -> str:
@@ -231,7 +237,7 @@ def activity_context(args: Sequence[Any], fn: Any = None) -> ActivityContext:
 
     return ActivityContext(
         actor=_first(models, _ACTOR_FIELDS) or _named(_ACTOR_FIELDS),
-        roles=roles,
+        roles=frozenset(),
         session_id=_first(models, _SESSION_FIELDS) or _named(_SESSION_FIELDS),
         correlation_id=_first(models, _CORRELATION_FIELDS) or _named(_CORRELATION_FIELDS),
     )

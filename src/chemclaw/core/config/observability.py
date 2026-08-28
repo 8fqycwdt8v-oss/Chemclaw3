@@ -151,6 +151,21 @@ class ObservabilitySettings(BaseSettings):
     # deployment is a decision about chemists' questions leaving the pod for a third party, on the
     # same footing as `otel_include_sensitive_data` and with less control over where they land.
     langsmith_tracing_allowed: bool = False
+    # The in-process egress guard (`chemclaw.core.netguard`), armed at config import. It patches the
+    # socket entry points so a connect or DNS lookup to a host outside the derived allowlist —
+    # the LLM gateway, Postgres, Temporal, the connector endpoints, the IdP, and whatever
+    # `egress_allow` names — is refused, logged at ERROR and counted. Defence in depth behind the
+    # NetworkPolicy for the invariant that only LLM traffic (and declared infrastructure) leaves the
+    # estate: a library fetching model weights, a usage ping, a DNS licence check is caught here,
+    # though a static scan cannot see it. On by default; `false` is the loud, stated opt-out for
+    # a deployment that has an equivalent network control and wants the process out of the way. It
+    # cannot cover a child process, a `ctypes` call into libc, or a compiled extension's own
+    # syscalls — the NetworkPolicy is the layer that does.
+    egress_guard_enabled: bool = True
+    # Extra hosts the guard permits, comma-separated, on top of the destinations derived from the
+    # other settings. Empty by default and empty in the shipped chart; each entry is a deliberate,
+    # reviewed exception (a mirror, a licence server) in the same spirit as `MCP_EGRESS_ALLOW`.
+    egress_allow: str = ""
     # The OTLP collector endpoint (plan F6-T5). Bridged into `OTEL_EXPORTER_OTLP_ENDPOINT` when
     # set, so the exporter's own precedence still applies; empty in dev (no collector). Config, so
     # the in-cluster collector address is one value like every other endpoint.
