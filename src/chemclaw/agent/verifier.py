@@ -480,7 +480,14 @@ async def _banded_verdict(
         except Exception:
             logger.warning("a review-band reroll failed; deciding from %d roll(s)", len(rolls))
     rolls.sort(key=lambda result: result.confidence)
-    return rolls[len(rolls) // 2]
+    # The **lower** middle roll, which for the odd counts this normally produces is simply the
+    # median. It matters only when an even number of rolls survives — a reroll that raised, or a
+    # deployment setting `verifier_band_rerolls=1` — and there `len // 2` took the *upper* of the
+    # two middle values. That is not a median, and the direction is the wrong one: a higher
+    # confidence is less likely to cross `verifier_confidence_threshold`, so the tie was broken
+    # toward *not* flagging the answer for review. A control that rounds toward less review when
+    # its own rerolls disagree has the bias backwards.
+    return rolls[(len(rolls) - 1) // 2]
 
 
 async def verify_answer(
