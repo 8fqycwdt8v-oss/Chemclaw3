@@ -153,6 +153,41 @@ def test_a_release_states_its_egress_posture() -> None:
     )
 
 
+def test_a_release_states_its_retention_posture_too() -> None:
+    """The chart refuses to render on **two** postures; the delivery path pre-flighted one.
+
+    `D-2026-08-26-a-knob-that-renders-nothing-is-not-a-knob` put a `fail` in
+    `templates/networkpolicy.yaml` *and* one in `templates/config.yaml`, and every other caller
+    treats them as a pair — the Makefile's three renders, the runbook and `deploy/README.md` all
+    pass both flags. This target grew `egress_flags` for the first and nothing at all for the
+    second: `grep -rn retention deploy/jenkins/` returned nothing.
+
+    The cost is not a silent one — helm prints its own `fail` — it is *where*: the egress twin is
+    caught in a pre-flight that names both remedies, and the retention one surfaces from inside
+    `helm upgrade`, after the image has been built and pushed, in a pipeline whose parameters
+    offered no way to state the posture at all. That is the lesson-written-too-narrowly shape
+    `D-2026-08-28-a-lane-primitive-must-verify-the-act-it-was-asked-for` describes, one repository
+    layer out.
+
+    Asserted with the same three claims as its egress sibling above, because the two guards are
+    one decision and a check that covers half of it is how they came to be treated differently.
+    """
+    target = (_JENKINS_DIR / "targets" / "openshift.sh").read_text(encoding="utf-8")
+    assert "ACCEPT_UNBOUNDED_GROWTH" in target, (
+        "no way to state the unbounded-growth posture deliberately"
+    )
+    assert "retention.unboundedGrowthAccepted=true" in target
+    assert "ACCEPT_UNBOUNDED_GROWTH:-false" in target, (
+        "the unbounded posture must be opt-in; defaulting it on ships tables that grow for the "
+        "life of the deployment under a comment naming retention as the bound"
+    )
+    for pipeline in _PIPELINES:
+        assert "ACCEPT_UNBOUNDED_GROWTH" in pipeline.read_text(encoding="utf-8"), (
+            f"{pipeline.name} cannot state a retention posture, so its chart render refuses for a "
+            "release that has not written one into its values file"
+        )
+
+
 def test_dry_run_is_the_default_everywhere() -> None:
     """First runs happen against real namespaces. The safe direction has to be the default."""
     for script in (_JENKINS_DIR / "targets").glob("*.sh"):

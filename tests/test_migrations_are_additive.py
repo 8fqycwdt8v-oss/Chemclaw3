@@ -358,6 +358,93 @@ def test_every_migration_is_re_runnable() -> None:
     assert not offenders, "migrations must be re-runnable:\n" + "\n".join(offenders)
 
 
+# `ALTER TABLE … ADD [CONSTRAINT <name>] …`, reduced to the table it names. Postgres has no
+# `ADD CONSTRAINT IF NOT EXISTS`, so the re-runnable spelling is a `DROP CONSTRAINT` of the same
+# object first — which is what 041, 056 and 063 all do, and what makes their key rebuilds
+# replayable.
+_ADDS_CONSTRAINT = re.compile(
+    rf"^\s*ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?({_NAME})\s+ADD\s+"
+    rf"(?:CONSTRAINT\s+{_NAME}|PRIMARY\s+KEY|UNIQUE|CHECK|FOREIGN\s+KEY)",
+    re.IGNORECASE | re.MULTILINE,
+)
+_DROPS_CONSTRAINT = re.compile(
+    rf"^\s*ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?({_NAME})\s+DROP\s+CONSTRAINT",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+# Migrations that add a constraint with no drop in front of it, so a replay of that file raises
+# `42710 duplicate_object` — mapped to the tables the guard flags, exactly as
+# `_REVIEWED_ROLLBACK_BREAKS` maps statements rather than filenames, so a later edit adding a
+# *second* unguarded constraint to an exempted file still fails.
+#
+# **Grandfathered, not repaired, and the reason is the ledger.** `046` is merged and applied, and
+# the runner keys on a checksum of its statements — so inserting the missing drop is precisely the
+# edit `test_no_merged_migration_had_its_statements_changed` refuses, and would make
+# `make db-migrate` refuse on every database that has already run it. A later migration cannot
+# repair it either: the failure happens while `046` itself is replayed. What an operator does
+# instead, on a database whose ledger is older than its tables, is
+# `ALTER TABLE session_messages DROP CONSTRAINT IF EXISTS session_messages_shape_known;` before
+# re-running — or record the ledger row by hand. That is the whole content of this exemption, and
+# it is written here because there is nowhere else it would be found from the migration.
+_UNGUARDED_CONSTRAINTS: dict[str, tuple[str, ...]] = {
+    "046_review_hardening_indexes.sql": ("session_messages",),
+}
+
+
+def test_no_migration_adds_a_constraint_a_second_run_would_reject() -> None:
+    """The other half of re-runnability, and the half `CREATE … IF NOT EXISTS` cannot see.
+
+    The check above matches `CREATE` statements only, while its docstring claims the property for
+    the whole file — and four merged migrations add constraints, which `CREATE` never spells.
+
+    Measured against a scratch Postgres schema, replaying `046`'s two statements:
+    `ERROR: constraint "session_messages_shape_known" for relation "session_messages" already
+    exists`. The runner sends every file inside one shared transaction, so that error does not skip
+    a file — it rolls the whole run back and `make db-migrate` exits having applied nothing. The
+    recovery is then exactly the one the sibling docstring says `IF NOT EXISTS` exists to prevent:
+    work out which statements already ran, by hand, under pressure.
+
+    Guarded on the *table* rather than on the constraint name, because `ADD PRIMARY KEY` names no
+    constraint: 041, 056 and 063 each drop `<table>_pkey` and add an unnamed one back, and a
+    name-matched rule would call all three unguarded. `IF EXISTS` is not required of the drop —
+    058 omits it and is still replayable, because the constraint it drops is one migration 027
+    always creates.
+    """
+    offenders: dict[str, list[str]] = {}
+    for path in _migration_files():
+        sql = _sql(path)
+        dropped = {table.lower() for table in _DROPS_CONSTRAINT.findall(sql)}
+        unguarded = tuple(
+            table for table in _ADDS_CONSTRAINT.findall(sql) if table.lower() not in dropped
+        )
+        reviewed = _UNGUARDED_CONSTRAINTS.get(path.name)
+        if reviewed is not None:
+            assert unguarded == reviewed, (
+                f"{path.name}'s exemption no longer describes it: flagged {list(unguarded)}, "
+                f"reviewed {list(reviewed)}. An exemption covers statements somebody read."
+            )
+            continue
+        if unguarded:
+            offenders[path.name] = list(unguarded)
+    assert not offenders, (
+        f"migration(s) adding a constraint with no `DROP CONSTRAINT` before it: {offenders}. "
+        "Postgres has no `ADD CONSTRAINT IF NOT EXISTS`, so replaying the file against a database "
+        "whose ledger is older than its tables aborts the entire migration run. Drop the "
+        "constraint first in the same file, as 041/056/063 do."
+    )
+
+
+def test_no_unguarded_constraint_exemption_outlives_its_migration() -> None:
+    """An exemption names a file that exists, or it is a permission nobody can see spent.
+
+    The sibling of `test_no_exemption_outlives_its_migration`, for the same reason: the check above
+    consults `_UNGUARDED_CONSTRAINTS` per file on disk, so an entry naming a file that was renamed
+    or never added is simply never read.
+    """
+    orphaned = sorted(set(_UNGUARDED_CONSTRAINTS) - {p.name for p in _migration_files()})
+    assert not orphaned, f"unguarded-constraint exemption(s) naming no migration: {orphaned}"
+
+
 def _git(repo: Path, *args: str) -> str:
     """`git` in `repo`, stdout only. A failure is the empty string — every caller treats it so."""
     return subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True).stdout.strip()

@@ -31,23 +31,43 @@ KUBECTL="$(command -v oc || command -v kubectl)" || { echo "need oc or kubectl" 
 
 log() { printf '\033[36m[openshift]\033[0m %s\n' "$*" >&2; }
 
-# Every pod's egress posture must be stated by the release, because an unstated one used to render
-# `to: []` — which a NetworkPolicy reads as *every* destination
-# (D-2026-08-26-a-knob-that-renders-nothing-is-not-a-knob). The chart now refuses to render without
-# one, and this refuses to guess which one you meant.
-egress_flags() {
-  local values_file="$1"
-  if [ -n "${values_file}" ] && grep -qE '^\s*(egressDestinations|allowAnyDestination):' "${values_file}"; then
-    return 0
+# **Two postures the release must state, not one.**
+# `D-2026-08-26-a-knob-that-renders-nothing-is-not-a-knob` put a `fail` in the chart for each: an
+# unstated *egress* posture used to render `to: []`, which a NetworkPolicy reads as every
+# destination, and an unstated *retention* posture shipped tables that grow for the life of the
+# deployment under a comment naming retention as the bound. Every other caller treats them as the
+# pair they are — the Makefile's three renders, the runbook and `deploy/README.md` all pass both.
+#
+# This target pre-flighted the first and knew nothing about the second, so the retention refusal
+# surfaced from inside `helm upgrade` — after the image was built and pushed, in a pipeline with no
+# parameter that could answer it. One function rather than two, because a second copy is exactly
+# what let the first one's lesson go unapplied to its twin.
+posture_flags() {
+  local values_file="$1" flags=()
+  if [ -z "${values_file}" ] \
+     || ! grep -qE '^\s*(egressDestinations|allowAnyDestination):' "${values_file}"; then
+    if [ "${ALLOW_ANY_EGRESS_DESTINATION:-false}" = "true" ]; then
+      flags+=(--set networkPolicy.allowAnyDestination=true)
+    else
+      echo "the release states no egress posture: put networkPolicy.egressDestinations in the" \
+           "values file, or set ALLOW_ANY_EGRESS_DESTINATION=true to say the old any-destination" \
+           "default is what you want. The chart will not render without one." >&2
+      return 1
+    fi
   fi
-  if [ "${ALLOW_ANY_EGRESS_DESTINATION:-false}" = "true" ]; then
-    printf -- '--set networkPolicy.allowAnyDestination=true'
-    return 0
+  if [ -z "${values_file}" ] \
+     || ! grep -qE '^\s*(windows|unboundedGrowthAccepted):' "${values_file}"; then
+    if [ "${ACCEPT_UNBOUNDED_GROWTH:-false}" = "true" ]; then
+      flags+=(--set retention.unboundedGrowthAccepted=true)
+    else
+      echo "the release states no retention posture: put retention.windows (the CHEMCLAW_RETENTION_*" \
+           "day windows this release keeps history for) in the values file, or set" \
+           "ACCEPT_UNBOUNDED_GROWTH=true to say the durable tables growing forever is what you" \
+           "want. The chart will not render without one." >&2
+      return 1
+    fi
   fi
-  echo "the release states no egress posture: put networkPolicy.egressDestinations in the values" \
-       "file, or set ALLOW_ANY_EGRESS_DESTINATION=true to say the old any-destination default is" \
-       "what you want. The chart will not render without one." >&2
-  return 1
+  printf '%s' "${flags[*]}"
 }
 
 apply_helm() {
@@ -58,7 +78,7 @@ apply_helm() {
   image="$(jq -r --arg n "${name}" '.components[$n].image' "${DESCRIPTOR}")"
   digest="$(jq -r --arg n "${name}" '.components[$n].digest' "${DESCRIPTOR}")"
   values="$(jq -r --arg n "${name}" '.components[$n].values // ""' "${DESCRIPTOR}")"
-  read -r -a extra <<<"$(egress_flags "${values}")"
+  read -r -a extra <<<"$(posture_flags "${values}")"
 
   local args=(upgrade --install "${release}" "${chart}"
               --namespace "${NAMESPACE}"

@@ -306,6 +306,16 @@ deps-audit:  ## Check the locked dependency closure for known vulnerabilities (s
 	@# first and fails unconditionally, so a connection string appearing in an advisory's text
 	@# cannot buy an exemption.
 	@#
+	@# **And the input is bounded, because every branch of that classification is only reached when
+	@# `pip-audit` exits non-zero.** Measured: `uvx pip-audit --no-deps -r <a file of comments>`
+	@# prints `No known vulnerabilities found` and exits 0 — so an export that succeeded and named
+	@# nothing produced a clean gate over zero packages, and the test that exists to be the clean
+	@# control stubbed `uv` as `echo '# stub export'`, asserting exactly that. The floor below is
+	@# one package rather than a number matched to today's closure: a larger literal goes stale in
+	@# the direction that quietly stops asking, and what is in doubt is only whether anything at
+	@# all was read (the shape `check_corpus_is_assembled` and `test_there_are_migrations_to_check`
+	@# already close elsewhere).
+	@#
 	@# **The classified bytes are the ones the command produced, held in a variable.** They used to
 	@# be read back from a log file the run piped into with `tee`, and that is a different question:
 	@# `tee`'s own failure was never examined, so a `tee` that could not write left the greps reading
@@ -317,6 +327,13 @@ deps-audit:  ## Check the locked dependency closure for known vulnerabilities (s
 	@# predictable path in a shared /tmp is a symlink someone else can plant.
 	@scratch=$$(mktemp -d); trap 'rm -rf "$$scratch"' EXIT; \
 	uv export --no-hashes --no-dev --format requirements-txt > "$$scratch/requirements.txt"; \
+	packages=$$(grep -cvE '^[[:space:]]*(#|-|$$)' "$$scratch/requirements.txt" || true); \
+	if [ "$${packages:-0}" -lt 1 ]; then \
+	  echo "deps-audit: the export named no packages, so this audit would examine nothing."; \
+	  echo "deps-audit: pip-audit answers 'No known vulnerabilities found' and exits 0 for an"; \
+	  echo "deps-audit: empty input, which is a green supply-chain gate over zero packages."; \
+	  exit 1; \
+	fi; \
 	report=$$(uvx pip-audit --no-deps --disable-pip -r "$$scratch/requirements.txt" 2>&1) && rc=0 || rc=$$?; \
 	printf '%s\n' "$$report"; \
 	if [ $$rc -ne 0 ]; then \

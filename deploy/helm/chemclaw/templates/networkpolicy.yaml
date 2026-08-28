@@ -73,37 +73,33 @@ spec:
         []
         {{- end }}
       ports:
+        {{- /* **Every entry in `egressPorts`, by iteration rather than by name.** This block used
+               to read nine keys off that map individually — `.egressPorts.postgres`, `.temporal`,
+               `.https`, `.llm`, `.otel`, and one each for the `chem`/`safety`/`calc` sibling
+               servers and the reaction labeller. Each of those is still the shipped default and
+               still documented beside its number in `values.yaml`; what changed is that the map
+               is now what decides the rule.
+
+               A NetworkPolicy egress rule restricts by port *independently* of its `to:` peer
+               list, so a destination whose port is missing here has every packet dropped —
+               silently, because a dropped SYN is a timeout and not a refusal. Read by name, a
+               tenth key an operator added rendered nothing at all, which is the same
+               "a knob that renders nothing is not a knob" shape as a quoted
+               `allowAnyDestination` (D-2026-08-26). And it was not hypothetical: this chart's own
+               `secrets.optionalKeys` ships `llmFallbackApiKey` and `vectorStoreApiKey`, whose
+               endpoints — a failover LLM on its own port, Qdrant on 6333 — are not among the nine
+               and could not be added without editing this file.
+
+               Helm ranges a map in sorted key order, so the rendered list is deterministic. */}}
+        {{- range $name, $port := .Values.networkPolicy.egressPorts }}
         - protocol: TCP
-          port: {{ .Values.networkPolicy.egressPorts.postgres }}
-        - protocol: TCP
-          port: {{ .Values.networkPolicy.egressPorts.temporal }}
-        - protocol: TCP
-          port: {{ .Values.networkPolicy.egressPorts.https }}
-        - protocol: TCP
-          port: {{ .Values.networkPolicy.egressPorts.llm }}
-        - protocol: TCP
-          port: {{ .Values.networkPolicy.egressPorts.otel }}
-        {{- /* The connector Services. Read from `connectorPort` rather than a second egressPorts
-               entry, so the port the front door is allowed to dial is the port the connector
-               containers actually listen on — one value, no drift. */}}
+          port: {{ $port }}
+        {{- end }}
+        {{- /* The connector Services, kept out of that map deliberately. Read from `connectorPort`
+               so the port the front door is allowed to dial is the port the connector containers
+               actually listen on — one value, no drift. */}}
         - protocol: TCP
           port: {{ .Values.connectorPort }}
-        {{- /* The `chem`/`safety`/`calc` sibling servers this release dials but does not run —
-               plain HTTP on their own ports, not `egressPorts.https`. Without these, an operator
-               who follows `values.yaml`'s own instruction to add the host to
-               `egressDestinations` still has every packet dropped, because a NetworkPolicy egress
-               rule restricts by port independently of the destination list. */}}
-        - protocol: TCP
-          port: {{ .Values.networkPolicy.egressPorts.chem }}
-        - protocol: TCP
-          port: {{ .Values.networkPolicy.egressPorts.safety }}
-        - protocol: TCP
-          port: {{ .Values.networkPolicy.egressPorts.calc }}
-        {{- /* And the reaction labeller, which the `reaction-labels` Schedule dials from the
-               background worker whenever a data source provides reactions. Same rule, same trap:
-               a port entry that is never emitted here permits nothing. */}}
-        - protocol: TCP
-          port: {{ .Values.networkPolicy.egressPorts.rxnlabel }}
 ---
 {{- /* The front door's own ingress, which did not exist. `policyTypes` listed only `Egress`, so any
        pod in any namespace could open a connection to `chemclaw-service:8080`. This is the rule
