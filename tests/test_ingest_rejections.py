@@ -4,18 +4,27 @@ The seeded corpus has exactly one entry that can never arrive: a well logged at 
 refused because `OrdReaction` bounds a yield at 100. Before the ledger, a chemist asking about it
 could only be told "I have no such record" — true of the corpus, false of what the system knows.
 
-Five claims, each of which the change would be worthless without:
+The claims, each of which the change would be worthless without (no count is written here — the
+list has been appended to twice and the number said "five" over six of them):
 
-1. The refusal reaches a durable row carrying the reason, not just a WARNING.
-2. Re-offering the record moves `last_seen` and adds no row — a ledger, not a second log.
-3. The question a chemist actually asks reaches that row through `gather_evidence`, and what comes
-   back is unmistakably a *rejection* rather than a reaction record.
-4. An entry that ingests cleanly leaves nothing behind.
-5. Growth is bounded: a source that refuses everything cannot write an unbounded table.
-6. The refusal's own words reach the model **inside the data envelope**. `reason` is `str(exc)`
-   over a record an export wrote and a `ValidationError` renders `input_value=` verbatim, so it is
-   third-party text on a channel the model reads; matching is loose by design, so one ordinary word
-   carries such a row onto turns it was never about.
+- The refusal reaches a durable row carrying the reason, not just a WARNING.
+- Re-offering the record moves `last_seen` and adds no row — a ledger, not a second log.
+- The question a chemist actually asks reaches that row through `gather_evidence`, and what comes
+  back is unmistakably a *rejection* rather than a reaction record.
+- An entry that ingests cleanly leaves nothing behind.
+- Growth is bounded: a source that refuses everything cannot write an unbounded table.
+- The refusal's own words reach the model **inside the data envelope**. `reason` is `str(exc)`
+  over a record an export wrote and a `ValidationError` renders `input_value=` verbatim, so it is
+  third-party text on a channel the model reads; matching is loose by design, so one ordinary word
+  carries such a row onto turns it was never about.
+- A second source of the same kind owns its own bucket, and a bounded drain chunk writes its own
+  chunk's refusals — the two halves of
+  `D-2026-08-28-a-refusal-is-recorded-by-the-pass-not-by-the-fetch`.
+- The refusal only the *fetch* can see survives the wrappers between it and the pass that files it.
+
+**Driven through `sync_entries`, because that is the producer.** These tests used to call
+`OrdJsonAdapter.fetch_new_entries` directly, which was the producer then and is not now: the pass
+writes the ledger, so a test starting at the adapter would be evidence about a path nothing takes.
 
 Postgres-backed, because a ledger nothing durably wrote is the thing this replaces.
 """
@@ -24,25 +33,35 @@ import asyncio
 import json
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
-import yaml
 
 from chemclaw.agent import research_tools
 from chemclaw.agent.framing import ENVELOPE_TAG, defang
 from chemclaw.core import db
 from chemclaw.core.config import settings
+from chemclaw.durable.eln_sync import _BoundedIngest
 from chemclaw.ingest import rejections
-from chemclaw.ingest.eln.ord_adapter import LEDGER_SOURCE, OrdJsonAdapter
+from chemclaw.ingest.eln.ord_adapter import OrdJsonAdapter
+from chemclaw.ingest.eln.records import InMemoryReactionRecordStore
+from chemclaw.ingest.eln.sync import sync_entries
 from chemclaw.ingest.rejections import IngestRejection, record_refusals, refusals_matching
 from chemclaw.retrieval.evidence import EvidenceChunk
+from chemclaw.science.fingerprints.store import InMemoryFingerprintStore
+from chemclaw.science.labels.store import InMemoryLabelIndex
 from tests.pg import migrated_db_or_skip
 
-_ROOT = Path(__file__).resolve().parents[1]
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 
 # The real entry, spelled as ORD would export it: the 119.43% well from the seeded HTE corpus.
 _WELL_ID = "santanilla-orgsyn-boronate-well-Y36"
+
+# The registry source name the ORD manifest declares. A *value passed to the sync*, not a
+# constant read off the adapter: `ingest_rejections.source` is documented as the registry
+# source name and its eviction cap is per-source, so the adapter cannot be the one that knows
+# it — it is built from `manifest.config` alone and is never told which source it is.
+_SOURCE = "eln-ord"
 
 # The chemist's question, taken verbatim from `data/evals/probes/grounded.yaml`'s `gr-08`. It names
 # no tool, no source and no entry id — which is the whole test: the ledger has to be reachable from
@@ -115,6 +134,26 @@ def _write(directory: Path, reaction_id: str, yield_percent: float) -> None:
     )
 
 
+async def _sync(directory: Path, source: str = _SOURCE, since: datetime = _EPOCH) -> Any:
+    """Run one real sync pass over `directory` — the pass that writes the ledger.
+
+    Driven through `sync_entries` rather than through the adapter's fetch, because that is where
+    the ledger write lives: the sync is the half that maps each entry exactly once, holds the one
+    `except` that knows how to word a refusal, and is told which registry source it is syncing.
+    An adapter recording refusals had to map the *whole* fetch to find them and had to guess its
+    own name to file them (`D-2026-08-28-a-refusal-is-recorded-by-the-pass-not-by-the-fetch`).
+    """
+    return await sync_entries(
+        OrdJsonAdapter(str(directory)),
+        InMemoryFingerprintStore(),
+        InMemoryFingerprintStore(),
+        InMemoryReactionRecordStore(),
+        since,
+        label_index=InMemoryLabelIndex(),
+        source=source,
+    )
+
+
 async def _rows(source: str) -> list[tuple[str, str, datetime, datetime, int]]:
     """Every ledger row for `source`, read back through SQL rather than through the reader."""
     async with db.connection(settings.postgres_dsn) as conn:
@@ -138,18 +177,18 @@ def test_the_119_percent_well_is_refused_and_lands_in_the_ledger(tmp_path: Path)
 
     async def _run() -> None:
         await migrated_db_or_skip()
-        await _clear(LEDGER_SOURCE)
+        await _clear(_SOURCE)
         _write(tmp_path, _WELL_ID, 119.43)
 
-        entries = await OrdJsonAdapter(str(tmp_path)).fetch_new_entries(_EPOCH)
+        summary = await _sync(tmp_path)
 
-        # The refusal is unchanged: the entry is still fetched and still refused by the mapper, so
-        # the sync's own summary reports it exactly as before.
-        assert [entry.entry_id for entry in entries] == [_WELL_ID]
-        with pytest.raises(ValueError, match="119.43"):
-            OrdJsonAdapter(str(tmp_path)).map_to_ord(entries[0])
+        # The refusal is unchanged: the entry is still fetched, still refused, and still reported
+        # in the run summary exactly as before — the ledger is a second record of it, not a
+        # replacement for it.
+        assert [entry.entry_id for entry in summary.rejected] == [_WELL_ID]
+        assert summary.ingested == []
 
-        rows = await _rows(LEDGER_SOURCE)
+        rows = await _rows(_SOURCE)
         assert len(rows) == 1, "the refused well must leave exactly one ledger row"
         entry_id, reason, first_seen, last_seen, occurrences = rows[0]
         assert entry_id == _WELL_ID
@@ -166,14 +205,13 @@ def test_re_offering_the_same_record_moves_last_seen_and_adds_no_row(tmp_path: P
 
     async def _run() -> None:
         await migrated_db_or_skip()
-        await _clear(LEDGER_SOURCE)
+        await _clear(_SOURCE)
         _write(tmp_path, _WELL_ID, 119.43)
-        adapter = OrdJsonAdapter(str(tmp_path))
 
-        await adapter.fetch_new_entries(_EPOCH)
-        first = await _rows(LEDGER_SOURCE)
-        await adapter.fetch_new_entries(_EPOCH)
-        second = await _rows(LEDGER_SOURCE)
+        await _sync(tmp_path)
+        first = await _rows(_SOURCE)
+        await _sync(tmp_path)
+        second = await _rows(_SOURCE)
 
         assert len(second) == 1, "a record refused twice is one row, or this is a log again"
         assert second[0][4] == 2, "occurrences must count the refusals"
@@ -188,14 +226,13 @@ def test_a_record_that_ingests_cleanly_leaves_no_ledger_row(tmp_path: Path) -> N
 
     async def _run() -> None:
         await migrated_db_or_skip()
-        await _clear(LEDGER_SOURCE)
+        await _clear(_SOURCE)
         _write(tmp_path, "well-ok", 84.0)
 
-        entries = await OrdJsonAdapter(str(tmp_path)).fetch_new_entries(_EPOCH)
+        summary = await _sync(tmp_path)
 
-        assert [entry.entry_id for entry in entries] == ["well-ok"]
-        assert OrdJsonAdapter(str(tmp_path)).map_to_ord(entries[0]).yield_percent == 84.0
-        assert await _rows(LEDGER_SOURCE) == []
+        assert summary.ingested == ["well-ok"] and summary.rejected == []
+        assert await _rows(_SOURCE) == []
 
     asyncio.run(_run())
 
@@ -212,9 +249,9 @@ def test_the_gr_08_question_reaches_the_refusal_through_gather_evidence(
 
     async def _run() -> None:
         await migrated_db_or_skip()
-        await _clear(LEDGER_SOURCE)
+        await _clear(_SOURCE)
         _write(tmp_path, _WELL_ID, 119.43)
-        await OrdJsonAdapter(str(tmp_path)).fetch_new_entries(_EPOCH)
+        await _sync(tmp_path)
 
         monkeypatch.setattr(research_tools, "_sources", lambda _anchor: [("graph", _Empty())])
         sweep = await research_tools.gather_evidence(query=_GR_08)
@@ -329,7 +366,7 @@ def test_the_reader_matches_the_words_that_carry_the_question() -> None:
         await _clear(source)
         # And the ORD source's own rows, because matching deliberately spans sources: a question
         # about data quality is about the corpus, and each row names the source it came from.
-        await _clear(LEDGER_SOURCE)
+        await _clear(_SOURCE)
         await record_refusals(source, {_WELL_ID: "yield_percent 119.43 exceeds 100"})
 
         assert [(r.source, r.entry_id) for r in await refusals_matching(_GR_08)] == [
@@ -344,23 +381,127 @@ def test_the_reader_matches_the_words_that_carry_the_question() -> None:
     asyncio.run(_run())
 
 
-def test_the_adapter_files_its_refusals_under_the_registry_source_name() -> None:
-    """`LEDGER_SOURCE` is a constant beside a manifest, so the manifest is what checks it.
+def test_a_second_ord_source_files_its_refusals_under_its_own_name(tmp_path: Path) -> None:
+    """`ingest_rejections.source` is the registry source name, and the eviction cap is per-source.
 
-    The ingest half is constructed from `manifest.config` alone and is never told its own name, so
-    nothing but this test can notice the two drifting apart — and a drifted name files a refusal
-    under a source no operator can join to anything.
+    It used to be `ord_adapter.LEDGER_SOURCE`, a module constant reading `"eln-ord"`. The ingest
+    half is built from `manifest.config` alone and is never told which source it is, so the adapter
+    could not know the answer — and the guarding test read this repository's manifests, which means
+    a *site* attaching a second ORD drop directory (the seam's whole point: one folder, no core
+    edit) had both sources sharing one 1,000-row bucket and mis-attributing each other's refusals,
+    while the test that was supposed to catch it failed in this repository instead.
+
+    Two directories, two source names, one adapter class. Nothing about the second is declared in
+    this repository — which is exactly the case the old test could not express.
     """
-    declaring = [
-        manifest["name"]
-        for path in (_ROOT / "src" / "chemclaw" / "ingest" / "sources").glob("*/datasource.yaml")
-        if isinstance(manifest := yaml.safe_load(path.read_text(encoding="utf-8")), dict)
-        and "OrdJsonAdapter" in str(manifest.get("ingest", ""))
-    ]
-    assert declaring == [LEDGER_SOURCE], (
-        f"the ORD adapter files rejections under {LEDGER_SOURCE!r}, but the manifests naming it "
-        f"are {declaring}"
-    )
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        first_dir, second_dir = tmp_path / "drop-a", tmp_path / "drop-b"
+        first_dir.mkdir()
+        second_dir.mkdir()
+        _write(first_dir, "site-a-well", 119.43)
+        _write(second_dir, "site-b-well", 140.0)
+        await _clear("eln-ord-site-a")
+        await _clear("eln-ord-site-b")
+
+        await _sync(first_dir, source="eln-ord-site-a")
+        await _sync(second_dir, source="eln-ord-site-b")
+
+        assert [row[0] for row in await _rows("eln-ord-site-a")] == ["site-a-well"]
+        assert [row[0] for row in await _rows("eln-ord-site-b")] == ["site-b-well"], (
+            "a second ORD source must own its own bucket; sharing one is what makes the per-source "
+            "eviction cap evict another site's rows"
+        )
+        await _clear("eln-ord-site-a")
+        await _clear("eln-ord-site-b")
+
+    asyncio.run(_run())
+
+
+def test_a_bounded_chunk_records_only_the_refusals_that_chunk_saw(tmp_path: Path) -> None:
+    """A drain chunk does a chunk's worth of work — including its ledger writes.
+
+    The pre-flight that found refusals mapped **every** entry the fetch returned, while
+    `_BoundedIngest` truncates to `eln_sync_batch_size` *after* the adapter returns. Measured on
+    this HEAD over 5,000 synthetic ORD exports: 0.30-0.32 s of pure re-mapping per fetch, 61-64 us
+    an entry, 18-38% of the whole call — and a 100k-entry backfill drains in ~1,000 chunks each
+    re-mapping all 100k, which is roughly two hours of re-mapping added to the drain. The same
+    pass handed `record_refusals` the whole directory's refusals every chunk.
+
+    So the observable claim is this: with the bound applied, a chunk's ledger writes are the
+    chunk's own. The remaining refusals are recorded when their chunk runs, which is what makes
+    the cost proportional to the backlog once rather than to the backlog squared.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        await _clear(_SOURCE)
+        for index in range(6):
+            _write(tmp_path, f"bad-well-{index}", 119.43 + index)
+
+        bounded = _BoundedIngest(OrdJsonAdapter(str(tmp_path)), _EPOCH, 2)
+        await sync_entries(
+            bounded,
+            InMemoryFingerprintStore(),
+            InMemoryFingerprintStore(),
+            InMemoryReactionRecordStore(),
+            _EPOCH,
+            label_index=InMemoryLabelIndex(),
+            source=_SOURCE,
+        )
+
+        assert bounded.truncated, "the fixture must actually be truncated by the bound"
+        assert len(await _rows(_SOURCE)) == 2, (
+            "a chunk bounded to two entries wrote the whole directory's refusals; the pre-flight "
+            "is mapping past its own bound"
+        )
+        await _clear(_SOURCE)
+
+    asyncio.run(_run())
+
+
+def test_an_unreadable_export_reaches_the_ledger_through_the_durable_wrapper(
+    tmp_path: Path,
+) -> None:
+    """The refusal only the fetch can see has to survive the wrappers between it and the sync.
+
+    A file that will not parse never becomes a `RawEntry`, so the sync's own reject-and-continue
+    cannot see it and the adapter holds it for the pass to file. `fetch_refusals` reads that
+    through the seam's wrapper chain, and a `runtime_checkable` Protocol is structural — a wrapper
+    that does not expose `inner` simply does not have the capability, and answers `{}` in silence.
+
+    That is not a hypothetical: it is precisely how `fetch_truncated` read `False` for every source
+    in every deployment. So this drives the wrapper the durable drain actually builds rather than
+    the adapter, because the adapter passes either way and the deployment is what does not.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        await _clear(_SOURCE)
+        (tmp_path / "half-written.json").write_text("{not json", encoding="utf-8")
+        _write(tmp_path, "well-ok", 84.0)
+
+        summary = await sync_entries(
+            _BoundedIngest(OrdJsonAdapter(str(tmp_path)), _EPOCH, 10),
+            InMemoryFingerprintStore(),
+            InMemoryFingerprintStore(),
+            InMemoryReactionRecordStore(),
+            _EPOCH,
+            label_index=InMemoryLabelIndex(),
+            source=_SOURCE,
+        )
+
+        assert summary.ingested == ["well-ok"], "the readable entry still ingests"
+        rows = await _rows(_SOURCE)
+        assert [row[0] for row in rows] == ["half-written"], (
+            "a file the fetch could not read left no ledger row; the capability did not survive "
+            "the wrapper the durable drain builds"
+        )
+        assert "unreadable ORD export" in rows[0][1]
+        await _clear(_SOURCE)
+
+    asyncio.run(_run())
 
 
 def test_an_injected_refusal_reason_reaches_the_model_inside_the_data_envelope(
@@ -379,9 +520,9 @@ def test_an_injected_refusal_reason_reaches_the_model_inside_the_data_envelope(
 
     async def _run() -> None:
         await migrated_db_or_skip()
-        await _clear(LEDGER_SOURCE)
+        await _clear(_SOURCE)
         _write_raw(tmp_path, "attacker-well-1", _INJECTION)
-        await OrdJsonAdapter(str(tmp_path)).fetch_new_entries(_EPOCH)
+        await _sync(tmp_path)
 
         monkeypatch.setattr(research_tools, "_sources", lambda _anchor: [("graph", _Empty())])
         sweep = await research_tools.gather_evidence(query=_UNRELATED)
@@ -406,7 +547,7 @@ def test_an_injected_refusal_reason_reaches_the_model_inside_the_data_envelope(
         # Framing does not soften what this is. It is still unmistakably a rejection.
         assert sweep.refused_on_ingest[0].kind == "ingest-rejection"
         assert "refused_on_ingest" in rendered and "ingest-rejection" in rendered
-        await _clear(LEDGER_SOURCE)
+        await _clear(_SOURCE)
 
     asyncio.run(_run())
 

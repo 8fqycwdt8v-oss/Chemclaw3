@@ -138,6 +138,61 @@ def test_a_pass_that_indexed_nothing_still_leaves_a_record(
     assert _events(caplog).count("ingest.finished") == 1
 
 
+def test_a_corpus_drain_pass_is_counted_like_every_other_ingest_pass() -> None:
+    """The one ingest pass that emitted nothing at all, so a dashboard read it as a dead feeder.
+
+    The ELN sync, the document sync and the labelling pass all tally
+    `chemclaw_ingest_records_total{source,outcome}`; `drain_corpus` tallied nothing, so its
+    `read`/`recorded`/`skipped` reached the activity's log line and Temporal's history and stopped
+    there. The number that matters most is the one with no series at all: `skipped` counts rows
+    dropped for want of a usable SMILES, key or citation, which is what says a feeder regressed —
+    and a bulk corpus regressing that way is indistinguishable, on `chemclaw_ingest_*`, from one
+    nobody configured.
+
+    Driven against the real registry, over a page holding one recordable row and one that is not,
+    so both outcomes have to be non-zero for the assertions to hold.
+    """
+    from chemclaw.ingest.eln.warehouse.binding import CorpusBinding
+    from chemclaw.ingest.labels.corpus import drain_corpus
+    from chemclaw.science.labels.store import InMemoryLabelIndex
+    from tests.warehouse_fake import KeysetWarehouse
+
+    relation, source = "V_REACTION", "pistachio-observability"
+    rows: list[dict[str, Any]] = [
+        {
+            "REACTION_ID": "q1",
+            "REACTION_SMILES": "Brc1ccccc1.OB(O)c1ccccc1>CCOCC>c1ccc(-c2ccccc2)cc1",
+            "PATENT_NUMBER": "US7000000B2",
+        },
+        # No citation: a precedent nobody can follow back, which the drain refuses to record.
+        {"REACTION_ID": "q2", "REACTION_SMILES": "CCO>>CC=O", "PATENT_NUMBER": None},
+    ]
+    binding = CorpusBinding.model_validate(
+        {
+            "relation": relation,
+            "key": "REACTION_ID",
+            "order_by": "REACTION_ID",
+            "fetch_limit": 10,
+            "smiles": {"path": "root.REACTION_SMILES"},
+            "citation": {"path": "root.PATENT_NUMBER"},
+        }
+    )
+    warehouse = KeysetWarehouse({relation: rows}, relation, "REACTION_ID")
+
+    before = _counter("chemclaw_ingest_records_total")
+    report = asyncio.run(drain_corpus(warehouse, binding, InMemoryLabelIndex(), source))
+
+    assert (report.read, report.recorded, report.skipped) == (2, 1, 1), (
+        "the fixture must exercise both outcomes, or the assertions below are vacuous"
+    )
+    assert _counter("chemclaw_ingest_records_total") > before
+    assert _series("chemclaw_ingest_records_total", source=source, outcome="ingested") == 1.0
+    # `rejected` rather than `skipped`: the vocabulary is shared with the two passes that already
+    # emit it, and there a row dropped for bad data is `rejected` while `skipped` is one the pass
+    # deliberately did not process. A corpus drain has no second population.
+    assert _series("chemclaw_ingest_records_total", source=source, outcome="rejected") == 1.0
+
+
 # --- G5: ingest lag ---------------------------------------------------------------------------
 
 

@@ -169,6 +169,21 @@ class _BoundedIngest:
         self._limit = limit
         self.truncated = False
 
+    @property
+    def inner(self) -> IngestHalf:
+        """The adapter this bounds — the seam's wrapper contract, not a convenience.
+
+        `adapter._wrapper_chain` walks this chain to find an optional capability, and a
+        `runtime_checkable` Protocol is structural: a wrapper that does not expose what it wraps
+        simply does not have the capability, and answers in silence. That is exactly how
+        `fetch_truncated` read `False` for every source in every deployment. This wrapper asks
+        `fetch_was_truncated` of its inner directly, below, so the gap surfaced on the *other*
+        capability — `fetch_refusals`, where a file the fetch could not read left no
+        rejection-ledger row at all. `DatedIngest` already exposed `inner` for this reason; this
+        is the same rule on the wrapper one layer out.
+        """
+        return self._inner
+
     async def fetch_new_entries(self, since: datetime) -> list[RawEntry]:
         """Fetch from the wrapped adapter: the overlap plus the oldest `limit` new entries."""
         entries = sorted(

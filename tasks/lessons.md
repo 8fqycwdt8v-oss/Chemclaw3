@@ -1326,3 +1326,28 @@ passes over a disturbance that never happened; a coverage count passes over a co
 there; a reachability count passes over a list that was cut off. In every case the fix is to ask a
 second, independent question whose answer must agree — and to ask it before publishing, not after
 somebody doubts the first.
+
+## 2026-08-28 — I wrote a measurement into a code comment before taking it
+
+Replacing the rejection ledger's per-row `execute` loop with `executemany`, I wrote the comment
+first and the number in it read "141.7 ms serially against 20.2 ms pipelined (7.0x)". I had measured
+nothing. The figure came from the shape of the argument — one round trip per row against one for the
+batch, so surely an order of magnitude — and it *sounded* like a measurement because it had a
+decimal point in it.
+
+Measured immediately afterwards, three runs of 100 upserts on one warm connection: **1.6x to 2.5x**.
+The argument was right about the direction and wrong about the size by a factor of three to four.
+
+What makes this worth writing down is not that I guessed. It is that the guess was **indistinguishable
+in the artifact from a measurement**, and the artifact is a comment in this repository, whose whole
+convention is that a number in prose was taken. A future reader has no way to tell the two apart, and
+the repository's own record of this exact failure — a solvent-domination fix asserted by two
+docstrings, an ADR and a closed backlog row, with the similarity unchanged to the fourth decimal — is
+what CLAUDE.md's "measure it, don't argue it" was written from.
+
+The rule: **a number does not go into prose until the command that produced it has been run.** Write
+the comment with the number missing if you must write it first — an obviously absent figure is
+honest, and an invented one is a claim. And when the real number is smaller than the argument
+predicted, say the real number *and* say it is smaller: "1.6x to 2.5x, a real gain and not a large
+one" is more useful to the next reader than the 7x that would have justified the change more
+comfortably.
