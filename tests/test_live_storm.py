@@ -46,15 +46,21 @@ from chemclaw.cli.mock_llm import Behaviour, ToolCall, _validate, already_has_to
 from chemclaw.cli.storm_behaviours import BEHAVIOURS
 
 
-def _row(cap: int, goodput: float, spread: float = 0.0) -> dict[str, object]:
+def _row(cap: int, goodput: float, spread: float = 0.0, repeats: int = 3) -> dict[str, object]:
     """One admission-sweep row, with only the fields `_knee` and `noise` read.
 
     `spread` is the within-cap disagreement across that cap's repeated samples, as a fraction of
-    its median. It defaults to zero so a test that is not about noise can ignore it — but a sweep
-    that really measured zero spread would be one that took a single sample, which is the shape
-    this whole mechanism exists to stop being read as an answer.
+    its median. `repeats` is how many samples produced it, and the two are not independent: a
+    sweep that really measured zero spread took **one** sample, which is the shape this whole
+    mechanism exists to stop being read as an answer. So the samples list is synthesised at the
+    declared length rather than being a one-element stand-in — the fixture used to say
+    `samples=[goodput]` beside a 5 % spread, which is a row no sweep can produce.
     """
-    return {"cap": cap, "goodput": goodput, "spread": spread, "samples": [goodput]}
+    samples = [goodput] * max(repeats, 1)
+    if spread and len(samples) > 1:
+        samples[0] = goodput * (1 - spread / 2)
+        samples[-1] = goodput * (1 + spread / 2)
+    return {"cap": cap, "goodput": goodput, "spread": spread, "samples": samples}
 
 
 # --------------------------------------------------------------------------- the knee
@@ -271,8 +277,13 @@ def test_every_declared_family_has_a_description() -> None:
     """`FAMILIES` is what the report prints and what `--families` validates against.
 
     One declaration, so a family cannot be runnable and undescribed (or described and unrunnable).
+
+    `M` is in the set and is not a scenario family: it is the lane's own check — that every model
+    call this run made was served by the mock — emitted whatever `--families` selected. It is
+    declared here so it appears in the coverage table like everything else, because the claim it
+    carries used to live in the notes where nothing reconciled it.
     """
-    assert set(FAMILIES) == set("ABCDEFGHT")
+    assert set(FAMILIES) == set("ABCDEFGHTM")
     assert all(description.strip() for description in FAMILIES.values())
 
 
@@ -420,3 +431,231 @@ def test_every_declared_behaviour_is_reached_by_some_check() -> None:
         "Wire a check that asserts something about them, or delete them — a catalogue entry that "
         "no run reaches is coverage the report cannot claim and a reader will assume."
     )
+
+
+# --------------------------------------------------------------------- the audit's own do-nothing
+
+
+def test_a_check_whose_arithmetic_cannot_fail_is_not_a_check() -> None:
+    """A1 read `accepted + failed == turns` with `failed` *defined* as `turns - accepted`.
+
+    That is an identity, not an observation: it holds for every conceivable sweep, including one
+    where every turn was dropped on the floor. The check's name — "every offered turn is accounted
+    for" — describes something a run can fail, so the buckets have to be counted independently.
+    """
+    results = [
+        TurnResult(status=200, answered=True),
+        TurnResult(status=429),
+        TurnResult(status=200, error_code="empty_answer"),
+        TurnResult(status=200, transport_error="ReadError"),
+        # 200, no error, no answer: the silent shape. Nothing said what happened to this turn.
+        TurnResult(status=200),
+    ]
+    outcomes = live_storm._turn_outcomes(results)
+    assert outcomes == {"accepted": 1, "shed": 1, "errored": 1, "dropped": 1, "silent": 1}
+    assert sum(outcomes.values()) == len(results)
+
+
+def test_goodput_counts_only_turns_that_actually_answered() -> None:
+    """The sweep's docstring says "turns that answered, per second"; the code said 200-and-no-error.
+
+    A turn that returned 200, wrote nothing and reported nothing is not goodput, and counting it
+    inflates exactly the number SCALE-3 is read off.
+    """
+    outcomes = live_storm._turn_outcomes(
+        [TurnResult(status=200, answered=True), TurnResult(status=200)]
+    )
+    assert outcomes["accepted"] == 1
+
+
+def test_a_single_sample_per_cap_cannot_resolve_a_knee() -> None:
+    """`--sweep-repeats 1` measures zero spread at every cap, which is not a small noise floor.
+
+    Zero spread makes `_knee` fire on the first pair that fails to improve *at all*, and makes the
+    noise check pass with nothing measured — the fabricated knee its own docstring warns about,
+    reached by the other door.
+    """
+    single = [
+        {"cap": 2, "goodput": 1.0, "spread": 0.0, "samples": [1.0]},
+        {"cap": 4, "goodput": 1.0, "spread": 0.0, "samples": [1.0]},
+    ]
+    assert live_storm._samples_per_cap(single) == 1
+    assert _knee(single) is None
+
+
+def test_the_knee_observation_says_which_none_it_is() -> None:
+    """`no knee in range` and `too noisy to look` are different findings that read identically.
+
+    `_knee` returns None for both, and the finding's observed text asserted the first — so a sweep
+    that could not see anything reported the system as still improving at cap 32.
+    """
+    unreadable = [
+        _row(2, 0.82, 0.26, repeats=3),
+        _row(4, 1.01, 0.26, repeats=3),
+    ]
+    assert "unreadable" in live_storm._knee_observation(unreadable)
+
+    climbing = [_row(2, 1.0, 0.05, repeats=3), _row(4, 2.0, 0.05, repeats=3)]
+    text = live_storm._knee_observation(climbing)
+    assert "unreadable" not in text and "limit of the sweep" in text
+
+    flat = [_row(2, 1.0, 0.05, repeats=3), _row(4, 1.01, 0.05, repeats=3)]
+    assert "stops improving at cap 2" in live_storm._knee_observation(flat)
+
+
+def test_a_turn_that_made_no_tool_call_did_not_survive_forty_of_them() -> None:
+    """`_completed_without_dying` passes on a turn with no tool activity whatsoever.
+
+    Every behaviour it graded either answers or reports `empty_answer`, so the predicate was
+    satisfied by the mock's own script — "forty parallel calls are survived" would have passed a
+    turn in which zero calls were dispatched, and "a 100 KB argument document is survived" a turn
+    in which the document never reached a tool.
+    """
+    silent = TurnResult(status=200, answered=True)
+    assert _completed_without_dying(silent)
+    assert not live_storm._every_call_came_back(silent, 40)
+
+    flooded = TurnResult(status=200, answered=True, announced=40, returned=40)
+    assert live_storm._every_call_came_back(flooded, 40)
+
+    half = TurnResult(status=200, answered=True, announced=40, returned=17)
+    assert not live_storm._every_call_came_back(half, 40)
+
+
+def test_an_empty_turn_is_not_an_upstream_outage_reaching_the_asker() -> None:
+    """`f-http-500` writes no prose, so `empty_answer` is guaranteed with or without the outage.
+
+    A predicate accepting any error code therefore passed whether or not the 500 was surfaced —
+    the vacuous shape `_bad_call_was_reported` was written to remove, still present one row down.
+    """
+    swallowed = TurnResult(status=200, error_code="empty_answer")
+    assert not live_storm._outage_reached_the_asker(swallowed)
+    assert live_storm._outage_reached_the_asker(TurnResult(status=200, error_code="internal"))
+    assert live_storm._outage_reached_the_asker(TurnResult(status=503))
+
+
+def test_the_expected_call_count_is_read_from_the_catalogue_not_from_a_name() -> None:
+    """Family C printed "(6 expected)" in a check that only compared announced against returned.
+
+    Five of six calls silently dropped reads as `1/1` and passes. The number is declared in
+    `storm_behaviours.BEHAVIOURS`, so the check can read it instead of restating it in prose.
+    """
+    assert live_storm.declared_calls("c-parallel") == 6
+    assert live_storm.declared_calls("c-fragmented") == 1
+    assert live_storm.declared_calls("f-call-flood") == 40
+    with pytest.raises(KeyError):
+        live_storm.declared_calls("no-such-behaviour")
+
+
+def test_a_tool_body_that_ran_before_this_run_is_not_evidence_about_this_run() -> None:
+    """Family B counted `audit_events` rows for all time, so any residue passed it.
+
+    Its own docstring claims the driving turn makes the question "asked of something this run
+    actually did rather than of residue an earlier run left in the table" — but an unbounded
+    `count(*)` is answered by the residue exactly as before. The delta is the measurement.
+    """
+    assert live_storm._tool_truth_finding("find_notes", 366, 367).ok
+    stale = live_storm._tool_truth_finding("find_notes", 366, 366)
+    assert not stale.ok
+    assert "0 audited call(s) during this run" in stale.observed
+
+
+def test_a_mock_that_is_merely_listening_does_not_prove_the_front_door_uses_it() -> None:
+    """`_require_mock_lane` pinged port 8820 and concluded no real model would be reached.
+
+    A mock left running by an earlier lane answers that ping while `CHEMCLAW_LLM_BASE_URL` points
+    at a real endpoint — the storm then drives hundreds of paid turns having "proved" it would
+    not. Only the counter moving in response to a turn this process drove says otherwise.
+    """
+    assert live_storm._mock_is_serving_the_front_door(4, 6)
+    assert not live_storm._mock_is_serving_the_front_door(4, 4)
+    # `mock_requests` reports -1 when it could not read the endpoint at all.
+    assert not live_storm._mock_is_serving_the_front_door(-1, 6)
+    assert not live_storm._mock_is_serving_the_front_door(4, -1)
+
+
+def test_the_zero_live_model_claim_is_a_finding_rather_than_a_note() -> None:
+    """The note `mock requests served: 516` sat there and nothing compared it to anything.
+
+    `MockLlm`'s own docstring says the counter exists because "no LLM calls were made" is a claim
+    the storm has to be able to prove, "and reconciling this number against the turn count is
+    how". Nothing reconciled it, and a run that drove no turns could print the same note.
+    """
+    assert live_storm._mock_reconciliation(served=516, turns=310).ok
+    short = live_storm._mock_reconciliation(served=4, turns=310)
+    assert not short.ok
+    assert "310" in short.observed
+    # A run that drove nothing has proved nothing, whatever the counter says.
+    assert not live_storm._mock_reconciliation(served=516, turns=0).ok
+
+
+def test_a_family_that_raises_does_not_take_the_whole_run_with_it() -> None:
+    """Only the chaos family caught its own exceptions; every other one could end the process.
+
+    A twenty-minute run that dies in family G loses every finding families C, D and F already
+    made, and writes no report at all — the run reports nothing rather than reporting what broke.
+    """
+
+    async def explodes() -> list[Finding]:
+        raise RuntimeError("the front door refused a session")
+
+    findings = asyncio.run(live_storm._run_family("G", explodes))
+    assert len(findings) == 1
+    assert findings[0].family == "G" and not findings[0].ok
+    assert "RuntimeError" in findings[0].observed
+
+
+def test_p95_over_twenty_samples_is_not_the_maximum() -> None:
+    """`int(len * 0.95)` lands one past nearest-rank whenever `len * 0.95` is a whole number.
+
+    At 20 answered turns it reports the slowest turn as the 95th percentile, which is the
+    statistic the sweep table publishes beside p50.
+    """
+    results = [TurnResult(status=200, seconds=float(i)) for i in range(1, 21)]
+    _, p95 = percentiles(results)
+    assert p95 == 19.0
+
+
+# ------------------------------------------------------------- the catalogue's unchecked payloads
+
+
+def test_a_job_payload_the_launcher_would_reject_is_refused_before_the_run() -> None:
+    """`_validate` skipped every connector tool, and a durable job's schema is *in this repo*.
+
+    Its comment — "an MCP connector tool: its schema lives in the bundle, not in-process" — is
+    true of the 46 endpoint tools and false of the 14 job launchers and 9 template runners, whose
+    params models `build_job_tool` and `build_template_tool` generate from manifests here. Those
+    payloads are the largest arguments in the catalogue and were the only ones nothing checked.
+    """
+    bad_job = Behaviour(
+        name="t",
+        calls=[
+            ToolCall(
+                tool="compute_reaction_energy",
+                arguments={
+                    "params": {"kind": "reaction", "reactants": ["N#N"], "level": "nonsense"},
+                    "rationale": "storm",
+                },
+            )
+        ],
+    )
+    with pytest.raises(ValueError, match="params"):
+        _validate(bad_job)
+
+    bad_template = Behaviour(
+        name="t",
+        calls=[ToolCall(tool="run_tautomer_resolution", arguments={"params": {"solvent": 3}})],
+    )
+    with pytest.raises(ValueError, match="params"):
+        _validate(bad_template)
+
+
+def test_a_missing_required_argument_is_the_same_defect_as_a_misspelled_one() -> None:
+    """LOAD-1 was a *wrong* name; an *absent* required name dies in the identical branch.
+
+    `_validate` compared only `set(arguments) - set(annotations)`, so a behaviour that dropped a
+    required argument passed the guard and failed at the tool boundary, which is exactly the
+    outcome the guard exists to make impossible.
+    """
+    with pytest.raises(ValueError, match="requires"):
+        _validate(Behaviour(name="t", calls=[ToolCall(tool="find_notes", arguments={})]))
