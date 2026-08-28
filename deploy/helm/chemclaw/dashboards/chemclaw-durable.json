@@ -26,7 +26,7 @@
       },
       "targets": [
         {
-          "expr": "sum(chemclaw_jobs_in_flight)",
+          "expr": "max(chemclaw_jobs_in_flight)",
           "refId": "A"
         }
       ]
@@ -378,111 +378,6 @@
           "expr": "sum(rate(chemclaw_worker_activities_cancelled_on_drain_total[30m]))",
           "legendFormat": "cancelled on drain",
           "refId": "D"
-        }
-      ]
-    },
-    {
-      "id": 11,
-      "type": "graph",
-      "title": "Temporal worker task slots",
-      "datasource": "prometheus",
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 20
-      },
-      "span": 6,
-      "fill": 0,
-      "stack": false,
-      "linewidth": 2,
-      "nullPointMode": "null",
-      "legend": {
-        "show": true,
-        "current": true,
-        "max": true,
-        "values": true
-      },
-      "tooltip": {
-        "shared": true,
-        "sort": 2,
-        "value_type": "individual"
-      },
-      "yaxes": [
-        {
-          "format": "short",
-          "show": true,
-          "min": 0
-        },
-        {
-          "format": "short",
-          "show": false
-        }
-      ],
-      "xaxis": {
-        "mode": "time",
-        "show": true
-      },
-      "targets": [
-        {
-          "expr": "sum by (pod, worker_type) (temporal_worker_task_slots_available)",
-          "legendFormat": "{{pod}} {{worker_type}} available",
-          "refId": "A"
-        },
-        {
-          "expr": "sum by (pod, worker_type) (temporal_worker_task_slots_used)",
-          "legendFormat": "{{pod}} {{worker_type}} used",
-          "refId": "B"
-        }
-      ]
-    },
-    {
-      "id": 12,
-      "type": "graph",
-      "title": "Temporal pollers",
-      "datasource": "prometheus",
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 20
-      },
-      "span": 6,
-      "fill": 0,
-      "stack": false,
-      "linewidth": 2,
-      "nullPointMode": "null",
-      "legend": {
-        "show": true,
-        "current": true,
-        "max": true,
-        "values": true
-      },
-      "tooltip": {
-        "shared": true,
-        "sort": 2,
-        "value_type": "individual"
-      },
-      "yaxes": [
-        {
-          "format": "short",
-          "show": true,
-          "min": 0
-        },
-        {
-          "format": "short",
-          "show": false
-        }
-      ],
-      "xaxis": {
-        "mode": "time",
-        "show": true
-      },
-      "targets": [
-        {
-          "expr": "sum by (pod, poller_type) (temporal_num_pollers)",
-          "legendFormat": "{{pod}} {{poller_type}}",
-          "refId": "A"
         }
       ]
     }

@@ -20,6 +20,7 @@ patch this symbol in tests and would each have needed their own cache).
 """
 
 import asyncio
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -30,13 +31,22 @@ from temporalio.runtime import PrometheusConfig, Runtime, TelemetryConfig
 
 from chemclaw.core.config import settings
 from chemclaw.core.errors import SubsystemUnavailableError
+from chemclaw.core.metrics_bridge import degraded
+
+logger = logging.getLogger(__name__)
 
 # The process's client, built on first use. A module singleton for the same reason the metrics
 # registry and the logging configuration are: the thing being shared is a process-wide resource,
 # and threading it through six unrelated call sites would be plumbing with no decision in it.
 _CLIENT: Client | None = None
 # Serialises the first connect so a burst of concurrent tool calls opens one channel, not N. One
-# lock per process is correct because one event loop per process is the deployment shape.
+# lock per process is correct because one event loop per process is the deployment shape — and
+# that is also the limit of what it protects: an `asyncio.Lock` binds one loop, so two loops in one
+# process (a `asyncio.run` in a thread, a test that starts its own) would each see `_CLIENT is
+# None` and each connect. `_RUNTIME`'s check-then-set below is not under it at all, being reached
+# from `asyncio.to_thread`. Neither is worth a `threading.Lock`: the deployment shape is one loop
+# per process, the loss in the multi-loop case is a second channel rather than a fault, and a
+# second `Runtime` now degrades instead of raising.
 _CONNECT_LOCK = asyncio.Lock()
 # The SDK's own telemetry runtime, built at most once per process (below). A `Runtime` owns a Rust
 # core and a bound socket, so a second one is either a bind failure or a second exposition nobody
@@ -64,20 +74,35 @@ def telemetry_runtime() -> Runtime | None:
     Returns `None` when `temporal_metrics_port` is 0, which is the default — a process that binds
     a port nobody asked for is a surprise outside a cluster, and two workers on one developer
     machine cannot both bind.
+
+    **And `None` when the exporter cannot start, because SDK metrics are optional and the worker is
+    not.** `Runtime(...)` raises `ValueError: Failed starting Prometheus exporter: Address already
+    in use` when something already holds the port — two workers on one machine, a leftover
+    listener, a port that collides with `worker_metrics_port`. That exception was raised inside
+    `connect_options()`, which `connect()` runs under `except Exception`, so it was replaced with
+    "the durable execution backend (Temporal) is unreachable … This is an infrastructure outage".
+    Measured on 2026-08-28 with 127.0.0.1:9111 already bound: the broker was up and answering, and
+    every durable tool in the process reported it down. A degraded optional subsystem is what this
+    is, and `chemclaw_degraded_total{subsystem="temporal_sdk_metrics"}` is how an operator finds
+    the port they double-booked.
     """
     global _RUNTIME
     if not settings.temporal_metrics_port:
         return None
     if _RUNTIME is None:
-        _RUNTIME = Runtime(
-            telemetry=TelemetryConfig(
-                metrics=PrometheusConfig(
-                    bind_address=(
-                        f"{settings.temporal_metrics_host}:{settings.temporal_metrics_port}"
-                    )
-                )
+        bind_address = f"{settings.temporal_metrics_host}:{settings.temporal_metrics_port}"
+        try:
+            _RUNTIME = Runtime(
+                telemetry=TelemetryConfig(metrics=PrometheusConfig(bind_address=bind_address))
             )
-        )
+        except Exception:
+            degraded(
+                logger,
+                "temporal_sdk_metrics",
+                "could not export Temporal SDK metrics on %s; the client runs without them",
+                bind_address,
+            )
+            return None
     return _RUNTIME
 
 

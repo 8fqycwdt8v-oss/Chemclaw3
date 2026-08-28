@@ -791,3 +791,55 @@ def test_the_shipped_republish_budget_is_strictly_inside_the_job_ceiling() -> No
     assert default.connector_job_timeout_seconds > (
         default.result_republish_timeout_seconds + default.activity_timeout_seconds
     )
+
+
+def test_a_heartbeat_timeout_must_fit_inside_the_budget_it_reports_within() -> None:
+    """The relation `background_activity_heartbeat_timeout_seconds`'s comment asserted as fact.
+
+    Two concrete misconfigurations, both silent, and one inequality covers them:
+
+    - `CHEMCLAW_RESULT_PUBLISH_TIMEOUT_SECONDS=30` with one sink gives the drain a 30 s
+      start-to-close under the shipped 60 s heartbeat timeout, so the heartbeat can never fire
+      first and the dead-worker detection it exists for is inert.
+    - A 3600 s heartbeat timeout makes `durable/heartbeat.py::beating` derive a 900 s beat
+      interval, longer than the 600 s `retention_timeout_seconds` — so the sweep sends no beat at
+      all before its own start-to-close expires, and fails on a timeout that has nothing to do
+      with the sweep.
+    """
+    with pytest.raises(ValueError, match="background_activity_heartbeat_timeout_seconds"):
+        Settings(_env_file=None, result_publish_timeout_seconds=30.0)  # type: ignore[call-arg]
+    with pytest.raises(ValueError, match="background_activity_heartbeat_timeout_seconds"):
+        Settings(  # type: ignore[call-arg]
+            _env_file=None, background_activity_heartbeat_timeout_seconds=3600.0
+        )
+
+
+def test_the_shipped_heartbeat_is_strictly_inside_every_budget_it_sits_under() -> None:
+    """The relation the defect violated, asserted on the numbers that actually ship."""
+    default = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert default.background_activity_heartbeat_timeout_seconds < min(
+        default.retention_timeout_seconds,
+        default.note_reindex_timeout_seconds,
+        default.result_publish_timeout_seconds,
+    )
+
+
+def test_the_two_metrics_expositions_may_not_claim_one_port() -> None:
+    """One process serves both, so equal ports is a bind failure rather than a duplicate scrape.
+
+    Measured with the port already held: the SDK's `Runtime(...)` raised `ValueError: Failed
+    starting Prometheus exporter: Address already in use` from inside `connect_options()`, and
+    `connect()`'s `except Exception` reported it to every durable tool as "the durable execution
+    backend (Temporal) is unreachable … This is an infrastructure outage". That half now degrades;
+    a deployment stating a thing it cannot have should still hear about it at startup, naming both
+    settings, rather than from a counter somebody has to think to look at.
+    """
+    with pytest.raises(ValueError, match="temporal_metrics_port"):
+        Settings(_env_file=None, temporal_metrics_port=9000)  # type: ignore[call-arg]
+    # 0 is "disabled" for both and is therefore not a collision, which is the shipped default.
+    assert Settings(_env_file=None).temporal_metrics_port == 0  # type: ignore[call-arg]
+    # And a different port on the same host is fine — the rule is about the collision, not about
+    # the two settings coexisting.
+    assert (
+        Settings(_env_file=None, temporal_metrics_port=9001).temporal_metrics_port == 9001  # type: ignore[call-arg]
+    )

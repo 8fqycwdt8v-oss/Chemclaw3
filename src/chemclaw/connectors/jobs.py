@@ -518,6 +518,18 @@ async def failed_job_reason(handle: Any) -> str:
     sentence this exists to replace, and `failure_reason` deliberately does not name that client
     type (it is imported inside the workflow sandbox — see its docstring).
 
+    **One clause, because `WorkflowFailureError` is all four bad endings.** This used to carry a
+    second `except Exception` beneath it, on the stated belief that "a cancelled, terminated or
+    timed-out run reaches the client as its own exception type". It does not:
+    `temporalio.client._workflow` raises `WorkflowFailureError` for the failed, cancelled,
+    terminated *and* timed-out events, differing only in the `cause` it carries — which is exactly
+    what the clause above already walks. So the broad clause caught nothing it was written for and
+    one thing it was not: `RPCError`. A broker rolling during this poll made `GET /jobs/{id}`
+    answer `status="failed", summary="<gRPC UNAVAILABLE …>"` about a perfectly healthy run — the
+    same defect `job_status` fixed forty lines above by reading `RPCError.status`. A transport
+    fault is not this run's failure reason, so it propagates and the caller's outage path frames
+    it.
+
     Args:
         handle: A `WorkflowHandle` for a run believed to have ended badly. Typed `Any` because the
             handle's own generic parameters differ per caller and none of them is used here.
@@ -529,12 +541,10 @@ async def failed_job_reason(handle: Any) -> str:
     try:
         await handle.result()
     except WorkflowFailureError as exc:
+        # `cause` is `CancelledError`, `TerminatedError`, `TimeoutError` or the application's own
+        # failure, depending on how the run ended. `failure_reason` degrades to the type name when
+        # there is no message, which for a cancellation is the whole honest answer.
         return failure_reason(exc.__cause__ or exc)
-    except Exception as exc:
-        # A cancelled, terminated or timed-out run reaches the client as its own exception type
-        # rather than as `WorkflowFailureError`. `failure_reason` degrades to the type name when
-        # there is no message, which for `Cancelled` is the whole honest answer.
-        return failure_reason(exc)
     return ""
 
 

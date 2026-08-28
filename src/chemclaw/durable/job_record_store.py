@@ -9,6 +9,23 @@ Writes are an **upsert on `job_id`**, not an append. The id is the deterministic
 (`connectors/jobs.py::job_workflow_id`), a Temporal activity is at-least-once, and a re-run of a
 failed job legitimately produces a second, better result for the same id — so "the record of this
 run" must have exactly one row in all three cases.
+
+**Two upserts, because a failure record and a result record do not carry the same facts.** A
+completed record refreshes every mutable column; a failed one refreshes only the columns
+`failed_job_record` actually fills, and never clears the five that describe what a run *produced*.
+Measured on 2026-08-28 against a live database: writing a failure record over the completed row
+for one job id turned
+`{'summary': 'dG = -12.3 kJ/mol', 'result': {'dg': -12.3}, 'note_id': 'note-1',
+'calc_refs': ['k1', 'k2'], 'state': 'completed'}` into
+`{'summary': '', 'result': {}, 'note_id': '', 'calc_refs': [], 'state': 'failed'}` — the scientific
+result of a finished run destroyed by the bookkeeping of the step that failed after it. That is
+reachable whenever the record activity commits and then overruns its own timeout (`record_job`'s
+docstring names exactly that case), because the workflow then believes no row was written.
+
+The asymmetry is the point rather than an omission: a *completed* record is the whole account of a
+run and replaces the row entire, which is what lets a re-run of a failed job supersede it. A
+*failed* record is an account of how a run ended, and it has nothing to say about a result — so it
+says nothing, instead of saying nothing loudly enough to erase one.
 """
 
 from contextlib import AbstractAsyncContextManager
@@ -28,33 +45,54 @@ _COLUMNS = (
     "payload_kind, state, failure_reason"
 )
 
-# Every mutable column is refreshed, **including the attribution**. Updating the reason and the
-# result while keeping the first run's `requested_by` was a row that contradicted itself: a second
-# execution under this id is a different person asking a differently-worded question (the id is
-# reused when Temporal has expired the first execution, which is exactly the horizon this table
-# exists for), and half-updating left run 2's reason beside run 1's name — the worst possible
-# answer for the field an audit joins on. The row describes the latest run, whole.
-_UPSERT = f"""
+# Every column a second write for the same job id may refresh, **including the attribution**.
+# Updating the reason and the result while keeping the first run's `requested_by` was a row that
+# contradicted itself: a second execution under this id is a different person asking a differently-
+# worded question (the id is reused when Temporal has expired the first execution, which is exactly
+# the horizon this table exists for), and half-updating left run 2's reason beside run 1's name —
+# the worst possible answer for the field an audit joins on. The row describes the latest run,
+# whole.
+_MUTABLE = (
+    "rationale",
+    "requested_by",
+    "session_id",
+    "correlation_id",
+    "plan_step",
+    "plan_hash",
+    "payload",
+    "summary",
+    "result",
+    "note_id",
+    "calc_refs",
+    "runtime_seconds",
+    "payload_kind",
+    "state",
+    "failure_reason",
+)
+
+# The five columns that say what a run *produced*. `failed_job_record` fills none of them — a
+# failure has no envelope to take one from — so a failure write must leave whatever is already
+# there rather than refreshing five empties over it. Named once and subtracted, so a new result
+# column is protected by being added here instead of by remembering to omit it from a second SQL
+# literal.
+_RESULT_COLUMNS = ("summary", "result", "note_id", "calc_refs", "payload_kind")
+
+
+def _upsert(columns: tuple[str, ...]) -> str:
+    """The insert-or-update statement that refreshes exactly `columns` on a conflicting job id."""
+    assignments = ", ".join(f"{column} = EXCLUDED.{column}" for column in columns)
+    placeholders = ", ".join("%s" for _ in _COLUMNS.split(", "))
+    return f"""
     INSERT INTO job_records ({_COLUMNS})
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    VALUES ({placeholders})
     ON CONFLICT (job_id) DO UPDATE SET
-        rationale = EXCLUDED.rationale,
-        requested_by = EXCLUDED.requested_by,
-        session_id = EXCLUDED.session_id,
-        correlation_id = EXCLUDED.correlation_id,
-        plan_step = EXCLUDED.plan_step,
-        plan_hash = EXCLUDED.plan_hash,
-        payload = EXCLUDED.payload,
-        summary = EXCLUDED.summary,
-        result = EXCLUDED.result,
-        note_id = EXCLUDED.note_id,
-        calc_refs = EXCLUDED.calc_refs,
-        runtime_seconds = EXCLUDED.runtime_seconds,
-        payload_kind = EXCLUDED.payload_kind,
-        state = EXCLUDED.state,
-        failure_reason = EXCLUDED.failure_reason,
+        {assignments},
         completed_at = now()
 """
+
+
+_UPSERT = _upsert(_MUTABLE)
+_FAIL_UPSERT = _upsert(tuple(c for c in _MUTABLE if c not in _RESULT_COLUMNS))
 
 _SELECT_ONE = f"SELECT {_COLUMNS}, completed_at FROM job_records WHERE job_id = %s"
 
@@ -83,10 +121,14 @@ class PostgresJobRecordSink:
     """Writes each finished job's record to `job_records`, one connection per record."""
 
     async def record(self, record: JobRecord) -> None:
-        """Insert the record, replacing any existing row for the same job id."""
+        """Insert the record, refreshing what this kind of record is entitled to refresh.
+
+        A completed record replaces the row entire; a failed one sets how the run ended and leaves
+        the result columns alone. See the module docstring for the measurement behind the split.
+        """
         async with _connect() as conn:
             await conn.execute(
-                _UPSERT,
+                _FAIL_UPSERT if record.state == "failed" else _UPSERT,
                 (
                     record.job_id,
                     record.connector,

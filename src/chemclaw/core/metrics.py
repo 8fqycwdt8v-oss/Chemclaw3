@@ -543,7 +543,12 @@ _COUNTERS: dict[str, str] = {
         "resolve. Non-zero means the store and its catalogue have drifted, which otherwise "
         "presents as an honest zero-chunk answer from a healthy-looking leg."
     ),
-    "chemclaw_embedding_calls_total": "Embedding provider calls, by outcome (ok / error).",
+    "chemclaw_embedding_calls_total": (
+        "Calls to the configured embedding provider through core.embeddings, by outcome "
+        "(ok / error). Not every embedding this deployment performs: a warehouse binding "
+        "declaring vector: {embedding: server} embeds inside its own SQL and books nothing "
+        "here — chemclaw_evidence_source_seconds{source} times that leg."
+    ),
     "chemclaw_db_query_failures_total": (
         "Pooled database operations that failed, by kind (unavailable / cancelled / deadlock / "
         "error) — statement timeouts and serialization failures had no handler and no counter."
@@ -608,6 +613,35 @@ _TOOL_BUCKETS: tuple[float, ...] = (
     300.0,
     900.0,
 )
+# `_JOB_BUCKETS` is the same argument as `_TURN_BUCKETS` one tier up, and this histogram shipped
+# making exactly the mistake that paragraph diagnoses: it was bound to `_TOOL_BUCKETS`, whose top
+# finite boundary is **900 s**, while `connector_job_timeout_seconds` defaults to 18,000 and
+# `xtb_job_timeout_seconds` to 15,000. `histogram_quantile` cannot interpolate into `+Inf` and
+# returns the highest finite boundary, so every job over fifteen minutes landed in `+Inf` and the
+# p95 pinned at exactly 900 s precisely as jobs got expensive — on the series whose own HELP text
+# says it exists "so a p95 exists for the most expensive work in the system".
+#
+# Bracketed on both sides of the ceiling (14400 below, 21600 above) so a deployment saturating its
+# own job timeout is visible as mass moving into the 18000 bucket rather than as a quantile that
+# stops moving. The low end stays fine-grained because a re-run that hits the D-011 cache returns
+# in seconds and belongs in a bucket of its own rather than pooled with a CREST search.
+_JOB_BUCKETS: tuple[float, ...] = (
+    1.0,
+    5.0,
+    15.0,
+    30.0,
+    60.0,
+    120.0,
+    300.0,
+    600.0,
+    1200.0,
+    1800.0,
+    3600.0,
+    7200.0,
+    14400.0,
+    18000.0,
+    21600.0,
+)
 # A generic set for the histograms added since, whose range is "a network call": an embedding
 # batch, a database statement, one delivery to a result sink, one model call.
 _CALL_BUCKETS: tuple[float, ...] = (
@@ -639,7 +673,10 @@ _HISTOGRAMS: dict[str, str] = {
     ),
     "chemclaw_embedding_duration_seconds": "Wall-clock duration of one embedding provider call.",
     "chemclaw_db_query_duration_seconds": (
-        "Wall-clock duration of one pooled database operation, by operation name."
+        "Wall-clock duration of one borrowed database connection — the caller's whole "
+        "db.connection() block, not one statement — by operation name. Pooled and dedicated "
+        "alike. A call site that holds a connection across work of its own is measured doing "
+        "exactly that, so this is hold time, not query latency."
     ),
     "chemclaw_job_duration_seconds": (
         "Wall-clock duration of one finished durable job, by connector — the distribution "
@@ -655,7 +692,7 @@ _HISTOGRAMS: dict[str, str] = {
 _HISTOGRAM_BUCKETS: dict[str, tuple[float, ...]] = {
     "chemclaw_turn_duration_seconds": _TURN_BUCKETS,
     "chemclaw_tool_duration_seconds": _TOOL_BUCKETS,
-    "chemclaw_job_duration_seconds": _TOOL_BUCKETS,
+    "chemclaw_job_duration_seconds": _JOB_BUCKETS,
     "chemclaw_http_request_duration_seconds": _CALL_BUCKETS,
     "chemclaw_model_call_duration_seconds": _CALL_BUCKETS,
     "chemclaw_evidence_source_seconds": _CALL_BUCKETS,
@@ -726,7 +763,9 @@ _COUNTER_LABELS: dict[str, tuple[str, ...]] = {
     # same guarantee `state` above gets from a CHECK constraint.
     "chemclaw_protocol_digests_total": ("outcome",),
     # Bounded by configuration exactly as `profile` is: a connector is a bundle the chart enables,
-    # never a name a caller supplies, and the whole shipped fleet is six.
+    # never a name a caller supplies, and the shipped fleet is the set of `connector.yaml` files in
+    # `connectors/` — not written down as a number here, because the number that was said six while
+    # seven shipped.
     "chemclaw_job_runtime_seconds_total": ("connector",),
     # Two sources of conflict, different causes and different operator responses. `process` is a
     # same-process double-submit (impossible with the LRU's single-session cardinality guarantee,
@@ -756,9 +795,10 @@ _COUNTER_LABELS: dict[str, tuple[str, ...]] = {
     "chemclaw_degraded_total": ("subsystem",),
     # Bounded by this module's own declarations: the label domain is `declared_metric_names()`.
     "chemclaw_gauge_read_failures_total": ("metric",),
-    # The route *template* from `request.scope["route"].path`, enumerable from `app.routes` — 23
-    # today. Never `request.url.path`, which is caller-controlled and unbounded, and which is
-    # already the subject of a measured denial of service through the uvicorn access log.
+    # The route *template* from `request.scope["route"].path`, enumerable from `app.routes` — which
+    # is the bound, and is why no count is written here: the one that was said 23 while `create_app`
+    # registered 21. Never `request.url.path`, which is caller-controlled and unbounded, and which
+    # is already the subject of a measured denial of service through the uvicorn access log.
     "chemclaw_http_requests_total": ("route", "status_class"),
     "chemclaw_request_validation_failures_total": ("route",),
     # Four literals in `api/deps.py`, four in `api/auth.py` — source-fixed, like `subsystem`.
@@ -837,12 +877,16 @@ _GAUGES: dict[str, str] = {
     "chemclaw_event_streams_open": "Push-back event streams currently open on this process.",
     "chemclaw_event_stream_capacity": "Configured maximum concurrent push-back streams.",
     # In-flight durable work. `chemclaw_jobs_started_total` minus a completion counter would have
-    # given this, except the completion counter did not exist until now.
-    # "carried by", not "launched from", and the difference is which pod you are looking at: a job
-    # is launched by an agent tool in the front door and executed by a connector worker, so a
-    # per-process subtraction of starts from finishes would be a number nobody can take. What this
-    # reads is the durable work *this* process is currently carrying.
-    "chemclaw_jobs_in_flight": "Durable jobs this process is currently carrying.",
+    # given this, except the two are booked in different processes — a job is launched by an agent
+    # tool in the front door and executed by a worker — so a per-process subtraction is a number
+    # nobody can take, and a fleet-wide one over raw counters is undone by any pod restart.
+    #
+    # **A deployment-wide reading, published identically by every worker**, so a dashboard takes
+    # `max()` over the series and never `sum()`. It is read from the broker's own visibility count
+    # (`durable/job_metrics.py`), because the per-process number this used to publish was not
+    # measurable from inside a workflow: driven live, it stuck at 1 after a terminate, read 0 for a
+    # RUNNING workflow after an eviction, and raised out of its own `finally` on worker shutdown.
+    "chemclaw_jobs_in_flight": "Durable jobs open in this deployment (the same reading per pod).",
 }
 
 # Gauges that carry **one** label, read as a whole family from a single callable returning

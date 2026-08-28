@@ -73,6 +73,11 @@ _EXPECTED_SUBSYSTEMS = {
     # produces.
     "job_record",
     "job_resume",
+    # `durable/job_metrics.refresh_open_jobs`, whose visibility count of open durable jobs is
+    # swallowed so a broker hiccup cannot take the refresh loop — and with it the drain and the
+    # probe surface — down with it. Counted because the alternative is a gauge that quietly stops
+    # moving, which reads as "no durable work" rather than as "nobody asked".
+    "jobs_in_flight",
     "log_redaction",
     "plan_approval",
     "preferences",
@@ -95,6 +100,11 @@ _EXPECTED_SUBSYSTEMS = {
     # deployment derive differently costs no calculation and produces no wrong number — every
     # lookup keyed on it simply misses, forever, while the service looks healthy.
     "structure_id",
+    # `core/temporal_client.telemetry_runtime`, when the SDK's Prometheus exporter cannot bind. It
+    # used to raise out of `connect_options()` into `connect()`'s `except Exception`, so a
+    # double-booked metrics port was reported to every durable tool as "Temporal is unreachable …
+    # This is an infrastructure outage" while the broker was up and answering.
+    "temporal_sdk_metrics",
     "tool_result_store",
     "transcript_projection",
 }

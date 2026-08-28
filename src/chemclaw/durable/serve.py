@@ -30,7 +30,6 @@ import asyncio
 import logging
 import signal
 
-from temporalio.contrib.opentelemetry import TracingInterceptor
 from temporalio.worker import Interceptor, Worker
 
 from chemclaw.core import db
@@ -39,7 +38,7 @@ from chemclaw.core.executor import install_default_executor
 from chemclaw.core.logging import log_event
 from chemclaw.core.worker_http import worker_http
 from chemclaw.durable.interceptor import ChemclawWorkerInterceptor, activities_in_flight, draining
-from chemclaw.durable.job_metrics import bind_job_gauges, jobs_in_flight
+from chemclaw.durable.job_metrics import bind_job_gauges, poll_open_jobs
 
 logger = logging.getLogger(__name__)
 
@@ -50,23 +49,29 @@ _STOP_SIGNALS = (signal.SIGINT, signal.SIGTERM)
 
 
 def worker_interceptors() -> list[Interceptor]:
-    """The interceptor chain every `Worker` in this system is built with.
+    """The interceptor chain every `Worker` in this system adds to the client's own.
 
     One function rather than a literal at each constructor, for the reason this module exists at
     all: two entrypoints wiring different subsets of the cross-cutting concerns is a pod that looks
     healthy while doing less than the other one. A third worker gets the whole chain by calling
     this, or gets none of it visibly.
 
-    Order matters and is the same order the client uses: the observability interceptor is outermost
-    so its log line and its failure counter bracket everything, including whatever the tracing
-    interceptor does. The tracing half is present only when span export is on, matching
-    `core/temporal_client.py` — with tracing off the global provider is a no-op and this would be
-    machinery around nothing.
+    **The tracing interceptor is deliberately not here, and used to be.** A `Worker` does not use
+    the list it is given as the chain; `temporalio.worker._worker` prepends the interceptors the
+    *client* already carries (`interceptors_from_client + list(config["interceptors"])`), and
+    `core/temporal_client.py::connect_options` puts a `TracingInterceptor` on every client when
+    `otel_enabled`. Measured on 2026-08-28 against a live broker, the chain a worker actually ran
+    was `['TracingInterceptor', 'ChemclawWorkerInterceptor', 'TracingInterceptor']` — every
+    activity and workflow traced twice, from one interceptor added in two places.
+
+    That measurement also corrects what this docstring used to claim. It said "the observability
+    interceptor is outermost so its log line and its failure counter bracket everything"; the SDK
+    wraps in reverse list order, so the *client's* tracing interceptor is outermost and ours runs
+    inside it, whatever this function returns. Which is the right way round: a span that does not
+    enclose the log line and the failure counter it explains is a span that ends before the thing
+    it is measuring does.
     """
-    interceptors: list[Interceptor] = [ChemclawWorkerInterceptor()]
-    if settings.otel_enabled:
-        interceptors.append(TracingInterceptor())
-    return interceptors
+    return [ChemclawWorkerInterceptor()]
 
 
 async def serve_worker(worker: Worker, *, component: str) -> None:
@@ -110,41 +115,55 @@ async def serve_worker(worker: Worker, *, component: str) -> None:
         async with db.pooling(), worker_http(component=component, ready=lambda: worker.is_running):
             running = asyncio.create_task(worker.run())
             waiting = asyncio.create_task(stop.wait())
-            await asyncio.wait({running, waiting}, return_when=asyncio.FIRST_COMPLETED)
-            waiting.cancel()
-            if running.done():  # a fatal worker error, or a shutdown from somewhere else
-                await running
-                return
-            # **The count, not just the fact.** This module's own docstring names the cost of a
-            # hard kill — a long activity re-run from the beginning, paid for twice — and the two
-            # log lines said only "draining" and "drained", so nothing anywhere reported what the
-            # drain was actually carrying. Work is not *lost* (Temporal redelivers), which is
-            # exactly why it needs a number: a silent second payment leaves no other trace.
-            log_event(
-                logger,
-                "worker.draining",
-                "%s: draining with %d activity/activities and %d durable job(s) in flight",
-                component,
-                activities_in_flight(),
-                int(jobs_in_flight()),
-                component=component,
-                activities_in_flight=activities_in_flight(),
-                jobs_in_flight=int(jobs_in_flight()),
-                budget_seconds=settings.worker_graceful_shutdown_seconds,
-            )
-            # Whatever `graceful_shutdown_timeout` does not cover is cancelled by `shutdown()`,
-            # and each cancellation is counted where it is observed: inside the interceptor, the
-            # only frame that sees one. See `durable/interceptor.py::draining`.
-            with draining():
-                await worker.shutdown()
-                await running
-            log_event(
-                logger,
-                "worker.drained",
-                "%s: drained",
-                component,
-                component=component,
-            )
+            # The gauge's reading, refreshed against the broker rather than kept by a workflow
+            # body — see `durable/job_metrics.py` for the three live measurements that retired the
+            # process-local set this replaced. Cancelled however this function leaves, so it never
+            # outlives the client it queries; kept alive *through* the drain, so `/metrics` does
+            # not freeze at the moment an operator is watching a shutdown.
+            polling = asyncio.create_task(poll_open_jobs(worker.client, stop))
+            try:
+                await asyncio.wait({running, waiting}, return_when=asyncio.FIRST_COMPLETED)
+                waiting.cancel()
+                if running.done():  # a fatal worker error, or a shutdown from somewhere else
+                    await running
+                    return
+                # **The count, not just the fact.** This module's own docstring names the cost of
+                # a hard kill — a long activity re-run from the beginning, paid for twice — and the
+                # two log lines said only "draining" and "drained", so nothing anywhere reported
+                # what the drain was actually carrying. Work is not *lost* (Temporal redelivers),
+                # which is exactly why it needs a number: a silent second payment leaves no other
+                # trace.
+                #
+                # Activities and not durable jobs, because an activity is what a drain can actually
+                # lose: a cancelled one is redelivered and paid for twice, while an evicted parent
+                # workflow is picked up by another worker with no work repeated. This line used to
+                # report both, taking the second figure from a process-local set that read the
+                # *wrong number* under exactly this event (`durable/job_metrics.py`).
+                log_event(
+                    logger,
+                    "worker.draining",
+                    "%s: draining with %d activity/activities in flight",
+                    component,
+                    activities_in_flight(),
+                    component=component,
+                    activities_in_flight=activities_in_flight(),
+                    budget_seconds=settings.worker_graceful_shutdown_seconds,
+                )
+                # Whatever `graceful_shutdown_timeout` does not cover is cancelled by `shutdown()`,
+                # and each cancellation is counted where it is observed: inside the interceptor,
+                # the only frame that sees one. See `durable/interceptor.py::draining`.
+                with draining():
+                    await worker.shutdown()
+                    await running
+                log_event(
+                    logger,
+                    "worker.drained",
+                    "%s: drained",
+                    component,
+                    component=component,
+                )
+            finally:
+                polling.cancel()
     finally:
         for sig in _STOP_SIGNALS:
             loop.remove_signal_handler(sig)

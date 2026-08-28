@@ -131,6 +131,14 @@ class TemporalSettings(BaseSettings):
     # sits under, so a dead worker is detected in a minute rather than in ten.
     background_activity_heartbeat_timeout_seconds: float = Field(default=60.0, gt=0)
 
+    # How often a worker re-asks the broker how many durable jobs are open
+    # (`durable/job_metrics.py`). A *reading* interval rather than a scrape-time query: a gauge
+    # source is synchronous and a Prometheus scrape must not make a network call, so the number a
+    # scrape sees is at most this old. 30 s because the thing being watched is a job that runs for
+    # minutes to hours — a fresher reading would buy nothing and cost one visibility query per
+    # worker per interval.
+    jobs_in_flight_refresh_seconds: float = Field(default=30.0, gt=0)
+
     @model_validator(mode="after")
     def _temporal_mtls_is_complete(self) -> Self:
         """A Temporal client cert without its key (or vice versa) is a silent half-config.
