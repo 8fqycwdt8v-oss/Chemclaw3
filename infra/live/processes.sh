@@ -356,6 +356,22 @@ up() {
     # sourced `env` exactly as the runbook says to. A checkout path is the same kind of thing as a
     # minted token: something this invocation settled that nobody downstream can re-derive.
     printf 'export CHEMCLAW_MCP_REPO=%q\n' "$MCP_REPO"
+    # The model posture this lane came up under, for the same reason and with a sharper cost.
+    #
+    # `llm_configured` decides whether `up` starts the front door at all, and `restart` *is* `up`.
+    # So a second shell that sourced this file and ran `processes.sh restart api` — which the
+    # storm's family A does at every admission cap — killed the front door, found neither
+    # `ANTHROPIC_API_KEY` nor `openai_compatible`, skipped starting it, printed "live stack up",
+    # and **exited 0**. Measured exactly that way: `api killed (pid 12668)`, then
+    # `skipping the front door`, then `live stack up`, then `/readyz` refused the connection.
+    # Every turn measured after that point would have been measured against nothing.
+    #
+    # Only what is set is written, and only when it is set: an empty `CHEMCLAW_LLM_MODEL` exported
+    # into a second shell would fail `_llm_provider_config`'s validator rather than fall back.
+    local key
+    for key in CHEMCLAW_LLM_PROVIDER CHEMCLAW_LLM_BASE_URL CHEMCLAW_LLM_MODEL; do
+      [ -n "${!key:-}" ] && printf 'export %s=%q\n' "$key" "${!key}"
+    done
   ) > "$RUN_DIR/connector-env.sh"
   if [ "${CHEMCLAW_LIVE_PROBE_TOKEN:-}" != "" ]; then
     ( umask 077; printf 'export CHEMCLAW_LIVE_PROBE_TOKEN=%q\n' "$CHEMCLAW_LIVE_PROBE_TOKEN" \
@@ -479,6 +495,20 @@ restart() {
   rm -f "$pidfile"
   log "$name killed (pid $pid)"
   up
+  # `up` is conditional in places — it skips the front door with no model configured, and skips the
+  # mock with no base URL pointing at it — and it reports those skips and exits 0. That is right
+  # for `up`, which is being asked to bring up whatever this configuration describes. It is wrong
+  # for `restart`, which was asked about one named process: a restart that ends with that process
+  # not running is a failure however reasonable the reason, and saying so is the difference between
+  # a chaos check that disturbed something and one that quietly removed it.
+  #
+  # This is the same rule `_chaos_postgres_bounce` now applies from the other side: the actor
+  # verifies the act, and the observer verifies it independently.
+  [ -e "$pidfile" ] || die "restart $name: the lane came back up without it.
+Read the lines above for the reason it was skipped — with no model configured, \`up\` deliberately
+does not start the front door. Whatever it says, this invocation asked for $name specifically and
+$name is not running, so this is a failure rather than a stack that is up in some other shape."
+  log "$name restarted (pid $(cat "$pidfile"))"
 }
 
 # Print the exports a *later* shell needs to talk to the running lane, so a tool started by hand

@@ -1263,3 +1263,34 @@ is to read an identity of the thing being disturbed (here the postmaster's own s
 connection outside the pool under test) before and after, and fail the check when it did not move.
 Fixing the primitive is not a substitute: the next primitive to silently no-op will be a different
 one, and this assertion is the only thing that notices.
+
+## 2026-08-28 — a lesson written about one function is a lesson that will be relearned
+
+Four defects in one afternoon, found by bringing the live lane up in a posture nobody had run it in
+(three repositories, a scripted model, no credential). Each blocked the next, so I fixed them in
+sequence and only saw the shape at the end:
+
+1. `restart-postgres` had no compose branch and restarted nothing, while logging "postgres up".
+2. The lane started five of six published fleet manifests; the sixth, `pyexec`, was the newest.
+3. `processes.sh env` — documented in its own comments as *the contract* a second shell reads —
+   carried the minted credentials and not the resolved checkout path, so every chaos restart died.
+4. Once that was fixed, the next restart killed the front door, declined to start it for want of a
+   model posture the contract also did not carry, printed **"live stack up"**, and exited **0**.
+
+**The pattern: every one had been learned before and written down too narrowly.** An earlier pass
+found #1's exact defect for the *Temporal* verbs and fixed it by adding `compose_temporal_id()` — a
+fix to Temporal, not to the class — so the second copy sat in the same file. An ADR titled *"a
+harness that starts two of five servers is a harness that tests two"* fixed #2's count of its day by
+naming the servers, and the fleet then grew one more. #3 and #4 are one omission a variable apart.
+
+The rule, and it is not about shell scripts: **when a fix is "this function forgot the other
+branch", the next question is always *which other functions have the same shape*, and the answer
+belongs in the same commit.** A fix that names one instance leaves the reader believing the class is
+handled. That belief is worse than the original defect, because it stops the next person looking.
+
+The second rule, from #4 specifically: **a reason is not an outcome.** `up` is right to skip a front
+door when no model is configured — it was asked to bring up whatever the configuration describes.
+`restart api` is not, because it was asked about one named process. A primitive must verify the act
+it was asked for; and separately, a check that disturbs something must verify the disturbance from
+outside. Defect #4 is what it looks like when neither does: a killed process, a printed success, and
+an exit code of 0.
