@@ -65,6 +65,7 @@ from deepagents.backends.protocol import (
     ReadResult,
 )
 
+from chemclaw.agent.audit import bounded_repr
 from chemclaw.agent.authz import AuthorizationError
 from chemclaw.core.logging import log_event
 from chemclaw.core.metrics_bridge import record_metric
@@ -151,28 +152,45 @@ class NarrowedSkillsBackend(FilesystemBackend):
         them held zero `logger.` calls and zero metric calls, so "the agent is not following the
         procedure" — a top-three support question — could not be answered at its first step: *was
         the skill even offered, and did the model read it?* An INFO per body read is the answer to
-        the second half, and it is cheap because a skill is read once per turn at most, not per
-        model call.
+        the second half.
+
+        **INFO is a judgement about volume, and the bound it used to rest on does not exist.** The
+        claim here was that "a skill is read once per turn at most, not per model call"; nothing
+        enforces that. `read` is a model-callable tool, a skill directory holds as many documents
+        as its author put in it, and a model that re-reads one on every step of a plan is doing
+        something this tree neither prevents nor refuses. The line stays at INFO because *which
+        procedure the model actually opened* is the fact the support question turns on and it is
+        not reconstructible from anywhere else — but it is a per-call line, and a deployment
+        drowning in it is looking at a real thing rather than at a broken bound.
 
         A refusal is a WARNING and a count, not an INFO, because the role gate lives here — this is
         the enforcement point (the class docstring says why), and an enforcement point whose
         refusals are silent is a control nobody can audit. It names the path rather than the skill,
         since a refused path may name no skill that exists; that is the same reason the message the
         *model* gets refuses to say whether the skill exists at all.
+
+        **The path is bounded before it is written, on both branches.** `file_path` arrives
+        verbatim out of the model's tool arguments — nothing between the provider and here caps it
+        — so a megabyte-long or newline-laden path was written whole into a WARNING on the refusal
+        and an INFO on the success, which is a model-authored string with unbounded reach into a
+        log stack. `audit.bounded_repr` is the budget this tree already applies to every other
+        model-authored string that reaches a record, and it reprs, so an embedded newline can no
+        longer split one refusal into two log lines.
         """
         skill = _skill_of(file_path)
+        recorded = bounded_repr(file_path)
         if not self._allows(file_path):
             record_metric(lambda m: m.increment("chemclaw_skill_reads_denied_total"))
             log_event(
                 logger,
                 "skill.read_denied",
                 "refused a read of %s: it is outside the skills this turn may reach",
-                file_path,
+                recorded,
                 level=logging.WARNING,
-                path=file_path,
+                path=recorded,
             )
             return ReadResult(error=REFUSED, file_data=None)
-        log_event(logger, "skill.read", "the model read %s", file_path, skill=skill, path=file_path)
+        log_event(logger, "skill.read", "the model read %s", recorded, skill=skill, path=recorded)
         return super().read(file_path, offset, limit)
 
     def glob(self, pattern: str, path: str | None = None) -> GlobResult:

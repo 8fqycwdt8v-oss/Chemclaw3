@@ -3,8 +3,8 @@
 The decision is `D-2026-08-27-a-refusal-is-not-a-crash`. Measured before it: a dry-run refusal and a
 repeat-guard trip both produced `outcome='error'` and a log line reading `tool X failed after N
 ms: <prose>` — `agent/audit.py` interpolated `%s` on the exception *instance*, so the class was gone
-from the log while `_truncate`'s repr kept it in the row. The database was strictly more diagnostic
-than the log, inverting that module's own opening rule that the log is the floor.
+from the log while `bounded_repr`'s repr kept it in the row. The database was strictly more
+diagnostic than the log, inverting that module's own opening rule that the log is the floor.
 
 The span half was measured the same way: clean `UNSET`, raised `ERROR`, `CancelledError` `UNSET`,
 **returned error `UNSET`** — and CLAUDE.md records that an MCP tool never raises, so essentially
@@ -24,9 +24,11 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from langchain_core.messages import AIMessage
 
 from chemclaw.agent.audit import AuditEvent, make_audit_middleware, refusal_reason
 from chemclaw.agent.plan_gate import plan_approval_refusal
+from chemclaw.agent.plan_link import plan_link_for_call
 from chemclaw.agent.repeat_guard import RepeatedCallRefusal
 from chemclaw.agent.skill_backend import SkillsReadOnlyRefusal
 from chemclaw.agent.tool_authz import DryRunRefusal, UndeclaredWriteRefusal
@@ -56,6 +58,7 @@ def _drive(
     raises: BaseException | None = None,
     returns: Any = None,
     todos: list[dict[str, Any]] | None = None,
+    batch_todos: list[dict[str, Any]] | None = None,
     registered: bool = True,
 ) -> tuple[_Sink, BaseException | None]:
     """Run one tool call through the audit middleware; return its sink and whatever escaped.
@@ -78,8 +81,26 @@ def _drive(
     # `registered=False` is the `ToolNode` shape for a name the model invented.
     tool = SimpleNamespace(name=name, metadata={}) if registered else None
     request = tool_request(name, {"q": "x"}, tool=tool)
-    if todos is not None:
-        request = request.override(state={"todos": todos})
+    if todos is not None or batch_todos is not None:
+        state: dict[str, Any] = {"todos": todos or []}
+        if batch_todos is not None:
+            # The canonical harness batch: one assistant message carrying `write_todos` beside the
+            # step's own call. `request.state["todos"]` is `ToolNode`'s pre-batch snapshot, so the
+            # rewrite in this message is the only place the plan as of *this* call is visible.
+            state["messages"] = [
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "write_todos",
+                            "args": {"todos": batch_todos},
+                            "id": "call-plan",
+                        },
+                        {"name": name, "args": {"q": "x"}, "id": "call-1"},
+                    ],
+                )
+            ]
+        request = request.override(state=state)
 
     async def _handler(_request: Any) -> Any:
         if raises is not None:
@@ -221,13 +242,56 @@ def test_every_call_is_counted_by_tool_and_outcome_and_timed_under_its_own_name(
 def test_the_row_names_the_plan_step_the_call_served() -> None:
     """`audit_events.plan_step` — the join `job_records` had and the trail did not.
 
-    Read from `request.state["todos"]` through the same `plan_link_from_todos` a job is stamped
-    with, because the ambient link `stamp_plan_link` binds is *reset* by the time the row is
-    written: that middleware is innermost and resets in a `finally` while this one is outermost.
-    Measured before the fix — `get_current_plan_link()` read `("", "")` at this point.
+    Read off the request through the same `plan_link_for_call` a job is stamped with, because the
+    ambient link `stamp_plan_link` binds is *reset* by the time the row is written: that middleware
+    is innermost and resets in a `finally` while this one is outermost. Measured before the fix —
+    `get_current_plan_link()` read `("", "")` at this point.
+
+    This case is a batch with **no** rewrite in it, which is the fallback half of that reading. The
+    case with one is next door, and it is the one the state-only read got wrong.
     """
     sink, _ = _drive("compute_xtb_energy", todos=_TODOS)
     assert sink.events[0].plan_step == "run the conformer search"
+
+
+def test_the_row_names_the_step_the_batch_marks_not_the_one_it_just_finished() -> None:
+    """The off-by-one this row carried, and the reason the two records could not agree.
+
+    The canonical harness batch is "tick step N completed, mark N+1 in_progress, call the tool" —
+    one assistant message, `TodoListMiddleware`'s own pattern — and `request.state["todos"]` is the
+    snapshot `ToolNode` took *before* it. `agent/plan_link.py` has worked around that from the day
+    it was written; this row read the state directly, so measured on that batch it stamped
+    `'run the conformer search'` — the step that had just **finished** — while
+    `job_records.plan_step` for the job the same call launched said `'compute the pKa'`. The
+    docstring beside it claimed "a tool call and the job it launched cannot disagree about which
+    step they served", and `chemclaw explain` rendered the previous step for every ordinary call of
+    every plan.
+
+    The two readings are now one function (`plan_link.plan_link_for_call`), and this asserts them
+    against each other rather than restating either.
+    """
+    after_the_tick = [
+        {"content": "run the conformer search", "status": "completed"},
+        {"content": "compute the pKa", "status": "in_progress"},
+    ]
+    sink, _ = _drive("compute_xtb_energy", todos=_TODOS, batch_todos=after_the_tick)
+    assert sink.events[0].plan_step == "compute the pKa"
+    # The same request, read the way a launched job reads it: one answer, not two.
+    request = tool_request("compute_xtb_energy", {"q": "x"}).override(
+        state={
+            "todos": _TODOS,
+            "messages": [
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {"name": "write_todos", "args": {"todos": after_the_tick}, "id": "c-plan"},
+                        {"name": "compute_xtb_energy", "args": {"q": "x"}, "id": "call-1"},
+                    ],
+                )
+            ],
+        }
+    )
+    assert plan_link_for_call(request)[0] == sink.events[0].plan_step
 
 
 def test_a_call_outside_a_plan_stamps_the_empty_step_rather_than_a_guess() -> None:

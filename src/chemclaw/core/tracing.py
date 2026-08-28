@@ -90,9 +90,22 @@ class SpanHandle:
         self._span = span
 
     def set_attribute(self, key: str, value: str | int | float | bool) -> None:
-        """Stamp one attribute, under the rule `start_span` states: identifiers and counts only."""
-        if self._span is not None:
+        """Stamp one attribute, under the rule `start_span` states: identifiers and counts only.
+
+        **Swallowing here for the reason `failed` swallows, and it did not.** The two are called
+        from the same `except` blocks — `agent/audit.py` stamps the outcome attribute one line
+        before it marks the span — so a `set_attribute` that raised (a shut-down provider, an
+        exporter that has torn its context down, a value type an SDK version rejects) would
+        replace the failure being reported with a tracing failure, on the tool path, inside the
+        handler written to report the first one. `failed`'s own docstring states that rule; this
+        method was the half that did not follow it.
+        """
+        if self._span is None:
+            return
+        try:
             self._span.set_attribute(key, value)
+        except Exception:  # pragma: no cover - defensive; tracing must never break the caller
+            logger.debug("could not set attribute %s on the current span", key, exc_info=True)
 
     def failed(self, description: str) -> None:
         """Mark the span `ERROR` with `description` — for a failure that does not *raise*.
@@ -139,6 +152,30 @@ def start_span(name: str, **attributes: str | int | float | bool) -> Iterator[Sp
         for key, value in attributes.items():
             span.set_attribute(key, value)
         yield SpanHandle(span)
+
+
+def trace_header_names() -> frozenset[str]:
+    """Every header name `trace_headers()` can produce, whether or not a span is active now.
+
+    The *names* rather than the values, because the caller that needs them is a guard rather than a
+    sender: `connectors.identity.turn_identity_hook` removes everything this system stamped when a
+    request leaves the connector's origin, and "what did we stamp" must be answerable at the moment
+    of the redirect — when the span may already have ended and `trace_headers()` would answer with
+    an empty dict for a request that is carrying `traceparent` anyway.
+
+    Read from the configured propagator's own `fields`, so a deployment that swaps W3C for B3 gets
+    B3's names with nothing to update here. Empty when tracing is off, which is honest: nothing was
+    stamped, so there is nothing to strip.
+    """
+    if _tracer() is None:
+        return frozenset()
+    try:
+        from opentelemetry.propagate import get_global_textmap
+
+        return frozenset(get_global_textmap().fields)
+    except Exception:  # pragma: no cover - defensive, as `trace_headers` below
+        logger.debug("could not read the propagator's header names", exc_info=True)
+        return frozenset()
 
 
 def trace_headers() -> dict[str, str]:

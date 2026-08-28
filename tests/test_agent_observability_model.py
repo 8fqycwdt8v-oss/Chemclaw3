@@ -15,13 +15,16 @@ constructs them. A test that classified a stand-in class would prove only that `
 
 import asyncio
 import logging
-from typing import Any
+from typing import Any, cast
 
 import httpx2
 import pytest
 from langchain.agents.middleware import ModelRequest
 from langchain.agents.middleware.types import ModelResponse
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.language_models import GenericFakeChatModel
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
+from langchain_core.outputs import ChatGenerationChunk
+from langchain_core.tools import tool
 
 from chemclaw.agent.llm_provider import _failover_exceptions, classify_model_failure
 from chemclaw.agent.model_calls import (
@@ -48,14 +51,25 @@ def _openai_error(kind: str, status: int, message: str, code: str | None = None)
     return error
 
 
-def _request(messages: list[Any]) -> ModelRequest[Any]:
-    """A `ModelRequest` carrying only what these middlewares read."""
+@tool
+def predict_pka(smiles: str) -> str:
+    """Stand in for the tool surface a request was made with — its *name* is what matters here."""
+    return "4.2"
+
+
+def _request(messages: list[Any], tools: list[Any] | None = None) -> ModelRequest[Any]:
+    """A `ModelRequest` carrying only what these middlewares read.
+
+    `tools` defaults to the one-tool surface these cases name, because the unparseable-call metric
+    clamps its label against exactly this list: a request that bound nothing can only ever produce
+    the `unknown` bucket, which would make the clamp's own test vacuous.
+    """
     return ModelRequest(
         model=None,  # type: ignore[arg-type]
         system_prompt=None,
         messages=messages,
         tool_choice=None,
-        tools=[],
+        tools=[predict_pka] if tools is None else tools,
         response_format=None,
         state={"messages": messages},
         runtime=None,
@@ -186,11 +200,17 @@ def test_an_unparseable_tool_call_is_found_where_nothing_looked() -> None:
             }
         ],
     )
-    assert invalid_tool_calls(ModelResponse(result=[broken])) == [
+    found = invalid_tool_calls(ModelResponse(result=[broken]))
+    assert [(call.name, call.error) for call in found] == [
         ("compute_xtb_energy", "Unterminated string")
     ]
+    # The malformed document itself is carried, because on the streaming path it is the only field
+    # that survives — see `test_the_correction_carries_the_arguments_because_the_error_does_not`.
+    assert found[0].arguments == repr('{"smiles": "CC')
     # The bare-`AIMessage` return shape a `wrap_model_call` handler is also allowed to use.
-    assert invalid_tool_calls(broken) == [("compute_xtb_energy", "Unterminated string")]
+    assert [(call.name, call.error) for call in invalid_tool_calls(broken)] == [
+        ("compute_xtb_energy", "Unterminated string")
+    ]
     assert invalid_tool_calls(ModelResponse(result=[AIMessage(content="fine")])) == []
 
 
@@ -235,7 +255,9 @@ def test_an_unparseable_tool_call_is_counted_and_the_model_is_asked_again(
     assert isinstance(correction, HumanMessage)
     assert "predict_pka" in correction.text
     assert "Unterminated string" in correction.text
-    # The broken attempt is not replayed to the provider, and not returned to the graph.
+    # The broken attempt is not replayed to the provider, and its *call* is not returned to the
+    # graph. Its prose is — see `test_the_recorded_message_is_the_text_the_turn_streamed` — and
+    # here there is none, so the repaired reply is returned unchanged.
     assert broken not in seen[1]
     assert answer.result == [good]
     assert METRICS.value("chemclaw_invalid_tool_calls_total") == before + 1
@@ -276,7 +298,10 @@ def test_a_second_unparseable_reply_is_returned_with_an_error_rather_than_a_thir
         )
 
     assert calls == 2
-    assert answer.result == [broken]
+    # The second reply is what the turn continues with, carrying the prose of the first — both
+    # were streamed, and the fixture returns the same object for both, so the prose appears twice.
+    assert answer.result[0].tool_calls == broken.tool_calls
+    assert answer.result[0].text == "I will compute that.I will compute that."
     assert "twice" in caplog.text
 
 
@@ -303,3 +328,262 @@ def test_the_repair_wraps_the_recorder_so_both_attempts_are_booked() -> None:
         "RepairInvalidToolCalls",
         "RecordModelCalls",
     ]
+
+
+class _StreamingModel(GenericFakeChatModel):
+    """A model that streams a scripted reply per call, tool-call fragments and all.
+
+    Not `tests/fakes_langgraph.ScriptedChatModel`: that fake emits only *valid* tool-call
+    arguments, and the whole subject here is what LangChain does with arguments that do not parse.
+    Streaming rather than returning whole messages is the point — `stream_mode="messages"` is what
+    a chemist receives, and it is emitted per **model call**, which is the thing the repair
+    middleware's own docstring used to get wrong.
+    """
+
+    script: list[dict[str, Any]] = []
+
+    def __init__(self, script: list[dict[str, Any]], **kwargs: Any) -> None:
+        """Hold the script; `messages` is unused because `_stream` is fully overridden."""
+        super().__init__(messages=iter([]), **kwargs)
+        object.__setattr__(self, "_step", 0)
+        self.script = script
+
+    def bind_tools(self, tools: Any, **kwargs: Any) -> Any:
+        """Accept the binding `create_agent` performs on every request and keep the script."""
+        return self
+
+    def _stream(self, messages: Any, stop: Any = None, run_manager: Any = None, **kwargs: Any):  # type: ignore[no-untyped-def]
+        """Stream the next scripted reply: its prose, then its tool-call fragment if it has one."""
+        step = object.__getattribute__(self, "_step")
+        object.__setattr__(self, "_step", step + 1)
+        reply = self.script[step]
+        yield ChatGenerationChunk(message=AIMessageChunk(content=reply["text"]))
+        if "args" in reply:
+            yield ChatGenerationChunk(
+                message=AIMessageChunk(
+                    content="",
+                    tool_call_chunks=[
+                        {
+                            "name": "predict_pka",
+                            "args": reply["args"],
+                            "id": f"call-{step}",
+                            "index": 0,
+                            "type": "tool_call_chunk",
+                        }
+                    ],
+                )
+            )
+
+
+async def _drive(script: list[dict[str, Any]]) -> tuple[str, str, list[dict[str, Any]]]:
+    """Run one turn of a compiled graph over `script`.
+
+    Returns `(streamed text, recorded assistant text, the tool calls the graph actually ran)`.
+
+    A **compiled** graph, because the divergence this exists to catch is invisible to a direct
+    hook call: `RepairInvalidToolCalls` returns one message, and the middleware's unit tests
+    therefore all passed while the stream carried two replies. Only `graph.astream` sees what the
+    front door sees.
+    """
+    from langchain.agents import create_agent
+
+    graph = create_agent(
+        model=_StreamingModel(script), tools=[predict_pka], middleware=[RepairInvalidToolCalls()]
+    )
+    streamed: list[str] = []
+    recorded: list[str] = []
+    ran: list[dict[str, Any]] = []
+    stream = graph.astream(
+        {"messages": [HumanMessage(content="what is the pKa of acetic acid")]},
+        stream_mode=["messages", "updates"],
+    )
+    async for emitted in stream:
+        # `astream` with a list of modes yields `(mode, payload)`; the tuple arity is the coupling
+        # `tests/test_upstream_surface.py` already names, so it is read here rather than re-typed.
+        mode, payload = cast(tuple[str, Any], emitted)
+        if mode == "messages":
+            chunk, _metadata = payload
+            if isinstance(chunk, AIMessageChunk) and chunk.text:
+                streamed.append(chunk.text)
+        else:
+            for update in (payload or {}).values():
+                for message in (update or {}).get("messages", []) or []:
+                    if isinstance(message, AIMessage):
+                        recorded.append(message.text)
+                        ran.extend(dict(call) for call in message.tool_calls or [])
+    return "".join(streamed), "".join(recorded), ran
+
+
+def test_the_recorded_message_is_the_text_the_turn_streamed() -> None:
+    """The invariant this middleware owes a chemist, and the one it broke.
+
+    Measured before the fix, on this exact graph: the client received
+    `"Let me compute that. Here it is: pKa 4.2."` — both attempts, because `stream_mode="messages"`
+    emits per **model call** — while the message the graph recorded held only the second. The
+    front door concatenates those root `TokenEvent`s into the persisted answer
+    (`api/runner._stream_into`), so the turn had two records of itself that disagreed, and the one
+    the corpus grades was not the one the session stored.
+
+    The discarded attempt cannot be un-streamed: it is the *first* call, which on every turn that
+    needs no repair is the only one, so suppressing it suppresses the streaming path rather than a
+    discarded attempt — and no stream mode retracts a token already emitted. So the record carries
+    the prose instead, and this asserts the equality rather than either half of it.
+    """
+    streamed, recorded, _ran = asyncio.run(
+        _drive(
+            [
+                {"text": "Let me compute that. ", "args": '{"smiles": }'},
+                {"text": "Here it is: pKa 4.2."},
+            ]
+        )
+    )
+    assert streamed == "Let me compute that. Here it is: pKa 4.2."
+    assert recorded == streamed
+
+
+def test_a_reply_needing_no_repair_streams_once_and_is_recorded_once() -> None:
+    """The negative case, and the guard on the fix: no prose is duplicated on an ordinary turn."""
+    streamed, recorded, ran = asyncio.run(_drive([{"text": "The pKa is 4.76."}]))
+    assert streamed == "The pKa is 4.76." and recorded == streamed and ran == []
+
+
+def test_a_truncated_argument_document_repairs_itself_and_never_reaches_this_middleware() -> None:
+    """The reachability claim this module made was wrong, and the correction is measurable.
+
+    The docstring said a truncated argument document — "what a real model emits when a stream is
+    cut" — is what reaches `invalid_tool_calls`. LangChain runs streamed tool-call fragments
+    through `parse_partial_json`, which closes the unterminated string and the open brace, so that
+    case never arrives: it lands on `tool_calls`, parsed, with `invalid_tool_calls` empty. What
+    does arrive is output that partial parsing cannot close.
+    """
+    streamed, _recorded, ran = asyncio.run(
+        _drive([{"text": "computing. ", "args": '{"smiles": "CC'}, {"text": "pKa 4.2."}])
+    )
+    # The call ran, with the document closed for it: no repair, no second attempt's prose.
+    assert [call["args"] for call in ran] == [{"smiles": "CC"}]
+    assert streamed == "computing. pKa 4.2."
+
+
+def test_a_valid_call_discarded_with_a_broken_one_is_named_rather_than_dropped_in_silence(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """`D-2026-08-04-a-failure-that-says-nothing-is-read-as-proceed`, in the module that cites it.
+
+    A reply carrying one unparseable call *and* one valid one is discarded whole — the repair
+    returns the second attempt, so the valid call never reaches `ToolNode`. Measured before the
+    fix: `predict_pka` was dropped with no log, no metric, no audit row and no word to the model,
+    while the correction it was sent said "none of them ran" over a count that named only the
+    unparseable one.
+    """
+    broken = AIMessage(
+        content="",
+        tool_calls=[{"name": "predict_pka", "args": {"smiles": "CC"}, "id": "call-ok"}],
+        invalid_tool_calls=[
+            {
+                "name": "compute_xtb_energy",
+                "args": "{oops",
+                "id": "call-bad",
+                "error": None,
+                "type": "invalid_tool_call",
+            }
+        ],
+    )
+    seen: list[list[Any]] = []
+
+    async def _handler(request: ModelRequest[Any]) -> Any:
+        seen.append(list(request.messages))
+        return ModelResponse(result=[broken if len(seen) == 1 else AIMessage(content="done")])
+
+    with caplog.at_level(logging.WARNING):
+        asyncio.run(
+            RepairInvalidToolCalls().awrap_model_call(_request([HumanMessage("pKa?")]), _handler)
+        )
+
+    correction = seen[1][-1].text
+    assert "predict_pka" in correction, "the discarded valid call is named to the model"
+    assert "did not run either" in correction
+    assert "predict_pka" in caplog.text or "1 valid call(s)" in caplog.text
+
+
+def test_the_correction_carries_the_arguments_because_the_error_does_not() -> None:
+    """On the streaming path `error` is `None`, so a tool name was the whole correction.
+
+    Measured on the aggregated `AIMessageChunk` LangChain produces for a streamed reply:
+    `invalid_tool_calls[0]["error"]` is `None`, so `invalid_tool_calls` fell back to the literal
+    `"arguments did not parse"` and the model — which cannot see its own discarded reply — was told
+    a tool name and nothing else. `args`, the malformed document, was read and thrown away.
+    """
+    broken = AIMessage(
+        content="",
+        invalid_tool_calls=[
+            {
+                "name": "predict_pka",
+                "args": '{"smiles": }',
+                "id": "call-1",
+                "error": None,
+                "type": "invalid_tool_call",
+            }
+        ],
+    )
+    seen: list[list[Any]] = []
+
+    async def _handler(request: ModelRequest[Any]) -> Any:
+        seen.append(list(request.messages))
+        return ModelResponse(result=[broken if len(seen) == 1 else AIMessage(content="ok")])
+
+    asyncio.run(
+        RepairInvalidToolCalls().awrap_model_call(_request([HumanMessage("pKa?")]), _handler)
+    )
+    assert '{"smiles": }' in seen[1][-1].text
+
+
+def test_a_model_invented_tool_name_cannot_mint_a_metric_series() -> None:
+    """The label was the model's own string, on the metric that fires when its output is malformed.
+
+    `agent/audit.py::metric_tool_name` makes this argument for the tool path — a hallucinated name
+    minted a permanent time series, and model output is attacker-influenceable. This metric had the
+    same hole with a docstring claiming it did not: `"It is a bounded literal"` was true only of the
+    `unknown` fallback.
+    """
+    hallucinated = AIMessage(
+        content="",
+        invalid_tool_calls=[
+            {
+                "name": "totally_made_up_" + "x" * 400,
+                "args": "{",
+                "id": "call-1",
+                "error": None,
+                "type": "invalid_tool_call",
+            }
+        ],
+    )
+
+    async def _handler(request: ModelRequest[Any]) -> Any:
+        return ModelResponse(result=[hallucinated])
+
+    asyncio.run(RepairInvalidToolCalls().awrap_model_call(_request([HumanMessage("x")]), _handler))
+    exposition = METRICS.render()
+    assert "totally_made_up_" not in exposition
+    assert 'chemclaw_invalid_tool_calls_total{tool="unknown"}' in exposition
+
+
+def test_a_name_the_request_actually_bound_is_kept_as_the_label() -> None:
+    """The guard on the guard: clamping everything to `unknown` would lose the whole distinction."""
+    broken = AIMessage(
+        content="",
+        invalid_tool_calls=[
+            {
+                "name": "predict_pka",
+                "args": "{",
+                "id": "call-1",
+                "error": None,
+                "type": "invalid_tool_call",
+            }
+        ],
+    )
+
+    async def _handler(request: ModelRequest[Any]) -> Any:
+        return ModelResponse(result=[broken])
+
+    asyncio.run(RepairInvalidToolCalls().awrap_model_call(_request([HumanMessage("x")]), _handler))
+    assert 'chemclaw_invalid_tool_calls_total{tool="predict_pka"}' in METRICS.render()

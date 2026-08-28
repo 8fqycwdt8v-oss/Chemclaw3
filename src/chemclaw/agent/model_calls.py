@@ -39,27 +39,62 @@ call whose arguments do not parse onto `AIMessage.invalid_tool_calls` rather tha
 nothing in `src/` read that field. The agent iterates `tool_calls`, so the call vanished: no
 `tool_failed`, no `tool_result`, no audit row, no span. With no prose beside it the turn ended as
 `empty_answer`; **with prose it proceeded as though no tool had been needed**, which is
-`D-2026-08-04-a-failure-that-says-nothing-is-read-as-proceed` exactly. A truncated argument document
-is what a real model emits when a stream is cut or a token budget runs out, so this is reachable in
-production rather than only under a mock.
+`D-2026-08-04-a-failure-that-says-nothing-is-read-as-proceed` exactly.
+
+**What reaches that field is genuinely malformed JSON, and not — as this said — a truncated
+document.** LangChain runs a streamed tool call's argument fragments through `parse_partial_json`,
+which closes an unterminated string and an unclosed brace, so the cut stream this docstring named
+as the reachable case repairs itself before anything sees it: measured, `'{"smiles": "CC'` arrives
+as a valid entry on `tool_calls` with `invalid_tool_calls` empty. The field is reached by output
+that is not JSON at all, or that is JSON-shaped and broken in a way partial parsing cannot close —
+which a model emits rarely and does emit, and which nothing recovered from.
 
 **It repairs from `wrap_model_call` and never jumps from `after_model`**, which is the constraint
 `D-2026-08-15-an-after-model-counter-is-a-counter-that-can-be-skipped` leaves behind: a middleware
 that jumps from `after_model` short-circuits every middleware that runs later, and the loop cap is
 one of them. A jump back to the model from there would buy a correction by disarming the runaway
-guard. Asking the model again from inside its own call has neither problem — the graph never sees
-the discarded attempt, and the state it does see holds exactly one assistant message.
+guard. Asking the model again from inside its own call has neither problem — the loop cap counts in
+`before_model` and is not skipped, and the state the graph is handed holds exactly one assistant
+message.
+
+**But the graph is not the only reader, and the stream was the one this module got wrong.** The
+docstring here used to say the discarded attempt "never reaches graph state, the transcript or the
+checkpoint", which is true, and rested it on "the graph never sees the discarded attempt", which is
+false for the one reader a chemist actually is. `graph.astream(stream_mode=["messages"])` emits per
+*model call*, not per returned message, so both attempts stream — measured on a compiled
+`create_agent` graph: a first reply of `"Let me compute that. "` beside an unparseable call, a
+second of `"Here it is: pKa 4.2."`, and a client that received
+`"Let me compute that. Here it is: pKa 4.2."`. `api/runner._stream_into` concatenates exactly those
+root `TokenEvent`s into the turn's persisted answer, so the discarded attempt's prose was in the
+answer, in the transcript the front door stores and in what the corpus `score_answer` grades —
+while the *message* the graph recorded held only the second attempt. Two records of one turn,
+disagreeing.
+
+Neither of the two obvious repairs is available, and the reason is worth stating because it is
+what shapes what this does instead. The attempt that gets discarded is the **first** one, which on
+every turn that needs no repair is also the only one — so running it off the run's callbacks, or
+tagging it `langsmith:nostream`, does not suppress a discarded attempt, it suppresses *the*
+streaming path. And a token already emitted cannot be recalled: nothing in either stream mode
+retracts.
+
+So the divergence is closed from the other end. The discarded attempt's **call** is discarded, and
+its **prose is carried into the message the graph records** (`_carrying_prose`), because that prose
+has already reached the chemist and the record's job is to say what happened. What this module
+guarantees is therefore the invariant that was actually broken and is now testable: *the assistant
+message the turn records is exactly the text the turn streamed.*
 """
 
 import logging
 import time
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
+from dataclasses import dataclass
 from functools import partial
-from typing import Any
+from typing import Any, cast
 
 from langchain.agents.middleware import AgentMiddleware, ModelRequest
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 
+from chemclaw.agent.audit import UNKNOWN_TOOL, bounded_repr
 from chemclaw.agent.llm_provider import classify_model_failure
 from chemclaw.core.config import settings
 from chemclaw.core.logging import log_event
@@ -69,15 +104,40 @@ from chemclaw.core.metrics_bridge import record_metric
 logger = logging.getLogger(__name__)
 
 # What the model is told when its own tool call did not parse. Addressed to the model rather than to
-# a log: it names each tool and the parse error verbatim (the error is the SDK's own sentence about
-# the JSON, which is the only thing that identifies *where* the document broke), and it asks for the
-# call again rather than for an apology, because the failure is a truncated argument document and
-# the remedy is to re-emit it.
+# a log, and it asks for the call again rather than for an apology, because the remedy for a
+# malformed argument document is to re-emit it.
+#
+# **It carries the arguments, because on the streaming path the parse error is empty.** This said it
+# "names each tool and the parse error verbatim"; measured on the aggregated `AIMessageChunk`
+# LangChain actually produces for a streamed reply, `error` is `None` and `invalid_tool_calls` falls
+# back to the literal `"arguments did not parse"` — so the model was handed a tool name and nothing
+# else about a reply it cannot see, and asked to fix it. The one field that *is* populated is
+# `args`, the malformed document itself, and it was read and thrown away. It is quoted back
+# (bounded by the same budget that bounds an audit row's arguments) because it is the only thing in
+# either record that says what broke.
 _CORRECTION = (
     "Your previous reply contained {count} tool call(s) whose arguments could not be parsed, so "
-    "none of them ran and no results exist for them: {failures}. Re-issue the call(s) you still "
-    "need with complete, valid JSON arguments. If you cannot, say what you were unable to do and "
-    "continue with what you can — do not answer as though the tool had returned."
+    "no tool call from that reply ran and no results exist for any of them: {failures}."
+    "{discarded} Re-issue the call(s) you still need with complete, valid JSON arguments. If you "
+    "cannot, say what you were unable to do and continue with what you can — do not answer as "
+    "though the tool had returned."
+)
+
+# The other half of "no tool call from that reply ran", and it is a separate sentence because it
+# describes calls the model has no reason to suspect. A reply carrying one unparseable call *and*
+# one valid one is discarded whole — the repair returns the second attempt, so the valid call never
+# reaches `ToolNode` — and the correction used to be formatted with the count of the *failures*
+# alone while asserting "so none of them ran". Measured: a valid `predict_pka` beside one broken
+# call was dropped with no log, no metric, no audit row and no word to the model, which is
+# `D-2026-08-04-a-failure-that-says-nothing-is-read-as-proceed` — the ADR this middleware cites as
+# its reason to exist.
+#
+# Naming them rather than letting them run is the choice with one code path: short-circuiting the
+# repair when `tool_calls` is non-empty would leave the *unparseable* call silently dropped
+# instead, which is the same defect wearing the other face.
+_DISCARDED_VALID = (
+    " The {count} call(s) in that same reply whose arguments were valid were discarded with it and "
+    "did not run either: {names}."
 )
 
 
@@ -178,30 +238,98 @@ class RecordModelCalls(AgentMiddleware[Any, Any, Any]):
         return response
 
 
-def invalid_tool_calls(response: Any) -> list[tuple[str, str]]:
-    """`(tool name, parse error)` per tool call in `response` whose arguments did not parse.
+def _messages_of(response: Any) -> Sequence[BaseMessage]:
+    """The messages in whatever shape a `wrap_model_call` handler answered with.
 
-    Reads the `AIMessage`s out of whichever shape the handler returned — LangChain lets a
-    `wrap_model_call` handler answer with a `ModelResponse`, a bare `AIMessage` or an
-    `ExtendedModelResponse`, and this must see the same thing on all three.
-
-    The name falls back to `"unknown"` because `invalid_tool_calls` is exactly the case where the
-    model's output was malformed: an entry can carry a parse error and no usable name, and a counter
-    that dropped those would under-report the failure it exists to surface. It is a bounded literal,
-    so the metric's label space stays the tool surface plus one.
+    LangChain lets a handler return a `ModelResponse`, a bare `AIMessage` or an
+    `ExtendedModelResponse`, and every reader here — the failures, the discarded valid calls, the
+    prose — must see the same thing on all three. One reading, so the three cannot disagree about
+    what the model said.
     """
-    messages: Sequence[BaseMessage]
     if isinstance(response, AIMessage):
-        messages = [response]
-    else:
-        inner = getattr(response, "model_response", response)
-        messages = getattr(inner, "result", None) or []
+        return [response]
+    inner = getattr(response, "model_response", response)
+    result = getattr(inner, "result", None) or []
+    return cast(Sequence[BaseMessage], result)
+
+
+def _bounded_name(value: object) -> str:
+    """The tool name the model emitted, bounded by the audit budget and deliberately not repr'd.
+
+    Bounded because nothing upstream limits what a model may call a tool and this string reaches a
+    log field and a sentence sent back to the model. **Not** repr'd, unlike the argument document
+    beside it: `_metric_label` compares this against the names the request actually bound, and a
+    quoted name matches none of them — which would clamp every label to `UNKNOWN_TOOL` and lose the
+    distinction the clamp exists to keep.
+    """
+    limit = settings.agent_audit_max_arg_chars
+    text = str(value)
+    return text if len(text) <= limit else text[:limit] + "…"
+
+
+@dataclass(frozen=True, slots=True)
+class BrokenCall:
+    """One tool call the model emitted whose arguments could not be parsed.
+
+    A record rather than a tuple because the third field arrived late and the two-tuple's call
+    sites read `name, error` positionally: what the model *sent* is the field that survives the
+    streaming path, and a reader has to be able to tell it from the parse error, which does not.
+    """
+
+    name: str
+    """The tool the model named, bounded — it is the model's own string and may be anything."""
+
+    error: str
+    """The SDK's sentence about the JSON, or a stand-in: empty on the streamed shape."""
+
+    arguments: str
+    """The malformed argument document, bounded. The one field the streamed shape populates."""
+
+
+def invalid_tool_calls(response: Any) -> list[BrokenCall]:
+    """Every tool call in `response` whose arguments did not parse, as bounded strings.
+
+    The name falls back to `UNKNOWN_TOOL` because `invalid_tool_calls` is exactly the case where
+    the model's output was malformed: an entry can carry a parse error and no usable name, and a
+    counter that dropped those would under-report the failure it exists to surface.
+
+    **Every field here is the model's own output and is bounded on the way out**, by the budget an
+    audit row's arguments are bounded by (`settings.agent_audit_max_arg_chars`). The name is
+    bounded too, not only the arguments: it reaches a log field and a sentence sent back to the
+    model, and nothing upstream limits what a model may call a tool.
+    """
     return [
-        (str(call.get("name") or "unknown"), str(call.get("error") or "arguments did not parse"))
-        for message in messages
+        BrokenCall(
+            name=_bounded_name(call.get("name") or UNKNOWN_TOOL),
+            error=str(call.get("error") or ""),
+            arguments=bounded_repr(call.get("args")),
+        )
+        for message in _messages_of(response)
         if isinstance(message, AIMessage)
         for call in (message.invalid_tool_calls or [])
     ]
+
+
+def valid_tool_calls(response: Any) -> list[str]:
+    """The names of the parseable tool calls in `response` — the ones a repair discards with it.
+
+    Bounded for the reason `invalid_tool_calls` bounds its own: this is model output, it reaches a
+    log field and the correction, and a *parseable* argument document says nothing about whether
+    the name beside it is a reasonable length.
+    """
+    return [
+        _bounded_name(call.get("name") or UNKNOWN_TOOL)
+        for message in _messages_of(response)
+        if isinstance(message, AIMessage)
+        for call in (message.tool_calls or [])
+    ]
+
+
+def _prose_of(response: Any) -> str:
+    """The text the model streamed in `response` — what a chemist has already read."""
+    return "".join(
+        message.text for message in _messages_of(response) if isinstance(message, AIMessage)
+    )
 
 
 class RepairInvalidToolCalls(AgentMiddleware[Any, Any, Any]):
@@ -214,9 +342,15 @@ class RepairInvalidToolCalls(AgentMiddleware[Any, Any, Any]):
     bound it. The second attempt is returned whatever it holds, with an ERROR beside it, because
     returning the *first* attempt instead would be choosing the reply that is known to be broken.
 
-    The corrective instruction is appended to the request only, so the discarded attempt never
-    reaches graph state, the transcript or the checkpoint: what the session records is one assistant
-    message, the one the model meant to send.
+    The corrective instruction is appended to the request only, so the discarded attempt's *tool
+    calls* never reach graph state, the transcript or the checkpoint: what the session records is
+    one assistant message, holding the calls the model meant to make.
+
+    **Its prose does reach them, on purpose, because it has already reached the chemist.** Both
+    attempts stream — `stream_mode="messages"` emits per model call — and a token cannot be
+    recalled, so discarding the first attempt's text from the record while the front door had
+    already concatenated it into the answer left two records of one turn that disagreed. The module
+    docstring has the measurement and why suppressing the first attempt's stream is not available.
     """
 
     def wrap_model_call(
@@ -229,10 +363,11 @@ class RepairInvalidToolCalls(AgentMiddleware[Any, Any, Any]):
         failures = invalid_tool_calls(response)
         if not failures:
             return response
-        _count_invalid(failures, attempt="first")
-        repaired = handler(_retry_request(request, failures))
-        _report_repair(invalid_tool_calls(repaired))
-        return repaired
+        discarded = valid_tool_calls(response)
+        _count_invalid(request, failures, discarded, attempt="first")
+        repaired = handler(_retry_request(request, failures, discarded))
+        _report_repair(request, repaired)
+        return _carrying_prose(response, repaired)
 
     async def awrap_model_call(
         self,
@@ -244,19 +379,91 @@ class RepairInvalidToolCalls(AgentMiddleware[Any, Any, Any]):
         failures = invalid_tool_calls(response)
         if not failures:
             return response
-        _count_invalid(failures, attempt="first")
-        repaired = await handler(_retry_request(request, failures))
-        _report_repair(invalid_tool_calls(repaired))
+        discarded = valid_tool_calls(response)
+        _count_invalid(request, failures, discarded, attempt="first")
+        repaired = await handler(_retry_request(request, failures, discarded))
+        _report_repair(request, repaired)
+        return _carrying_prose(response, repaired)
+
+
+def _carrying_prose(discarded: Any, repaired: Any) -> Any:
+    """`repaired`, with the discarded attempt's prose in front of it — the record the chemist saw.
+
+    The one invariant this middleware owes a reader: **the assistant message the turn records is
+    the text the turn streamed.** Both attempts stream, so the recorded message has to hold both
+    or the persisted answer, the transcript and the graded corpus answer say something the session
+    does not.
+
+    The repaired response is edited in place rather than rebuilt, because its shape is the
+    handler's choice (`_messages_of` names the three) and a rebuild would have to reproduce it —
+    along with the message's id, its tool calls, its usage metadata and its response metadata,
+    every one of which a later reader depends on. The message object is this call's own, freshly
+    returned by the model and not yet in state, so there is nothing else holding a reference to
+    the text being replaced.
+
+    A discarded attempt with no prose — the common shape, a bare tool call — changes nothing, and
+    a repaired response with no `AIMessage` to prepend to leaves the prose out rather than
+    inventing a message that the graph would then have to interpret.
+    """
+    prose = _prose_of(discarded)
+    if not prose:
         return repaired
+    target = next(
+        (message for message in _messages_of(repaired) if isinstance(message, AIMessage)), None
+    )
+    if target is None:
+        return repaired
+    if isinstance(target.content, str):
+        target.content = prose + target.content
+    else:
+        # Content blocks (the shape a provider sends when a reply mixes text with other parts):
+        # a text block in front is the same edit, expressed the way that shape expresses text.
+        target.content = [{"type": "text", "text": prose}, *target.content]
+    return repaired
 
 
 def _retry_request(
-    request: ModelRequest[Any], failures: list[tuple[str, str]]
+    request: ModelRequest[Any], failures: list[BrokenCall], discarded: list[str]
 ) -> ModelRequest[Any]:
     """The same request with the correction appended — `override`, so nothing is mutated."""
-    described = "; ".join(f"{name} ({error})" for name, error in failures)
-    correction = _CORRECTION.format(count=len(failures), failures=described)
+    described = "; ".join(
+        f"{call.name} (the arguments received were {call.arguments}"
+        + (f"; {call.error}" if call.error else "")
+        + ")"
+        for call in failures
+    )
+    also = (
+        _DISCARDED_VALID.format(count=len(discarded), names=", ".join(discarded))
+        if discarded
+        else ""
+    )
+    correction = _CORRECTION.format(count=len(failures), failures=described, discarded=also)
     return request.override(messages=[*request.messages, HumanMessage(content=correction)])
+
+
+def _metric_label(request: ModelRequest[Any], name: str) -> str:
+    """`name` if this request actually bound a tool by that name, else the `UNKNOWN_TOOL` bucket.
+
+    **The label was the model's own string, on the one metric that fires exactly when the model's
+    output is malformed.** The docstring beside it claimed the label space "stays the tool surface
+    plus one" and that was true only of the `unknown` fallback: `call.get("name")` is whatever the
+    model emitted, so a single hallucinated or corrupted name minted a permanent time series, and
+    model output is attacker-influenceable — which is the whole reason this tree carries
+    `frame_untrusted`. `agent/audit.py::metric_tool_name` makes exactly this argument for the tool
+    path and cannot be reused verbatim here: it resolves the *registered tool object* a
+    `wrap_tool_call` request carries, and a `ModelRequest` has no such object — it has the list of
+    tools this call was made with, which is the same registry one step earlier.
+
+    The bucket is `audit.UNKNOWN_TOOL` rather than a local literal, so an unregistered name lands
+    in the one series both paths already agree on instead of a second spelling of it.
+    """
+    for tool in request.tools or ():
+        served = getattr(tool, "name", None)
+        if served is None and isinstance(tool, Mapping):
+            served = tool.get("name")
+        if isinstance(served, str) and served == name:
+            return served
+    return UNKNOWN_TOOL
 
 
 def _bump_invalid(tool: str, metrics: Metrics) -> None:
@@ -269,31 +476,58 @@ def _bump_invalid(tool: str, metrics: Metrics) -> None:
     metrics.increment("chemclaw_invalid_tool_calls_total", labels={"tool": tool})
 
 
-def _count_invalid(failures: list[tuple[str, str]], *, attempt: str) -> None:
-    """Count each unparseable call under its tool, and say so once per model call."""
-    for name, _error in failures:
-        record_metric(partial(_bump_invalid, name))
+def _count_invalid(
+    request: ModelRequest[Any],
+    failures: list[BrokenCall],
+    discarded: list[str],
+    *,
+    attempt: str,
+) -> None:
+    """Count each unparseable call under its tool, and say once what the reply cost.
+
+    The counter takes the *clamped* name (`_metric_label`) and the log line takes the model's own
+    bounded string, which is the split `audit.metric_tool_name` states: what the model asked for is
+    the forensic fact and belongs in the record, and only the unbounded metric *label* is refused.
+
+    `discarded` — the parseable calls thrown away with the reply — is named here as well as in the
+    correction, because a record that shows only the failures reads as though nothing else was
+    lost.
+    """
+    for call in failures:
+        record_metric(partial(_bump_invalid, _metric_label(request, call.name)))
     log_event(
         logger,
         "model.invalid_tool_calls",
-        "the model emitted %d tool call(s) with unparseable arguments (%s attempt): %s",
+        "the model emitted %d tool call(s) with unparseable arguments (%s attempt): %s%s",
         len(failures),
         attempt,
-        ", ".join(f"{name}: {error}" for name, error in failures),
+        ", ".join(f"{call.name}: {call.error or call.arguments}" for call in failures),
+        f"; {len(discarded)} valid call(s) in the same reply were discarded with it"
+        if discarded
+        else "",
         level=logging.WARNING,
         attempt=attempt,
         count=len(failures),
+        discarded_valid=len(discarded),
         # A comma-joined string rather than a list, because a log stack indexes scalars — the same
         # rule `log_event` states for every field it takes.
-        tools=", ".join(sorted({name for name, _ in failures})),
+        tools=", ".join(sorted({call.name for call in failures})),
     )
 
 
-def _report_repair(failures: list[tuple[str, str]]) -> None:
-    """Close the repair out: silence when it worked, an ERROR and a count when it did not."""
+def _report_repair(request: ModelRequest[Any], repaired: Any) -> None:
+    """Close the repair out: silence when it worked, an ERROR and a count when it did not.
+
+    Nothing is reported as *discarded* here, and that is the difference between the two attempts:
+    the second reply is the one the turn continues with, so a parseable call beside a still-broken
+    one runs rather than being thrown away. What is lost at this point is named by the ERROR below
+    — the calls that still cannot run — and saying "discarded" about the ones that do would be the
+    inverse of the silence this middleware exists to end.
+    """
+    failures = invalid_tool_calls(repaired)
     if not failures:
         return
-    _count_invalid(failures, attempt="second")
+    _count_invalid(request, failures, [], attempt="second")
     log_event(
         logger,
         "model.invalid_tool_calls_unrepaired",

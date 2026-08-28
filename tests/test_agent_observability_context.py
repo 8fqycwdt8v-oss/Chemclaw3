@@ -13,6 +13,7 @@ run, in order to save tokens.
 """
 
 import logging
+from collections.abc import Iterator
 from typing import Any
 
 import pytest
@@ -21,11 +22,25 @@ from langchain.agents.middleware.context_editing import ContextEdit
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, ToolMessage
 
 from chemclaw.agent.compaction import (
+    _REPORTED,
     GuardedEdit,
     RecordContextCompaction,
     context_compaction_middleware,
 )
 from chemclaw.core.metrics import METRICS
+
+
+@pytest.fixture(autouse=True)
+def _fresh_degradation_latch() -> Iterator[None]:
+    """Start every case with nothing yet reported loudly.
+
+    The guards below report the *first* failure of each kind in a process at ERROR and the rest at
+    DEBUG — see `compaction._degrade_once` — so without this the level a case observes would depend
+    on which case ran before it, which is a test that passes for a reason unrelated to its subject.
+    """
+    _REPORTED.clear()
+    yield
+    _REPORTED.clear()
 
 
 def _thread(groups: int) -> list[AnyMessage]:
@@ -173,3 +188,79 @@ def test_both_edits_are_guarded_including_the_one_upstream_owns() -> None:
         "ClearToolUsesEdit",
         "KeepLastConversationGroupsEdit",
     ]
+
+
+def test_a_standing_degradation_is_loud_once_and_counted_every_time(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """One ERROR-with-traceback per model call, per turn, per pod is not a report — it is a flood.
+
+    Both guards here are inside `wrap_model_call`, so the realistic failure — an upstream shape
+    change, not a one-off — recurs on every model call the fleet makes until someone ships a fix.
+    A 30-step turn wrote 30 identical tracebacks at ERROR, which is the level an operator pages on.
+    `KeepLastConversationGroupsEdit` demotes its own per-call line to DEBUG on exactly this
+    argument, and `agent/langgraph_agent.py::_log_narrowing` makes it again.
+
+    **The count is deliberately not latched.** `chemclaw_degraded_total` is a rate, and a rate that
+    reported once per process would understate the degradation exactly as the run got worse — the
+    failure `metrics_bridge.degraded` exists to correct. So the assertion is asymmetric: one loud
+    line, two increments.
+    """
+    before = METRICS.value("chemclaw_degraded_total")
+    edit = GuardedEdit(_RaisingEdit())
+
+    with caplog.at_level(logging.DEBUG):
+        for _call in range(2):
+            edit.apply(_thread(3), count_tokens=lambda _messages: 10)
+
+    errors = [record for record in caplog.records if record.levelno == logging.ERROR]
+    debugs = [
+        record
+        for record in caplog.records
+        if record.levelno == logging.DEBUG and "_RaisingEdit" in record.getMessage()
+    ]
+    assert len(errors) == 1, "the same standing failure was reported at ERROR more than once"
+    assert errors[0].exc_info is not None, "the one loud line is the one that carries the traceback"
+    assert len(debugs) == 1 and not debugs[0].exc_info, (
+        "the quiet line must not carry a traceback either — the traceback is the expensive half"
+    )
+    assert METRICS.value("chemclaw_degraded_total") == before + 2, "the counter must not latch"
+
+
+def test_the_observer_latches_separately_from_the_edits() -> None:
+    """A failing observer must not silence a failing edit, or the pod reports whichever came first.
+
+    They are different faults with different remedies — one loses the reduction, the other loses
+    only the measurement — so the latch is keyed per kind rather than per module.
+    """
+
+    def _handler(_request: ModelRequest[Any]) -> str:
+        return "answered"
+
+    broken = _request(_thread(2), _thread(2))
+    object.__setattr__(broken, "state", "not a mapping")
+    RecordContextCompaction().wrap_model_call(broken, _handler)
+    GuardedEdit(_RaisingEdit()).apply(_thread(2), count_tokens=lambda _messages: 10)
+
+    assert _REPORTED == {"reduction", "_RaisingEdit"}
+
+
+def test_the_module_does_not_claim_a_guard_over_upstreams_own_copy_and_count() -> None:
+    """`ContextEditingMiddleware.wrap_model_call` deep-copies and counts *outside* any `apply`.
+
+    "Nothing here may end a turn" was the claim; `GuardedEdit` wraps `ContextEdit.apply` only, and
+    upstream's own `deepcopy(list(request.messages))` and `count_tokens` closure run before the
+    first `apply` is reached. Asserted against the installed source rather than restated in prose,
+    because the whole defect was a docstring that outlived what it described.
+    """
+    import inspect
+
+    from langchain.agents.middleware.context_editing import ContextEditingMiddleware
+
+    source = inspect.getsource(ContextEditingMiddleware.awrap_model_call)
+    copied = source.index("deepcopy(list(request.messages))")
+    applied = source.index("edit.apply(")
+    assert copied < applied, (
+        "upstream now copies inside the loop; the narrowing in this module's docstring should be "
+        "re-derived against the new shape"
+    )
