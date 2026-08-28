@@ -121,6 +121,49 @@ class AgentSettings(BaseSettings):
     # validator in `Settings` refuses that rather than letting a deployment set a number that
     # silently means "unchanged".
     agent_tool_result_clear_trigger: int = Field(default=30_000, ge=1)
+    # **What the two numbers above are denominated in, which used to be left unsaid and was wrong.**
+    # Both are counted with `count_tokens_approximately` — chars/4 — and that estimator is content
+    # dependent in one direction. Measured against a real BPE tokenizer on this repository's own
+    # payloads: the static prefix is 1.04x, tool schemas 1.00x, a markdown note 1.01x — and a
+    # connector JSON result is **0.45x**, an xyz geometry 0.47x. So the estimate is good for prose
+    # and schemas and roughly half of the truth for exactly the payload class these two triggers
+    # exist to reclaim, which put a thread the policy believed was at 100,000 tokens at ~224,000
+    # billed ones.
+    #
+    # No constant corrects that, because the error is a property of the *content* and runs in both
+    # directions. What does correct it is the number the provider returns: `input_tokens` on every
+    # response is the billed size of the request this system just estimated, so the ratio between
+    # them is measurable at the one place that holds both (`agent/context_budget.py`). The budget is
+    # therefore read as a **billed**-token budget and converted into the estimator's unit by that
+    # measured ratio — which is 1.0, and so changes nothing, until enough calls have been observed.
+    #
+    # `min_calls` is the sample floor before the ratio is believed: one unusual first turn must not
+    # move a budget. The factor only ever *tightens* the trigger (it is clamped at 1.0 below), so
+    # the worst a mismeasurement can do is compact earlier than needed — never send a request the
+    # policy thinks is smaller than it is, which is the failure being closed.
+    agent_context_calibration_enabled: bool = True
+    agent_context_calibration_min_calls: int = Field(default=20, ge=1)
+    # Ceiling on the factor, so a pathological sample cannot collapse the budget. 4.0 is well above
+    # the 2.2x the worst measured payload class produces and still bounds the arithmetic.
+    agent_context_calibration_max_factor: float = Field(default=4.0, ge=1.0)
+    # **Ceiling on what one tool result may put in front of the model**, and the one bound that was
+    # missing entirely. `connector_max_request_bytes` caps what this system *sends* a server;
+    # nothing capped what a server — or an in-process tool — sends back. Both context edits have a
+    # carve-out for the newest results (`agent_keep_last_tool_groups`) and for the newest
+    # conversation group, so a single large result is by construction the thing neither can touch:
+    # two results at 200,000 characters each measured 100,077 estimated tokens (one over the
+    # budget), ~224,000 billed, with both edits running and reclaiming nothing.
+    #
+    # 60,000 rather than a new opinion: it is the number this repository already chose for
+    # `gather_evidence_max_chars`, its largest deliberate evidence payload. A result over it is cut
+    # head-and-tail with a notice naming the tool and the characters removed — never silently, and
+    # never in the middle of a sentence a chemist might quote. 0 disables the cap, which restores
+    # the unbounded behaviour and is a decision a deployment has to make on purpose.
+    #
+    # It does not replace a per-tool ceiling (`document_read_max_chars`,
+    # `calc_find_max_result_chars` and the rest); it is the floor under all of them, applied at the
+    # one place every tool result passes.
+    agent_max_tool_result_chars: int = Field(default=60_000, ge=0)
     # Durable working memory for the agent's scratchpad (`agent/scratchpad.py`). Off by default,
     # and the default is about *data* rather than about the code being unproven: enabling it
     # creates the `store`/`store_vectors` tables and starts writing files a turn authored to a

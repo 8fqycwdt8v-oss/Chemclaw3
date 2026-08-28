@@ -212,7 +212,7 @@ a live target, which is the row above both of them.
 
 ## Migration and rollback
 
-`069_corpus_reactions.sql` and `070_corpus_cursors.sql` are `CREATE TABLE IF NOT EXISTS` and add no
+`071_corpus_reactions.sql` and `072_corpus_cursors.sql` are `CREATE TABLE IF NOT EXISTS` and add no
 column to an existing table, so the previous image runs unchanged against the migrated database —
 `tests/test_migrations_are_additive.py` covers the shape. Rolling back leaves two unused tables and a
 `corpus_reactions` index nothing writes; nothing reads them either, so there is no half-state.

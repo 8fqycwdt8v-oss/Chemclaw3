@@ -88,6 +88,22 @@ class LlmSettings(BaseSettings):
     # `build_langgraph_agent`, which omits the key entirely when this is None (F0.3).
     llm_temperature: float | None = Field(default=None, ge=0)
     llm_max_tokens: int = Field(default=4096, gt=0)
+    # **The model's context window, and until this existed no number anywhere in this tree was
+    # one.** `agent_context_token_budget` is 100,000 by fiat, the ~28,000-token static prefix sits
+    # *outside* it, and neither was ever compared to what the endpoint will actually accept: the
+    # whole handling of the ceiling was retrospective, in `classify_model_failure`, after the
+    # request had been assembled, sent and rejected.
+    #
+    # 0 means undeclared, which is the honest default for an endpoint whose window this repository
+    # cannot know — and it keeps today's behaviour exactly. Set it, and the conversation window's
+    # budget becomes `window - (this request's own measured prefix) - llm_max_tokens`, floored at
+    # the configured budget rather than replacing it: the smaller of what the deployment asked for
+    # and what the model can hold (`agent/context_budget.py::effective_trigger`).
+    #
+    # Per deployment rather than per `model_routes` entry, because the routes name *tasks* and the
+    # window is a property of the endpoint every task shares. A deployment that routes tasks across
+    # models with different windows should declare the smallest.
+    llm_context_window_tokens: int = Field(default=0, ge=0)
     # Anthropic prompt caching: mark the static prefix — the tool schemas and the system prompt —
     # so a repeat call reads it at roughly a tenth of the input price instead of re-sending it at
     # full price. Read only by `agent/llm_provider.prompt_caching_middleware`, which is also the

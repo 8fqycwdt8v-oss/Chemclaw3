@@ -104,7 +104,14 @@ from langchain.agents.middleware.context_editing import ContextEdit, TokenCounte
 from langchain_core.messages import AnyMessage, HumanMessage, ToolMessage
 from langchain_core.messages.utils import count_tokens_approximately, trim_messages
 
-from chemclaw.agent.repeat_guard import current_watch, forget_calls
+from chemclaw.agent.context_budget import (
+    MeasureRequestPrefix,
+    current_context,
+    effective_trigger,
+    note_model_call,
+    prefix_tokens,
+)
+from chemclaw.agent.repeat_guard import forget_calls
 from chemclaw.core.config import settings
 from chemclaw.core.logging import log_event
 from chemclaw.core.metrics_bridge import degraded, record_metric
@@ -129,6 +136,91 @@ logger = logging.getLogger(__name__)
 TOOL_RESULT_PLACEHOLDER = (
     "[Earlier tool result dropped to stay inside this session's context budget.]"
 )
+
+
+@dataclass(slots=True)
+class ClearOlderToolResultsEdit(ContextEdit):
+    """Upstream's tool-result clearing, with the two bounds it does not have.
+
+    `ClearToolUsesEdit` is the right strategy and is reused unchanged; what is wrong is what it is
+    handed. Two defects, both measured, and both fixed by computing the arguments per apply instead
+    of once at construction.
+
+    **It cleared results the model had never seen.** Upstream's `keep` counts the newest tool
+    *results*, not the newest tool-call *step* — a distinction this repository had written down and
+    not acted on. The edit runs in `wrap_model_call`, so the list it reduces already holds the
+    results that came back in the step immediately before; with `agent_keep_last_tool_groups` at 2
+    and `agent_max_parallel_tool_calls` at **8**, a fan-out wider than two lost its own newest
+    results to a placeholder before the model's first look at them. Measured over the shipped
+    settings on a five-way fan-out past the trigger: three of the five replaced, each with a
+    placeholder beginning "Earlier tool result" about a result that was not earlier. What reaches
+    the chemist is not a slow turn — it is an answer that quietly rests on two of five values.
+
+    The two settings are a hundred lines apart in `core/config/agent.py` and contradicted each
+    other. `keep` is now the larger of the configured floor and the number of results belonging to
+    the newest batch, so the batch survives **structurally** rather than because a number happened
+    to be big enough.
+
+    **And it cleared everything when it needed to clear something.** `clear_at_least` defaults to
+    0, which never breaks upstream's loop, so crossing the trigger by one token wiped every result
+    but the newest `keep`: measured, 18 of 20 results on a thread that needed roughly half of that,
+    an 88% cut. Every one of those is re-fetchable, which is what makes the edit lossless — and
+    also what makes over-clearing expensive, because a re-fetch costs a model call, the tool again,
+    and (`repeat_guard.forget_calls`) a forgiveness that lets the same call be cleared again.
+    Passing the overshoot as `clear_at_least` stops the loop at the trigger.
+
+    A wrapper rather than a subclass: upstream's `apply` is the whole strategy and none of it is
+    being changed, only its arguments. `tests/test_upstream_surface.py` holds the constructor
+    keywords this depends on.
+    """
+
+    trigger: int
+    """Billed tokens above which older tool results are cleared (`effective_trigger` converts)."""
+
+    keep: int
+    """Floor on the newest results kept verbatim. The newest batch raises it when it is wider."""
+
+    placeholder: str
+    """What a cleared result leaves behind."""
+
+    def apply(self, messages: list[AnyMessage], *, count_tokens: TokenCounter) -> None:
+        """Clear older tool results, never this step's own, and stop at the trigger."""
+        budget = effective_trigger(self.trigger)
+        tokens = count_tokens(messages)
+        if tokens <= budget:
+            return
+        ClearToolUsesEdit(
+            trigger=budget,
+            keep=max(self.keep, newest_batch_size(messages)),
+            # The overshoot, so upstream stops as soon as the thread is back under the trigger
+            # rather than continuing to the end of its candidate list.
+            clear_at_least=tokens - budget,
+            placeholder=self.placeholder,
+        ).apply(messages, count_tokens=count_tokens)
+
+
+def newest_batch_size(messages: Sequence[AnyMessage]) -> int:
+    """How many results in `messages` answer the newest assistant message that called tools.
+
+    The number `keep` has to cover for a fan-out to survive its own model call. It is a count
+    rather than a set of ids because that is what upstream's `keep` takes: it preserves the last N
+    `ToolMessage`s in list order, and a batch's results are exactly the trailing ones — `ToolNode`
+    appends every result of a step after the `AIMessage` that requested it.
+
+    0 when no assistant message in the list called a tool at all — a prose conversation, where
+    there is no batch to protect and the configured floor stands unchanged.
+    """
+    for message in reversed(messages):
+        calls = getattr(message, "tool_calls", None)
+        if not calls:
+            continue
+        wanted = {str(call.get("id")) for call in calls if call.get("id")}
+        return sum(
+            1
+            for candidate in messages
+            if isinstance(candidate, ToolMessage) and str(candidate.tool_call_id) in wanted
+        )
+    return 0
 
 
 @dataclass(slots=True)
@@ -183,20 +275,31 @@ class KeepLastConversationGroupsEdit(ContextEdit):
     """
 
     trigger: int = 100_000
-    """Estimated tokens above which the window is applied — and the budget it cuts back to."""
+    """Billed tokens above which the window is applied — and the budget it cuts back to.
+
+    Converted to the estimator's unit by `effective_trigger`, and clamped there by a declared
+    context window; it is not compared to `count_tokens` directly.
+    """
 
     keep: int = 12
     """Floor on the cut: groups older than the newest `keep` always go, whatever the budget says."""
 
     def apply(self, messages: list[AnyMessage], *, count_tokens: TokenCounter) -> None:
-        """Cut `messages` in place back to `trigger` tokens, when over `trigger`.
+        """Cut `messages` in place back to the effective budget, when over it.
 
         In place because that is the `ContextEdit` protocol: `ContextEditingMiddleware` deep-copies
         the request's list once and hands the same list to each edit in turn, so returning a new one
         would silently discard this edit's work. Hence an index is computed and `del` applied,
         rather than the list `trim_messages` returns being handed back.
+
+        **`self.trigger` is a budget in billed tokens and `count_tokens` counts estimated ones**, so
+        the two are reconciled by `effective_trigger` rather than compared directly — which is what
+        they used to be. That function also subtracts this request's own prefix from a declared
+        context window, so the number below is what the *model* has room for rather than what the
+        configuration hoped it had (`agent/context_budget.py`).
         """
-        if count_tokens(messages) <= self.trigger:
+        budget = effective_trigger(self.trigger)
+        if count_tokens(messages) <= budget:
             return
         starts = [
             index for index, message in enumerate(messages) if isinstance(message, HumanMessage)
@@ -206,7 +309,7 @@ class KeepLastConversationGroupsEdit(ContextEdit):
             return
         kept = trim_messages(
             messages,
-            max_tokens=self.trigger,
+            max_tokens=budget,
             token_counter=count_tokens,
             strategy="last",
             start_on="human",
@@ -236,7 +339,7 @@ class KeepLastConversationGroupsEdit(ContextEdit):
             "%d of %d conversation groups survive",
             cut,
             len(messages),
-            self.trigger,
+            budget,
             sum(1 for start in starts if start >= cut),
             len(starts),
         )
@@ -343,6 +446,8 @@ def context_compaction_middleware() -> list[Any]:
     middleware groups `build_langgraph_agent` already splices.
     """
     return [
+        # Outermost, because everything below budgets against a prefix only a middleware can see.
+        MeasureRequestPrefix(),
         ContextEditingMiddleware(
             edits=[
                 # Both wrapped, so a raising edit costs the reduction rather than the turn — see
@@ -351,9 +456,11 @@ def context_compaction_middleware() -> list[Any]:
                 # Upstream counts the newest *tool results*, where D-025's setting counts tool-call
                 # *groups*. The difference is real and the setting's name is the half that is wrong;
                 # renaming an ENV-visible knob to fix a name would cost every deployment that sets
-                # it, so the name stays and `core/config/agent.py` says what it now means.
+                # it, so the name stays and `core/config/agent.py` says what it now means — and
+                # `ClearOlderToolResultsEdit` is what stops the difference costing a chemist an
+                # answer, by raising `keep` to cover the newest batch.
                 GuardedEdit(
-                    ClearToolUsesEdit(
+                    ClearOlderToolResultsEdit(
                         # Its own trigger, well below the budget the window uses. The two edits
                         # are different instruments: this one is lossless — the `tool_use` record
                         # survives and the model can re-fetch — so it is cheap enough to run
@@ -420,7 +527,9 @@ def _publish_reduction(request: ModelRequest[Any]) -> None:
     thread = request.state.get("messages") or []
     if not thread:
         return
-    reclaimed = count_tokens_approximately(thread) - count_tokens_approximately(request.messages)
+    sent = count_tokens_approximately(request.messages)
+    _record_overrun(request, sent)
+    reclaimed = count_tokens_approximately(thread) - sent
     if reclaimed <= 0:
         return
     # The one place the reduction is *known*, so the one place that can tell the repeat guard its
@@ -439,21 +548,97 @@ def _publish_reduction(request: ModelRequest[Any]) -> None:
     # 30-step turn with one standing reduction is one compaction, not thirty, and a reclaimed
     # token is reclaimed once. Off the request path there is no watch and each call reports
     # itself, which is what a single-shot `graph.invoke` in a test observes.
-    watch = current_watch()
-    if watch is None:
+    turn = current_context()
+    if turn is None:
         record_metric(lambda m: m.increment("chemclaw_context_compactions_total"))
         record_metric(
             lambda m: m.increment("chemclaw_context_reclaimed_tokens_total", float(reclaimed))
         )
         _announce(request, reclaimed, cleared)
         return
-    if watch.peak_reclaimed == 0:
+    if turn.peak_reclaimed == 0:
         record_metric(lambda m: m.increment("chemclaw_context_compactions_total"))
         _announce(request, reclaimed, cleared)
-    delta = float(reclaimed) - watch.peak_reclaimed
+    turn.compacted = True
+    delta = float(reclaimed) - turn.peak_reclaimed
     if delta > 0:
         record_metric(lambda m: m.increment("chemclaw_context_reclaimed_tokens_total", delta))
-        watch.peak_reclaimed = float(reclaimed)
+        turn.peak_reclaimed = float(reclaimed)
+
+
+def _record_overrun(request: ModelRequest[Any], sent: int) -> None:
+    """Say, once per turn, that a request is going out over the budget anyway.
+
+    **This is the reading the two compaction counters could not express**, and the claim beside
+    them in `core/metrics.py` was wrong because of it: a flat zero was documented as "never over
+    budget" and in fact meant "never *reduced*". Measured through a compiled graph — one human
+    message and two 200,000-character tool results — the thread was 100,081 estimated tokens
+    (~224,000 billed), both edits ran, and both counters moved by zero. `ClearToolUsesEdit` had
+    exactly `keep` candidates so it cleared nothing; the window edit cannot cut past the newest
+    group so it dropped nothing. The single turn about to fail at the provider's context limit was
+    indistinguishable from a quiet one.
+
+    The comparison is the window edit's own: the thread being sent, against the budget that edit
+    was given. So this fires when the policy has finished and the request is still over — whether
+    it reclaimed nothing at all or reclaimed plenty and could not reach the line. Both are the same
+    fact for an operator, and it is the only leading indicator this system has for a context-length
+    failure.
+
+    Once per turn, for the same reason every other number here is high-water marked: the edits are
+    non-destructive, so a standing overrun is re-derived on every model call of the turn.
+
+    Args:
+        request: The model request as it stands after the edits above.
+        sent: Estimated tokens of the message list actually being sent.
+    """
+    budget = effective_trigger(settings.agent_context_token_budget)
+    if sent <= budget:
+        return
+    turn = current_context()
+    if turn is not None and turn.unreducible:
+        return
+    if turn is not None:
+        turn.unreducible = True
+    record_metric(lambda m: m.increment("chemclaw_context_unreducible_total"))
+    log_event(
+        logger,
+        "context.unreducible",
+        "sending ~%d estimated tokens against a budget of %d: the context policy could not "
+        "reduce this request further",
+        sent,
+        budget,
+        estimated_tokens=sent,
+        budget_tokens=budget,
+        prefix_tokens=prefix_tokens(),
+    )
+
+
+def _note_billing(request: ModelRequest[Any], response: Any) -> None:
+    """Compare what this call was estimated at with what the provider billed for it.
+
+    **The one place both numbers exist.** The estimate is computed here to decide whether a
+    reduction happened; the bill arrives on the response of the very call this middleware wraps.
+    Nothing compared them, so the budget stayed denominated in a unit measured to be 2.2x off on
+    the payload class it governs (`agent/context_budget.py` carries the measurement).
+
+    The estimate is the *whole* request — the ambient prefix plus the messages actually sent —
+    because `input_tokens` counts the whole request and half a comparison is not one.
+
+    Guarded end to end: this is an observation, and an observation that ended a turn would be the
+    worst trade in this module. A response shape that carries no usage simply teaches nothing.
+    """
+    try:
+        message = response.result[0] if getattr(response, "result", None) else response
+        usage = getattr(message, "usage_metadata", None) or {}
+        billed = int(usage.get("input_tokens") or 0)
+        estimated = prefix_tokens() + int(count_tokens_approximately(request.messages))
+        note_model_call(estimated, billed)
+    except Exception:
+        degraded(
+            logger,
+            "compaction",
+            "could not compare this model call's estimate with its billed size",
+        )
 
 
 def _announce(
@@ -579,15 +764,19 @@ class RecordContextCompaction(AgentMiddleware[Any, Any, Any]):
         request: ModelRequest[Any],
         handler: Callable[[ModelRequest[Any]], Any],
     ) -> Any:
-        """Record the reduction, then run the call (sync path)."""
+        """Record the reduction, run the call, then learn what it was billed (sync path)."""
         _record_reduction(request)
-        return handler(request)
+        response = handler(request)
+        _note_billing(request, response)
+        return response
 
     async def awrap_model_call(
         self,
         request: ModelRequest[Any],
         handler: Callable[[ModelRequest[Any]], Awaitable[Any]],
     ) -> Any:
-        """Record the reduction, then run the call — the path a turn actually takes."""
+        """Record, run, and learn what it cost — the path a turn actually takes."""
         _record_reduction(request)
-        return await handler(request)
+        response = await handler(request)
+        _note_billing(request, response)
+        return response

@@ -34,6 +34,11 @@ from langchain_core.messages import AIMessage, HumanMessage
 from chemclaw.agent.audit import default_audit_sink
 from chemclaw.agent.checkpointer import checkpointer
 from chemclaw.agent.chemclaw_agent import connector_specs
+from chemclaw.agent.context_budget import (
+    begin_context_watch,
+    current_context,
+    end_context_watch,
+)
 from chemclaw.agent.framing import frame_untrusted
 from chemclaw.agent.job_results import await_job_results
 from chemclaw.agent.langgraph_agent import build_langgraph_agent
@@ -604,6 +609,11 @@ def _turn_ambient(
     identity_token = set_current_identity(actor, roles) if actor is not None else None
     correlation_token = set_current_correlation_id(correlation_id)
     calls_token = begin_call_watch()
+    # The turn's context record, started beside the tool-call counter because it is the same kind
+    # of thing: per-turn state the middleware writes and the teardown reads. Without it compaction
+    # reports every model call's standing reduction as a fresh one, and `turn_costs` cannot say
+    # whether the policy touched the turn at all (`agent/context_budget.py`).
+    context_token = begin_context_watch()
     loop_token = begin_loop_watch()
     usage_token = set_turn_usage(usage)
     dry_run_token = set_dry_run(dry_run)
@@ -611,6 +621,7 @@ def _turn_ambient(
         yield
     finally:
         _unstamp(session_id, end_call_watch, calls_token)
+        _unstamp(session_id, end_context_watch, context_token)
         _unstamp(session_id, end_loop_watch, loop_token)
         _unstamp(session_id, reset_turn_usage, usage_token)
         _unstamp(session_id, reset_dry_run, dry_run_token)
@@ -1130,6 +1141,7 @@ def _book_turn_spend(
     elapsed = time.perf_counter() - ledger.started
     outcome = _settle_outcome(ledger)
     model = _resolved_model()
+    context = current_context()
     if budget is not None:
         budget.record(session.session_id, actor, ledger.usage.total)
     METRICS.observe("chemclaw_turn_duration_seconds", elapsed)
@@ -1158,6 +1170,12 @@ def _book_turn_spend(
             tool_refusals=ledger.tool_refusals,
             jobs_started=ledger.jobs_started,
             ttft_seconds=ledger.ttft_seconds,
+            # Read off the turn's context record rather than the ledger, because the producer is a
+            # middleware three layers down and the ledger is this module's. Still live here: this
+            # runs inside `_turn_ambient`'s `with`, which is what makes the read the turn's own
+            # rather than the next turn's or nobody's.
+            compacted=context.compacted if context is not None else False,
+            context_unreducible=context.unreducible if context is not None else False,
         )
     )
     # **The same record as a log line, because a deployment may have no ledger to read.** The cost

@@ -109,6 +109,25 @@ closing the two regressions the framework removal left — with content suppress
 Apache-2.0 and speaks plain OTLP, so **Arize Phoenix is a deployment choice rather than a
 dependency**; what stays open is AG-13's eval surface, which wants that backend actually run.
 
+**That compaction policy was sound and its arithmetic was not**
+(`D-2026-08-28-a-budget-in-the-wrong-unit-is-not-a-budget`, eight measured defects). The estimator
+is chars/4, which measures **1.04x** on the static prefix and **0.45x** on a connector JSON result
+— so a thread believed to be at its 100,000 budget billed 223,750. Upstream's `keep` counts tool
+*results* rather than steps, so with 8 parallel calls allowed and 2 results kept, a five-way fan-out
+past the trigger lost **three of its five** to a placeholder reading "Earlier tool result" before
+the model had read them. Nothing capped a single result, so two calls inside their own ceilings
+made a ~245,000-token request with both edits reclaiming nothing — and that turn moved **neither**
+compaction counter, while `core/metrics.py` documented a flat zero as "never over budget". Now: the
+configured budgets are **billed**-token budgets, converted by a ratio `agent/context_budget.py`
+measures from the provider's own `input_tokens` and clamps so it can only tighten; the newest
+tool-call batch is never cleared and clearing stops at the trigger; `agent/tool_result_size.py`
+bounds one result head-and-tail with a notice that names itself as system text;
+`chemclaw_context_unreducible_total` is the leading indicator of a context-length failure;
+`llm_context_window_tokens` bounds the budget against this request's *measured* prefix; `turn_costs`
+records whether the policy acted; and `chemclaw_connector_tool_schema_tokens` measures the half of
+the prefix `tests/test_context_floor.py` cannot ratchet, because an endpoint tool's schema comes
+from a server this repository does not build.
+
 M13 removed the dependency itself: `agent-framework-*` is out of `pyproject.toml` and the suite is
 green with it uninstalled, which is how that was verified. Taking it out is also what exposed
 readers that only knew the *old* stored message shape — `chemclaw.cli.explain` was rendering every

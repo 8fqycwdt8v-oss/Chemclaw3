@@ -185,8 +185,8 @@ run's `unfingerprintable` count before suspecting the query.
 
 ## 4 — Work items for this pass
 
-- [x] `infra/sql/069_corpus_reactions.sql` — the table + its HNSW index.
-- [x] `infra/sql/070_corpus_cursors.sql` — the persisted keyset watermark.
+- [x] `infra/sql/071_corpus_reactions.sql` — the table + its HNSW index.
+- [x] `infra/sql/072_corpus_cursors.sql` — the persisted keyset watermark.
 - [x] `src/chemclaw/science/labels/reactions.py` — `corpus_reactions()`, the id, and the
       transformation form. No class: unlike `CorpusMolecules` there is no extra column and no
       second search shape, so a constant and three functions is the whole module.
@@ -253,7 +253,10 @@ key. Three consequences, all taken rather than merged around:
    `corpus_reactions` is `(source, id)`-keyed like its sibling, `Facet.reaction_keys` is a set of
    pairs matched through `unnest(sources, ids)`, and the source rides on the record via
    `model_copy` — the idiom `ingest_reaction` sets, with the reason it states.
-3. **The migrations renumbered** 062/063 → 069/070, because `main` took 062–068.
+3. **The migrations renumbered** 062/063 → 071/072, because `main` took 062–068 and then
+   069 in a second merge. `test_no_two_migrations_claim_one_number` is what caught the second
+   collision — it grandfathers the four already merged and exists for exactly this case, "caught
+   at review, when a rename is still free".
 
 One thing found while resolving and deliberately *not* fixed here, because it is `main`'s code and
 outside this change: `PostgresFingerprintStore.add`'s docstring says "a sourced write also removes

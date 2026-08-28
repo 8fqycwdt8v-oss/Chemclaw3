@@ -57,23 +57,18 @@ class TurnCallWatch:
     counters being wiped as fast as they accumulated. A call id names one *invocation*, so each
     cleared result forgives exactly one repeat, once.
 
-    `peak_reclaimed` is the same per-model-call re-derivation problem on the metrics side: one
-    reduction re-reported on every subsequent call inflated `chemclaw_context_compactions_total`
-    by the turn's model-call count and multiple-counted every reclaimed token. The high-water mark
-    is what lets `agent/compaction.py` report each token once and each turn's compaction once.
+    **What is deliberately no longer here is `peak_reclaimed`.** Compaction's high-water mark sat
+    on this object because compaction had nowhere else to put a per-turn fact, and it made the
+    repeat guard's state carry a subject it has nothing to do with. It lives on
+    `agent/context_budget.TurnContext` now, beside the two flags `turn_costs` records — one ambient
+    per subject, both started by the same two callers that bracket a turn.
     """
 
     counts: Counter[tuple[str, str]] = field(default_factory=Counter)
     forgiven: set[str] = field(default_factory=set)
-    peak_reclaimed: float = 0.0
 
 
 _calls: ContextVar[TurnCallWatch | None] = ContextVar("chemclaw_repeated_calls", default=None)
-
-
-def current_watch() -> TurnCallWatch | None:
-    """This turn's watch, or `None` off the request path — the seam `agent/compaction.py` reads."""
-    return _calls.get()
 
 
 class RepeatedCallRefusal(ChemclawError):

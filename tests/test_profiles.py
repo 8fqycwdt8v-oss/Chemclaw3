@@ -99,6 +99,9 @@ def test_profile_attenuates_but_audit_and_authz_always_attach() -> None:
         # (`D-2026-08-27-a-tool-result-crosses-a-boundary-and-must-say-so`): every out-of-process
         # result is framed as data, and a refusal this system composed is not.
         "frame_connector_results",
+        # Inside the framing so the envelope wraps a bounded payload, and outside the trail so the
+        # audit row still records what the tool returned (`agent/tool_result_size.py`).
+        "bound_tool_results",
         "announce_tool_failures",
         "object",  # the audit middleware, a stand-in here
         "refuse_undeclared_writes",
