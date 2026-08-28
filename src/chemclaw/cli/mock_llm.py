@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import inspect
 import json
 import logging
 import time
@@ -136,6 +137,33 @@ def already_has_tool_results(payload: dict[str, Any]) -> bool:
     )
 
 
+def _generated_params_model(tool: str) -> Any:
+    """The params model of a connector job or a template runner, if this repo generates one.
+
+    **These are not "the schema lives in the bundle" tools, and treating them as such is what left
+    the catalogue's largest arguments unchecked.** Of the ninety-nine tools the agent advertises,
+    forty-six are MCP endpoint tools whose schema genuinely only exists on a server this process
+    cannot reach — but fourteen are durable-job launchers and nine are template runners, and both
+    kinds are *generated here* from a manifest in this repository: `build_job_tool` and
+    `build_template_tool` each build a pydantic model and hang it on the launcher's `params`
+    annotation. Their payloads are the deepest nested arguments in the storm's catalogue (a
+    reaction equation, a symmetry map, a BO problem) and nothing checked a single field of one.
+
+    Returns `None` for everything else, which is the honest answer for an endpoint tool.
+    """
+    from chemclaw.connectors.jobs import build_job_tool
+    from chemclaw.connectors.registry import find_job, job_names
+    from chemclaw.templates.registry import build_template_tool, enabled, tool_name
+
+    if tool in set(job_names()):
+        connector, job = find_job(tool)
+        return build_job_tool(connector, job).__annotations__["params"]
+    for template in enabled():
+        if tool_name(template) == tool:
+            return build_template_tool(template).__annotations__["params"]
+    return None
+
+
 def _validate(behaviour: Behaviour) -> None:
     """Refuse a behaviour whose tool or arguments the real system would reject (the LOAD-1 guard).
 
@@ -143,6 +171,16 @@ def _validate(behaviour: Behaviour) -> None:
     agent actually advertises, and `tool_signatures` holds the callable whose signature the schema
     is derived from. A behaviour that passes here cannot fail for the reason every measurement in
     the previous load test failed.
+
+    Three things are checked, and the second and third were added after an audit asked what the
+    first actually covered:
+
+    * the tool is one the agent advertises;
+    * no argument name is one the tool does not take, **and no argument the tool requires is
+      absent** — LOAD-1 was a misspelled name, and an omitted required name dies in the identical
+      branch, so a guard that caught only the first was catching half of its own subject;
+    * a generated `params` payload validates against the model the launcher was built with. See
+      `_generated_params_model` for why that is a schema this process can see.
 
     **The argument half used to cover a third of the surface and read as if it covered all of it.**
     It resolved a name against `registered_tools()` and `continue`d on a miss, commented "an MCP
@@ -158,10 +196,9 @@ def _validate(behaviour: Behaviour) -> None:
 
     What stays unresolvable is stated rather than implied, because a silent skip is how the first
     gap survived: a bundle served from `Chemclaw3-mcp` (`chem`, `safety`) ships no server module
-    here, a generated launcher takes one `params` object whose fields
-    `tests/test_storm_behaviour_coverage.py` checks against the model `build_job_tool` annotates,
-    and the skills, harness and subagent tools are upstream's. None of those is a name this tree
-    can answer for, and inventing an answer would be worse than not having one.
+    here, and the skills, harness and subagent tools are upstream's. None of those is a name this
+    tree can answer for, and inventing an answer would be worse than not having one — a generated
+    launcher is the one case that *is* answerable, and `_validate_generated_params` answers it.
     """
     from chemclaw.agent.chemclaw_agent import available_tool_names, tool_signatures
 
@@ -180,6 +217,7 @@ def _validate(behaviour: Behaviour) -> None:
                 f"behaviour {behaviour.name!r} sends raw arguments for {call.tool!r}; that can "
                 "only be deliberate, so mark the behaviour adversarial."
             )
+        _validate_generated_params(behaviour, call)
         signature = signatures.get(call.tool)
         if signature is None:  # not answerable here — see the docstring for the three cases
             continue
@@ -191,6 +229,35 @@ def _validate(behaviour: Behaviour) -> None:
                 "in the parse-error branch before the tool body ran, and the run would report it "
                 "as a tool call that happened."
             )
+        required = {
+            name
+            for name, parameter in signature.parameters.items()
+            if parameter.default is inspect.Parameter.empty
+            and parameter.kind
+            in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+        }
+        absent = sorted(required - set(call.arguments))
+        if absent:
+            raise ValueError(
+                f"behaviour {behaviour.name!r} calls {call.tool!r} without {absent}, which it "
+                "requires. That call dies in the same parse-error branch a misspelled argument "
+                "does, and the run would report it as a tool call that happened."
+            )
+
+
+def _validate_generated_params(behaviour: Behaviour, call: ToolCall) -> None:
+    """Check a job or template launcher's `params` payload against the model it was built with."""
+    model = _generated_params_model(call.tool)
+    if model is None:
+        return
+    try:
+        model.model_validate(call.arguments.get("params"))
+    except Exception as exc:
+        raise ValueError(
+            f"behaviour {behaviour.name!r} sends a params payload {call.tool!r} would reject: "
+            f"{exc}. The launcher validates it before anything durable starts, so this call is "
+            "refused at the tool boundary and the storm grades a refusal it caused itself."
+        ) from exc
 
 
 class MockLlm:
