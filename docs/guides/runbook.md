@@ -458,9 +458,14 @@ override a shipped one), `CHEMCLAW_CONNECTORS_ENABLED`, `CHEMCLAW_CONNECTOR_URLS
 (`endpoint.request_timeout`, `endpoint.auth`); the `bearer` mode names an env var, so no credential is
 ever written into a bundle.
 
-**Troubleshooting.** Each enabled connector is probed as `healthy`, `unreachable` or `unprobed`
-(no `health_url` declared — honest for a third-party server). `GET /readyz` reports the *count* of
-unreachable ones and never their names — it is unauthenticated by necessity, so its body is a public
+**Troubleshooting.** Each enabled connector is probed as one of five states: `healthy`,
+`unreachable` (the health route did not answer), `unpolled` (Temporal answered and nothing polls the
+bundle's `connector-<name>` queue — a jobs-only bundle whose worker fleet is at zero), `unknown` (the
+queue could not be asked at all, so reachability was not determined; this neither counts nor gates,
+because a broker outage is one fault shared by every durable bundle) or `unprobed` (nothing to ask —
+no `health_url` declared and no durable work, honest for a third-party server). `unreachable` and
+`unpolled` are the two that count as unhealthy and trip `connectors_required`.
+`GET /readyz` reports the *count* of unhealthy ones and never their names — it is unauthenticated by necessity, so its body is a public
 document and a roster of the internal capability surface does not belong in one. The names are on
 `/metrics` (`chemclaw_connectors_unhealthy`) and in the WARNING each failed probe logs, which also
 carries the reason. An unreachable connector
