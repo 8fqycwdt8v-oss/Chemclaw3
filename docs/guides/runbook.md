@@ -1241,6 +1241,23 @@ indistinguishable from a value that has not changed. The `metric` label names it
 along with every alert and panel reading it. A label here is meant to be low-cardinality, so this
 means something is generating values it should not; the pod's log names the metric.
 
+#### ChemclawEgressRefused
+`critical`. The in-process egress guard (`chemclaw.core.netguard`) refused an outbound connection to
+a host that is not the LLM gateway, declared infrastructure, or a named exception — a dependency
+reaching out at runtime, or a misconfiguration. The pod's ERROR log names the host. This should be
+zero. Triage: read the ERROR line for the host; if it is a destination the deployment legitimately
+needs (a new connector, an internal service), add it to `CHEMCLAW_EGRESS_ALLOW` or fix the setting
+it should have been derived from; if it is not, it is an attempted exfiltration path and the
+component that raised it is the lead — the NetworkPolicy is the layer that also stopped it at the pod
+boundary.
+
+#### ChemclawEgressGuardDisarmed
+`critical`. A process is running with `CHEMCLAW_EGRESS_GUARD_ENABLED=false`, so outbound calls are
+bounded only by the NetworkPolicy — the defence-in-depth layer for "only LLM traffic leaves the
+estate" is off in that process. Either it was disabled deliberately (and this alert should be
+silenced for that deployment, with the reason recorded) or a values file turned it off by accident;
+set it back to `true` and roll the affected pods.
+
 ## (xi) A migration that will not apply, and a release stuck in `pending-upgrade`
 
 Migrations run as a Helm `pre-install,pre-upgrade` hook Job that completes before any app container

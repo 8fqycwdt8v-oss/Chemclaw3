@@ -1764,6 +1764,13 @@ def test_an_unstated_egress_posture_refuses_to_render() -> None:
     )
     assert guard in policy, "the egress posture can be left unstated"
     assert "{{- fail " in policy, "the guard warns rather than refusing"
+    # A quoted boolean is the failure the emptiness check alone could not see: Go templates treat a
+    # non-empty string as truthy and `empty` treats it as non-empty, so `--set-string
+    # allowAnyDestination=false` rendered the allow-any policy while reading as off. The type guard
+    # refuses a string outright so the emptiness logic only ever sees a real bool.
+    assert 'kindIs "string" .Values.networkPolicy.allowAnyDestination' in policy, (
+        "a quoted allowAnyDestination (--set-string) would render allow-any while reading as off"
+    )
     assert _values()["networkPolicy"]["allowAnyDestination"] is False, (
         "the shipped default grants a permission the release never wrote down"
     )
