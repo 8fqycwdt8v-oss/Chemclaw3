@@ -137,7 +137,19 @@ jobs:
       #
       # `suspicious` and `segfault` fail at zero, and they are a different kind of thing — not a
       # result at all, but the harness going wrong, which leaves every number above them unexplained.
-      - name: Gate on the kill rate, and on the harness having worked
+      #
+      # **A rate needs a denominator somebody checked.** The gate divides `killed` by `total` and
+      # cannot see *which* mutants are in `total`: mutmut's `walk_all_files` falls through to
+      # `walk(path)` for a `source_paths` entry that is neither a file nor a directory, which
+      # yields nothing — no warning, no error, and `_load_config` never stats the paths. So a
+      # module moved without `pyproject.toml` following it is scored on six modules instead of
+      # seven, and the rate usually goes *up*, because the aggregate loses a below-average module.
+      # Measured over run 1's per-module counts, dropping any one of the seven leaves a rate above
+      # this floor, and five of the seven leave it *above the baseline* — so no floor on the rate
+      # can catch this, and a floor on the count would move whenever a module legitimately grows.
+      # What is checked instead is coverage: every declared source path must have left results
+      # behind, named one by one.
+      - name: Gate on the kill rate, on the coverage, and on the harness having worked
         if: ${{ !cancelled() }}
         env:
           # Measured 2026-08-27 on this checkout, twice: 618 and 634 killed of 825 — 74.9% and
@@ -150,10 +162,23 @@ jobs:
           MUTATION_SCORE_FLOOR: "72.0"
         run: |
           python - <<'PY'
-          import json, os, pathlib, sys
+          import json, os, pathlib, sys, tomllib
 
           stats = json.loads(pathlib.Path("mutants/mutmut-cicd-stats.json").read_text())
           print(json.dumps(stats, indent=2))
+
+          # mutmut writes `mutants/<source path>.meta` for every file it actually mutated, and
+          # `export-cicd-stats` skips any path without one — which is exactly how a path that
+          # stopped resolving leaves the aggregate silently smaller. Reading the declaration back
+          # from `pyproject.toml` keeps the seven modules named in one place.
+          config = tomllib.loads(pathlib.Path("pyproject.toml").read_text())
+          declared = config["tool"]["mutmut"]["source_paths"]
+          unmutated = [p for p in declared if not pathlib.Path("mutants", p + ".meta").exists()]
+          if unmutated:
+              sys.exit(
+                  "these [tool.mutmut] source_paths left no results, so the kill rate below is "
+                  f"over a smaller set of modules than it claims: {unmutated}"
+              )
 
           broken = {k: stats.get(k, 0) for k in ("suspicious", "segfault") if stats.get(k, 0)}
           if broken:
@@ -175,12 +200,24 @@ jobs:
 
       # The half that makes the schedule worth having. Deduplicated on the label, so a failure that
       # persists for three weeks is one issue with the runs linked, not three issues nobody closes.
+      #
+      # **The label is created here rather than assumed**, and that is the whole reason this step
+      # ever ran without filing anything: `mutation-testing` did not exist in the repository, `gh
+      # issue create` resolves label names to node ids before it issues the mutation, so the step
+      # died with `could not add label: 'mutation-testing' not found` — and the dedup read above it
+      # could not warn, because `gh issue list --label` routes through search and answers empty
+      # with exit 0 for a label that does not exist. `--force` rather than `|| true`: the create is
+      # idempotent, so it is not a failure to swallow, and swallowing one is how this step would
+      # go quiet again. Repository settings are not in this checkout, so the workflow carrying its
+      # own label is the only form of this that a reviewer can see.
       - name: File an issue when the run reports something
         if: ${{ failure() }}
         env:
           GH_TOKEN: ${{ github.token }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
+          gh label create mutation-testing --force \
+            --color ededed --description "the weekly mutants workflow reported something"
           existing=$(gh issue list --label mutation-testing --state open --limit 1 --json number --jq '.[0].number')
           if [ -n "$existing" ]; then
             gh issue comment "$existing" --body "Weekly mutation run failed again: $RUN_URL"
