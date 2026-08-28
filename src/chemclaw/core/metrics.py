@@ -410,6 +410,27 @@ _COUNTERS: dict[str, str] = {
         "Estimated prompt tokens reclaimed by context compaction (char/4 estimate, not billed "
         "tokens — the billed figure is chemclaw_input_tokens_total)."
     ),
+    # **The series the two above could not express, and the paragraph they used to end with was
+    # wrong.** It said a flat zero on the compaction counter means "never over budget". Measured
+    # through a compiled graph: a thread of 100,081 estimated tokens — over both triggers, ~224,000
+    # billed — moved *neither* counter and emitted no event, because both edits ran and reclaimed
+    # nothing. `ClearToolUsesEdit` had exactly `keep` candidates and the window edit cannot cut past
+    # the newest group, so the one turn that is about to fail at the provider's context limit was
+    # indistinguishable from a quiet one.
+    #
+    # So a flat zero on the two counters above means "never *reduced*", and this is what separates
+    # the two readings of that. It is the leading indicator of a hard context-length failure, and
+    # the only one this system has.
+    "chemclaw_context_unreducible_total": (
+        "Model calls over a context trigger that the policy could not reduce — the leading "
+        "indicator of a context-length failure at the provider."
+    ),
+    # Counted rather than only logged because the *rate* is the signal: one truncated result is a
+    # tool answering a broad question, and a tool that truncates on every call is one whose own
+    # ceiling is set wrong for what a model can read.
+    "chemclaw_tool_results_truncated_total": (
+        "Tool results cut to agent_max_tool_result_chars before the model read them, by tool."
+    ),
     # The counter for everything this codebase does *deliberately* and invisibly: catch, log a
     # warning, continue with less. Measured on `391b6ec^`: 41 such handlers across 34 modules, and
     # exactly 4 of them counted anything (`api/routes/turns.py`, `api/state.py`,
@@ -736,6 +757,10 @@ _COUNTER_LABELS: dict[str, tuple[str, ...]] = {
     # Bounded by the registered tool surface, which is configuration (the enabled connectors and
     # profile) rather than anything a caller can name.
     "chemclaw_repeated_tool_calls_total": ("tool",),
+    # The same bound and for the same reason: a tool name here is one the registry served, never a
+    # string a caller invented (`agent/tool_result_size.py` reads the request's tool name, which is
+    # the one the graph dispatched).
+    "chemclaw_tool_results_truncated_total": ("tool",),
     # A retriever's own `name`, and the bound is the same kind as `connector`: a source is a
     # registry entry a deployment activates, never a string a caller supplies. The shipped set is
     # the knowledge graph, the lexical and dense indexes, and the fingerprint store.
@@ -813,6 +838,17 @@ _GAUGES: dict[str, str] = {
     # these two can. 0 when no ceiling is declared, which is what makes that alert self-disabling.
     "chemclaw_fleet_turn_ceiling": "Declared fleet-wide ceiling on concurrent turns (0 = none).",
     "chemclaw_live_sessions": "Sessions held in the front door's in-process LRU.",
+    # **What the context budget is actually worth, measured instead of assumed.** The policy counts
+    # with chars/4 and the provider bills its own tokenizer; the two disagree by content type, and
+    # in the direction that matters — measured on this repository's payloads, the static prefix is
+    # 1.04x and a connector JSON result 0.45x, so a thread believed to be at budget was ~2.2x it.
+    # This is `billed / estimated`, smoothed over the calls this process has made, and it is the
+    # number `agent/context_budget.effective_trigger` divides the configured budget by. 1.0 means
+    # "not enough calls observed yet", which is also the state in which nothing is adjusted.
+    "chemclaw_context_estimator_ratio": (
+        "Billed input tokens divided by this system's own estimate of the same request (1.0 = "
+        "not yet calibrated)."
+    ),
     # Out-of-process capability can fail independently of the chat service, so its reachability
     # is a first-class signal rather than something to find in a log (`connectors.health`).
     "chemclaw_connectors_unhealthy": "Enabled connectors that could not be reached (0 = all up).",
@@ -886,6 +922,15 @@ _GAUGE_FAMILIES: dict[str, str] = {
         "How far behind its source each ingest cursor is, in seconds. A source whose fetch has "
         "wedged advances no cursor and logs `ingested=0`, which is what a quiet source also does."
     ),
+    # **The half of the static prefix the ratchet cannot see.** `tests/test_context_floor.py`
+    # gates every in-process tool schema a turn binds, and an endpoint tool's schema arrives from a
+    # running MCP server at handshake — so a connector's docstrings grow every turn's cost, forever,
+    # with nothing in this repository able to fail. Measured at handshake, by connector, which is
+    # the only place both the tool list and its origin are known. Its `sum()` plus the ratcheted
+    # floor is what a turn actually pays before the chemist says anything.
+    "chemclaw_connector_tool_schema_tokens": (
+        "Estimated tokens of bound tool schema advertised by each connector at handshake."
+    ),
     "chemclaw_connector_unhealthy": (
         "1 per enabled connector that could not be reached, by connector. The unlabelled "
         "`chemclaw_connectors_unhealthy` says how many; this says which, which is the half "
@@ -899,6 +944,7 @@ _GAUGE_FAMILY_LABELS: dict[str, str] = {
     "chemclaw_outbox_dead_lettered": "sink",
     "chemclaw_ingest_cursor_lag_seconds": "source",
     "chemclaw_connector_unhealthy": "connector",
+    "chemclaw_connector_tool_schema_tokens": "connector",
 }
 
 

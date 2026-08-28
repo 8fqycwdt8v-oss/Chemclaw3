@@ -58,6 +58,7 @@ from mcp.shared.exceptions import McpError
 from chemclaw.connectors.reachability import recently_unreachable, record_reachability
 from chemclaw.core.config import settings
 from chemclaw.core.mcp_session import cancel_on_timeout
+from chemclaw.core.metrics import METRICS
 
 logger = logging.getLogger(__name__)
 
@@ -364,4 +365,43 @@ def _stamped(tools: list[BaseTool], *, connector: str, revision: str) -> list[Ba
     served = {"connector": connector, "revision": revision}
     for tool in tools:
         tool.metadata = {**(tool.metadata or {}), SERVED_BY: served}
+    _record_schema_cost(connector, tools)
     return tools
+
+
+#: What each connector's advertised tool schemas cost a turn, by connector name. Written at
+#: handshake and read on scrape — a plain dict rather than a counter because the quantity is a
+#: level, not a rate, and the last handshake is the truth about what a turn now binds.
+_SCHEMA_TOKENS: dict[str, float] = {}
+
+
+def _record_schema_cost(connector: str, tools: list[BaseTool]) -> None:
+    """Publish what this connector's tool schemas add to every turn's prefix.
+
+    **The half of the static prefix nothing could gate.** `tests/test_context_floor.py` ratchets
+    every in-process tool schema a profile binds — 28,123 tokens on `default`, and a merge that
+    added eighteen tools was caught by it at +32%. An *endpoint* tool's schema is not in this
+    repository at all: it arrives from a running server at handshake, so a connector's docstrings
+    grow what every turn pays, forever, with nothing here able to fail. That test says so about six
+    `chem` tools and could do nothing about it.
+
+    It cannot become a ratchet — the number is a property of a server this repository does not
+    build — so it becomes a *measurement* instead, by connector, which is what lets a deployment
+    see the whole floor rather than the half it happens to own. The sum of this family plus the
+    ratcheted floor is what a turn costs before the chemist says anything.
+
+    Never raises and never blocks a handshake: a connector that could not be measured contributes
+    nothing to the family, which is the same reading as a connector that is not open.
+    """
+    try:
+        # Imported here rather than at module scope: `connectors -> agent` is a declared edge, but
+        # the agent imports this module to build its tool surface, and a module-scope import would
+        # make the pair a real import cycle rather than a permitted one.
+        from chemclaw.agent.context_budget import estimate_tool_schemas
+
+        _SCHEMA_TOKENS[connector] = float(estimate_tool_schemas(tools))
+    except Exception:
+        logger.debug("could not measure %s's tool schemas", connector, exc_info=True)
+
+
+METRICS.bind_gauge_family("chemclaw_connector_tool_schema_tokens", lambda: dict(_SCHEMA_TOKENS))

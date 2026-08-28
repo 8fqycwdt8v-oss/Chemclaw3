@@ -60,6 +60,12 @@ _EXPECTED_SUBSYSTEMS = {
     # it now continues uncompacted, which is the safe direction — a request over budget still has a
     # chance of being answered, where a failed turn has none.
     "compaction",
+    # `agent/context_budget.MeasureRequestPrefix`. A request whose prefix cannot be measured is
+    # budgeted as though it had none, which is the generous direction — the alternative is a
+    # middleware raising on the way to every model call. Counted because the consequence is silent:
+    # a declared context window would then be subtracted from nothing, and the budget would quietly
+    # be the configured constant again.
+    "context_budget",
     "cost_ledger",
     # A retrieval source that could not be asked. Added when `fanout._sweep`'s swallow was moved
     # onto `degraded()` — it had been a bare `logger.exception` plus a private counter, so the one

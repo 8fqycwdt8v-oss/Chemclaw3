@@ -82,4 +82,20 @@ class TurnCost(BaseModel):
     # opposed to `duration_seconds`, which includes every tool call after it. `None` when the turn
     # produced no token at all, which is a different fact from zero.
     ttft_seconds: float | None = Field(default=None, ge=0)
+    # **What the context policy did to this turn**, and the join nothing could make before it.
+    # `chemclaw_context_compactions_total` says the policy fired somewhere in the fleet;
+    # `input_tokens` above says what a turn cost. Neither could answer "what is compaction costing
+    # us, and is it working", because the counter carries no identity and the ledger had never
+    # heard of the policy.
+    #
+    # `context_unreducible` is the one to alert on: a model call went out over the conversation
+    # budget with the policy unable to reduce it further, which is the state immediately before a
+    # context-length failure at the provider. Measured, the compaction counters cannot see it —
+    # both edits run and reclaim nothing — so a turn like that used to look exactly like a quiet
+    # one (`agent/compaction.py::_record_overrun`).
+    #
+    # Both may be true of one turn: an early model call reduced the thread, a later one had
+    # nothing left to reclaim.
+    compacted: bool = False
+    context_unreducible: bool = False
     recorded_at: datetime | None = None
