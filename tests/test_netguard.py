@@ -1,6 +1,7 @@
 """The in-process egress guard: it blocks a non-allowlisted host and permits the declared ones."""
 
 import socket
+from collections.abc import Iterator
 
 import pytest
 
@@ -8,7 +9,7 @@ from chemclaw.core import netguard
 
 
 @pytest.fixture(autouse=True)
-def _restore_allowlist():
+def _restore_allowlist() -> Iterator[None]:
     """Snapshot and restore the config-derived allowlist around a test that mutates it.
 
     `_reset_for_tests` writes the module-global `_allowed`; without this, a later test in a full run

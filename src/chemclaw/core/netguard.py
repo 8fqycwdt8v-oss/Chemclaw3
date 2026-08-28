@@ -35,7 +35,7 @@ from __future__ import annotations
 import ipaddress
 import logging
 import socket
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -331,7 +331,7 @@ def _publish_armed() -> None:
         pass
 
 
-def _reset_for_tests(allowed: Sequence[str] = ()) -> None:
+def _reset_for_tests(allowed: Iterable[str] = ()) -> None:
     """Re-derive the allowlist without re-patching. Tests only — the patch itself is idempotent."""
     global _allowed
     _allowed = frozenset(allowed)

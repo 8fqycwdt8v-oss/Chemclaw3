@@ -156,9 +156,9 @@ class ObservabilitySettings(BaseSettings):
     # the LLM gateway, Postgres, Temporal, the connector endpoints, the IdP, and whatever
     # `egress_allow` names — is refused, logged at ERROR and counted. Defence in depth behind the
     # NetworkPolicy for the invariant that only LLM traffic (and declared infrastructure) leaves the
-    # estate: a library fetching model weights, a usage ping, a DNS licence check is caught here even
-    # though a static scan cannot see it. On by default; `false` is the loud, stated opt-out for a
-    # deployment that has an equivalent network control and wants the process out of the way. It
+    # estate: a library fetching model weights, a usage ping, a DNS licence check is caught here,
+    # though a static scan cannot see it. On by default; `false` is the loud, stated opt-out for
+    # a deployment that has an equivalent network control and wants the process out of the way. It
     # cannot cover a child process, a `ctypes` call into libc, or a compiled extension's own
     # syscalls — the NetworkPolicy is the layer that does.
     egress_guard_enabled: bool = True
