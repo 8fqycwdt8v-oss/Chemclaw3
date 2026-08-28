@@ -464,6 +464,40 @@ def _bad_call_was_reported(result: TurnResult) -> bool:
     )
 
 
+def _partial_document_was_completed(result: TurnResult) -> bool:
+    """The truncated document was closed by the streaming parser and the tool ran on the cut value.
+
+    **This check asserts the behaviour rather than complaining about it, and that is deliberate.**
+    Measured 2026-08-28 against `AIMessageChunk`: `'{"text": "unterminated'` arrives as a *valid*
+    tool call `{'text': 'unterminated'}` with `invalid_tool_calls` empty, because LangChain runs a
+    streamed call's argument fragments through `parse_partial_json`, which closes an unterminated
+    string and an unclosed brace. `agent/model_calls.py`'s docstring records the same measurement.
+
+    So `find_notes` searches for a word the model never finished writing and answers "no matches",
+    and nothing anywhere says the argument was cut. That is
+    `D-2026-08-04-a-failure-that-says-nothing-is-read-as-proceed` one layer further out than this
+    repository has met it before: not a call that vanished, but a call that *ran* on an argument
+    its author did not finish. The completion happens inside upstream's streaming assembler, above
+    anything `src/` owns, so this is a property to keep checked rather than a defect to patch here.
+
+    The check that used to stand in this slot claimed the opposite — "a truncated argument document
+    is reported, not swallowed" — and had been failing for that reason rather than for a defect,
+    which is the vacuous-check pattern in reverse: a check that cannot pass because it asks for
+    something the system documents it does not do.
+
+    A `tool_result` came back, and it is not a refusal. If upstream ever starts rejecting the
+    document instead, this goes red and the finding is that the behaviour changed.
+    """
+    if result.status != 200:
+        return False
+    if result.tools_failed:
+        return False
+    return bool(result.result_previews) and not any(
+        any(word in preview.lower() for word in _REFUSAL_WORDS)
+        for preview in result.result_previews
+    )
+
+
 async def family_f_adversarial() -> list[Finding]:
     """F · what a real model will not do on request.
 
@@ -475,8 +509,13 @@ async def family_f_adversarial() -> list[Finding]:
     cases: list[tuple[str, str, Callable[[TurnResult], bool]]] = [
         (
             "f-malformed-json",
-            "a truncated argument document is reported, not swallowed",
+            "an unparseable argument document is reported, not swallowed",
             _bad_call_was_reported,
+        ),
+        (
+            "f-truncated-arguments",
+            "a truncated argument document is completed and run — the tool sees the cut value",
+            _partial_document_was_completed,
         ),
         (
             "f-wrong-argument",

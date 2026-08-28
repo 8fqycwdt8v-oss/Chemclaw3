@@ -504,7 +504,13 @@ restart() {
   #
   # This is the same rule `_chaos_postgres_bounce` now applies from the other side: the actor
   # verifies the act, and the observer verifies it independently.
-  [ -e "$pidfile" ] || die "restart $name: the lane came back up without it.
+  # `running`, not `[ -e "$pidfile" ]`. `start` records `$!` the instant it forks, so the pidfile
+  # exists before the process has proved it can serve — a mock that refuses its behaviour set at
+  # startup, or a uvicorn that dies on an address still held by the process just killed, leaves a
+  # pidfile pointing at nothing. Measured here: a restart left `mock-llm.pid` behind while port
+  # 8820 refused connections, which is the same "verify the act" hole one level finer than the one
+  # this guard was added to close.
+  running "$name" || die "restart $name: the lane came back up without it.
 Read the lines above for the reason it was skipped — with no model configured, \`up\` deliberately
 does not start the front door. Whatever it says, this invocation asked for $name specifically and
 $name is not running, so this is a failure rather than a stack that is up in some other shape."

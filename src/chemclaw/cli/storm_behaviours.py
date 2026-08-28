@@ -204,6 +204,39 @@ BEHAVIOURS: list[Behaviour] = [
     # ---------------------------------------------------------------- F · adversarial
     Behaviour(
         name="f-malformed-json",
+        # **JSON-shaped and broken in a way partial parsing cannot close** — which is what actually
+        # reaches `AIMessage.invalid_tool_calls` and therefore the repair middleware.
+        #
+        # This used to send `'{"text": "unterminated'`, and the check over it is named "a truncated
+        # argument document is reported, not swallowed". Measured 2026-08-28 against
+        # `AIMessageChunk`, that document does not reach the repair path at all: LangChain runs a
+        # streamed call's fragments through `parse_partial_json`, which closes the unterminated
+        # string, and it arrives as a **valid** call `{'text': 'unterminated'}` with
+        # `invalid_tool_calls` empty. `agent/model_calls.py`'s own docstring records the same
+        # measurement. So the check was asserting the opposite of a documented fact about the
+        # module it tests, and had been failing for that reason rather than for a defect.
+        #
+        # Truncation is not lost, it is *renamed*: `f-truncated-arguments` below pins what really
+        # happens to it, because that is the more interesting half.
+        calls=[ToolCall(tool="find_notes", arguments={}, raw_arguments='{"text": ]}')],
+        text="",
+        adversarial=True,
+    ),
+    Behaviour(
+        name="f-truncated-arguments",
+        # A cut argument document, and the point is that nothing rejects it.
+        #
+        # `parse_partial_json` closes the string, so `find_notes` runs with `text="unterminated"` —
+        # a search for a word the model never finished writing, answered with "no matches" and no
+        # indication that the question was truncated in transit. That is
+        # `D-2026-08-04-a-failure-that-says-nothing-is-read-as-proceed` with the failure one layer
+        # further out than this repository has previously met it: not a call that vanished, but a
+        # call that ran on an argument the model did not finish.
+        #
+        # It is not obviously fixable here — the completion happens inside LangChain's streaming
+        # assembler, above anything `src/` owns — so this behaviour exists to make the property
+        # *checked* rather than rediscovered. If a future upstream release starts rejecting the
+        # document instead, the check over this goes red and says so.
         calls=[ToolCall(tool="find_notes", arguments={}, raw_arguments='{"text": "unterminated')],
         text="",
         adversarial=True,
