@@ -4,13 +4,17 @@ These prove the two contracts the rest of the system relies on: sane defaults
 load with no `.env`, and any value is overridable via a prefixed env var.
 """
 
+import logging
 import os
 import re
+import subprocess
+import sys
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 import pytest
+from pydantic import SecretStr
 
 from chemclaw.core.config import Settings
 
@@ -851,3 +855,105 @@ def test_the_shipped_republish_budget_is_strictly_inside_the_job_ceiling() -> No
     assert default.connector_job_timeout_seconds > (
         default.result_republish_timeout_seconds + default.activity_timeout_seconds
     )
+
+
+# The prompt-injection envelope's nonce and the durable session store
+# (`D-2026-08-27-a-warning-is-the-shape-a-guard-takes-when-raising-would-break-a-deployment`).
+# Every other cross-section rule in `core/config/__init__.py` refuses; this one announces, because
+# the pairing it flags is the configuration the shipped chart itself ships.
+
+
+def _envelope_warnings(records: list[logging.LogRecord]) -> list[logging.LogRecord]:
+    """The records this guard emitted — matched on the env var it names, not on the logger."""
+    return [r for r in records if "CHEMCLAW_FRAMING_ENVELOPE_SECRET" in r.getMessage()]
+
+
+def test_a_durable_deployment_without_the_envelope_secret_is_warned(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The pairing is detected at startup, and the line names both settings and the fix.
+
+    `session_store="postgres"` with an empty `framing_envelope_secret` is the combination where
+    `agent/framing.py`'s per-process nonce orphans: a replayed thread's envelopes carry a previous
+    process's tag, and the agent instructions say only the current tag marks retrieved content as
+    data. Nothing said so until this guard — `framing.py`'s own docstring claimed `Settings` warned
+    while no validator anywhere read the field.
+
+    Asserting the *contents* rather than the count: a warning an operator cannot act on is the
+    failure this replaces, so the line has to name the variable to set.
+    """
+    with caplog.at_level(logging.WARNING, logger="chemclaw.core.config"):
+        Settings(_env_file=None, session_store="postgres")  # type: ignore[call-arg]
+    warnings = _envelope_warnings(caplog.records)
+    assert len(warnings) == 1, [r.getMessage() for r in caplog.records]
+    message = warnings[0].getMessage()
+    assert warnings[0].levelno == logging.WARNING
+    assert "CHEMCLAW_SESSION_STORE=postgres" in message
+    assert "secrets.optionalKeys.framingEnvelopeSecret" in message
+    assert "agent/framing.py" in message
+
+
+def test_the_durable_pairing_is_warned_about_rather_than_refused() -> None:
+    """The decision itself, pinned: this configuration still constructs.
+
+    The shipped chart sets `CHEMCLAW_SESSION_STORE: "postgres"` and lists `framingEnvelopeSecret`
+    under `secrets.optionalKeys`, so a `ValueError` here would fail every existing release on
+    `helm upgrade` — front door and workers alike — over a condition the operator did not change.
+    Whoever converts this warning into a refusal has to delete this test, which is where the cost
+    is written down.
+    """
+    durable = Settings(_env_file=None, session_store="postgres")  # type: ignore[call-arg]
+    assert durable.session_store == "postgres"
+
+
+def test_setting_the_envelope_secret_leaves_a_durable_deployment_silent(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A deployment that did the thing the warning asks for hears nothing further."""
+    with caplog.at_level(logging.WARNING, logger="chemclaw.core.config"):
+        Settings(  # type: ignore[call-arg]
+            _env_file=None,
+            session_store="postgres",
+            framing_envelope_secret=SecretStr("a-deployment-wide-secret"),
+        )
+    assert _envelope_warnings(caplog.records) == []
+
+
+def test_a_memory_store_deployment_is_not_warned(caplog: pytest.LogCaptureFixture) -> None:
+    """The per-process fallback is *correct* without a durable store, so saying so would be noise.
+
+    A memory session lives and dies inside one process, so no envelope it framed is ever replayed
+    under a different nonce. This is what makes the guard's condition `session_store`, and it is
+    also what keeps every dev run, CLI invocation and test from printing a security warning that
+    does not apply to it — the shape of warning an operator learns to ignore.
+    """
+    with caplog.at_level(logging.WARNING, logger="chemclaw.core.config"):
+        Settings(_env_file=None, session_store="memory")  # type: ignore[call-arg]
+    assert _envelope_warnings(caplog.records) == []
+
+
+def test_the_warning_reaches_stderr_with_no_logging_configured(tmp_path: Path) -> None:
+    """It is not silently swallowed: an unconfigured process still prints it.
+
+    This is the half a `caplog` assertion cannot prove, and the half that decides whether a
+    deployment sees anything. `Settings()` is constructed while `chemclaw.core.config` is still
+    being imported — before any entrypoint reaches `configure_logging()` — so the record is emitted
+    with no handler installed and reaches stderr through `logging.lastResort`. A pod log carries
+    it; the JSON stream does not, which is the cost this mechanism pays and the reason it is
+    measured here rather than assumed.
+    """
+    env = {k: v for k, v in os.environ.items() if not k.startswith("CHEMCLAW_")} | {
+        "CHEMCLAW_SESSION_STORE": "postgres",
+        "CHEMCLAW_FRAMING_ENVELOPE_SECRET": "",
+    }
+    done = subprocess.run(
+        [sys.executable, "-c", "import chemclaw.core.config"],
+        env=env,
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert done.returncode == 0, done.stderr
+    assert "CHEMCLAW_FRAMING_ENVELOPE_SECRET is unset" in done.stderr
+    assert done.stdout == ""
