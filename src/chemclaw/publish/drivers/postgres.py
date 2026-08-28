@@ -22,6 +22,7 @@ import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
+from chemclaw.core.config import PG_LOOPBACK_HOSTS, require_pg_tls, settings
 from chemclaw.core.connect import check_identifier
 from chemclaw.ingest.eln.warehouse.driver import (
     VectorDialect,
@@ -29,6 +30,30 @@ from chemclaw.ingest.eln.warehouse.driver import (
     WarehouseQueryError,
 )
 from chemclaw.publish.connect import SinkConnectionError
+
+
+def _refuse_plaintext_connection(dsn: str, host: str) -> None:
+    """Refuse a non-loopback sink connection that cannot require TLS, under the enforced posture.
+
+    A published record is confidential chemistry and the connection carries the sink's password, so
+    under `entra_required` it must not cross a non-loopback network in cleartext — the same rule
+    `require_pg_tls` enforces for the system's own database. A `dsn` states its own `sslmode` and is
+    checked with that shared guard. The discrete `host=/password=` form has no `sslmode` keyword to
+    set, so a non-loopback discrete binding cannot express TLS at all and is refused with the
+    remedy: give a `dsn` with `sslmode=verify-full`. Loopback dev is exempt.
+    """
+    if not settings.entra_required:
+        return
+    if dsn:
+        require_pg_tls(dsn, "postgres sink dsn")
+        return
+    if host and host.lower() not in PG_LOOPBACK_HOSTS:
+        raise SinkConnectionError(
+            f"entra_required=true with a non-loopback postgres sink host {host!r} given as "
+            "discrete connection parameters: that form has no sslmode keyword, so libpq's default "
+            "permits a silent plaintext fallback carrying the sink password. Provide a `dsn:` with "
+            "sslmode=verify-full (and sslrootcert=<ca>) instead, or bind a loopback host for dev."
+        )
 
 
 class _PostgresCursor:
@@ -133,6 +158,7 @@ class PostgresWarehouse:
             if value
         }
         self._conn: psycopg.AsyncConnection[Any] | None = None
+        _refuse_plaintext_connection(dsn, host)
 
     @property
     def placeholder(self) -> str:

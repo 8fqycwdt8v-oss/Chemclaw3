@@ -113,7 +113,7 @@ __all__ = [
 
 
 _TLS_SSLMODES = {"require", "verify-ca", "verify-full"}
-_PG_LOOPBACK = {"localhost", "127.0.0.1", "::1", ""}
+PG_LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1", ""}
 
 
 def _pg_sslmode(dsn: str) -> str:
@@ -139,7 +139,7 @@ def _pg_host(dsn: str) -> str:
     return ""
 
 
-def _require_pg_tls(dsn: str, name: str) -> None:
+def require_pg_tls(dsn: str, name: str) -> None:
     """Refuse a non-loopback Postgres DSN whose sslmode leaves plaintext or an unverified peer.
 
     libpq's default is `prefer`: it tries TLS, silently falls back to cleartext when the server does
@@ -148,7 +148,7 @@ def _require_pg_tls(dsn: str, name: str) -> None:
     enforced posture a non-loopback DSN must state `sslmode=require`/`verify-ca`/`verify-full`
     (`verify-full` recommended, with `sslrootcert=`). Loopback dev is exempt.
     """
-    if _pg_host(dsn) in _PG_LOOPBACK or _pg_sslmode(dsn) in _TLS_SSLMODES:
+    if _pg_host(dsn) in PG_LOOPBACK_HOSTS or _pg_sslmode(dsn) in _TLS_SSLMODES:
         return
     raise ValueError(
         f"entra_required=true with a non-loopback {name} and sslmode={_pg_sslmode(dsn)!r}: libpq's "
@@ -326,9 +326,9 @@ class Settings(
                 "entra_required=true, the deployment that believes it is in the enforced posture."
             )
         if self.entra_required:
-            _require_pg_tls(self.postgres_dsn, "postgres_dsn")
+            require_pg_tls(self.postgres_dsn, "postgres_dsn")
             if self.postgres_migration_dsn:
-                _require_pg_tls(self.postgres_migration_dsn, "postgres_migration_dsn")
+                require_pg_tls(self.postgres_migration_dsn, "postgres_migration_dsn")
         if self.service_uvicorn_workers > 1:
             raise ValueError(
                 "service_uvicorn_workers>1 silently breaks five per-process guarantees until they "
