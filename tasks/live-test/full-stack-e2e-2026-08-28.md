@@ -49,8 +49,8 @@ skips a large set and still prints green.
 
 - Infra: `make live-infra` up (postgres, temporal, temporal-ui containers healthy); `make db-migrate`
   applied **71 migrations**, `converted 0 stored message(s)`.
-- Chemclaw3: `make lint` **PASS** (exit 0, 734 files formatted); `make type` / `make test` → running
-- Chemclaw3-mcp: `make check` (lint + mypy --strict + suite + deps-audit) → running
+- Chemclaw3: `make lint` **PASS** (exit 0, 734 files formatted) · `make type` **PASS** (exit 0, `mypy --strict` clean over **734 source files**) · `make test` → running, Postgres up
+- Chemclaw3-mcp: `make check` **PASS**, exit 0 — ruff clean, `mypy --strict` clean over **120 source files**, **1521 passed / 7 skipped** in 334s, `pip-audit`: no known vulnerabilities (`.live/baseline/mcp-check.log`)
 - Chemclaw3_ui: `typecheck` **PASS** (exit 0) · `lint` **PASS** (exit 0) · `test` **PASS** — 74 files, **761 tests passed**, 40.1s (`.live/baseline/ui-*.log`)
 - Chemclaw3_mock: `pytest` → **PASS**, 39 passed, exit 0 (`.live/baseline/mock-test.log`); venv built at `/home/user/Chemclaw3_mock/.venv`, which the lane needs for `mock-eln`/`mock-vendor`
 
