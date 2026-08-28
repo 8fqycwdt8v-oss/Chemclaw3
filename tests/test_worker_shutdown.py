@@ -25,6 +25,27 @@ from temporalio.worker import Worker
 from chemclaw.durable.serve import serve_worker
 
 
+class _FakeCount:
+    """What `Client.count_workflows` returns: an object with a `count`."""
+
+    count = 0
+
+
+class _FakeClient:
+    """The one client method `serve_worker` reaches for, through the in-flight gauge's refresh.
+
+    Present because `serve_worker` now drives `poll_open_jobs(worker.client, stop)`: the durable
+    in-flight reading is the broker's own visibility count rather than a number a workflow body
+    kept about itself (`durable/job_metrics.py`). A fake that omitted it would make every test here
+    exercise the refresh's *degrade* path instead of its normal one, which is the wrong thing for
+    tests whose subject is the shutdown.
+    """
+
+    async def count_workflows(self, query: str) -> _FakeCount:
+        """Answer nothing is running, without a broker."""
+        return _FakeCount()
+
+
 class _FakeWorker:
     """A worker that runs until told to shut down, recording what it was asked to do.
 
@@ -43,6 +64,7 @@ class _FakeWorker:
         stops awaiting once `shutdown()` returns.
         """
         self.is_running = False
+        self.client = _FakeClient()
         self.shutdown_calls = 0
         self.drained = False
         self._stop = asyncio.Event()
