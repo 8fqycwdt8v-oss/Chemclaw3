@@ -249,22 +249,41 @@ def main(argv: list[str] | None = None) -> int:
     # like every other process's. A leak probe printing an unredacted credential would be the
     # sharpest possible version of this file's own point.
     configure_logging()
+    # Imported here rather than at module scope for the same reason `create_app` is: this module's
+    # `--help` should answer without building the settings singleton. By this line it exists.
+    from chemclaw.core.config import settings
+
     # The lane's configuration, not a lighter one. LIVE-8's lesson is that a configuration only
     # production sets is a configuration nothing tests, and this probe's whole claim is that it
     # drives the same path the soak measured — so it pins what `infra/live/processes.sh` pins:
     # the durable session store, required connectors, and the dedicated note checkout. The
     # loopback host is not cosmetic either: `_refuse_unauthenticated_exposure` correctly refuses
     # to build an app that binds 0.0.0.0 with `entra_required` off.
-    for key, value in (
-        ("CHEMCLAW_LLM_PROVIDER", "openai_compatible"),
-        ("CHEMCLAW_LLM_BASE_URL", "http://127.0.0.1:8820/v1"),
-        ("CHEMCLAW_LLM_MODEL", "mock"),
-        ("CHEMCLAW_SERVICE_HOST", "127.0.0.1"),
-        ("CHEMCLAW_ENTRA_REQUIRED", "false"),
-        ("CHEMCLAW_SESSION_STORE", "postgres"),
-        ("CHEMCLAW_CONNECTORS_REQUIRED", "true"),
+    #
+    # **Assigned onto `settings`, not into the environment, and every one of these used to be an
+    # `os.environ.setdefault` that did nothing.** `settings` is a singleton built on first import
+    # and `configure_logging()` two lines above imports it, so by the time this loop ran the
+    # object had already been constructed from the environment as it was at import — exactly the
+    # hazard the `connector_urls` comment below states, three lines later, having been written for
+    # that one field and not applied to these. Measured 2026-08-28: with the variable absent from
+    # the environment, `os.environ.setdefault("CHEMCLAW_SERVICE_HOST", "127.0.0.1")` set the
+    # variable and left `settings.service_host` reading `0.0.0.0`, so `make leak-probe` after the
+    # documented `make live-up` died in `_refuse_unauthenticated_exposure` — and the six pins
+    # beside it were equally inert, meaning the probe pinned nothing it claims to pin and measured
+    # whatever the caller's shell happened to hold.
+    #
+    # The environment still wins where the caller set it, which is what `setdefault` meant.
+    for key, setting, value in (
+        ("CHEMCLAW_LLM_PROVIDER", "llm_provider", "openai_compatible"),
+        ("CHEMCLAW_LLM_BASE_URL", "llm_base_url", "http://127.0.0.1:8820/v1"),
+        ("CHEMCLAW_LLM_MODEL", "llm_model", "mock"),
+        ("CHEMCLAW_SERVICE_HOST", "service_host", "127.0.0.1"),
+        ("CHEMCLAW_ENTRA_REQUIRED", "entra_required", False),
+        ("CHEMCLAW_SESSION_STORE", "session_store", "postgres"),
+        ("CHEMCLAW_CONNECTORS_REQUIRED", "connectors_required", True),
     ):
-        os.environ.setdefault(key, value)
+        if key not in os.environ:
+            setattr(settings, setting, value)
     # The connector URLs come from `connectors_dev.build_composite()` itself rather than being
     # rebuilt here from the same string pattern — the rule `infra/live/processes.sh` states and
     # follows. One reader for one shape: if the dev runner changes its port or its mount path, this
@@ -275,7 +294,6 @@ def main(argv: list[str] | None = None) -> int:
     # built on first import and `build_composite` imports it — so by the time the URLs exist, an
     # environment variable is already too late to be read.
     from chemclaw.cli.connectors_dev import build_composite
-    from chemclaw.core.config import settings
 
     if not settings.connector_urls:
         settings.connector_urls = build_composite()[1]
