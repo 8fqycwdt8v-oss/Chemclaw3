@@ -121,8 +121,36 @@ export CHEMCLAW_NOTE_REPO_DIR="${CHEMCLAW_NOTE_REPO_DIR:-$LIVE_DIR/knowledge-rep
 # minted tokens. Exporting them afterwards would leave the servers holding one secret and core
 # presenting another, which surfaces as every tool call 401ing — a failure that reads as a broken
 # connector rather than as a missing variable.
+#
+# **A credential's lifetime is the process holding it, not the invocation that minted it.** The
+# paragraph above got the ordering right and left the lifetime open: `--export-env` mints a fresh
+# set on *every* call, and `restart` calls `up`, so restarting the front door — which family A of
+# the storm does once per admission cap — reminted every bundle token, wrote them to the contract,
+# and started core presenting secrets the still-running connectors process had never seen. Measured
+# 2026-08-28 on the campaign lane: the connectors process started at 21:03 held tokens whose hashes
+# differed from the contract rewritten at 21:28, all four in-tree bundles answered 401 to their own
+# minted credential, and the storm's T family scored `announced=5/5 returned=0` for every calc,
+# molfp, rxnfp and bo behaviour while `/readyz` reported `connectors_unhealthy: 0`. The chemist saw
+# "similar_molecules is not a valid tool" — a whole capability gone, with a green readiness probe.
+#
+# So the minted half is persisted on its own and reused while the process it belongs to is alive.
+# It is a separate file from the full contract deliberately: the contract is rewritten on every
+# `up` and mixes derived values with minted ones, and only the minted ones may not change.
 connector_env() {
-  "$1" -m chemclaw.cli.connectors_dev --export-env
+  local minted="$RUN_DIR/connector-mint.sh"
+  # **The lane is the lifetime, not the connectors process.** Keying reuse on `running connectors`
+  # was one scope too narrow: `restart connectors` then re-minted, and the front door — still up,
+  # still holding the previous set — 401'd on every bundle from that moment. `down` is what ends a
+  # lane and what deletes this file, so its existence is the right condition.
+  if [ -s "$minted" ]; then
+    cat "$minted"
+    return
+  fi
+  mkdir -p "$RUN_DIR"
+  # Redirection *inside* the umask, per D-2026-08-28: with `( umask 077; … ) >file` bash applies the
+  # outer redirection in the child before the body runs, and the file is created world-readable.
+  ( umask 077; "$1" -m chemclaw.cli.connectors_dev --export-env >"$minted" ) || return 1
+  cat "$minted"
 }
 
 # The pid file must hold the pid of the *worker*, not of a wrapper around it. `uv run python -m …`
@@ -324,6 +352,44 @@ PY
 #
 # The probe token is written here rather than appended afterwards, because it is minted earlier in
 # `up()` and was already known: one write path is one place that has to get the mode right.
+# One value out of the contract this lane last wrote, or nothing.
+#
+# Sourced in a subshell rather than parsed, so the `%q` quoting `write_connector_env` applies is
+# undone by the same shell that applied it instead of by a regex that would have to agree with it.
+previous_contract_value() {
+  local file="$RUN_DIR/connector-env.sh"
+  [ -f "$file" ] || return 0
+  ( set +u; . "$file" >/dev/null 2>&1 || true; printf '%s' "${!1:-}" )
+}
+
+# Adopt every inherited credential this invocation was not given but the lane already settled.
+#
+# **An invocation that was not handed a credential must not erase one, and must not start a process
+# without it.** The fleet tokens are *inherited* — `e2e-full-stack/up.sh` mints them and exports
+# them inward — while `restart` is `up`, so a second shell that sourced `env` and ran
+# `processes.sh restart api` rewrote the contract from an environment holding none of them. The
+# contract narrowed, and the front door it then started had none either.
+#
+# Measured 2026-08-28: after exactly that restart the front door carried no `CHEMCLAW_CALC_TOKEN`,
+# and the storm's `t-calc-properties` scored `announced=5/5 returned=0` with every message reading
+# `the calculation service refused this client's credential (HTTP 401 from
+# http://127.0.0.1:8860/mcp)` — while `/readyz` reported `connectors_unhealthy: 0`, because `calc`
+# is a *backend* and the probe does not reach it. A green stack that cannot calculate.
+#
+# This runs **before** anything is started, so the adoption reaches the processes and not only the
+# file, and it reads the contract before `write_connector_env` truncates it. The environment still
+# wins wherever it has a value — a lane deliberately restarted with a new credential must be able
+# to say so. What is refused is *forgetting*.
+adopt_inherited_credentials() {
+  local key value
+  for key in $(fleet_token_vars); do
+    [ -n "${!key:-}" ] && continue
+    value="$(previous_contract_value "$key")"
+    [ -n "$value" ] && export "$key=$value"
+  done
+  return 0
+}
+
 write_connector_env() {
   local connector_exports="$1" key
   ( umask 077
@@ -388,6 +454,7 @@ write_connector_env() {
 
 up() {
   mkdir -p "$RUN_DIR"
+  adopt_inherited_credentials
   command -v uv >/dev/null 2>&1 || die "uv not found"
   pg_isready -h 127.0.0.1 -p "${CHEMCLAW_LIVE_PGPORT:-5432}" >/dev/null 2>&1 \
     || die "postgres is not up — run infra/live/bootstrap.sh first"
@@ -522,7 +589,7 @@ down() {
   # The credentials belong to the processes that just stopped. Left behind, `processes.sh env`
   # would hand a later shell tokens for servers that are gone — a stale secret is a slower version
   # of the mismatch this file exists to prevent, not a milder one.
-  rm -f "$RUN_DIR/connector-env.sh"
+  rm -f "$RUN_DIR/connector-env.sh" "$RUN_DIR/connector-mint.sh"
 }
 
 status() {
