@@ -62,7 +62,7 @@ the pair applies in filename order and neither shadows the other.
 | `calculation_artifacts` | 019 | `science/calc/postgres_artifacts.py` | cascades from `artifact_blobs` |
 | `plan_approvals` | 020 (+034) | `agent/plan_approval_store.py` | — (consumed rows are marked, not removed) |
 | `job_records` | 023 (+033, 049, 055, 057, 061) | `durable/job_record_store.py` | **refused**: the table exists because a durable run's result used to expire with Temporal's history and take a campaign's evaluation record with it (D-157) |
-| `observations` | 025 | `memory/observations.py` | stale rows retired by status, not deleted |
+| `observations` | 025 (+062 index) | `memory/observations.py` | stale rows retired by status, not deleted |
 | `note_proposals` | 027 (+036, +058) | `kg/proposal_store.py` | — |
 | `measurements` | 030 | `science/calc/calibration.py` | — |
 | `bo_campaigns` | 031 | `science/bo/campaign_record_store.py` | — |
