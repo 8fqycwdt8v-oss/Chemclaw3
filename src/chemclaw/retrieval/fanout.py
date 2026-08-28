@@ -222,7 +222,7 @@ def record_kept_chunks(
 
 
 def _record_kept(name: str, count: int) -> None:
-    """Add one source's surviving-chunk count — named, so the loop above cannot capture late."""
+    """Add one source's surviving-hit count — named, so the loop above cannot capture late."""
     record_metric(
         lambda m: m.increment("chemclaw_evidence_source_kept_total", count, {"source": name})
     )
