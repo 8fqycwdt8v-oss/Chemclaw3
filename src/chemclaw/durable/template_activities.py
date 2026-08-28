@@ -20,6 +20,7 @@ is deliberately *not* here is enforcement: `api/budget.py` lives in the front do
 worker is a different process, so this meters honestly rather than pretending to cap.
 """
 
+import asyncio
 import logging
 import time
 from collections.abc import Callable, Iterator, Sequence
@@ -544,6 +545,11 @@ async def run_agent_step(step: AgentStepInput) -> str:
     started = time.perf_counter()
     meter = _StepMeter()
     answered = False
+    # How this step ended, in the vocabulary `turn_costs.outcome` is read in. `empty_answer` is
+    # the floor for the same reason it is in `api/runner._settle_outcome`: a step that ran to its
+    # own end and produced nothing is the silent death, and every other ending overwrites this
+    # before the `finally` books it.
+    outcome = "empty_answer"
     calls_token = begin_call_watch()
     with _acting_as(step.identity):
         try:
@@ -584,8 +590,29 @@ async def run_agent_step(step: AgentStepInput) -> str:
                     settings.template_step_heartbeat_timeout_seconds,
                 )
                 answer = answer_text(result)
-                answered = True
+                # **An empty answer is not an answer, in both fields at once.** The chat path
+                # settles the same case the same way — `_empty_answer_event` returns *before*
+                # `answered = True`, so the silent turn books `completed=False` — and a step that
+                # returned nothing hands the next step of the template nothing.
+                answered = bool(answer)
+                outcome = "answered" if answered else "empty_answer"
                 return answer
+        except asyncio.CancelledError:
+            # A Temporal activity cancellation — the workflow was cancelled, the worker is
+            # draining, or an activity timeout fired. The chat path calls this ending `abandoned`
+            # and tells a *wall-clock* kill apart from it by the caller's own deadline; there is
+            # no such deadline here (Temporal owns the clock and the cancellation carries no
+            # reason), so `timed_out` is deliberately not produced by this writer rather than
+            # guessed at.
+            outcome = "abandoned"
+            raise
+        except Exception:
+            # Everything else, the step ceiling included: `agent_recursion_limit` surfaces as a
+            # raise with no partial answer to read, so it is `errored` and not `loop_capped` —
+            # `loop_capped` names a turn that was stopped gracefully *and still answered*, which
+            # this path cannot be.
+            outcome = "errored"
+            raise
         finally:
             # Booked on every path, including a failure, a runaway and a cancelled attempt: a step
             # that broke after three model calls still spent them, and a ledger that kept only the
@@ -599,11 +626,11 @@ async def run_agent_step(step: AgentStepInput) -> str:
             # to read. Every call that completed is booked. So the ledger can under-report by at
             # most one call, never by a whole turn.
             end_call_watch(calls_token)
-            _book_step_spend(step, meter.usage, time.perf_counter() - started, answered)
+            _book_step_spend(step, meter.usage, time.perf_counter() - started, answered, outcome)
 
 
 def _book_step_spend(
-    step: AgentStepInput, usage: TurnUsage, duration_seconds: float, answered: bool
+    step: AgentStepInput, usage: TurnUsage, duration_seconds: float, answered: bool, outcome: str
 ) -> None:
     """Publish one agent step's spend: the five counters, and the durable per-turn cost row.
 
@@ -614,6 +641,17 @@ def _book_step_spend(
     records why one instrument cannot be both. Each counter is guarded on a non-zero value so a
     provider that reports none of a dimension leaves its series untouched rather than publishing a
     fabricated zero, which is the rule `core/metrics.py` states for gauges.
+
+    **`outcome` is written, and leaving it defaulted was a defect.** This is the *second* writer
+    of `turn_costs`, and it used to pass `completed=answered` and nothing else — so every row a
+    template agent step has ever written carries `outcome='unknown'`, which is the column default
+    meaning "written before the column existed". Two populations in one value: an outcome query
+    cannot tell a 2026-08 backfill row from a step booked today, and the index on that column
+    indexes a value that means two things. The vocabulary is
+    `api/runner._OUTCOMES`, and it is spelled out here rather than imported because `durable` may
+    not import `api` (`tests/test_layering.py`); what this writer can produce is four of the six —
+    `answered`, `empty_answer`, `errored`, `abandoned` — and `run_agent_step` says at each raise
+    site why the other two are not among them.
 
     **The cost row's key is the run's correlation id plus the step id.** `turn_costs` upserts on
     `correlation_id` (`agent/turn_cost_store.py`) — deliberately, so a retried write replaces rather
@@ -627,6 +665,7 @@ def _book_step_spend(
         usage: What that turn's model calls reported, already summed.
         duration_seconds: Wall clock for the step, for the ledger's duration column.
         answered: Whether the step produced its answer. Recorded, not filtered — see `TurnCost`.
+        outcome: How the step ended, in `turn_costs.outcome`'s vocabulary — see below.
     """
     labels = {"profile": step.profile or "default"}
     record_turn_cost(
@@ -645,6 +684,7 @@ def _book_step_spend(
             cache_write_tokens=usage.cache_write,
             duration_seconds=duration_seconds,
             completed=answered,
+            outcome=outcome,
         )
     )
     if usage.total:

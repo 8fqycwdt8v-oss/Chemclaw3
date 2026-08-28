@@ -214,10 +214,25 @@ async def _drain_result_publications() -> PublishOutcome:
             # sink that failed its batch is holding the same connection as one that succeeded.
             await sink.aclose()
 
-    # **No pending gauge, deliberately.** The backlog is
-    # `chemclaw_results_queued_total - chemclaw_results_published_total`, which is already exact
-    # and costs nothing; a gauge would need a `COUNT(*)` on every scrape to say the same thing.
-    # `pending_counts()` stays for the CLI, where an operator asks once rather than every 15s.
+    # **The backlog gauges are refreshed here, once, after every row of every sink has been
+    # marked.** Three things put it at exactly this point:
+    #
+    # - *After the marking*, because a claim does not remove a row from the backlog. `_CLAIM` only
+    #   increments `attempts`; the state stays `pending` until `mark_delivered`/`mark_failed` runs.
+    #   The refresh used to sit inside `outbox.claim` with a comment saying it was taken after the
+    #   claim so the reading "excludes the rows this pass is about to deliver" — measured, three
+    #   rows and one `claim()` left `chemclaw_outbox_pending{sink="probe"} 3.0` with all three
+    #   still pending. The gauge published the pre-drain depth and held it for a whole pass.
+    # - *Once per pass rather than once per sink*, because `refresh_backlog` reads every sink in
+    #   two `GROUP BY sink` statements. Inside `claim` it ran N times per pass for N sinks, N-1 of
+    #   them redundant — and one of the two is a sequential scan of the whole table (see
+    #   `publish/outbox._DEAD_LETTERED`, ~20 ms on 200k rows), which is not a read to repeat per
+    #   destination for the same answer.
+    # - *Outside the per-sink loop*, so a sink whose driver would not build, or whose batch failed,
+    #   does not cost the other sinks their reading.
+    #
+    # It never raises — see `refresh_backlog` — so telemetry cannot fail a pass that just published.
+    await outbox.refresh_backlog()
     return outcome
 
 

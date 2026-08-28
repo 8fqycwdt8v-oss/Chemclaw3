@@ -24,8 +24,12 @@ ALTER TABLE audit_events
 -- or contended disk is worse.
 --
 -- `CONCURRENTLY` is not available *here*: `core/migrate.py` runs the whole migration set inside
--- one transaction (it takes `pg_advisory_xact_lock` to serialize migrators), and Postgres refuses
--- `CREATE INDEX CONCURRENTLY` inside a transaction block. Moving the index out of the migration
+-- one transaction (it holds a transaction-scoped advisory lock so two migrators cannot interleave
+-- their DDL), and Postgres refuses `CREATE INDEX CONCURRENTLY` inside a transaction block. Naming
+-- that lock function here in prose is deliberately avoided: the runner sends this file whole, and
+-- `tests/test_migrations.py` picks the lock statement out of what was executed by substring — so a
+-- comment mentioning it registers as a second lock. Measured: it did, and the test failed.
+-- Moving the index out of the migration
 -- set instead would mean an index that exists on whichever deployments remembered to run a
 -- script, which is worse than a stall nobody planned: the query it serves would be a sequential
 -- scan on some pods and not others, and nothing would say which.
