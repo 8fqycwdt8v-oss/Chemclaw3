@@ -45,6 +45,7 @@ from typing import Protocol, runtime_checkable
 
 from pydantic import BaseModel, Field
 
+from chemclaw.core.config import settings
 from chemclaw.core.embeddings import embed_texts, embedding_config_key
 from chemclaw.core.ids import stable_hash
 from chemclaw.core.logging import log_event
@@ -106,6 +107,13 @@ class SyncReport(BaseModel):
     skipped_scan: int = 0
     # Opened and refused, or unreadable on the share (a permission error, a truncated file).
     skipped_unreadable: int = 0
+    # Still being read when the per-file bound expired. Its own counter rather than a second
+    # meaning for `skipped_unreadable`, because the two ask for different things: an unreadable
+    # file is a fact about the file, while a timed-out one says only that this deployment's budget
+    # ran out first — and the worker thread it left behind is a cost `skipped_unreadable` does not
+    # carry. A share whose count is persistently non-zero is one where either the bound or the
+    # document needs looking at; see `_parse_changed`.
+    skipped_timeout: int = 0
     skipped_oversized: int = 0
     # Parsed successfully to no text at all — an empty workbook, a placeholder file. Indexed as a
     # file row with no chunks, so it is not re-read every run.
@@ -227,6 +235,24 @@ async def _parse_changed(
     Reject-and-continue, the discipline the ELN sync uses: one unreadable PDF must not abort a pass
     over ten thousand files.
 
+    Reading is also **bounded per file**, and the bound is the front door's own
+    `attachment_parse_timeout_seconds` rather than a second number beside it: an upload and a share
+    document are the same work — untrusted bytes through the same `parse_document`, in the same
+    kind of worker thread — so a deployment that has decided how long that may take has decided it
+    once. Without it, one pathological document (a decompression bomb inside the size limit, a PDF
+    whose `/ToUnicode` table took the previously locked pypdf 33.8 s, a read off a mount that
+    stopped answering) held this activity for as long as it liked, and with it the share's whole
+    crawl: `document_sync_timeout_seconds` bounds the activity attempt, not any file within it.
+
+    **What the bound frees is this pass, not the thread.** Python cannot interrupt a running
+    parser, and none of the libraries behind `parse_document` — pypdf, python-docx, openpyxl,
+    python-pptx — offers an interruption hook, so the worker thread runs the hostile document to
+    completion in the background while the crawl moves on, exactly as `parse_attachment_off_loop`
+    does on the front door. The honest claim is therefore narrow: the
+    activity finishes, its remaining files are indexed, the pass is reported, and one thread of the
+    default executor stays busy until the parse ends by itself. Killing it needs a subprocess, and
+    that is a `docs/planning/BACKLOG.md` row rather than something this bound quietly delivers.
+
     Returns the parsed documents, their refs by path, and the paths that were **refused but are
     still on the share** — the caller restamps those, because a file that failed to open did not
     stop existing and the sweep must not read this pass's silence about it as deletion.
@@ -236,9 +262,14 @@ async def _parse_changed(
     refused: list[str] = []
     unreadable: Counter[str] = Counter()
     first_unreadable = ""
+    timed_out: Counter[str] = Counter()
+    first_timed_out = ""
     for ref in refs:
         try:
-            result = await asyncio.to_thread(_read_and_parse, ref, max_bytes)
+            result = await asyncio.wait_for(
+                asyncio.to_thread(_read_and_parse, ref, max_bytes),
+                timeout=settings.attachment_parse_timeout_seconds,
+            )
         # A refused file gets **no index row**, so its fingerprint is not stored and the next crawl
         # opens it again. That is a deliberate trade, not an oversight: recording it would make the
         # file look unchanged forever, and `skipped_scan` would then read zero on every run after
@@ -248,6 +279,23 @@ async def _parse_changed(
         # revisiting it if a share's refused population makes that read volume material.
         except ScannedDocumentError:
             report.skipped_scan += 1
+            refused.append(ref.path)
+            continue
+        # **Before the `OSError` arm, and that order is load-bearing**: the builtin `TimeoutError`
+        # is an `OSError` subclass, so catching them the other way round would file every timeout
+        # under `skipped_unreadable` and lose the one number that says a bound fired. The same
+        # kinship makes this arm slightly wider than the bound: a share read that fails with
+        # `ETIMEDOUT` arrives here too. Both mean "this file did not come back in time", which is
+        # what the counter is named for.
+        except TimeoutError:
+            logger.debug(
+                "%s exceeded %ss; the pass moved on and its worker thread runs on",
+                ref.path,
+                settings.attachment_parse_timeout_seconds,
+            )
+            timed_out[TimeoutError.__name__] += 1
+            first_timed_out = first_timed_out or ref.path
+            report.skipped_timeout += 1
             refused.append(ref.path)
             continue
         except (DocumentParseError, OSError) as exc:
@@ -265,6 +313,7 @@ async def _parse_changed(
         parsed.append(result)
         by_path[ref.path] = ref
     _summarise_skips("unreadable documents", unreadable, first_unreadable)
+    _summarise_skips("documents past the read bound", timed_out, first_timed_out)
     return parsed, by_path, refused
 
 
@@ -331,13 +380,14 @@ def _record_pass(report: SyncReport, duration_s: float) -> None:
 
     The three outcomes on `chemclaw_ingest_records_total` partition the candidates this pass saw,
     and the split is by *what happened to the corpus*, not by severity: `ingested` is a file with an
-    index row, `rejected` is one that was opened or reached and could not be read (the population
-    that is invisible to a chemist and that OCR or a permission fix would recover), `skipped` is one
+    index row, `rejected` is one that was opened or reached and could not be read — a scanned PDF,
+    a permission error, or a read that ran past its bound (the population that is invisible to a
+    chemist and that OCR, a permission fix or a longer budget would recover), `skipped` is one
     this pass deliberately did not process — unchanged since last time, over the size limit, or a
     format the allowlist turns away. `deduplicated` is not its own outcome because such a file does
     get an index row and is counted in `indexed`.
     """
-    rejected = report.skipped_scan + report.skipped_unreadable
+    rejected = report.skipped_scan + report.skipped_unreadable + report.skipped_timeout
     skipped = report.unchanged + report.skipped_oversized + sum(report.skipped_unsupported.values())
     for outcome, count in (
         ("ingested", report.indexed),
@@ -366,6 +416,7 @@ def _record_pass(report: SyncReport, duration_s: float) -> None:
         pruned=report.pruned,
         skipped_scan=report.skipped_scan,
         skipped_unreadable=report.skipped_unreadable,
+        skipped_timeout=report.skipped_timeout,
         skipped_oversized=report.skipped_oversized,
         empty=report.empty,
         skipped_unsupported=report.skipped_unsupported,
@@ -665,6 +716,7 @@ def merge_reports(reports: list[SyncReport], source: str) -> SyncReport:
         merged.pruned += report.pruned
         merged.skipped_scan += report.skipped_scan
         merged.skipped_unreadable += report.skipped_unreadable
+        merged.skipped_timeout += report.skipped_timeout
         merged.skipped_oversized += report.skipped_oversized
         merged.empty += report.empty
         unsupported.update(report.skipped_unsupported)

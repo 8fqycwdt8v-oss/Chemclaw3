@@ -5,9 +5,25 @@ tells them. It re-runs each saved query on a cadence and pushes only what has ap
 subscriber was last told, through the *existing* session push-back channel (F3-T3) — no new
 delivery mechanism, no email integration, no second notification system.
 
-**Why the watermark advances after delivery, not before.** A crash between "found matches" and
-"delivered" must cause a re-report, not a silent skip: a duplicate digest line is a nuisance, a
-missed one defeats the entire feature. That ordering is the only genuinely tricky thing here.
+**Where it lands, and who reads it.** Each subscriber has one mailbox in `session_events`, keyed by
+the synthetic session id `digest_channel(owner)`, and the front door's `GET /digests` claims it —
+scoped to `DIGEST_KIND` so the claim cannot destroy another consumer's rows, and addressed by the
+*authenticated* caller's `oid` rather than by anything in the request. That route is what makes the
+acknowledgement below true, and it did not exist for the whole first life of this job: the only
+consumer in the tree was `GET /sessions/{id}/events`, which 404s a synthetic id no `session_owners`
+row backs and claims only the two job-outcome kinds anyway. Measured against a real row: the claim
+returned `[]` and left it `consumed_at IS NULL`, which `durable/retention.py` then declines to prune
+forever — while the watermark below advanced past it
+(`D-2026-08-27-a-digest-nobody-can-read-is-not-delivered`).
+
+**Why the watermark advances on the mailbox write, not on the chemist reading it.** A crash between
+"found matches" and "handed to the mailbox" must cause a re-report, not a silent skip: a duplicate
+digest line is a nuisance, a missed one defeats the entire feature. The mailbox row is the durable
+handover — retention prunes a `session_events` row only once it is *consumed*, so an unread digest
+is never aged out — so once the insert commits, re-collecting the same notes would append a second
+row for them every cadence instead of protecting anything. What must not advance is the watermark
+after a *swallowed* delivery, which is why the acknowledgement is conditional on
+`notify_session_best_effort` returning True. That ordering is the only genuinely tricky thing here.
 
 **Why per-subscription isolation.** One subscriber's broken query (or a full mailbox) must not stop
 every other chemist's digest, so each is delivered independently and a failure is logged and
@@ -34,6 +50,12 @@ from chemclaw.durable.notify import notify_session_best_effort
 from chemclaw.durable.publish import BAD_DATA_RETRY, queue_wait_timeout
 
 logger = logging.getLogger(__name__)
+
+#: The `session_events` kind a digest lands under. Named once because the writer below and the
+#: reader (`api/routes/streams.read_digests`) must agree exactly: the claim is destructive and
+#: kind-scoped, so a reader claiming a kind the writer does not use consumes nothing and a reader
+#: claiming more than this would destroy rows meant for another consumer.
+DIGEST_KIND = "digest"
 
 
 class DigestItem(BaseModel):
@@ -175,8 +197,8 @@ class DigestWorkflow:
         for item in digests:
             # Best-effort per subscriber: one broken mailbox must not stop everyone else's digest.
             sent = await notify_session_best_effort(
-                _digest_channel(item.owner),
-                "digest",
+                digest_channel(item.owner),
+                DIGEST_KIND,
                 {"query": item.query, "note_ids": item.note_ids},
             )
             # Only after delivery — see the module docstring on why this ordering matters. The
@@ -199,6 +221,16 @@ class DigestWorkflow:
         return delivered
 
 
-def _digest_channel(owner: str) -> str:
-    """The per-user push-back channel a digest lands on (a surface tails it, like job push-back)."""
+def digest_channel(owner: str) -> str:
+    """The per-user mailbox a digest lands in, addressed by the owner's Entra `oid`.
+
+    Public and imported by the reader (`api/routes/streams.read_digests`) rather than restated
+    there: this string is the whole addressing scheme, so a second spelling of it would be a
+    mailbox the job writes to and nobody opens — which is exactly the state
+    `D-2026-08-27-a-digest-nobody-can-read-is-not-delivered` found.
+
+    It is a *synthetic* session id: no `session_owners` row backs it, so it cannot be authorized by
+    session ownership. The reader therefore never takes it from a caller — it derives it from the
+    authenticated principal, which is why one chemist cannot name another's mailbox.
+    """
     return f"digest-{owner}"

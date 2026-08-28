@@ -129,7 +129,8 @@ async def sync_entries(
     untouched by the record upsert only when the record smiles is unchanged.
     """
     started = time.perf_counter()
-    entries = await adapter.fetch_new_entries(_fetch_floor(since) if apply_overlap else since)
+    floor = _fetch_floor(since) if apply_overlap else since
+    entries = await adapter.fetch_new_entries(floor)
     ingested: list[str] = []
     skipped_existing: list[str] = []
     rejected: list[RejectedEntry] = []

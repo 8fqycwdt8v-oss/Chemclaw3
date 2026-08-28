@@ -802,7 +802,9 @@ _POD_SPECS: dict[str, int] = {
     "deployment-service.yaml": 1,
     "deployment-workers.yaml": 1,
     "deployment-connectors.yaml": 2,  # the MCP server and the bundle's Temporal worker
-    "migrate-job.yaml": 1,
+    # The pre-upgrade DDL Job and the post-upgrade stored-message conversion
+    # (D-2026-08-27-a-conversion-that-cannot-be-rolled-back-is-not-a-pre-upgrade-step).
+    "migrate-job.yaml": 2,
     "schedules-job.yaml": 1,
 }
 
@@ -837,9 +839,9 @@ def test_every_container_drops_its_capabilities() -> None:
         .count('include "chemclaw.containerSecurityContext"')
         for name in [*_POD_SPECS, "_helpers.tpl"]
     )
-    # 6 main containers (one per pod spec, two in the connectors file) + 3 helper-defined
-    # containers: the knowledge-sync init, the refresh sidecar, and the note-repo init.
-    assert containers == 9, f"{containers} containers declare a security context, expected 9"
+    # 7 main containers (one per pod spec, two each in the connectors and migrate files) + 3
+    # helper-defined containers: the knowledge-sync init, the refresh sidecar, the note-repo init.
+    assert containers == 10, f"{containers} containers declare a security context, expected 10"
 
 
 def test_the_restricted_profile_itself_is_not_a_toggle() -> None:

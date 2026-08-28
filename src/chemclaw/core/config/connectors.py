@@ -87,11 +87,19 @@ class ConnectorSettings(BaseSettings):
     # 0 disables it: every turn dials every connector, which is the behaviour before this existed.
     connector_breaker_window_seconds: float = Field(default=30.0, ge=0)
 
-    # Whole-run ceiling for one connector job's child workflow (`ConnectorJobWorkflow`).
+    # Whole-run **maximum** for one connector job's child workflow (`ConnectorJobWorkflow`).
     # Generous, because a connector job is by definition the long-running kind, but bounded so a
-    # wedged connector workflow eventually fails instead of pinning a run forever. Deliberately
-    # one global ceiling rather than a per-manifest field: a bundle in the repo must not be able
-    # to grant itself unlimited runtime — that is a deployment's call.
+    # wedged connector workflow eventually fails instead of pinning a run forever.
+    #
+    # **A bundle may lower this for one of its own jobs and may not raise it**
+    # (`JobSpec.timeout_seconds`, applied as a `min` by
+    # `durable/connector_job.py::child_execution_timeout`). This used to be one global ceiling with
+    # no per-manifest field at all, on the reasoning that a bundle in the repo must not be able to
+    # grant itself unlimited runtime — which is right about the direction and was over-applied to
+    # both. What it cost: one number bounds a twenty-second job and a four-hour job identically, so
+    # with a bundle's worker down the short job sat `running` for the whole ceiling with nothing
+    # said. A bound that can only move downward gives the deployment's call away in neither
+    # direction (`D-2026-08-27-a-bundle-may-lower-its-own-ceiling`).
     #
     # It is a ceiling over the *whole* child, so it must exceed the longest activity that child
     # runs. `_the_job_ceiling_covers_the_activity_it_bounds` enforces that; raise this whenever you

@@ -16,7 +16,13 @@ from pathlib import Path
 import pytest
 
 from chemclaw.core.config import settings
-from chemclaw.ingest.eln.adapter import RawEntry, parse_iso_utc
+from chemclaw.ingest.eln import adapter as eln_adapter
+from chemclaw.ingest.eln.adapter import (
+    DatedIngest,
+    RawEntry,
+    fetch_was_truncated,
+    parse_iso_utc,
+)
 from chemclaw.ingest.eln.ingest import IngestError, ingest_reaction
 from chemclaw.ingest.eln.json_adapter import ElnFormatError, JsonExportAdapter
 from chemclaw.ingest.eln.ord import (
@@ -30,8 +36,12 @@ from chemclaw.ingest.eln.ord import (
 )
 from chemclaw.ingest.eln.ord_adapter import OrdFormatError, OrdJsonAdapter
 from chemclaw.ingest.eln.record import record_from_ord_reaction
-from chemclaw.ingest.eln.records import InMemoryReactionRecordStore
-from chemclaw.ingest.eln.sync import sync_entries
+from chemclaw.ingest.eln.records import (
+    InMemoryReactionRecordStore,
+    PostgresReactionRecordStore,
+    ReactionRecord,
+)
+from chemclaw.ingest.eln.sync import IngestSummary, sync_entries
 from chemclaw.ingest.eln.validate import validate_ord
 from chemclaw.kg.note import cited_ids, cited_links, note_id_for_reaction
 from chemclaw.science.fingerprints.molfp.search import find_similar_molecules
@@ -2186,3 +2196,70 @@ def test_the_validator_does_not_report_ok_over_a_source_that_yielded_nothing(
     printed = capsys.readouterr().out
     assert "OK:" not in printed, printed
     assert "eln-empty" in printed and "no entries" in printed, printed
+
+
+# --- The retraction tier, and the absence it left ----------------------------------------------
+#
+# `D-2026-08-27-a-withdrawn-entry-is-a-fact-the-sync-must-carry` built one and it was removed on
+# review. The defect it named is real and open; what it shipped could not fix it, in three
+# independent places measured below. These two tests are what is left: the wrapper fix the ADR
+# found on the way, which was a live defect of its own, and an absence test naming what a working
+# implementation has to include.
+
+
+def test_the_seam_wrapper_does_not_swallow_an_optional_capability() -> None:
+    """`DatedIngest` must not narrow what the adapter it wraps can do — measured, it did.
+
+    The registry hands the durable sync `DatedIngest(...)` for *every* source, and a
+    `runtime_checkable` Protocol is structural, so a wrapper that does not redeclare a method
+    simply does not have it. `fetch_was_truncated` therefore answered `False` in every deployment,
+    including for the warehouse adapter that implements `fetch_truncated` precisely so the workflow
+    comes back for the truncated remainder — the signal `D-2026-08-27` added, dead through the seam
+    that carries it.
+
+    Read through the public `inner` instead, so a wrapper that exposes what it wraps forwards the
+    capability by doing nothing.
+    """
+
+    class _Bounded(_ListAdapter):
+        def fetch_truncated(self) -> bool:
+            return True
+
+    assert fetch_was_truncated(DatedIngest(_Bounded([]))) is True
+    assert fetch_was_truncated(DatedIngest(_ListAdapter([]))) is False
+    assert fetch_was_truncated(_ListAdapter([])) is False
+
+
+def test_no_retraction_tier_claims_to_exist_without_the_readers_that_honour_it() -> None:
+    """A tombstone nothing sets, and that three of its four readers ignore, is not a control.
+
+    **This test exists to be deleted by whoever implements this properly**, and to make them read
+    `D-2026-08-27` first. What was removed had a `RetractionAware` protocol, a `RetractionReport`,
+    a `retract` on all three stores, a sweep in `sync_entries` and a `retracted_at` column bound —
+    and every one of the following was measured against it:
+
+    - **No producer.** `RetractionAware` had zero implementers in `src/`; the only one was a fake
+      in this file, so `fetch_retractions` answered `None` in every deployment.
+    - **No path to one.** `durable/eln_sync.py::_BoundedIngest` — which `sync_eln_entries` wraps
+      every adapter in — keeps `self._inner` private, and the capability walk follows the public
+      `inner`. So the report was `None` through production even for an adapter that could answer:
+      bare and `DatedIngest`-wrapped returned the report, `_BoundedIngest` returned `None`.
+    - **Three of the four readers ignored the tombstone.** Only the *filtered* leg of
+      `retrieval.retrievers.FingerprintReactionRetriever` consults the record store; the ordinary
+      unfiltered `gather_evidence` sweep still returned `reaction-EXP-1001` for a run whose
+      `is_current` was `False` and whose `eligible(no filters)` was empty. `agent.graph_tools`
+      never reads it, `connectors.rxnfp` never asks the store at all, and
+      `ingest.eln.record.record_from_ord_reaction` renders no withdrawal into the body — so a
+      chemist handed a withdrawn run had no way to see that it was withdrawn.
+
+    So re-adding the storage half alone recreates a control that reads as enabled and is not, which
+    is worse than the gap it closes. Migration `066`'s column is still in the database, unread and
+    deliberately not dropped; a real implementation starts from the readers and reuses it.
+    """
+    assert not hasattr(ReactionRecord(reaction_id="x", body="b", source="s"), "retracted_at")
+    assert not hasattr(InMemoryReactionRecordStore(), "retract")
+    assert not hasattr(PostgresReactionRecordStore(), "retract")
+    absent = ("Retraction", "RetractionReport", "RetractionAware", "fetch_retractions")
+    present = [name for name in absent if hasattr(eln_adapter, name)]
+    assert not present, f"the retraction tier is back without its readers: {present}"
+    assert "retracted" not in IngestSummary.model_fields

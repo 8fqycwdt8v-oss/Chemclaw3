@@ -326,6 +326,54 @@ def _report_postgres_skips(terminalreporter: TerminalReporter) -> None:
     )
 
 
+def _report_public_schema_shadowing(terminalreporter: TerminalReporter) -> None:
+    """Say when a green run was green because *this* database has already run the agent.
+
+    The isolation DSN is `search_path=<test schema>,public` — `public` second, because the
+    `vector` extension is installed once per database and the type has to stay resolvable
+    (`tests/pg.py::schema_dsn`). That fallthrough is what keeps the suite runnable; it is also a
+    way for a test to pass on evidence the runner will not have.
+
+    The tables it can happen with are exactly the ones **no migration creates**:
+    `AsyncPostgresSaver.setup()` and `AsyncPostgresStore.setup()` make them the first time the
+    agent runs, so a dev database that has held a conversation has them in `public` and CI's
+    throwaway container never does. A test that reads `checkpoints` unqualified without creating
+    it therefore passes locally and fails on the runner, on identical code — measured, three of
+    `tests/test_api_sessions.py`'s delete tests did exactly that, and the local run that cleared
+    them reported 5422 passed. `tests/pg.py::create_checkpoint_tables` is the fix for a test that
+    needs them; this section is what makes their *absence* in CI visible from a dev run.
+
+    Reported rather than enforced, and reported as a qualification rather than a failure: having
+    run the agent against your own database is not a mistake, and dropping the tables would break
+    the next `make chat`. What is a mistake is reading a green line as evidence about a database
+    that has never run it — the same misreading `_report_postgres_skips` exists for.
+    """
+    from chemclaw.agent.checkpointer import CHECKPOINT_TABLES
+    from chemclaw.agent.scratchpad import STORE_TABLES
+
+    upstream = sorted({*CHECKPOINT_TABLES, *STORE_TABLES})
+    try:
+        with psycopg.connect(settings.postgres_dsn, connect_timeout=3) as conn:
+            rows = conn.execute(
+                "SELECT tablename FROM pg_tables WHERE schemaname = 'public' "
+                "AND tablename = ANY(%s)",
+                (upstream,),
+            ).fetchall()
+    except psycopg.Error:  # pragma: no cover - the no-Postgres run is already reported above
+        return
+    shadowing = sorted(str(row[0]) for row in rows)
+    if not shadowing:
+        return
+    terminalreporter.write_sep("=", "`public` holds tables no migration creates", yellow=True)
+    terminalreporter.write_line(
+        f"{', '.join(shadowing)} exist in `public` on this database, and the isolation "
+        "search_path falls through to it. A test that reads one of these unqualified without "
+        "calling tests.pg.create_checkpoint_tables() passed here on rows CI will not have — its "
+        "database has run migrations but never the agent. This run is not evidence about that "
+        "case."
+    )
+
+
 # The marker `tests/temporal_env.py::start_env_or_skip` puts in its skip reason. Matched the same
 # way, for the same reason: the number a reader needs is how many tests did not run.
 _TEMPORAL_SKIP = "Temporal test server unavailable"
@@ -379,6 +427,7 @@ def pytest_terminal_summary(terminalreporter: TerminalReporter) -> None:
     """
     _report_postgres_skips(terminalreporter)
     _report_temporal_skips(terminalreporter)
+    _report_public_schema_shadowing(terminalreporter)
     timed_out = sorted(
         report.nodeid
         for report in terminalreporter.stats.get("failed", [])

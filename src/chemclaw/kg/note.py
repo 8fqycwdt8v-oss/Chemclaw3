@@ -85,6 +85,22 @@ def note_id_for_reaction(record_id: str) -> str:
     `retrieval.retrievers` and the ELN ingest both prefixed it, so a chemist handed a search hit
     straight to `expand_note` was told the note did not exist — while it sat on disk under the
     prefixed name. Two spellings of one id is how a search stops reaching the thing it found.
+
+    **There is no source-qualified form, and its absence is deliberate.** One existed here for a
+    day: an optional `source` argument spelling `reaction-<source>.<id>`, so that two sites behind
+    one entry id could be cited apart — the read `ingest.eln.records._one_of` refuses rather than
+    guessing. Nothing in `src/` ever passed it. Every reader that would have to *resolve* such an
+    id — `agent.graph_tools.expand_note`, `agent.protocol_tools`, `ingest.eln.records.read`,
+    `ingest.labels.record.record_phase`, `retrieval.retrievers`, `connectors.rxnfp.tools` — still
+    spells and strips the bare form, so the qualified id it built resolved to nothing anywhere, and
+    its own docstring said so. A spelling no reader accepts is not a spelling; it is a claim that
+    two sites can be told apart in a citation, which is exactly the shape `reject_widening` and
+    `map_to_hpc_identity` were deleted for.
+
+    The need is real and unchanged — `_one_of`'s refusal is still a chemist unable to open a run a
+    search just found — and it is a knowledge-graph *identity* change: the readers, the stored
+    citations and the validator move together or not at all. That is its own decision, and it starts
+    from the six readers above, not from a citation spelling waiting for them.
     """
     return f"reaction-{record_id}"
 
