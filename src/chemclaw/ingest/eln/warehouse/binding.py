@@ -688,6 +688,22 @@ class CorpusBinding(BaseModel):
             "millions of rows rather than a decade of one site's runs."
         ),
     )
+    append_only: bool = Field(
+        default=False,
+        description=(
+            "Whether this source is a live feed whose `order_by` is monotonically increasing for "
+            "new rows, rather than a versioned release. It is a *claim the binding author makes "
+            "about the source*, not something this side can detect, and it is worded that way "
+            "because the cost of it being wrong is a silently skipped row: a record inserted "
+            "below the watermark is never seen again. Set it and the drain persists its keyset "
+            "position in `corpus_cursors` and resumes there on the next fire, so a daily job "
+            "reads the rows added since yesterday instead of re-walking the corpus to find them. "
+            "Leave it false — the default — and a release is walked from the top every time, "
+            "which is correct for a vendor load that is replaced wholesale. Deleting the "
+            "`corpus_cursors` row is the supported way to force a full re-walk after a binding "
+            "change or a backfill the watermark would have hidden."
+        ),
+    )
 
     smiles: FieldBinding = Field(
         description="The reaction SMILES, `reactants>agents>products`. The one required value."

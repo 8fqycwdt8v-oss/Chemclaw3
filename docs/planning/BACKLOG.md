@@ -201,8 +201,11 @@ topic).
       here; `config/temporal.py` no longer claims otherwise, but
       `D-2026-08-27-a-start-to-close-timeout-does-not-bound-the-wait.md` still does and wants a
       superseding ADR — as do three further claims in the pair of 2026-08-27 ADRs that the tree has
-      since falsified or fixed: that "the ELN and corpus syncs are cursored" (`corpus_sync.py:14`
-      and `document_sync.py:213` say in their own words that they keep no `sync_cursors` row), that
+      since falsified or fixed: that "the ELN and corpus syncs are cursored" — `document_sync.py:213`
+      says in its own words that it keeps no `sync_cursors` row, and `corpus_sync.py` keeps one only
+      for a source whose binding sets `append_only`
+      (`D-2026-08-28-a-feed-is-a-corpus-that-does-not-stop`), never in the release mode this claim
+      was made about — that
       "a run with no memo stamps nothing" (`CalcJobWorkflow` defaults the memo read to
       `settings.service_actor_id`, so the durable path delivers `service-account`), and that the
       queue-bound AST rule "fails on any dispatched activity call with neither queue bound" (it was
@@ -349,6 +352,48 @@ topic).
       side effect of a retrieval change is how a store nobody decided on gets built. It is also the
       trigger on the `DEFERRED.md` row for reagent/solvent set diffs in the turn-time comparison —
       one change answers both.
+
+- [ ] **A published calculation names no reaction, note or compound context** — [M]. `grep -n
+      "reaction_id\|note_id\|citation" src/chemclaw/publish/` returns nothing:
+      `schema/result-store/001_core.sql` models a `subject` of kind `reaction` and
+      `subject_member` rows with roles, and neither carries the id of the `reaction_records` or
+      `reaction_labels` row the calculation was about. So a result computed for the product of ELN
+      entry `EXP-1001` cannot be joined back to the run that motivated it, in either direction. The
+      two stores are also separate databases (`sink.yaml` targets `chemclaw-results`;
+      `corpus_molecules.id` is a bare standardized SMILES against `compound.canonical_smiles`), so
+      the join has to be designed rather than discovered. **Needs an ADR.** Deliberately not taken
+      while the row below is open: `D-2026-08-26-a-route-is-not-a-shape` records the composite half
+      of that path being inert for a release with no test noticing, because every test started at a
+      projector rather than at a hook — deciding a cross-reference against a store nobody has run
+      repeats exactly that. **Trigger:** the results store gets a live target.
+
+- [ ] **Structure identity is canonical SMILES and nothing else** — [M]. No InChI, InChIKey,
+      formula, molecular weight, CAS or external registry number exists anywhere in `infra/sql/` or
+      `schema/`; `051_reaction_labels.sql:72` states the omission as a decision ("nothing asks, and
+      this tree deletes dead columns") and it was right when written. What now asks is a
+      cross-system join — an identifier a site's other systems can match on, and one that survives a
+      `STANDARDIZATION_VERSION` bump, which a `standard_smiles` string by construction does not.
+      **Needs an ADR, and the honest form of it is "name the reader", not "add a column"**: an
+      InChIKey nothing queries is precisely the dead column that comment refuses. Candidate readers
+      to argue in it: `schema/result-store/001_core.sql`'s `compound` row, and a lookup that stays
+      valid across a re-standardization. Note the ordering constraint with the solvate row in §2 —
+      any identifier minted before that fix inherits the collapse.
+
+- [ ] **A stalled append-only feed has no first-party signal** — [S]. `corpus_cursors`
+      (`infra/sql/063`) records where each feed's drain stopped, and nothing reads `updated_at`:
+      `ingest/labels/cursor.py:23` selects `after` only. The module declines a lag gauge for a
+      stated reason — a keyset position is opaque, so "how far behind" would have to be invented,
+      unlike `sync_cursors`' datetime twin which exports `chemclaw_ingest_cursor_lag_seconds`. What
+      was offered instead does not hold, and `cursor.py:17-22` now says so: `ReactionCorpusWorkflow`
+      returns **one** report aggregated over every source at the end of the whole `continue_as_new`
+      chain (`durable/corpus_sync.py:252`), not one per pass, and builds it without `has_more` — so
+      a feed whose source stopped exporting looks exactly like a feed with nothing new. Two shapes
+      would close it and they are not equivalent: a per-source outcome (fixes
+      `CorpusSyncOutcome`'s own docstring, which claims "per source" and aggregates), or a staleness
+      gauge over `corpus_cursors.updated_at` — age since the last *advance*, which is a real number
+      even when the position is opaque. **Trigger:** the first deployment that runs an
+      `append_only:` source, since no shipped binding sets it
+      (`D-2026-08-28-a-feed-is-a-corpus-that-does-not-stop`).
 
 - [ ] **The results store has no live target** — [M]. `D-2026-08-25-a-cache-is-not-a-record` ships
       the whole path — `src/chemclaw/publish/`, the canonical schema in `schema/result-store/`, two
