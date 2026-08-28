@@ -366,11 +366,19 @@ async def list_artifacts(calc_ref: str) -> list[StoredArtifact]:
     the bulk data a run produced and the system kept — today that means the second derivatives a
     Hessian computed, held out of the result row because they are megabytes.
 
-    **Not geometries.** A computed structure is addressed by its `structure_id`, which every
-    geometry calculation reports and which `optimize_geometry`, `compute_thermochemistry`,
-    `compute_electronic_properties`, `scan_coordinate` and `sample_conformers` all *take* — that is
-    how a conformer is carried from one calculation into the next, and it needs no file. This tool
-    predates that and used to be the only route to one.
+    **Everything this release stores is a packed array**, so what comes back here is something to
+    seed another calculation with, never something to read. `fetch_artifact` refuses every one of
+    them. Two questions people bring to this tool have better answers elsewhere, and both are a
+    calculation rather than a file:
+
+    - **Not geometries.** A computed structure is addressed by its `structure_id`, which every
+      geometry calculation reports and which `optimize_geometry`, `compute_thermochemistry`,
+      `compute_electronic_properties`, `scan_coordinate` and `sample_conformers` all *take* — that
+      is how a conformer is carried from one calculation into the next, and it needs no file. This
+      tool predates that and used to be the only route to one.
+    - **Not spectra.** Band positions and IR intensities come from `compute_thermochemistry`, which
+      returns them as `modes` — ordered, with `mode_count` stating how many there were and
+      `top_bands` deciding how many to report. That is the band list, and there is no other one.
 
     An empty list is a real answer and usually the right one: most calculations produce no
     by-products worth keeping. It does not mean the calculation is missing — ask
@@ -407,11 +415,18 @@ async def fetch_artifact(artifact_ref: str, max_chars: int = 0) -> ArtifactConte
     file costs a bounded amount of context; if `truncated` is set, say the value came from part of
     the file.
 
-    **In this release every artifact is one of those binary arrays, so this refuses more often
-    than it answers.** The text by-products it was written for — an `xtbopt.xyz`, a `vibspectrum` —
-    have no producer since the calculators moved to their own server. For a geometry, use the
-    `structure_id` a calculation reports: it names the structure exactly and the next calculation
-    takes it directly, which is what quoting coordinates was ever a substitute for.
+    **In this release every stored artifact is one of those packed arrays, so this refuses every
+    one of them.** Nothing here writes a text by-product; the calculators that once did are on
+    their own server and keep no files. So do not come to this tool for a number — come to it only
+    to open an `artifact_refs` citation an older note carries, and expect a refusal. The two things
+    it used to be reached for are each a calculation away:
+
+    - **A geometry** is the `structure_id` a calculation reports. It names the structure exactly
+      and the next calculation takes it directly, which is what quoting coordinates was ever a
+      substitute for.
+    - **A spectrum** is `compute_thermochemistry`'s `modes` — wavenumbers with IR intensities, as
+      many as `top_bands` asks for, with `mode_count` saying how many there were. Quoting bands
+      from there is quoting the calculation, not a rendering of it.
 
     Args:
         artifact_ref: `<calculation key>#<name>`, as `list_artifacts` returns it and as a note's
