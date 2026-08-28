@@ -272,7 +272,7 @@ def test_every_declared_family_has_a_description() -> None:
 
     One declaration, so a family cannot be runnable and undescribed (or described and unrunnable).
     """
-    assert set(FAMILIES) == set("ABCDEFGH")
+    assert set(FAMILIES) == set("ABCDEFGHT")
     assert all(description.strip() for description in FAMILIES.values())
 
 

@@ -75,6 +75,10 @@ FAMILIES: dict[str, str] = {
     "F": "adversarial model output a real model will not produce on request",
     "G": "the front door's own limits, asked for deliberately",
     "H": "pathological data: bad chemistry, impossible arguments, unicode, injection",
+    # The other eight families named five tools between them when this one was added, over a
+    # surface of ninety-nine. This one asks every bundle for something, because "the tool path is
+    # exercised" over 5% of the surface is LOAD-1's own shape one level up.
+    "T": "every advertised tool, called once with arguments it would accept",
 }
 
 # The admission caps the SCALE-3 sweep restarts the front door at. Powers of two around the
@@ -137,7 +141,7 @@ class Finding:
     detail: str = ""
 
 
-async def run_turn(client: httpx.AsyncClient, message: str) -> TurnResult:
+async def run_turn(client: httpx.AsyncClient, message: str, *, dry_run: bool = False) -> TurnResult:
     """Ask the front door one turn and fold its SSE stream into a result.
 
     A transport failure is recorded rather than raised, the discipline `evals/live.run_probe`
@@ -147,6 +151,11 @@ async def run_turn(client: httpx.AsyncClient, message: str) -> TurnResult:
     The behaviour is not a parameter: it travels inside `message` as the `[[name]]` selector the
     mock reads, so passing it separately meant two places could disagree about which scenario a
     turn was. `storm` asserts the selector is present, which is the check that actually matters.
+
+    `dry_run` *is* a parameter, because it is not the model's to set — it rides the request the way
+    `api/schemas.MessageRequest` carries it, and family T is what needs it: the expensive half of
+    the tool surface is driven on a dry-run turn so every launcher is refused before anything is
+    started. That also makes IDEA-4's gate measurable, which nothing else in this lane does.
     """
     result = TurnResult()
     started = time.monotonic()
@@ -156,7 +165,9 @@ async def run_turn(client: httpx.AsyncClient, message: str) -> TurnResult:
         result.session_id = str(created.json()["session_id"])
 
         async with client.stream(
-            "POST", f"/sessions/{result.session_id}/messages", json={"message": message}
+            "POST",
+            f"/sessions/{result.session_id}/messages",
+            json={"message": message, "dry_run": dry_run},
         ) as response:
             result.status = response.status_code
             if response.status_code != 200:
@@ -194,6 +205,7 @@ async def storm(
     concurrency: int,
     timeout: float = 300.0,
     message: str | None = None,
+    dry_run: bool = False,
 ) -> list[TurnResult]:
     """Fire `turns` turns of one behaviour, `concurrency` of them in flight at once.
 
@@ -219,7 +231,11 @@ async def storm(
 
         async def one(index: int) -> TurnResult:
             async with semaphore:
-                return await run_turn(client, message or f"storm turn {index} [[{behaviour}]]")
+                return await run_turn(
+                    client,
+                    message or f"storm turn {index} [[{behaviour}]]",
+                    dry_run=dry_run,
+                )
 
         return list(await asyncio.gather(*(one(i) for i in range(turns))))
 
@@ -908,6 +924,153 @@ async def family_e_chaos() -> list[Finding]:
     return findings
 
 
+# The tool-surface sweep, in the three groups `cli/storm_behaviours.py` documents. Spelled here as
+# literals rather than derived from a prefix, because `tests/test_live_storm.py` reads *this file*
+# for every declared behaviour's name: a harness that named its scenarios by pattern would satisfy
+# the catalogue and tell a reader nothing about what it drives.
+#
+# Group 1 runs for real. A tool whose body never executes proves nothing about its arguments, which
+# is LOAD-1 — so every cheap tool on the surface is genuinely called here.
+_T_DIRECT = (
+    "t-chem-identity",
+    "t-chem-species",
+    "t-chem-degradation",
+    "t-chem-batch",
+    "t-safety-screen",
+    "t-calc-properties",
+    "t-calc-electronic",
+    "t-calc-geometry",
+    "t-calc-ledger",
+    "t-calc-record",
+    "t-molfp-search",
+    "t-rxnfp-similar",
+    "t-rxnfp-precedent",
+    "t-bo-inline",
+    "t-memory",
+    "t-watches",
+    "t-knowledge-read",
+    "t-scratchpad",
+    "t-attachments",
+)
+
+# Group 2: every reference in these is deliberately unresolvable, because a job id, a campaign id
+# and an artifact ref are all minted by a run and cannot be put in a static catalogue. What is
+# asserted is that the turn *survives* — a tool that dies rather than reporting "not on file" costs
+# the chemist the turn (D-2026-08-04-a-failure-that-says-nothing-is-read-as-proceed).
+_T_SURVIVES = ("t-unknown-reference", "t-scratchpad-edit", "t-clarify")
+
+# Group 3: the launchers, driven on a dry-run turn so each is refused before anything starts.
+_T_DRY_RUN = (
+    "t-job-calc-screens",
+    "t-job-calc-conformers",
+    "t-job-calc-coordinates",
+    "t-job-calc-association",
+    "t-job-calc-bonds",
+    "t-job-bo-campaign",
+    "t-job-results",
+    "t-job-report",
+    "t-knowledge-write",
+    "t-memory-synthesis",
+    "t-template-species",
+    "t-template-conformers",
+    "t-template-safety",
+    "t-template-bonds",
+)
+
+
+async def family_t_tool_surface() -> list[Finding]:
+    """T · every tool the agent advertises, reached by a call the tool would actually accept.
+
+    **The gap this closes is the one LOAD-1 is about, one level up.** Measured when this family
+    was added: the other eight named five tools between them, over a surface of ninety-nine. So
+    "the tool path is genuinely exercised" was a claim about 5% of it, and the 95% it said nothing
+    about was the part a chemist mostly uses — every `chem`, `safety`, `molfp`, `rxnfp` and `bo`
+    tool, the whole calibration ledger, the memory verbs and every template. Nothing had removed
+    their coverage; the catalogue was written against the surface of the day and nothing
+    re-derived it afterwards. `tests/test_storm_behaviour_coverage.py` is what re-derives it, so
+    this family cannot go stale in that direction again.
+
+    Three checks, because the three groups can honestly assert different things.
+
+    The **direct** group is the strong one: every announced call must come back as a result, so a
+    call that died in the parse-error branch before the tool body ran shows up as a missing result
+    rather than as a passing turn. That is exactly the measurement the 2026-07 load test did not
+    make. It is a count of results and not of *bodies* — a gate's refusal is a result too — so the
+    finding is worded as "came back" rather than as "ran".
+
+    The **survives** group asks less on purpose. Its references cannot exist — an artifact ref and
+    a job id are minted by runs — so the finding is that the turn came back at all.
+
+    The **dry-run** group is the weakest and says so. `agent/tool_authz.dry_run_refusal` refuses
+    every side-effecting call on a dry-run turn, so these reach the gate with their arguments
+    decoded and start nothing: it proves the call was well-formed enough to be refused, not that
+    the tool body accepted it. That is the price of not starting every durable job and every
+    template run this deployment declares in a lane that has to finish, and it buys the one thing
+    nothing else here measures — IDEA-4's gate swept across the whole expensive surface at once. A
+    launcher that slipped through it would start real work, so `not r.tools_failed` is not the
+    assertion; the refusal appearing in every preview is.
+    """
+    findings: list[Finding] = []
+
+    for behaviour in _T_DIRECT:
+        (result,) = await storm(behaviour, turns=1, concurrency=1)
+        missing = result.announced - result.returned
+        findings.append(
+            Finding(
+                family="T",
+                # "came back", not "the body ran": a gate's refusal is also a result, and this
+                # count cannot tell the two apart. What it *can* say is that no call vanished,
+                # which is the thing LOAD-1 hid.
+                name=f"{behaviour}: every announced call came back",
+                ok=result.status == 200 and result.announced > 0 and missing == 0,
+                observed=(
+                    f"status={result.status} announced={result.announced} "
+                    f"returned={result.returned} failed={result.tools_failed}"
+                ),
+                detail="an announced call with no result is a call that died before the tool ran",
+            )
+        )
+
+    for behaviour in _T_SURVIVES:
+        (result,) = await storm(behaviour, turns=1, concurrency=1)
+        findings.append(
+            Finding(
+                family="T",
+                name=f"{behaviour}: an unresolvable reference does not kill the turn",
+                ok=result.status == 200 and result.transport_error is None,
+                observed=(
+                    f"status={result.status} returned={result.returned} "
+                    f"failed={result.tools_failed} error={result.error_code}"
+                ),
+                detail="'not on file' is an answer; a dead turn is not",
+            )
+        )
+
+    for behaviour in _T_DRY_RUN:
+        (result,) = await storm(behaviour, turns=1, concurrency=1, dry_run=True)
+        # Matched on the word the refusal itself opens with, so a launcher that slipped past the
+        # gate and returned a job id cannot read as a pass.
+        refused = [p for p in result.result_previews if "DRY RUN" in p]
+        findings.append(
+            Finding(
+                family="T",
+                name=f"{behaviour}: every launcher is refused on a dry-run turn",
+                ok=(
+                    result.status == 200
+                    and result.announced > 0
+                    and len(refused) == result.announced
+                ),
+                observed=(
+                    f"status={result.status} announced={result.announced} "
+                    f"refused={len(refused)} failed={result.tools_failed}"
+                ),
+                detail="a call that was not refused started durable work this lane did not want",
+            )
+        )
+
+    return findings
+
+
 async def family_h_edges() -> list[Finding]:
     """H · data a chemist could plausibly send that nothing in the corpus resembles.
 
@@ -1318,6 +1481,8 @@ async def run_storm(
         findings.extend(await family_g_limits())
     if "H" in selected:
         findings.extend(await family_h_edges())
+    if "T" in selected:
+        findings.extend(await family_t_tool_surface())
     if "A" in selected:
         admission, sweep = await family_a_admission(
             sweep_turns=sweep_turns, offered=offered, repeats=repeats

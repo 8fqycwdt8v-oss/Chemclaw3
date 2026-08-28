@@ -182,21 +182,26 @@ knowledge-contribution half of a run silently disappears.
 **`make live-storm` is the third stage, and it needs no model at all.** Point the lane at the mock
 (`CHEMCLAW_LLM_PROVIDER=openai_compatible`, `CHEMCLAW_LLM_BASE_URL=http://127.0.0.1:8820/v1`,
 `CHEMCLAW_LLM_MODEL=mock`) and `make live-up` starts `chemclaw.cli.mock_llm` alongside everything
-else. The storm then drives load, adversarial model behaviour and the front door's own limits with
-zero LLM calls — the mock reports how many requests it served, which is how the run *proves* that
-rather than asserting it. It is an HTTP mock of the **Responses** API, not chat-completions, and
-not an injected chat client: the streaming assembler, the middleware stack, budget admission, the
-audit sink and the session store all sit between the socket and the agent.
+else. The storm then drives load, adversarial model behaviour, the whole advertised tool surface
+and the front door's own limits with zero LLM calls — the mock reports how many requests it served,
+which is how the run *proves* that rather than asserting it. It is an HTTP mock, not an injected
+chat client: the streaming assembler, the middleware stack, budget admission, the audit sink and
+the session store all sit between the socket and the agent. It serves **both** chat protocols —
+`/v1/responses` and `/v1/chat/completions` — because the engine changed under it and for a while it
+served only the first, so every credential-free lane took a bare 404 and every turn died with no
+answer and no tool call.
 
 **`make live-soak` repeats the storm for as long as you leave it and fits what drifts.** It asks the
 one question no single run can — does anything grow that should not — so it is checkpointed per
 round to a JSON-lines record under `.live/` and re-running it *resumes*: on a host whose container is
 reclaimed on a timer, a reclaim costs one round rather than the run. `make live-soak-report` fits
 every series.
-It deliberately runs families `BCDFGH` rather than all eight, because family A restarts the front
+It deliberately runs families `BCDFGH` rather than every one, because family A restarts the front
 door at each admission cap and family E SIGKILLs a worker, and the RSS of a process that has just
-been replaced is not a series. Ask `make live-storm` whether the system survives being disturbed;
-ask this one what drifts when it is not.
+been replaced is not a series. T is left out for a different reason: it sweeps the whole tool
+surface once, which is a coverage question rather than a drift one, and repeating it every round
+would add wall-clock to each sample without adding a series. Ask `make live-storm` whether the
+system survives being disturbed; ask this one what drifts when it is not.
 
 **Stage B (`make live-probes`) adds the model.** With the workers up, the `du-*` probes in
 `data/evals/probes/durable.yaml` exercise durable work for the first time, and every workflow id a
