@@ -380,6 +380,14 @@ def test_the_store_table_list_is_derived_from_upstream_not_asserted_against_itse
 
     `store_migrations`/`vector_migrations` are excluded by name for the reason
     `checkpoint_migrations` is: a ledger of which statements have run holds nobody's memories.
+
+    **That exclusion currently removes nothing, and saying so is the point.** Upstream creates the
+    checkpointer's ledger inside `MIGRATIONS`, which is why the twin's subtraction is load-bearing;
+    the store's ledgers are created inside `setup()` itself, in an f-string this regex cannot see.
+    So the subtraction is insurance against upstream moving them, not a filter doing work today —
+    and the gap it leaves is real: a store table added the same way, outside the migration lists,
+    would still escape. That is a narrower hole than the one this test closes, and it is the reason
+    `make offline-run`-style verification against a live `setup()` would be the stronger check.
     """
     import re
 

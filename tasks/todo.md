@@ -93,3 +93,30 @@ pass. A test that passes both ways proves nothing, and this file's own history s
 `tests/test_deploy_chart.py::test_the_fleet_ceiling_...` as failing on a clean tree. The baseline
 run taken before any edit was **5,444 passed, 11 skipped, exit 0**. Prose about a test is evidence
 about what its author believed; the run is the evidence.
+
+
+---
+
+## Follow-up: the review of this change (2026-08-28)
+
+Four adversarial passes over the merged diff. **Three defects in my own change, all now closed**,
+two false claims in its ADRs retracted in a new one, and one gap filed with its measurement.
+
+- [x] `jsonb_array_elements` on a non-array aborted the whole erasure — guarded, parametrized over
+      the five shapes Postgres refuses.
+- [x] The leaver's own orphaned link spared the leaver's own blob, under a report reading `0` —
+      the anti-join goes through `session_owners` now, paired with the test proving another
+      *person* still spares it.
+- [x] A `BACKLOG.md` section heading was deleted with a moved row, silently re-filing three rows.
+- [x] A test fixture that outlived its own test and was measured by the next one.
+- [x] `unwindowed_ownership_dependencies` claimed to be derived and was not — a test now joins the
+      two maps; and its `session_events` entry named a window that cannot unblock it.
+- [x] Corrected: the "three tables said no decision is on record" quotation (two did), the 90,366
+      figure (90,090 on the fixture the suite builds), the ordering row's overgeneralisation from
+      erasure to `delete_session`, and the counts in the unbounded-tables row.
+- [x] Hardened: the register assertion tested an English substring; the shipped compaction default
+      was pinned only by fixtures it could outgrow; a declared column nothing read now has to exist.
+- [ ] **Filed, not fixed**: no deployment declares `llm_context_window_tokens`, so the ~30k prefix
+      is uncharged and a request now measures ~135,700 against a configured 100,000 — and
+      `_record_overrun` cannot see it. Three candidate fixes, one of which changes what
+      `agent_context_token_budget` means. That is a decision with an owner.

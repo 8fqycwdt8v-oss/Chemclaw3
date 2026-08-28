@@ -29,6 +29,7 @@ from chemclaw.durable.retention import (
     _ANALYZE_THREADS,
     _EXPIRED_THREADS,
     _NOT_PRUNED,
+    _OWNERSHIP_DEPENDENCIES,
     _PRUNABLE,
     _SESSION_SCOPED_ROWS,
     RetentionOutcome,
@@ -179,7 +180,8 @@ def test_a_table_the_erasure_keeps_is_not_disposed_of_on_a_clock() -> None:
     sentence was written for `bo_campaigns` and is a property of the whole retained tier, so
     asserting it against four names left the other three unchecked — and unchecked is exactly where
     they were: `note_proposals`, `plan_approvals` and `turn_costs` sat in `_NOT_PRUNED` reading
-    *nothing bounds it, no decision is on record*, while `agent/leaver.py` had been keeping all
+    *nothing bounds it* — two of the three adding *no decision is on record* — while
+    `agent/leaver.py` had been keeping all
     three through an erasure request for the same reason the four "refused" entries give. One
     argument, two registers, and nothing joining them. This is the join.
 
@@ -202,9 +204,15 @@ def test_a_table_the_erasure_keeps_is_not_disposed_of_on_a_clock() -> None:
             f"{table} is in the erasure register's retained tier and in no disposal register at "
             "all — `_NOT_PRUNED` is where that decision is recorded"
         )
-        assert "no decision is on record" not in _NOT_PRUNED[table], (
-            f"{table} is retained through erasure, so a decision *is* on record; "
-            f"`_NOT_PRUNED` says {_NOT_PRUNED[table]!r}"
+        # The register has exactly two ways to say "a decision was taken, and it was not a clock":
+        # `refused:` for the table itself, and `cascades from` for one whose parent is refused
+        # (`bo_suggestions`). Asserting the vocabulary rather than the absence of one English
+        # phrase is the point — the earlier form checked that the reason did not contain "no
+        # decision is on record", which any rewording escapes while recording just as little.
+        stated = _NOT_PRUNED[table]
+        assert stated.startswith(("refused:", "cascades from")), (
+            f"{table} is retained through erasure, so its disposal entry has to state a decision "
+            f"rather than a blank; `_NOT_PRUNED` says {stated!r}"
         )
 
 
@@ -240,6 +248,36 @@ def test_a_session_owner_row_names_the_windows_that_hold_it_back() -> None:
         ), "a window that is set is not a window holding the ownership row back"
     finally:
         settings.retention_tool_results_days = original
+
+
+def test_every_session_scoped_blocker_says_what_would_unblock_it() -> None:
+    """The two maps name one set of tables, and nothing derived them from each other.
+
+    `_untouched_arms` builds a `NOT EXISTS` arm per `_SESSION_SCOPED_ROWS` entry, and
+    `_OWNERSHIP_DEPENDENCIES` says what would empty each of them. The advice function's docstring
+    claimed to be *derived* from the first map "so it cannot drift"; it is not, and a review found
+    that claim inside the change whose own ADR is about two registers describing one set of tables
+    with nothing joining them.
+
+    This is the join. A table added to `_SESSION_SCOPED_ROWS` blocks ownership rows immediately and
+    would drop silently out of the operator advice; now it fails here, and the author has to say
+    which window empties it — or `None`, which is the honest answer for `session_events`, whose
+    unconsumed rows no window prunes at all.
+    """
+    assert set(_OWNERSHIP_DEPENDENCIES) == set(_SESSION_SCOPED_ROWS), (
+        "these two maps must name the same tables: "
+        f"{sorted(set(_OWNERSHIP_DEPENDENCIES) ^ set(_SESSION_SCOPED_ROWS))}"
+    )
+    for table, dependency in _OWNERSHIP_DEPENDENCIES.items():
+        if dependency is None:
+            continue
+        windowed_table, env = dependency
+        assert windowed_table in _PRUNABLE, (
+            f"{table} is said to be unblocked by pruning {windowed_table}, which nothing prunes"
+        )
+        # The ENV name is what an operator types, so it has to be the one `Settings` reads.
+        field = env.removeprefix("CHEMCLAW_").lower()
+        assert field in type(settings).model_fields, f"{env} is not a setting"
 
 
 def test_every_table_in_the_schema_has_a_disposal_decision() -> None:

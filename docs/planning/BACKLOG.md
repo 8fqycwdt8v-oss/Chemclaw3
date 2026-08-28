@@ -98,6 +98,8 @@ topic).
       for the audit trail, where that question can be answered. What stays open is unchanged: the
       string is still the caller's to choose.
 
+## 2 — Answers that are wrong without saying so
+
 - [ ] **The fingerprint index is keyed by source and the citation is not, so two sources collapse
       to one note id** — [M], and it is the half `D-2026-08-27-a-fingerprint-is-keyed-by-its-source`
       deliberately left. Migration 063 made the write side `(source, id)`, which is what stops one
@@ -197,6 +199,35 @@ topic).
 
 ## 4 — Operating it
 
+- [ ] **No deployment declares a context window, and the overrun indicator cannot see the prefix**
+      — [M], found reviewing `D-2026-08-28-the-budget-is-the-control-not-the-trigger` after it
+      merged, and it is that change that made a latent gap live.
+      `context_budget.effective_trigger` subtracts the request's own prefix from the budget **only**
+      `if window:`; `llm_context_window_tokens` defaults to 0, `.env.example` ships 0, and
+      `grep -rn CONTEXT_WINDOW deploy/ infra/ docs/guides/runbook.md` returns nothing. So the ~30k
+      prefix — instructions, the skills listing, every tool schema — is never charged against
+      `agent_context_token_budget`.
+      While the group floor shipped at 12 an ordinary thread sat at ~4k and this could not bite.
+      With the floor off the window fills the budget by design, so a request measures **~135,700
+      estimated tokens** (99,924 thread + 35,773 prefix) against a configured 100,000 — over a
+      128k model window, and at this repository's own measured 2.2x ratio for structured chemistry
+      payloads, well over 200,000 billed.
+      **And the one thing that would say so reads clean.** `compaction._record_overrun` compares
+      the *thread* against the thread's budget, which the window edit has just cut to fit by
+      construction, so `chemclaw_context_unreducible_total` moved by **0** on exactly that request
+      — while its own docstring calls it "the only leading indicator this system has for a
+      context-length failure". `agent_context_calibration_min_calls = 20` also pins the ratio at
+      1.0 for the first twenty model calls of every process, i.e. every pod restart.
+      Three candidate fixes and they are not equivalent, which is why this is a row rather than a
+      patch: declare `llm_context_window_tokens` in `deploy/` (cheapest, and it needs a number
+      nobody here knows); subtract `prefix_tokens()` unconditionally (changes what
+      `agent_context_token_budget` *means* — thread spend becomes request spend — which is
+      `D-2026-08-28-a-budget-in-the-wrong-unit-is-not-a-budget`'s decision to revisit, not a review
+      pass's); or add a window-aware arm to `_record_overrun` so the indicator at least fires where
+      a window is declared. **The first two are a decision with an owner.**
+
+
+
 - [ ] **`/readyz` now waits on Temporal inside a 1-second kubelet probe** — [M], found by the
       correctness review of the branch that added the queue probe. `readyz` calls
       `probe_connectors()` on every poll, and a jobs-only bundle now routes to a
@@ -243,10 +274,14 @@ topic).
 
       **"Order the two consistently" was examined on 2026-08-28 and is not available**, which is
       what this row now records instead of an instruction that cannot be followed. Each order is
-      required by its own invariant. Erasure and the single-session delete must remove
-      session-scoped rows *before* `session_owners`, because that table is the only way to find
-      which sessions were the person's — reversing it strands the rows rather than deleting them
-      (measured: `session_messages`, `session_events` and `checkpoints` each keep a row).
+      required by its own invariant — but only one of the two paths is *forced*, and a first
+      telling of this correction claimed both were. **Erasure** must remove session-scoped rows
+      before `session_owners`, because its statements re-resolve through a subquery over that table
+      every time (measured by reordering `_ERASE`: `session_turns` keeps a row). **The
+      single-session delete is not forced** — `_SESSION_DELETE`'s predicates are
+      `session_id = %(session_id)s` lookups, and reversing it strands nothing (measured). It shares
+      erasure's order because `_session_delete_statements` *derives* it, which is a coupling worth
+      keeping rather than an invariant of that path.
       `_DELETE_SESSIONS` must take the ownership row *first*, because the lease deletion reads that
       DELETE's `RETURNING` — which is what makes "a lease goes only if its ownership row went" true
       rather than intended; deleting leases first would collect the lease of a live turn whose
@@ -409,14 +444,18 @@ topic).
       that the receipt stays — but the copy downstream is somebody else's sweep, and the first
       deployment to point at a real store inherits the obligation. Settle it with that
       deployment, not before: the answer depends on whose database it is.
-- [ ] **Five tables still say "nothing bounds it, and no decision is on record"** — [M].
+- [ ] **Five tables still say "nothing bounds it"** — [M].
       `durable/retention.py`'s `_NOT_PRUNED` is the register that makes this visible, and it is
       doing its job: it names every table in the schema and does not invent an answer where none was
-      taken. Eight entries carried that wording; the 2026-08-28 erasure pass closed three of them
+      taken. Eight entries carried that wording — five of them also saying *no decision is on
+      record*, which an earlier version of this row quoted as though it were the same set; the
+      2026-08-28 erasure pass closed three of the eight
       (`note_proposals`, `plan_approvals`, `turn_costs` — all three are kept through a data-subject
       erasure, so the decision *was* on record one module over, and a derived test now couples the
       two registers). The remaining five are `molecule_fingerprints`, `reaction_fingerprints`,
-      `user_preferences`, `predictions` and `measurements`, plus a sixth question of a different
+      `user_preferences`, `predictions` and `measurements` — and `user_preferences` is the weakest
+      of the five, because `leaver._ERASE` already deletes it per actor, so what is open there is a
+      clock rather than a policy. Plus a sixth question of a different
       kind: `tool_result_blobs` has a window and it ships at 0 "as a deliberate uniformity rather
       than a considered policy for this table", which `retention.py` itself flags as the
       highest-volume table in the set.

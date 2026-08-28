@@ -216,6 +216,22 @@ def test_the_budget_is_the_control_at_the_shipped_defaults() -> None:
     )
 
 
+def test_the_shipped_configuration_leaves_the_budget_in_charge() -> None:
+    """The default is 0, asserted directly rather than implied by a fixture that fits it.
+
+    Mutation-testing the two tests below found they pin "keep is large *or* zero": sweeping the
+    setting, they fail across 1..63 and pass again at 64 and above, because 64 groups of that
+    fixture already exceed its budget. That is the right band for what each of them measures and it
+    is not the claim their docstrings make. A default is a claim in this repository, so it is
+    asserted as one — one line, no fixture, nothing to outgrow.
+    """
+    assert settings.agent_keep_last_conversation_groups == 0, (
+        "the shipped default re-arms the group floor; the budget is then a trigger rather than "
+        "the control, which is what `D-2026-08-28-the-budget-is-the-control-not-the-trigger` "
+        "changed"
+    )
+
+
 def test_a_group_floor_still_binds_when_a_deployment_asks_for_one() -> None:
     """`agent_keep_last_conversation_groups` ships at 0 and is not gone.
 
