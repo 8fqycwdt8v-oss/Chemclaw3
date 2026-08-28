@@ -79,7 +79,7 @@
     "tool_failed": {
       "agent": "str",
       "message": "str",
-      "reason": "Optional[Literal['plan_gate']]",
+      "reason": "Optional[Literal['dry_run', 'undeclared_write', 'plan_gate', 'repeat', 'authz']]",
       "tool": "str"
     },
     "tool_result": {

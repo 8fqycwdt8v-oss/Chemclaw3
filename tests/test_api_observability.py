@@ -447,7 +447,7 @@ def test_the_turn_record_separates_a_tool_failure_from_a_governance_refusal() ->
     Folding them together reports a correctly-gated turn as a broken one — the exact mistake
     `ToolFailedEvent.reason` was added to prevent, and the reason the ledger gets two columns
     rather than one. The classification is not re-derived here: `reason` is set once, from the
-    exception *class*, by `agent/plan_gate.plan_gate_failure_reason`.
+    exception *class*, by `agent/audit.refusal_reason`, and carried out on the signal.
     """
     ledger = _ledger()
     for event in (
@@ -462,6 +462,52 @@ def test_the_turn_record_separates_a_tool_failure_from_a_governance_refusal() ->
     assert (ledger.tool_calls, ledger.tool_failures, ledger.tool_refusals) == (2, 1, 1)
     assert ledger.jobs_started == 1
     assert ledger.ttft_seconds is not None and ledger.ttft_seconds >= 0
+
+
+def test_every_gate_the_audit_trail_classifies_can_be_said_on_the_wire() -> None:
+    """`refusal_reason`'s table and `ToolFailedEvent.reason` are one vocabulary, not two.
+
+    This is the property that made the old shape wrong rather than merely narrow. `refusal_reason`
+    has named five gates since it was written; the wire said `plan_gate` and nothing else, so the
+    other four reached every surface as an ordinary fault — a dry run the chemist themselves asked
+    for, a role denial, a write a narrowed agent never had, and a repeat the guard stopped, each
+    rendered exactly like an unreachable pod.
+
+    Asserted in both directions and derived from the table rather than transcribed, so a sixth gate
+    fails here instead of silently reporting itself as a database outage. `RefusalReason` has one
+    definition (`core/turn_signals`) that both sides import, which is what makes this a check on
+    the *table* rather than on two copies of a list.
+    """
+    from typing import get_args
+
+    from chemclaw.agent.audit import _refusal_types
+    from chemclaw.core.turn_signals import RefusalReason
+
+    classified = {reason for _, reason in _refusal_types()}
+    sayable = set(get_args(RefusalReason))
+    assert classified == sayable, "a gate the trail classifies has no way to reach a surface"
+    # And each really is constructible on the event, rather than merely present in a type alias.
+    for reason in sorted(sayable):
+        assert ToolFailedEvent(tool="t", message="m", reason=reason).reason == reason
+
+
+def test_a_refusal_is_classified_from_the_exception_not_from_its_wording() -> None:
+    """The gate's verdict survives someone rewording the sentence a chemist reads.
+
+    The predecessor matched `signal.message` against the literal `"PlanNotApprovedError:"`, so the
+    classification depended on a *string* that `failure_detail` truncates to 300 characters and
+    that any editor may reword. Here the same refusal is classified with its message replaced by
+    text naming no class at all: what is read is the exception.
+    """
+    from chemclaw.agent.audit import refusal_reason
+    from chemclaw.agent.plan_gate import PLAN_GATE_REASON, plan_approval_refusal
+    from chemclaw.agent.tool_authz import DryRunRefusal, UndeclaredWriteRefusal
+
+    assert refusal_reason(plan_approval_refusal("propose_note")) == PLAN_GATE_REASON
+    assert refusal_reason(DryRunRefusal("you asked me not to")) == "dry_run"
+    assert refusal_reason(UndeclaredWriteRefusal("never given it")) == "undeclared_write"
+    # A genuine fault is not a refusal, whatever it says about itself.
+    assert refusal_reason(ConnectionError("PlanNotApprovedError: down")) is None
 
 
 def test_time_to_first_token_is_the_first_token_not_the_last() -> None:
