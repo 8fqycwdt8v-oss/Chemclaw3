@@ -63,6 +63,25 @@ topic).
 
 ## 1 — Untrusted input reaching a privileged surface
 
+- [ ] **A standing plan approval authorizes any state-changing tool, not the plan's steps** — [L],
+  from the 2026-08 security review (proven live). `plan_gate.enforce_plan_approval` refuses a
+  state-changing call unless an approval exists for the current plan's identity — `plan_identity`,
+  a hash of the todo *contents* — but it never compares the *tool being called* to anything in the
+  plan. So once a human approves a one-line read-only plan ("look up the melting point of aspirin"),
+  every tool in `authz.side_effecting_tools()` executes for the rest of that turn:
+  `propose_knowledge_note` (a knowledge-graph write / git push), `synthesize_memory`, every durable
+  calc/BO launch. Combined with the unframed injection surfaces (connector output, `find_past_jobs`
+  `plan_step`, ELN notes) this is the injection amplifier — untrusted text that reaches the model
+  during an approved turn reaches the full write surface while the chemist believes they approved a
+  lookup. The clean fix is **not** a patch: the plan is prose todos with no per-step tool
+  declaration, so binding an approval to "its tools" requires the harness to enumerate the
+  side-effecting tools each step will use (a `write_todos`/prompt schema change), capture that set
+  on the `plan_approvals` row at approval, and refuse a call whose tool is outside it. Scanning the
+  todo prose for tool names was rejected as fragile in both directions (a legitimate plan that does
+  not spell the exact registered name would fail to authorize its own tool, making `plan_only`
+  unusable — the worst outcome the gate's own docstring names). Until the declaration exists, the
+  gate binds plan *content* only. Deliberately left as a feature rather than shipped as a heuristic.
+
 - [ ] **The unauthenticated `X-Chemclaw-Actor` header becomes durable attribution** — [M], and
       **narrower than this row used to claim**. It does not reach `job_records` or the audit trail:
       the durable path takes the actor as an argument sourced from core's validated front-door
