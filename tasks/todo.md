@@ -79,3 +79,15 @@ Each names the input that is missing, not an effort estimate.
 ## Review
 
 (filled in at the end)
+
+## Merge-time tasks (cross-agent couplings)
+
+Each is a one-line edit that no single agent could make, because the file
+belonged to a sibling working concurrently.
+
+- [ ] `ingest_rejections` (migration 065) needs a `_NOT_PRUNED` entry in
+      `durable/retention.py`. `tests/test_retention.py::test_every_table_in_the_schema_has_a_disposal_decision`
+      is red until it lands. The table is self-bounding per its own README row.
+- [ ] Delete every `BACKLOG.md` row this branch closes, in the merging commit.
+- [ ] Re-run the whole gate after the last agent lands: the per-agent runs each
+      saw a tree the others were still editing.
