@@ -195,12 +195,20 @@ def _fact(
 
     **`value` is canonical and `reported_value` is what the calculator said.** `to_canonical` is the
     one place a unit conversion happens on the publish path, which is what makes a predicate over
-    `value_canonical` sound — and today every call site below passes a unit that already *is* the
-    property's canonical unit, so the conversion is an identity on every live path and only its own
-    unit test exercises it. The first projector reporting an energy difference in hartree or kJ/mol
-    — the natural shape for anything coming back from `servers/calc` — is the one that needs this,
-    and it lands off by 627.5 or 4.184 with the unit string beside it still right. Keeping the
-    reported pair is what makes that recoverable rather than merely wrong.
+    `value_canonical` sound.
+
+    This paragraph used to say the conversion was an identity on every live path, because every
+    call site passed an already-canonical unit and only its own unit test exercised it. That stopped
+    being true when `max_gradient` was corrected to the unit it actually holds, and the guard is now
+    load-bearing: a projector reporting an energy difference in hartree or kJ/mol — the natural
+    shape for anything coming back from `servers/calc` — lands off by 627.5 or 4.184 with the unit
+    string beside it still right, and therefore inside or outside every range filter the column
+    exists for.
+
+    How many sites convert is not written here, because it moved twice while that sentence stood.
+    `tests/test_publish_projection.py::test_the_conversion_guard_is_load_bearing_on_a_live_path`
+    derives it and fails if the set ever empties. Keeping the reported pair is what makes a wrong
+    conversion recoverable rather than merely wrong.
     """
     if value is None:
         return None

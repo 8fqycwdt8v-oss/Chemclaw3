@@ -12,8 +12,10 @@ things with different answers (D-2026-08-08-a-rollback-that-is-not-a-schema-step
 is refused outright. Leaving the *previous image* unable to write — `SET NOT NULL` on an existing
 column, or a dropped or replaced key — is refused unless the migration is listed in
 `_REVIEWED_ROLLBACK_BREAKS` with the statements read and an ADR saying what an operator does
-instead of "deploy the previous image". Exactly one migration is: `041_document_chunk_identity.sql`,
-whose rollback procedure is in that ADR.
+instead of "deploy the previous image". Four migrations are: `041_document_chunk_identity.sql`, `056_reaction_record_identity.sql`, `058_note_proposal_superseded.sql`, `063_reaction_fingerprint_source.sql`,
+each with its rollback procedure in the ADR `tests/test_migrations_are_additive.py` makes it
+name. (The count and the list are both derived from that set, which is the only place they are
+maintained — this sentence said "exactly one" while the set held four.)
 
 `grants/` is not part of that set and is invisible to the runner's non-recursive glob by
 construction. See the note at the bottom.

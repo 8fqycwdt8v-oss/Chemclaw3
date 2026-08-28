@@ -18,7 +18,7 @@ prefers death to a silently reduced tool surface — was structurally unable to 
 the largest blast radius. A connector's HTTP pod going dark costs a read tool for a turn. A bundle's
 worker fleet at zero costs every job launched onto that queue: the launch **succeeds**, the child is
 accepted onto `connector-<name>`, the chemist is told "running", and the answer arrives when
-`connector_job_timeout_seconds` — 25 h at the shipped default — expires.
+`connector_job_timeout_seconds` — 5 h at the shipped default — expires.
 
 That failure already has an offline guard one level up. `make connector-validate` refuses a job
 naming a workflow the bundle's own modules do not register, precisely because "the child starts on a
@@ -121,26 +121,21 @@ bundle per readiness sweep — cached for `service_readiness_cache_seconds` like
 sweep. A deployment with no broker gets one `unknown` row per durable bundle and a WARNING, not a
 crash-loop.
 
-**Two readers of the verdict were not brought onto the shared predicate, and both are follow-ups
-rather than oversights.**
+**One reader of the verdict is still not on the shared predicate, and it is a follow-up rather
+than an oversight.**
 
-- `api/routes/ops.py` still computes `/readyz`'s `connectors_unhealthy` as
-  `state == "unreachable"`, so that body under-reports an `unpolled` bundle by one while `/metrics`
-  reports it. It is a one-expression change to `item.unhealthy` and it must be made; it is outside
-  the file budget of the branch that took this decision, which is the whole of the reason it is not
-  in it.
 - **A bundle with *both* halves is still judged on its endpoint alone.** `bo` and `calc` declare an
   endpoint and jobs, so their queues are not asked about: one `ConnectorHealth` carries one state,
-  and a composite verdict ("healthy only if both halves are") needs the readers above to agree on
-  what a two-part state means before it can be reported honestly. That leaves the shipped fleet's
-  heaviest worker — `connector-calc`, whose CREST searches are the longest activity in the system —
-  covered by this ADR's argument and not yet by its code. The trigger to finish it is the `/readyz`
-  fix above; the argument is already made here and does not need remaking.
+  and a composite verdict ("healthy only if both halves are") needs a decision about what a
+  two-part state means before it can be reported honestly. That leaves the shipped fleet's heaviest
+  worker — `connector-calc`, whose CREST searches are the longest activity in the system — covered
+  by this ADR's argument and not yet by its code.
 
-- `docs/guides/runbook.md` tells an operator a connector is probed as "`healthy`, `unreachable` or
-  `unprobed`", which is now three of five. Same budget, same fix: the troubleshooting section needs
-  the two new words and the sentence that `unpolled` means a worker deployment rather than a server
-  pod.
+Two other readers *were* brought onto it in the same branch, after this section was first written
+naming them as outstanding: `api/routes/ops.py` now computes `/readyz`'s `connectors_unhealthy`
+from `item.unhealthy`, so that body and `/metrics` cannot hold two definitions of "down"; and
+`docs/guides/runbook.md`'s troubleshooting section names all five states and says that `unpolled`
+means a worker deployment rather than a server pod.
 
 **A namespace that does not exist reports `unknown` forever**, not a misconfiguration. That is the
 price of "only a success is a verdict", and it is paid down by the WARNING carrying the RPC's own

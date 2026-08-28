@@ -2,11 +2,12 @@
 # and the named protocols that sequence them.
 #
 # **Every probe here covers a tool that had no probe at all**, and they are the same seventeen
-# names `tests/test_probe_coverage.py` grandfathered in: the GFN multi-step merge added them in one
-# change, the coverage gate landed on a branch that was already behind it, and the gate recorded
-# the debt rather than pretending the corpus was complete. This file is that debt paid. Nothing was
-# added to the grandfathered baseline to make this possible — the live debt is computed as the
-# baseline minus whatever now has a probe, so each of these questions removes one name by existing.
+# names `tests/test_probe_coverage.py` used to grandfather: the GFN multi-step merge added them in
+# one change, the coverage gate landed on a branch that was already behind it, and the gate
+# recorded the debt rather than pretending the corpus was complete. This file is that debt paid —
+# and because it is paid in full, the grandfathering machinery was deleted rather than left holding
+# an empty set, so there is no longer a live debt to compute. The gate is now simply that every
+# advertised tool has a probe.
 #
 # The surface these ask about has a shape worth stating, because it decides what a right answer is
 # and it is the commonest thing to get wrong:

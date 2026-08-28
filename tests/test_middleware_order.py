@@ -50,7 +50,7 @@ from tests.fakes import scripted
 #
 # - `FilesystemMiddleware` is *this repository's*, occupying upstream's slot by sharing its name.
 #   That is what withholds `execute` and `delete`.
-# - the seven `wrap_tool_call` wrappers sit inside it and inside `SubAgentMiddleware`, so a
+# - the `wrap_tool_call` wrappers sit inside it and inside `SubAgentMiddleware`, so a
 #   scratchpad write and a `task` spawn cross the audit row and the authorization gate exactly like
 #   any other tool call.
 # - `AnthropicPromptCachingMiddleware` is last because it too replaces an upstream entry in place,

@@ -680,7 +680,8 @@ def tool_governance_middleware(audit: Any, profile: AgentProfile) -> list[Any]:
     `entra_required`, `is_dry_run()` is False off the request path, and the repeat counter is
     absent unless a turn started one.
 
-    **Separate from the two model-facing converters, and the split is a decision.** They used to be
+    **Separate from the two model-facing converters and the framing wrapper, and the split is a
+    decision.** The converters used to be
     one list, because the only caller was a chat turn and every tool call there is answered *to a
     model*. `agent/tool_invocation.py` is the caller that made the difference visible: a template
     step has no model, and handing it a refusal converted into prose is actively wrong — the

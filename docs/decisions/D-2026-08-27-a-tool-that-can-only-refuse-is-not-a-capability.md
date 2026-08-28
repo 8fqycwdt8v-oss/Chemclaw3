@@ -134,7 +134,7 @@ fix above:
 - `skills/computational-evidence/SKILL.md` still promises "the relaxed coordinates, the second
   derivatives, the raw vibrational spectrum" and tells the agent to fetch a geometry or a spectrum.
   It is the largest remaining statement of the removed promise.
-- `science/calc/artifacts.py::_MEDIA_TYPES` still carries six names with no producer. They are
+- `science/calc/artifacts.py::_MEDIA_TYPES` still carries eight names with no producer. They are
   harmless as a table — `media_type_for` falls back to opaque bytes — and they are what the absence
   test above derives its dead set *from*, so removing them is a change to that test as well.
 
