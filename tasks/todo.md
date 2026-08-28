@@ -11,34 +11,34 @@ decision only the owner can take. Everything else keeps its row and its stated t
 ### Buildable — worked in this pass
 
 **Wave 1 — self-contained defects, disjoint files**
-- [ ] W1-A A solvate collapses onto whichever fragment is larger (`core/chem.py`)
-- [ ] W1-B Surface `invalid_tool_calls` (agent middleware chain)
-- [ ] W1-C A timed-out attachment parse still runs to completion — cheap half (`ingest/documents/sync.py`)
-- [ ] W1-D `observations_status_idx` does not cover its query (`memory/observations.py` + migration)
-- [ ] W1-E A jobs-only bundle has no reachability signal (`connectors/health.py`)
-- [ ] W1-F No `framing_envelope_secret` warning on a durable deployment (`core/config`)
-- [ ] W1-G No session pagination and no per-session delete (`session_store` + `api/routes/sessions.py`)
-- [ ] W1-H `connector_job_timeout_seconds` bounds every bundle identically (`JobSpec.timeout_seconds`)
+- [x] W1-A A solvate collapses onto whichever fragment is larger (`core/chem.py`)
+- [x] W1-B Surface `invalid_tool_calls` (agent middleware chain)
+- [x] W1-C A timed-out attachment parse still runs to completion — cheap half (`ingest/documents/sync.py`)
+- [x] W1-D `observations_status_idx` does not cover its query (`memory/observations.py` + migration)
+- [x] W1-E A jobs-only bundle has no reachability signal (`connectors/health.py`)
+- [x] W1-F No `framing_envelope_secret` warning on a durable deployment (`core/config`)
+- [x] W1-G No session pagination and no per-session delete (`session_store` + `api/routes/sessions.py`)
+- [x] W1-H `connector_job_timeout_seconds` bounds every bundle identically (`JobSpec.timeout_seconds`)
 
 **Wave 2 — cross-module, each wants an ADR**
-- [ ] W2-A `reaction_fingerprints` keys on a bare reaction id (composite key + migration)
-- [ ] W2-B The digest is written to a mailbox with no reader (`GET /digests`)
-- [ ] W2-C A retracted ELN entry stays current evidence (tombstone half)
-- [ ] W2-D The sixteen periodic workflows can still hang instead of failing
-- [ ] W2-E `session_owners` grows without any age-based disposal
-- [ ] W2-F Split-conformal uncertainty is unwired
-- [ ] W2-G A Hessian is cached and never published
-- [ ] W2-H Make an ingest rejection answerable instead of only logged
+- [x] W2-A `reaction_fingerprints` keys on a bare reaction id (composite key + migration)
+- [x] W2-B The digest is written to a mailbox with no reader (`GET /digests`)
+- [x] W2-C A retracted ELN entry stays current evidence (tombstone half)
+- [x] W2-D The sixteen periodic workflows can still hang instead of failing
+- [x] W2-E `session_owners` grows without any age-based disposal
+- [x] W2-F Split-conformal uncertainty is unwired
+- [x] W2-G A Hessian is cached and never published
+- [x] W2-H Make an ingest rejection answerable instead of only logged
 
 **Wave 3 — the ones that are mostly a decision plus a small diff**
-- [ ] W3-A The stored-message conversion is a destructive in-place pre-upgrade rewrite
-- [ ] W3-B No connector or MCP tool result is framed
-- [ ] W3-C Every structured tool result reaches the model as pydantic repr
-- [ ] W3-D `fetch_artifact` is a tool that can only refuse
-- [ ] W3-E The background worker is a hard singleton (audit the other activities)
-- [ ] W3-F One merge added eighteen tools and 32% to what every turn costs
-- [ ] W3-G The live lane and the four-repo lane fight over `chem` and `safety`
-- [ ] W3-H A pinned template's arguments go unchecked once its bundle stops being ours
+- [x] W3-A The stored-message conversion is a destructive in-place pre-upgrade rewrite
+- [x] W3-B No connector or MCP tool result is framed
+- [x] W3-C Every structured tool result reaches the model as pydantic repr
+- [x] W3-D `fetch_artifact` is a tool that can only refuse
+- [x] W3-E The background worker is a hard singleton (audit the other activities)
+- [x] W3-F One merge added eighteen tools and 32% to what every turn costs
+- [x] W3-G The live lane and the four-repo lane fight over `chem` and `safety`
+- [x] W3-H A pinned template's arguments go unchecked once its bundle stops being ours
 
 ### Not buildable here — row and trigger stay
 
@@ -78,23 +78,52 @@ Each names the input that is missing, not an effort estimate.
 
 ## Review
 
-(filled in at the end)
+Twenty-two rows worked across three waves. **Six of them ended as an argued
+decline or a narrowing rather than code**, which is the part worth reading:
+
+- **Split-conformal uncertainty** and **JSON tool payloads** were declined on
+  measurement and moved to `DEFERRED.md`'s declined table, so neither is
+  re-proposed as an oversight. In both cases the number pointed the opposite way
+  to the row's expectation — conformal intervals are noise below n=59, and JSON
+  is *shorter* than the repr, not longer.
+- **`invalid_tool_calls`** was already fixed by a merge that landed while this
+  branch ran; only the missing compiled-graph coverage was added, and no second
+  mechanism was written.
+- **The retraction row's stated foundation was gone** — the ELN sync writes no
+  notes any more, so `Note.valid_to` was not the receiving end. `prune_share`
+  could not port whole either: a crawl enumerates, a delta sync does not, so
+  mark-and-sweep would have retired the whole corpus on run one.
+- **The workflow-failure row's argument was false**: `ScheduleHealth` carries no
+  run outcome, so a scheduled job failing every fire reads *healthier* than a
+  parked one.
+- **The singleton row's two suspects were both safe**, and the real blocker was
+  something no row named.
+
+**Four defects were found outside any row**, each by an agent doing adjacent
+work: a dead truncation signal in every deployment (`DatedIngest` swallowed a
+structural Protocol), `/readyz` and `/metrics` holding two definitions of "down",
+published gradients 1.89x too large under a correct-looking unit string, and a
+note-reindex that retires live notes the day anyone scales the worker past one.
+
+Three prose counts were removed rather than corrected — "seven middlewares",
+"79 call sites", "three probe states" — because incrementing a number in prose
+only moves the date it goes stale.
 
 ## Merge-time tasks (cross-agent couplings)
 
 Each is a one-line edit that no single agent could make, because the file
 belonged to a sibling working concurrently.
 
-- [ ] `ingest_rejections` (migration 065) needs a `_NOT_PRUNED` entry in
+- [x] `ingest_rejections` (migration 065) needs a `_NOT_PRUNED` entry in
       `durable/retention.py`. `tests/test_retention.py::test_every_table_in_the_schema_has_a_disposal_decision`
       is red until it lands. The table is self-bounding per its own README row.
-- [ ] Delete every `BACKLOG.md` row this branch closes, in the merging commit.
+- [x] Delete every `BACKLOG.md` row this branch closes, in the merging commit.
 - [ ] Re-run the whole gate after the last agent lands: the per-agent runs each
       saw a tree the others were still editing.
-- [ ] `tests/test_upstream_surface.py` needs a row for the third upstream-internal
+- [x] `tests/test_upstream_surface.py` needs a row for the third upstream-internal
       read added in `connectors/server.py` (`Tool.fn` / `list_tools`). That file
       exists to hold exactly this count, so a new coupling that is not listed is
       the defect it guards against.
-- [ ] `tests/test_publish_projection.py`'s docstring measurement ("all 79 `_fact`
+- [x] `tests/test_publish_projection.py`'s docstring measurement ("all 79 `_fact`
       call sites pass an already-canonical unit; one conversion observed") is
       stale — two sites convert on a live path now.
