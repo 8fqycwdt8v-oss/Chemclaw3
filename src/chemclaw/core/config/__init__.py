@@ -48,6 +48,7 @@ the internals of one attached thing, it belongs in that thing's manifest, not he
 """
 
 from typing import Self
+from urllib.parse import parse_qs, urlsplit
 
 from pydantic import model_validator
 from pydantic_settings import SettingsConfigDict
@@ -109,6 +110,53 @@ __all__ = [
     "TemporalSettings",
     "settings",
 ]
+
+
+_TLS_SSLMODES = {"require", "verify-ca", "verify-full"}
+_PG_LOOPBACK = {"localhost", "127.0.0.1", "::1", ""}
+
+
+def _pg_sslmode(dsn: str) -> str:
+    """The sslmode of a libpq DSN (URL query or `key=value` form); libpq's `prefer` when absent."""
+    parsed = urlsplit(dsn)
+    query = parse_qs(parsed.query)
+    if "sslmode" in query:
+        return query["sslmode"][0].lower()
+    for part in dsn.split():
+        if part.startswith("sslmode="):
+            return part[len("sslmode=") :].strip().lower()
+    return "prefer"
+
+
+def _pg_host(dsn: str) -> str:
+    """The host of a libpq DSN, lowercased; '' when it is a `host=`-keyword or socket DSN."""
+    host = urlsplit(dsn).hostname
+    if host:
+        return host.lower()
+    for part in dsn.split():
+        if part.startswith("host="):
+            return part[len("host=") :].strip().lower()
+    return ""
+
+
+def _require_pg_tls(dsn: str, name: str) -> None:
+    """Refuse a non-loopback Postgres DSN whose sslmode leaves plaintext or an unverified peer.
+
+    libpq's default is `prefer`: it tries TLS, silently falls back to cleartext when the server does
+    not offer it, and verifies no certificate even when it does negotiate. The full conversation
+    transcript, the turn checkpoints and the audit trail all cross this connection, so under the
+    enforced posture a non-loopback DSN must state `sslmode=require`/`verify-ca`/`verify-full`
+    (`verify-full` recommended, with `sslrootcert=`). Loopback dev is exempt.
+    """
+    if _pg_host(dsn) in _PG_LOOPBACK or _pg_sslmode(dsn) in _TLS_SSLMODES:
+        return
+    raise ValueError(
+        f"entra_required=true with a non-loopback {name} and sslmode={_pg_sslmode(dsn)!r}: libpq's "
+        "default permits a silent plaintext fallback and verifies no certificate, and this "
+        "connection carries the conversation transcripts, turn checkpoints and the audit trail. "
+        "Add "
+        "sslmode=verify-full&sslrootcert=<ca> to the DSN (or sslmode=require on a trusted net)."
+    )
 
 
 class Settings(
@@ -258,6 +306,29 @@ class Settings(
                 "does), or CHEMCLAW_HARNESS_AUTONOMY=execute to state that this deployment's "
                 "turns are deliberately unsupervised."
             )
+        temporal_insecure = not (
+            self.temporal_tls_cert
+            or self.temporal_tls_ca
+            or self.temporal_api_key.get_secret_value()
+        )
+        temporal_host = self.temporal_address.rsplit(":", 1)[0].strip("[]").lower()
+        temporal_loopback = temporal_host in {"localhost", "127.0.0.1", "::1", ""}
+        if self.entra_required and temporal_insecure and not temporal_loopback:
+            raise ValueError(
+                "entra_required=true with a non-loopback temporal_address "
+                f"({self.temporal_address!r}) and no temporal_tls_cert / temporal_tls_ca / "
+                "temporal_api_key opens a plaintext, unauthenticated gRPC channel to the broker — "
+                "and identity rides *inside* the workflow payload (ConnectorJobInput.requested_by, "
+                "StepIdentity), so anyone who can reach the broker can start any workflow as any "
+                "actor. mTLS is what restricts broker write access, which the template authorize "
+                "path relies on (D-2026-08-28). Set temporal_tls_ca (+ cert/key) or "
+                "temporal_api_key, or bind a loopback address for local dev. Refused only under "
+                "entra_required=true, the deployment that believes it is in the enforced posture."
+            )
+        if self.entra_required:
+            _require_pg_tls(self.postgres_dsn, "postgres_dsn")
+            if self.postgres_migration_dsn:
+                _require_pg_tls(self.postgres_migration_dsn, "postgres_migration_dsn")
         if self.service_uvicorn_workers > 1:
             raise ValueError(
                 "service_uvicorn_workers>1 silently breaks five per-process guarantees until they "
