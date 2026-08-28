@@ -156,6 +156,12 @@ class ResolvedJob(BaseModel):
     workflow: str
     task_queue: str
     publish_to_graph: bool
+    # The job's declared runtime ceiling (`JobSpec.timeout_seconds`), or `None` where it declared
+    # none. Resolved here with the rest of the job, so a template step and a chat launch of the
+    # same job get the same ceiling — the two ids this step once dropped are the standing reminder
+    # that a field the template path does not carry is a field that silently means something else
+    # on that path.
+    timeout_seconds: float | None = None
     payload: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -276,6 +282,7 @@ async def authorize_job_step(step: JobStepInput) -> ResolvedJob:
         workflow=job.workflow,
         task_queue=bundle_queue(connector),
         publish_to_graph=job.publish_to_graph,
+        timeout_seconds=job.timeout_seconds,
         payload=payload,
     )
 
