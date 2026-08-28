@@ -97,3 +97,43 @@ def test_the_allowlist_is_derived_from_the_dialled_destinations() -> None:
     assert "mirror.internal" in hosts
     # openai_compatible never permits the public Anthropic API
     assert "api.anthropic.com" not in hosts
+
+
+def test_a_connect_to_a_resolved_ip_is_permitted() -> None:
+    """The getaddrinfo→connect flow: a connect to an IP an allowed name resolved to is permitted.
+
+    This is the case a naive allowlist guard breaks — the allowlist holds a *hostname* but `connect`
+    receives the *IP* the name resolved to. `getaddrinfo` records the resolved IPs (see
+    `test_getaddrinfo_records_the_resolved_ip`); here we assert the consequence: a recorded IP is
+    allowed at `connect`, while an IP never resolved from an allowed name is refused (the
+    direct-to-IP bypass stays closed).
+    """
+    netguard._reset_for_tests(["llm.internal.example"])
+    netguard._resolved_ips.clear()
+    netguard._resolved_ips.add("203.0.113.5")  # as the patched getaddrinfo would have recorded it
+    netguard._check(("203.0.113.5", 443))  # permitted — it is a resolved IP
+    with pytest.raises(netguard.EgressForbidden):
+        netguard._check(("198.51.100.7", 443))  # refused — never resolved from an allowed name
+    netguard._resolved_ips.clear()
+
+
+def test_getaddrinfo_records_the_resolved_ip() -> None:
+    """The patched getaddrinfo records the IPs a resolution returned, for the connect check.
+
+    `localhost` resolves (unlike a synthetic name in this sandbox) and is loopback, so it exercises
+    the recording path end-to-end through the real armed guard.
+    """
+    netguard._resolved_ips.clear()
+    infos = socket.getaddrinfo("localhost", 80)
+    resolved = {entry[4][0] for entry in infos}
+    assert resolved <= netguard._resolved_ips, "getaddrinfo did not record the resolved IPs"
+    netguard._resolved_ips.clear()
+
+
+def test_a_blocked_name_never_reaches_connect() -> None:
+    """A non-allowlisted name is refused at getaddrinfo, so its IP is never recorded."""
+    netguard._reset_for_tests([])
+    before = set(netguard._resolved_ips)
+    with pytest.raises(netguard.EgressForbidden):
+        socket.getaddrinfo("blocked.example", 443)
+    assert netguard._resolved_ips == before, "a refused resolution still recorded an IP"

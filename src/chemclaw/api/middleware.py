@@ -153,12 +153,12 @@ def _refuse_unauthenticated_exposure() -> None:
 def _refuse_public_llm_exposure() -> None:
     """Fail closed when a network-exposed process sends its LLM traffic to the public vendor API.
 
-    `llm_provider="anthropic"` with no `llm_base_url` builds a client pointed at
-    `https://api.anthropic.com` (agent/llm_provider.py::_anthropic_model passes no base_url), so a
-    real deployment on that default sends every prompt, tool result and completion — user free text
-    and confidential chemistry — to a third-party SaaS instead of the internal gateway. The client
-    fails closed on a missing *credential* but not on this *destination*, and D2's measurement
-    confirmed the constructed client resolves to the public host.
+    `llm_provider="anthropic"` with no `llm_base_url` builds a client pointed at the public
+    Anthropic API (api.anthropic.com; agent/llm_provider._anthropic_model passes no base_url),
+    so a real deployment on that default sends every prompt, tool result and completion —
+    user free text and confidential chemistry — to a third-party SaaS instead of the internal
+    gateway. The client fails closed on a missing *credential* but not on this *destination*, and
+    D2's measurement confirmed the constructed client resolves to the public host.
 
     Gated on the same non-loopback-bind signal as `_refuse_unauthenticated_exposure`, and checked
     here at app boot rather than in the `Settings` validator, so it fires for an actual serving
@@ -175,7 +175,7 @@ def _refuse_public_llm_exposure() -> None:
             f"({settings.service_host!r}) with llm_provider='anthropic' and no "
             "CHEMCLAW_LLM_BASE_URL "
             "— every prompt and completion (confidential chemistry) would go to the public "
-            "https://api.anthropic.com rather than the internal gateway. Set "
+            "the public Anthropic API rather than the internal gateway. Set "
             "CHEMCLAW_LLM_PROVIDER=openai_compatible with CHEMCLAW_LLM_BASE_URL pointing at the "
             "internal endpoint (what the shipped chart does), or set CHEMCLAW_LLM_BASE_URL to an "
             "anthropic-compatible gateway you host. The bare anthropic provider is the "

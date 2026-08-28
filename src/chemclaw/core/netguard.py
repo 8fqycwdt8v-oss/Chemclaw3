@@ -44,6 +44,14 @@ logger = logging.getLogger(__name__)
 _armed = False
 _allowed: frozenset[str] = frozenset()
 _refused = 0
+# IPs that an allowlisted *hostname* resolved to, recorded by the patched `getaddrinfo`. This is
+# what makes an allowlist guard work at the `connect` layer: a legitimate call resolves an allowed
+# name (permitted, and the resulting IPs land here) and then connects to one of those IPs (permitted
+# because it is here). A `connect` to an IP literal that was never resolved from an allowed name is
+# still refused, and a blocked name never reaches `connect` because its `getaddrinfo` was refused
+# first. Unbounded growth is a non-issue: the set is the deployment's own small, stable set of
+# gateway/infra addresses, and it lives for the life of the process like the allowlist itself.
+_resolved_ips: set[str] = set()
 
 
 class EgressForbidden(OSError):
@@ -95,9 +103,20 @@ def _host_of(address: Any) -> str | None:
 
 
 def _check(address: Any) -> None:
-    """Raise `EgressForbidden` unless `address` is loopback or an allowlisted host."""
+    """Raise `EgressForbidden` unless `address` is loopback, an allowlisted host, or a resolved IP.
+
+    `connect` almost always receives an *IP*, not a name (the caller resolved it first), so the
+    allowlist — which holds hostnames — is consulted together with `_resolved_ips`, the IPs that an
+    allowlisted name resolved to through the patched `getaddrinfo`. A name that reaches here
+    directly (some clients pass a hostname to `connect`) is checked against the allowlist.
+    """
     host = _host_of(address)
-    if host is None or _is_loopback(host) or host.strip("[]").lower() in _allowed:
+    if (
+        host is None
+        or _is_loopback(host)
+        or host.strip("[]").lower() in _allowed
+        or host.strip("[]") in _resolved_ips
+    ):
         return
     global _refused
     _refused += 1
@@ -232,7 +251,15 @@ def arm(allowed: Iterable[str] = ()) -> None:
 
     def getaddrinfo(host: Any, port: Any, *args: Any, **kwargs: Any) -> Any:
         _check((host, port))
-        return original_getaddrinfo(host, port, *args, **kwargs)
+        results = original_getaddrinfo(host, port, *args, **kwargs)
+        # Record the IPs an allowed name resolved to, so the subsequent `connect` to one of them is
+        # permitted. Only when the *name* was not itself an IP literal (an IP literal resolving to
+        # itself is already covered by the allowlist / loopback check).
+        for entry in results:
+            sockaddr = entry[4] if len(entry) > 4 else None
+            if isinstance(sockaddr, tuple) and sockaddr and isinstance(sockaddr[0], str):
+                _resolved_ips.add(sockaddr[0])
+        return results
 
     def gethostbyname(hostname: Any) -> Any:
         _check((hostname, 0))
