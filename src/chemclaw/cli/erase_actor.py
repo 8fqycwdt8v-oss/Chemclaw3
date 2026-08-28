@@ -15,7 +15,12 @@ import argparse
 import asyncio
 import sys
 
-from chemclaw.agent.leaver import ErasureReport, erase_actor, retention_reasons
+from chemclaw.agent.leaver import (
+    ErasureReport,
+    erase_actor,
+    retention_reasons,
+    unreachable_tables,
+)
 from chemclaw.core.logging import configure_logging
 
 
@@ -37,6 +42,16 @@ def _render(report: ErasureReport) -> str:
         if count:
             lines.append(f"           {reasons[table]}")
     lines.append(f"  {report.retained_total:>7}  total")
+
+    # The third tier, and the reason it is printed rather than left out: a table this command can
+    # neither clear nor count is a question it did not answer, and an operator signing off on an
+    # erasure has to see the unanswered ones. Printed unconditionally — a count would be the honest
+    # thing to show and is exactly what is unavailable here, so the table is named instead.
+    beyond = unreachable_tables()
+    if beyond:
+        lines += ["", "OUT OF REACH (named a person; this command can neither clear nor count):"]
+        for table, why in beyond:
+            lines += [f"          {table}", f"           {why}"]
 
     if not report.applied:
         lines += ["", "Nothing was written. Re-run with --apply to commit."]

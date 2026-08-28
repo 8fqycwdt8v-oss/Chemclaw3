@@ -34,6 +34,7 @@ from chemclaw.durable.retention import (
     RetentionOutcome,
     _window_days,
     prune_expired_rows,
+    unwindowed_ownership_dependencies,
 )
 from tests.legacy_rows import legacy_call, legacy_result, legacy_text
 from tests.pg import create_checkpoint_tables, migrated_db_or_skip
@@ -169,6 +170,76 @@ def test_a_campaign_is_a_record_and_is_never_pruned() -> None:
     retained = {table for table, _columns, _why in leaver_retained}
     assert {"bo_campaigns", "bo_suggestions"} <= retained
     assert {"audit_events", "job_records"} <= retained
+
+
+def test_a_table_the_erasure_keeps_is_not_disposed_of_on_a_clock() -> None:
+    """The rule the test above states, over every table it governs instead of four of them.
+
+    *A retention clock may not dispose of what a person asking to be forgotten does not.* That
+    sentence was written for `bo_campaigns` and is a property of the whole retained tier, so
+    asserting it against four names left the other three unchecked — and unchecked is exactly where
+    they were: `note_proposals`, `plan_approvals` and `turn_costs` sat in `_NOT_PRUNED` reading
+    *nothing bounds it, no decision is on record*, while `agent/leaver.py` had been keeping all
+    three through an erasure request for the same reason the four "refused" entries give. One
+    argument, two registers, and nothing joining them. This is the join.
+
+    Derived from `_RETAINED`, so the next table added there arrives with its disposal decision
+    already made rather than with a blank somebody has to notice.
+
+    **The payload tier is deliberately not covered**, and the difference is real rather than an
+    exemption: `result_publications` is retained against an *erasure request* — a receipt saying who
+    asked for a result and why — and is still disposable on a clock once `delivered`, because by
+    then the record it receipts lives in a store this system does not own. "Not deletable on
+    request" and "not disposable on a policy" are different claims, and only the first one is what
+    the retained tier makes.
+    """
+    for table, _columns, why in leaver_retained:
+        assert table not in _PRUNABLE, (
+            f"{table} is kept through a data-subject erasure ({why!r}) and pruned on a clock; "
+            "one of the two registers has to change, and which one is a decision with an owner"
+        )
+        assert table in _NOT_PRUNED, (
+            f"{table} is in the erasure register's retained tier and in no disposal register at "
+            "all — `_NOT_PRUNED` is where that decision is recorded"
+        )
+        assert "no decision is on record" not in _NOT_PRUNED[table], (
+            f"{table} is retained through erasure, so a decision *is* on record; "
+            f"`_NOT_PRUNED` says {_NOT_PRUNED[table]!r}"
+        )
+
+
+def test_a_session_owner_row_names_the_windows_that_hold_it_back() -> None:
+    """A zero can mean nothing was disposable or nothing is left; the sweep now says which.
+
+    An ownership row goes only once every session-scoped table has let go of that session, and each
+    of those empties on a window of its own. `tool_result_links` is the one with no window and no
+    DELETE grant: a link row disappears only behind its blob, on
+    `CHEMCLAW_RETENTION_TOOL_RESULTS_DAYS`. Both default to 0, so a deployment that states a
+    conversation policy and stops there can forget **no session that ever called a tool** — while
+    the sweep logs a clean pass every night.
+
+    Nothing about that is visible at the point it bites, which is what this makes checkable: the
+    unset windows are derived from the same map the SQL arms are built from, so the answer to "why
+    is `session_owners` not shrinking" is a list of ENV names rather than a query plan.
+    """
+    tables = set(_SESSION_SCOPED_ROWS)
+
+    with_none_set = unwindowed_ownership_dependencies(tables)
+    assert "CHEMCLAW_RETENTION_TOOL_RESULTS_DAYS" in with_none_set, (
+        "the tool-result window is what empties `tool_result_links`, and it is unset by default"
+    )
+
+    # An absent table blocks nothing — the arms skip it, so the advice must skip it too.
+    assert unwindowed_ownership_dependencies(set()) == []
+
+    original = settings.retention_tool_results_days
+    try:
+        settings.retention_tool_results_days = 30
+        assert "CHEMCLAW_RETENTION_TOOL_RESULTS_DAYS" not in unwindowed_ownership_dependencies(
+            tables
+        ), "a window that is set is not a window holding the ownership row back"
+    finally:
+        settings.retention_tool_results_days = original
 
 
 def test_every_table_in_the_schema_has_a_disposal_decision() -> None:
