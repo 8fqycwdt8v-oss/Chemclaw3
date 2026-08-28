@@ -15,7 +15,10 @@ somewhere in this tree before it was a rule here:
   refuses a unit it has no conversion for rather than passing it through. The model field names
   carry their units (`delta_g_kcal`, `energy_hartree`) and that is what is read.
 - **The payload rides along untouched.** Whatever a projector fails to extract is still in
-  `ResultRecord.payload`, so a projector bug is a re-projection rather than lost science.
+  `ResultRecord.payload`, so a projector bug is a re-projection rather than lost science. One
+  projector narrows it — `_hessian` drops the packed `.npy` arrays, which are megabytes and are not
+  science a re-projection could read. It states the argument in its own docstring, and `project`
+  states what a narrowing may and may not be.
 
 **Geometries are not copied into the record.** A `Structure` reaches the published row as its
 `structure_id` — the same rule `D-2026-08-21` established for what reaches the model's context, and
@@ -1129,6 +1132,59 @@ def _rotation(
     )
 
 
+# Which fields of a Hessian payload are packed `.npy` arrays. Named here rather than imported from
+# `science/calc/artifacts.py::HESSIAN_ARRAYS` because this module reads *payloads*, not models, and
+# a stored row from an older calculator may carry a field the current mapping no longer names —
+# the same reason every projector above takes a dict.
+_PACKED_ARRAYS: tuple[str, ...] = ("hessian_npy", "dipole_derivatives_npy")
+
+
+def _hessian(payload: dict[str, Any]) -> tuple[Subject, Conditions, TheoryLevel, dict[str, Any]]:
+    """The second derivatives at one geometry — everything about them except the matrix.
+
+    **This row holds no frequencies, and that is the finding rather than an omission.** Wavenumbers
+    are the eigenvalues of the *mass-weighted* Hessian, and a `HessianPayload` carries the matrix
+    and an `atom_count` but no elements — the geometry is a `structure_id`, an address into a store
+    this module may not read (a projector is pure and synchronous, and the backfill walks rows whose
+    structures may be long gone). So no arrangement of this projector can publish a frequency;
+    the frequencies reach the store through `ThermochemistryResult`, which is where the masses were
+    applied. That is the whole reason the Hessian and the thermochemistry were one question rather
+    than two (`D-2026-08-27-a-composite-needs-a-hook-not-a-projector`).
+
+    What it *does* publish is the pair that makes a frequency set readable afterwards: the
+    electronic energy the SCF settled at, and `max_gradient` — the evidence that the geometry
+    differentiated was a stationary point at all
+    (`D-2026-08-27-a-gradient-is-the-evidence-a-frequency-set-cannot-carry`). Reported in
+    Hartree/Angstrom and converted, which is the first live use `to_canonical` has ever had.
+
+    **The packed arrays do not ride along.** Every other projector leaves `ResultRecord.payload`
+    untouched so a projection bug is a re-projection rather than lost science; here the payload is
+    the one in this system that is *megabytes* — 99x99 doubles at 33 atoms, ~1.4 MB of base64 at
+    120 — and `result_publications` is a queue nobody prunes. Re-projecting them could not recover
+    a frequency either, for the reason above. So an array reaches the record the way a geometry
+    does: by not being copied (D-2026-08-21). The matrix itself is not lost — `ArrayOffloadingStore`
+    put it in the content-addressed artifact store before the row was written.
+    """
+    structure_id = payload.get("structure_id") or ""
+    subject = Subject(kind="geometry", members=[_molecule(None, structure_id)], label=structure_id)
+    conditions = Conditions(
+        solvent=payload.get("solvent"),
+        solvent_model="alpb" if payload.get("solvent") else "",
+    )
+    level = TheoryLevel(
+        method=payload.get("method") or "unknown", family="semiempirical", engine="xtb"
+    )
+    facts = _kept(
+        _fact("electronic_energy", payload.get("electronic_energy_hartree"), "hartree"),
+        # `None` from the `xtb` binary backend, which reports no gradient beside its Hessian.
+        # Absent stays absent: "not reported" is a different claim from "zero".
+        _fact("max_gradient", payload.get("max_gradient_hartree_per_angstrom"), "hartree/angstrom"),
+        _fact("atom_count", payload.get("atom_count"), ""),
+    )
+    carried = {key: value for key, value in payload.items() if key not in _PACKED_ARRAYS}
+    return subject, conditions, level, {"properties": facts, "payload": carried}
+
+
 def _thermochemistry(
     payload: dict[str, Any],
 ) -> tuple[Subject, Conditions, TheoryLevel, dict[str, Any]]:
@@ -1177,6 +1233,12 @@ def _thermochemistry(
         _fact("entropy", payload.get("entropy_cal_per_mol_k"), "cal/(mol*K)"),
         _fact("symmetry_number", payload.get("symmetry_number"), ""),
         _fact("mode_count", payload.get("mode_count"), ""),
+        # The evidence `is_minimum` alone cannot carry: a geometry that is not *stationary* usually
+        # shows no imaginary mode at all, and `thermo._vibrational` sums over positive wavenumbers
+        # only, so its zero-point energy is quietly too small rather than obviously wrong
+        # (`D-2026-08-27-a-gradient-is-the-evidence-a-frequency-set-cannot-carry`). Reported in
+        # Hartree/Angstrom; `None` when the backend that ran reported no gradient.
+        _fact("max_gradient", payload.get("max_gradient_hartree_per_angstrom"), "hartree/angstrom"),
         _flag("is_minimum", payload.get("is_minimum")),
         # The reference state `entropy`, `gibbs_correction` and `gibbs_free_energy` above are
         # quoted at — 1 atm in the gas phase, 1 mol/L in solution. Three of the facts in this list
@@ -1350,7 +1412,14 @@ def _optimization(
         _fact("relaxation", payload.get("relaxation_kcal"), "kcal/mol"),
         _fact("optimization_steps", payload.get("steps"), ""),
         # None under GFN-FF, which reports no gradient. Absent stays absent.
-        _fact("max_gradient", payload.get("max_gradient"), "hartree/bohr"),
+        #
+        # **Reported in Hartree/Angstrom, not in the registry's canonical Hartree/bohr.**
+        # `OptimizationResult.max_gradient` says so in its own comment and the server derives it
+        # that way; this call site passed the canonical unit, so `to_canonical` returned the number
+        # unchanged and every `max_gradient` this system has published was 1.89x too large with a
+        # correct-looking unit string beside it. Exactly the failure `_fact`'s docstring predicted
+        # for "the first projector reporting a value in a non-canonical unit".
+        _fact("max_gradient", payload.get("max_gradient"), "hartree/angstrom"),
         _fact("displacement_rms", payload.get("displacement_rms_angstrom"), "angstrom"),
     )
     # The geometry the optimization *produced*, as an address. Not a subject member: the subject is
@@ -1690,6 +1759,7 @@ PAYLOAD_PROJECTORS: dict[str, _Projector] = {
     "InteractionResult": _interaction,
     "ScanResult": _scan,
     "RotationProfile": _rotation,
+    "HessianPayload": _hessian,
     "ThermochemistryResult": _thermochemistry,
     "ElectronicProperties": _electronic_properties,
     "SiteReactivityResult": _site_reactivity,
@@ -1729,6 +1799,7 @@ _CALC_TYPE_PROJECTORS: tuple[tuple[str, _Projector], ...] = (
     ("xtb.conformers", _ensemble),
     ("xtb.complex", _interaction),
     ("xtb.fukui", _site_reactivity),
+    ("xtb.hess", _hessian),
     ("xtb.scan", _scan),
     ("xtb.opt", _optimization),
     ("xtb.sp", _single_point),
@@ -1784,6 +1855,14 @@ def project(
             "add one to `PAYLOAD_PROJECTORS` and `_CALC_TYPE_PROJECTORS`"
         )
     subject, conditions, level, extra = projector(payload)
+    # **What rides along, which is the payload itself unless a projector says otherwise.** The rule
+    # is still "the payload rides along untouched", because that is what makes a projection safe to
+    # be wrong — every fact can be rebuilt by re-projecting. The one exception is a payload field
+    # that is *not science but bytes*: a packed array whose re-projection could not produce a fact
+    # this projector missed, and whose size (megabytes, for a Hessian) would otherwise sit in a
+    # queue nobody prunes. `_hessian` is the only projector that narrows, and its docstring carries
+    # the argument. Anything a projector does not remove is still here, unmodified.
+    carried = extra.get("payload", payload)
     # A geometry-keyed calculation records the structure it ran *on*. The server's own answer wins
     # when the caller has one; otherwise the subject's member carries it, which is the same value by
     # construction for every projector above.
@@ -1810,7 +1889,7 @@ def project(
         compute_seconds=compute_seconds,
         computed_at=computed_at,
         depends_on=list(depends_on or []),
-        payload=payload,
+        payload=carried,
         payload_kind=payload_kind,
     )
 
