@@ -1351,3 +1351,22 @@ honest, and an invented one is a claim. And when the real number is smaller than
 predicted, say the real number *and* say it is smaller: "1.6x to 2.5x, a real gain and not a large
 one" is more useful to the next reader than the 7x that would have justified the change more
 comfortably.
+
+## A per-file gate is green on every branch and red on the merge
+
+**2026-08-28, the parallel audit pass.** Eight audit branches each ran
+`tests/test_docstring_paths.py` and each reported it green. The merge of six of them was
+**red in that same file**, three failures. Nothing regressed: the test is parametrized *per
+referring file*, so a branch that adds a dangling pointer to `tests/test_service.py` fails only
+the `[tests/test_service.py]` case — and a sibling running its own subset never collects it.
+Each agent's "green" was true and none of them was evidence about the branch.
+
+The correction is not "run the whole suite" — that cost every agent hours at load 30–48 and
+produced only BoFire wall-clock timeouts. It is: **a gate parametrized over the tree is a
+whole-tree gate, and running it on a subset of parameters is not running it.** After a merge,
+re-run the *unparametrized* gates whole — `test_docstring_paths`, `test_prose_contract`,
+`test_decision_log`, `test_repo_map`, `test_backlog_register` — because those are exactly the
+ones a per-branch subset cannot see. They cost seconds; the six-way merge cost 8 s to clear.
+
+The corollary is the one this session already had and applied too narrowly: verify each agent's
+gate yourself. That is not the same as re-running what the agent ran.

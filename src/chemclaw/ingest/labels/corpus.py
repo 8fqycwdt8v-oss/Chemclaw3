@@ -212,7 +212,7 @@ async def drain_corpus(
 
 
 def _count_records(source: str, outcome: str, count: int) -> None:
-    """Add `count` to this source's tally of one outcome (a named function; see `eln/sync.py`'s).
+    """Add `count` to this source's tally of one outcome (a named function; see `ingest/eln/sync.py`'s).
 
     **The two outcomes partition what the page read**, and there is no third: `ingested` is a row
     whose record phase was written, `rejected` is one dropped for want of a usable SMILES, key or

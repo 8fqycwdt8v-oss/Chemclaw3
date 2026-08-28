@@ -1745,7 +1745,7 @@ def test_a_shed_turn_names_the_correlation_id_the_request_ran_under(monkeypatch)
     `ErrorEvent.correlation_id` exists for exactly one job — "quoting it in a bug report is what
     lets an operator find the turn" — and `run_turn` already adopts the ambient id for that reason,
     naming the alternative as "two ids for one event, which is the failure a correlation id exists
-    to prevent". The three error events `routes/turns.py` raises around `run_turn` did not: the
+    to prevent". The three error events `api/routes/turns.py` raises around `run_turn` did not: the
     shed, the budget refusal and the timeout sent `""`, so the one failure a chemist is most likely
     to report — a turn that ran out of wall clock — carried nothing to look up.
     """
