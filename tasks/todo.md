@@ -1,100 +1,86 @@
-# The cross-session "plans waiting on you" inbox
+# Recurring feeder pipelines — the recurring work that keeps a corpus fresh, run outside ChemClaw3
 
-Two repositories, one capability: a chemist who closed a tab must be able to find the plan the
-agent is blocked on, without remembering which conversation it was in.
+## The ask
 
-## Where this came from
+> Instructions for setting up recurring pipelines that are **not in ChemClaw** but facilitate it:
+> daily cron jobs that pull from an upstream database over a URL, or new reaction SMILES plus a
+> reaction identifier, into the chemical database, so the vectors for reactions and molecules can be
+> computed there. Check whether this fits the codebase, then prepare super-detailed MD files to be
+> implemented directly on OpenShift or Databricks.
 
-`Chemclaw3_ui`'s `/review` page carries an empty slot and a paragraph explaining it
-(`src/components/ReviewQueue.tsx`): the durable-hold section was deleted with the routes behind it
-(`D-2026-08-27-a-hold-nothing-can-open-is-not-a-hold`), and
+## Does it fit? — yes, and the seam it fits is already load-bearing
 
-> The gate that *does* block work is the plan approval, which is answered per session on
-> `POST /sessions/{id}/plan/decision` and currently lives only as an inline card in a live turn.
+Verified against the tree, not assumed:
 
-The reload half of that harm is closed — `App.tsx` re-reads `GET /sessions/{id}/plan` and
-re-attaches the decision — but only for a conversation somebody opens. **Nothing answers "which of
-my conversations is waiting on me", because no route asks that question across sessions.** Every
-plan route is `/sessions/{id}/…`.
+- `chemclaw.ingest.sources` (D-120) attaches a corpus with **zero core edits**: one folder holding a
+  `datasource.yaml`, one name in `CHEMCLAW_DATA_SOURCES`.
+- `chemclaw.ingest.eln.warehouse` names **no table and no column**; the site's schema is a binding in
+  that manifest (`D-2026-08-04-the-schema-is-a-file`), and `connection:` is the driver's own keyword
+  arguments (`D-2026-08-26-the-driver-s-signature-is-the-schema`).
+- A `corpus:` block is drained by `ReactionCorpusWorkflow` on the `reaction-corpus` Schedule
+  (`corpus_sync_schedule_minutes`, default 1440) into `reaction_labels`, `reaction_species` and
+  `corpus_molecules`; `ReactionLabelWorkflow` (`reaction-labels`, hourly) then fills the atom map and
+  the named reaction through `Chemclaw3-mcp:servers/rxnlabel`.
+- A `vector:` block searches an embedding the warehouse **already holds** — ChemClaw3 embeds the
+  *query* and never the corpus. `pistachio/datasource.yaml` is the worked example at patent scale.
 
-## The decision that shapes the route
+So everything from the landing relation inwards exists. **What has no owner is everything upstream of
+it**: fetching the release, normalising it, and computing the per-reaction embedding. That is the
+pipeline being asked for, and it belongs outside this repository for a reason the tree already
+states twice (`Chemclaw3-mcp`'s no-egress posture; D-089 on third-party runtime dependencies).
 
-`api/runner._pending_plan_approval` emits the decision card whenever a plan-gated turn ends with a
-non-empty plan holding no *live* approval. That predicate is right for a card inside a turn and
-wrong for an inbox: an approval is spent at the end of the turn it authorized, so every finished
-plan-gated conversation would sit in the inbox forever — the mirror of the permanently-empty inbox
-`ISSUES.md` records as the failure worth not repeating.
+## Plan
 
-So the inbox lists a narrower set: **a plan nobody has decided at all** — no row in
-`plan_approvals` for this session and this plan hash. A spent approval and a rejection are both
-answers; the conversation is where a *re*-approval is asked for, by the card at the turn's end.
-What that misses is stated in the route's docstring rather than left to be discovered: a plan
-re-proposed byte-identically after its approval was spent has a row, so it does not list.
+- [x] Verify the seam end to end — the manifest, the binding models, the two Schedules, the
+      Postgres tables, the vector store adapter, and the settings each one reads.
+- [x] Write the ADR that fixes the boundary, so a later session does not build the feeder inside a
+      connector: `D-2026-08-28-a-feeder-writes-a-table-and-nothing-else.md` + its ledger row.
+- [x] `docs/guides/feeder-pipelines/README.md` — the index, the division of labour, the fit verdict.
+- [x] `01-contract.md` — the normative target contract: relations, columns, casing, key identity,
+      embedding parity, unit normalisation, the three index columns, keyset stability, and the
+      ChemClaw3-side setting each one pairs with.
+- [x] `02-acquisition.md` — pulling from an upstream URL database: idempotency, watermarks,
+      checksums, licence, resume, canonicalisation, dedup.
+- [x] `03-databricks.md` — the Databricks implementation: bundle, DDL, MERGE, embed task, Vector
+      Search index, schedule, sizing, secrets, monitoring.
+- [x] `04-openshift.md` — the OpenShift implementation: CronJob, Secret, NetworkPolicy, RBAC,
+      concurrency, resources, alerts, and the Postgres-target variant.
+- [x] `05-operations.md` — bring-up order, the verification probes, the failure modes as they look
+      from ChemClaw3's side, re-embedding after a model change, cost and scale.
+- [x] `docs/README.md` — the `guides/` row names the new set.
+- [x] `make lint type test` (documentation-only change; the repo-map and decision-log tests are the
+      ones that can fail on it).
 
-## Chemclaw3 (backend)
+## Verification
 
-- [x] `SessionOwnerStore.list_for_owner` also returns each session's `profile` (already a column),
-      so a session that cannot hold a plan is skipped without a checkpoint read.
-- [x] One read path for a session's plan, shared by `GET /sessions/{id}/plan` and the inbox, so the
-      two surfaces cannot disagree about what a plan is or whether it was decided (`_read_plan`).
-- [x] `GET /plans/pending` → `{plans, considered, gated, unread}`. The three counts are what make an
-      empty list unambiguous: `gated == 0` means this deployment does not gate plans at all,
-      `unread > 0` means the scan hit its bound and the answer is partial.
-- [x] Bound the scan (`service_max_plan_scans`): `AsyncPostgresSaver` serializes every statement
-      behind one `asyncio.Lock`, so an unbounded per-session checkpoint read would hold the
-      checkpointer against every concurrent turn on the pod.
-- [x] Tests: the filter (undecided lists, approved/rejected/spent do not), ownership scoping, the
-      counts, the bound, and the empty envelope under `session_store="memory"` —
-      `tests/test_plan_inbox.py`, eight cases.
-- [x] ADR + `docs/decisions/README.md` row.
+Documentation only — no `src/` change, so the behavioural suite is unaffected. What must be green is
+what checks *declarations*: `tests/test_decision_log.py` (the ADR id, its heading, its ledger row and
+their order) and `tests/test_repo_map.py` (no shipped document naming a bundle that is gone).
 
-## Chemclaw3_ui (frontend)
-
-- [x] Whitelist `GET /api/plans/pending` in `server/routes.ts`, with a test pinning it.
-- [x] `api.listPendingPlans` + types.
-- [x] `/review` grows the section its own docstring says is deliberately empty: title, when, the
-      plan's steps, and a link into the conversation. It does **not** decide in place — the same
-      reason the deleted holds section gave, and here the plan's own reasoning is one click away.
-- [x] The three empty states rendered distinctly (not gated / nothing waiting / partial), plus the
-      failure, which is a fourth and was the whole defect in the section this replaces.
-- [x] Correct `USER-STORIES.md` F3 and `ISSUES.md`, both of which still describe the deleted
-      `GET /approvals` inbox as the answer.
+Every normative claim in `01-contract.md` is cited to the file it was read from, so a reviewer can
+check it without trusting this text — the standard `CLAUDE.md` asks for ("prose is evidence about
+what its author believed").
 
 ## Review
 
-**What the work turned on.** One decision, taken twice before it was right. The obvious route is
-"list the sessions whose plan holds no live approval" — the predicate
-`runner._pending_plan_approval` already uses. It is wrong for an inbox, and the reason is D-167: an
-approval is consumed at the end of the turn it authorized, so *no live approval* is the resting
-state of every finished plan-gated conversation. That route ships a permanently full inbox, which is
-the mirror of the permanently empty one `Chemclaw3_ui`'s `ISSUES.md` records. The filter is "no
-decision recorded" instead, and what that misses is written into the route's docstring rather than
-discovered later.
+Written and pushed on `claude/recurring-pipeline-setup-14kia5`.
 
-**What measurement changed.** Two things were read rather than assumed:
+Six guide files plus one ADR, no `src/` change. Three findings that only came out of reading the
+code and that a naively-built feeder would have got wrong:
 
-- `harness_enabled` defaults to **False**, so in a default deployment no session has a todo list at
-  all and the inbox is structurally empty. That is what made the `gated` count non-negotiable: an
-  empty list had to be able to say it is a property of the configuration.
-- `AsyncPostgresSaver` serializes every statement behind one `asyncio.Lock`
-  (`agent/checkpointer.py`'s own docstring, reason 2). So concurrency buys nothing here and the
-  scan needed a bound, and the profile prune stopped being an optimisation — it is what keeps the
-  route free in the deployment that cannot ever have a row.
+1. **The corpus drain keeps no `sync_cursors` row** (`corpus_sync.py`'s own docstring, and
+   `BACKLOG.md` records the two ADRs that claimed otherwise as falsified). Its cursor is intra-run.
+   So a daily Schedule re-walks the whole relation, and the feeder — not ChemClaw3 — is what keeps
+   that affordable, by maintaining a `load_date` the binding's `where:` narrows on.
+2. **A Databricks-hosted corpus index needs `group_key` and it must equal the binding's `key:`.**
+   `DatabricksVectorStore.search` always requests `columns=[id, group_key]` and filters eligibility
+   as `{group_key: [...]}`, where the eligible values are warehouse keys resolved from
+   `filter_columns`. An index built with only `id` and `embedding` fails every search; one whose
+   `group_key` is anything else returns nothing for every filtered search.
+3. **Vectors written by a feeder must be L2-normalised.** The adapter normalises what *it* upserts
+   and what it queries with, and inverts Databricks' `1/(1+d²)` assuming unit length on both sides —
+   so an un-normalised corpus vector is not a crash, it is a wrong cosine fused into hybrid ranking.
 
-**What I did not build, and why it is written down.** A durable "pending" table would answer the
-query in one statement and be exact. It is a second piece of state saying what the checkpoint and
-`plan_approvals` already determine — the DARK-1 shape. Deriving "blocked" from plan-gate refusals in
-`audit_events` is the most faithful signal and is the named restart condition in the ADR; it needs a
-reader on a table that has none and an INSERT-only grant, which is a bigger decision than a route.
-
-**What I got wrong on the way.** I read a mid-run `F` in the suite as a timing flake in
-`test_connector_transport.py` from the test index, and ran that file alone to "confirm" it. The
-actual failure was `test_config.py::test_env_example_documents_every_field` — my new setting was not
-in `.env.example`. A guess about which test failed is not a diagnosis, and the run's own summary was
-twelve minutes away. Logged in `tasks/lessons.md`.
-
-**Verification.** `make lint` clean; `mypy --strict` over `src examples tests` clean;
-`pytest` 5,293 passed / 9 skipped with Postgres up (the skips are `helm` not installed and the
-truncated-history migration checks — no Postgres-gated test skipped). UI: `tsc -b`, `eslint`,
-`prettier --check` and 730 vitest tests green, and the `/review` axe pass runs against the new
-section in both themes with the e2e fixture serving a pending plan.
+And one thing deliberately *not* built: a molecule-vector table. `corpus_molecules` (ECFP4 bits plus
+the RDKit pattern screen) is written by ChemClaw3's own drain from the corpus `smiles:` column, so a
+feeder that computed molecule fingerprints would be computing something nothing reads.
