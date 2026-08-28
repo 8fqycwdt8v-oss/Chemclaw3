@@ -171,8 +171,26 @@ def fetch_was_truncated(adapter: object) -> bool:
     Optional rather than a method on `ElnAdapter` because the file-drop adapters read a whole
     directory and have no page to be cut short by, so `False` is the true answer for them and a
     method they would all have to implement would only be a way to get it wrong.
+
+    **Asked through the seam's wrappers, not only of the object handed over.** The registry always
+    returns `DatedIngest(...)`, and a `runtime_checkable` Protocol is structural: a wrapper that
+    does not redeclare a method simply does not have it. So this read `False` for every source in
+    every deployment, including the warehouse adapter that implements `fetch_truncated` precisely
+    so the workflow would come back for the truncated remainder. The capability belongs to the
+    adapter, so the question has to reach it — the walk below is that rule, and a wrapper that
+    exposes what it wraps through the public `inner` satisfies it by doing nothing.
+
+    The visited set is not defensiveness about a cycle anyone would write: it is what keeps a
+    mistaken `inner` returning `self` from hanging a sync run rather than failing it.
     """
-    return adapter.fetch_truncated() if isinstance(adapter, BoundedFetch) else False
+    seen: set[int] = set()
+    candidate: object | None = adapter
+    while candidate is not None and id(candidate) not in seen:
+        seen.add(id(candidate))
+        if isinstance(candidate, BoundedFetch):
+            return candidate.fetch_truncated()
+        candidate = getattr(candidate, "inner", None)
+    return False
 
 
 class DatedIngest:

@@ -1163,3 +1163,27 @@ more characters. The rule: **before pushing, run the repo's own gate target verb
 run is the right tool *while* iterating and the wrong evidence for "this is done". CLAUDE.md
 already says a step is done only when `make lint type test` is green; the failure was reading that
 as a description of CI rather than as an instruction to me.
+
+## 2026-08-28 — a guess about which test failed is not a diagnosis
+
+Mid-run, the streaming pytest output showed one `F` at the 16% mark. Rather than wait for the
+summary — twelve minutes off, and it names the test — I mapped 16% onto `pytest --collect-only`'s
+ordering, landed on `test_connector_transport.py`, noticed it holds wall-clock tests, and ran that
+file alone. It passed, and I recorded the failure as a timing flake under load. Both halves of that
+were wrong: the file was never the failing one, and its passing was evidence about nothing.
+
+The actual failure was `test_config.py::test_env_example_documents_every_field` — a new
+`service_max_plan_scans` setting that I had not documented in `.env.example`. A real gap in my own
+change, one line to fix, and I had classified it away as somebody else's flakiness.
+
+The mechanism is worth naming, because "I was impatient" is not it. **A percentage in a progress
+bar is a position in an ordering I reconstructed, not an identifier.** Two of the steps between it
+and a test name are my own inference, and running the guessed file can only ever *fail* to falsify
+the guess — a pass is consistent with "not this file" as well as with "flaky here". I built a test
+whose green result told me nothing and then read it as confirmation.
+
+The rule: **when a run reports a failure, get the failure's name from the run.** If waiting is not
+acceptable, re-run the suspect *with the same seed and load*, or grep the partial log — do not
+index a progress percentage into a collection listing. And never let "flake" be the conclusion of a
+chain that starts with a guess about identity; it is the one classification that requires knowing
+exactly which test, since the whole claim is about that test's history.

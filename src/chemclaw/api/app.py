@@ -381,9 +381,13 @@ def create_app(
     # opens a pool reports on it rather than only the one process that happened to have the
     # binding — the workers and connector servers pool too and were reporting nothing
     # (D-2026-08-05-the-connection-budget-is-a-fleet-number).
+    # `unhealthy`, not `state == "unreachable"`: a jobs-only bundle whose task queue has no poller
+    # is `unpolled`, which is down in the way that matters (D-2026-08-27). The predicate lives on
+    # the model so this gauge and the `connectors_required` gate cannot drift into two definitions
+    # of the same word; `unknown` — the probe itself could not run — is neither, by the same ADR.
     METRICS.bind_gauge(
         "chemclaw_connectors_unhealthy",
-        lambda: float(sum(1 for item in app.state.connector_health if item.state == "unreachable")),
+        lambda: float(sum(1 for item in app.state.connector_health if item.unhealthy)),
     )
 
     # The routes, one module per resource (`chemclaw/api/routes/`). Order mirrors the audience:

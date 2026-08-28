@@ -6,8 +6,11 @@ none, so it skips). The provider-selection test is a pure unit test with no data
 """
 
 import asyncio
+import base64
+from datetime import UTC, datetime
 from typing import Any, cast
 
+import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage, message_to_dict
 
 from chemclaw.agent.chemclaw_agent import history_provider
@@ -17,9 +20,13 @@ from chemclaw.agent.session_store import (
     PostgresHistoryProvider,
     SessionOwnerStore,
     SessionTurnClaims,
+    _session_delete_statements,
+    decode_session_cursor,
+    encode_session_cursor,
     is_degraded_render,
     message_from_row,
 )
+from chemclaw.api.tool_results import content_address, store_tool_result
 from chemclaw.cli.explain import explain
 from chemclaw.core import db
 from chemclaw.core.config import settings
@@ -28,7 +35,7 @@ from chemclaw.core.identity_context import (
     set_current_correlation_id,
 )
 from chemclaw.core.metrics import METRICS
-from tests.pg import migrated_db_or_skip
+from tests.pg import create_checkpoint_tables, migrated_db_or_skip
 
 # The counter that separates "one unreadable legacy row" from "the reader is broken for everyone".
 _DEGRADED = "chemclaw_degraded_total"
@@ -208,6 +215,33 @@ def test_session_owner_lists_an_unnamed_session_rather_than_dropping_it() -> Non
 
         listed = await store.list_for_owner("owner-untitled-test")
         assert [(row[0], row[3]) for row in listed] == [("sess-untitled", None)]
+
+    asyncio.run(_run())
+
+
+def test_session_owner_listing_carries_the_profile_each_session_runs_under() -> None:
+    """The listing returns `profile`, which is what `GET /plans/pending` filters on.
+
+    Not cosmetic and not for the sidebar: it is the one column that says whether a session can be
+    holding a plan waiting on a decision, and the alternative to reading it here is one serialized
+    checkpointer statement per conversation to discover the same thing. `None` is a real value and
+    means the default profile — `agent.profiles.get_profile(None)` resolves exactly that — so it
+    must come back rather than being normalised into a name the row does not hold.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        store = SessionOwnerStore()
+        await store.record("sess-profiled", "owner-profile-list-test", "property-lookup")
+        await store.record("sess-unprofiled", "owner-profile-list-test")
+        await _spoke_in("sess-profiled")
+        await _spoke_in("sess-unprofiled")
+
+        listed = await store.list_for_owner("owner-profile-list-test")
+        assert {row[0]: row[4] for row in listed} == {
+            "sess-profiled": "property-lookup",
+            "sess-unprofiled": None,
+        }
 
     asyncio.run(_run())
 
@@ -461,3 +495,250 @@ def test_a_stored_message_carries_the_correlation_id_of_the_turn_that_wrote_it()
         )
 
     asyncio.run(_run())
+
+
+def test_a_cursor_round_trips_its_position_exactly_and_refuses_anything_else() -> None:
+    """A cursor is the sort key it was minted from, to the microsecond, and nothing else parses.
+
+    The round trip has to be exact: the listing resumes with `(updated_at, session_id) < (…)`, so a
+    timestamp that lost its microseconds or its offset would name a *different* position — one that
+    re-serves the row the caller has already seen, or skips a conversation that shares its second
+    with another. Asserting the pair back is what makes "opaque" a property of the wire format
+    rather than of the value.
+
+    The refusals are the other half. The token is client-supplied, so every way it can arrive
+    wrong — not base64, base64 of something else, a missing field, a timestamp nothing can parse —
+    has to land on one `ValueError` the route can turn into a 422, rather than on a `binascii`
+    error or a `UnicodeDecodeError` reaching the handler as a 500.
+    """
+    stamp = datetime(2026, 8, 27, 14, 3, 2, 123456, tzinfo=UTC)
+    cursor = encode_session_cursor(stamp, "sess-cursor-1")
+    assert decode_session_cursor(cursor) == (stamp, "sess-cursor-1")
+    assert "sess-cursor-1" not in cursor, "the cursor spells its own contents in the clear"
+
+    for forged in ("", "!!!!", "not-base64!", base64.urlsafe_b64encode(b"no-separator").decode()):
+        with pytest.raises(ValueError):
+            decode_session_cursor(forged)
+    with pytest.raises(ValueError):
+        decode_session_cursor(base64.urlsafe_b64encode(b"not-a-timestamp|sess-x").decode())
+
+
+def test_the_session_listing_pages_past_its_ceiling_without_skipping_or_repeating() -> None:
+    """Every conversation is reachable, and a list that reorders itself mid-read stays honest.
+
+    `service_max_listed_sessions` used to be the end of the list rather than a page: a chemist with
+    more sessions than the cap could not reach the older ones from any client, because nothing said
+    where the answer stopped. So the first assertion is simply that all six of a six-session owner
+    come back through a ceiling of two.
+
+    The second is why the cursor is a keyset and not an `OFFSET`. This list is ordered by *last
+    activity*, so speaking in an old conversation moves it to the top — the list mutates while it is
+    being read, which is the case an offset cannot survive: rows that move above the boundary push
+    the ones below it down, so `OFFSET 2` re-serves a row the caller already has and never shows the
+    one it displaced. Here a new session is created and an already-listed one is revived *between*
+    pages, and the remaining pages must still deliver each unseen conversation exactly once.
+    """
+
+    async def _run() -> list[str]:
+        await migrated_db_or_skip()
+        store = SessionOwnerStore()
+        owner = "owner-page-test"
+        sessions = [f"sess-page-{index}" for index in range(6)]
+        for session_id in sessions:
+            await store.record(session_id, owner)
+            await _spoke_in(session_id)
+
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(settings, "service_max_listed_sessions", 2)
+        try:
+            seen: list[str] = []
+            cursor: str | None = None
+            disturbed = False
+            while True:
+                page = await store.page_for_owner(owner, after=cursor)
+                if not page:
+                    break
+                seen.extend(session_id for session_id, *_ in page)
+                cursor = encode_session_cursor(page[-1][2], page[-1][0])
+                if not disturbed:
+                    # The list reorders itself under the reader: a brand-new conversation lands
+                    # above the cursor, and the newest already-seen one is spoken in again, which
+                    # moves it back to the top of an ordering the reader has already passed.
+                    disturbed = True
+                    await store.record("sess-page-new", owner)
+                    await _spoke_in("sess-page-new")
+                    await _spoke_in(sessions[-1], "and one more thing")
+            return seen
+        finally:
+            monkeypatch.undo()
+
+    seen = asyncio.run(_run())
+    expected = [f"sess-page-{index}" for index in reversed(range(6))]
+    assert seen == expected, (
+        f"paging returned {seen}; every session must appear exactly once, newest first, even "
+        "though the list was reordered between pages"
+    )
+    assert len(seen) == len(set(seen)), f"a row was served twice while paging: {seen}"
+
+
+async def _rows(table: str, column: str, value: str) -> int:
+    """How many rows of `table` carry `value` in `column` — the delete's own evidence."""
+    async with db.connection(settings.postgres_dsn) as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(f"SELECT count(*) FROM {table} WHERE {column} = %s", (value,))
+            row = await cur.fetchone()
+    return int(row[0]) if row else 0
+
+
+def test_deleting_a_session_clears_every_table_it_reaches_and_no_one_elses() -> None:
+    """One conversation goes; the conversation beside it, and the person's own rows, stay.
+
+    The table set is the erasure sweep's (`chemclaw.agent.leaver._ERASE`) rather than a second list
+    written here — that is what `_session_delete_statements` is for — so this asserts the sweep
+    actually *reaches* each of them with a row in it. A delete that removed the ownership row and
+    left the messages would be worse than no delete at all: every session-scoped sweep in this
+    system starts from `session_owners`, so those rows would be unreachable by name and invisible to
+    the erasure that is supposed to be able to find them later.
+
+    The bystander session is the other half, and it is not decoration. `tool_result_blobs` is
+    content-addressed, so two conversations that ran the same tool over the same arguments share one
+    row, and the link rows cascade with it — deleting the blob unconditionally would take a stored
+    result out of a conversation nobody asked to delete.
+    """
+
+    async def _run() -> tuple[dict[str, int], dict[str, int], int, int]:
+        await migrated_db_or_skip()
+        await create_checkpoint_tables()
+        store = SessionOwnerStore()
+        doomed, bystander = "sess-delete-mine", "sess-delete-theirs"
+        for session_id, owner in ((doomed, "owner-delete-test"), (bystander, "owner-delete-other")):
+            await store.record(session_id, owner)
+            await _spoke_in(session_id)
+            async with db.connection(settings.postgres_dsn) as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "INSERT INTO session_events (session_id, kind) VALUES (%s, 'job-result')",
+                        (session_id,),
+                    )
+                    # All three checkpoint tables, because they are one conversation's graph
+                    # state split across three keys with no foreign key between them: a delete
+                    # that took `checkpoints` and left the blobs would leave the payload behind.
+                    await cur.execute(
+                        "INSERT INTO checkpoints "
+                        "(thread_id, checkpoint_ns, checkpoint_id, checkpoint, metadata) "
+                        "VALUES (%s, '', 'ckpt-1', '{}'::jsonb, '{}'::jsonb)",
+                        (session_id,),
+                    )
+                    await cur.execute(
+                        "INSERT INTO checkpoint_blobs "
+                        "(thread_id, checkpoint_ns, channel, version, type, blob) "
+                        "VALUES (%s, '', 'messages', '1', 'msgpack', %s)",
+                        (session_id, b"payload"),
+                    )
+                    await cur.execute(
+                        "INSERT INTO checkpoint_writes (thread_id, checkpoint_ns, checkpoint_id, "
+                        "task_id, idx, channel, type, blob) "
+                        "VALUES (%s, '', 'ckpt-1', 'task-1', 0, 'messages', 'msgpack', %s)",
+                        (session_id, b"payload"),
+                    )
+                await conn.commit()
+            await SessionTurnClaims().claim(session_id, f"holder-{session_id}", 60)
+            # One result only this session has, and one both of them do — the same bytes under the
+            # same content address, which is what the store's dedup makes of an identical answer.
+            await store_tool_result(
+                session_id=session_id,
+                correlation_id="corr-delete",
+                tool="screen_hazards",
+                text=f"private to {session_id}",
+            )
+            await store_tool_result(
+                session_id=session_id,
+                correlation_id="corr-delete",
+                tool="screen_hazards",
+                text="a result both conversations produced",
+            )
+
+        shared_ref = content_address("a result both conversations produced")
+        removed = await store.delete_session(doomed)
+        survivors = {
+            table: await _rows(
+                table, "thread_id" if table.startswith("checkpoint") else "session_id", bystander
+            )
+            for table, _ in _session_delete_statements()
+            if table != "tool_result_blobs"
+        }
+        return (
+            removed,
+            survivors,
+            await _rows("tool_result_links", "session_id", doomed),
+            await _rows("tool_result_blobs", "content_hash", shared_ref),
+        )
+
+    removed, survivors, doomed_links, shared_blobs = asyncio.run(_run())
+
+    assert set(removed) == {table for table, _ in _session_delete_statements()}, (
+        "the report must name every table the sweep covers, so an operator comparing two runs "
+        f"sees the same keys: {sorted(removed)}"
+    )
+    for table in ("session_messages", "session_events", "session_turns", "session_owners"):
+        assert removed[table] == 1, f"{table} kept a deleted session's row: {removed}"
+    for table in ("checkpoints", "checkpoint_blobs", "checkpoint_writes"):
+        assert removed[table] == 1, f"the graph state outlived the conversation: {removed}"
+    assert removed["tool_result_blobs"] == 1, (
+        "the session's own stored result was not deleted (or the shared one was): "
+        f"{removed['tool_result_blobs']} blob(s)"
+    )
+    assert shared_blobs == 1, (
+        "deleting one conversation removed bytes another one links to — the cascade would have "
+        "taken the bystander's link row with them"
+    )
+    assert doomed_links == 1, (
+        "the deleted session's link to the shared blob should be the only thing left of it "
+        "(DELETE on tool_result_links is deliberately withheld; retention collects it with the "
+        f"blob), found {doomed_links}"
+    )
+    assert all(count == 1 for count in survivors.values()), (
+        f"deleting one session took rows from another: {survivors}"
+    )
+
+
+def test_deleting_a_session_leaves_what_belongs_to_the_person() -> None:
+    """A conversation is not a person: their preferences and subscriptions survive its deletion.
+
+    `_ACTOR_SCOPED_ONLY` is the classification that makes this true, and it is checked here rather
+    than asserted in prose because the tables sit in the *same* erasure set the session sweep
+    derives itself from — one wrong entry and closing a conversation would quietly clear the
+    chemist's memories, preferences and standing queries across every other one.
+    """
+
+    async def _run() -> tuple[int, int]:
+        await migrated_db_or_skip()
+        store = SessionOwnerStore()
+        owner = "owner-keeps-their-own"
+        await store.record("sess-delete-personal", owner)
+        await _spoke_in("sess-delete-personal")
+        async with db.connection(settings.postgres_dsn) as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "INSERT INTO user_preferences (owner, key, value) "
+                    "VALUES (%s, 'solvent', '2-MeTHF') ON CONFLICT DO NOTHING",
+                    (owner,),
+                )
+                await cur.execute(
+                    "INSERT INTO subscriptions (owner, query) VALUES (%s, 'nitration') "
+                    "ON CONFLICT DO NOTHING",
+                    (owner,),
+                )
+            await conn.commit()
+
+        await store.delete_session("sess-delete-personal")
+        return (
+            await _rows("user_preferences", "owner", owner),
+            await _rows("subscriptions", "owner", owner),
+        )
+
+    preferences, subscriptions = asyncio.run(_run())
+    assert (preferences, subscriptions) == (1, 1), (
+        "deleting one conversation took data that belongs to the person, not to it: "
+        f"{preferences} preference(s), {subscriptions} subscription(s) left"
+    )

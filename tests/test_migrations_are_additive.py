@@ -128,6 +128,13 @@ _REVIEWED_ROLLBACK_BREAKS: dict[str, tuple[str, tuple[str, ...]]] = {
         "D-2026-08-27-the-gate-tells-the-truth-about-what-it-pushed",
         ("ALTER TABLE note_proposals DROP CONSTRAINT",),
     ),
+    "063_reaction_fingerprint_source.sql": (
+        "D-2026-08-27-a-fingerprint-is-keyed-by-its-source",
+        (
+            "ALTER TABLE reaction_fingerprints DROP CONSTRAINT",
+            "ALTER TABLE reaction_fingerprints ADD PRIMARY KEY",
+        ),
+    ),
     "056_reaction_record_identity.sql": (
         "D-2026-08-26-a-transcription-is-keyed-by-its-source",
         (

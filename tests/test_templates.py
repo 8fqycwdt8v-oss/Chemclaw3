@@ -832,3 +832,143 @@ def test_the_validator_refuses_an_empty_or_absent_templates_directory(
         assert any("no templates discovered" in problem for problem in problems), (
             f"{directory} produced {problems}"
         )
+
+
+# --- the live argument check ----------------------------------------------------------
+#
+# `make template-validate` cannot answer for a bundle this repository declares and does not run —
+# there is no local signature to read, and seven shipped steps are in that state. The live gate
+# (`make live-template-args`) answers from a running server's advertised schema instead. What is
+# testable offline is its *judgment*: given the tools a session did and did not produce, does it
+# check what it can, refuse to invent what it cannot, and say which is which. The reaching itself
+# is the live lane's job, and the run is recorded in
+# `docs/decisions/D-2026-08-27-an-argument-check-needs-a-live-session.md`.
+
+
+def _live_tool(name: str) -> Any:
+    """A tool as an open connector session hands one over: an ordinary LangChain tool.
+
+    Real rather than a stand-in, so `_live_arguments` reads a genuine `tool_call_schema` — the
+    thing whose shape the live check depends on and which no assertion about a mock would pin.
+    """
+
+    @tool_decorator(name_or_callable=name, description="screen a molecule for hazards")
+    async def _served(smiles: list[str], top_k: int = 5) -> str:
+        return "hazard: none found"
+
+    return _served
+
+
+def _live_template(**arguments: Any) -> Template:
+    """A one-step template calling `screen_hazards` with `arguments`."""
+    return Template.model_validate(
+        {
+            "name": "probe",
+            "summary": "Do the thing.",
+            "steps": [
+                {"id": "one", "kind": "tool", "tool": "screen_hazards", "arguments": arguments}
+            ],
+        }
+    )
+
+
+_OWNERS = {"screen_hazards": "safety"}
+
+
+def test_the_live_check_reads_the_arguments_off_a_running_tool() -> None:
+    """The whole point of the live lane: the authority is the schema the server advertised.
+
+    Both directions, because both are run-time failures of a *pinned* procedure and neither is
+    visible offline for this tool: a key the tool does not take, and a required key the step omits.
+    """
+    from chemclaw.cli.validate_template_args_live import check_live_arguments
+
+    served = {"screen_hazards": _live_tool("screen_hazards")}
+    report = check_live_arguments(
+        [_live_template(smilez=["CCO"], nonexistent_arg=42)], _OWNERS, served, unreachable=()
+    )
+    assert any("does not take" in p and "nonexistent_arg" in p for p in report.problems), report
+    assert any("omits required argument(s) ['smiles']" in p for p in report.problems), report
+
+    # And it must not invent failures: `top_k` has a default, so omitting it is correct.
+    good = check_live_arguments([_live_template(smiles=["CCO"])], _OWNERS, served, unreachable=())
+    assert good.problems == []
+    assert good.checked == ["probe/one -> screen_hazards (safety)"]
+    assert good.unreached == {}
+
+
+def test_the_live_check_reports_an_unreached_connector_instead_of_counting_it() -> None:
+    """A harness that reached two of five servers checked two — D-2026-08-17, as a return value.
+
+    A connector that did not come up contributes no tools, so every check against it would pass
+    vacuously. It is recorded as *unreached* instead: not a problem (nothing is known to be wrong)
+    and not a pass (nothing was looked at). This is the assertion that keeps the green line honest,
+    and `main` turns the same distinction into a distinct exit code.
+    """
+    from chemclaw.cli.validate_template_args_live import check_live_arguments
+
+    report = check_live_arguments(
+        [_live_template(smilez=["CCO"])], _OWNERS, {}, unreachable=("safety",)
+    )
+    assert report.problems == []
+    assert report.checked == []
+    assert report.unreached == {"safety": ["probe/one -> screen_hazards"]}
+
+
+def test_the_live_check_flags_a_tool_a_reachable_server_does_not_serve() -> None:
+    """A manifest declaring what its server does not answer is a template that fails at the call.
+
+    Both `connector.yaml` files for these bundles say in prose that the two copies of the tool list
+    can drift and that only a running server settles it. Offline nothing can: the local check has
+    no module to read. Here the connector came up, so its silence about the tool is evidence rather
+    than absence, and it is reported as a problem rather than skipped.
+    """
+    from chemclaw.cli.validate_template_args_live import check_live_arguments
+
+    report = check_live_arguments([_live_template(smiles=["CCO"])], _OWNERS, {}, unreachable=())
+    assert report.checked == []
+    assert any("running server does not serve" in p for p in report.problems), report
+
+
+def test_an_in_process_tool_is_left_to_the_offline_gate() -> None:
+    """One question, one answer. A tool whose signature is in this tree is checked there, not twice.
+
+    A second lane checking the same thing differently is how two gates end up disagreeing about
+    one template — the failure `_resolvable_signatures` already records for the import path.
+    """
+    from chemclaw.cli.validate_template_args_live import check_live_arguments
+
+    report = check_live_arguments(
+        [_live_template(anything=1)], owners={}, live_tools={}, unreachable=()
+    )
+    assert (report.problems, report.checked, report.unreached) == ([], [], {})
+
+
+def test_both_lanes_derive_the_same_arguments_from_the_same_tool() -> None:
+    """The two authorities must agree wherever both can answer, or the lanes are two rules.
+
+    `ToolArguments` exists to make that structural rather than hoped for: the offline gate builds
+    one from an `inspect.Signature` and the live gate from the schema a session advertised, and
+    `argument_problems` is the single reader. This pins the two constructors against one function
+    and its served form — the case where a disagreement would be a real defect and silent.
+    """
+    import inspect
+
+    from chemclaw.cli.validate_template_args_live import _live_arguments
+    from chemclaw.cli.validate_templates import ToolArguments
+
+    async def screen_hazards(smiles: list[str], top_k: int = 5) -> str:
+        """Screen a molecule for hazards."""
+        return "hazard: none found"
+
+    offline = ToolArguments.of_signature(inspect.signature(screen_hazards))
+    live = _live_arguments(_live_tool("screen_hazards"))
+    assert (
+        offline
+        == live
+        == ToolArguments(
+            accepted=frozenset({"smiles", "top_k"}),
+            required=frozenset({"smiles"}),
+            takes_any_key=False,
+        )
+    )

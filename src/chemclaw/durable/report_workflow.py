@@ -113,7 +113,13 @@ async def propose_report(report: Report, requested_by: str = "") -> str:
 
 
 @durable_workflow("background")
-@workflow.defn
+# Declared because the wait a parked section costs is the requesting chemist's. A section that
+# fails is dropped by `fan_out` and `_reconcile` turns the gap into a visible `retrieval_failed`
+# marker; a section that *parks* is dropped only when `fan_out_child_timeout_seconds` expires —
+# an hour per batch — while `DevelopmentReportWorkflow` waits and the requester polls. Same
+# outcome, an hour sooner, and the degradation contract below is what makes it safe.
+# D-2026-08-27.
+@workflow.defn(failure_exception_types=[Exception])
 class ReportSectionWorkflow:
     """Retrieve one report section durably — the fan-out unit of a report (plan F10-D2).
 
@@ -189,7 +195,13 @@ def _reconcile(
 
 
 @durable_workflow("background")
-@workflow.defn
+# Declared: `request_development_report` starts this for a named chemist with no
+# `execution_timeout` and hands back an id to poll, and it returns the `ConnectorJobResult`
+# envelope precisely so `get_durable_job_status` can answer for it — which, for a parked run,
+# means answering `running` for ever. It also runs real logic outside an activity
+# (`_reconcile`), so the plain exception this guards against is not hypothetical.
+# D-2026-08-27.
+@workflow.defn(failure_exception_types=[Exception])
 class DevelopmentReportWorkflow:
     """Draft a report durably, fanning sections out to child workflows, then PR-gate the draft."""
 

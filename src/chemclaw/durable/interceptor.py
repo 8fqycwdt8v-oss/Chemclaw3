@@ -32,10 +32,19 @@ cannot read its workflow's memo, and the argument is where this system already p
 in the payload rather than on the transport). So the walk below looks for the field *names* this
 codebase already standardised on, one level into a nested identity model, and binds nothing it does
 not find.
+
+Two spellings, because this tree has two. Most activities take a model that declares the ids; four
+take them as bare strings beside a model-authored payload, deliberately, so that the payload's
+digest can be a cache key identity cannot move. The second group was invisible to a walk that skips
+`str`, so their own `activity.started`/`activity.finished` lines carried `actor=-` — including the
+fleet's longest-running activity. They are read off the activity function's **signature** instead,
+which is first-party Python, so the rule that a model-authored payload can never supply an identity
+is unchanged: a payload cannot rename the parameter it is bound to.
 """
 
 import asyncio
 import contextlib
+import inspect
 import logging
 import time
 from collections.abc import Iterator, Sequence
@@ -67,6 +76,20 @@ _CORRELATION_FIELDS = ("correlation_id",)
 # `identity: StepIdentity` rather than flat, and that is the shape the template path — the one
 # path whose failures were completely silent (J4) — actually uses.
 _NESTED_FIELDS = ("identity",)
+# The same names again, read as *parameters* of the activity function rather than as fields of its
+# argument models. Four activities carry identity beside a model-authored payload rather than
+# inside a model — `connectors/calc/activities.py::run_xtb_calculation`,
+# `connectors/bo/activities.py::record_campaign_run`,
+# `durable/memory_jobs.py::publish_memory_note_activity` and
+# `durable/report_workflow.py::propose_report` — precisely because the payload's digest is a cache
+# key and identity must not be able to change it. `_models` skips `str` outright, so the walk saw
+# none of them and both of this module's own records rendered `actor=- correlation_id=-` for the
+# fleet's longest-running activity while its dispatch ran fully attributed.
+#
+# Reading them by *parameter name* keeps the rule `_models` is written for: the name comes from
+# first-party Python — the activity's own signature — never from data, so a model-authored payload
+# still cannot supply an identity however it spells its keys.
+_NAMED_IDENTITY_PARAMETERS = frozenset(_ACTOR_FIELDS + _SESSION_FIELDS + _CORRELATION_FIELDS)
 
 # How many activities this worker is running right now, and whether it is draining. Plain module
 # state and no lock: a worker is one event loop in one process, so these are only ever touched from
@@ -157,37 +180,66 @@ def _first(models: Sequence[Any], fields: Sequence[str]) -> str:
     return ""
 
 
-def activity_context(args: Sequence[Any]) -> ActivityContext:
+def _named_strings(fn: Any, args: Sequence[Any]) -> dict[str, str]:
+    """The identity-bearing *parameters* of `fn` that this call bound to a non-empty string.
+
+    Positional only, because that is how Temporal invokes an activity: the SDK passes the decoded
+    payloads in order, so zipping the signature's parameter names against `args` is the binding.
+    A signature that cannot be read (a builtin, a C callable) yields nothing rather than raising —
+    this runs around every activity and must never be the reason one fails.
+    """
+    try:
+        parameters = list(inspect.signature(fn).parameters)
+    except (TypeError, ValueError):  # pragma: no cover - no such activity exists in this tree
+        return {}
+    return {
+        name: value
+        # `strict=False`: an activity with defaulted identity parameters is invoked with
+        # fewer arguments than it declares, which is the ordinary case here.
+        for name, value in zip(parameters, args, strict=False)
+        if name in _NAMED_IDENTITY_PARAMETERS and isinstance(value, str) and value
+    }
+
+
+def activity_context(args: Sequence[Any], fn: Any = None) -> ActivityContext:
     """The turn context an activity's own arguments carry, for logging and attribution.
 
     Public because it is the whole testable part of this module: everything else needs a running
     activity, and "the ids the front door stamped reach the worker's log lines" is a property that
     should be checkable without a broker.
 
-    **Roles are taken only where an input actually declares them.** Binding an actor with an empty
-    role set is safe by construction — every gate that reads them fails closed on an empty set
-    (`authz.check_expensive_action`, `documents/retriever._entitled`) — so the widening this could
-    have been is not one. What it buys is that `agent/audit.py` and `kg/proposal.py`, which read
-    the ambient actor and booked `""` for every row a worker ever wrote, now name the person the
-    run was launched for.
+    **Roles are never taken from the payload; the actor is.** A relayed workflow argument is data,
+    not a verified claim, so binding a role from it would let anyone who can enqueue an activity
+    forge a privileged role (security review, `D-2026-08-28`) — authorization binds an *empty* set,
+    which every gate treats as fail-closed (`authz.authorize_trigger`,
+    `documents/retriever._entitled`). Lifting the actor, session and correlation is safe on the same
+    reasoning: they are attribution, not authority, and what it buys is that `agent/audit.py` and
+    `kg/proposal.py`, which read the ambient actor and booked `""` for every row a worker ever
+    wrote, now name the person the run was launched for.
     """
     models = list(_models(args))
     # Roles are NOT taken from the payload. A workflow argument is data the broker relays, not a
     # verified claim: anyone who can enqueue an activity (a plaintext broker, a compromised worker,
     # a replay) could otherwise put `roles=["Chemclaw.Privileged"]` in the payload and satisfy the
     # privileged gate, because `authz._has_required_role` reads exactly the contextvar this binds.
-    # The actor is still lifted, for attribution — the audit trail and job records name the person a
-    # run was launched for — but authorization binds an *empty* set, which every gate treats as
-    # fail-closed (`authz.authorize_trigger`, `documents/retriever._entitled`). A durable job that
-    # legitimately needs a user's entitlements was already authorized at the front door before the
-    # workflow started (`connectors/jobs.prepare_job_launch`); propagating role-scoped authority
-    # *into* the durable boundary safely needs a signed payload (a Temporal codec), which is a
-    # separate decision — see the security-review ADR. Until then, fail closed.
+    # Actor, session and correlation are still lifted, for attribution — the audit trail and job
+    # records name the person a run was launched for — but authorization binds an *empty* set,
+    # which every gate treats as fail-closed (`authz.authorize_trigger`,
+    # `documents/retriever._entitled`). A durable job that legitimately needs a user's entitlements
+    # was already authorized at the front door before the workflow started
+    # (`connectors/jobs.prepare_job_launch`); propagating role-scoped authority *into* the durable
+    # boundary safely needs a signed payload (a Temporal codec), a separate decision — see
+    # `D-2026-08-28`. Until then, fail closed.
+    named = _named_strings(fn, args) if fn is not None else {}
+
+    def _named(fields: Sequence[str]) -> str:
+        return next((named[field] for field in fields if field in named), "")
+
     return ActivityContext(
-        actor=_first(models, _ACTOR_FIELDS),
+        actor=_first(models, _ACTOR_FIELDS) or _named(_ACTOR_FIELDS),
         roles=frozenset(),
-        session_id=_first(models, _SESSION_FIELDS),
-        correlation_id=_first(models, _CORRELATION_FIELDS),
+        session_id=_first(models, _SESSION_FIELDS) or _named(_SESSION_FIELDS),
+        correlation_id=_first(models, _CORRELATION_FIELDS) or _named(_CORRELATION_FIELDS),
     )
 
 
@@ -197,7 +249,7 @@ class _ObservedActivity(ActivityInboundInterceptor):
     async def execute_activity(self, input: ExecuteActivityInput) -> Any:
         """Run the activity inside the ambient context its own argument declares."""
         info = activity.info()
-        context = activity_context(input.args)
+        context = activity_context(input.args, input.fn)
         # Typed `Any` rather than `object` because it is splatted into `log_event`'s `**fields`,
         # which sits beside two typed keyword-only parameters (`level`, `exc_info`) — a
         # `dict[str, object]` splat is a type error against those, and narrowing the values is the

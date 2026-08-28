@@ -258,19 +258,37 @@ def test_every_schedule_skips_an_overrunning_run(monkeypatch: pytest.MonkeyPatch
 
 
 def test_every_schedule_bounds_one_run(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A scheduled run has an execution ceiling, because SKIP makes an endless one invisible.
+    """A scheduled run has a ceiling, and it is the *per-run* one, not the chain-wide one.
 
     The pair with the test above is the point: `SKIP` is right, and it is exactly what turns a run
     that never ends into a job family that silently stops running — every subsequent fire is
     skipped, and a skipped fire is an error nowhere. The ceiling is what makes that state a failed
     run instead.
+
+    **Which knob carries it decides whether a drain can finish at all.** `execution_timeout` is
+    Temporal's WorkflowExecutionTimeout: it spans the whole `continue_as_new` chain, and a continued
+    run cannot extend it (the continue-as-new command carries a run timeout and a task timeout and
+    no execution timeout). Four of these jobs drain by continuing as new — `corpus_sync`,
+    `document_sync`, `label_sync`, `eln_sync` — so a chain-wide ceiling kills a first load of a
+    multi-million-row corpus mid-drain rather than bounding the page it is on. Measured against a
+    live broker with the timeouts this function actually builds, on a workflow that sleeps a second
+    and continues as new ten times under a five-second ceiling: `execution_timeout` failed the chain
+    at 5.64 s, `run_timeout` completed it in 12.38 s.
+
+    The absence is asserted beside the presence because it is the whole invariant, and because the
+    time-skipping test server **cannot** tell the two knobs apart — measured, the same ten-page
+    chain completes under either — so a behavioural test on that server would be a vacuous green.
     """
     for job in planned_schedules():
         action = _build_schedule(job).action
         assert isinstance(action, ScheduleActionStartWorkflow)
-        assert action.execution_timeout == timedelta(
-            seconds=settings.schedule_run_timeout_seconds
-        ), job.schedule_id
+        assert action.run_timeout == timedelta(seconds=settings.schedule_run_timeout_seconds), (
+            job.schedule_id
+        )
+        assert action.execution_timeout is None, (
+            f"{job.schedule_id} carries a chain-wide execution timeout; a drain that continues as "
+            "new would be killed mid-chain and restart from its first page on the next fire"
+        )
 
 
 def test_co_scheduled_jobs_are_spread_deterministically() -> None:

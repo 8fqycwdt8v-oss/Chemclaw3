@@ -251,11 +251,18 @@ class CalculatorSettings(BaseSettings):
     # while `.env.example` published the knobs for an operator to set and see nothing change.
     #
     # Deleted rather than left: a setting with no reader is configuration in appearance only, and
-    # this repository has fixed that class of defect often enough to name it. The *function* stays,
-    # tested and correct; wiring it to a predictor is a capability decision with its own backlog
-    # row, and these two come back with the caller that needs them (their values were argued for —
-    # 0.9 because the guarantee needs `ceil((n+1)·coverage) ≤ n` samples to exist at all, 20 because
-    # nine residuals give a valid interval one unusual compound sets — and that is in `git log`).
+    # this repository has fixed that class of defect often enough to name it. The function went the
+    # same way and is *not* still standing — `science/calc/uncertainty.py` records its deletion, and
+    # `Method` is `reported | propagated | none`.
+    #
+    # Neither comes back. `D-2026-08-27-an-interval-is-only-honest-where-it-was-calibrated` declines
+    # the wiring on three measurements: the ledger holds no residuals and its only producer is a
+    # chemist typing one measurement in at a time; the 20-sample floor argued for here takes the
+    # 19th of 20 absolute residuals, which lands >25% off the true half-width in 23.8% of runs
+    # (±20% at 90% confidence first arrives at n = 59); and a 90% half-width is not the 1σ this
+    # field means, so it can only narrow below a published RMSE if the calculator runs ~1.6x better
+    # than published, while at matching 1σ semantics it converges on the `Calibration.rmse`
+    # `calculator_trust` already reports. The ADR states the trigger that would reopen it.
 
     # logD (calc.logd, D-092): the working pH used when a caller does not name one.
     # 7.4 (physiological pH) is the conventional analytical-chemistry default.

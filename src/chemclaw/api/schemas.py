@@ -246,6 +246,54 @@ class PlanStatusOut(BaseModel):
     decided_by: str | None = None
 
 
+class PendingPlan(BaseModel):
+    """One session whose plan is waiting for a first human decision.
+
+    Carries the conversation's identity as well as the plan, because the inbox is read outside the
+    conversation that raised it: a chemist who closed the tab has the session id nowhere else, and
+    `title`/`updated_at` are what makes a row recognisable as "the impurity question from Tuesday"
+    rather than a hex string.
+
+    `plan_hash` is *not* here to be posted back. A decision is bound to the plan as displayed, and
+    the decision route re-reads the plan and 409s a stale hash — so a hash carried from a listing
+    that was rendered ten minutes ago would buy nothing but a race with the agent. It is here for
+    the same reason `PlanStatusOut` carries it: two rows showing the same steps under different
+    hashes are two different plans, and a surface that cannot tell them apart cannot say so.
+    """
+
+    session_id: str
+    title: str | None
+    updated_at: datetime
+    plan_hash: str
+    plan: list[str]
+
+
+class PendingPlansOut(BaseModel):
+    """The caller's undecided plans, with what the scan actually covered.
+
+    **The three counts are the point, and an empty `plans` is why.** A list with no rows has three
+    different meanings and a surface that cannot separate them shows a confident emptiness it has
+    not earned — the failure the companion UI recorded when a deleted `GET /approvals` 404 was
+    swallowed into `[]` and rendered as "nothing is waiting on you":
+
+    - `gated == 0` — no session of the caller's runs a plan-gated profile, so this deployment has
+      no plan gate to be waiting on. Nothing can ever appear here, and a surface should say that
+      rather than imply an empty queue.
+    - `gated > 0` and `unread == 0` — every plan that could be waiting was read. The queue is
+      genuinely empty.
+    - `unread > 0` — the scan hit `service_max_plan_scans` (or could not reach the checkpointer),
+      so this answer is partial and the sessions it did not reach are the *older* ones.
+    """
+
+    plans: list[PendingPlan]
+    # Sessions in the caller's listing — the same set and the same cap `GET /sessions` returns.
+    considered: int
+    # Of those, the ones that can hold a plan at all: a harness-enabled profile.
+    gated: int
+    # Gated sessions whose plan was not read, so `plans` is short by an unknown amount.
+    unread: int
+
+
 def session_title(message: str) -> str:
     """A session's name, from the message that opened it.
 

@@ -321,12 +321,18 @@ def _live_credential() -> str | None:
     uses it for its real work. One round trip, cached for the session by `functools.cache`, so a
     suite with thirty guarded tests still costs one call.
 
-    **Only a credential that does not work becomes a skip** — a rejected key
-    (`AuthenticationError`), or a key on an account with no balance (a 400 whose body is "credit
-    balance is too low"). Both are the operator being unconfigured. A 429 or a 529 is the provider
-    being *busy*, not unconfigured, and folding those into "skipped" is how a suite quietly stops
-    testing; they propagate, and the test fails as it should. Any other 400 is a real fault in this
-    fixed probe and propagates too.
+    **Only "this credential cannot be served" becomes a skip.** A 429 or a 529 is the provider
+    being busy, not the operator being unconfigured, and folding those into "skipped" is how a
+    suite quietly stops testing. They propagate, and the test fails as it should.
+
+    Two status families qualify, and the second was found the same way the first was — by a red
+    suite nobody could read. A 401 is a rejected key. A **400 `invalid_request_error` is also an
+    account state** on this probe: measured 2026-08-28, a present and well-formed `API-KEY` whose
+    account has no credit answers *"Your credit balance is too low to access the Anthropic API"*,
+    and `make test` reported `2 errors` several frames inside the client. This request cannot be
+    malformed by us — it is a two-field literal against a pinned model — so a 400 here is always
+    about the account, never about the call. The provider's own sentence is carried into the skip
+    reason rather than paraphrased, because "out of credit" and "revoked" want different people.
 
     **Called from a fixture, never from `skipif`.** `skipif` evaluates its condition at
     *collection*, and an exception there is not a failing test — it is `Interrupted: N errors
@@ -347,17 +353,24 @@ def _live_credential() -> str | None:
             model="claude-haiku-4-5-20251001",
             messages=[{"role": "user", "content": "probe"}],
         )
-    except anthropic.AuthenticationError:
+    except anthropic.AuthenticationError as exc:
+        _record_refusal(str(exc))
         return None
     except anthropic.BadRequestError as exc:
-        # An unfunded account is the operator being unconfigured, not the provider being busy:
-        # `count_tokens` on a zero-balance key answers 400 "credit balance is too low", which is a
-        # credential that does not work in exactly the sense the docstring means. Fold *only* that
-        # one signal into a skip; any other 400 is a real fault in this fixed probe and propagates.
-        if "credit balance is too low" in str(exc).lower():
-            return None
-        raise
+        # See the docstring: a 400 on this fixed two-field probe is an account state, not a bad
+        # call. Anything else the client raises — 429, 529, a transport error — propagates.
+        _record_refusal(str(exc))
+        return None
     return key
+
+
+_REFUSAL: list[str] = []
+
+
+def _record_refusal(message: str) -> None:
+    """Keep the provider's own words for the skip line, since that is where they are read."""
+    _REFUSAL.clear()
+    _REFUSAL.append(message)
 
 
 @pytest.fixture
@@ -381,10 +394,10 @@ def _no_credential_reason() -> str:
     """
     if not os.environ.get(_CREDENTIAL_ENV):
         return f"no {_CREDENTIAL_ENV} in the environment"
-    return (
-        f"{_CREDENTIAL_ENV} is set but the provider will not serve it — the credential is stale "
-        "or its account has no balance"
-    )
+    # The provider's own sentence, not a paraphrase: "revoked" and "out of credit" are both
+    # "set but not served", and they want different people.
+    said = _REFUSAL[0] if _REFUSAL else ""
+    return f"{_CREDENTIAL_ENV} is set but the provider will not serve it — {said}".rstrip(" —")
 
 
 # --------------------------------------------------------------------------------------------

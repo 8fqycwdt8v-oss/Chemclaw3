@@ -21,7 +21,7 @@ from typing import Any
 from langchain.agents.middleware import wrap_tool_call
 from langchain_core.messages import ToolMessage
 
-from chemclaw.agent.audit import returned_failure
+from chemclaw.agent.audit import refusal_reason, returned_failure
 from chemclaw.agent.authz import (
     AuthorizationError,
     authorize_tool,
@@ -388,12 +388,21 @@ async def announce_tool_failures(request: Any, handler: Callable[[Any], Any]) ->
     connector call left a `tool_call` event with no result and no failure beside it and vanished
     from the transcript entirely. Checking the returned message closes that, and cannot
     double-report — `returned_failure` is `None` for anything that signalled by raising.
+
+    **This is also where a refusal is told from a fault, because this is where the exception is.**
+    `refusal_reason` is the one table naming the five gates, and it takes the exception — so the
+    signal carries a classification made from the class rather than one a downstream module
+    reconstructs by matching a string. Only the raising path classifies: a returned failure is a
+    remote server's own words, and every gate here refuses by raising, so there is no gate to name.
     """
     try:
         result = await handler(request)
     except Exception as exc:
         record_tool_failure(
-            request.tool_call["name"], failure_detail(exc), str(request.tool_call.get("id") or "")
+            request.tool_call["name"],
+            failure_detail(exc),
+            str(request.tool_call.get("id") or ""),
+            refusal_reason(exc),
         )
         raise
     failed = returned_failure(result)

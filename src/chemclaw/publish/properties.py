@@ -83,6 +83,13 @@ UNIT_CONVERSIONS: dict[tuple[str, str], float] = {
     ("cal/(mol*K)", "j/(mol*K)"): 4.184,
     ("j/(mol*K)", "cal/(mol*K)"): 1.0 / 4.184,
     ("ev", "kcal/mol"): 23.060547830619026,
+    # A gradient's unit is the *reciprocal* of a length, so this factor is the bohr radius itself
+    # and not its reciprocal: one Hartree/Angstrom is 0.529 Hartree/bohr, because a bohr is the
+    # shorter step. Here because both calculators that report a gradient report it per Angstrom
+    # (`OptimizationResult.max_gradient`, `HessianPayload.max_gradient_hartree_per_angstrom`) while
+    # the registry keeps `max_gradient` in the atomic unit every quantum-chemistry program prints
+    # its convergence criterion in. CODATA 2018 bohr radius in Angstrom.
+    ("hartree/angstrom", "hartree/bohr"): 0.529177210903,
 }
 
 # The shipped registry. Grouped by what the quantity is, because that is how a reader looking for

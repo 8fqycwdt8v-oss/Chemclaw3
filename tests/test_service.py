@@ -673,9 +673,15 @@ class _FakeOwnerStore:
 
     async def list_for_owner(
         self, owner: str | None
-    ) -> list[tuple[str, datetime, datetime, str | None]]:
+    ) -> list[tuple[str, datetime, datetime, str | None, str | None]]:
         rows = [
-            (sid, self.created[sid], self.updated[sid], self.titles.get(sid))
+            (
+                sid,
+                self.created[sid],
+                self.updated[sid],
+                self.titles.get(sid),
+                self.profiles[sid],
+            )
             for sid, own in self.owners.items()
             if own == owner and sid in self.updated
         ]
@@ -1594,6 +1600,12 @@ def test_every_session_scoped_route_is_ownership_gated() -> None:
         # ownership gate exists to refuse — and 404 either way, so a stranger cannot learn
         # whether a session is mid-turn.
         ("/sessions/{session_id}/turn/stop", "POST"),
+        # Deleting the conversation
+        # (`D-2026-08-27-a-session-list-is-a-cursor-and-a-session-is-deletable`). Owner-scoped
+        # through the *same* gate reading it is, deliberately: a caller who cannot read a session
+        # must not be able to delete it, and one gate cannot drift from itself. 404 either way, so
+        # a stranger cannot use it to learn which ids exist.
+        ("/sessions/{session_id}", "DELETE"),
     }, (
         "new session-scoped route detected — it MUST resolve ownership via _resolve_session, "
         "and this inventory + the non-owner sweep below must cover it"

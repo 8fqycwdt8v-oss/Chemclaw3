@@ -1,6 +1,7 @@
 """A template's `tool` step, and the one way a tool failure used to become a step's answer.
 
-`agent/tool_invocation.invoke_governed` deliberately omits the two model-facing converters a chat
+`agent/tool_invocation.invoke_governed` deliberately omits the two model-facing converters and the
+framing wrapper a chat
 turn gets: a template step has no model, and converting a refusal there made a refused `job` step
 return the refusal as its payload and launch anyway. That reasoning is right and it left a hole,
 because it assumed a failure *raises*. An MCP tool does not — `langchain_mcp_adapters` builds every

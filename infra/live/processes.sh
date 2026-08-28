@@ -129,10 +129,20 @@ connector_env() {
 # directly removes the layer instead of working around it.
 python_bin() { ( cd "$REPO_ROOT" && uv run python -c 'import sys; print(sys.executable)' ); }
 
+# Whether *this lane* has a live process recorded under `name`.
+#
+# It answers a question about this lane's own bookkeeping and nothing else, which is exactly its
+# limit: a pidfile is a per-lane record of a machine-wide resource. `start_fleet_bundles` says what
+# that costs and asks the address itself instead.
+running() {
+  local pidfile="$RUN_DIR/$1.pid"
+  [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null
+}
+
 start() {
   local name="$1"; shift
   local pidfile="$RUN_DIR/$name.pid"
-  if [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then
+  if running "$name"; then
     log "$name already running (pid $(cat "$pidfile"))"
     return
   fi
@@ -169,18 +179,26 @@ llm_configured() {
 # fails within a second of the pid going away, so only real waiting waits.
 wait_for() {
   local name="$1" url="$2" attempts="${3:-300}"
-  local pidfile="$RUN_DIR/$name.pid"
   for _ in $(seq 1 "$attempts"); do
+    # **Liveness first, and the order is the point.** A URL answering is evidence that *something*
+    # serves that address — never that this process does. When a start loses a race for a bound
+    # port the incumbent answers the poll, so with the checks the other way round the lane logs
+    # "$name ready" over a process that died on its first line and records a pid nothing can
+    # signal. Measured: two lanes both starting `chem` left `.live/run/chem.pid` pointing at a dead
+    # pid while `wait_for` reported ready off the other lane's server, and `status` then said DOWN
+    # about a capability that was serving fine
+    # (D-2026-08-27-one-lane-starts-the-fleet).
+    #
+    # This also keeps the original reason the check exists: a process that crashed is reported as
+    # crashed rather than waited out for the whole budget and then blamed on the timeout.
+    if [ -e "$RUN_DIR/$name.pid" ] && ! running "$name"; then
+      die "$name exited before becoming ready — see $LIVE_DIR/$name.log"
+    fi
     # `-s` without `-S`: a poll that has not succeeded yet is not an error to report,
     # and printing one per second buries the line that says which process never came up.
     if curl -fs -o /dev/null --max-time 2 "$url"; then
       log "$name ready"
       return
-    fi
-    # Exited processes are reported as exited rather than waited out. Without this the lane spends
-    # the whole budget on a process that crashed on its first line, and then blames the timeout.
-    if [ -f "$pidfile" ] && ! kill -0 "$(cat "$pidfile")" 2>/dev/null; then
-      die "$name exited before becoming ready — see $LIVE_DIR/$name.log"
     fi
     sleep 1
   done
@@ -188,6 +206,11 @@ wait_for() {
 }
 
 # ------------------------------------------------------------------ the fleet's two bundles
+#
+# **This script is the only thing that starts them.** The four-repo lane
+# (`infra/live/e2e-full-stack/up.sh`) reaches them by calling this script, which it already does for
+# the connectors, the workers and the front door; it deliberately no longer starts its own
+# (D-2026-08-27-one-lane-starts-the-fleet).
 #
 # `chem` and `safety` are enabled bundles whose capability is `Chemclaw3-mcp`'s: they carry a
 # manifest here and no `server/`, which is `D-2026-08-09-a-connector-we-do-not-run` working as
@@ -200,7 +223,10 @@ wait_for() {
 # before the front door binds. **The pin is not the bug and must not be relaxed to fix this** —
 # LIVE-8's lesson is that a configuration only production sets is a configuration nothing tests, and
 # turning it off here would delete the test rather than pass it. So the lane starts the two servers
-# it needs from the fleet checkout, which is what the four-repo lane already does.
+# it needs from the fleet checkout, and that is also why the ownership falls here rather than there:
+# measured, with the two unreachable the front door does not degrade, it exits 3 with
+# `ConnectorsUnavailable: chem (unreachable), safety (unreachable)` — so a `make live-up` that did
+# not start them could not run a single one of the 259 probes in `data/evals/probes/`.
 readonly MCP_REPO="${CHEMCLAW_MCP_REPO:-$REPO_ROOT/../chemclaw3-mcp}"
 
 # Ports and package names come from the fleet's own manifests, which is the same "one reader for one
@@ -231,6 +257,16 @@ not the fix: it is the posture the chart ships and the one this lane exists to e
     # reason a dev token works here: core reads it to send, the server reads it to verify.
     local var="CHEMCLAW_$(printf '%s' "$name" | tr '[:lower:]' '[:upper:]')_TOKEN"
     export "$var=${!var:-dev-token}"
+    # A port is machine-wide; the guard in `start` is not. It reads this lane's pidfile, so a
+    # server this lane did not launch — the four-repo lane started by hand, `make run-chem` in the
+    # fleet checkout — is invisible to it, and the uvicorn launched here dies on the bound address.
+    # `wait_for` no longer passes that off, so the failure would be loud either way; asking the
+    # address itself is what lets it name the cause instead of pointing at a log.
+    if ! running "$name" && curl -fs -o /dev/null --max-time 2 "http://127.0.0.1:$port/healthz"; then
+      die "$name: 127.0.0.1:$port is already served, and not by a process this lane started.
+This lane owns chem and safety; the four-repo lane reaches them by calling this script, so nothing
+should be starting them twice. Stop the other server, or run \`make live-e2e-full-stack\`."
+    fi
     ( cd "$MCP_REPO" && start "$name" "$fleet_python" -m "uvicorn" "chemclaw_mcp_$name.app:app" \
         --host 127.0.0.1 --port "$port" )
     wait_for "$name" "http://127.0.0.1:$port/healthz"

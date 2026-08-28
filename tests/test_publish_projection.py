@@ -11,13 +11,15 @@ model tomorrow shows up as an unread key and fails, which is what stops this fro
 projection that quietly drops the newest half of a calculator's output.
 """
 
+import ast
+from pathlib import Path
 from typing import Any
 
 import pytest
 
 from chemclaw.publish import project as projection
 from chemclaw.publish.project import project
-from chemclaw.publish.properties import REGISTRY
+from chemclaw.publish.properties import REGISTRY, UNIT_CONVERSIONS
 from chemclaw.publish.record import Conditions
 from chemclaw.science.calc.models import (
     AtomCharge,
@@ -57,6 +59,8 @@ from chemclaw.science.calc.models import (
     XtbResult,
 )
 from chemclaw.science.calc.thermo import half_life_from_barrier
+
+_PROJECT_MODULE = Path(projection.__file__)
 
 
 def _structure(z: float = 1.0, smiles: str = "CCO") -> Structure:
@@ -982,17 +986,68 @@ def test_every_model_field_is_read_or_deliberately_ignored(
     )
 
 
+def test_the_conversion_guard_is_load_bearing_on_a_live_path() -> None:
+    """Derive how many projected facts actually convert, instead of asserting a number in prose.
+
+    The claim this replaces ("every call site already passes the canonical unit, so the conversion
+    is an identity") was true when written, was quoted with a call-site count in two docstrings,
+    and went false in the commit that corrected `max_gradient` — which is exactly the drift
+    D-2026-08-01-the-count-lives-in-the-test-not-in-the-prose is about. A count nobody re-derives
+    is a claim about its author's afternoon.
+
+    So this scans `project.py` for `_fact` call sites whose literal unit is not its property's
+    canonical unit, and asserts the set is non-empty: the guard has at least one live caller and
+    deleting it would silently corrupt a published number. It deliberately does not pin the exact
+    count — the point is that the answer is computed, and a projector added tomorrow moves it
+    without anybody having to notice.
+    """
+    source = ast.parse(_PROJECT_MODULE.read_text(encoding="utf-8"))
+    converting: set[tuple[str, str]] = set()
+    for call in ast.walk(source):
+        if not (
+            isinstance(call, ast.Call)
+            and isinstance(call.func, ast.Name)
+            and call.func.id == "_fact"
+            and len(call.args) >= 3
+        ):
+            continue
+        name_node, unit_node = call.args[0], call.args[2]
+        if not (isinstance(name_node, ast.Constant) and isinstance(unit_node, ast.Constant)):
+            continue  # a computed property name or unit; this scan reads literals only
+        name, unit = name_node.value, unit_node.value
+        if not (isinstance(name, str) and isinstance(unit, str)):
+            continue
+        definition = REGISTRY.get(name)
+        if definition is not None and unit != definition.canonical_unit:
+            converting.add((name, unit))
+    assert converting, (
+        "no `_fact` call site reports a non-canonical unit, so `to_canonical` is an identity on "
+        "every live path again. That is not a failure in itself — but the guard's justification "
+        "now rests on a future caller rather than a present one, and this test should be rewritten "
+        "to say so rather than deleted."
+    )
+    for name, unit in sorted(converting):
+        assert (unit, REGISTRY[name].canonical_unit) in UNIT_CONVERSIONS, (
+            f"`{name}` is projected in `{unit}` but `UNIT_CONVERSIONS` has no path to "
+            f"`{REGISTRY[name].canonical_unit}`, so `to_canonical` raises on a live path"
+        )
+
+
 def test_a_fact_reported_in_a_non_canonical_unit_is_converted_before_it_is_published() -> None:
     """`value` is the predicate column's number, so it is canonical or the column is a lie.
 
-    Measured rather than assumed: an AST scan of all 79 `_fact` call sites in `project.py` shows
-    every one of them passing a unit that already *is* the property's canonical unit, and a runtime
-    probe over the whole publish suite recorded exactly one conversion — from `to_canonical`'s own
-    unit test. So replacing `value=to_canonical(name, value, unit)` with `value=value` passed 86
-    tests across six publish files: the guard is an identity function on every live path, and the
-    first projector reporting an energy difference in hartree or kJ/mol (the natural shape for
-    anything coming back from `servers/calc`) would land off by 627.5 or 4.184 with the unit string
-    beside it still right, silently in or out of every range filter the column exists for.
+    This docstring used to say the guard was an identity on every live path — that an AST scan
+    found every `_fact` call site passing an already-canonical unit, so deleting `to_canonical`
+    changed nothing. That stopped being true the moment `_optimization` was corrected to report
+    `max_gradient` in the unit it actually holds, and the count it quoted has moved twice since.
+    The number is therefore derived by
+    `test_the_conversion_guard_is_load_bearing_on_a_live_path` below rather than written here
+    (D-2026-08-01-the-count-lives-in-the-test-not-in-the-prose).
+
+    What the guard buys is unchanged and is the reason it stays: a projector reporting an energy
+    difference in hartree or kJ/mol — the natural shape for anything coming back from
+    `servers/calc` — lands off by 627.5 or 4.184 with the unit string beside it still right, so it
+    passes every range filter the column exists for while being wrong.
 
     The reported pair is asserted beside it because a conversion nobody can undo is the other half
     of the same problem: `value` alone cannot answer "what did the calculator actually say".

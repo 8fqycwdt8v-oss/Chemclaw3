@@ -1,6 +1,25 @@
-"""The job push-back stream: a finished durable job wakes the chat that launched it (F3-T3).
+"""The push-back mailbox's two readers: the job stream, and the standing-query digest.
 
-One route, `GET /sessions/{id}/events`, plus the two closures that stay nested in it on purpose:
+`session_events` is one durable mailbox with two kinds of addressee, and this module is where both
+are read from. `GET /sessions/{id}/events` streams a finished durable job back into the chat that
+launched it (F3-T3). `GET /digests` claims the standing-query digests
+(`durable/digest.py`) the daily job left for the caller. They sit together because they claim the
+same table through the same kind-scoped claim, and apart in every other respect — one is an
+unbounded SSE stream over a session the caller owns, the other a single read of a mailbox addressed
+by the caller's own identity:
+
+| | `/sessions/{id}/events` | `/digests` |
+| --- | --- | --- |
+| addressed by | a session id in the path | the authenticated `oid`, never the request |
+| authorized by | `resolve_session` (stored owner) | nothing to authorize — no id is accepted |
+| shape | SSE, polls for the session's life | one claim, one JSON body |
+
+**Why the digest read is not a second SSE stream**, since it would have reused every bound here:
+the digest job's cadence is `digest_schedule_minutes` (a day by default), so a stream would hold a
+per-user slot and a poller on the loop for hours to carry one row; and a digest is not a turn event,
+so streaming it would want a member in the turn contract (`api/events.py`) that no turn ever emits.
+
+Beside the job route stay the two closures that are nested in it on purpose:
 `_release_stream_slot` and `_events` capture this request's principal and admission bookkeeping —
 per-request state with exactly one consumer — so hoisting them would thread arguments to move code
 nowhere. The per-user/per-pod stream ledger they mutate is app-wide and is read through
@@ -13,17 +32,21 @@ its docstring).
 
 import logging
 from collections.abc import AsyncIterator, Callable
+from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Request
+from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse, SendTimeoutError
 from starlette.types import Receive, Scope, Send
 
+from chemclaw.agent.session_events import claim_unconsumed
 from chemclaw.api import app as front_door
 from chemclaw.api.deps import CurrentUser, resolve_session
 from chemclaw.api.events import ErrorEvent, JobCompletedEvent, JobFailedEvent
 from chemclaw.api.state import state
 from chemclaw.core.config import settings
 from chemclaw.core.metrics import METRICS
+from chemclaw.durable.digest import DIGEST_KIND, digest_channel
 
 logger = logging.getLogger(__name__)
 
@@ -217,6 +240,63 @@ async def session_events(
             _release_stream_slot()
 
 
+class Digest(BaseModel):
+    """One standing query's new matches, as the digest job left them in the caller's mailbox."""
+
+    query: str = ""
+    note_ids: list[str] = Field(default_factory=list)
+
+
+def _digest(payload: dict[str, Any]) -> Digest:
+    """Read one claimed mailbox row, tolerating a payload an older job wrote.
+
+    Deliberately lenient, and the claim is the reason: by the time this runs the row is already
+    marked consumed and the subscription's watermark is long past the notes it names, so a payload
+    that failed validation would take the digest with it and there would be nothing to re-deliver.
+    A missing key costs one blank field; a raised `ValidationError` costs the whole digest.
+    """
+    note_ids = payload.get("note_ids")
+    return Digest(
+        query=str(payload.get("query", "")),
+        note_ids=[str(note_id) for note_id in note_ids] if isinstance(note_ids, list) else [],
+    )
+
+
+async def read_digests(principal: CurrentUser) -> list[Digest]:
+    """Claim and return the standing-query digests waiting for the caller (gap IDEA-1).
+
+    **The caller cannot name a mailbox, so there is nothing to authorize.** `digest-<owner>` is a
+    synthetic session id no `session_owners` row backs, so `resolve_session` — the gate every
+    session-scoped route uses — cannot decide it, and gating a path segment against the principal
+    would be a check that has to be got right rather than one that cannot be got wrong. This route
+    therefore takes no id at all: it derives the channel from the authenticated principal with the
+    writer's own `digest_channel`, exactly as `GET /sessions` scopes its listing to
+    `principal.oid`. One chemist reading another's digest would take a forged token, not a crafted
+    request.
+
+    **The read is the consume**, scoped to `DIGEST_KIND`. The mailbox claim is destructive by
+    design (COR-4) — claiming everything and filtering afterwards would silently destroy the job
+    push-back rows of whatever channel it ran against — and consuming is what lets
+    `durable/retention.py` age the row out, since its predicate is `consumed_at IS NOT NULL`. The
+    residual window is the one every consumer of this mailbox has: a row claimed here whose
+    response never reaches the client is not re-delivered. That is the at-most-once contract the
+    channel documents, and its cost is bounded to the *notification* — the notes it names are
+    merged knowledge, and the query that found them is saved, so `list_watches` plus a search
+    re-finds them. Losing the notification is not losing the knowledge.
+
+    **The answer is deliberately unbounded**, and a page here would be worse than none: the claim
+    has already run by the time a slice could be taken, so dropping the tail would destroy it
+    rather than defer it. The bound is upstream and is the cadence — one row per subscription per
+    `digest_schedule_minutes` (a day), for as long as the owner has not read them.
+
+    Nothing is counted here on purpose: `session_events.consumed_at` already records, per row,
+    whether a digest was read, which is the same evidence the runbook has operators read for the
+    eval-drift channel — and a counter would need a declaration in `core/metrics.py` to say less.
+    """
+    claimed = await claim_unconsumed(digest_channel(principal.oid), kinds=(DIGEST_KIND,))
+    return [_digest(event.payload) for event in claimed]
+
+
 def register(app: FastAPI) -> None:
     """Attach this module's route to `app` — called once, by `create_app` only.
 
@@ -232,3 +312,6 @@ def register(app: FastAPI) -> None:
     app.get("/sessions/{session_id}/events", dependencies=[Depends(resolve_session)])(
         session_events
     )
+    # No `dependencies=[Depends(resolve_session)]`, and that absence is the authorization model
+    # rather than a gap in it: this route accepts no session id to resolve. See `read_digests`.
+    app.get("/digests")(read_digests)

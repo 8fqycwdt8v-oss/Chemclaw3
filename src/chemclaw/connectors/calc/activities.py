@@ -140,13 +140,15 @@ def _acting_for(actor: str, correlation_id: str) -> Iterator[None]:
     a test — both are empty and nothing is stamped, which keeps "no identity" honest rather than
     fabricated.
 
-    **`durable/interceptor.py` does not cover this one, and that is by its design rather than an
-    oversight.** It binds the ids an activity's argument *models* declare and skips plain strings
-    outright, so that a model-authored payload can never supply an identity — measured,
-    `activity_context([spec, "chemist-1", "job-corr-1"])` binds nothing at all. The actor and the
-    correlation id arrive here as bare arguments precisely because `spec` is the model-authored
-    payload whose digest is the cache key, and identity must not be able to change it. So this
-    bracket is the only producer on this path, not a second one.
+    **`durable/interceptor.py` reads the same two arguments, and this bracket is still what stamps
+    a direct call.** The actor and the correlation id arrive here as bare arguments precisely
+    because `spec` is the model-authored payload whose digest is the cache key, and identity must
+    not be able to change it — and the interceptor's model walk skips plain strings for the same
+    reason, so it saw neither, and both of *its* records said `actor=-` about a run this bracket
+    was attributing correctly. It now also reads the two by parameter name off the activity's
+    signature, which is first-party Python and therefore still not something a payload can spell.
+    The two agree by construction, being the same two arguments; what this bracket adds is the
+    path with no interceptor on it — a direct call from the CLI or a test.
     """
     if not actor and not correlation_id:
         yield

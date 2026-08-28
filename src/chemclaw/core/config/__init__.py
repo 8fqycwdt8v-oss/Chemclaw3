@@ -47,6 +47,7 @@ bound: **config says which and where; a manifest says what.** If a proposed fiel
 the internals of one attached thing, it belongs in that thing's manifest, not here.
 """
 
+import logging
 from typing import Self
 from urllib.parse import parse_qs, urlsplit
 
@@ -273,6 +274,11 @@ class Settings(
           dimension error, with nothing pointing at the setting that caused it. The question is
           "does anything in this deployment write `note_index`", and `note_reindex_enabled` is the
           third way that happens — the scheduled rebuild, which needs no retrieve source at all.
+
+        Every rule in this method **raises**, and that is what keeps the one rule that does not out
+        of it: `_a_durable_deployment_is_told_its_envelopes_will_orphan` below warns instead, for
+        the reason its own docstring measures. A method whose name promises refusal and whose body
+        sometimes logs is a method a reader stops trusting.
         """
         # Only when the operator *set* it. At its default the trigger is clamped instead, because a
         # default is this repository's opinion and a budget is the deployment's: a small-context
@@ -366,18 +372,31 @@ class Settings(
                     "max_connections can serve it."
                 )
         if self.calc_backend_max_concurrent_requests:
-            dispatched = self.calc_fleet_worker_processes * self.worker_max_concurrent_activities
+            # Three factors, not two: a solvent screen fans out inside one activity under
+            # `asyncio.Semaphore(calc_screen_max_parallel)` and each branch holds its own
+            # `calc_session` for the whole of its chain, so an activity is not one backend session.
+            # Measured over five solvents with the knob at 1/4/8: 1/4/6 concurrent sessions inside
+            # a single activity. `connectors/calc/compose.py` has exactly two concurrency sites,
+            # both bounded by this one knob and neither nested inside the other, so one extra
+            # factor is the whole correction.
+            dispatched = (
+                self.calc_fleet_worker_processes
+                * self.worker_max_concurrent_activities
+                * self.calc_screen_max_parallel
+            )
             if dispatched > self.calc_backend_max_concurrent_requests:
                 raise ValueError(
                     f"this deployment may dispatch {dispatched} concurrent calculations "
                     f"({self.calc_fleet_worker_processes} calc worker process(es) × "
-                    f"{self.worker_max_concurrent_activities} activities each) against a "
+                    f"{self.worker_max_concurrent_activities} activities each × "
+                    f"{self.calc_screen_max_parallel} media in flight per screen) against a "
                     f"calculation backend declaring "
                     f"{self.calc_backend_max_concurrent_requests}. That backend pins "
                     "OMP_NUM_THREADS=1 and is CPU-bound, so the surplus arrives as thrashing, then "
                     "as heartbeat timeouts, then as retries onto the same pod. Lower "
-                    "worker_max_concurrent_activities or the calc worker replica count, or raise "
-                    "calc_backend_max_concurrent_requests if that server can serve it."
+                    "worker_max_concurrent_activities, calc_screen_max_parallel or the calc worker "
+                    "replica count, or raise calc_backend_max_concurrent_requests if that server "
+                    "can serve it."
                 )
         if self.mid_turn_resume_enabled and (
             self.mid_turn_resume_timeout_seconds >= self.service_turn_timeout_seconds
@@ -411,6 +430,78 @@ class Settings(
                 f"({SCHEMA_VECTOR_DIM}, infra/sql/012_note_index.sql); pgvector would reject "
                 "every write. Change both together, drop 'vector' from data_sources, or move the "
                 "vectors out of Postgres with vector_store_provider."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _a_durable_deployment_is_told_its_envelopes_will_orphan(self) -> Self:
+        """`session_store="postgres"` with no `framing_envelope_secret`: warned about, not refused.
+
+        The condition. `agent/framing.py::_envelope_nonce` falls back to `secrets.token_hex(8)`
+        per *process* when the secret is empty, and the agent instructions say only an envelope
+        carrying **exactly** the current tag marks retrieved content as data. A durable session
+        outlives a process, so a replayed thread carries envelopes written under a previous
+        process's nonce: they no longer match, and the ELN text, note bodies and uploaded
+        attachments inside them are presented to the model as ordinary prose. The prompt-injection
+        marking switches itself off for precisely the oldest material it exists to cover
+        (`D-2026-08-06-an-envelope-that-only-survives-its-own-process`, which shipped the setting
+        and left the pairing unchecked).
+
+        **Why this one warns where every rule in `_guards_that_the_comments_already_demand`
+        raises**, which is the decision rather than an omission
+        (`D-2026-08-27-a-warning-is-the-shape-a-guard-takes-when-raising-would-break-a-deployment`):
+
+        - What a raise would cost is measured, not estimated: `deploy/helm/chemclaw/values.yaml`
+          ships `CHEMCLAW_SESSION_STORE: "postgres"` and lists `framingEnvelopeSecret` under
+          `secrets.optionalKeys`, so the flagged pairing **is the shipped default release**. A
+          `ValueError` here is not "some deployments" — it is every pod of every existing release,
+          front door and workers alike, failing to construct `Settings()` on `helm upgrade`, over a
+          condition the operator did not change and this repository documented as the default.
+          Scoping the raise to `entra_required` — the escape the harness guard above takes — buys
+          nothing, because the same file sets `CHEMCLAW_ENTRA_REQUIRED: "true"`.
+        - What the lapse costs is real and bounded. It is a *marking*, not a gate: no verdict is
+          computed from an envelope's presence, so nothing here is a degraded check clearing the
+          gate it guards (`D-2026-08-08-a-degraded-check-must-not-clear-the-gate`). The defang half
+          of the mechanism — the half that closes forgery, and the half D-2026-08-06 measured a
+          real bypass in — runs at framing time and is untouched by a rotated nonce. Every tool
+          call an injected instruction could reach still passes `authorize_tool`, the plan gate and
+          the audit trail, so a payload that lands cannot exceed the caller's own entitlements.
+        - Failing the fleet to start is itself the larger harm, and the surprising one: a
+          deployment that answers nothing is worse than one whose oldest retrieved content is read
+          unmarked. That is the same trade D-2026-08-08 took for `usage_tokens` — instrument the
+          defect, decline to make an upgrade a full outage.
+
+        The one thing this cannot buy is a fix. Persisting the nonce beside the session is the root
+        cause's answer and a schema decision; the two cheap alternatives (a fixed public tag,
+        deriving from another credential) were both rejected by D-2026-08-06 and stay rejected.
+
+        Emitted with the standard library's logger rather than `core/logging.py::log_event`,
+        matching `core/logging.py::_warn_about_sensitive_data`, which announces what a
+        configuration now means the same way. Not a preference: `core/logging.py` does `from
+        chemclaw.core.config import settings` at import, so importing it from here — during the
+        `Settings()` at the bottom of this module, before that name is bound — is a circular
+        import. That also fixes *when* the line lands: at import, ahead of `configure_logging()`,
+        so it reaches stderr through `logging.lastResort` and not through `JsonFormatter`. An
+        unconfigured process still prints it, which is the half that decides whether a deployment
+        sees anything, and `tests/test_config.py` pins it with a subprocess rather than trusting
+        it.
+        """
+        if self.session_store == "postgres" and not self.framing_envelope_secret.get_secret_value():
+            logging.getLogger(__name__).warning(
+                "CHEMCLAW_FRAMING_ENVELOPE_SECRET is unset while CHEMCLAW_SESSION_STORE=postgres: "
+                "the prompt-injection envelope tag (agent/framing.py) falls back to a random "
+                "per-process nonce, so every restart and every extra replica frames retrieved "
+                "content under a tag the next process does not recognise. The agent instructions "
+                "say only an envelope carrying exactly the current tag marks retrieved content as "
+                "data, so a replayed thread's older ELN text, note bodies and uploaded "
+                "attachments reach the model as ordinary prose and the injection marking lapses "
+                "for the oldest content it exists to cover. Set CHEMCLAW_FRAMING_ENVELOPE_SECRET "
+                "to a stable per-deployment value (Helm: "
+                "secrets.optionalKeys.framingEnvelopeSecret). Warned rather than refused because "
+                "the shipped chart is this configuration, so refusing would fail every existing "
+                "release on upgrade "
+                "(D-2026-08-27-a-warning-is-the-shape-a-guard-takes-when-raising-would-break-a-"
+                "deployment)."
             )
         return self
 

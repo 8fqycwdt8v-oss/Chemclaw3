@@ -188,7 +188,15 @@ async def publish_memory_note_activity(unit: SynthesisUnit, actor: str = "") -> 
 
 
 @durable_workflow("background")
-@workflow.defn
+# Declared because the hour a parked child costs is charged to somebody who is waiting.
+# `fan_out` drops a child that fails, but a child that *parks* is dropped only when its
+# `execution_timeout` expires — `fan_out_child_timeout_seconds`, an hour by default, per batch —
+# and the parent is one of the three synthesis jobs, which a chemist started from
+# `synthesize_memory` and is polling with `get_durable_job_status`. Declaring turns that hour
+# into the immediate drop the fan-out contract already promises, with the same outcome:
+# logged, counted on `chemclaw_fan_out_children_dropped_total`, siblings unaffected.
+# D-2026-08-27 has the per-workflow table.
+@workflow.defn(failure_exception_types=[Exception])
 class PublishNoteWorkflow:
     """Publish one memory note through the PR-gate — the fan-out unit of a synthesis job (F10-D2).
 
@@ -296,7 +304,13 @@ async def _synthesize(build_activity: Any, id_prefix: str) -> list[str]:
 
 
 @durable_workflow("background")
-@workflow.defn
+# Declared: this is the job path in everything but its queue name. `synthesize_memory`
+# starts it for a named chemist with **no `execution_timeout`** and hands back an id to
+# poll, so a plain exception here is D-2026-08-16's measured hang exactly —
+# `get_durable_job_status` answering `running` forever for a run that will never finish.
+# Nothing is lost by failing instead: the scan is re-requestable, and a re-proposed note
+# is byte-identical, so it produces no second pull request. D-2026-08-27.
+@workflow.defn(failure_exception_types=[Exception])
 class CampaignSynthesisWorkflow:
     """Run episodic campaign synthesis durably; return the proposed note references."""
 
@@ -307,7 +321,13 @@ class CampaignSynthesisWorkflow:
 
 
 @durable_workflow("background")
-@workflow.defn
+# Declared: this is the job path in everything but its queue name. `synthesize_memory`
+# starts it for a named chemist with **no `execution_timeout`** and hands back an id to
+# poll, so a plain exception here is D-2026-08-16's measured hang exactly —
+# `get_durable_job_status` answering `running` forever for a run that will never finish.
+# Nothing is lost by failing instead: the scan is re-requestable, and a re-proposed note
+# is byte-identical, so it produces no second pull request. D-2026-08-27.
+@workflow.defn(failure_exception_types=[Exception])
 class PlaybookDistillationWorkflow:
     """Run semantic playbook distillation durably; return the proposed note references."""
 
@@ -318,7 +338,13 @@ class PlaybookDistillationWorkflow:
 
 
 @durable_workflow("background")
-@workflow.defn
+# Declared: this is the job path in everything but its queue name. `synthesize_memory`
+# starts it for a named chemist with **no `execution_timeout`** and hands back an id to
+# poll, so a plain exception here is D-2026-08-16's measured hang exactly —
+# `get_durable_job_status` answering `running` forever for a run that will never finish.
+# Nothing is lost by failing instead: the scan is re-requestable, and a re-proposed note
+# is byte-identical, so it produces no second pull request. D-2026-08-27.
+@workflow.defn(failure_exception_types=[Exception])
 class OptimizationCampaignWorkflow:
     """Run episodic optimization-campaign grouping durably; return the proposed note references."""
 

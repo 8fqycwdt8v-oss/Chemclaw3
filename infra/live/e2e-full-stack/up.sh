@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Bring up the four-repo ChemClaw3 stack for a full end-to-end pass: this backend, the
-# Chemclaw3-mcp tool fleet (props, rxnpredict, chem, safety, calc), Chemclaw3_mock (the
-# eln-json/eln-ord data sources, the mock-vendor MCP tool), and Chemclaw3_ui.
+# Chemclaw3-mcp tool fleet (props, rxnpredict, calc here; chem and safety via processes.sh),
+# Chemclaw3_mock (the eln-json/eln-ord data sources, the mock-vendor MCP tool), and Chemclaw3_ui.
 #
 # Deliberately does not reimplement readiness polling for pieces that already have it:
 # `infra/live/bootstrap.sh` brings up Postgres/Temporal and the PR-gate's note repo, and
@@ -39,10 +39,17 @@ require_repo() {
 # Same shape as infra/live/processes.sh's start/wait_for: no subshell around the launch (the
 # recorded pid must be the real process, not a wrapper), readiness asked rather than assumed.
 
+# Whether *this lane* has a live process recorded under `name` — this lane's own bookkeeping, and
+# nothing about whether the address that process wants is free.
+running() {
+  local pidfile="$RUN_DIR/$1.pid"
+  [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null
+}
+
 start() {
   local name="$1"; shift
   local pidfile="$RUN_DIR/$name.pid"
-  if [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then
+  if running "$name"; then
     log "$name already running (pid $(cat "$pidfile"))"
     return
   fi
@@ -53,14 +60,17 @@ start() {
 
 wait_for() {
   local name="$1" url="$2" attempts="${3:-120}"
-  local pidfile="$RUN_DIR/$name.pid"
   for _ in $(seq 1 "$attempts"); do
+    # Liveness first — a URL answering says something serves the address, never that this process
+    # does, and with the checks the other way round a start that lost a race for a bound port was
+    # reported ready off the incumbent. See the same comment in `infra/live/processes.sh` and
+    # D-2026-08-27-one-lane-starts-the-fleet.
+    if [ -e "$RUN_DIR/$name.pid" ] && ! running "$name"; then
+      die "$name exited before becoming ready — see $LIVE_DIR/e2e-$name.log"
+    fi
     if curl -fs -o /dev/null --max-time 2 "$url"; then
       log "$name ready"
       return
-    fi
-    if [ -f "$pidfile" ] && ! kill -0 "$(cat "$pidfile")" 2>/dev/null; then
-      die "$name exited before becoming ready — see $LIVE_DIR/e2e-$name.log"
     fi
     sleep 1
   done
@@ -100,17 +110,21 @@ assert_credential_accepted() {
 }
 
 # ---------------------------------------------------------------------------- Chemclaw3-mcp
-# The four servers this harness runs share one uv workspace at the repo root, so one resolved
+# The servers this harness runs share one uv workspace at the repo root, so one resolved
 # interpreter serves them all (same reasoning as processes.sh's python_bin()).
 #
-# `chem` and `safety` are here because Chemclaw3 *dials* them: both bundles declare
-# `http://127.0.0.1:885{8,9}/mcp`, and under `CHEMCLAW_CONNECTORS_REQUIRED=true` an unreachable
-# one is a hard startup failure of the front door, not a degraded connector. They were absent
-# from this script while the fleet grew to five servers, which is exactly how that failed —
-# `ConnectorsUnavailable: ... chem, safety`, with nothing in the harness saying who should have
-# started them.
+# **`chem` and `safety` are started by `infra/live/processes.sh`, not here**
+# (D-2026-08-27-one-lane-starts-the-fleet). Chemclaw3 *dials* them — both bundles declare
+# `http://127.0.0.1:885{8,9}/mcp`, and under `CHEMCLAW_CONNECTORS_REQUIRED=true` an unreachable one
+# is a hard startup failure of the front door, not a degraded connector — so the script that starts
+# the front door is the script that has to start them, and it does. This one started them too, and
+# because a pidfile is a per-lane record of a machine-wide port, the two starts did not collide
+# loudly: the second uvicorn died on the bound address while the readiness poll was answered by the
+# first, leaving `processes.sh status` reporting DOWN over servers that were serving. What stays
+# here is the *check* — `assert_credential_accepted` below, after processes.sh returns — because
+# that is this lane's own lesson (D-2026-08-17) and a check is not a start.
 #
-# The fifth server, `calc`, is started too, but it is NOT a connector and its manifest must stay
+# `calc` is started here, and it is NOT a connector and its manifest must stay
 # off `CHEMCLAW_CONNECTORS_DIR` — it says so in a box. Chemclaw3 keeps its own `calc` bundle and
 # all fifteen tools; what moved to the fleet is the *physics* behind them
 # (D-2026-08-16-the-physics-leaves-the-cache-stays), which `connectors/calc/remote.py::calc_session`
@@ -150,22 +164,6 @@ start_rxnpredict() {
     start rxnpredict "$python" -m uvicorn chemclaw_mcp_rxnpredict.app:app --host 127.0.0.1 --port 8857
   wait_for rxnpredict "http://127.0.0.1:8857/healthz"
   assert_credential_accepted rxnpredict "http://127.0.0.1:8857/mcp" "${CHEMCLAW_RXNPREDICT_TOKEN:-dev-token}"
-}
-
-start_chem() {
-  local python="$1"
-  CHEMCLAW_CHEM_TOKEN="${CHEMCLAW_CHEM_TOKEN:-dev-token}" \
-    start chem "$python" -m uvicorn chemclaw_mcp_chem.app:app --host 127.0.0.1 --port 8858
-  wait_for chem "http://127.0.0.1:8858/healthz"
-  assert_credential_accepted chem "http://127.0.0.1:8858/mcp" "${CHEMCLAW_CHEM_TOKEN:-dev-token}"
-}
-
-start_safety() {
-  local python="$1"
-  CHEMCLAW_SAFETY_TOKEN="${CHEMCLAW_SAFETY_TOKEN:-dev-token}" \
-    start safety "$python" -m uvicorn chemclaw_mcp_safety.app:app --host 127.0.0.1 --port 8859
-  wait_for safety "http://127.0.0.1:8859/healthz"
-  assert_credential_accepted safety "http://127.0.0.1:8859/mcp" "${CHEMCLAW_SAFETY_TOKEN:-dev-token}"
 }
 
 # Not a connector — see the fleet comment above. `calc_server_url` defaults to 8860.
@@ -284,12 +282,15 @@ up() {
 
   log "connectors dir: $CHEMCLAW_CONNECTORS_DIR"
 
-  log "starting the Chemclaw3-mcp fleet (props, rxnpredict, chem, safety, calc)"
+  # `chem` and `safety` come up inside processes.sh, which resolves the fleet checkout from this
+  # same variable but defaults it differently (`$REPO_ROOT/../chemclaw3-mcp`). Exporting the value
+  # this lane resolved is what makes one owner work from either lane's default.
+  export CHEMCLAW_MCP_REPO="$MCP_REPO"
+
+  log "starting the Chemclaw3-mcp fleet (props, rxnpredict, calc; chem and safety via processes.sh)"
   local mcp_python; mcp_python="$(mcp_python_bin)"
   start_props "$mcp_python"
   start_rxnpredict "$mcp_python"
-  start_chem "$mcp_python"
-  start_safety "$mcp_python"
   start_calc "$mcp_python"
 
   log "starting Chemclaw3_mock (ELN mock + mock-vendor MCP tool)"
@@ -297,8 +298,16 @@ up() {
   start_mock_eln "$mock_python"
   start_mock_vendor "$mock_python"
 
-  log "starting this repo's connectors, workers and front door"
+  log "starting this repo's connectors, chem, safety, workers and front door"
   bash "$REPO_ROOT/infra/live/processes.sh" up
+
+  # The two halves of a connector token are still set in two places — the exports above give the
+  # *front door* what it sends, processes.sh gives the *server* what it verifies — so the check
+  # D-2026-08-17 left behind still has to run. It runs here rather than inside the start, because
+  # the start is no longer this lane's and a check is not a start: `/healthz` is unauthenticated,
+  # so without it a mismatch shows up only as a degraded turn with nothing naming a credential.
+  assert_credential_accepted chem "http://127.0.0.1:8858/mcp" "$CHEMCLAW_CHEM_TOKEN"
+  assert_credential_accepted safety "http://127.0.0.1:8859/mcp" "$CHEMCLAW_SAFETY_TOKEN"
 
   log "starting Chemclaw3_ui (BFF + SPA)"
   start_ui
@@ -370,11 +379,19 @@ status() {
 }
 
 # Stop one named external process and bring it back — the shape the chaos round needs. Only
-# covers the processes this script owns (props, rxnpredict, chem, safety, calc, mock-eln,
-# mock-vendor, ui-bff);
-# restarting a piece of this repo's own stack is infra/live/processes.sh's `restart` verb.
+# covers the processes this script owns (props, rxnpredict, calc, mock-eln, mock-vendor, ui-bff);
+# restarting a piece of this repo's own stack is infra/live/processes.sh's `restart` verb — and
+# since D-2026-08-27-one-lane-starts-the-fleet that includes chem and safety. They get a named arm
+# below rather than falling through to "unknown process", because they *are* known: they are
+# simply somebody else's to restart.
 restart() {
   local name="$1" pidfile="$RUN_DIR/$1.pid"
+  case "$name" in
+    chem|safety)
+      die "$name is started by infra/live/processes.sh, which this lane calls — restart it there:
+  bash infra/live/processes.sh restart $name"
+      ;;
+  esac
   [ -e "$pidfile" ] || die "no $pidfile — is '$name' up?"
   local pid; pid="$(cat "$pidfile")"
   kill -9 "$pid" 2>/dev/null || true
@@ -384,8 +401,6 @@ restart() {
   case "$name" in
     props) start_props "$(mcp_python_bin)" ;;
     rxnpredict) start_rxnpredict "$(mcp_python_bin)" ;;
-    chem) start_chem "$(mcp_python_bin)" ;;
-    safety) start_safety "$(mcp_python_bin)" ;;
     calc) start_calc "$(mcp_python_bin)" ;;
     mock-eln) start_mock_eln "$(mock_venv_bin)" ;;
     mock-vendor) start_mock_vendor "$(mock_venv_bin)" ;;

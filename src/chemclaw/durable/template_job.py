@@ -318,6 +318,10 @@ class TemplateWorkflow:
                     # wrapper carries keys off one of these two fields.
                     session_id=identity.session_id,
                     correlation_id=identity.correlation_id,
+                    # The job's own declared ceiling, so a job launched from a template is bounded
+                    # exactly as the same job launched from a chat turn is — a field this path
+                    # drops is a field that quietly means something else here.
+                    timeout_seconds=resolved.timeout_seconds,
                     publish_to_graph=resolved.publish_to_graph,
                 ),
                 # Named from the run's *execution*, not just its id — `TemplateWorkflow` is also

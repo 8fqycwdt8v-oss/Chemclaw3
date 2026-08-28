@@ -24,17 +24,28 @@ Temporal-backed test here.
 
 import asyncio
 import inspect
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from pydantic import BaseModel
+from temporalio import workflow
 from temporalio.client import Client, WorkflowFailureError
 from temporalio.worker import Worker
 
 from chemclaw.agent.session_events import record_session_event
 from chemclaw.connectors.jobs import build_job_tool, job_workflow_id
 from chemclaw.connectors.registry import enabled
-from chemclaw.durable.connector_job import ConnectorJobResult, ConnectorJobWorkflow
+from chemclaw.core.config import settings
+from chemclaw.durable.connector_job import (
+    ConnectorJobInput,
+    ConnectorJobResult,
+    ConnectorJobWorkflow,
+    child_execution_timeout,
+    wrapper_execution_timeout,
+)
 from chemclaw.durable.job_record import JobRecord, record_job
 from chemclaw.durable.memory_jobs import publish_memory_note_activity
 from chemclaw.durable.notify import record_session_event_activity
@@ -50,6 +61,26 @@ _CORE_QUEUE = "background-jobs"
 _SESSION = "session-under-test"
 _ACTOR = "oid-under-test"
 _EXPECTED_ID = job_workflow_id("fixture", "run_fixture_job", {"subject": "benzene"})
+
+# One launch input whose job declared a 20 s ceiling — the twenty-second job the fleet-wide
+# ceiling used to bound identically with a four-hour one.
+_CEILING_JOB = ConnectorJobInput(
+    connector="fixture",
+    job="run_fixture_job",
+    workflow="FixtureJobWorkflow",
+    task_queue=_CONNECTOR_QUEUE,
+    payload={"subject": "benzene"},
+    rationale="why the tests run it",
+    requested_by=_ACTOR,
+    timeout_seconds=20.0,
+)
+
+
+class _CeilingInfo:
+    """The two `workflow.info()` fields the wrapper reads outside a real execution."""
+
+    workflow_id = _EXPECTED_ID
+    run_id = "run-a"
 
 
 def test_the_wrapper_is_served_by_the_background_worker() -> None:
@@ -391,3 +422,114 @@ def test_a_failed_connector_job_wakes_the_session_before_the_failure_propagates(
     assert "the fixture job was asked to fail" in payload["reason"], (
         "the innermost cause must survive; Temporal's outer frames say only that a child failed"
     )
+
+
+# --- the ceiling one job actually gets ---------------------------------------------------------
+#
+# `connector_job_timeout_seconds` is the deployment's *maximum*; a bundle may declare less for one
+# of its own jobs and may never declare more (`JobSpec.timeout_seconds`,
+# `D-2026-08-27-a-bundle-may-lower-its-own-ceiling`). These four run offline, because the
+# asymmetry is the whole safety property and it must not be checkable only where a broker is.
+
+
+def test_a_declared_ceiling_may_only_lower_the_deployments_maximum() -> None:
+    """Both directions of the `min`, and the absent case that must not move at all.
+
+    The direction is the point. A bundle lives in this repository, so a manifest that could raise
+    its own ceiling would be a capability granting itself runtime the operator never funded —
+    which is why this setting was one global number with no per-job field for as long as it was.
+    Taking the *lower* of the two gives a bundle the only power that is safe to hand it, and a
+    declaration above the setting is clamped rather than obeyed.
+    """
+    ceiling = settings.connector_job_timeout_seconds
+    assert child_execution_timeout(20.0) == timedelta(seconds=20)
+    # The declaration a bundle must not be able to make: far above the deployment's maximum, and
+    # the deployment still wins.
+    assert child_execution_timeout(ceiling * 10) == timedelta(seconds=ceiling)
+    assert child_execution_timeout(ceiling) == timedelta(seconds=ceiling)
+
+
+def test_a_job_that_declares_nothing_is_bounded_exactly_as_it_was_before() -> None:
+    """Every shipped manifest declares no ceiling, so `None` must be the identity, not a default.
+
+    Asserted separately from the `min` above because it is the compatibility claim: a manifest
+    written before this key existed, and a Temporal history in flight when it shipped, both decode
+    to `None`, and either would be silently re-bounded if the absent case resolved to anything but
+    the setting itself.
+    """
+    assert ConnectorJobInput.model_validate(_CEILING_JOB.model_dump()).timeout_seconds == 20.0
+    unbounded = _CEILING_JOB.model_copy(update={"timeout_seconds": None})
+    assert child_execution_timeout(unbounded.timeout_seconds) == timedelta(
+        seconds=settings.connector_job_timeout_seconds
+    )
+
+
+def test_the_child_is_started_with_the_resolved_ceiling_and_the_wrapper_still_clears_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The resolved number reaches `execute_child_workflow`, and the wrapper stays above it.
+
+    Two assertions because the second is the invariant the first could break. `ConnectorJobWorkflow`
+    is not a pass-through — after the child returns it writes the durable record, offers the result
+    to the results store, PR-gates the note and wakes the session — so the ceiling the *template*
+    path puts on the wrapper must stay strictly above whatever the child gets, or the wrapper
+    expires first and its failure push-back never runs. A declared ceiling can only lower the
+    child's, so `wrapper_execution_timeout` clears it by construction; this pins that rather than
+    trusting it, since the arithmetic lives in two functions.
+    """
+    starts: list[dict[str, Any]] = []
+
+    async def _child(*_args: Any, **kwargs: Any) -> ConnectorJobResult:
+        starts.append(kwargs)
+        return ConnectorJobResult(summary="done")
+
+    async def _nothing(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(workflow, "info", lambda: _CeilingInfo())
+    monkeypatch.setattr(workflow, "now", lambda: datetime(2026, 8, 27, tzinfo=UTC))
+    monkeypatch.setattr(workflow, "execute_child_workflow", _child)
+    monkeypatch.setattr(workflow, "execute_activity", _nothing)
+
+    asyncio.run(ConnectorJobWorkflow().run(_CEILING_JOB))
+    (start,) = starts
+
+    assert start["execution_timeout"] == timedelta(seconds=20)
+    assert wrapper_execution_timeout() > start["execution_timeout"]
+
+
+def test_the_declared_ceiling_travels_from_the_manifest_to_the_launch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The producer half: a key nothing copies out of the manifest bounds nothing.
+
+    The workflow reads `ConnectorJobInput.timeout_seconds`, and a workflow may not read a
+    `connector.yaml` off disk — so the manifest's number has to be copied at the launch site, the
+    way `publish_to_graph` is. Driven through the real generated tool rather than by constructing
+    the input, because the copy is exactly the step that can be forgotten, and forgetting it fails
+    nothing: every job would simply keep the global ceiling and the key would look like it worked.
+    """
+    _fixture_job_tool(monkeypatch)
+    (manifest,) = enabled()
+    (job,) = manifest.jobs
+    assert job.timeout_seconds is None, "the fixture bundle declares no ceiling; see below"
+    bounded = build_job_tool(manifest.name, job.model_copy(update={"timeout_seconds": 20.0}))
+
+    launched: list[ConnectorJobInput] = []
+
+    class _Client:
+        """The one method a launch calls, capturing the input the wrapper will be started with."""
+
+        async def start_workflow(self, _run: Any, arg: ConnectorJobInput, **kwargs: Any) -> Any:
+            launched.append(arg)
+            return SimpleNamespace(id=str(kwargs["id"]))
+
+    async def _connect() -> _Client:
+        return _Client()
+
+    monkeypatch.setattr("chemclaw.connectors.jobs.connect", _connect)
+    params: type[BaseModel] = bounded.__annotations__["params"]
+    asyncio.run(bounded(params(subject="benzene"), "why the tests run it"))
+
+    (started,) = launched
+    assert started.timeout_seconds == 20.0

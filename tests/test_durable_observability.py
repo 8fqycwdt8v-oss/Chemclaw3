@@ -36,6 +36,7 @@ from temporalio.worker import (
 
 from chemclaw.core.config import settings
 from chemclaw.core.identity_context import get_current_actor, get_current_correlation_id
+from chemclaw.core.logging import ContextFilter
 from chemclaw.core.metrics import Metrics
 from chemclaw.core.session_context import get_current_session_id
 from chemclaw.core.temporal_client import connect_options
@@ -264,6 +265,69 @@ def test_an_activity_logs_a_start_and_a_finish_with_its_temporal_coordinates(
     # because the four activities that logged used a plain module logger with no `extra`.
     assert isinstance(finished.__dict__["duration_ms"], float)
     assert {"workflow_id", "run_id", "task_queue"} <= set(finished.__dict__)
+
+
+def test_an_activity_whose_identity_is_a_bare_argument_is_attributed_too(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Four activities take identity as plain strings, and their own records were anonymous.
+
+    `_models` skips `str` outright — deliberately, so a model-authored payload can never supply an
+    identity — and four activities in this tree carry theirs beside such a payload rather than
+    inside a model: `connectors/calc/activities.py::run_xtb_calculation`,
+    `connectors/bo/activities.py::record_campaign_run`,
+    `durable/memory_jobs.py::publish_memory_note_activity` and
+    `durable/report_workflow.py::propose_report`. None is rescued by the model walk, so both
+    interceptor records rendered `actor=- correlation_id=-` for the fleet's longest-running
+    activity while its own dispatch ran fully attributed — and `deploy/README.md` tells an operator
+    to grep those fields.
+
+    The names come from the activity function's **signature**, which is first-party Python, so the
+    property `test_a_model_authored_payload_cannot_supply_an_identity` pins is untouched: `spec`
+    is not one of the four names, and a payload cannot rename the parameter it is bound to.
+
+    Asserted through `ContextFilter`, because the record's own `extra` never carried these and the
+    filter is what an operator's log lines actually go through.
+    """
+
+    @activity.defn(name="flat")
+    async def _flat(spec: dict[str, str], actor: str = "", correlation_id: str = "") -> str:
+        return "ok"
+
+    env = _env_for("flat")
+    outer = ChemclawWorkerInterceptor().intercept_activity(_Terminal(_flat))
+    context_filter = ContextFilter()
+    caplog.handler.addFilter(context_filter)
+    try:
+        with caplog.at_level(logging.INFO, logger="chemclaw.durable.interceptor"):
+            asyncio.run(
+                env.run(
+                    outer.execute_activity,
+                    _input(_flat, [{"smiles": "CCO"}, "oid-chemist-1", "turn-corr-1"]),
+                )
+            )
+    finally:
+        caplog.handler.removeFilter(context_filter)
+
+    records = [r for r in caplog.records if "event" in r.__dict__]
+    assert [r.__dict__["event"] for r in records] == ["activity.started", "activity.finished"]
+    for record in records:
+        assert record.__dict__["actor"] == "oid-chemist-1", record.__dict__["event"]
+        assert record.__dict__["correlation_id"] == "turn-corr-1", record.__dict__["event"]
+
+
+def test_a_positional_payload_still_cannot_name_itself_an_actor() -> None:
+    """The signature read is by parameter name, so an ordinary payload parameter is not one.
+
+    The pair with the test above: reading arguments by name is only safe while the names come from
+    first-party Python, and this is what says the widening stopped where it was argued to.
+    """
+
+    @activity.defn(name="payload_only")
+    async def _payload_only(requested_by: dict[str, str]) -> str:
+        return "ok"
+
+    assert activity_context([{"requested_by": "oid-victim"}], fn=_payload_only).actor == ""
 
 
 def test_a_failed_attempt_is_counted_and_logged_and_still_propagates() -> None:
