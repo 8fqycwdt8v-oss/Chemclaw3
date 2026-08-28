@@ -129,9 +129,20 @@ run() {
     #
     # They used to be `SOAK_METRICS="$(curl … /metrics)"` as a command prefix, and that is a
     # ceiling rather than a style: Linux caps a *single* environment string at MAX_ARG_STRLEN
-    # (128 KiB), far below the 2 MiB `ARG_MAX` this host reports, and the front door's exposition
-    # passes it once the per-tool series multiply. Measured 2026-08-28 — rounds 1 to 5 each ran and
-    # each reported `24/24 checks passed`, while every one of them died here with
+    # (131,072 bytes on this host, `32 * PAGE_SIZE`), which is unrelated to and far below the 2 MiB
+    # `ARG_MAX` it advertises.
+    #
+    # **What was measured, and what was inferred — they are not the same and the difference matters
+    # here.** Measured: rounds 1 to 5 each ran and each reported `24/24 checks passed` while every
+    # one of them died at this line and wrote nothing. Measured: the exposition grows with distinct
+    # tool labels, `29,931 -> 49,009 bytes` (+64%) across a single storm, dominated by
+    # `chemclaw_tool_duration_seconds_bucket`. **Not** measured: its size at the moment of failure —
+    # the scrape that overflowed is gone, and a fresh stack sits at ~30 KiB, well under the cap. So
+    # the per-string cap is the *mechanism this fix removes*, not a number this comment saw crossed.
+    # A reader chasing a similar failure should capture the size before believing the threshold.
+    #
+    # Either way the payload has no business at an exec boundary, which is why the fix moves it off
+    # rather than trimming it to fit. The failure looked like this:
     #
     #     soak.sh: line 128: /usr/bin/curl: Argument list too long
     #     soak.sh: line 128: .venv/bin/python3: Argument list too long
