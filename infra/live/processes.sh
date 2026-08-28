@@ -345,6 +345,17 @@ up() {
     printf 'export CHEMCLAW_CONNECTOR_URLS=%q\n' "$CHEMCLAW_CONNECTOR_URLS"
     printf 'export CHEMCLAW_CHEM_TOKEN=%q\n' "$CHEMCLAW_CHEM_TOKEN"
     printf 'export CHEMCLAW_SAFETY_TOKEN=%q\n' "$CHEMCLAW_SAFETY_TOKEN"
+    # The fleet checkout this invocation *resolved*, not the one a second shell would default to.
+    #
+    # `env` is documented above as the contract a second shell reads, and it carried only
+    # credentials — but `restart` re-runs `start_fleet_bundles`, which needs `MCP_REPO`, and a
+    # second shell that never set `CHEMCLAW_MCP_REPO` falls back to `$REPO_ROOT/../chemclaw3-mcp`.
+    # Measured: the storm's family A restarts the front door at every admission cap through this
+    # very verb, and the whole run died at the first one with "chem and safety are served by
+    # Chemclaw3-mcp, which is not at /home/user/Chemclaw3/../chemclaw3-mcp" — from a shell that had
+    # sourced `env` exactly as the runbook says to. A checkout path is the same kind of thing as a
+    # minted token: something this invocation settled that nobody downstream can re-derive.
+    printf 'export CHEMCLAW_MCP_REPO=%q\n' "$MCP_REPO"
   ) > "$RUN_DIR/connector-env.sh"
   if [ "${CHEMCLAW_LIVE_PROBE_TOKEN:-}" != "" ]; then
     ( umask 077; printf 'export CHEMCLAW_LIVE_PROBE_TOKEN=%q\n' "$CHEMCLAW_LIVE_PROBE_TOKEN" \
