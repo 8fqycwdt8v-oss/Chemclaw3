@@ -81,7 +81,7 @@ async def _database_unavailable(request: Request, exc: Exception) -> Response:
     names itself loudly in the log line below.
     """
     METRICS.increment("chemclaw_db_unavailable_total")
-    logger.warning("shedding %s %s: %s", request.method, request.url.path, exc)
+    logger.warning("shedding %s %s: %s", request.method, request.url.path[:256], exc)
     return JSONResponse(status_code=503, content={"detail": _AT_CAPACITY})
 
 
@@ -113,7 +113,7 @@ async def _subsystem_unavailable(request: Request, exc: Exception) -> Response:
     # the operator's copy of this event says no more than the client's — the half of the contract
     # that had no implementation.
     logger.warning(
-        "shedding %s %s: %s", request.method, request.url.path, exc, exc_info=exc.__cause__
+        "shedding %s %s: %s", request.method, request.url.path[:256], exc, exc_info=exc.__cause__
     )
     return JSONResponse(status_code=503, content={"detail": str(exc)})
 
