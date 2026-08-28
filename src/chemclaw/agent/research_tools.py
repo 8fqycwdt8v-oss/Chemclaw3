@@ -15,15 +15,19 @@ evidenced fact from transferred analogy, and drafting new protocols — lives in
 `deep-research` skill, not here. This tool only gathers.
 """
 
+import logging
 from datetime import date
 from itertools import zip_longest
 from typing import Any, Literal
+
+from pydantic import Field
 
 from chemclaw.agent.framing import defang, frame_untrusted
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.core.tool_registry import tool
 from chemclaw.ingest.eln.records import default_record_store
+from chemclaw.ingest.rejections import IngestRejection, refusals_matching
 from chemclaw.ingest.sources.registry import active_retrieve_sources
 from chemclaw.retrieval.evidence import EvidenceChunk, EvidenceSweep, SourceRetriever
 from chemclaw.retrieval.fanout import sweep_sources
@@ -31,11 +35,38 @@ from chemclaw.retrieval.hybrid import reciprocal_rank_fusion
 from chemclaw.retrieval.retrievers import FingerprintReactionRetriever
 from chemclaw.science.fingerprints.store import default_reaction_store
 
+logger = logging.getLogger(__name__)
+
 # Test seam: swap the production reaction store for an in-memory one without a database.
 _reaction_store = default_reaction_store
 
 # Which bound cut the sweep, or `None` when nothing did.
 _Truncation = Literal["count", "chars"] | None
+
+
+class EvidenceSweepWithRefusals(EvidenceSweep):
+    """A sweep, plus the records an ingest source offered and this system refused.
+
+    **The two halves are different kinds of statement and the type keeps them apart.** A chunk is
+    evidence, cited to a note a reader can expand; a refusal is a fact about data that is *not*
+    there, and the corpus holds nothing to cite for it. Folding a rejection into `chunks` — as a
+    retriever returning `EvidenceChunk`s would have — is exactly the confusion this whole ledger
+    exists to prevent: the well logged at 119.43% is the one entry of the seeded corpus that can
+    never arrive, and reporting its refusal as a hit would hand a chemist a yield the system
+    refused to believe.
+
+    Subclassing rather than widening `EvidenceSweep` because `retrieval/` is the source-agnostic
+    retriever contract and a rejection comes from no retriever. The composition belongs to the tool
+    that answers the chemist's question, which is here.
+    """
+
+    # Refusals whose id or reason matches the question. Named for what they are, because a pydantic
+    # tool return reaches the model as its `repr` (`tests/test_upstream_surface.py`), so this field
+    # name and `IngestRejection`'s own `kind` are what the model actually reads.
+    refused_on_ingest: list[IngestRejection] = Field(default_factory=list)
+    # Why the rejection ledger could not be asked; empty when it was. An unreachable ledger and a
+    # clean corpus must not render alike — the same rule `sources_failed` exists for one field up.
+    refusals_unavailable: str = ""
 
 
 def _text_retrievers() -> list[SourceRetriever]:
@@ -154,6 +185,36 @@ def _interleave_dedup(ranked_lists: list[list[EvidenceChunk]]) -> list[EvidenceC
     return merged
 
 
+async def _refused_on_ingest(query: str) -> tuple[list[IngestRejection], str]:
+    """The refused records this question matches, and why the ledger could not be asked if it was.
+
+    Both halves are needed because an empty list has to keep meaning "nothing was refused". A
+    ledger that cannot be reached would otherwise say the same thing as a clean corpus, which is
+    the failure `sources_failed` exists for one field up, applied to the other kind of statement
+    this tool returns.
+
+    The refusal's own words are neutralised on the way through, exactly as a chunk's `source` is
+    and for the same reason: `reason` and `entry_id` are text an external system wrote, they land
+    in the prompt outside any evidence envelope, and a forged delimiter there would read as the
+    envelope closing. `defang` rather than `frame_untrusted`, because a rejection is not evidence
+    and wrapping it as evidence is the one reading this must not permit.
+    """
+    try:
+        found = await refusals_matching(query)
+    except Exception as exc:
+        # An unreachable ledger costs this footnote and nothing else: the sweep above is the
+        # answer, and failing the whole turn over a data-quality annotation would be the larger
+        # harm. Reported in the return value, never swallowed into an empty list.
+        logger.warning("ingest rejection ledger could not be read: %s", exc)
+        return [], f"the ingest rejection ledger could not be read ({type(exc).__name__})"
+    return [
+        rejection.model_copy(
+            update={"reason": defang(rejection.reason), "entry_id": defang(rejection.entry_id)}
+        )
+        for rejection in found
+    ], ""
+
+
 def _as_date(value: str, field: str) -> date:
     """Parse an ISO date argument, or fail with a message the model can act on.
 
@@ -175,7 +236,7 @@ async def gather_evidence(
     tag: str | None = None,
     since: str | None = None,
     until: str | None = None,
-) -> EvidenceSweep:
+) -> EvidenceSweepWithRefusals:
     """Gather cited evidence for a research question from every internal source at once.
 
     Runs each text source (the knowledge graph, and any future literature/analytics source)
@@ -198,13 +259,22 @@ async def gather_evidence(
 
     Returns:
         The sweep: its `chunks` (each with its content, the `source_note_id` to cite or expand, and
-        which retriever found it), plus what it could not say. **Read `truncated_by` and
-        `sources_failed` before concluding anything from an absence.** `truncated_by` is set when a
-        cap cut the list — `count` means narrow the query with a `note_type`/`tag`/date filter,
-        `chars` means the sources are returning long chunks and a narrower question will reach
+        which retriever found it), plus what it could not say. **Read `truncated_by`,
+        `sources_failed` and `refused_on_ingest` before concluding anything from an absence.**
+        `truncated_by` is set when a cap cut the list — `count` means narrow the query with a
+        `note_type`/`tag`/date filter, `chars` means the sources are returning long chunks and a
+        narrower question will reach
         further — and `total_before_cap` says how much there was. A name in `sources_failed` means
         that source could not be asked at all, so the answer is about less than the whole corpus
         however complete the chunks look.
+
+        `refused_on_ingest` is **not evidence and not a result**. Each entry is a record an ingest
+        source offered and this system *refused*, with the reason it was refused — a record that is
+        therefore absent from the corpus, however much it matches the question. Report it as what
+        it is ("that entry was rejected on ingest because …"); never present its id, its numbers or
+        its reason as something found in the corpus, and never fill the gap it names with a value.
+        `refusals_unavailable` is non-empty when that ledger could not be asked, in which case an
+        empty list says nothing about whether anything was refused.
     """
     filters: dict[str, Any] = {}
     if note_type is not None:
@@ -293,8 +363,11 @@ async def gather_evidence(
         for chunk in ranked
     ]
     kept, truncated_by = _within_budget(framed)
-    return EvidenceSweep(
+    refused, refusals_unavailable = await _refused_on_ingest(query)
+    return EvidenceSweepWithRefusals(
         chunks=kept,
+        refused_on_ingest=refused,
+        refusals_unavailable=refusals_unavailable,
         truncated_by=truncated_by,
         total_before_cap=len(framed),
         sources_failed=sorted(failed),

@@ -27,6 +27,7 @@ from pydantic import ValidationError
 from rdkit import Chem
 
 from chemclaw.core.config import settings
+from chemclaw.core.errors import ChemclawError
 from chemclaw.core.reagents import resolve_compound_name
 from chemclaw.ingest.eln.adapter import (
     ElnMappingError,
@@ -37,8 +38,18 @@ from chemclaw.ingest.eln.adapter import (
     warn_late_arrivals,
 )
 from chemclaw.ingest.eln.ord import Component, OrdReaction, ReactionStep, Role, StepKind
+from chemclaw.ingest.rejections import record_refusals
 
 logger = logging.getLogger(__name__)
+
+# The source name a refusal by this adapter is filed under in the rejection ledger. It is the
+# registry source name, not a label invented here, because the ledger's `source` is what tells a
+# reader whose data quality a row is a statement about — the same rule
+# `registry._build_retrieve_half` states for a retrieve half's name. The ingest half is built with
+# the manifest's `config` only and is never told its own name, so this constant is the one place
+# the two can disagree, and `tests/test_ingest_rejections.py` reads every manifest that names this
+# adapter and fails if they do.
+LEDGER_SOURCE = "eln-ord"
 
 # ORD reaction-role -> our Role subset. Roles outside the subset (WORKUP,
 # INTERNAL_STANDARD, AUTHENTIC_STANDARD) collapse to REAGENT: they are auxiliary species,
@@ -93,14 +104,33 @@ class OrdJsonAdapter:
         A message whose creation time predates `since` but whose file *arrived* after it is a late
         arrival: it is filtered out here and on every later run, so it is reported in one
         aggregated WARNING (`warn_late_arrivals`) instead of vanishing silently.
+
+        **Every refusal this run makes is also recorded in the rejection ledger**, so a chemist
+        asking about a record that never arrived gets the reason instead of "I have no such
+        record" (`D-2026-08-27-a-refused-record-is-a-question-somebody-will-ask`). All three kinds
+        are refusals of the same sort — a file this adapter could not read, a file that arrived too
+        late to ever be fetched, and a message that cannot be mapped — and the third is why the
+        recording happens *here* rather than in `map_to_ord`: the ledger write is `await`ed, and
+        `map_to_ord` is synchronous by the `ElnAdapter` contract. So the entries this fetch is
+        about to hand over are mapped once here to find the ones that cannot be, which costs one
+        pure-function call per entry — **measured at 65 µs** over the shipped
+        `data/eln-exports/ord/ord-2026-001.json`, so ~6.5 ms on a full 100-entry
+        `eln_sync_batch_size` chunk —
+        and changes nothing about what is returned: the sync maps them again, refuses the same
+        ones, and stays the sole author of the run summary. `sync.py::_replay_record_ids` already
+        pays the same cost for the same structural reason.
         """
         entries: list[RawEntry] = []
         late: list[str] = []
+        # entry id -> why it was refused. A dict, because one file is refused once per fetch and
+        # the ledger is keyed the same way.
+        refused: dict[str, str] = {}
         for path in sorted(self._dir.glob("*.json")):
             try:
                 payload = json.loads(path.read_text(encoding="utf-8"))
                 if not isinstance(payload, dict):
                     logger.warning("skipping ORD export %s: not a JSON object", path.name)
+                    refused[path.stem] = f"{path.name} is not a JSON object, so it is not a record"
                     continue
                 created = _created_at(payload)
                 # ORD's own `record_modified` list, if the exporter populates it: the record is
@@ -114,6 +144,9 @@ class OrdJsonAdapter:
             # contract and losing every later file in the directory along with it.
             except (OSError, UnicodeDecodeError, json.JSONDecodeError, OrdFormatError) as exc:
                 logger.warning("skipping unreadable ORD export %s: %s", path.name, exc)
+                # The file stem is the only id there is: the payload never parsed, so nothing in
+                # it can be trusted to name the record.
+                refused[path.stem] = f"unreadable ORD export {path.name}: {exc}"
                 continue
             if entry_window(created, modified) >= since:
                 entries.append(
@@ -126,9 +159,36 @@ class OrdJsonAdapter:
                 )
             elif is_late_arrival(path, since):
                 late.append(path.name)
+                refused[path.stem] = (
+                    f"{path.name} arrived after the sync cursor but carries an older timestamp "
+                    f"({created.isoformat()}), so no scheduled run will fetch it; re-run the sync "
+                    "from an explicit earlier `since` to backfill it"
+                )
         warn_late_arrivals(logger, "ORD export", late)
         entries.sort(key=lambda e: e.created_at)
+        refused.update(self._unmappable(entries))
+        await record_refusals(LEDGER_SOURCE, refused)
         return entries
+
+    def _unmappable(self, entries: list[RawEntry]) -> dict[str, str]:
+        """Which of these entries cannot be mapped, and what the refusal says.
+
+        The pre-flight `fetch_new_entries` describes: the refusal is found here so it can be
+        recorded from an `async` caller, and the entry is still returned so the sync refuses it
+        itself and reports it in the summary exactly as before.
+
+        The two caught types are the pair `sync.py`'s own reject-and-continue catches, which is the
+        definition of "deterministic bad data in one entry" this repository already uses. Anything
+        else is a bug rather than a bad record and is left to propagate, as it would from the
+        sync's loop one step later.
+        """
+        refused: dict[str, str] = {}
+        for raw in entries:
+            try:
+                self.map_to_ord(raw)
+            except (ChemclawError, ValidationError) as exc:
+                refused[raw.entry_id] = str(exc)
+        return refused
 
     def map_to_ord(self, raw: RawEntry) -> OrdReaction:
         """Map one ORD message to the canonical `OrdReaction` (structured, step-linked).

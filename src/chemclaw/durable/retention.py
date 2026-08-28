@@ -296,6 +296,11 @@ _NOT_PRUNED: dict[str, str] = {
     "schema_migrations": "never: the ledger is the record of its own work, and the runtime role "
     "cannot write it at all",
     "sync_cursors": "one row per ingest source, so bounded by the source count",
+    "ingest_rejections": "bounded by its own writer (`ingest/rejections.py`): at most "
+    "`_MAX_ROWS_PER_SOURCE` rows per source, the least recently refused evicted in the same "
+    "transaction as a write (D-2026-08-27-a-refused-record-is-a-question-somebody-will-ask). A "
+    "clock is the wrong bound here — the runaway case is a source refusing every record it holds, "
+    "which fills the table between two sweeps",
     "session_turns": "a lease, released at turn end; the lease a crashed worker never released is "
     "swept with its session's ownership row by `_prune_session_owners`, never on a clock of its "
     "own — a live lease is what says a turn is running",
