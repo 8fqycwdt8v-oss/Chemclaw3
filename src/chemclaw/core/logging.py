@@ -1330,17 +1330,24 @@ def _redacted_field(value: object, swept: bool) -> object:
     The rendered value is returned as a **string** when it had to be rendered, so what the log
     stack receives is what was scrubbed. A structure that survives redaction unchanged is returned
     as itself, keeping the nested shape a query can index for the overwhelmingly common case.
+
+    A value that cannot be rendered at all becomes `***` rather than an exception: this runs inside
+    `format()`, and a field that cannot be produced safely must not take the record with it.
     """
     if isinstance(value, str):
         return value if swept else redact_secrets(value)
     try:
         rendered = json.dumps(value, default=str)
-    except (TypeError, ValueError):
-        # A value `json.dumps` cannot render at all — a cycle, or a `default=str` that raises.
-        # `repr` is what the payload dump would have fallen back to anyway, and it must not be the
-        # one field that escapes the sweep.
-        rendered = redact_secrets(repr(value))
-        return rendered
+    except Exception:
+        # **`Exception`, not `(TypeError, ValueError)`, and the difference loses a whole record.**
+        # `default=str` calls `str()`, which falls through to `__repr__`, so a value with a hostile
+        # or merely broken `__repr__` raises whatever it likes — measured, a `RuntimeError` from a
+        # `__repr__` propagated out of `format()` and logging dropped the record onto stderr as a
+        # handler error. That is the input `_redacted_for_diagnostic` above already exists for, and
+        # it says why in as many words: a hostile `__repr__` is expected here, not exotic. The
+        # earlier version of this arm also called `repr(value)` again, which is the one thing
+        # guaranteed to raise a second time for the value that got it here.
+        return _REDACTED
     scrubbed = redact_secrets(rendered)
     if scrubbed == rendered:
         return value

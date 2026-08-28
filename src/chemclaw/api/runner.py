@@ -1161,10 +1161,20 @@ def _book_turn_spend(
             cache_read_tokens=ledger.usage.cache_read,
             cache_write_tokens=ledger.usage.cache_write,
             duration_seconds=elapsed,
-            # **Derived, and kept only for compatibility.** It is `outcome == "answered"` — one
-            # boolean over a six-value enum — and every dashboard and eval that already reads it
-            # keeps reading the same thing. `outcome` is what a new reader should ask.
-            completed=outcome == "answered",
+            # **`ledger.answered`, which is what it has always been, not `outcome == "answered"`.**
+            # The two agree on most rows and disagree on the ones that matter: a loop-capped turn
+            # *does* deliver its partial answer (`events.py` names `loop_cap_reached` as the one
+            # error that shares its turn with one), and a turn that raised after answering has an
+            # answer too. Deriving the boolean from the enum booked both as `completed=False`, so
+            # the field every existing dashboard and eval reads would have quietly changed meaning
+            # under them — while this migration's own header claimed it "stays exactly where it
+            # was". It stays exactly where it was.
+            #
+            # The two fields are not redundant and neither is the other's summary: `completed`
+            # answers "did the chemist get an answer for the money", which is a billing question,
+            # and `outcome` answers "how did the turn end", which is six-valued and is what a new
+            # reader should ask.
+            completed=ledger.answered,
             outcome=outcome,
             error_code=ledger.error_code,
             model=model,
