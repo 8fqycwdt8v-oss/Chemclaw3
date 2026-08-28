@@ -91,3 +91,10 @@ belonged to a sibling working concurrently.
 - [ ] Delete every `BACKLOG.md` row this branch closes, in the merging commit.
 - [ ] Re-run the whole gate after the last agent lands: the per-agent runs each
       saw a tree the others were still editing.
+- [ ] `tests/test_upstream_surface.py` needs a row for the third upstream-internal
+      read added in `connectors/server.py` (`Tool.fn` / `list_tools`). That file
+      exists to hold exactly this count, so a new coupling that is not listed is
+      the defect it guards against.
+- [ ] `tests/test_publish_projection.py`'s docstring measurement ("all 79 `_fact`
+      call sites pass an already-canonical unit; one conversion observed") is
+      stale — two sites convert on a live path now.
