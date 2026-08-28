@@ -25,13 +25,14 @@ from temporalio import activity, workflow
 
 with workflow.unsafe.imports_passed_through():
     from chemclaw.core.config import settings
+    from chemclaw.durable.heartbeat import beating
     from chemclaw.durable.registry import durable_activity, durable_workflow
     from chemclaw.publish import outbox
     from chemclaw.publish.driver import ResultSink, SinkUnavailableError
     from chemclaw.publish.record import ResultRecord
     from chemclaw.publish.registry import ResultSinkError, build, enabled
 
-from chemclaw.durable.publish import BAD_DATA_RETRY
+from chemclaw.durable.publish import BAD_DATA_RETRY, queue_wait_timeout
 
 logger = logging.getLogger(__name__)
 
@@ -160,6 +161,22 @@ async def _drain_one(manifest_name: str, sink: ResultSink, batch_size: int) -> S
 @durable_activity("background")
 @activity.defn
 async def drain_result_publications() -> PublishOutcome:
+    """Drain the outbox, heartbeating: this is delivery to somebody else's database.
+
+    A thin wrapper for the reason `retention.prune_expired_rows` is one — a per-sink boundary would
+    report progress through a batch, and the thing that actually hangs is one HTTP or driver call
+    inside a sink. The budget it sits under is `result_publish_timeout_seconds` multiplied by the
+    number of configured sinks, which is the longest of the three core background activities and
+    the only one whose slow part is *outside* this deployment.
+    """
+    return await beating(
+        _drain_result_publications(),
+        "result publication drain",
+        settings.background_activity_heartbeat_timeout_seconds,
+    )
+
+
+async def _drain_result_publications() -> PublishOutcome:
     """Deliver one batch to each enabled sink, and report what happened.
 
     Never raises for a destination's own failure — see the module docstring. It *does* raise if the
@@ -217,6 +234,15 @@ class PublishResultsWorkflow:
             start_to_close_timeout=timedelta(
                 seconds=settings.result_publish_timeout_seconds
                 * max(1, len(settings.result_sink_list))
+            ),
+            schedule_to_start_timeout=queue_wait_timeout(),
+            # Without a heartbeat timeout the beats the activity now sends do nothing for failure
+            # detection, and the budget above is the longest of the three core background
+            # activities — `result_publish_timeout_seconds` times the number of sinks. A worker
+            # that dies while delivering to an external store would otherwise be invisible for all
+            # of it. The beat is derived from this same number, so the two cannot drift.
+            heartbeat_timeout=timedelta(
+                seconds=settings.background_activity_heartbeat_timeout_seconds
             ),
             retry_policy=BAD_DATA_RETRY,
         )

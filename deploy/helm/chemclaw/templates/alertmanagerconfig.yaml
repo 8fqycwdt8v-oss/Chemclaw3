@@ -1,0 +1,73 @@
+{{- if and .Values.monitoring.enabled .Values.monitoring.alerts.enabled .Values.monitoring.alertmanager.enabled }}
+{{- /* Where the alerts go, which was the second of the three absences `prometheusrule.yaml`'s own
+       header names — "no PrometheusRule anywhere in the repo, no SLO, and no Alertmanager route" —
+       and the one that decides whether the first is worth anything.
+
+       **On OpenShift, a PrometheusRule in a user namespace fires into nothing by default.** The
+       user-workload Prometheus forwards its alerts to the *platform* Alertmanager, whose routing
+       tree a cluster admin owns and which normally has no receiver matching a namespace it has
+       never heard of — so the sixteen rules this chart shipped could all be firing while every one
+       of them was silently discarded downstream. Nothing in the cluster reports that: the alert is
+       `firing` in the console and reaches no human. It is the same shape as the user-workload
+       monitoring switch one level up, and it fails the same way — completely, and quietly.
+
+       Two cluster-side edits can make this object readable, and **neither is on out of the box**;
+       `docs/guides/runbook.md` § "Make the monitoring stack actually collect this" has both, and
+       the release cannot make either itself because both live in namespaces a release installer
+       does not own.
+
+       Values-gated and *empty by default* because a receiver is a deployment fact: a Slack webhook,
+       a PagerDuty routing key and an SMTP relay are things this chart cannot invent and must not
+       guess. Enabled with no receivers, the render fails naming the value rather than shipping a
+       routing object that routes to nothing — the same discipline as the egress and retention
+       postures, and for the same reason: a control that exists and does nothing is worse than an
+       absent one, because it reads as coverage. */ -}}
+{{- if not .Values.monitoring.alertmanager.receivers }}
+{{- fail "monitoring.alertmanager.enabled is true but monitoring.alertmanager.receivers is empty: an AlertmanagerConfig with no receiver routes every alert into nothing, which is the state this object exists to fix. Declare the receivers (see values.yaml) or set monitoring.alertmanager.enabled=false." }}
+{{- end }}
+{{- if not .Values.monitoring.alertmanager.defaultReceiver }}
+{{- fail "monitoring.alertmanager.enabled is true but monitoring.alertmanager.defaultReceiver is empty: the route's fallback receiver decides where an alert with no more specific match lands, and Alertmanager rejects a route without one." }}
+{{- end }}
+{{- $names := list }}
+{{- range .Values.monitoring.alertmanager.receivers }}{{ $names = append $names .name }}{{ end }}
+{{- if not (has .Values.monitoring.alertmanager.defaultReceiver $names) }}
+{{- fail (printf "monitoring.alertmanager.defaultReceiver %q names no declared receiver (declared: %v). Alertmanager loads the object and then drops every alert routed to the missing name." .Values.monitoring.alertmanager.defaultReceiver $names) }}
+{{- end }}
+{{- if and .Values.monitoring.alertmanager.criticalReceiver (not (has .Values.monitoring.alertmanager.criticalReceiver $names)) }}
+{{- fail (printf "monitoring.alertmanager.criticalReceiver %q names no declared receiver (declared: %v)." .Values.monitoring.alertmanager.criticalReceiver $names) }}
+{{- end }}
+apiVersion: {{ .Values.monitoring.alertmanager.apiVersion }}
+kind: AlertmanagerConfig
+metadata:
+  name: {{ include "chemclaw.name" . }}
+  labels:
+    {{- include "chemclaw.labels" . | nindent 4 }}
+    {{- with .Values.monitoring.additionalLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  {{- /* No namespace matcher and none needed: the Prometheus Operator scopes an AlertmanagerConfig
+         to the namespace it lives in by injecting one, so this route sees this release's alerts and
+         no one else's. Writing a second one here would be a claim that could drift from the
+         enforced one. */}}
+  route:
+    receiver: {{ .Values.monitoring.alertmanager.defaultReceiver | quote }}
+    groupBy:
+      {{- toYaml .Values.monitoring.alertmanager.groupBy | nindent 6 }}
+    groupWait: {{ .Values.monitoring.alertmanager.groupWait | quote }}
+    groupInterval: {{ .Values.monitoring.alertmanager.groupInterval | quote }}
+    repeatInterval: {{ .Values.monitoring.alertmanager.repeatInterval | quote }}
+    {{- if .Values.monitoring.alertmanager.criticalReceiver }}
+    {{- /* One child route, on the label the rules already carry. `continue: false` is the default
+           and is what makes this a *split* rather than a duplicate: a critical alert goes to the
+           critical receiver only, so an incident channel does not also carry every warning. */}}
+    routes:
+      - receiver: {{ .Values.monitoring.alertmanager.criticalReceiver | quote }}
+        matchers:
+          - name: severity
+            matchType: "="
+            value: critical
+    {{- end }}
+  receivers:
+    {{- toYaml .Values.monitoring.alertmanager.receivers | nindent 4 }}
+{{- end }}

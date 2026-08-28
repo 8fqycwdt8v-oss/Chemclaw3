@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 
 from chemclaw.core import db
 from chemclaw.core.config import settings
+from chemclaw.core.metrics_bridge import record_metric
 
 # The cursor for a source that has never synced: the epoch, so the first run ingests the
 # whole backlog (fetching is "newer than", and every real ELN entry postdates 1970).
@@ -24,18 +25,63 @@ _UPSERT = (
 )
 
 
+# The last cursor each source was seen holding, in this process. Not the *lag* — the cursor — so
+# the gauge below is `now() - cursor` computed at scrape time rather than at sync time: an operator
+# reading a frozen "3600 s behind" cannot tell a source that is an hour behind from a sync that
+# stopped running an hour ago, and those are the two states this metric exists to separate. The
+# reading costs one subtraction and no query, which is what makes refreshing it on the sync pass
+# (rather than on every scrape) the right trade in the first place.
+_OBSERVED: dict[str, datetime] = {}
+
+
+def _cursor_lags() -> dict[str, float]:
+    """How far behind now each observed cursor is, in seconds — the gauge family's source.
+
+    A source that has never synced holds the epoch and therefore reports decades, which is the
+    honest reading: it is not "up to date", it has ingested nothing. Floored at zero because a
+    cursor may legitimately sit a fraction ahead of local wall clock across two machines.
+    """
+    now = datetime.now(UTC)
+    return {
+        source: max(0.0, (now - cursor).total_seconds()) for source, cursor in _OBSERVED.items()
+    }
+
+
+def observe_cursor(source: str, cursor: datetime) -> None:
+    """Record where `source`'s cursor stands, for `chemclaw_ingest_cursor_lag_seconds`.
+
+    **Called on load as well as on store, and the load is the half that matters.** The wedge
+    `ingest/eln/sync.py` documents at length — a fetch that keeps returning the same amended page,
+    so the cursor never moves past it — advances nothing and stores nothing, while the run's own
+    log reads `ingested=N rejected=0`. Observing what each run *loaded* is what makes that visible:
+    the cursor stands still and the lag climbs by one scheduling interval per run, which is a shape
+    no alert on ingest counts can see, because a source that is genuinely quiet produces the same
+    counts and a lag that does not climb past its own cadence.
+    """
+    _OBSERVED[source] = cursor
+
+
 async def load_cursor(source: str, dsn: str | None = None) -> datetime:
     """Return the stored high-water cursor for `source`, or the epoch if none yet."""
     target = dsn if dsn is not None else settings.postgres_dsn
-    async with db.connection(target) as conn:
+    async with db.connection(target, operation="sync_cursor_load") as conn:
         cursor = await conn.execute(_SELECT, (source,))
         row = await cursor.fetchone()
-    return row[0] if row is not None else _EPOCH
+    stored: datetime = row[0] if row is not None else _EPOCH
+    observe_cursor(source, stored)
+    return stored
 
 
 async def store_cursor(source: str, cursor: datetime, dsn: str | None = None) -> None:
     """Persist the advanced high-water `cursor` for `source` (upsert)."""
     target = dsn if dsn is not None else settings.postgres_dsn
-    async with db.connection(target) as conn:
+    async with db.connection(target, operation="sync_cursor_store") as conn:
         await conn.execute(_UPSERT, (source, cursor))
         await conn.commit()
+    observe_cursor(source, cursor)
+
+
+# Bound at import rather than from a startup hook, for the reason `db.bind_pool_metrics` is bound
+# from `pooling()`: the reading lives in this module, so a process that can move a cursor is
+# exactly a process that should report the lag, and there is no second place to remember it in.
+record_metric(lambda m: m.bind_gauge_family("chemclaw_ingest_cursor_lag_seconds", _cursor_lags))

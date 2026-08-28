@@ -25,6 +25,7 @@ from jwt import PyJWKClient
 from jwt.exceptions import PyJWKClientConnectionError, PyJWKClientError
 from pydantic import BaseModel, Field
 
+from chemclaw.api.middleware import bind_request_actor
 from chemclaw.api.rate_limit import RateLimited, enforce_request_budget
 from chemclaw.core.config import settings
 from chemclaw.core.identity_context import GROUP_ROLE_PREFIX
@@ -240,23 +241,57 @@ async def require_principal(request: Request) -> Principal:
     them all.
     """
     if not settings.entra_required:
-        return _within_budget(Principal(oid=_DEV_PRINCIPAL_OID, upn="dev@localhost"))
+        return _bind(
+            request, _within_budget(Principal(oid=_DEV_PRINCIPAL_OID, upn="dev@localhost"))
+        )
     header = request.headers.get("Authorization", "")
     if not header.startswith("Bearer "):
+        # **Counted and said out loud, and it used to be neither.** The invalid-token path below
+        # logs; this one raised in silence — so "a client is misconfigured and sending no header
+        # at all" and "a healthy service nobody is failing against" produced identical evidence,
+        # and the first is the one an operator can actually fix. `info` rather than `warning`
+        # because an unauthenticated probe of a public endpoint is ordinary internet traffic; the
+        # counter is what makes a *rate* of them alertable.
+        _count_auth_failure("missing")
+        logger.info("request to %s carried no bearer token", request.url.path)
         raise HTTPException(status_code=401, detail="missing bearer token")
     try:
         principal = await asyncio.to_thread(validate_token, header[len("Bearer ") :])
     except IdentityProviderUnavailable as exc:
         # 503, not 401: we could not reach the tenant to decide. `warning` rather than `info`
         # because this one is actionable — the token is fine and the dependency is not.
+        _count_auth_failure("provider_unavailable")
         logger.warning("identity provider unavailable: %s", exc)
         raise HTTPException(status_code=503, detail="identity provider unavailable") from exc
     except AuthError as exc:
         # The specific failure reason (audience/issuer/expiry mismatch) is useful to an operator
         # but is not disclosed to the caller — log it server-side, return a generic 401 (SEC-7).
+        _count_auth_failure("invalid")
         logger.info("token validation failed: %s", exc)
         raise HTTPException(status_code=401, detail="invalid or expired token") from exc
-    return _within_budget(principal)
+    return _bind(request, _within_budget(principal))
+
+
+def _count_auth_failure(reason: str) -> None:
+    """Book one refused authentication under its reason — a closed, three-value label set.
+
+    Through `record_metric` rather than `METRICS` directly, for the reason the group-claim overage
+    beside it does: this module is imported by processes that do not own the registry.
+    """
+    record_metric(lambda m: m.increment("chemclaw_auth_failures_total", labels={"reason": reason}))
+
+
+def _bind(request: Request, principal: Principal) -> Principal:
+    """Make the authenticated caller ambient for the rest of the request, then return it.
+
+    Here because this function is already the funnel every authenticated route passes through —
+    the same argument that put `_within_budget` here rather than on twenty decorators. Until this
+    existed the only thing in the process that ever stamped an actor was `run_turn`, so the ~30
+    WARNING sites on the other 22 routes all logged `actor=-`. The reset belongs to
+    `api/middleware._RequestObservability`, which is the one frame that runs on every exit path.
+    """
+    bind_request_actor(request, principal.oid, principal.roles)
+    return principal
 
 
 def _within_budget(principal: Principal) -> Principal:

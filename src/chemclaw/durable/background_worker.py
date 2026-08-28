@@ -46,7 +46,7 @@ from chemclaw.durable import retention as _retention  # noqa: F401
 from chemclaw.durable import template_activities as _template_activities  # noqa: F401
 from chemclaw.durable import template_job as _template_job  # noqa: F401
 from chemclaw.durable.registry import describe, registered_activities, registered_workflows
-from chemclaw.durable.serve import serve_worker
+from chemclaw.durable.serve import serve_worker, worker_interceptors
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +76,15 @@ async def main() -> None:
         # magnitude smaller — and this queue's work is almost entirely database work (the retention
         # sweep, the reindex, the chain verification, every job record).
         max_concurrent_activities=settings.worker_max_concurrent_activities,
+        # Every activity this worker serves, bound to the turn that asked for it and recorded on
+        # its way in and out (`durable/interceptor.py`). Here rather than in `serve_worker` for
+        # the reason `graceful_shutdown_timeout` is: it is a property of what the worker *serves*,
+        # and a reader looking for "why does this activity log anything" looks at the constructor.
+        #
+        # The SDK's OpenTelemetry interceptor rides beside it when span export is on, which is the
+        # half that makes a durable job a child of the launching turn — `core/temporal_client.py`
+        # writes the context on the client, this reads it here.
+        interceptors=worker_interceptors(),
     )
     logger.info(
         "background worker connected: address=%s namespace=%s queue=%s %s",

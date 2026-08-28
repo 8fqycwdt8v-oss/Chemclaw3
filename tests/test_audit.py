@@ -174,6 +174,10 @@ def test_the_audit_row_records_an_empty_agent_and_nothing_else_changes() -> None
         # Written in rather than excluded, for the same reason `tool_revision` is: an exclude set
         # that grows with each new field is a guard that checks less every time it is updated.
         "agent": "",
+        # Empty because this request carries no todo list — the plan step is read from
+        # `request.state["todos"]`, and a request built outside the harness has none
+        # (`D-2026-08-27-a-refusal-is-not-a-crash`).
+        "plan_step": "",
         "tool": "find_notes",
         "arguments": "{'q': 'x'}",
         "outcome": "ok",
@@ -183,6 +187,10 @@ def test_the_audit_row_records_an_empty_agent_and_nothing_else_changes() -> None
         # Empty because `find_notes` ran in this process — see the two tests at the end of the file
         # for why that is a complete answer and not a gap.
         "tool_revision": "",
+        # Stamped by the middleware when the call *started*, so a row is dated by the tool rather
+        # than by whenever the batching sink drained. Read off the event for the same reason
+        # `latency_ms` is: this asserts the field is present and the row's own, not its value.
+        "ts": event.ts,
     }
 
 

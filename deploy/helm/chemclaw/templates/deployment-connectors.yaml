@@ -57,6 +57,12 @@ spec:
     spec:
       serviceAccountName: {{ $.Values.serviceAccount.name }}
       {{- include "chemclaw.imagePullSecrets" $ | nindent 6 }}
+      {{- /* The default 30 s would SIGKILL through the `preStop` sleep below plus whatever request
+             is in flight, which is the same mistake `chemclaw.workerGracePeriod` exists to prevent
+             on the other kind of pod. Stated rather than derived: a connector's longest in-process
+             wait is an HTTP call to a sibling server under *its* timeout, not a number this chart
+             holds. */}}
+      terminationGracePeriodSeconds: {{ $.Values.connectorGracePeriodSeconds }}
       securityContext:
         {{- include "chemclaw.podSecurityContext" $ | nindent 8 }}
       containers:
@@ -71,21 +77,67 @@ spec:
           env:
             - name: CHEMCLAW_COMPONENT
               value: "connector-{{ $name }}"
+            {{- include "chemclaw.otelResourceEnv" (dict "component" (printf "connector-%s" $name)) | nindent 12 }}
             - name: CHEMCLAW_SERVICE_PORT
               value: {{ $.Values.connectorPort | quote }}
             {{- include "chemclaw.env" $ | nindent 12 }}
           envFrom:
             {{- include "chemclaw.envFrom" $ | nindent 12 }}
           {{- /* The probe the core startup/readiness sweep also uses, so "healthy" means the same
-                 thing to Kubernetes and to `/readyz` — one definition, no second health notion. */}}
+                 thing to Kubernetes and to `/readyz` — one definition, no second health notion.
+
+                 **All three thresholds used to be absent, and that was a latent outage rather than
+                 an untidiness.** With no `initialDelaySeconds`/`periodSeconds`/`failureThreshold`,
+                 Kubernetes' defaults apply: liveness begins at t=0 with a 10 s period, a 1 s
+                 timeout and three failures allowed, so the kubelet SIGKILLs the container about
+                 thirty seconds after it starts. `calc` and `molfp` import RDKit and open a Postgres
+                 pool during FastAPI lifespan, and uvicorn accepts connections only *after* lifespan
+                 completes — so on a throttled node this is a crash loop with nothing wrong
+                 anywhere in it, and each restart pays the same import again. The workers were never
+                 exposed to it because `chemclaw.workerProbes` states its numbers and argues for
+                 them; this block is the same discipline applied to the pods that were missing it.
+
+                 The `startupProbe` is what makes the other two safe: neither runs at all until the
+                 process answers once, so their periods can be tuned for a *running* process instead
+                 of being stretched to cover a cold start.
+
+                 Readiness and liveness are now separate decisions rather than one probe written
+                 twice. Readiness removes an unhealthy connector from its Service endpoints, which
+                 is the right response for an MCP server: the front door's sweep marks it
+                 unreachable and answers degraded (`chemclaw_connectors_unhealthy`), instead of a
+                 restart discarding every in-flight tool call. Liveness is deliberately the slower
+                 and more forgiving of the two — a tool call here can legitimately hold the loop. */}}
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: {{ $.Values.probes.connector.startup.periodSeconds }}
+            failureThreshold: {{ $.Values.probes.connector.startup.failureThreshold }}
+            timeoutSeconds: {{ $.Values.probes.connector.startup.timeoutSeconds }}
           readinessProbe:
             httpGet:
               path: /healthz
               port: http
+            periodSeconds: {{ $.Values.probes.connector.readiness.periodSeconds }}
+            timeoutSeconds: {{ $.Values.probes.connector.readiness.timeoutSeconds }}
+            failureThreshold: {{ $.Values.probes.connector.readiness.failureThreshold }}
           livenessProbe:
             httpGet:
               path: /healthz
               port: http
+            periodSeconds: {{ $.Values.probes.connector.liveness.periodSeconds }}
+            timeoutSeconds: {{ $.Values.probes.connector.liveness.timeoutSeconds }}
+            failureThreshold: {{ $.Values.probes.connector.liveness.failureThreshold }}
+          {{- /* The connector half of D-121's drain, which only the front door had. A connector pod
+                 is the one holding an in-flight MCP tool call *and* an endpoint the front door is
+                 still routing to: Kubernetes removes the Endpoint and sends SIGTERM concurrently,
+                 so without this sleep a rolling update refuses calls the caller is still making.
+                 The sleep drains nothing itself — it buys the endpoint controller time to stop
+                 choosing this pod, and uvicorn's own SIGTERM handling finishes what is in flight. */}}
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sleep", {{ $.Values.connectorDrainSeconds | quote }}]
           resources:
             {{- toYaml $.Values.resources.connector | nindent 12 }}
 ---
@@ -137,6 +189,7 @@ spec:
           env:
             - name: CHEMCLAW_COMPONENT
               value: "connector-worker-{{ $name }}"
+            {{- include "chemclaw.otelResourceEnv" (dict "component" (printf "connector-worker-%s" $name)) | nindent 12 }}
             {{- /* The bundle's own activity ceiling when it declares one, else the shared default.
                    Same argument as `resources` below and it belongs to the same shape of bundle:
                    a worker whose activities are long *waits* rather than database work (`calc`

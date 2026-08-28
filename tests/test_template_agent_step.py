@@ -225,10 +225,11 @@ def test_an_undeclared_write_never_runs_and_the_step_still_answers(
 
     1. the write's **body never ran** — not that it was hidden from the model, that it did not
        happen;
-    2. the attempt is an audit row with `outcome="error"` **saying why it was refused**. The outcome
-       alone proves less than it looks: `ToolNode` *returns* its invalid-name message from inside
-       the wrapper chain, so `returned_failure` books an error row either way, and with the refusal
-       middleware deleted this row reads "compute_xtb_energy is not a valid tool, try one of
+    2. the attempt is an audit row with `outcome="refused"` **saying why it was refused**. The
+       outcome alone proves less than it looks, and that was the whole argument for asserting the
+       `detail` beside it: `ToolNode` *returns* its invalid-name message from inside the wrapper
+       chain, so `returned_failure` books a row either way, and with the refusal middleware deleted
+       this row reads "compute_xtb_energy is not a valid tool, try one of
        [list_attachments, read_attachment, …]" — the library's guess at a typo, with the agent's
        whole remaining inventory in the field an auditor reads as what happened. So the `detail` is
        asserted, not just the outcome;
@@ -250,7 +251,7 @@ def test_an_undeclared_write_never_runs_and_the_step_still_answers(
         f"twice, and only the builder's copy is narrowed; offered: {sorted(set(run.offered))}"
     )
     (refused,) = [e for e in run.events if e.tool == _CONNECTOR_WRITE]
-    assert (refused.outcome, refused.actor) == ("error", "chemist-1"), refused
+    assert (refused.outcome, refused.actor) == ("refused", "chemist-1"), refused
     assert "UndeclaredWriteRefusal" in refused.detail, refused.detail
     assert "not a valid tool" not in refused.detail, refused.detail
     assert run.answer == "no flags matched"

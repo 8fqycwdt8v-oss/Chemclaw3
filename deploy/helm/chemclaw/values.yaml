@@ -258,6 +258,67 @@ connectors:
 # keeps the computed URL map and the probes trivially consistent.
 connectorPort: 8080
 
+# How long a process is allowed to take to come up, and how patiently it is then watched.
+#
+# **This block exists because the numbers were absent, not because they were wrong.** A connector
+# server declared `readinessProbe` and `livenessProbe` with no thresholds at all, so Kubernetes'
+# own defaults applied: liveness starts at t=0 with `periodSeconds: 10`, `timeoutSeconds: 1` and
+# `failureThreshold: 3`, which SIGKILLs the container about thirty seconds after start. The `calc`
+# and `molfp` bundles import RDKit and open a Postgres pool during FastAPI lifespan, and uvicorn
+# accepts connections only *after* lifespan completes — so on a throttled node that is a crash loop
+# with no bad state anywhere in it, and every restart pays the same import again. The workers were
+# never exposed to this, because `chemclaw.workerProbes` states its thresholds and argues for them.
+#
+# A `startupProbe` is the right shape rather than a large `initialDelaySeconds`: it takes liveness
+# and readiness out of play entirely until the process answers once, and then hands over to periods
+# tuned for a *running* process. `failureThreshold x periodSeconds` is the whole cold-start budget.
+probes:
+  connector:
+    # 30 x 10 s = five minutes to import RDKit, open the pool and finish lifespan. Generous on
+    # purpose: the cost of being wrong high is a slow first rollout, and the cost of being wrong low
+    # is the permanent crash loop described above.
+    startup:
+      periodSeconds: 10
+      failureThreshold: 30
+      timeoutSeconds: 5
+    # Readiness is what removes an unhealthy connector from its Service endpoints, which is the
+    # response an MCP server actually wants: the front door's own sweep marks it unreachable and
+    # answers degraded, rather than a restart throwing away every in-flight tool call.
+    readiness:
+      periodSeconds: 10
+      timeoutSeconds: 5
+      failureThreshold: 3
+    # Liveness is deliberately slower and more forgiving than readiness — three minutes of a wedged
+    # process before a restart. A tool call here can legitimately hold the loop (a `calc` primitive
+    # is minutes), so a false restart mid-call costs more than a slow true one. Same argument, same
+    # direction, as `chemclaw.workerProbes`' `failureThreshold: 6`.
+    liveness:
+      periodSeconds: 20
+      timeoutSeconds: 5
+      failureThreshold: 9
+  service:
+    # 30 x 10 s, the same budget and for the same reason: the front door imports
+    # langchain/deepagents/RDKit and runs a connector sweep during startup, and with no startup
+    # probe its first liveness restart landed at ~70 s — inside that budget on a cold or throttled
+    # node. Readiness and liveness here already state their own periods and keep them.
+    startup:
+      periodSeconds: 10
+      failureThreshold: 30
+      timeoutSeconds: 5
+
+# How long a connector pod is given to finish what it is holding when it is told to stop, and how
+# long its Service is given to stop routing to it first. The front door has had both since D-121 and
+# the workers have a derived grace period; connector pods had neither, so a rolling update SIGKILLed
+# an in-flight MCP tool call at the 30 s default while the front door was still dialling the
+# endpoint. The sleep is the same shape as `service.drainSeconds` and for the same reason:
+# Kubernetes removes the Endpoint and sends SIGTERM concurrently, so a pod that stopped promptly
+# would refuse calls the front door was still making.
+connectorDrainSeconds: 10
+# Strictly larger than the drain plus the longest request a connector serves *in process*. The heavy
+# science is not in process — it is `Chemclaw3-mcp`'s `servers/calc`, dialled over HTTP under its
+# own `request_timeout` — so this bounds the wait for that call to return, not a CREST search.
+connectorGracePeriodSeconds: 120
+
 # The port every *worker* container serves `/healthz`, `/readyz` and `/metrics` on
 # (`chemclaw.core.worker_http`). A worker has no Service — nothing routes to it — so this is a bare
 # container port, named `metrics` for the PodMonitor and the probes to reference. One value across
@@ -395,6 +456,21 @@ config:
   # `connectors.safety.url` name their siblings: whatever Service the sibling repo's chart gives
   # its `calc` server in this namespace.
   CHEMCLAW_CALC_SERVER_URL: "http://chemclaw3-mcp-calc:8860/mcp"
+  # What that server will serve concurrently — the right-hand side of a bound nothing computed
+  # (D-2026-08-27-a-per-worker-cap-is-not-a-backend-ceiling). Every calc worker process may run
+  # CHEMCLAW_WORKER_MAX_CONCURRENT_ACTIVITIES activities at once and each holds one session to that
+  # single pod, so what it is offered is that cap times `connectors.calc.workerReplicas` — and
+  # scaling that worker, an ordinary operational lever, multiplied CPU-bound load on it invisibly.
+  # Anything exceeding this fails `Settings` validation at startup, in every pod, naming both sides.
+  #
+  # **Shipped as 0 — undeclared, and therefore inert — deliberately.** The other two budgets ship a
+  # real number because both describe something this release provisions (its own replicas, the
+  # database it is given). This one describes the admission semaphore of a pod in *another* release
+  # (`Chemclaw3-mcp` `servers/calc`), whose CPU allocation this chart cannot see; a number invented
+  # here would be a guess wearing the shape of a statement. Set it to that server's own ceiling.
+  # The runtime half needs no declaration to be useful: `sum(chemclaw_calc_requests_in_flight)` is
+  # the live load, and it also counts the calc *server* pods' dispatches, which no product can.
+  CHEMCLAW_CALC_BACKEND_MAX_CONCURRENT_REQUESTS: "0"
   # Where the reaction labeller answers (`Chemclaw3-mcp`'s `rxnlabel`, port 8865). The same
   # argument as `CHEMCLAW_CALC_SERVER_URL` above and reached the same way — the code default is a
   # loopback address chosen for a dev process, and `durable/schedules.py` creates the
@@ -541,9 +617,18 @@ secrets:
     # retrieval source, and have their text read as instructions instead of as data.
     #
     # Optional rather than required: the setting defaults to `""` and the app starts either way, so
-    # a required key would only buy a mandatory Secret edit for every existing deployment. Unset,
-    # the envelope tag is derived from the empty string — predictable, which is the weakness this
-    # slot exists to let an operator close, not a new one it introduces.
+    # a required key would only buy a mandatory Secret edit for every existing deployment.
+    #
+    # **Unset is not "predictable", which is what this comment used to say and is the weaker
+    # failure.** `agent/framing.py::_envelope_nonce` falls back to `secrets.token_hex(8)` — a fresh
+    # random value *per process*. So the tag is unguessable and also unshared: two replicas frame
+    # with different tags, and a restart changes the tag under a durable session's stored history.
+    # The agent instructions say only an envelope carrying exactly the current tag marks retrieved
+    # content as data, so a thread replayed by another pod has its older retrieved material read as
+    # ordinary prose — the injection marking switches itself off for precisely the oldest content it
+    # exists to cover. Any deployment with `session_store="postgres"` or more than one replica
+    # should set this; `docs/planning/BACKLOG.md` carries the open question of whether the
+    # combination should be refused at startup.
     framingEnvelopeSecret: "CHEMCLAW_FRAMING_ENVELOPE_SECRET"
     # The `chem`, `safety` and `calc` bearer tokens `connectors/identity.py::_EnvBearerAuth` reads
     # per request (`connectors/chem/connector.yaml` and `connectors/safety/connector.yaml`'s
@@ -693,6 +778,113 @@ monitoring:
     # "More than five in the window"; tune to the deployment's real baseline rather than treating
     # the default as meaningful.
     durableUnreachableWarning: 5
+    # The p95 turn latency, in seconds, that `ChemclawTurnLatencyHigh` treats as "slow enough that
+    # a chemist has stopped waiting". `core/logging.py` argues the turn histogram exists *precisely*
+    # because a trace "cannot answer 'what is p95 right now' for an alert" — and until now nothing
+    # asked it. 120 s is well inside `CHEMCLAW_SERVICE_TURN_TIMEOUT_SECONDS` (600), so the alert
+    # fires while turns are still completing rather than only once they start timing out; the
+    # timeout counter is the *other* signal and has its own rule.
+    turnLatencyP95Seconds: 120
+    # The share of durable jobs that may end `failed` before the durable group pages. A ratio and
+    # not a count, because one connector's jobs are minutes apart and another's are seconds apart —
+    # a count would mean six different things across the six bundles.
+    jobFailureRatio: 0.2
+    # How long a result publication may sit undelivered before the outbox counts as stuck, in
+    # seconds. Read off `chemclaw_outbox_oldest_pending_seconds`, the age gauge, and NOT off
+    # queued-minus-published: dead-lettered rows never leave that difference, and its two counters
+    # live in different processes, so restarting one makes it go negative
+    # (`core/metrics.py`, `chemclaw_outbox_dead_lettered`). 30 minutes: long enough that a retry
+    # backoff is not an alert, short enough that a wedged drain is caught inside a working day.
+    outboxStuckSeconds: 1800
+    # How far behind an ingest cursor may fall before it counts as wedged, in seconds. A source
+    # whose fetch has wedged advances no cursor and logs `ingested=0`, which is exactly what a
+    # genuinely quiet source also does — the lag gauge is the only thing that separates them. 24
+    # hours, because the shipped sources are nightly.
+    ingestLagSeconds: 86400
+    # Which scrape targets `ChemclawTargetDown` watches, as a PromQL matcher on the `job` label.
+    # `.+` means "every target in this release's namespace", which is correct by construction: the
+    # rule already pins `namespace`, this chart's ServiceMonitor and PodMonitor are what put those
+    # targets there, and a namespace that holds only this release therefore needs no guess about
+    # what `job` label the Prometheus Operator assigned. Narrow it if the namespace is shared —
+    # the operator's default `job` is the Service name for a ServiceMonitor and
+    # `<namespace>/<name>` for a PodMonitor, so `chemclaw.*` is the usual narrowing here.
+    targetJobPattern: ".+"
+    # Where an alert's `runbook_url` points. Every rule carries one, built as
+    # `<runbookBaseUrl>#<anchor>` from the "When an alert fires" index in
+    # `docs/guides/runbook.md` — so the operator woken at 03:00 gets the section rather than a
+    # summary line. Repoint it at wherever your deployment publishes that file.
+    runbookBaseUrl: https://github.com/8fqycwdt8v-oss/Chemclaw3/blob/main/docs/guides/runbook.md
+  # Routing for the alerts above. **On OpenShift, a PrometheusRule in a user namespace fires into
+  # nothing by default**: user-workload alerts are sent to the platform Alertmanager, whose routes a
+  # cluster admin owns and which normally drops what it does not recognise. Two cluster-side
+  # switches decide whether an `AlertmanagerConfig` in *this* namespace is read at all, and neither
+  # is on out of the box — `docs/guides/runbook.md` § "Make the monitoring stack actually collect
+  # this" has both ConfigMap edits. Without one of them this object is inert, exactly like a
+  # ServiceMonitor with user-workload monitoring disabled.
+  alertmanager:
+    # Off by default because the chart cannot invent a receiver: a Slack webhook, a PagerDuty
+    # routing key and an SMTP relay are all deployment facts. On with no `receivers`, the render
+    # *fails* naming this block rather than shipping an AlertmanagerConfig that routes to nothing —
+    # the same discipline as the egress and retention postures below.
+    enabled: false
+    # The `AlertmanagerConfig` API version to render. `v1beta1` is what OpenShift 4.12+ and
+    # prometheus-operator 0.60+ serve; a cluster on an older operator has only
+    # `monitoring.coreos.com/v1alpha1`, whose schema for this object is otherwise identical.
+    apiVersion: monitoring.coreos.com/v1beta1
+    # Receivers, passed through verbatim into `spec.receivers`. For example:
+    #   receivers:
+    #     - name: chemistry-oncall
+    #       slackConfigs:
+    #         - apiURL: {name: chemclaw-alertmanager, key: slackWebhookUrl}
+    #           channel: "#chemclaw-alerts"
+    # Secrets are referenced by SecretKeySelector against a Secret in this namespace, never inlined
+    # — an AlertmanagerConfig is an ordinary readable object.
+    receivers: []
+    # The receiver every Chemclaw alert goes to. Must name one of `receivers` above.
+    defaultReceiver: ""
+    # Optional: a second receiver for `severity: critical` only, so a lost audit record and a slow
+    # turn do not arrive on the same channel. Empty means everything goes to `defaultReceiver`.
+    criticalReceiver: ""
+    # Alertmanager's own grouping and repeat timings. Named here rather than left to Alertmanager's
+    # defaults because the defaults (`repeat_interval: 4h`) are a page cadence, and a page cadence
+    # is a deployment's decision.
+    groupBy: [alertname, severity]
+    groupWait: 30s
+    groupInterval: 5m
+    repeatInterval: 4h
+  # Console/Grafana dashboards for the metrics that have no alert. 104 series are declared and 16
+  # are alerted; the rest had no consumer of any kind, which is the same failure one level up from
+  # the one the ServiceMonitor fixed — collected, and read by nobody.
+  dashboards:
+    enabled: true
+    # **The OpenShift console reads custom dashboards only from `openshift-config-managed`**, so
+    # leaving this empty renders them into the release namespace where the console will not look.
+    # It is empty anyway, deliberately: writing into another namespace needs permissions a release
+    # installer usually does not have, and a chart whose *install* fails on a dashboard is worse
+    # than one whose dashboards need one more `--set`. Set it to `openshift-config-managed` (as
+    # cluster-admin) to get the Observe -> Dashboards entry; leave it empty for a self-managed
+    # Grafana, whose sidecar watches the release namespace instead.
+    namespace: ""
+    # What makes something a dashboard to the consumer that reads it. `console.openshift.io/dashboard`
+    # is the OpenShift console's label; a self-managed Grafana with the kiwigrid sidecar wants
+    # `grafana_dashboard: "1"` instead. Both may be set at once — they are read by different things.
+    labels:
+      console.openshift.io/dashboard: "true"
+  # The Temporal SDK's own Prometheus exporter on the worker pods — task-slot occupancy, poller
+  # counts, schedule-to-start latency: the queue-side numbers no first-party counter can produce,
+  # because they are the SDK's view of the broker.
+  #
+  # **Off until the worker process actually binds the port.** Turning it on renders a second
+  # container port and a second `podMetricsEndpoint`; with nothing listening, every worker gains a
+  # permanently-down scrape target — which `ChemclawTargetDown` would then report forever. Flip
+  # this to `true` in the same change that adds the `TelemetryConfig(metrics=PrometheusConfig(...))`
+  # bind in `durable/serve.py`.
+  temporalSdkMetrics:
+    enabled: false
+    # The port that exporter binds. Distinct from `workerMetricsPort`: the SDK's exporter is a Rust
+    # HTTP server inside the SDK core, not a route on `chemclaw.core.worker_http`, so the two
+    # cannot share a listener.
+    port: 9001
 
 # Pod/container security context. The chart asserted none of this, so a namespace labelled
 # `pod-security.kubernetes.io/enforce=restricted` — the default posture for a regulated OpenShift
@@ -782,6 +974,14 @@ networkPolicy:
   #   - ipBlock: {cidr: 10.0.1.0/24}                     # the database subnet
   #   - namespaceSelector: {matchLabels: {name: temporal}}
   #   - namespaceSelector: {matchLabels: {name: llm-serving}}
+  #   # The collector `CHEMCLAW_OTEL_ENDPOINT` points at. **Enumerate this or lose tracing
+  #   # silently**: `egressPorts.otel: 4317` permits nothing on its own — a port is only reachable
+  #   # where some `to:` also matches — so an operator who follows this example and lists the three
+  #   # obvious destinations ends up with an OTLP exporter whose every export is dropped by the
+  #   # policy, which presents as an empty trace backend rather than as an error. The three
+  #   # sibling MCP servers (`egressPorts.chem`/`safety`/`calc`) and the labeller need the same
+  #   # treatment for the same reason.
+  #   - namespaceSelector: {matchLabels: {name: observability}}
   egressDestinations: []
   # The escape hatch, and the reason the guard above is a `fail` rather than a broken default: a
   # deployment that genuinely cannot enumerate its destinations yet says so here, in its own values

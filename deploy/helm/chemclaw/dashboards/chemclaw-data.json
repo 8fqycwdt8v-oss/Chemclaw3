@@ -1,0 +1,872 @@
+{
+  "__comment": "Ingest, retrieval, the calculation cache, the result outbox and the Postgres pool.",
+  "annotations": {
+    "list": []
+  },
+  "editable": false,
+  "graphTooltip": 1,
+  "panels": [
+    {
+      "id": 1,
+      "type": "singlestat",
+      "title": "Cache hit ratio (1h)",
+      "datasource": "prometheus",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 0,
+        "y": 0
+      },
+      "span": 2,
+      "format": "percentunit",
+      "decimals": 2,
+      "valueName": "current",
+      "sparkline": {
+        "show": true
+      },
+      "targets": [
+        {
+          "expr": "sum(increase(chemclaw_calc_cache_total{outcome=~\"hit|shared\"}[1h])) / clamp_min(sum(increase(chemclaw_calc_cache_total[1h])), 0.001)",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "singlestat",
+      "title": "Pool connections",
+      "datasource": "prometheus",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 4,
+        "y": 0
+      },
+      "span": 2,
+      "format": "short",
+      "decimals": 2,
+      "valueName": "current",
+      "sparkline": {
+        "show": true
+      },
+      "targets": [
+        {
+          "expr": "sum(chemclaw_pg_pool_size)",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "singlestat",
+      "title": "Callers waiting for a connection",
+      "datasource": "prometheus",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 8,
+        "y": 0
+      },
+      "span": 2,
+      "format": "short",
+      "decimals": 2,
+      "valueName": "current",
+      "sparkline": {
+        "show": true
+      },
+      "targets": [
+        {
+          "expr": "max(chemclaw_pg_pool_requests_waiting)",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "singlestat",
+      "title": "Declared connection ceiling",
+      "datasource": "prometheus",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 12,
+        "y": 0
+      },
+      "span": 2,
+      "format": "short",
+      "decimals": 2,
+      "valueName": "current",
+      "sparkline": {
+        "show": true
+      },
+      "targets": [
+        {
+          "expr": "max(chemclaw_pg_fleet_max_connections)",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "singlestat",
+      "title": "Oldest pending publication",
+      "datasource": "prometheus",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 16,
+        "y": 0
+      },
+      "span": 2,
+      "format": "s",
+      "decimals": 2,
+      "valueName": "current",
+      "sparkline": {
+        "show": true
+      },
+      "targets": [
+        {
+          "expr": "max(chemclaw_outbox_oldest_pending_seconds)",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "singlestat",
+      "title": "Connectors unreachable",
+      "datasource": "prometheus",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 20,
+        "y": 0
+      },
+      "span": 2,
+      "format": "short",
+      "decimals": 2,
+      "valueName": "current",
+      "sparkline": {
+        "show": true
+      },
+      "targets": [
+        {
+          "expr": "max(chemclaw_connectors_unhealthy)",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "graph",
+      "title": "Calculation cache",
+      "datasource": "prometheus",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 4
+      },
+      "span": 6,
+      "fill": 1,
+      "stack": true,
+      "linewidth": 2,
+      "nullPointMode": "null",
+      "legend": {
+        "show": true,
+        "current": true,
+        "max": true,
+        "values": true
+      },
+      "tooltip": {
+        "shared": true,
+        "sort": 2,
+        "value_type": "individual"
+      },
+      "yaxes": [
+        {
+          "format": "reqps",
+          "show": true,
+          "min": 0
+        },
+        {
+          "format": "short",
+          "show": false
+        }
+      ],
+      "xaxis": {
+        "mode": "time",
+        "show": true
+      },
+      "targets": [
+        {
+          "expr": "sum by (outcome) (rate(chemclaw_calc_cache_total[15m]))",
+          "legendFormat": "{{outcome}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "graph",
+      "title": "Postgres pool",
+      "datasource": "prometheus",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 4
+      },
+      "span": 6,
+      "fill": 0,
+      "stack": false,
+      "linewidth": 2,
+      "nullPointMode": "null",
+      "legend": {
+        "show": true,
+        "current": true,
+        "max": true,
+        "values": true
+      },
+      "tooltip": {
+        "shared": true,
+        "sort": 2,
+        "value_type": "individual"
+      },
+      "yaxes": [
+        {
+          "format": "short",
+          "show": true,
+          "min": 0
+        },
+        {
+          "format": "short",
+          "show": false
+        }
+      ],
+      "xaxis": {
+        "mode": "time",
+        "show": true
+      },
+      "targets": [
+        {
+          "expr": "sum(chemclaw_pg_pool_size)",
+          "legendFormat": "held",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(chemclaw_pg_pool_available)",
+          "legendFormat": "idle",
+          "refId": "B"
+        },
+        {
+          "expr": "max(chemclaw_pg_pool_requests_waiting)",
+          "legendFormat": "waiting (max over pods)",
+          "refId": "C"
+        },
+        {
+          "expr": "sum(chemclaw_pg_pool_max_size)",
+          "legendFormat": "fleet maximum",
+          "refId": "D"
+        },
+        {
+          "expr": "max(chemclaw_pg_fleet_max_connections)",
+          "legendFormat": "declared ceiling",
+          "refId": "E"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, operation) (rate(chemclaw_db_query_duration_seconds_bucket[15m])))",
+          "legendFormat": "{{operation}} p95 seconds",
+          "refId": "F"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "type": "graph",
+      "title": "Evidence: contributed against kept, by source",
+      "datasource": "prometheus",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 12
+      },
+      "span": 6,
+      "fill": 0,
+      "stack": false,
+      "linewidth": 2,
+      "nullPointMode": "null",
+      "legend": {
+        "show": true,
+        "current": true,
+        "max": true,
+        "values": true
+      },
+      "tooltip": {
+        "shared": true,
+        "sort": 2,
+        "value_type": "individual"
+      },
+      "yaxes": [
+        {
+          "format": "short",
+          "show": true,
+          "min": 0
+        },
+        {
+          "format": "short",
+          "show": false
+        }
+      ],
+      "xaxis": {
+        "mode": "time",
+        "show": true
+      },
+      "targets": [
+        {
+          "expr": "sum by (source) (rate(chemclaw_evidence_source_chunks_total[30m]))",
+          "legendFormat": "{{source}} contributed",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (source) (rate(chemclaw_evidence_source_kept_total[30m]))",
+          "legendFormat": "{{source}} kept",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "type": "graph",
+      "title": "Evidence: legs that failed or declined",
+      "datasource": "prometheus",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 12
+      },
+      "span": 6,
+      "fill": 0,
+      "stack": false,
+      "linewidth": 2,
+      "nullPointMode": "null",
+      "legend": {
+        "show": true,
+        "current": true,
+        "max": true,
+        "values": true
+      },
+      "tooltip": {
+        "shared": true,
+        "sort": 2,
+        "value_type": "individual"
+      },
+      "yaxes": [
+        {
+          "format": "short",
+          "show": true,
+          "min": 0
+        },
+        {
+          "format": "short",
+          "show": false
+        }
+      ],
+      "xaxis": {
+        "mode": "time",
+        "show": true
+      },
+      "targets": [
+        {
+          "expr": "sum by (source) (rate(chemclaw_evidence_source_failures_total[30m]))",
+          "legendFormat": "{{source}} failed",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (source) (rate(chemclaw_evidence_source_skips_total[30m]))",
+          "legendFormat": "{{source}} skipped",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, source) (rate(chemclaw_evidence_source_seconds_bucket[30m])))",
+          "legendFormat": "{{source}} p95 seconds",
+          "refId": "C"
+        },
+        {
+          "expr": "sum(rate(chemclaw_vector_unresolved_points_total[30m]))",
+          "legendFormat": "unresolved vector points",
+          "refId": "D"
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "type": "graph",
+      "title": "Result outbox by sink",
+      "datasource": "prometheus",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 20
+      },
+      "span": 6,
+      "fill": 0,
+      "stack": false,
+      "linewidth": 2,
+      "nullPointMode": "null",
+      "legend": {
+        "show": true,
+        "current": true,
+        "max": true,
+        "values": true
+      },
+      "tooltip": {
+        "shared": true,
+        "sort": 2,
+        "value_type": "individual"
+      },
+      "yaxes": [
+        {
+          "format": "short",
+          "show": true,
+          "min": 0
+        },
+        {
+          "format": "short",
+          "show": false
+        }
+      ],
+      "xaxis": {
+        "mode": "time",
+        "show": true
+      },
+      "targets": [
+        {
+          "expr": "max by (sink) (chemclaw_outbox_pending)",
+          "legendFormat": "{{sink}} pending",
+          "refId": "A"
+        },
+        {
+          "expr": "max by (sink) (chemclaw_outbox_oldest_pending_seconds)",
+          "legendFormat": "{{sink}} oldest (seconds)",
+          "refId": "B"
+        },
+        {
+          "expr": "max by (sink) (chemclaw_outbox_dead_lettered)",
+          "legendFormat": "{{sink}} dead-lettered",
+          "refId": "C"
+        },
+        {
+          "expr": "sum(rate(chemclaw_results_queued_total[30m]))",
+          "legendFormat": "queued/second",
+          "refId": "D"
+        },
+        {
+          "expr": "sum(rate(chemclaw_results_published_total[30m]))",
+          "legendFormat": "published/second",
+          "refId": "E"
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "type": "graph",
+      "title": "Publication failures",
+      "datasource": "prometheus",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 20
+      },
+      "span": 6,
+      "fill": 0,
+      "stack": false,
+      "linewidth": 2,
+      "nullPointMode": "null",
+      "legend": {
+        "show": true,
+        "current": true,
+        "max": true,
+        "values": true
+      },
+      "tooltip": {
+        "shared": true,
+        "sort": 2,
+        "value_type": "individual"
+      },
+      "yaxes": [
+        {
+          "format": "short",
+          "show": true,
+          "min": 0
+        },
+        {
+          "format": "short",
+          "show": false
+        }
+      ],
+      "xaxis": {
+        "mode": "time",
+        "show": true
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(chemclaw_result_publish_failures_total[30m]))",
+          "legendFormat": "delivery",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate(chemclaw_result_projection_failures_total[30m]))",
+          "legendFormat": "projection",
+          "refId": "B"
+        },
+        {
+          "expr": "sum(rate(chemclaw_results_dead_lettered_total[30m]))",
+          "legendFormat": "dead-lettered",
+          "refId": "C"
+        },
+        {
+          "expr": "sum(rate(chemclaw_notes_publish_failures_total[30m]))",
+          "legendFormat": "knowledge notes",
+          "refId": "D"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, sink) (rate(chemclaw_sink_delivery_seconds_bucket[30m])))",
+          "legendFormat": "{{sink}} delivery p95",
+          "refId": "E"
+        }
+      ]
+    },
+    {
+      "id": 13,
+      "type": "graph",
+      "title": "Ingest cursor lag by source",
+      "datasource": "prometheus",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 28
+      },
+      "span": 6,
+      "fill": 0,
+      "stack": false,
+      "linewidth": 2,
+      "nullPointMode": "null",
+      "legend": {
+        "show": true,
+        "current": true,
+        "max": true,
+        "values": true
+      },
+      "tooltip": {
+        "shared": true,
+        "sort": 2,
+        "value_type": "individual"
+      },
+      "yaxes": [
+        {
+          "format": "s",
+          "show": true,
+          "min": 0
+        },
+        {
+          "format": "short",
+          "show": false
+        }
+      ],
+      "xaxis": {
+        "mode": "time",
+        "show": true
+      },
+      "targets": [
+        {
+          "expr": "max by (source) (chemclaw_ingest_cursor_lag_seconds)",
+          "legendFormat": "{{source}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 14,
+      "type": "graph",
+      "title": "Ingest records by source and outcome",
+      "datasource": "prometheus",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 28
+      },
+      "span": 6,
+      "fill": 0,
+      "stack": false,
+      "linewidth": 2,
+      "nullPointMode": "null",
+      "legend": {
+        "show": true,
+        "current": true,
+        "max": true,
+        "values": true
+      },
+      "tooltip": {
+        "shared": true,
+        "sort": 2,
+        "value_type": "individual"
+      },
+      "yaxes": [
+        {
+          "format": "reqps",
+          "show": true,
+          "min": 0
+        },
+        {
+          "format": "short",
+          "show": false
+        }
+      ],
+      "xaxis": {
+        "mode": "time",
+        "show": true
+      },
+      "targets": [
+        {
+          "expr": "sum by (source, outcome) (rate(chemclaw_ingest_records_total[30m]))",
+          "legendFormat": "{{source}} {{outcome}}",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (outcome) (rate(chemclaw_embedding_calls_total[30m]))",
+          "legendFormat": "embedding {{outcome}}",
+          "refId": "B"
+        },
+        {
+          "expr": "sum by (kind) (rate(chemclaw_db_query_failures_total[30m]))",
+          "legendFormat": "db failure {{kind}}",
+          "refId": "C"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(chemclaw_embedding_duration_seconds_bucket[30m])))",
+          "legendFormat": "embedding p95 seconds",
+          "refId": "D"
+        }
+      ]
+    },
+    {
+      "id": 15,
+      "type": "graph",
+      "title": "The PR-gate queue",
+      "datasource": "prometheus",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 36
+      },
+      "span": 6,
+      "fill": 0,
+      "stack": false,
+      "linewidth": 2,
+      "nullPointMode": "null",
+      "legend": {
+        "show": true,
+        "current": true,
+        "max": true,
+        "values": true
+      },
+      "tooltip": {
+        "shared": true,
+        "sort": 2,
+        "value_type": "individual"
+      },
+      "yaxes": [
+        {
+          "format": "reqps",
+          "show": true,
+          "min": 0
+        },
+        {
+          "format": "short",
+          "show": false
+        }
+      ],
+      "xaxis": {
+        "mode": "time",
+        "show": true
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(chemclaw_notes_proposed_total[1h]))",
+          "legendFormat": "notes proposed",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (state) (rate(chemclaw_note_proposals_total[1h]))",
+          "legendFormat": "proposals {{state}}",
+          "refId": "B"
+        },
+        {
+          "expr": "sum(rate(chemclaw_notes_unparseable_total[1h]))",
+          "legendFormat": "unparseable",
+          "refId": "C"
+        },
+        {
+          "expr": "sum(rate(chemclaw_notes_duplicate_id_total[1h]))",
+          "legendFormat": "duplicate id",
+          "refId": "D"
+        }
+      ]
+    },
+    {
+      "id": 16,
+      "type": "graph",
+      "title": "Connector reachability",
+      "datasource": "prometheus",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 36
+      },
+      "span": 6,
+      "fill": 0,
+      "stack": false,
+      "linewidth": 2,
+      "nullPointMode": "null",
+      "legend": {
+        "show": true,
+        "current": true,
+        "max": true,
+        "values": true
+      },
+      "tooltip": {
+        "shared": true,
+        "sort": 2,
+        "value_type": "individual"
+      },
+      "yaxes": [
+        {
+          "format": "short",
+          "show": true,
+          "min": 0
+        },
+        {
+          "format": "short",
+          "show": false
+        }
+      ],
+      "xaxis": {
+        "mode": "time",
+        "show": true
+      },
+      "targets": [
+        {
+          "expr": "max by (connector) (chemclaw_connector_unhealthy)",
+          "legendFormat": "{{connector}}",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate(chemclaw_connectors_unreachable_total[30m]))",
+          "legendFormat": "sweeps that found one unreachable",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 17,
+      "type": "graph",
+      "title": "The counters that mean something is silently wrong",
+      "datasource": "prometheus",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 44
+      },
+      "span": 12,
+      "fill": 0,
+      "stack": false,
+      "linewidth": 2,
+      "nullPointMode": "null",
+      "legend": {
+        "show": true,
+        "current": true,
+        "max": true,
+        "values": true
+      },
+      "tooltip": {
+        "shared": true,
+        "sort": 2,
+        "value_type": "individual"
+      },
+      "yaxes": [
+        {
+          "format": "reqps",
+          "show": true,
+          "min": 0
+        },
+        {
+          "format": "short",
+          "show": false
+        }
+      ],
+      "xaxis": {
+        "mode": "time",
+        "show": true
+      },
+      "targets": [
+        {
+          "expr": "sum by (subsystem) (rate(chemclaw_degraded_total[30m]))",
+          "legendFormat": "degraded {{subsystem}}",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate(chemclaw_audit_sink_failures_total[30m]))",
+          "legendFormat": "audit records lost",
+          "refId": "B"
+        },
+        {
+          "expr": "sum by (metric) (rate(chemclaw_gauge_read_failures_total[30m]))",
+          "legendFormat": "gauge {{metric}} unreadable",
+          "refId": "C"
+        },
+        {
+          "expr": "sum(rate(chemclaw_metric_series_dropped_total[30m]))",
+          "legendFormat": "metric series dropped",
+          "refId": "D"
+        },
+        {
+          "expr": "sum(rate(chemclaw_subsystem_unavailable_total[30m]))",
+          "legendFormat": "subsystem unavailable",
+          "refId": "E"
+        },
+        {
+          "expr": "sum(rate(chemclaw_db_unavailable_total[30m]))",
+          "legendFormat": "database unavailable",
+          "refId": "F"
+        }
+      ]
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 16,
+  "style": "dark",
+  "tags": [
+    "chemclaw"
+  ],
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "timezone": "utc",
+  "title": "Chemclaw data and storage",
+  "uid": "chemclaw-data-and-storage",
+  "version": 1
+}

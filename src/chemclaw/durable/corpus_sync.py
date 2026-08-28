@@ -37,7 +37,7 @@ with workflow.unsafe.imports_passed_through():
 import logging
 
 from chemclaw.durable.heartbeat import beating
-from chemclaw.durable.publish import BAD_DATA_RETRY
+from chemclaw.durable.publish import BAD_DATA_RETRY, queue_wait_timeout
 
 logger = logging.getLogger(__name__)
 
@@ -181,7 +181,10 @@ class ReactionCorpusWorkflow:
         timeout = timedelta(seconds=settings.corpus_sync_timeout_seconds)
         if state is None:
             plan: CorpusSyncPlan = await workflow.execute_activity(
-                plan_corpus_sync, start_to_close_timeout=timeout, retry_policy=BAD_DATA_RETRY
+                plan_corpus_sync,
+                start_to_close_timeout=timeout,
+                schedule_to_start_timeout=queue_wait_timeout(),
+                retry_policy=BAD_DATA_RETRY,
             )
             state = CorpusSyncState(max_iterations=plan.max_iterations, remaining=plan.sources)
         iterations = 0
@@ -191,6 +194,7 @@ class ReactionCorpusWorkflow:
                 drain_reaction_corpus,
                 args=[source, state.after],
                 start_to_close_timeout=timeout,
+                schedule_to_start_timeout=queue_wait_timeout(),
                 heartbeat_timeout=timedelta(seconds=settings.corpus_sync_heartbeat_timeout_seconds),
                 retry_policy=BAD_DATA_RETRY,
             )

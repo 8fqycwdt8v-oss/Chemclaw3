@@ -36,7 +36,7 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.science.labels.store import default_label_index
 
 from chemclaw.durable.heartbeat import beating
-from chemclaw.durable.publish import BAD_DATA_RETRY
+from chemclaw.durable.publish import BAD_DATA_RETRY, queue_wait_timeout
 
 # Module-level indirections so tests swap the production index and server client for fakes — the
 # shape `eln_sync.py` uses for the same reason.
@@ -146,7 +146,10 @@ class ReactionLabelWorkflow:
         timeout = timedelta(seconds=settings.label_sync_timeout_seconds)
         if state is None:
             plan: LabelSyncPlan = await workflow.execute_activity(
-                plan_label_sync, start_to_close_timeout=timeout, retry_policy=BAD_DATA_RETRY
+                plan_label_sync,
+                start_to_close_timeout=timeout,
+                schedule_to_start_timeout=queue_wait_timeout(),
+                retry_policy=BAD_DATA_RETRY,
             )
             state = LabelSyncState(version=plan.version, max_iterations=plan.max_iterations)
         iterations = 0
@@ -155,6 +158,7 @@ class ReactionLabelWorkflow:
                 label_stale_reactions,
                 args=[state.version],
                 start_to_close_timeout=timeout,
+                schedule_to_start_timeout=queue_wait_timeout(),
                 heartbeat_timeout=timedelta(seconds=settings.label_sync_heartbeat_timeout_seconds),
                 # Bad data is dropped per reaction inside the pass; what reaches here is a refused
                 # request the whole batch shares, which no retry changes.

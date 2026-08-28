@@ -41,7 +41,7 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.science.labels.store import default_label_index
 
 from chemclaw.durable.heartbeat import beating
-from chemclaw.durable.publish import BAD_DATA_RETRY
+from chemclaw.durable.publish import BAD_DATA_RETRY, queue_wait_timeout
 
 # Module-level indirection so tests swap the production stores for in-memory ones.
 _reaction_store = default_reaction_store
@@ -284,6 +284,7 @@ class ElnSyncWorkflow:
             plan: ElnSyncPlan = await workflow.execute_activity(
                 plan_eln_sync,
                 start_to_close_timeout=activity_timeout,
+                schedule_to_start_timeout=queue_wait_timeout(),
                 retry_policy=BAD_DATA_RETRY,
             )
             state = ElnSyncState(
@@ -300,6 +301,7 @@ class ElnSyncWorkflow:
                         load_sync_cursor,
                         source,
                         start_to_close_timeout=activity_timeout,
+                        schedule_to_start_timeout=queue_wait_timeout(),
                         retry_policy=BAD_DATA_RETRY,
                     )
                 else:
@@ -308,6 +310,7 @@ class ElnSyncWorkflow:
                 sync_eln_entries,
                 args=[source, state.source_since, state.apply_overlap],
                 start_to_close_timeout=activity_timeout,
+                schedule_to_start_timeout=queue_wait_timeout(),
                 heartbeat_timeout=timedelta(seconds=settings.eln_sync_heartbeat_timeout_seconds),
                 # Bad data must reject-and-continue inside the sync, never retry the batch.
                 retry_policy=BAD_DATA_RETRY,
@@ -323,6 +326,7 @@ class ElnSyncWorkflow:
                     store_sync_cursor,
                     args=[source, chunk.summary.next_cursor],
                     start_to_close_timeout=activity_timeout,
+                    schedule_to_start_timeout=queue_wait_timeout(),
                     retry_policy=BAD_DATA_RETRY,
                 )
             if chunk.has_more and chunk.summary.next_cursor > state.source_since:

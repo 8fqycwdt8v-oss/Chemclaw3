@@ -37,10 +37,18 @@ overridable as `CHEMCLAW_<FIELD>`); this runbook covers the four recurring admin
   - **What the process installs**, since `configure_telemetry` stopped being one line into the
     agent framework: a `TracerProvider` whose spans go through a `BatchSpanProcessor` to the OTLP
     **span** exporter, tagged `service.name=chemclaw` and `service.version=<deployment revision>`.
-    Set the standard `OTEL_SERVICE_NAME` per Deployment if you want the front door and each worker
-    to appear as separate services — unset, they are one. Traces only, on purpose: metrics are
-    `/metrics` (Prometheus, scraped per pod) and logs are JSON on stdout, and neither needs a
-    second copy over OTLP.
+    **The chart now sets `OTEL_SERVICE_NAME` per Deployment** (`chemclaw-service`,
+    `chemclaw-background-worker`, `chemclaw-connector-<name>`, `chemclaw-connector-worker-<name>`),
+    so the four process roles are four services in the trace backend rather than one — they all
+    reported `service.name=chemclaw` until then, which made "which component emitted this span"
+    unanswerable. `OTEL_RESOURCE_ATTRIBUTES` carries `k8s.pod.name` and `k8s.namespace.name` from
+    the downward API on top. Traces only, on purpose: metrics are `/metrics` (Prometheus, scraped
+    per pod) and logs are JSON on **stderr**, and neither needs a second copy over OTLP.
+  - **Logs go to stderr, not stdout.** `configure_logging` calls `logging.basicConfig` with no
+    `stream=`, and that default is `sys.stderr`. Three documents said stdout, which matters the
+    moment anything separates the two streams — a `2>/dev/null`, a sidecar tailing one of them, a
+    log driver configured per-stream. Under Kubernetes both land in the container log and
+    `kubectl logs` shows them together, which is why the claim survived so long.
   - **`CHEMCLAW_OTEL_LLM_SPANS=true` gives you a span per model call** — token counts, model name
     and provider, plus the chain and tool spans around them — through OpenInference's LangChain
     instrumentation, over the same OTLP exporter. On in the shipped chart. Point the collector at
@@ -847,11 +855,391 @@ curl -s localhost:9000/metrics   # this pod's counters, gauges and histograms
 
 Two monitors collect all of this in-cluster: `servicemonitor.yaml` for anything with a Service (the
 front door, each connector's MCP server) and `podmonitor.yaml` for the workers, which have none.
-Both need `monitoring.additionalLabels` set to whatever your Prometheus's `serviceMonitorSelector`
-and `podMonitorSelector` match — the default is empty, so a fresh install collects nothing until an
-operator says where. If a target is `down` rather than absent, check
-`networkPolicy.monitoringNamespaces`: that is the list granting the scraper ingress to the connector
-port and the worker probe port.
+
+**`monitoring.additionalLabels` is not what decides whether they are read, and this section used to
+say it was** ("a fresh install collects nothing until an operator says where"). That is false on the
+stated target: OpenShift's user-workload monitoring selects **every** ServiceMonitor and PodMonitor
+in every user namespace, with no label selector at all, so the shipped empty default is correct
+there and adding labels changes nothing. It is true of a **self-managed Prometheus Operator**, whose
+`Prometheus` resource carries a `serviceMonitorSelector`/`podMonitorSelector` that these labels have
+to match — which is the deployment the value exists for.
+
+What *does* decide it on OpenShift is a cluster-wide switch that is off by default: see
+§ "Make the monitoring stack actually collect this" below. If a target is `down` rather than absent,
+check `networkPolicy.monitoringNamespaces`: that is the list granting the scraper ingress to the
+connector port and the worker probe port.
+
+## (x-b) Make the monitoring stack actually collect this
+
+**Do this before believing anything above.** The chart ships a ServiceMonitor, a PodMonitor and a
+PrometheusRule with thirty-five alerts; on a stock OpenShift cluster **all three are inert custom
+resources**. `oc get servicemonitor` lists them, nothing scrapes, no rule ever loads, and there is
+no error anywhere — a deployment in this state is indistinguishable, from inside, from a healthy
+one. It is the single most likely way this system ships and observes nothing.
+
+Three switches, none of them the release's to flip, in the order they matter.
+
+**1. User-workload monitoring — without it nothing is scraped.**
+
+```bash
+oc -n openshift-monitoring edit configmap cluster-monitoring-config
+# under data.config.yaml:
+#   enableUserWorkload: true
+```
+
+The ConfigMap may not exist; create it with that one key. Then check the stack came up and that
+this release's targets are actually being collected — a monitor that exists is not a monitor that
+matched:
+
+```bash
+oc -n openshift-user-workload-monitoring get pods
+oc -n <release-namespace> get servicemonitor,podmonitor,prometheusrule
+# and, from the console: Observe -> Targets, filtered to the release namespace
+```
+
+Every target should be `Up`. One `Down` is a NetworkPolicy question, not a monitoring one — see
+`networkPolicy.monitoringNamespaces` in §(x).
+
+`monitoring.additionalLabels` is **not** part of this on OpenShift: user-workload monitoring selects
+every monitor in every user namespace regardless of labels. It exists for a self-managed Prometheus
+Operator, whose `serviceMonitorSelector` these labels have to match.
+
+**2. Alert routing — without it the alerts fire into nothing.**
+
+User-workload alerts are forwarded to the platform Alertmanager, whose routing tree a cluster admin
+owns and which normally drops what it does not recognise. So every rule can be `firing` in the
+console while no human is ever told. Either that admin routes on `namespace="<release-namespace>"`,
+or this namespace supplies its own routing, which needs **one** of these two — both off by default:
+
+```bash
+# the platform Alertmanager reads AlertmanagerConfigs from user namespaces
+oc -n openshift-monitoring edit configmap cluster-monitoring-config
+#   alertmanagerMain:
+#     enableUserAlertmanagerConfig: true
+
+# or: a dedicated Alertmanager for user workloads
+oc -n openshift-user-workload-monitoring edit configmap user-workload-monitoring-config
+#   alertmanager:
+#     enabled: true
+#     enableAlertmanagerConfig: true
+```
+
+Then give the release its receivers. The chart renders an `AlertmanagerConfig` when
+`monitoring.alertmanager.enabled=true`, and **refuses to render** if you enable it without any —
+an object that routes to nothing is the state this is fixing:
+
+```yaml
+monitoring:
+  alertmanager:
+    enabled: true
+    defaultReceiver: chemistry-oncall
+    criticalReceiver: chemistry-pager   # optional; severity=critical goes here instead
+    receivers:
+      - name: chemistry-oncall
+        slackConfigs:
+          - apiURL: {name: chemclaw-alertmanager, key: slackWebhookUrl}
+            channel: "#chemclaw-alerts"
+      - name: chemistry-pager
+        pagerdutyConfigs:
+          - routingKey: {name: chemclaw-alertmanager, key: pagerdutyRoutingKey}
+```
+
+Secrets are referenced by `SecretKeySelector` against a Secret in the release namespace, never
+inlined — an `AlertmanagerConfig` is an ordinary readable object. Prove the route end to end before
+trusting it, because everything above is silent when wrong:
+
+```bash
+oc -n <release-namespace> get alertmanagerconfig
+# then watch a deliberately noisy alert arrive, or use amtool against the Alertmanager directly
+```
+
+**3. Dashboards — where they land is not where the console reads.**
+
+The chart writes five dashboards into a ConfigMap labelled `console.openshift.io/dashboard: "true"`.
+The OpenShift console reads that label **only in `openshift-config-managed`**, and the shipped
+default writes into the release namespace, because a chart that fails to *install* on a dashboard is
+worse than one that needs a second flag:
+
+```bash
+helm upgrade ... --set monitoring.dashboards.namespace=openshift-config-managed   # needs cluster-admin
+oc -n openshift-config-managed get configmap -l console.openshift.io/dashboard=true
+# then: Observe -> Dashboards
+```
+
+For a self-managed Grafana instead, add its sidecar's label and leave the namespace empty:
+`--set monitoring.dashboards.labels.grafana_dashboard=1`.
+
+**What the five cover.** `Chemclaw turns` (rate, outcomes, p50/p95/p99, tokens, in-flight against
+capacity), `Chemclaw tools and model` (p95 **by tool**, refusals by reason, the provider seam),
+`Chemclaw durable jobs` (success ratio, p95 by connector, Temporal task slots and pollers),
+`Chemclaw front door` (per-route rate, error ratio and p95) and `Chemclaw data and storage` (ingest
+lag, evidence per source, cache hit ratio, the result outbox, the Postgres pool). Between them every
+metric this system declares has either a panel or an alert, and
+`tests/test_deploy_chart.py::test_every_declared_metric_has_a_consumer` is what keeps that true.
+
+**The Temporal SDK's own metrics are off.** `monitoring.temporalSdkMetrics.enabled=true` renders a
+second worker container port and a second `podMetricsEndpoint` for the SDK's Prometheus exporter —
+task-slot occupancy, poller counts, schedule-to-start latency, the queue-side numbers no first-party
+counter can produce, and the only thing `ChemclawWorkerNotPolling` can read. Leave it off until the
+worker process actually binds that port: with nothing listening it is a permanently-down scrape
+target, which `ChemclawTargetDown` would then report forever.
+
+## (x-c) When an alert fires
+
+Every rule carries a `runbook_url` pointing at its heading below, so an alert arrives with its own
+entry attached. The rules' own `description` annotations say what happened and are not repeated
+here; what follows is what to *do*, and what the alert does not mean.
+
+Two things to know before reading any of them:
+
+- **Every alert is per-fleet, and almost every metric is per-process.** A counter reads zero on a
+  pod that is not the one doing the work: a durable job launched from the front door increments the
+  front door's registry and its *activity* increments the worker's. Scrape both before concluding a
+  number is missing.
+- **Only `ChemclawTargetDown` and `ChemclawNoWorkerIsScraped` fire for a process that is gone.**
+  Everything else reads an application counter, and a process that is not running emits no counters
+  — which looks exactly like a healthy quiet system.
+
+### chemclaw.records — a durable record is being lost
+
+#### ChemclawAuditTrailIncomplete
+`critical`. Tool calls keep succeeding while the trail of who ran them does not. Find the
+`audit_sink_failure` marker in the front door's log; it is almost always the database. The rows
+already lost are not recoverable — `durable/retention.py` refuses to prune this table for the same
+reason this is critical.
+
+#### ChemclawVerifierDegraded
+`warning`. Answers are being scored by the citation gate instead of the judge, so every affected
+turn goes to human review: this is a review-queue load signal as much as a model one. Check the
+`verifier` model route's reachability. §(xvi-b) covers turning the judge on and off deliberately.
+
+#### ChemclawUsageUnreadable
+`critical` because the failure mode is an unbounded bill that looks like an idle deployment. The
+provider changed its usage keys; affected turns meter zero tokens and the budget guard admits them
+regardless. Read `chemclaw_tokens_total` against the provider's own console to size the gap.
+
+#### ChemclawDurableUnreachable
+`warning`. Chemists are being told durable jobs are unavailable. Check the broker before the
+workers: `ChemclawTargetDown` covers the pods, this covers the thing they dial. The threshold
+(`monitoring.alerts.durableUnreachableWarning`) is what suppresses a single blip.
+
+#### ChemclawKnowledgeNotesLost
+`critical`. Knowledge is being dropped silently — the publish is best-effort so a dead remote cannot
+fail a finished calculation. Usual causes are a dead git remote, an expired push credential, or two
+processes sharing one `note_repo_dir`. §(ix) is the PR-gate queue; the notes lost here never reached
+it.
+
+### chemclaw.correctness — an invariant is at risk
+
+#### ChemclawTurnLeaseFailing
+`critical`. A turn's cross-process lease could not be refreshed, so it may expire mid-turn and admit
+a second turn onto the same session. Usually the session store under load — read
+`ChemclawPgPoolSaturated` beside it.
+
+#### ChemclawTurnClaimsLost
+`critical`, and the other end of the same invariant: this one has already happened. Two turns can
+now interleave into one session history. The session's thread is what is at risk, not the turn.
+
+### chemclaw.availability — chemists are being refused or degraded
+
+#### ChemclawTurnsFailing
+`critical`. More than one turn in ten ends in an opaque internal error. Break it down with
+`sum by (outcome) (rate(chemclaw_turns_finished_total[10m]))` — `errored` and `timed_out` are
+different problems — then the front-door dashboard's per-route error ratio.
+
+#### ChemclawFleetAboveItsTurnCeiling
+`warning`. More front-door pods are running than the declared fleet ceiling accounts for, so the
+shared LLM endpoint can be offered more concurrent turns than its budget permits. A manual scale, an
+HPA edited in the cluster, or a rollout that left both generations up. Scale back, or raise
+`CHEMCLAW_SERVICE_FLEET_MAX_CONCURRENT_TURNS` to a number the endpoint can actually serve.
+
+#### ChemclawTurnsShed
+`warning`. The admission guard is declining load. Either the deployment is undersized or
+`service_max_concurrent_turns` is below what the endpoint serves. Check
+`ChemclawTurnLatencyHigh` first: slow turns hold permits, so latency usually precedes shedding
+rather than following it.
+
+#### ChemclawCalcBackendOverCommitted
+`warning`. More calculation-backend sessions are held across the fleet than
+`CHEMCLAW_CALC_BACKEND_MAX_CONCURRENT_REQUESTS` says that pod will serve. It pins
+`OMP_NUM_THREADS=1` and is CPU-bound, so the surplus arrives as thrashing, then as activity
+heartbeat timeouts, then as retries onto the same pod — which is why this fires before anything
+fails. `sum(chemclaw_calc_requests_in_flight)` by pod says who is dispatching: a scaled `calc`
+worker (`replicas × CHEMCLAW_WORKER_MAX_CONCURRENT_ACTIVITIES`) or interactive tool traffic on that
+bundle's own server pods, which have no per-process cap at all. Either scale back, or raise the
+ceiling to what the server actually admits — `Settings` checks only the durable product, once, at
+startup, so it cannot see the interactive half. Silent until a release declares a ceiling: the
+gauge is 0 by default.
+
+#### ChemclawConnectorsUnhealthy
+`warning`. Turns are being answered without those capabilities and **nothing in the answer says so**.
+`chemclaw_connector_unhealthy{connector}` names which; the data dashboard has it. Then
+`ChemclawTargetDown` for whether the pod is gone or merely unreachable.
+
+#### ChemclawSubsystemUnavailable
+`warning`. Requests are being shed with 503 because a dependency did not answer — the durable broker
+or the document index. The `shedding` log line on the same pod names the method, the path and the
+subsystem.
+
+#### ChemclawGroupClaimOverage
+`warning`. A user's Entra token replaced `groups` with `_claim_names`, so their group-derived
+entitlements could not be read and any gated corpus answers emptily *for them only*. There is no
+request-time fix; assign the group to an app role so it arrives in `roles` instead. §(xv) covers
+entitlement.
+
+#### ChemclawDatabaseUnavailable
+`critical`. Sessions, the audit trail and the calculation cache all live there. §(xiii) is the
+restore path; check the pool alerts below before assuming the server is down, since a saturated pool
+presents as connect timeouts against an idle database.
+
+#### ChemclawDatabaseQueriesFailing
+`warning`, and not an outage: the server is answering and rejecting. A schema disagreement, a
+constraint violation, or a migration that did not fully apply (§(xi)). The `kind` label names the
+operation; the driver's own message is in the pod's log.
+
+#### ChemclawPgPoolSaturated
+`warning`. Callers are queueing for a connection and will fail as `ConnectionError` after
+`CHEMCLAW_PG_POOL_TIMEOUT_SECONDS`. Raise `CHEMCLAW_PG_POOL_MAX_SIZE` **and**
+`postgres.maxConnections` together (`Settings` refuses a pair that stops agreeing), or lower the
+concurrency feeding it. Deliberately `max()` across pods: one saturated process is one saturated
+process, and averaging hides it.
+
+#### ChemclawFleetAboveItsConnectionCeiling
+`warning`. The same blind spot as the turn ceiling, for connections: the fleet can ask for more than
+the server will serve, which surfaces as connect failures against a database that is not busy.
+
+### chemclaw.cost
+
+#### ChemclawTokenBurnHigh
+`warning`. The fleet-wide burn is above `monitoring.alerts.tokensPerHourWarning`. The per-process
+budget guard bounds one runaway process and says nothing about the fleet. §(viii) is how to tell
+whether caching is paying off before you raise the threshold.
+
+#### ChemclawTurnsRefusedByBudget
+`warning`, and the same subject seen from the chemist's side: they get a 429 with no explanation.
+Read `chemclaw_tokens_total` beside it — either the allowance is genuinely spent, or the window is
+set below real traffic.
+
+### chemclaw.fleet — a process is gone
+
+#### ChemclawTargetDown
+`critical`. A pod stopped answering `/metrics`. This is the only alert that fires for a process that
+is *gone* rather than misbehaving: crash loop, eviction, OOM kill, or a NetworkPolicy that stopped
+admitting the scraper. The `pod` label names it; `oc describe pod` and the previous container's logs
+are the next two commands.
+
+Scoped by namespace rather than by `job`, because the `job` label the Prometheus Operator assigns
+differs between a ServiceMonitor and a PodMonitor. If the release namespace holds other workloads,
+narrow `monitoring.alerts.targetJobPattern`.
+
+#### ChemclawNoWorkerIsScraped
+`critical`, and a different failure from the one above: there is no target to be down. Pods that
+cannot be scheduled, a PodMonitor whose selector no longer matches, or user-workload monitoring
+turned off cluster-wide — in which case every alert here is inert and this is the only one that says
+so. Start at §(x-b) step 1.
+
+#### ChemclawWorkerNotPolling
+`critical`, and rendered only when `monitoring.temporalSdkMetrics.enabled` is on. A worker is up and
+answering its probes while asking Temporal for no work, so jobs queue and nothing runs them. This is
+the gap the worker's probes leave *on purpose*: `/readyz` is deliberately not a liveness signal,
+because restarting on a lost broker connection would turn an ordinary reconnect into a crash loop.
+Check `/readyz` on the named pod (§(x)) and the broker before restarting anything.
+
+### chemclaw.turns — the answer itself
+
+#### ChemclawTurnLatencyHigh
+`warning`. p95 is over `monitoring.alerts.turnLatencyP95Seconds`. Break it down in this order, all
+on the tools and data dashboards, taking `histogram_quantile(0.95, …)` over each histogram's
+`_bucket` series: `chemclaw_tool_duration_seconds` **by `tool`** — that label is what makes "which
+tool is slow" answerable at all, and it did not exist until this pass — then
+`chemclaw_model_call_duration_seconds` by provider, then `chemclaw_evidence_source_seconds` by
+source. Slow turns hold admission permits, so this tends to precede `ChemclawTurnsShed`.
+
+#### ChemclawTurnsTimingOut
+`warning`. Someone waited out `CHEMCLAW_SERVICE_TURN_TIMEOUT_SECONDS` and got nothing. If
+`ChemclawTurnLatencyHigh` is already firing these are its tail and the cause is upstream of the
+timeout.
+
+#### ChemclawTurnsAnsweringEmpty
+`warning`, and the quietest bad outcome in the system: the turn succeeded and produced nothing to
+read. No error counter moves. Usually a model that emitted only tool calls, or a middleware that
+short-circuited after the last one; `make explain <session>` reconstructs the turn.
+
+### chemclaw.durable — the expensive half
+
+#### ChemclawDurableJobsFailing
+`critical`. More than `monitoring.alerts.jobFailureRatio` of jobs are ending `failed`. Break down by
+connector with `sum by (connector, outcome) (rate(chemclaw_jobs_finished_total[30m]))`, then by
+activity with `chemclaw_activity_failures_total` — which counts one row per *attempt*, so a retry
+storm shows as a rate rather than only in the broker's history. The Temporal UI's event history is
+the next stop (§(x)).
+
+#### ChemclawActivityRetryStorm
+`warning`. Every attempt of one activity has failed for half an hour, so its job is retrying without
+progress or has already given up. The Temporal event history for a workflow using it is the fastest
+route to the exception (§(x)); `chemclaw_jobs_finished_total{outcome="failed"}` says whether jobs are
+dying with it.
+
+#### ChemclawPushBackDropped
+`warning`. A finished job's result never reached the session that asked for it. The job succeeded
+and the result is stored; what was lost is the chemist being told. Check
+`chemclaw_event_streams_open` against `chemclaw_event_stream_capacity` on the front door first.
+
+#### ChemclawFanOutChildrenDropped
+`warning`. A fan-out parent completed **reporting success** with children missing, so its result is
+incomplete. The scenario this exists for is three memory-synthesis jobs going green every night
+while returning `[]`.
+
+#### ChemclawResultPublishFailing
+`critical`. A result could not be delivered to a configured sink. The calculation stands in the
+cache; the scientific record this deployment publishes to does not have it.
+`chemclaw_sink_delivery_seconds` and the sink's logs name which. §(xvi) is the attach procedure.
+
+#### ChemclawResultProjectionFailing
+`critical`, and **retrying will not help**: `publish/` could not turn a calculation into the typed
+record its sink expects, which is a schema disagreement between this build and
+`schema/result-store/`. The result is dropped before any delivery is attempted.
+
+#### ChemclawResultsDeadLettered
+`warning`. Publications exhausted their retries and were retired to `failed`. Nothing will attempt
+them again; re-queueing is an operator action. They also never leave the queued-minus-published
+difference, which is why that difference is not a backlog and why the alert below reads an age.
+
+#### ChemclawResultOutboxStuck
+`warning`. The oldest undelivered publication for this sink is older than
+`monitoring.alerts.outboxStuckSeconds`. Read `chemclaw_outbox_pending{sink}` for the depth and
+`chemclaw_outbox_dead_lettered{sink}` for what has already been given up on.
+
+### chemclaw.degradation — something is quietly not working
+
+#### ChemclawSubsystemDegraded
+`warning`, and the umbrella over roughly forty deliberate exception swallows. The `subsystem` label
+names which one; the pod's log carries the exception. Turns keep being answered, which is exactly
+why this needs an alert rather than a panel.
+
+#### ChemclawEvidenceSourceFailing
+`warning`. A retrieval leg is raising, so answers are composed from the remaining legs and cite
+nothing from this one — and nothing in the answer says so. Read
+`chemclaw_evidence_source_chunks_total` and `chemclaw_evidence_source_skips_total` on the same
+`source` label: a leg that fails, a leg that declines and a leg that legitimately matches nothing are
+three different states, and telling them apart is what
+`D-2026-08-01-a-cap-that-starves-a-source` was written about.
+
+#### ChemclawIngestCursorStalled
+`warning`. A source is further behind than `monitoring.alerts.ingestLagSeconds`, so the corpus
+chemists query is stale by at least that much. A wedged fetch advances no cursor and logs
+`ingested=0`, which is byte-identical to a genuinely quiet source — the lag gauge is the only thing
+that separates them. §(v) covers re-ingesting rejected entries.
+
+#### ChemclawGaugeReadFailing
+`warning`. `render()` drops one gauge whose source raised rather than losing the whole scrape, so
+every other series is intact and this one is simply *absent* — which on a graph is
+indistinguishable from a value that has not changed. The `metric` label names it.
+
+#### ChemclawMetricSeriesDropped
+`warning`. A metric hit its per-metric label-set cap and is now undercounting by an unknown amount,
+along with every alert and panel reading it. A label here is meant to be low-cardinality, so this
+means something is generating values it should not; the pod's log names the metric.
 
 ## (xi) A migration that will not apply, and a release stuck in `pending-upgrade`
 

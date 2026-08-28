@@ -8,6 +8,16 @@ is a policy a deployment has to be able to state and act on.
 
 **What this prunes, and what it deliberately refuses to.**
 
+The bullets below are the *argued* cases — the ones where the decision was close, or where getting
+it wrong destroys something. They are not the whole schema, and this docstring read as though they
+were. Measured: it named **three** refusals against the **thirty-three** tables this sweep does not
+prune, so thirty of them had no disposal decision recorded anywhere a reader or a test could reach
+one — including `bo_campaigns` and `bo_suggestions`, which are append-only and grow on every
+campaign ask. `_NOT_PRUNED` below closes that. Every table in the schema is in exactly one of it
+and `_PRUNABLE`, and `tests/test_retention.py` fails the next migration that adds a table without
+saying what bounds it — because a list whose whole discipline is being exhaustive has to be checked
+to be exhaustive, not asserted to be.
+
 - `session_events` — a consumed push-back mailbox row is spent; it exists to wake one stream once.
 - `session_messages` — conversation history. Bounded by age, per the deployment's policy, **but an
   age cutoff alone cannot dispose of a conversation row** (D-145). A `tool_use` and the
@@ -92,6 +102,31 @@ is a policy a deployment has to be able to state and act on.
   clock, so it needs its own eviction design (LRU by access, or by compute cost) rather than an age
   cutoff. Deliberately not lumped in here.
 
+- `bo_campaigns` and `bo_suggestions` are **refused**, and this is the pair the list was silent
+  about. A campaign row is the decision space a chemist and an agent jointly framed, and a
+  suggestion row snapshots the candidates, the observations they were drawn from and the space they
+  were drawn in — migration 031's own words, "the sequence *is* the campaign's history". Both are
+  append-only by design, which is what made the silence worth closing rather than what argues for
+  pruning them.
+
+  **Erasure already answered this question in the harder direction.** `agent/leaver.py`'s
+  `_RETAINED` tier keeps both tables through a *data-subject erasure request* — counting the rows
+  and naming why they stay ("who framed an optimization campaign's decision space") — beside
+  `audit_events` and `job_records`, the two tables refused above. A retention clock may not dispose
+  of what a person asking to be forgotten does not, so the answer here was fixed by a merged
+  decision before the question was put.
+
+  The abandoned-campaign case is real and does not overturn it. `campaign_id` is a hash of the
+  problem, so a campaign nobody resumes costs one row plus its suggestions and the identity is
+  *stable*: deleting it would leave `resume_campaign` reconstructing the same id against an empty
+  history, which reads to the next chemist as "nobody has asked this before" rather than as an
+  error — the one outcome worse than keeping the row. Growth is not the pressure it would have to
+  be either: a row is written per **human ask**, not per model call or per tool call, against
+  `tool_result_blobs`'s row per tool call and `checkpoints`' several per turn. `bo_suggestions`
+  cascades from `bo_campaigns`, so a policy on the parent would be the whole policy — and
+  `cli/rekey_campaigns.py` exists to carry old campaigns *forward* across a problem-hash change,
+  which is not something a deployment builds for rows it means to age out.
+
 Every prune is age-based against a per-table window, runs on `background-jobs`, and reports what it
 removed so the deletion is itself auditable in the job's own result.
 """
@@ -111,9 +146,10 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.agent.session_store import SELECT_SESSION_ROWS
     from chemclaw.core.config import settings
     from chemclaw.core.db import connection, existing_tables
+    from chemclaw.durable.heartbeat import beating
     from chemclaw.durable.registry import durable_activity, durable_workflow
 
-from chemclaw.durable.publish import BAD_DATA_RETRY
+from chemclaw.durable.publish import BAD_DATA_RETRY, queue_wait_timeout
 
 logger = logging.getLogger(__name__)
 
@@ -154,6 +190,102 @@ _PRUNABLE: dict[str, tuple[str, str]] = {
     # after it finally arrived, not deleted on arrival.
     "result_publications": ("delivered_at", "state = 'delivered'"),
     "checkpoints": ("(checkpoint->>'ts')::timestamptz", "TRUE"),
+}
+
+# Every other table in this schema, mapped to what bounds its growth instead — or to the fact that
+# nothing does and no decision is on record. Together with `_PRUNABLE` this names **every** table,
+# and `tests/test_retention.py::test_every_table_in_the_schema_has_a_disposal_decision` asserts
+# exactly that, in both directions, against the migrations on disk.
+#
+# **Why this exists as data rather than as prose.** The module docstring above enumerates what this
+# sweep prunes and what it refuses, and reads as though that were the whole schema. It was not:
+# three refusals against thirty-three tables. `bo_campaigns` and `bo_suggestions` are how that was
+# found — append-only, written on every campaign ask, in neither list — but they were one of thirty
+# in the same silence, so adding two entries and leaving the register open would have fixed the
+# example and not the defect. The shape is `agent/leaver.py`'s `_RETAINED` (table, why it stays),
+# for the same reason: a disposal decision nobody can enumerate is a decision nobody made.
+#
+# **The keys are checked; the reasons are not.** That is the split `infra/sql/README.md` already
+# draws over its own Disposal column — a test for the judgement would be a second copy of the
+# answer, while a test for the *set* catches the migration that adds a table and says nothing. This
+# register is what that column's "the BACKLOG row ... is the record of which those are" delegates
+# to; that row covers `session_owners` and `session_turns` and nothing else, so for the rest of the
+# blanks there was no record to delegate to.
+#
+# **"nothing bounds it" is a finding, not a policy.** Where the decision is genuinely open the entry
+# says so rather than inventing an answer, because making the silence visible is this register's
+# job and resolving eight unrelated tables in a retention change is not.
+#
+# Upstream's own version ledgers are out of scope here, and are named so the omission is deliberate
+# rather than another blank: `checkpoint_migrations` and the memory store's
+# `store_migrations`/`vector_migrations` are the `schema_migrations` of libraries this repo does not
+# own. None is created by a first-party migration or named by a first-party constant, so the test
+# below cannot derive them and this register does not claim them. (No count is written into that
+# sentence on purpose — the counts in this tree's prose are the thing that goes stale.)
+_NOT_PRUNED: dict[str, str] = {
+    # Records. Deleting a row does not reclaim a cache, it ends the ability to answer a question
+    # about the past — so disposal belongs to whoever owns the record, never to a clock.
+    "audit_events": "refused: the record of who ran what — see the docstring above",
+    "job_records": "refused: a durable run's evaluation record, which used to expire with "
+    "Temporal's history and take a campaign's results with it (D-157)",
+    "calculation_results": "refused: evicting a cached result converts a hit into a "
+    "recomputation (D-011); bounded by cost policy, not by a clock",
+    "bo_campaigns": "refused: the decision space a chemist framed and the history of what was "
+    "proposed against it; kept through erasure, so not disposable on a clock",
+    "structures": "refused: a `structure_id` is a handle handed to chemists and taken as an "
+    "argument by the next calculation (D-2026-08-21) — pruning breaks it and reclaims nothing",
+    "reaction_records": "refused: a row is the only readable form of an ELN run "
+    "(D-2026-08-25), so pruning one deletes a result",
+    # Disposed by a mechanism that is not an age cutoff, and deliberately not duplicated here.
+    "checkpoint_blobs": "swept by `_prune_checkpoints` with the thread it belongs to, not by a "
+    "cutoff of its own — `checkpoints` in `_PRUNABLE` is the key that finds it",
+    "checkpoint_writes": "swept by `_prune_checkpoints` with its thread, as `checkpoint_blobs` is",
+    "artifact_blobs": "`durable/artifact_eviction.py`, by idle window and size budget",
+    "document_files": "`ingest/documents/sync.py`, mark-and-sweep — rows a *complete* crawl did "
+    "not see are removed, so a file deleted from the share leaves the index",
+    "subscriptions": "deleted on unsubscribe, which is an event rather than an age",
+    "observations": "stale rows are retired by status, not deleted",
+    "store": "the scratchpad memory store (`agent/scratchpad.py`); erasure reaches it per actor",
+    # Cascades. A `ON DELETE CASCADE` parent is the whole policy, and listing the child separately
+    # would be a second, racing definition of one disposal.
+    "bo_suggestions": "cascades from `bo_campaigns`",
+    "calculation_artifacts": "cascades from `artifact_blobs`",
+    "tool_result_links": "cascades from `tool_result_blobs` (042)",
+    "document_chunks": "cascades in effect from `document_files` — the same sweep removes any "
+    "cutting no remaining file row claims",
+    # Derived and rebuildable: the source is elsewhere, so a row is regenerable rather than lost.
+    "note_index": "derived and rebuildable (`make reindex`); rows for deleted notes are not "
+    "removed",
+    "reaction_labels": "derived and rebuildable by re-running the corpus drain and the backfill",
+    "reaction_species": "derived and rebuildable; a species the source amended away is deleted "
+    "with its reaction's record phase",
+    "corpus_molecules": "derived and rebuildable by re-draining the corpus",
+    # Bounded by construction — the row count cannot run away, so there is nothing to bound.
+    "schema_migrations": "never: the ledger is the record of its own work, and the runtime role "
+    "cannot write it at all",
+    "sync_cursors": "one row per ingest source, so bounded by the source count",
+    "session_turns": "a lease, released at turn end — but see `session_owners` below for the half "
+    "of this that is open",
+    "audit_anchors": "retired with the audit hash chain; nothing writes it and the table is empty",
+    "store_vectors": "not created in this deployment — the memory store is built without an "
+    "`index_config`, so `AsyncPostgresStore.setup()` never makes it",
+    # Nothing bounds these, and no decision is on record. Each is a real open question, not a
+    # shorthand for "unimportant"; naming them is what this register is for.
+    "session_owners": "**nothing bounds it** — a client creates a row on the first keystroke and "
+    "it outlives its session's pruned history; needs a policy decision (BACKLOG, with "
+    "`session_turns`)",
+    "molecule_fingerprints": "**nothing bounds it**, and no decision is on record",
+    "reaction_fingerprints": "**nothing bounds it**, and no decision is on record",
+    "user_preferences": "**nothing bounds it** — one row per person per key, and a preference has "
+    "no age at which it stops being current",
+    "predictions": "**nothing bounds it** — the calibration ledger's evidence, where pruning a row "
+    "changes a calibration rather than reclaiming space; no decision is on record",
+    "measurements": "**nothing bounds it** — the calibration ledger's other half, same question",
+    "note_proposals": "**nothing bounds it** — the PR-gate's record of what was proposed and who "
+    "decided it; no decision is on record",
+    "plan_approvals": "**nothing bounds it** — consumed rows are marked, never removed",
+    "turn_costs": "**nothing bounds it** — what a person's turns cost, the record an operator "
+    "bills against; no decision is on record",
 }
 
 # The expired threads. The rule is the only correct one and has never changed: **a thread is expired
@@ -292,6 +424,26 @@ def _window_days(table: str) -> int:
 @durable_activity("background")
 @activity.defn
 async def prune_expired_rows() -> RetentionOutcome:
+    """Run one retention sweep, heartbeating so a dead worker is noticed in a minute not ten.
+
+    A thin wrapper rather than a heartbeat inside the sweep, because the sweep has no boundary
+    worth reporting at: it walks a closed table map and the slow part is one `DELETE` inside one of
+    them, so "which table are we on" is neither stable nor interesting. That is exactly the "opaque
+    single call" case `durable/heartbeat.py` was extracted for, and its `finally` guarantees the
+    work is not left running detached if the beat itself fails.
+
+    Without this the only thing that would notice a worker dying mid-sweep is
+    `retention_timeout_seconds` — ten minutes, on a job whose whole point is to run unattended on a
+    schedule.
+    """
+    return await beating(
+        _prune_expired_rows(),
+        "retention sweep",
+        settings.background_activity_heartbeat_timeout_seconds,
+    )
+
+
+async def _prune_expired_rows() -> RetentionOutcome:
     """Delete rows past their table's retention window; return the per-table counts.
 
     Each table is pruned **and committed** in its own statement, so one failure cannot roll back
@@ -552,5 +704,14 @@ class RetentionWorkflow:
         return await workflow.execute_activity(
             prune_expired_rows,
             start_to_close_timeout=timedelta(seconds=settings.retention_timeout_seconds),
+            schedule_to_start_timeout=queue_wait_timeout(),
+            # Without a heartbeat timeout the heartbeats the activity now sends do nothing for
+            # failure detection: a worker that dies mid-sweep would be noticed only when the
+            # ten-minute start-to-close budget expired. `connectors/calc/workflows.py` states the
+            # rule; core's own long work simply never applied it. The beat is derived from this
+            # same number (`durable/heartbeat.py::beating`), so the two cannot drift.
+            heartbeat_timeout=timedelta(
+                seconds=settings.background_activity_heartbeat_timeout_seconds
+            ),
             retry_policy=BAD_DATA_RETRY,
         )

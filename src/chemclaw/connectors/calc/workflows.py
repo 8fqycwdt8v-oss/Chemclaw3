@@ -104,7 +104,23 @@ class CalcJobWorkflow:
         """
         result = await workflow.execute_activity(
             run_xtb_calculation,
-            spec,
+            # The actor and the correlation id come off the run's **memo**, which
+            # `ConnectorJobWorkflow` sets on every connector job for exactly this (D-118) — the
+            # same read `connectors/bo/workflows.py` makes for its campaign record. They are
+            # arguments rather than part of `spec` because `spec` is the model-authored payload and
+            # its digest is the cache key: identity must not be able to change either.
+            #
+            # What they are *for* is the call this activity makes back out to the calculation
+            # server. `science/calc/store.py::cached_compute` opens an MCP session per call and
+            # `core.mcp_session.open_session` stamps the ambient identity onto it — ambient that
+            # nothing on this path ever set, so the heaviest server in the fleet logged
+            # `actor=- session=-` for every durable run while the same tool called inline from a
+            # chat turn was fully attributed.
+            args=[
+                spec,
+                workflow.memo_value("requested_by", settings.service_actor_id),
+                workflow.memo_value("correlation_id", ""),
+            ],
             start_to_close_timeout=timedelta(seconds=settings.xtb_job_timeout_seconds),
             # The activity heartbeats between species and scan points. Without a heartbeat timeout
             # those heartbeats do nothing for failure detection, and a worker that dies mid-job

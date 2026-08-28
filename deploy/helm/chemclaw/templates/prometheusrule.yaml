@@ -3,9 +3,24 @@
 
        REV-2 closed "nothing scrapes `/metrics`" by adding a ServiceMonitor, and its own comment
        makes the argument that an endpoint which answers while nothing collects it is how
-       observability fails quietly. The same argument applies one level up: thirty-seven metrics
-       were collected and **no rule fired on any of them**. There was no PrometheusRule anywhere in
-       the repo, no SLO, and no Alertmanager route.
+       observability fails quietly. The same argument applies one level up: every metric this
+       system declares was collected and **no rule fired on any of them**. There was no
+       PrometheusRule anywhere in the repo, no SLO, and no Alertmanager route.
+
+       How many metrics that was is deliberately not written here. The number this sentence used to
+       carry said thirty-seven while the registry declared sixty-six, and the count that replaced it
+       would have gone stale on the next commit that declared one — the same failure `CLAUDE.md`
+       records for the Makefile's target count and `tests/conftest.py`'s skip count. The registry is
+       the only honest source: `len(declared_metric_names())`, and
+       `tests/test_deploy_chart.py::test_every_counter_that_can_fail_silently_has_an_alert` is what
+       makes the *coverage* of it checkable rather than believed.
+
+       The other two absences that sentence named are closed beside this file, not in it.
+       `templates/alertmanagerconfig.yaml` is the route — values-gated, because a receiver is a
+       deployment fact — and it is inert until a cluster admin turns on user-workload
+       AlertmanagerConfig, exactly as this object is inert until they turn on user-workload
+       monitoring at all. `docs/guides/runbook.md` § "When an alert fires" is the SLO's practical
+       half and the target of every `runbook_url` below.
 
        The tell is `agent/audit.py`, which logs `audit_sink_failure` at ERROR with a stable marker
        and increments a counter, with a comment saying in as many words that a lost audit
@@ -47,6 +62,7 @@ spec:
           labels:
             severity: critical
           annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawaudittrailincomplete
             summary: Audit records are not being persisted
             description: >-
               The audit sink failed to record at least one tool call in the last 10 minutes, so the
@@ -63,6 +79,7 @@ spec:
           labels:
             severity: warning
           annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawverifierdegraded
             summary: Answers are being scored by the citation gate, not the judge
             description: >-
               The LLM judge is unreachable, so answers are scored for citation *resolvability*
@@ -75,6 +92,7 @@ spec:
           labels:
             severity: critical
           annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawusageunreadable
             summary: Token usage is unparseable, so the cost guard is not binding
             description: >-
               The model provider reported usage this build cannot read, so affected turns meter
@@ -89,6 +107,7 @@ spec:
           labels:
             severity: warning
           annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawdurableunreachable
             summary: Temporal is not answering its health probe
             description: >-
               Chemists are being told durable jobs are unavailable. The threshold is what suppresses
@@ -107,6 +126,7 @@ spec:
           labels:
             severity: critical
           annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawknowledgenoteslost
             summary: Knowledge notes are failing to reach the PR-gate
             description: >-
               A note could not be opened on a branch and the failure was swallowed so the job could
@@ -124,10 +144,29 @@ spec:
           labels:
             severity: critical
           annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawturnleasefailing
             summary: The cross-process turn guard is lapsing
             description: >-
               A turn's lease could not be refreshed, so it may expire while the turn is still
               running and admit a second turn on the same session.
+
+        {{- /* The other end of the same invariant, and the one that has already happened: a refresh
+               *failing* is a risk, a claim being *lost* is the second turn already admitted. Same
+               group, same severity, and deliberately not folded into one rule — the remedies
+               differ (a slow store versus a lease that has already lapsed) and summing them would
+               make one rate out of a warning and an incident. */}}
+        - alert: ChemclawTurnClaimsLost
+          expr: increase(chemclaw_turn_claims_lost_total[5m]) > 0
+          for: 0m
+          labels:
+            severity: critical
+          annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawturnclaimslost
+            summary: A turn lost its cross-process claim while still running
+            description: >-
+              The lease expired or was taken by another process while the turn held it, so two turns
+              can now interleave into one session history. The session's thread is the thing at
+              risk, not the turn.
 
 
     - name: chemclaw.availability
@@ -140,6 +179,7 @@ spec:
           labels:
             severity: critical
           annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawturnsfailing
             summary: More than 10% of turns are ending in an error
             description: Every failure reaches a chemist as an opaque internal-error message.
 
@@ -159,6 +199,7 @@ spec:
           labels:
             severity: warning
           annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawfleetaboveitsturnceiling
             summary: The front-door fleet can admit more concurrent turns than it is allowed to
             description: >-
               More front-door pods are running than the declared fleet ceiling accounts for, so the
@@ -167,12 +208,41 @@ spec:
               or a rollout that left both generations up. Either scale back or raise
               `CHEMCLAW_SERVICE_FLEET_MAX_CONCURRENT_TURNS` with a number the endpoint can serve.
 
+        {{- /* The calculation backend's version of the alert above, and it needs a *live* left
+               hand where that one uses a configured capacity: two kinds of process dispatch to
+               `servers/calc` and they do not share a cap — a calc worker is bounded by
+               `worker_max_concurrent_activities`, while that bundle's own MCP server pods dispatch
+               straight from a tool call and are bounded by nothing local. Counting the sessions
+               actually held is the only number that covers both. `Settings` refuses a bad
+               *product* at startup and never re-runs, and it cannot see the interactive half at
+               all, so this pair is what catches a real overload. Self-disabling: the ceiling gauge
+               is 0 until a release declares what that pod will serve. */}}
+        - alert: ChemclawCalcBackendOverCommitted
+          expr: >-
+            max(chemclaw_calc_backend_max_concurrent_requests) > 0
+            and sum(chemclaw_calc_requests_in_flight)
+                > max(chemclaw_calc_backend_max_concurrent_requests)
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawcalcbackendovercommitted
+            summary: More concurrent calculations are in flight than the backend declares it serves
+            description: >-
+              The calculation server pins OMP_NUM_THREADS=1 and is CPU-bound, so surplus concurrency
+              arrives as thrashing, then as activity heartbeat timeouts, then as retries onto the
+              same pod. Usual causes are a scaled calc worker, a raised
+              CHEMCLAW_WORKER_MAX_CONCURRENT_ACTIVITIES, or interactive tool traffic on the calc
+              connector's own server pods. Either scale back or raise
+              CHEMCLAW_CALC_BACKEND_MAX_CONCURRENT_REQUESTS to what that server actually admits.
+
         - alert: ChemclawTurnsShed
           expr: sum(rate(chemclaw_turns_shed_total[10m])) > 0
           for: 10m
           labels:
             severity: warning
           annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawturnsshed
             summary: Turns are being rejected for lack of admission capacity
             description: >-
               The admission guard is shedding load (503). Either the deployment is undersized or
@@ -187,6 +257,7 @@ spec:
           labels:
             severity: warning
           annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawconnectorsunhealthy
             summary: One or more connectors are unreachable
             description: >-
               Turns are being answered without these capabilities and nothing in the answer says
@@ -204,6 +275,7 @@ spec:
           labels:
             severity: warning
           annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawsubsystemunavailable
             summary: Requests are being shed because a subsystem is unavailable
             description: >-
               Callers are getting 503s because a dependency the route needed did not answer — the
@@ -224,6 +296,7 @@ spec:
           labels:
             severity: warning
           annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawgroupclaimoverage
             summary: A token arrived with more groups than it could carry
             description: >-
               A user's Entra token replaced `groups` with `_claim_names`, so none of their
@@ -237,10 +310,30 @@ spec:
           labels:
             severity: critical
           annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawdatabaseunavailable
             summary: Postgres is unreachable from the front door
             description: >-
               Sessions, the audit trail and the calculation cache all live there; a turn that
               cannot reach it fails or silently degrades to log-only auditing.
+
+        {{- /* Distinct from the alert above, and the distinction is the point: that one is "the
+               database did not answer", this one is "it answered with an error". A failing query
+               against a healthy server is a schema disagreement, a constraint violation or a
+               half-applied migration — none of which move `chemclaw_db_unavailable_total`, and all
+               of which are silent in a path that catches and continues. `by (kind)` because the
+               remedy differs per operation and summing them makes one rate out of several causes. */}}
+        - alert: ChemclawDatabaseQueriesFailing
+          expr: sum by (kind) (increase(chemclaw_db_query_failures_total[15m])) > 0
+          for: 0m
+          labels:
+            severity: warning
+          annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawdatabasequeriesfailing
+            summary: Pooled database operations are raising against a reachable server
+            description: >-
+              A query failed on a database that is answering, so this is not an outage — it is the
+              schema, a constraint, or a migration that did not fully apply. The `kind` label names
+              the operation and the pod's log carries the driver's own message.
 
         {{- /* D-119 introduced `requests_waiting` as *the* reading that distinguishes "the pool is
                too small" from "the database is down" — the pair that presented as connect timeouts
@@ -254,6 +347,7 @@ spec:
           labels:
             severity: warning
           annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawpgpoolsaturated
             summary: Callers are queueing for a Postgres connection
             description: >-
               A process has more concurrent database work than `CHEMCLAW_PG_POOL_MAX_SIZE` allows,
@@ -278,6 +372,7 @@ spec:
           labels:
             severity: warning
           annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawfleetaboveitsconnectionceiling
             summary: The fleet can open more Postgres connections than it is allowed to
             description: >-
               More pooled processes are running than `postgres.maxConnections` accounts for, so the
@@ -293,8 +388,414 @@ spec:
           labels:
             severity: warning
           annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawtokenburnhigh
             summary: Token consumption is above the configured hourly expectation
             description: >-
               The per-process budget guard bounds one runaway process; it says nothing about the
               fleet. This is the fleet-wide signal.
+
+        {{- /* The same subject seen from the chemist's side: the guard above is what an operator
+               watches, this is what a user experiences when it binds. A 429 from the budget is a
+               refused question, and until now the only trace of one was an HTTP status the front
+               door did not keep. Sustained rather than first-increment, because a single refusal at
+               the end of a heavy month is the control working, not an incident. */}}
+        - alert: ChemclawTurnsRefusedByBudget
+          expr: sum(rate(chemclaw_turns_refused_budget_total[15m])) > 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawturnsrefusedbybudget
+            summary: Chemists are being refused with 429 by the token budget
+            description: >-
+              The turn/token budget is refusing questions. Either the deployment has genuinely spent
+              its allowance — read `chemclaw_tokens_total` beside this — or the window is set below
+              real traffic. The affected users see a 429, not an explanation.
+
+    {{- /* The group nothing in this file used to have, and the one whose absence made every rule
+           above conditional on something no rule stated: **all sixteen alert on an application
+           counter, so a process that is gone emits silence** — and silence is what a healthy
+           quiet system also emits. A CrashLooping, evicted, unschedulable or simply un-scraped pod
+           produced no alert of any kind. `up` is the only series that inverts that: it is
+           synthesised by Prometheus per target, so it exists precisely when the target does not
+           answer.
+
+           **`kube_pod_status_ready` would be the better signal and is not available here.**
+           kube-state-metrics is scraped by the *platform* Prometheus in `openshift-monitoring`; a
+           user-workload `PrometheusRule` is evaluated by the user-workload Prometheus, which does
+           not hold those series. A rule written against them would be permanently empty — green
+           forever, which reads exactly like "the condition never occurred". So `up` and `absent()`
+           are the degraded substitute, chosen deliberately and named as such. */}}
+    - name: chemclaw.fleet
+      rules:
+        {{- /* Scoped by namespace rather than by a guessed `job` value: this chart's ServiceMonitor
+               and PodMonitor are what put targets in this namespace, so "every target here" is
+               exact, while the `job` label the Prometheus Operator assigns differs between the two
+               monitor kinds (the Service name for one, `<namespace>/<name>` for the other) and is
+               not something this file should assert without a cluster to check it against.
+               `targetJobPattern` is the narrowing for a shared namespace. */}}
+        - alert: ChemclawTargetDown
+          expr: >-
+            up{namespace="{{ .Release.Namespace }}",
+            job=~"{{ .Values.monitoring.alerts.targetJobPattern }}"} == 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawtargetdown
+            summary: A Chemclaw process is not being scraped
+            description: >-
+              A pod in this release stopped answering `{{ .Values.monitoring.path }}`. Every other
+              alert in this file reads an application counter, so this is the only one that fires
+              for a process that is gone rather than misbehaving — a crash loop, an eviction, an
+              OOM kill, or a NetworkPolicy that stopped admitting the scraper. The `pod` label names
+              it.
+
+        {{- /* The failure `up` cannot see: a pod that never became a target at all. An
+               unschedulable Deployment, a `replicas: 0`, a bad selector or a PodMonitor whose
+               labels stopped matching all produce *no series*, and `up{...} == 0` over no series is
+               an empty vector. `absent()` is the only shape that alerts on nothing being there.
+
+               Pinned to the workers' scrape endpoint because they are the release's one guaranteed
+               population — the front door has an HPA and connectors are enabled per deployment,
+               while `background-worker` always runs. `endpoint` is the port *name* the operator
+               stamps on every sample, and `tests/test_deploy_chart.py` holds it equal to the
+               PodMonitor's own `port:` so the two cannot drift apart silently. */}}
+        - alert: ChemclawNoWorkerIsScraped
+          expr: absent(up{namespace="{{ .Release.Namespace }}", endpoint="metrics"})
+          for: 10m
+          labels:
+            severity: critical
+          annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawnoworkerisscraped
+            summary: No worker pod exists as a scrape target
+            description: >-
+              Not one worker in this release is being scraped, which is a different failure from a
+              worker being down: there is no target to be down. Usual causes are pods that cannot be
+              scheduled, a PodMonitor whose selector no longer matches, or user-workload monitoring
+              having been turned off cluster-wide — in which case every alert in this file is inert
+              and this is the only one that says so.
+{{- if .Values.monitoring.temporalSdkMetrics.enabled }}
+
+        {{- /* The gap the worker's own probes leave open on purpose. `/readyz` is the worker's
+               `is_running` and is deliberately *not* wired to liveness (`chemclaw.workerProbes`):
+               restarting on a lost broker connection would turn an ordinary Temporal reconnect into
+               a crash loop. The cost of that correct decision is that a worker can sit not-ready
+               indefinitely with nothing saying so — it still serves `/metrics`, so `up` is 1, and
+               no first-party counter moves when a poll loop is simply not polling.
+
+               The SDK's own exporter is what closes it: a worker with no pollers is not asking the
+               broker for work, whatever its process state looks like. Rendered only when that
+               exporter is switched on, because a rule over a series nothing emits is green
+               forever. */}}
+        - alert: ChemclawWorkerNotPolling
+          expr: sum by (pod) (temporal_num_pollers{namespace="{{ .Release.Namespace }}"}) == 0
+          for: 10m
+          labels:
+            severity: critical
+          annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawworkernotpolling
+            summary: A worker is running but asking Temporal for no work
+            description: >-
+              The pod is up and answering its probes while its Temporal poll loop is not polling, so
+              durable jobs queue and nothing runs them. Check `/readyz` on the named pod and the
+              broker connection before restarting anything.
+{{- end }}
+
+    {{- /* Latency, which had no rule at all — while `core/logging.py` argues the histograms exist
+           *precisely* because a trace "cannot answer 'what is p95 right now' for an alert". The
+           buckets were widened to bracket the 600 s turn timeout, so a p95 here is a real number
+           rather than the top bucket it used to saturate against at 300 s. */}}
+    - name: chemclaw.turns
+      rules:
+        - alert: ChemclawTurnLatencyHigh
+          expr: >-
+            histogram_quantile(0.95, sum by (le) (rate(chemclaw_turn_duration_seconds_bucket[15m])))
+            > {{ .Values.monitoring.alerts.turnLatencyP95Seconds }}
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawturnlatencyhigh
+            summary: One turn in twenty is taking longer than the configured p95 budget
+            description: >-
+              Turns are slow enough that chemists are waiting rather than working, and slow turns
+              hold admission permits — so this precedes `ChemclawTurnsShed` rather than following
+              it. Break it down with the same quantile over
+              `chemclaw_tool_duration_seconds_bucket` **by `tool`**, which is what answers "which
+              tool is slow" now that the histogram carries the label, and with
+              `chemclaw_model_call_duration_seconds_bucket` by provider for the other half.
+
+        {{- /* The turn budget's hard edge. A timeout is not a degraded answer, it is no answer
+               after ten minutes of waiting, so the first one is worth knowing about. */}}
+        - alert: ChemclawTurnsTimingOut
+          expr: increase(chemclaw_turn_timeouts_total[15m]) > 0
+          for: 0m
+          labels:
+            severity: warning
+          annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawturnstimingout
+            summary: Turns are being cancelled by the wall-clock timeout
+            description: >-
+              A chemist waited out `CHEMCLAW_SERVICE_TURN_TIMEOUT_SECONDS` and received nothing.
+              Read `ChemclawTurnLatencyHigh` beside this: if p95 is already climbing these are its
+              tail, and the cause is upstream of the timeout rather than in it.
+
+        {{- /* The quietest bad outcome in the system: the turn succeeded, the stream closed, and
+               the answer was empty. Nothing failed, so nothing else fires. */}}
+        - alert: ChemclawTurnsAnsweringEmpty
+          expr: increase(chemclaw_turn_empty_answers_total[15m]) > 0
+          for: 0m
+          labels:
+            severity: warning
+          annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawturnsansweringempty
+            summary: Turns are completing with no answer text
+            description: >-
+              The turn ended normally and produced nothing for the chemist to read. This is not an
+              error path — no counter above moves — which is exactly why it needs its own rule.
+              Usually a model that emitted only tool calls, or a middleware that short-circuited
+              after the last one.
+
+    {{- /* The durable tier, which **not one rule read** before this group existed. Every alert in
+           this file was a front-door alert: a connector whose every job failed, an outbox that
+           stopped draining and a fan-out that returned `[]` every night were all indistinguishable
+           from an idle deployment. `chemclaw_jobs_finished_total` is what makes the first of those
+           expressible at all — `chemclaw_jobs_started_total` had no counterpart until now. */}}
+    - name: chemclaw.durable
+      rules:
+        {{- /* A ratio, not a count: one connector's jobs are seconds apart and another's are hours
+               apart, so a count would mean six different things across the six bundles. Denominated
+               on *started* rather than on finished, because a job that never finishes at all is the
+               failure this is most likely to be. The two counters are incremented in different
+               processes — the front door launches, the worker finishes — which is fine for a
+               fleet-wide `sum()` and is the reason this is not `by (connector)`: a partial scrape
+               of one side would otherwise fabricate a per-connector ratio above 1. */}}
+        - alert: ChemclawDurableJobsFailing
+          expr: >-
+            sum(rate(chemclaw_jobs_finished_total{outcome="failed"}[30m]))
+            / clamp_min(sum(rate(chemclaw_jobs_started_total[30m])), 0.001)
+            > {{ .Values.monitoring.alerts.jobFailureRatio }}
+          for: 30m
+          labels:
+            severity: critical
+          annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawdurablejobsfailing
+            summary: Durable jobs are failing at more than the configured share
+            description: >-
+              The expensive half of the system is not completing. Break it down by connector with
+              `sum by (connector, outcome) (rate(chemclaw_jobs_finished_total[30m]))` and by
+              activity with `chemclaw_activity_failures_total`, which counts one row per attempt and
+              so shows a retry storm the broker's history would otherwise hold alone.
+
+        {{- /* One row per *attempt*, so a retry storm is a rate here where the broker's history is
+               the only other place it exists. Sustained rather than first-increment because
+               Temporal retries by design: one failed attempt is the mechanism working, and half an
+               hour of continuous failure on one activity is the mechanism not helping. */}}
+        - alert: ChemclawActivityRetryStorm
+          expr: sum by (activity) (rate(chemclaw_activity_failures_total[15m])) > 0
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawactivityretrystorm
+            summary: One activity has been failing continuously for half an hour
+            description: >-
+              Every attempt of this activity is failing, so its job is either retrying without
+              progress or has already given up. Temporal's own event history for a workflow using it
+              is the fastest way to the exception; `chemclaw_jobs_finished_total{outcome="failed"}`
+              says whether jobs are dying with it.
+
+        {{- /* A finished job whose result never reaches the session that asked for it. The push-back
+               path is best-effort by design — a closed stream must not fail a job — so this counter
+               is the only thing that distinguishes "nobody was listening" from "the result was
+               dropped". */}}
+        - alert: ChemclawPushBackDropped
+          expr: increase(chemclaw_pushback_dropped_total[15m]) > 0
+          for: 0m
+          labels:
+            severity: warning
+          annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawpushbackdropped
+            summary: Job results are not reaching the sessions that asked for them
+            description: >-
+              A completed job's push-back could not be delivered. The job succeeded and its result
+              is stored; what was lost is the chemist being told. Check
+              `chemclaw_event_streams_open` against `chemclaw_event_stream_capacity` on the front
+              door before assuming the durable side.
+
+        {{- /* The scenario this counter's own declaration spells out — "all three memory-synthesis
+               jobs complete green returning `[]` every night" — and which had no rule behind it.
+               A dropped child is missing work inside a parent that reports success, so no other
+               series in this file moves. */}}
+        - alert: ChemclawFanOutChildrenDropped
+          expr: increase(chemclaw_fan_out_children_dropped_total[30m]) > 0
+          for: 0m
+          labels:
+            severity: warning
+          annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawfanoutchildrendropped
+            summary: A fan-out parent completed with children missing
+            description: >-
+              Children exhausted their retries and were dropped, so the parent's result is
+              incomplete while reporting success. The nightly synthesis returning an empty list is
+              the shape this is written for.
+
+        {{- /* The two sinks' failure counters, alerted for the same reason
+               `ChemclawKnowledgeNotesLost` is: publication is best-effort so a finished calculation
+               is not failed by a dead sink, which leaves the counter as the only signal. Kept as
+               two rules and not one sum, because the remedies are different systems — a delivery
+               failure is the sink or the network, a projection failure is this build's own
+               `publish/` mapping against a schema that has moved. */}}
+        - alert: ChemclawResultPublishFailing
+          expr: increase(chemclaw_result_publish_failures_total[15m]) > 0
+          for: 0m
+          labels:
+            severity: critical
+          annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawresultpublishfailing
+            summary: Computed results are not reaching the result store
+            description: >-
+              A result could not be delivered to a configured sink. The calculation stands in the
+              D-011 cache, but the scientific record this deployment publishes to does not have it.
+              `chemclaw_sink_delivery_seconds` and the sink's own logs name which one.
+        - alert: ChemclawResultProjectionFailing
+          expr: increase(chemclaw_result_projection_failures_total[15m]) > 0
+          for: 0m
+          labels:
+            severity: critical
+          annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawresultprojectionfailing
+            summary: Results cannot be projected into their typed record
+            description: >-
+              `publish/` could not turn a calculation into the typed record its sink expects, so the
+              result is dropped before any delivery is attempted. Retrying will not help: this is a
+              schema disagreement between this build and `schema/result-store/`.
+
+        {{- /* Publications that have given up. These never leave the queued-minus-published
+               difference, which is precisely why that difference is not a backlog and why the age
+               gauge below is the one this file reads. */}}
+        - alert: ChemclawResultsDeadLettered
+          expr: increase(chemclaw_results_dead_lettered_total[30m]) > 0
+          for: 0m
+          labels:
+            severity: warning
+          annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawresultsdeadlettered
+            summary: Result publications have been retired to `failed`
+            description: >-
+              A publication exhausted its retries and was retired. It will not be attempted again by
+              anything; re-queueing it is an operator action.
+
+        {{- /* The stuck-outbox condition, read off the *age* of the oldest undelivered row.
+
+               The obvious expression — queued minus published — is arithmetically wrong and was
+               measured to be: dead-lettered rows never leave that difference, so it never returns
+               to zero, and its two counters live in different processes, so restarting one makes it
+               go **negative**. An age gauge has neither problem, and it is the number that actually
+               separates "a backlog of five that turns over every second" from "a backlog of five
+               that has not moved since Tuesday". `max by (sink)` and not a sum: one wedged sink is
+               one wedged sink, and averaging it against a healthy one hides it. */}}
+        - alert: ChemclawResultOutboxStuck
+          expr: >-
+            max by (sink) (chemclaw_outbox_oldest_pending_seconds)
+            > {{ .Values.monitoring.alerts.outboxStuckSeconds }}
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawresultoutboxstuck
+            summary: A result sink's outbox has stopped draining
+            description: >-
+              The oldest undelivered publication for this sink is older than the configured budget,
+              so the drain is not keeping up or has stopped. Read
+              `chemclaw_outbox_pending{sink}` beside it for the depth and
+              `chemclaw_outbox_dead_lettered{sink}` for what has already been given up on.
+
+    {{- /* The counters that exist *because* the system degrades quietly, and which nothing watched.
+           `metrics_bridge` and `degraded()` were built so that roughly forty deliberate exception
+           swallows become visible — and then no rule read the series they produce, which left the
+           swallow exactly as silent as it was before, one indirection further away. */}}
+    - name: chemclaw.degradation
+      rules:
+        {{- /* The umbrella. `subsystem` is a string literal at a `degraded()` call site and
+               `tests/test_degraded.py` enumerates the whole domain, so one rule names the failing
+               subsystem without this file having to list them — and a subsystem added tomorrow is
+               covered on the day it is added. */}}
+        - alert: ChemclawSubsystemDegraded
+          expr: sum by (subsystem) (increase(chemclaw_degraded_total[15m])) > 0
+          for: 0m
+          labels:
+            severity: warning
+          annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawsubsystemdegraded
+            summary: A subsystem is failing in a way the system deliberately swallows
+            description: >-
+              Something raised where the design chooses to continue rather than fail the caller. The
+              `subsystem` label names it and the pod's log carries the exception. Turns keep being
+              answered, which is why this needs an alert rather than a dashboard.
+
+        {{- /* The retrieval leg that returns nothing forever.
+               `D-2026-08-01-a-cap-that-starves-a-source` is the whole argument: a leg contributing
+               zero is normal on one query and a broken deployment on every query, and the failure
+               counter is what tells those apart from outside. Read against
+               `chemclaw_evidence_source_chunks_total` on the same `source` label. */}}
+        - alert: ChemclawEvidenceSourceFailing
+          expr: sum by (source) (increase(chemclaw_evidence_source_failures_total[15m])) > 0
+          for: 0m
+          labels:
+            severity: warning
+          annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawevidencesourcefailing
+            summary: An evidence source is raising during sweeps
+            description: >-
+              Answers are being composed from the remaining legs and cite nothing from this one.
+              Nothing in the answer says so, and the sweep still succeeds — which is the failure
+              D-2026-08-01 was written about, found late and by hand.
+
+        {{- /* An ingest cursor that has stopped moving. A wedged fetch advances no cursor and logs
+               `ingested=0`, which is byte-identical to a genuinely quiet source; the lag gauge is
+               the only thing that separates them. */}}
+        - alert: ChemclawIngestCursorStalled
+          expr: >-
+            max by (source) (chemclaw_ingest_cursor_lag_seconds)
+            > {{ .Values.monitoring.alerts.ingestLagSeconds }}
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawingestcursorstalled
+            summary: A data source has not advanced its cursor
+            description: >-
+              This source is further behind than the configured budget, so the corpus chemists are
+              querying is stale by at least that much. `chemclaw_ingest_records_total{source}` says
+              whether anything is arriving at all.
+
+        {{- /* The two metrics about the metrics, which are the only warning that a number on a
+               dashboard has quietly stopped being true. */}}
+        - alert: ChemclawGaugeReadFailing
+          expr: sum by (metric) (increase(chemclaw_gauge_read_failures_total[15m])) > 0
+          for: 0m
+          labels:
+            severity: warning
+          annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawgaugereadfailing
+            summary: A gauge is missing from the scrape because its source raised
+            description: >-
+              `render()` omits a gauge whose source raises rather than losing the whole scrape, so
+              every other series is intact and this one is simply absent — which on a graph is
+              indistinguishable from a value that has not changed. The `metric` label names it.
+        - alert: ChemclawMetricSeriesDropped
+          expr: increase(chemclaw_metric_series_dropped_total[30m]) > 0
+          for: 0m
+          labels:
+            severity: warning
+          annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawmetricseriesdropped
+            summary: A metric has hit its label-set cap and is undercounting
+            description: >-
+              Samples are being discarded because one metric reached the per-metric label-set cap,
+              so that metric — and any alert or panel reading it — is now low by an unknown amount.
+              A label here is meant to be low-cardinality, so this means something is generating
+              values it should not. The pod's log names the metric.
 {{- end }}

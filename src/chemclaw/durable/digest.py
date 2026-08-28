@@ -31,7 +31,7 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.kg.search import query_terms, term_coverage
 
 from chemclaw.durable.notify import notify_session_best_effort
-from chemclaw.durable.publish import BAD_DATA_RETRY
+from chemclaw.durable.publish import BAD_DATA_RETRY, queue_wait_timeout
 
 logger = logging.getLogger(__name__)
 
@@ -166,7 +166,10 @@ class DigestWorkflow:
         """Deliver every pending digest; return how many were sent."""
         timeout = timedelta(seconds=settings.digest_timeout_seconds)
         digests = await workflow.execute_activity(
-            collect_digests, start_to_close_timeout=timeout, retry_policy=BAD_DATA_RETRY
+            collect_digests,
+            start_to_close_timeout=timeout,
+            schedule_to_start_timeout=queue_wait_timeout(),
+            retry_policy=BAD_DATA_RETRY,
         )
         delivered = 0
         for item in digests:
@@ -189,6 +192,7 @@ class DigestWorkflow:
                 acknowledge_digest,
                 args=[item.subscription_id, item.note_ids],
                 start_to_close_timeout=timeout,
+                schedule_to_start_timeout=queue_wait_timeout(),
                 retry_policy=BAD_DATA_RETRY,
             )
             delivered += 1

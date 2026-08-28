@@ -50,5 +50,36 @@ class TurnCost(BaseModel):
     # completed turn that keeps its history, and only one that lands before it is not. Recorded
     # rather than filtered: those turns spent real tokens, and a ledger that kept only the tidy ones
     # would be wrong in the direction that hides a runaway.
+    #
+    # **Derived from `outcome` since 2026-08-27, and kept because things already read it.** It is
+    # one boolean over a six-value enum: a capped turn, a silent turn, a raised turn, a timed-out
+    # turn and an abandoned turn were all simply `False`, and a partial answer after the runaway cap
+    # was `True` beside a clean one.
     completed: bool = True
+    # How the turn ended (`chemclaw.api.runner._OUTCOMES`, one producer: `_settle_outcome`).
+    # `unknown` is the column default a row written before this field existed carries; nothing
+    # writes it.
+    outcome: str = "unknown"
+    # The user-facing classification of a failed turn (`chemclaw.api.runner._classify`), empty for
+    # every other outcome. It was computed, sent to the chemist and discarded server-side, so a
+    # chemist quoting a code named something the deployment had no record of.
+    error_code: str = ""
+    # The model id the turn's *agent* route resolved to. `core/metrics.py` and the runbook both
+    # said this table carried model attribution — it is the stated reason the spend counters
+    # deliberately omit a `model` label — while the table had no such column. One turn can span
+    # models (the verifier's judge runs on its own route); this names the one that answered.
+    model: str = ""
+    # What the turn actually did, which `duration_seconds` alone cannot separate: a slow turn that
+    # made two tool calls and a slow turn that made forty are different problems. `None` where the
+    # writer did not count, which is every row written before these existed.
+    tool_calls: int | None = Field(default=None, ge=0)
+    tool_failures: int | None = Field(default=None, ge=0)
+    # Calls a governance gate stopped (the plan gate today) — the control working, which must not
+    # be read as a failure.
+    tool_refusals: int | None = Field(default=None, ge=0)
+    jobs_started: int | None = Field(default=None, ge=0)
+    # Seconds to the turn's first streamed token — the latency a chemist actually experiences, as
+    # opposed to `duration_seconds`, which includes every tool call after it. `None` when the turn
+    # produced no token at all, which is a different fact from zero.
+    ttft_seconds: float | None = Field(default=None, ge=0)
     recorded_at: datetime | None = None

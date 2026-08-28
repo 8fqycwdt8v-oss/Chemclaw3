@@ -32,6 +32,7 @@ from mcp.shared.exceptions import McpError
 from mcp.types import INTERNAL_ERROR, INVALID_PARAMS, METHOD_NOT_FOUND, ErrorData
 
 from chemclaw.connectors import registry
+from chemclaw.connectors.calc import remote
 from chemclaw.connectors.calc.remote import (
     CalcServerError,
     CalcToolError,
@@ -42,6 +43,8 @@ from chemclaw.core import mcp_session
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError, SubsystemUnavailableError
 from chemclaw.core.ids import stable_hash
+from chemclaw.core.mcp_session import McpConnectFailed
+from chemclaw.core.metrics import METRICS
 from chemclaw.science.calc.store import CALCULATION_EPOCH, InMemoryStore
 
 # A version carrying *both* key delimiters, which is not a contrived string: `esol-delaney@2004`
@@ -787,3 +790,73 @@ def test_the_two_epochs_compose_rather_than_having_to_match(
     # already inside `served`, and `served` is inside both keys above.
     assert at_epoch == stable_hash({"epoch": CALCULATION_EPOCH, "remote_params": served})
     assert bumped == stable_hash({"epoch": "an-unmerged-bump", "remote_params": served})
+
+
+def _in_flight() -> float:
+    """What Prometheus would read for `chemclaw_calc_requests_in_flight` right now.
+
+    Read off the exposition rather than the module's counter, because the claim is about what a
+    scrape sees: a counter that is right and a gauge that is not bound are the same outage from the
+    alert's point of view.
+    """
+    for line in METRICS.render().splitlines():
+        if line.startswith("chemclaw_calc_requests_in_flight "):
+            return float(line.split()[1])
+    raise AssertionError("chemclaw_calc_requests_in_flight is not on the exposition")
+
+
+def test_a_held_calculation_session_is_visible_to_a_scrape(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The live half of the calculation backend's admission budget (BS-07).
+
+    `worker_max_concurrent_activities` caps one worker *process* and `servers/calc` is one shared
+    pod, so the fleet's real demand is that cap times the replica count — and the `calc` bundle's
+    own MCP server pods dispatch there too, from a tool call, with no per-process cap at all.
+    `Settings` refuses a bad *product* at startup; only this gauge can see the sum, so it has to be
+    bound in every process that dispatches and it has to read *current* state.
+    """
+    seen: list[float] = []
+
+    @asynccontextmanager
+    async def _open(*args: Any, **kwargs: Any) -> Any:
+        seen.append(_in_flight())
+        yield _FakeSession(_KEY, {})
+
+    monkeypatch.setattr(remote, "open_session", _open)
+
+    async def _run() -> None:
+        async with remote.calc_session():
+            pass
+
+    assert _in_flight() == 0.0
+    asyncio.run(_run())
+    assert seen == [1.0], "a session held against the calculation backend was invisible to a scrape"
+    assert _in_flight() == 0.0
+
+
+def test_a_failed_open_does_not_leak_a_permanent_unit_of_load(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The gauge must fall on every exit path, and an outage is the one that repeats.
+
+    A backend that is down fails every open, so a count that only decremented on success would
+    climb by one per attempt and the saturation alert would fire on an idle pod — the classic way a
+    load signal becomes noise nobody acts on.
+    """
+
+    @asynccontextmanager
+    async def _refused(*args: Any, **kwargs: Any) -> Any:
+        raise McpConnectFailed("nothing is listening")
+        yield  # pragma: no cover - unreachable, present so this is an async generator
+
+    monkeypatch.setattr(remote, "open_session", _refused)
+
+    async def _run() -> None:
+        for _ in range(3):
+            with pytest.raises(CalcServerError):
+                async with remote.calc_session():
+                    pass  # pragma: no cover - the open never yields
+
+    asyncio.run(_run())
+    assert _in_flight() == 0.0

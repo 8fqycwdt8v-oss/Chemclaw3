@@ -18,13 +18,15 @@ log-redaction inventory so a driver echoing its own configuration cannot leak it
 
 import logging
 import os
+import time
 from collections.abc import Sequence
 from typing import Any
 
 import httpx
 
 from chemclaw.core.config import settings
-from chemclaw.core.logging import register_secret_env
+from chemclaw.core.logging import log_event, register_secret_env
+from chemclaw.core.metrics_bridge import record_metric
 from chemclaw.publish.driver import SinkRejectedError, SinkUnavailableError
 from chemclaw.publish.record import ResultRecord
 
@@ -118,6 +120,52 @@ class HttpResultSink:
         which is why this sink never had the leak the SQL one did.
         """
 
+    def _record(
+        self,
+        outcome: str,
+        rows: int,
+        seconds: float,
+        *,
+        status: int = 0,
+        detail: str = "",
+    ) -> None:
+        """Time and name every delivery attempt — the thing this module declared a logger for.
+
+        **The logger was declared and used zero times.** So a results endpoint that had been dead
+        for a week produced no line and no number anywhere: every row simply spent its
+        `result_publish_max_attempts` and was dead-lettered, and the only evidence was a counter
+        that four unrelated failures share. There is no circuit breaker either, which makes the
+        latency the operative signal — a sink timing out at 30 s per attempt is what turns a
+        15-minute drain into one that never finishes its batch, and until this nothing measured it.
+
+        `outcome` is bounded by construction: `timeout`, `unreachable`, or the response's status
+        *class* — never the status itself, which would put an endpoint's error vocabulary into a
+        log field's value space. The exact code rides as `status`.
+
+        The histogram is labelled by sink and not by outcome: the question it answers is "how long
+        does this destination take", and splitting the distribution by outcome would leave the
+        timeouts — the samples that decide whether a drain finishes — in a series of their own.
+        """
+        record_metric(
+            lambda m: m.observe("chemclaw_sink_delivery_seconds", seconds, {"sink": self._name})
+        )
+        log_event(
+            logger,
+            "sink.delivered" if outcome == "2xx" else "sink.failed",
+            "result sink %r: %d row(s) -> %s in %.3fs%s",
+            self._name,
+            rows,
+            outcome,
+            seconds,
+            f" ({detail[:200]})" if detail else "",
+            level=logging.INFO if outcome == "2xx" else logging.WARNING,
+            sink=self._name,
+            outcome=outcome,
+            status=status,
+            rows=rows,
+            duration_s=round(seconds, 3),
+        )
+
     async def deliver(self, records: Sequence[ResultRecord]) -> None:
         """POST the batch, classifying the response into retryable and not.
 
@@ -128,18 +176,29 @@ class HttpResultSink:
         """
         if not records:
             return
+        started = time.perf_counter()
         try:
             async with httpx.AsyncClient(timeout=self._timeout, verify=self._verify) as client:
                 response = await client.post(
                     self._url, json=self._document(records), headers=self._headers()
                 )
         except httpx.TimeoutException as exc:
+            self._record("timeout", len(records), time.perf_counter() - started, detail=str(exc))
             raise SinkUnavailableError(
                 f"result sink {self._name!r} timed out after {self._timeout}s: {exc}"
             ) from exc
         except httpx.HTTPError as exc:
+            self._record(
+                "unreachable", len(records), time.perf_counter() - started, detail=str(exc)
+            )
             raise SinkUnavailableError(f"result sink {self._name!r} is unreachable: {exc}") from exc
 
+        self._record(
+            f"{response.status_code // 100}xx",
+            len(records),
+            time.perf_counter() - started,
+            status=response.status_code,
+        )
         if response.status_code in _RETRYABLE_STATUSES:
             raise SinkUnavailableError(
                 f"result sink {self._name!r} answered {response.status_code}; will retry"

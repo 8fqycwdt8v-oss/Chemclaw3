@@ -105,20 +105,47 @@ def test_a_failed_turn_is_still_timed() -> None:
 
 
 def test_the_histogram_renders_cumulative_buckets_with_a_sum_and_count() -> None:
-    """Prometheus buckets are cumulative and the `+Inf` bucket must equal the count."""
+    """Prometheus buckets are cumulative and the `+Inf` bucket must equal the count.
+
+    Driven through `chemclaw_turn_duration_seconds`, which is the unlabelled histogram: this
+    asserts the *rendering*, and the bare form is the one whose `_sum`/`_count` carry no brace
+    group. The labelled form has its own test below, because the two emit different lines and a
+    single test over one of them would leave the other unrendered by anything.
+    """
     metrics = Metrics()
-    for seconds in (0.02, 0.2, 7.0):
-        metrics.observe("chemclaw_tool_duration_seconds", seconds)
+    for seconds in (1.5, 4.0, 25.0):
+        metrics.observe("chemclaw_turn_duration_seconds", seconds)
     body = metrics.render()
 
-    assert "# TYPE chemclaw_tool_duration_seconds histogram" in body
-    assert 'chemclaw_tool_duration_seconds_bucket{le="0.05"} 1' in body
-    assert (
-        'chemclaw_tool_duration_seconds_bucket{le="0.25"} 2' in body
-    )  # cumulative, not per-bucket
-    assert 'chemclaw_tool_duration_seconds_bucket{le="+Inf"} 3' in body
-    assert "chemclaw_tool_duration_seconds_count 3" in body
-    assert "chemclaw_tool_duration_seconds_sum 7.22" in body
+    assert "# TYPE chemclaw_turn_duration_seconds histogram" in body
+    assert 'chemclaw_turn_duration_seconds_bucket{le="2.5"} 1' in body
+    assert 'chemclaw_turn_duration_seconds_bucket{le="5"} 2' in body  # cumulative, not per-bucket
+    assert 'chemclaw_turn_duration_seconds_bucket{le="+Inf"} 3' in body
+    assert "chemclaw_turn_duration_seconds_count 3" in body
+    assert "chemclaw_turn_duration_seconds_sum 30.5" in body
+
+
+def test_a_labelled_histogram_renders_one_series_per_label_set() -> None:
+    """The label pairs sit inside the same brace group as `le`, and `_sum`/`_count` carry them too.
+
+    `chemclaw_tool_duration_seconds` gained a `tool` label because the unlabelled version pooled an
+    xTB call through the calc connector and a `read_attachment` into one distribution — so "which
+    tool is slow", the question its own docstring says it exists to answer, had no answer. What
+    that costs is a rendering shape the bare form does not have: `le` must join the declared labels
+    inside one `{...}`, not sit in a second group, or every bucket line is a different series from
+    its own `_sum`.
+    """
+    metrics = Metrics()
+    metrics.observe("chemclaw_tool_duration_seconds", 0.02, labels={"tool": "load_skill"})
+    metrics.observe("chemclaw_tool_duration_seconds", 7.0, labels={"tool": "run_xtb"})
+    body = metrics.render()
+
+    assert 'chemclaw_tool_duration_seconds_bucket{tool="load_skill",le="0.025"} 1' in body
+    assert 'chemclaw_tool_duration_seconds_bucket{tool="load_skill",le="+Inf"} 1' in body
+    assert 'chemclaw_tool_duration_seconds_count{tool="run_xtb"} 1' in body
+    assert 'chemclaw_tool_duration_seconds_sum{tool="run_xtb"} 7' in body
+    # The two tools are separate series, so neither carries the other's samples.
+    assert 'chemclaw_tool_duration_seconds_count{tool="load_skill"} 1' in body
 
 
 def test_a_sample_on_a_boundary_lands_in_that_bucket() -> None:

@@ -371,3 +371,86 @@ def test_a_mixed_factorial_crosses_categories_against_both_bounds() -> None:
     pairs = {(run["cat0"], run["cont0"]) for run in factorial_design(problem).runs}
 
     assert pairs == {("a0", 0.0), ("a0", 100.0), ("b0", 0.0), ("b0", 100.0)}
+
+
+def test_a_screen_beyond_the_run_ceiling_is_refused_before_it_is_built() -> None:
+    """The unbounded-model-input guard on this surface, and why it counts instead of measuring.
+
+    A full factorial's size is the product of every factor's level count, and every one of those
+    counts comes from a category list the *model* wrote. Twenty two-level factors is 1 048 576 rows
+    of twenty-entry dicts, materialized as a Python list before anything downstream sees it — not
+    an adversarial input, just one over-broad problem statement, and the pod dies building the
+    answer to it. `fingerprint_max_top_k` is the same guard on the search side; this surface had
+    none.
+
+    The refusal has to happen on the *count*, not on the built design: a bound that trips once the
+    list exists has already paid the memory it exists to protect.
+    """
+    problem = OptimizationProblem(
+        parameters=[
+            CategoricalParameter(name=f"f{i}", categories=[f"lo{i}", f"hi{i}"]) for i in range(20)
+        ],
+        objectives=[Objective(name="yield", direction="maximize")],
+    )
+    with pytest.raises(ValueError, match="beyond the configured ceiling"):
+        factorial_design(problem)
+
+
+def test_a_screen_inside_the_ceiling_still_builds() -> None:
+    """The bound must not refuse a design anybody would actually run.
+
+    Ten two-level factors is 1 024 runs — already far past a plate and well inside the ceiling, so
+    the guard's job is to be invisible here.
+    """
+    problem = OptimizationProblem(
+        parameters=[
+            CategoricalParameter(name=f"f{i}", categories=[f"lo{i}", f"hi{i}"]) for i in range(10)
+        ],
+        objectives=[Objective(name="yield", direction="maximize")],
+    )
+    assert len(factorial_design(problem).runs) == 1024
+
+
+def test_a_reduced_design_is_measured_after_the_reduction_not_before() -> None:
+    """The ceiling counts the design that would actually be built, in both directions.
+
+    A reduced design is the corner count halved per generator, so the two errors available here
+    point opposite ways and both matter. Refusing on the *unreduced* count would refuse a design
+    that fits — 40 two-level factors at 30 generators is 1 024 runs, which is a real screen.
+
+    The other direction is the one this test was written for, because the first version of the
+    guard had it: it stopped multiplying once the running product passed the ceiling, and a
+    partial product is smaller than the true one, so shifting it right by `n_generators` landed
+    back under the ceiling. Measured then — 40 factors at one generator passed a 4 096 ceiling on
+    a partial product of 8 192, against a true reduced size of 2^39 rows. A guard that reproduces
+    the defect it was written to prevent is worth a test naming the number.
+    """
+    problem = OptimizationProblem(
+        parameters=[
+            CategoricalParameter(name=f"f{i}", categories=[f"lo{i}", f"hi{i}"]) for i in range(40)
+        ],
+        objectives=[Objective(name="yield", direction="maximize")],
+    )
+    # 2^40 >> 1 is still half a trillion rows.
+    with pytest.raises(ValueError, match="beyond the configured ceiling"):
+        factorial_design(problem, n_generators=1)
+
+
+def test_a_reduced_design_over_a_three_level_factor_reports_the_real_error() -> None:
+    """The size guard must not answer ahead of the error that actually applies.
+
+    `_require_design_fits_the_ceiling` runs before `_fractional_design`'s two-level check, and its
+    arithmetic (`corners >> n_generators`) models a design that cannot be built at all. On five
+    ten-level factors at three generators it therefore reported "this screen would generate 12500
+    runs" — a fictional number — and offered two remedies that were both wrong for the input:
+    "screen fewer factors", and "ask for a reduced design with `n_generators`", to a caller who
+    had already asked for one.
+    """
+    problem = OptimizationProblem(
+        parameters=[
+            CategoricalParameter(name=f"f{i}", categories=list("abcdefghij")) for i in range(5)
+        ],
+        objectives=[Objective(name="yield", direction="maximize")],
+    )
+    with pytest.raises(ValueError, match="two-level design"):
+        factorial_design(problem, n_generators=3)

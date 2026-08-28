@@ -888,6 +888,9 @@ async def compute_atomic_descriptors(
         default_store(),
         "compute_atomic_descriptors",
         {"smiles": smiles, "solvent": solvent},
+        # Pinned to the `xtb` binary (see above), whose own timeout can run to 3600 s — see
+        # `calc_atomic_timeout_seconds`'s docstring for why the client must wait at least that long.
+        timeout_seconds=settings.calc_atomic_timeout_seconds,
     )
     return AtomicDescriptorResult.model_validate(payload)
 
@@ -920,6 +923,8 @@ async def compute_surface_potential(
         default_store(),
         "compute_surface_potential",
         {"smiles": smiles, "solvent": solvent},
+        # Pinned to the `xtb` binary (see above); see `calc_atomic_timeout_seconds`'s docstring.
+        timeout_seconds=settings.calc_atomic_timeout_seconds,
     )
     return SurfacePotentialResult.model_validate(payload)
 

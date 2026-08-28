@@ -103,7 +103,7 @@ def test_a_composite_reaches_an_external_database_and_answers_a_question(
 
         monkeypatch.setattr(outbox, "publishing_enabled", lambda: True)
         monkeypatch.setattr(outbox, "enabled_names", lambda: ["e2e"])
-        async with outbox._connect() as conn:
+        async with outbox._connect("test_fixture") as conn:
             await conn.execute("DELETE FROM result_publications")
             await conn.commit()
 
@@ -173,7 +173,7 @@ def test_a_composite_reaches_an_external_database_and_answers_a_question(
             )
 
         # Redelivery converges: every key is a content hash, so a second drain writes nothing new.
-        async with outbox._connect() as conn:
+        async with outbox._connect("test_fixture") as conn:
             await conn.execute("UPDATE result_publications SET state='pending', attempts=0")
             await conn.commit()
         again = await publish_results._drain_one("e2e", sink, 50)

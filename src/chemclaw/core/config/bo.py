@@ -13,9 +13,10 @@ from pydantic_settings import BaseSettings
 class BoSettings(BaseSettings):
     """Durable BoFire BO campaigns (plan step 1d.4).
 
-    Grouped because these four knobs shape one thing: how a Bayesian-optimization campaign runs
-    durably — its per-round activity budget and heartbeat, reproducibility seed, and the round
-    ceiling that protects Temporal's event-history limit.
+    Grouped because these knobs shape one thing: how a Bayesian-optimization campaign runs
+    durably — its per-round activity budget and heartbeat, reproducibility seed, the round and
+    evaluation ceilings a spec is refused above, and the two bounds that keep a model-supplied
+    decision space from costing unbounded CPU and memory to enumerate.
     """
 
     # A single round (BoFire propose + evaluate) can be slow, so activities get a generous
@@ -38,6 +39,32 @@ class BoSettings(BaseSettings):
     # history bound entirely; what is left is that every round costs an evaluation, and a spec
     # asking for thousands is a mistake worth refusing at build time.
     bo_max_rounds: int = Field(default=500, ge=1)
+    # Ceiling on a campaign spec's whole evaluation budget — `n_initial + n_rounds * batch` — and
+    # the reason `bo_max_rounds` alone was never the bound its name implied. A *round* is not a
+    # unit of cost: at `batch=50` a spec inside the 500-round ceiling asks for 25 000 objective
+    # evaluations, each one a registered objective that may call an uncached calculator. The round
+    # ceiling refuses a campaign that runs too long; this refuses one that costs too much, which is
+    # the quantity a chemist and a cluster budget both actually care about. 2 000 is a working
+    # default: far above any campaign this system has run (the durable tests run tens), far below
+    # what an unbounded batch turns a plausible round count into.
+    bo_max_evaluations: int = Field(default=2000, ge=1)
+    # Ceiling on how many cells of a discrete decision space may be *enumerated*. Reached only when
+    # the space carries an exclusion constraint: `discrete_candidate_count` then counts feasible
+    # cells one at a time, because exclusions can overlap and inclusion-exclusion would be wrong.
+    # That walk is over the full categorical cross product, which is a product of model-supplied
+    # category-list lengths — ten parameters of ten options is 10^10 cells, and the walk happens
+    # inside `campaign_progress`, on a request. Above this ceiling the space is reported as
+    # effectively unbounded (None) instead of being counted, which is the safe degradation: the
+    # exhaustion guards it feeds simply do not fire, and a space this large cannot be exhausted by
+    # a campaign anyway.
+    bo_max_enumerated_cells: int = Field(default=1_000_000, ge=1)
+    # Ceiling on the number of runs a screening design may contain. A full factorial is the product
+    # of every factor's level count, so `generate_screening_design` builds a list whose length is
+    # exponential in a model-supplied parameter count before anything bounds it — the same
+    # unbounded-model-input shape `fingerprint_max_top_k` guards on the search side. 4 096 is far
+    # past any design a human runs (a 12-factor two-level full factorial) and far below what
+    # exhausts a pod.
+    bo_max_design_runs: int = Field(default=4096, ge=1)
     # How many recent evaluations `science.bo.progress` reads for its "have the last N results
     # moved at all" statement, and how many consecutive noise-sized evaluations make a plateau.
     # Five is a working default rather than a statistical claim: it is short enough that a chemist

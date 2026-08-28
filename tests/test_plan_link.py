@@ -13,6 +13,7 @@ import asyncio
 from typing import Any
 
 import pytest
+from langchain_core.messages import AIMessage
 
 from chemclaw.agent.plan_gate import plan_identity
 from chemclaw.agent.plan_link import plan_link_from_todos, stamp_plan_link
@@ -139,6 +140,96 @@ def test_the_job_started_announcement_carries_the_ambient_step() -> None:
             reset_current_plan_link(token)
         assert signals == [
             JobSignal(job_id="job-1", kind="run_calculation", plan_step="run the conformer search")
+        ]
+
+    asyncio.run(_run())
+
+
+def test_the_stamp_reads_the_batchs_own_rewrite_not_the_pre_batch_snapshot() -> None:
+    """The canonical "tick step N, do step N+1" batch must stamp step N+1, not step N.
+
+    `request.state["todos"]` is the snapshot taken *before* the whole tool batch, so it still shows
+    step N ("compute the barrier") as `in_progress` even though this call's own `write_todos` — in
+    the *same* assistant message — has already flipped it to `completed` and step N+1
+    ("propose the note") to `in_progress`. Reading only `request.state` stamped the step that had
+    just finished, not the one this call actually serves. `enforce_plan_approval` already judges a
+    call in this exact batch shape against the plan the batch *writes*
+    (`rewrite_todos_in_batch`/`plan_after_batch`); this is the same reading applied here.
+    """
+
+    async def _run() -> None:
+        seen: list[tuple[str, str]] = []
+
+        async def _handler(_request: Any) -> Any:
+            seen.append(get_current_plan_link())
+            return None
+
+        pre_batch_todos = [
+            {"content": "compute the barrier", "status": "in_progress"},
+            {"content": "propose the note", "status": "pending"},
+        ]
+        tick = {
+            "name": "write_todos",
+            "args": {
+                "todos": [
+                    {"content": "compute the barrier", "status": "completed"},
+                    {"content": "propose the note", "status": "in_progress"},
+                ]
+            },
+            "id": "c-plan",
+        }
+        this_call = {"name": "propose_knowledge_note", "args": {}, "id": "c-write"}
+        request = tool_request("propose_knowledge_note", call_id="c-write")
+        object.__setattr__(
+            request,
+            "state",
+            {
+                "todos": pre_batch_todos,
+                "messages": [AIMessage(content="", tool_calls=[tick, this_call])],
+            },
+        )
+        await run_middleware(stamp_plan_link, request, _handler)
+
+        assert seen == [
+            ("propose the note", plan_identity(["compute the barrier", "propose the note"]))
+        ]
+
+    asyncio.run(_run())
+
+
+def test_an_unanswerable_batch_rewrite_falls_back_to_the_pre_batch_snapshot() -> None:
+    """Two rewrites gathered concurrently have no answerable post-batch plan, so this falls back.
+
+    Unlike `enforce_plan_approval`, which must fail *closed* on an unanswerable batch, the stamp has
+    no safety property to protect either way — falling back to `request.state` is just the same
+    honest-best-effort this middleware already gives an absent `todos` key.
+    """
+
+    async def _run() -> None:
+        seen: list[tuple[str, str]] = []
+
+        async def _handler(_request: Any) -> Any:
+            seen.append(get_current_plan_link())
+            return None
+
+        rewrite_one = {"name": "write_todos", "args": {"todos": []}, "id": "c-plan-1"}
+        rewrite_two = {"name": "write_todos", "args": {"todos": []}, "id": "c-plan-2"}
+        this_call = {"name": "propose_knowledge_note", "args": {}, "id": "c-write"}
+        request = tool_request("propose_knowledge_note", call_id="c-write")
+        object.__setattr__(
+            request,
+            "state",
+            {
+                "todos": _TODOS,
+                "messages": [
+                    AIMessage(content="", tool_calls=[rewrite_one, rewrite_two, this_call])
+                ],
+            },
+        )
+        await run_middleware(stamp_plan_link, request, _handler)
+
+        assert seen == [
+            ("run the conformer search", plan_identity([str(t["content"]) for t in _TODOS]))
         ]
 
     asyncio.run(_run())

@@ -19,6 +19,7 @@ from pathlib import Path
 import networkx as nx
 
 from chemclaw.core.config import settings
+from chemclaw.core.logging import log_event
 from chemclaw.core.metrics_bridge import record_metric
 from chemclaw.kg.note import Note, NoteError, Relation, read_note, resolves_outside_graph
 
@@ -228,13 +229,17 @@ def _parse_notes(notes_dir: Path) -> list[Note]:
     First in path order wins, matching `chemclaw.kg.validate`'s `id_to_path` and
     `note_file_fingerprints`, so every reader of one tree names the same file.
     """
+    started = time.perf_counter()
     notes: dict[str, tuple[Path, Note]] = {}
+    unparseable = 0
+    duplicate = 0
     for path, _ in scan_notes_dir(notes_dir):
         try:
             note = read_note(path)
         except NoteError as exc:
             log.warning("skipping unparseable note %s: %s", path, exc)
             record_metric(lambda m: m.increment("chemclaw_notes_unparseable_total"))
+            unparseable += 1
             continue
         if note is None:
             continue
@@ -248,8 +253,30 @@ def _parse_notes(notes_dir: Path) -> list[Note]:
                 claimed[0],
             )
             record_metric(lambda m: m.increment("chemclaw_notes_duplicate_id_total"))
+            duplicate += 1
             continue
         notes[note.id] = (path, note)
+    skipped = unparseable + duplicate
+    # **The per-file warnings have no denominator, and that is what makes them unreadable.** A
+    # corpus where two notes in ten thousand fail to parse and one where four thousand do produce
+    # the same *kind* of line, so an operator scrolling a log cannot tell a typo from a partial
+    # sync that has taken 40% of the knowledge graph out of retrieval. One summary per parse pass
+    # is the denominator; the per-file lines stay, because they are what names the file to fix.
+    log_event(
+        log,
+        "kg.indexed",
+        "parsed %d note(s) from %s in %.3fs (%d unparseable, %d duplicate id)",
+        len(notes),
+        notes_dir,
+        time.perf_counter() - started,
+        unparseable,
+        duplicate,
+        level=logging.INFO if skipped else logging.DEBUG,
+        notes=len(notes),
+        unparseable=unparseable,
+        duplicate_id=duplicate,
+        duration_s=round(time.perf_counter() - started, 3),
+    )
     return [note for _, note in notes.values()]
 
 

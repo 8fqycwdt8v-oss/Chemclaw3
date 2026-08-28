@@ -40,6 +40,8 @@ from pathlib import Path
 
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
+from chemclaw.core.logging import log_event
+from chemclaw.core.metrics_bridge import degraded
 from chemclaw.kg.graph import invalidate_cache
 from chemclaw.kg.submission import NoteSubmission, NoteSubmitter, SubmissionOutcome
 
@@ -199,6 +201,36 @@ def _require_dedicated_checkout(repo_dir: str) -> None:
         )
 
 
+# What git says when the remote refused *us* rather than being unreachable. Phrases rather than
+# bare status codes: `403` as a substring matches an object hash, and the point of this list is to
+# be wrong in the safe direction — a missed phrase keeps today's behaviour (retried as transient),
+# while a false positive would make a genuine network blip permanent. Lower-cased before matching.
+_AUTH_FAILURE_MARKERS = (
+    "authentication failed",
+    "invalid username or password",
+    "could not read username",
+    "could not read password",
+    "permission denied",
+    "access denied",
+    "support for password authentication was removed",
+    "the requested url returned error: 401",
+    "the requested url returned error: 403",
+    "error: 401",
+    "error: 403",
+)
+
+
+def _is_auth_failure(stderr: str) -> bool:
+    """Whether git's stderr says the remote refused this credential.
+
+    The distinction `durable/publish.py` cannot make and this can: a 401/403 on a push is a fact
+    about the token, and retrying it forever is how an expired PAT becomes an indefinitely retrying
+    workflow whose log says only that a publish failed.
+    """
+    lowered = stderr.lower()
+    return any(marker in lowered for marker in _AUTH_FAILURE_MARKERS)
+
+
 class GitNoteSubmitter:
     """Push a note on a per-note branch via git. Conforms to `NoteSubmitter`."""
 
@@ -254,17 +286,47 @@ class GitNoteSubmitter:
         return process.returncode or 0, stderr.decode().strip()
 
     async def _git(self, *args: str, cwd: str | None = None, transient: bool = False) -> None:
-        """Run one git command, raising on a non-zero exit.
+        """Run one git command, raising on a non-zero exit — and log what git actually said.
 
         `transient=True` marks the commands whose ordinary failure is the *network's* — fetch and
         push — so they raise the retryable `GitRemoteError`. Local operations (worktree, add,
         commit, checkout) fail for structural reasons a retry replays identically, and keep the
         non-retryable class.
+
+        **An expired credential is not a network partition, and this used to classify it as one.**
+        `transient=True` covers fetch and push, so a 403 from the git host raised `GitRemoteError`
+        exactly like a dropped connection — and `durable/publish.py` catches that, logs the note's
+        label and *drops the message*, so the distinguishing text never reached a log at all while
+        the job retried indefinitely against a credential that will never work again. Two changes,
+        both needed: git's own stderr is logged **here**, at the raise, where it still exists; and
+        an authentication failure is raised non-retryable, because no number of retries installs a
+        token.
+
+        The stderr is git's output rather than a user's text, and `SecretRedactingFilter` strips
+        URL userinfo from every record, so a remote carrying `user:token@` before its host cannot
+        put its credential into this line. (Written without the scheme deliberately:
+        `tests/test_no_egress.py` reads every `http(s)://` literal in first-party source as a host
+        this system dials, and an illustrative one in prose is indistinguishable from a real one.)
         """
         returncode, stderr = await self._run(*args, cwd=cwd)
-        if returncode != 0:
-            error = GitRemoteError if transient else GitSubmitError
-            raise error(f"git {' '.join(args)} failed: {stderr}")
+        if returncode == 0:
+            return
+        auth = transient and _is_auth_failure(stderr)
+        error = GitRemoteError if transient and not auth else GitSubmitError
+        log_event(
+            log,
+            "git.failed",
+            "git %s failed (%d)%s: %s",
+            " ".join(args),
+            returncode,
+            " — an authentication failure, which no retry can fix" if auth else "",
+            stderr,
+            level=logging.WARNING,
+            command=args[0],
+            returncode=returncode,
+            retryable=error is GitRemoteError,
+        )
+        raise error(f"git {' '.join(args)} failed: {stderr}")
 
     async def _read(self, *args: str) -> str | None:
         """One git query's stdout, stripped — or `None` on a non-zero exit.
@@ -482,6 +544,18 @@ class GitNoteSubmitter:
         try:
             head = (_git_dir(self._repo_dir) / "HEAD").read_text(encoding="utf-8").strip()
         except OSError:
+            # Swallowed because a repair cannot be a precondition for a submission — but *said*,
+            # because this is the branch on which the repair silently does not happen: the next
+            # `worktree add -B` then fails with "already used by worktree", which names neither
+            # this file nor this function and reads as a git bug rather than an unreadable HEAD.
+            degraded(
+                log,
+                "note_repo",
+                "cannot read %s/HEAD; skipping the parked-worktree repair. A submission "
+                "interrupted on a note/ branch will fail with 'already used by worktree'",
+                self._repo_dir,
+                level=logging.WARNING,
+            )
             return
         if not head.startswith("ref: refs/heads/note/"):
             return

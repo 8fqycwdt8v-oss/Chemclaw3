@@ -29,6 +29,7 @@ from _pytest.config import UsageError
 from _pytest.terminal import TerminalReporter
 
 from chemclaw.agent.authz import side_effecting_tools as _side_effecting_tools
+from chemclaw.connectors.reachability import forget_reachability as _forget_reachability
 from chemclaw.connectors.registry import discovered as _connectors_discovered
 from chemclaw.core.config import settings
 from chemclaw.ingest.eln.warehouse.connect import forget_open_warehouses as _forget_warehouses
@@ -133,6 +134,22 @@ def _fresh_discovery_caches() -> Iterator[None]:
     _templates_discovered.cache_clear()
     _sources_discovered.cache_clear()
     _side_effecting_tools.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def _fresh_connector_reachability() -> Iterator[None]:
+    """Forget the per-process connector reachability verdicts around every test.
+
+    `chemclaw.connectors.reachability` is what stops a turn dialling a connector this process just
+    found unreachable (`D-2026-08-27-the-breaker-is-the-readiness-verdict-already-taken`), and it is
+    module state for the same reason the pools and discovery caches are: it belongs to the process,
+    not to a request. In a test session that is exactly the hazard the two fixtures above exist for
+    — one test's dark connector would silently stop the *next* test's open from dialling at all, and
+    the failure would be order-dependent.
+    """
+    _forget_reachability()
+    yield
+    _forget_reachability()
 
 
 @pytest.fixture(autouse=True)
@@ -309,12 +326,48 @@ def _report_postgres_skips(terminalreporter: TerminalReporter) -> None:
     )
 
 
+# The marker `tests/temporal_env.py::start_env_or_skip` puts in its skip reason. Matched the same
+# way, for the same reason: the number a reader needs is how many tests did not run.
+_TEMPORAL_SKIP = "Temporal test server unavailable"
+
+
+def _report_temporal_skips(terminalreporter: TerminalReporter) -> None:
+    """The same warning for the other backend a green line can be silent about.
+
+    `start_env_or_skip` downloads the time-skipping server's binary on first use, so a
+    network-restricted sandbox skips every test that drives a *real workflow* — the durable BO
+    campaign and its resumption, the connector-job wrapper, the report fan-out — and prints green.
+    That is the `_report_postgres_skips` failure exactly, on a second backend that had no such
+    warning: the Postgres half of this file exists because a count in prose went stale by 38%,
+    while the Temporal half of the same risk was reported by nothing at all.
+
+    It matters most for the tests that are hardest to replace: a workflow's sequencing, its
+    idempotency keys and its continue-as-new can only be observed against a server, so a suite that
+    skips them silently is not evidence about durability in the one place durability lives.
+    """
+    skipped = [
+        report
+        for report in terminalreporter.stats.get("skipped", [])
+        if _TEMPORAL_SKIP in str(report.longrepr)
+    ]
+    if not skipped:
+        return
+    terminalreporter.write_sep("=", "Temporal-backed tests did not run", yellow=True)
+    terminalreporter.write_line(
+        f"{len(skipped)} tests were skipped because the Temporal test server could not start, so "
+        "this run is not evidence about any durable workflow — the BO campaign's per-round record "
+        "and resumption, the connector-job wrapper, or the report fan-out. The binary is fetched "
+        "on first use and needs network egress."
+    )
+
+
 def pytest_terminal_summary(terminalreporter: TerminalReporter) -> None:
     """Say plainly which failures were timeouts, and how much of the suite never ran.
 
-    Both sections are about the same misreading: a run's headline number is believed without the
-    two things that qualify it. A timed-out test proves nothing about the assertions it never
-    reached, and a skipped Postgres test proves nothing at all — see `_report_postgres_skips`.
+    Every section is about the same misreading: a run's headline number is believed without the
+    things that qualify it. A timed-out test proves nothing about the assertions it never
+    reached, and a skipped Postgres or Temporal test proves nothing at all — see
+    `_report_postgres_skips` and `_report_temporal_skips`.
 
     `FAILED tests/test_pka.py::test_… - Failed: Timeout (>180.0s) from pytest-timeout` in the
     short summary was read as a numerical failure by two separate reviewers of this repository, and
@@ -325,6 +378,7 @@ def pytest_terminal_summary(terminalreporter: TerminalReporter) -> None:
     Printed as its own section, after the short summary, naming the knob that fixes it.
     """
     _report_postgres_skips(terminalreporter)
+    _report_temporal_skips(terminalreporter)
     timed_out = sorted(
         report.nodeid
         for report in terminalreporter.stats.get("failed", [])

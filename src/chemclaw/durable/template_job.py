@@ -49,7 +49,7 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.templates.manifest import AgentStep, JobStep, Template, ToolStep
     from chemclaw.templates.resolve import resolve
 
-from chemclaw.durable.publish import BAD_DATA_RETRY, agent_step_retry
+from chemclaw.durable.publish import BAD_DATA_RETRY, agent_step_retry, queue_wait_timeout
 from chemclaw.durable.registry import durable_workflow
 
 
@@ -210,6 +210,7 @@ class TemplateWorkflow:
                     tool=step.tool, arguments=resolve(step.arguments, scope), identity=identity
                 ),
                 start_to_close_timeout=timeout,
+                schedule_to_start_timeout=queue_wait_timeout(),
                 heartbeat_timeout=heartbeat,
                 retry_policy=BAD_DATA_RETRY,
             )
@@ -239,6 +240,7 @@ class TemplateWorkflow:
                     step_id=step.id,
                 ),
                 start_to_close_timeout=timeout,
+                schedule_to_start_timeout=queue_wait_timeout(),
                 heartbeat_timeout=heartbeat,
                 retry_policy=agent_step_retry(),
             )
@@ -304,6 +306,18 @@ class TemplateWorkflow:
                     # a reason nobody gave.
                     rationale=step.purpose or f"template step {step.id!r} (job {step.job})",
                     requested_by=identity.actor,
+                    # **The two ids the template path dropped, and the reason its failures were
+                    # completely silent.** `StepIdentity` has carried both since it was written —
+                    # `session_id` from `TemplateRunInput` and `correlation_id` set to this run's
+                    # own workflow id — and this call built a `ConnectorJobInput` without either.
+                    # `ConnectorJobWorkflow._notify_failure` short-circuits on `if not
+                    # job.session_id: return`, so a connector job that failed inside a template
+                    # told the launching chat nothing; combined with the failure record it also
+                    # wrote no row and moved no metric, leaving the run in Temporal's expiring
+                    # history alone. Passing them through is the whole fix: every obligation the
+                    # wrapper carries keys off one of these two fields.
+                    session_id=identity.session_id,
+                    correlation_id=identity.correlation_id,
                     publish_to_graph=resolved.publish_to_graph,
                 ),
                 # Named from the run's *execution*, not just its id — `TemplateWorkflow` is also

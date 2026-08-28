@@ -122,7 +122,7 @@ from pathlib import Path
 from chemclaw.agent.chemclaw_agent import _INSTRUCTIONS, available_tool_names
 from chemclaw.connectors.registry import skills_dirs as connector_skills_dirs
 from chemclaw.core.config import Settings, settings
-from chemclaw.core.metrics import declared_metric_names
+from chemclaw.core.metrics import declared_histogram_names, declared_metric_names
 from chemclaw.kg.note import known_note_types
 
 # Symbols a skill may legitimately name in call form that are not agent tools: library/graph
@@ -514,6 +514,25 @@ def check_operator_prose() -> list[str]:
     return problems
 
 
+def _declared_including_histogram_series() -> frozenset[str]:
+    """Every declared name, plus the three series Prometheus derives from each histogram.
+
+    A histogram's declared name is not the name an operator queries. `histogram_quantile(0.95,
+    rate(chemclaw_turn_duration_seconds_bucket[10m]))` is the correct and only way to write a
+    latency alert, and until this fold existed that line failed this validator — so the runbook and
+    the shipped alerts were written with *base* names instead, which is worse prose defending
+    against a check that was wrong. The fold is exact rather than a blanket suffix strip:
+    `declared_histogram_names()` is consulted so a counter is never granted a `_bucket` spelling.
+    """
+    declared = declared_metric_names()
+    derived = {
+        f"{name}{suffix}"
+        for name in declared_histogram_names()
+        for suffix in ("_bucket", "_sum", "_count")
+    }
+    return declared | frozenset(derived)
+
+
 def check_metric_citations() -> list[str]:
     """Rules 8-9: a metric name written down for an operator must be one the registry declares.
 
@@ -551,7 +570,7 @@ def check_metric_citations() -> list[str]:
     `_RETIRED_METRIC_NAMES` is where such a retirement lands — one reviewed line, the same shape as
     this module's two other release valves — instead of in the history of a merged decision.
     """
-    declared = declared_metric_names()
+    declared = _declared_including_histogram_series()
     problems: list[str] = []
     for origin, text in _operator_sources().items():
         for name in sorted(set(_METRIC.findall(text)) - _NON_METRIC_NAMES - declared):

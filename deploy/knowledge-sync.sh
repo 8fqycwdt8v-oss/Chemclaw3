@@ -14,6 +14,9 @@
 #               pod never serves traffic against an empty graph.
 #   loop      — `once`, then refresh every CHEMCLAW_KNOWLEDGE_SYNC_INTERVAL_SECONDS. Used as a
 #               sidecar so merges reach live pods without a redeploy.
+#   staleness — exit non-zero when the last *successful* refresh is older than the given number of
+#               seconds. The sidecar's liveness probe, and the only thing that makes a wedged loop
+#               visible from outside the pod; see `heartbeat` below.
 #
 # The refresh is `fetch` + `reset --hard`, never `pull`: the checkout is a read-only *replica* of the
 # base branch, so a fast-forward failure must not be able to leave it on a merge conflict.
@@ -55,6 +58,27 @@ seed_dir="/app/${notes_subdir}"
 # The submitter's advisory lock file, relative to its checkout. Must match
 # `kg/git_submitter.py::_LOCK_FILE_NAME` — the two are the same lock or they are no lock at all.
 submit_lock=".git/chemclaw-submit.lock"
+# The last time a refresh actually completed, as a file whose mtime is the answer.
+#
+# **This exists because a wedged sidecar was invisible.** `loop` catches a failing refresh so a dead
+# remote cannot kill the pod — correct, and the pod then serves the previous snapshot indefinitely
+# while logging one WARNING per interval into a stream nobody tails. On an expired push credential
+# (the exact cause `templates/prometheusrule.yaml` names for `ChemclawKnowledgeNotesLost`) the graph
+# silently stops moving: `ChemclawKnowledgeNotesLost` covers notes going *out* and nothing covered
+# the graph coming *in*. There is no counter for it either, because this is a shell script in a
+# sidecar with no registry to increment.
+#
+# A file's mtime is what a container *can* publish with no listener and no library, and the
+# `staleness` mode below is what turns it into a probe. It is the degraded half of the real fix,
+# which is a `chemclaw_knowledge_sync_age_seconds` gauge the reading process exposes — see
+# `docs/planning/BACKLOG.md`. Written on success only: a refresh that failed must not look recent.
+#
+# In `/tmp` and deliberately not inside `${target}`: the refresh runs `git clean -fd`, which deletes
+# untracked files, so a heartbeat living in the checkout would be removed at the *start* of every
+# tick and a refresh that then failed would read as "never succeeded" rather than as "last succeeded
+# an interval ago". Per-container state is also the right lifetime — the probe runs in this
+# container, and a restarted one has genuinely not refreshed yet.
+heartbeat="${CHEMCLAW_KNOWLEDGE_SYNC_HEARTBEAT:-/tmp/chemclaw-knowledge-sync.heartbeat}"
 
 log() { printf '%s knowledge-sync: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
 
@@ -82,6 +106,41 @@ seed_from_image() {
   cp -a "${seed_dir}/." "${publish_dir}/"
   log "seeded ${publish_dir} from the image corpus ($(find "${publish_dir}" -name '*.md' | wc -l) notes)"
 }
+
+# Exit 0 when the last successful refresh is younger than `$1` seconds, non-zero otherwise.
+#
+# This is the whole probe: the kubelet's `exec` liveness on the sidecar calls it, so a sidecar that
+# has stopped refreshing becomes a *restarting container* — a restart count and a `Warning` event —
+# instead of a quiet WARNING loop nobody tails. A restart does not repair an expired credential and
+# is not meant to; what it buys is that the failure stops being indistinguishable from health.
+#
+# Deliberately *not* wired to readiness. A sidecar's readiness is the pod's readiness, so a stale
+# graph would take the front door out of its Service — and serving a chemist an answer from a
+# three-hour-old corpus is better than serving them a connection error.
+#
+# Dispatched here, above the no-remote branch below, for two reasons: it reads one file's mtime and
+# needs none of the git setup, and that branch re-seeds the image corpus on every call — which on a
+# probe schedule would rewrite a shared volume every interval forever.
+if [[ "${mode}" == "staleness" ]]; then
+  max="${2:-0}"
+  if [[ -z "${repo_url}" ]]; then
+    # Nothing refreshes, so nothing can be stale. Reported rather than silently passed, because a
+    # probe that always succeeds should say which of the two reasons it succeeded for.
+    log "CHEMCLAW_KNOWLEDGE_REPO_URL unset — no refresh loop to be stale"
+    exit 0
+  fi
+  if [[ ! -f "${heartbeat}" ]]; then
+    log "ERROR no successful refresh has been recorded at ${heartbeat}"
+    exit 1
+  fi
+  age=$(( $(date -u +%s) - $(date -u -r "${heartbeat}" +%s) ))
+  if (( age > max )); then
+    log "ERROR last successful refresh was ${age}s ago, over the ${max}s budget"
+    exit 1
+  fi
+  log "last successful refresh was ${age}s ago"
+  exit 0
+fi
 
 if [[ -z "${repo_url}" ]]; then
   # Not configured: publish the corpus the image shipped and exit success. A deployment that
@@ -129,6 +188,9 @@ refresh() {
     git -C "${target}" clean -fd
   fi
   publish_under_submit_lock
+  # After the publish, not before it: what this timestamp claims is that the tree readers resolve
+  # was rebuilt, and a fetch whose publish then failed rebuilt nothing.
+  : > "${heartbeat}"
 }
 
 # Run `publish` holding the PR-gate submitter's checkout lock, when there is a checkout to lock.
@@ -229,7 +291,7 @@ case "${mode}" in
     done
     ;;
   *)
-    echo "usage: chemclaw-knowledge-sync [once|loop|checkout]" >&2
+    echo "usage: chemclaw-knowledge-sync [once|loop|checkout|staleness <seconds>]" >&2
     exit 64
     ;;
 esac

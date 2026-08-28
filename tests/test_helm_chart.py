@@ -124,7 +124,7 @@ def _rendered_publish_path() -> str:
 
 
 def _rendered_derived_values() -> dict[str, str]:
-    """What the ConfigMap's two derived keys render to under the chart's own values.
+    """What the ConfigMap's derived keys render to under the chart's own values.
 
     The helper's logic is reproduced here, which is a duplication worth taking: the alternative is
     shelling out to `helm`, and this suite is the *offline* half that runs everywhere (the rendered
@@ -140,11 +140,19 @@ def _rendered_derived_values() -> dict[str, str]:
         if cfg.get("enabled") and cfg.get("server")
     }
     autoscaling = _VALUES["service"]["autoscaling"]
+    calc = _VALUES["connectors"]["calc"]
     return {
         "CHEMCLAW_NOTE_REPO_DIR": _VALUES["knowledge"]["noteRepoPath"],
         "CHEMCLAW_CONNECTOR_URLS": json.dumps(urls),
         "CHEMCLAW_SERVICE_FLEET_REPLICAS": str(
             autoscaling["maxReplicas"] if autoscaling["enabled"] else _VALUES["service"]["replicas"]
+        ),
+        # `0` when this release runs no calc worker: it then dispatches no durable calculation, and
+        # a rendered floor of 1 would refuse a deployment over work it never does.
+        "CHEMCLAW_CALC_FLEET_WORKER_PROCESSES": str(
+            calc.get("workerReplicas", calc.get("replicas"))
+            if calc.get("enabled") and calc.get("worker")
+            else 0
         ),
     }
 
@@ -272,10 +280,14 @@ def test_chart_declares_only_the_documented_secrets() -> None:
 
     Required is right for a credential whose absence silently breaks a capability — the four above.
     This one is the HMAC key `agent/framing.py` derives `ENVELOPE_TAG` from, it defaults to `""`,
-    and the app starts either way; unset, the tag is merely *predictable*, which is the weakness the
-    slot exists to let an operator close rather than a new one it introduces. So it gets a Secret
-    slot (not a `config` entry, which would render into a ConfigMap the `view` role can read) and an
-    `optional: true` reference.
+    and the app starts either way. Not because unset is harmless: this docstring said the tag was
+    then merely *predictable*, and `_envelope_nonce` actually falls back to `secrets.token_hex(8)`,
+    a fresh random per process — so the tag is unguessable and *unshared*, and a durable session
+    replayed by another replica or after a restart carries envelopes whose tag no longer matches,
+    which the agent instructions make it read as ordinary prose. It is optional because the app
+    starts and a required key breaks every upgrade, not because the deployment is fine without it.
+    So it gets a Secret slot (not a `config` entry, which would render into a ConfigMap the `view`
+    role can read) and an `optional: true` reference.
 
     The `chem`, `safety` and `calc` bearer tokens are the seventh through ninth, and they land in
     `optionalKeys` for the same *upgrade* reason the framing key does, not because their absence is

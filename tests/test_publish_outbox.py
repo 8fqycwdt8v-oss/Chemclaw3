@@ -78,13 +78,13 @@ def test_enqueueing_the_same_record_twice_queues_it_once(
     async def _run() -> None:
         await migrated_db_or_skip()
         _with_sink(monkeypatch, "alpha")
-        async with outbox._connect() as conn:
+        async with outbox._connect("test_fixture") as conn:
             await _reset(conn)
 
         assert await outbox.enqueue([_record("dup")]) == 1
         assert await outbox.enqueue([_record("dup")]) == 0, "a second enqueue writes nothing"
 
-        async with outbox._connect() as conn:
+        async with outbox._connect("test_fixture") as conn:
             cursor = await conn.execute(
                 "SELECT count(*) FROM result_publications WHERE calc_ref = 'dup'"
             )
@@ -100,7 +100,7 @@ def test_one_record_is_queued_once_per_enabled_sink(monkeypatch: pytest.MonkeyPa
     async def _run() -> None:
         await migrated_db_or_skip()
         _with_sink(monkeypatch, "alpha", "beta")
-        async with outbox._connect() as conn:
+        async with outbox._connect("test_fixture") as conn:
             await _reset(conn)
 
         assert await outbox.enqueue([_record("fan")]) == 2
@@ -127,7 +127,7 @@ def test_a_failed_delivery_leaves_the_row_pending_until_it_runs_out_of_attempts(
         await migrated_db_or_skip()
         _with_sink(monkeypatch, "alpha")
         monkeypatch.setattr(settings, "result_publish_max_attempts", 2)
-        async with outbox._connect() as conn:
+        async with outbox._connect("test_fixture") as conn:
             await _reset(conn)
         await outbox.enqueue([_record("flaky")])
 
@@ -140,7 +140,7 @@ def test_a_failed_delivery_leaves_the_row_pending_until_it_runs_out_of_attempts(
         await outbox.mark_failed([claimed[0][0]], "destination unreachable")
         assert await outbox.claim("alpha", 10) == [], "out of attempts, no longer claimed"
 
-        async with outbox._connect() as conn:
+        async with outbox._connect("test_fixture") as conn:
             cursor = await conn.execute(
                 "SELECT state, attempts, last_error FROM result_publications "
                 "WHERE calc_ref = 'flaky'"
@@ -160,7 +160,7 @@ def test_a_delivered_row_is_not_claimed_again(monkeypatch: pytest.MonkeyPatch) -
     async def _run() -> None:
         await migrated_db_or_skip()
         _with_sink(monkeypatch, "alpha")
-        async with outbox._connect() as conn:
+        async with outbox._connect("test_fixture") as conn:
             await _reset(conn)
         await outbox.enqueue([_record("done")])
 
@@ -168,7 +168,7 @@ def test_a_delivered_row_is_not_claimed_again(monkeypatch: pytest.MonkeyPatch) -
         await outbox.mark_delivered([row_id for row_id, _, _ in claimed])
         assert await outbox.claim("alpha", 10) == []
 
-        async with outbox._connect() as conn:
+        async with outbox._connect("test_fixture") as conn:
             cursor = await conn.execute(
                 "SELECT state, delivered_at IS NOT NULL FROM result_publications "
                 "WHERE calc_ref = 'done'"
@@ -229,7 +229,7 @@ def test_claiming_a_row_spends_its_attempt(monkeypatch: pytest.MonkeyPatch) -> N
         await migrated_db_or_skip()
         _with_sink(monkeypatch, "alpha")
         monkeypatch.setattr(settings, "result_publish_max_attempts", 5)
-        async with outbox._connect() as conn:
+        async with outbox._connect("test_fixture") as conn:
             await _reset(conn)
         await outbox.enqueue([_record("counted")])
 
@@ -237,7 +237,7 @@ def test_claiming_a_row_spends_its_attempt(monkeypatch: pytest.MonkeyPatch) -> N
         assert len(await outbox.claim("alpha", 10)) == 1
         assert len(await outbox.claim("alpha", 10)) == 1
 
-        async with outbox._connect() as conn:
+        async with outbox._connect("test_fixture") as conn:
             cursor = await conn.execute(
                 "SELECT attempts FROM result_publications WHERE calc_ref = 'counted'"
             )
@@ -256,14 +256,14 @@ def test_marking_failed_does_not_double_count_the_attempt(
         await migrated_db_or_skip()
         _with_sink(monkeypatch, "alpha")
         monkeypatch.setattr(settings, "result_publish_max_attempts", 5)
-        async with outbox._connect() as conn:
+        async with outbox._connect("test_fixture") as conn:
             await _reset(conn)
         await outbox.enqueue([_record("once")])
 
         claimed = await outbox.claim("alpha", 10)
         await outbox.mark_failed([row_id for row_id, _, _ in claimed], "nope")
 
-        async with outbox._connect() as conn:
+        async with outbox._connect("test_fixture") as conn:
             cursor = await conn.execute(
                 "SELECT attempts, state FROM result_publications WHERE calc_ref = 'once'"
             )
@@ -298,12 +298,12 @@ def test_one_unreadable_document_does_not_retire_its_whole_batch(
     async def _run() -> None:
         await migrated_db_or_skip()
         _with_sink(monkeypatch, "alpha")
-        async with outbox._connect() as conn:
+        async with outbox._connect("test_fixture") as conn:
             await _reset(conn)
 
         assert await outbox.enqueue([_record("good-1"), _record("good-2")]) == 2
         # A row this release cannot parse, written straight into the queue beside them.
-        async with outbox._connect() as conn:
+        async with outbox._connect("test_fixture") as conn:
             await conn.execute(
                 "INSERT INTO result_publications (sink, calc_ref, document, schema_version) "
                 "VALUES ('alpha', 'poison', '{\"calc_ref\": \"poison\"}'::jsonb, '1')"
@@ -317,7 +317,7 @@ def test_one_unreadable_document_does_not_retire_its_whole_batch(
         assert outcome.delivered == 2
         assert outcome.failed == 1, "exactly the unreadable row is charged an attempt"
 
-        async with outbox._connect() as conn:
+        async with outbox._connect("test_fixture") as conn:
             cursor = await conn.execute(
                 "SELECT calc_ref, state, attempts FROM result_publications ORDER BY calc_ref"
             )
@@ -365,7 +365,7 @@ def test_the_drain_closes_every_sink_it_builds(monkeypatch: pytest.MonkeyPatch) 
     async def _run() -> None:
         await migrated_db_or_skip()
         _with_sink(monkeypatch, "alpha", "beta")
-        async with outbox._connect() as conn:
+        async with outbox._connect("test_fixture") as conn:
             await _reset(conn)
         await outbox.enqueue([_record("shared")])
 
@@ -418,7 +418,7 @@ def test_one_refused_record_does_not_retire_its_neighbours(
     async def _run() -> None:
         await migrated_db_or_skip()
         _with_sink(monkeypatch, "alpha")
-        async with outbox._connect() as conn:
+        async with outbox._connect("test_fixture") as conn:
             await _reset(conn)
         # Enqueued in this order, so the refused one sits in the middle of the claim: the rows
         # before it are the ones the batch-wide handler retired *after* they had been written.
@@ -433,7 +433,7 @@ def test_one_refused_record_does_not_retire_its_neighbours(
         assert outcome.delivered == 3
         assert outcome.failed == 1, "exactly the refused record is charged with the failure"
 
-        async with outbox._connect() as conn:
+        async with outbox._connect("test_fixture") as conn:
             cursor = await conn.execute(
                 "SELECT calc_ref, state FROM result_publications ORDER BY calc_ref"
             )
@@ -474,7 +474,7 @@ def test_an_unreachable_destination_still_fails_the_whole_batch(
     async def _run() -> None:
         await migrated_db_or_skip()
         _with_sink(monkeypatch, "alpha")
-        async with outbox._connect() as conn:
+        async with outbox._connect("test_fixture") as conn:
             await _reset(conn)
         await outbox.enqueue([_record(ref) for ref in ("d-1", "d-2", "d-3")])
 
@@ -550,11 +550,11 @@ def test_two_workers_claiming_at_once_split_the_queue(monkeypatch: pytest.Monkey
         await migrated_db_or_skip()
         _with_sink(monkeypatch, "alpha")
         monkeypatch.setattr(settings, "result_publish_max_attempts", 5)
-        async with outbox._connect() as conn:
+        async with outbox._connect("test_fixture") as conn:
             await _reset(conn)
         await outbox.enqueue([_record(f"race-{index}") for index in range(4)])
 
-        async with outbox._connect() as first:
+        async with outbox._connect("test_fixture") as first:
             # Worker A, mid-claim: rows updated, transaction still open, locks still held.
             cursor = await first.execute(outbox._CLAIM, ("alpha", 5, 2))
             mine = {str(row[1]) for row in await cursor.fetchall()}
@@ -589,7 +589,7 @@ def test_a_row_out_of_attempts_is_not_claimed_again_even_while_it_is_pending(
         await migrated_db_or_skip()
         _with_sink(monkeypatch, "alpha")
         monkeypatch.setattr(settings, "result_publish_max_attempts", 2)
-        async with outbox._connect() as conn:
+        async with outbox._connect("test_fixture") as conn:
             await _reset(conn)
         await outbox.enqueue([_record("abandoned")])
 
@@ -598,7 +598,7 @@ def test_a_row_out_of_attempts_is_not_claimed_again_even_while_it_is_pending(
         assert len(await outbox.claim("alpha", 10)) == 1
         assert await outbox.claim("alpha", 10) == [], "a row out of attempts was claimed again"
 
-        async with outbox._connect() as conn:
+        async with outbox._connect("test_fixture") as conn:
             cursor = await conn.execute(
                 "SELECT state, attempts FROM result_publications WHERE calc_ref = 'abandoned'"
             )

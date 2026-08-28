@@ -610,6 +610,16 @@ _CATALOG_VALIDATED_KINDS = frozenset({"ServiceMonitor", "PodMonitor", "Prometheu
 # stops that flag from being a hole: a skipped kind is a deliberate entry here, not a silent pass.
 _UNVALIDATED_KINDS = frozenset({"Route"})
 
+# Kinds the chart *can* render but does not on the shipped values, so they never reach kubeconform
+# in the validation render and cannot appear in its `Skipped` count.
+#
+# `AlertmanagerConfig` is gated on `monitoring.alertmanager.enabled`, which is off because the chart
+# cannot invent a receiver — a Slack webhook or a PagerDuty key is a deployment fact. It would be
+# skipped rather than validated if it did render (the datreeio catalog carries a `v1alpha1` schema
+# for it and no `v1beta1`), which is why it is recorded here rather than quietly left out: the point
+# of these three sets is that every kind in the template text is accounted for by *someone*.
+_UNRENDERED_BY_DEFAULT_KINDS = frozenset({"AlertmanagerConfig"})
+
 # What the CI gate reports for the chart as it stands: every rendered resource validated except the
 # OpenShift `Route`. Pinned as a number because the two sets above are claims about kubeconform's
 # behaviour, and a claim about someone else's tool is worth stating in a form that can be compared
@@ -642,14 +652,22 @@ def test_only_the_known_crd_is_unvalidated_by_kubeconform() -> None:
         "ServiceAccount",
     }
     rendered = set(re.findall(r"^kind:\s*([A-Za-z]+)", _all_templates(), flags=re.MULTILINE))
-    unexpected = rendered - core_kinds - _CATALOG_VALIDATED_KINDS - _UNVALIDATED_KINDS
+    unexpected = (
+        rendered
+        - core_kinds
+        - _CATALOG_VALIDATED_KINDS
+        - _UNVALIDATED_KINDS
+        - _UNRENDERED_BY_DEFAULT_KINDS
+    )
     assert not unexpected, (
         f"the chart renders kind(s) {sorted(unexpected)} that kubeconform may silently skip — "
         "add a schema location, or add them to _UNVALIDATED_KINDS with the reason"
     )
     # Both exemptions must stay earned: a kind the chart stopped rendering is stale bookkeeping,
     # and — the failure this test itself had — an exemption nobody ever checked against the tool.
-    stale = (_UNVALIDATED_KINDS | _CATALOG_VALIDATED_KINDS) - rendered
+    stale = (
+        _UNVALIDATED_KINDS | _CATALOG_VALIDATED_KINDS | _UNRENDERED_BY_DEFAULT_KINDS
+    ) - rendered
     assert not stale, f"exempted kind(s) the chart no longer renders: {sorted(stale)}"
     assert len(_UNVALIDATED_KINDS) == _EXPECTED_SKIPPED_RESOURCES, (
         "the count CI reports as `Skipped` must match what this file claims is unvalidated; "
@@ -1453,6 +1471,40 @@ def test_every_action_is_pinned_to_a_commit_not_a_tag() -> None:
     assert not unpinned, f"actions referenced by a mutable tag: {unpinned}"
 
 
+def test_the_mutation_run_is_scheduled_and_has_a_database_to_run_against() -> None:
+    """The two properties of `mutants.yml` whose loss is silent, and one of them manufactures a lie.
+
+    The schedule is the whole point: `make mutants` sat in the `Makefile` for months with nothing
+    running it, so the seven invariant-bearing modules had a mutation control that had executed once
+    (`D-2026-08-27-a-survivor-is-not-a-failing-build`).
+
+    The Postgres service is the subtler half. Six of the eighteen files in
+    `pytest_add_cli_args_test_selection` gate on `tests/pg.py::migrated_db_or_skip`, so without a
+    database they skip and still report green — and every mutant in `science/calc/store.py` and
+    `agent/audit_store.py` is then scored SURVIVED for a reason that has nothing to do with the
+    mutation. Dropping the service would not break the job; it would make it report invented
+    survivors in two of the seven modules it exists for, which is worse than not running it.
+    """
+    document: Any = yaml.safe_load(
+        (DEPLOY.parent / ".github" / "workflows" / "mutants.yml").read_text()
+    )
+    # `on` is YAML 1.1's boolean `True` once parsed, which is why this reads oddly.
+    triggers = document[True]
+    assert triggers.get("schedule"), "mutants.yml has no schedule; it is a target nobody runs again"
+
+    job = document["jobs"]["mutants"]
+    assert "postgres" in job.get("services", {}), (
+        "the mutation job has no Postgres service, so the six database-backed test files in "
+        "`pytest_add_cli_args_test_selection` skip and their mutants are scored as survivors"
+    )
+    assert "CHEMCLAW_POSTGRES_DSN" in job.get("env", {}), (
+        "the mutation job provisions Postgres and does not point the suite at it"
+    )
+    assert any("db-migrate" in step.get("run", "") for step in job["steps"]), (
+        "the mutation job never migrates the database it provisions"
+    )
+
+
 def test_every_downloaded_binary_is_checksummed_before_it_runs() -> None:
     """A release asset is mutable in a way a git tag is not, and both of these execute as root.
 
@@ -1664,6 +1716,31 @@ def test_egress_destinations_are_declarable() -> None:
     assert _values()["networkPolicy"]["egressDestinations"] == []
 
 
+def _makefile_renders() -> list[list[str]]:
+    """Every `helm template` of this chart in the Makefile, as its whole (continued) command.
+
+    A render is a backslash-continued block, so "does this one pass the flag" is a question about
+    the block and not about the line the command starts on. Returned as a list of lines per render
+    so a caller can ask what each one carries.
+
+    Replaces a pair of `len(...) == 2` assertions. The count was the *point* of those tests — every
+    render must pay the escape hatch — and pinning it as a literal meant that adding a third render
+    failed them for the one reason that is not a defect. The invariant is "each", not "two".
+    """
+    lines = (DEPLOY.parent / "Makefile").read_text().splitlines()
+    renders: list[list[str]] = []
+    for index, line in enumerate(lines):
+        if "helm template chemclaw" not in line or line.lstrip().startswith("@#"):
+            continue
+        block = [line]
+        cursor = index
+        while lines[cursor].rstrip().endswith("\\"):
+            cursor += 1
+            block.append(lines[cursor])
+        renders.append(block)
+    return renders
+
+
 def test_an_unstated_egress_posture_refuses_to_render() -> None:
     """Available and visible was not enough: the chart must not render a posture nobody chose.
 
@@ -1691,17 +1768,15 @@ def test_an_unstated_egress_posture_refuses_to_render() -> None:
         "the shipped default grants a permission the release never wrote down"
     )
     # Every render of the shipped defaults must carry the escape hatch, or it cannot render at all.
-    makefile = (DEPLOY.parent / "Makefile").read_text()
-    renders = [line for line in makefile.splitlines() if "helm template chemclaw" in line]
-    assert len(renders) == 2, f"{len(renders)} renders in the Makefile; each needs the flag"
-    flagged = [
-        line
-        for line in makefile.splitlines()
-        if "--set networkPolicy.allowAnyDestination=true" in line
-        and not line.lstrip().startswith("@#")
+    renders = _makefile_renders()
+    assert renders, "no `helm template` found in the Makefile — the extraction is broken"
+    unflagged = [
+        block[0].strip()
+        for block in renders
+        if not any("--set networkPolicy.allowAnyDestination=true" in line for line in block)
     ]
-    assert len(flagged) == 2, (
-        "a shipped-defaults render is missing the flag it cannot render without"
+    assert not unflagged, (
+        f"a shipped-defaults render is missing the flag it cannot render without: {unflagged}"
     )
 
 
@@ -1728,16 +1803,14 @@ def test_an_unstated_retention_posture_refuses_to_render() -> None:
         "the shipped default grants a permission the release never wrote down"
     )
     # Every render of the shipped defaults must carry the escape hatch, or it cannot render at all
-    # — the same two renders the egress test counts, now each paying both flags.
-    makefile = (DEPLOY.parent / "Makefile").read_text()
-    flagged = [
-        line
-        for line in makefile.splitlines()
-        if "--set retention.unboundedGrowthAccepted=true" in line
-        and not line.lstrip().startswith("@#")
+    # — the same renders the egress test walks, now each paying both flags.
+    unflagged = [
+        block[0].strip()
+        for block in _makefile_renders()
+        if not any("--set retention.unboundedGrowthAccepted=true" in line for line in block)
     ]
-    assert len(flagged) == 2, (
-        "a shipped-defaults render is missing the flag it cannot render without"
+    assert not unflagged, (
+        f"a shipped-defaults render is missing the flag it cannot render without: {unflagged}"
     )
 
 
@@ -1753,6 +1826,123 @@ def test_dns_egress_survives_narrowing_the_destinations() -> None:
     dns_rule, scoped_rule = egress.split("- to:")[1], egress.split("- to:")[2]
     assert "port: 53" in dns_rule and "egressDestinations" not in dns_rule
     assert "egressDestinations" in scoped_rule and "port: 53" not in scoped_rule
+
+
+def _alert_expressions() -> str:
+    """Every rule's PromQL, and nothing else.
+
+    The annotations legitimately name metrics in prose — `ChemclawDurableJobsFailing`'s description
+    tells an operator to break the ratio down with three other series — so any check that reads the
+    file as text will call a metric "alerted" because a sentence mentioned it. That is the exact
+    shape of false coverage these tests exist to prevent, so the expressions are extracted first.
+    """
+    rule = (CHART / "templates" / "prometheusrule.yaml").read_text()
+    return " ".join(re.findall(r"expr:\s*(?:>-\s*)?((?:.|\n)*?)\n\s*for:", rule))
+
+
+def _series_referenced(text: str) -> set[str]:
+    """Metric names in some PromQL, with Prometheus's derived histogram suffixes folded away."""
+    return {
+        re.sub(r"_(bucket|sum|count)$", "", name)
+        for name in re.findall(r"\b(chemclaw_[a-z_]+)\b", text)
+    }
+
+
+def _dashboard_expressions() -> str:
+    """Every panel query the chart's dashboards carry."""
+    import json
+
+    return " ".join(
+        target["expr"]
+        for path in sorted((CHART / "dashboards").glob("*.json"))
+        for panel in json.loads(path.read_text())["panels"]
+        for target in panel["targets"]
+    )
+
+
+# Counters ending `_failures_total` or `_dropped_total` that deliberately have no alert, each with
+# the reason it is not one. The set is small on purpose: it is what stops the rule below from being
+# satisfied by adding a name to a list.
+#
+# Both entries share one property — the increment is *caused by the caller* and its steady-state
+# rate is not zero. A rule on either would page on an expired token or a malformed request body,
+# which is the failure mode that trains people to ignore an alert channel. They are dashboard
+# series (`Chemclaw front door` -> "Refused before the handler"), and a rise in either is a security
+# or client question rather than a system one.
+_COUNTERS_WITH_NO_ALERT: dict[str, str] = {
+    "chemclaw_auth_failures_total": (
+        "a rejected credential is a caller's mistake with a non-zero steady state; alerting on the "
+        "first would page on every expired token"
+    ),
+    "chemclaw_request_validation_failures_total": (
+        "a 422 is the caller's malformed request, not this system failing; the route breakdown "
+        "lives on the front-door dashboard"
+    ),
+}
+
+
+def test_every_counter_that_can_fail_silently_has_an_alert() -> None:
+    """The coverage rule, stated so that a counter added tomorrow is covered by it.
+
+    This test used to name eight metrics and check they appeared somewhere in the rule file. That
+    direction is worth keeping (it is the test below, which catches a rename that leaves its alert
+    behind) but it proves nothing about *coverage*: a ninth counter shipped with no rule passed it,
+    and several did — `chemclaw_pushback_dropped_total`,
+    `chemclaw_fan_out_children_dropped_total`, `chemclaw_result_publish_failures_total` and
+    `chemclaw_result_projection_failures_total` were all unalerted while the exactly-analogous
+    `chemclaw_notes_publish_failures_total` was alerted, which is one failure class with two
+    different answers.
+
+    So it is inverted: the *registry* is the list, and every counter whose name says it counts a
+    silent failure must either appear in an alert expression or be exempted here with a reason.
+    `_failures_total` and `_dropped_total` are the two suffixes this codebase uses for "something
+    was swallowed", which is what makes the selection mechanical rather than a judgement call.
+    """
+    from chemclaw.core.metrics import _COUNTERS
+
+    alerted = _series_referenced(_alert_expressions())
+    silent = {name for name in _COUNTERS if name.endswith(("_failures_total", "_dropped_total"))}
+    assert silent, "no silent-failure counters found — the suffix convention moved, not the alerts"
+    uncovered = sorted(silent - alerted - set(_COUNTERS_WITH_NO_ALERT))
+    assert not uncovered, (
+        f"counters that record a swallowed failure and fire nothing: {uncovered}. Add a rule to "
+        "templates/prometheusrule.yaml, or an entry to _COUNTERS_WITH_NO_ALERT saying why the "
+        "steady-state rate is not zero."
+    )
+    # The exemptions must stay earned in both directions: one for a counter that no longer exists is
+    # stale bookkeeping, and one for a counter that has since been alerted is a note nobody reads.
+    stale = sorted(set(_COUNTERS_WITH_NO_ALERT) - silent)
+    assert not stale, f"exemptions for counters that are gone or renamed: {stale}"
+    redundant = sorted(set(_COUNTERS_WITH_NO_ALERT) & alerted)
+    assert not redundant, f"exempted counters that do have an alert: {redundant}"
+
+
+def test_every_declared_metric_has_a_consumer() -> None:
+    """A metric with no panel and no rule is a number nobody has ever seen.
+
+    This is the failure the ServiceMonitor fixed one level down, one level up. Before the dashboards
+    existed, sixteen of the registry's series had an alert and the other eighty-eight had no reader
+    of *any* kind — computed on a hot path, exposed, scraped, retained, and read by nobody.
+    `deploy/README.md` said so outright.
+
+    Asserted against the registry rather than against a list here, so the obligation lands on
+    whoever declares the metric: a series added tomorrow with no panel and no rule fails here, which
+    is the only moment anyone is in a position to say what question it answers.
+    """
+    from chemclaw.core.metrics import _COUNTERS, _GAUGE_FAMILIES, _GAUGES, _HISTOGRAMS
+
+    declared = {*_COUNTERS, *_GAUGES, *_HISTOGRAMS, *_GAUGE_FAMILIES}
+    consumed = _series_referenced(_alert_expressions() + " " + _dashboard_expressions())
+    orphans = sorted(declared - consumed)
+    assert not orphans, (
+        f"declared metrics with no alert and no dashboard panel: {orphans}. Put each on a panel in "
+        "deploy/helm/chemclaw/dashboards/ or give it a rule; a series nobody reads is a cost with "
+        "no benefit."
+    )
+    # And the other direction, which is how a dashboard rots: a panel querying a series the app
+    # stopped emitting renders as an empty graph, which looks exactly like "nothing happened".
+    unknown = sorted(_series_referenced(_dashboard_expressions()) - declared)
+    assert not unknown, f"dashboard panels query series the app never emits: {unknown}"
 
 
 def test_the_metrics_that_were_designed_to_alert_actually_alert() -> None:
@@ -1818,13 +2008,21 @@ def test_every_alerted_metric_is_a_metric_the_app_declares() -> None:
     A PromQL expression naming a typo'd or deleted series is silently always-empty — the alert is
     green forever, which reads exactly like "the condition never occurred".
     """
-    from chemclaw.core.metrics import _COUNTERS, _GAUGES, _HISTOGRAMS
+    from chemclaw.core.metrics import _COUNTERS, _GAUGE_FAMILIES, _GAUGES, _HISTOGRAMS
 
-    declared = {*_COUNTERS, *_GAUGES, *_HISTOGRAMS}
+    declared = {*_COUNTERS, *_GAUGES, *_HISTOGRAMS, *_GAUGE_FAMILIES}
     rule = (CHART / "templates" / "prometheusrule.yaml").read_text()
     # Only the PromQL, not the prose: the annotations legitimately name metrics in explanations.
     expressions = " ".join(re.findall(r"expr:\s*(?:>-\s*)?((?:.|\n)*?)\n\s*for:", rule))
-    referenced = set(re.findall(r"\b(chemclaw_[a-z_]+)\b", expressions))
+    # A histogram is queried through its derived series — `_bucket` for `histogram_quantile`, and
+    # `_sum`/`_count` for an average — and none of those three is a name the registry declares. The
+    # suffix is Prometheus's, not this system's, so stripping it is what makes the comparison a
+    # comparison about metric *names*. Gauge families are queried by their bare name and need no
+    # such treatment; they are in `declared` below for the first time here.
+    referenced = {
+        re.sub(r"_(bucket|sum|count)$", "", name)
+        for name in re.findall(r"\b(chemclaw_[a-z_]+)\b", expressions)
+    }
     assert referenced, "no PromQL expressions were parsed — the extraction is broken, not the rules"
     unknown = referenced - declared
     assert not unknown, f"alerts reference metrics the app never emits: {sorted(unknown)}"
@@ -2069,3 +2267,316 @@ def test_the_shipped_defaults_still_render() -> None:
     assert result.returncode == 0, result.stderr
     assert "terminationGracePeriodSeconds: 615" in result.stdout
     assert "terminationGracePeriodSeconds: 150" in result.stdout
+
+
+def test_a_connector_server_is_not_sigkilled_before_it_finishes_starting() -> None:
+    """The one latent outage in this pass, and it was an *absence* of numbers rather than bad ones.
+
+    `deployment-connectors.yaml` declared `readinessProbe` and `livenessProbe` with no
+    `initialDelaySeconds`, `periodSeconds`, `timeoutSeconds` or `failureThreshold` at all.
+    Kubernetes' defaults then apply — liveness from t=0, a 10 s period, a 1 s timeout and three
+    failures — so the kubelet SIGKILLs the container about thirty seconds after start. `calc` and
+    `molfp` import RDKit and open a Postgres pool during FastAPI lifespan and uvicorn accepts
+    nothing until lifespan returns, so a cold start on a throttled node crash-loops forever with
+    nothing wrong anywhere in it. The workers were never exposed to it because
+    `define "chemclaw.workerProbes"` states its thresholds and argues for them.
+
+    Pinned as "a startup probe exists and buys more than a minute", not as the exact numbers: the
+    budget is a deployment's to tune and the invariant is that a cold start is not a restart.
+    """
+    text = (CHART / "templates" / "deployment-connectors.yaml").read_text()
+    assert "startupProbe:" in text, (
+        "the connector server has no startup probe, so liveness runs during the import that "
+        "delays its first response"
+    )
+    probes = _values()["probes"]["connector"]
+    budget = int(probes["startup"]["periodSeconds"]) * int(probes["startup"]["failureThreshold"])
+    assert budget >= 60, f"a {budget}s cold-start budget is inside RDKit's import time"
+    # Every probe on this container states its own periods, or a default fills the gap silently.
+    for probe in ("startupProbe", "readinessProbe", "livenessProbe"):
+        body = text.split(f"{probe}:", 1)[1].split("Probe:", 1)[0]
+        assert "periodSeconds:" in body and "failureThreshold:" in body, (
+            f"{probe} leaves a threshold to a Kubernetes default"
+        )
+    # Liveness must be the slower of the two, or an unhealthy connector is restarted before it is
+    # taken out of its Service — the reverse of what an in-flight MCP tool call wants.
+    liveness = int(probes["liveness"]["periodSeconds"]) * int(
+        probes["liveness"]["failureThreshold"]
+    )
+    readiness = int(probes["readiness"]["periodSeconds"]) * int(
+        probes["readiness"]["failureThreshold"]
+    )
+    assert liveness > readiness, (
+        "liveness reacts no slower than readiness, so a struggling connector is restarted rather "
+        "than removed from its endpoints"
+    )
+
+
+def test_the_front_door_gets_the_same_head_start() -> None:
+    """The same gap, one process bigger: langchain, deepagents and RDKit, then a connector sweep.
+
+    `initialDelaySeconds: 10` with the default `failureThreshold: 3` over a 20 s period put the
+    first liveness restart at ~70 s, which a cold or throttled node spends inside the import.
+    """
+    text = (CHART / "templates" / "deployment-service.yaml").read_text()
+    assert "startupProbe:" in text, "the front door restarts itself mid-import on a slow node"
+    startup = _values()["probes"]["service"]["startup"]
+    budget = int(startup["periodSeconds"]) * int(startup["failureThreshold"])
+    assert budget >= 60, f"a {budget}s cold-start budget is inside the front door's import time"
+
+
+def test_a_connector_pod_drains_before_it_dies() -> None:
+    """The half of D-121's drain the connector pods never got.
+
+    The front door has a `preStop` sleep and a derived grace period and the workers have a derived
+    one; a connector pod had neither, so it took the 30 s default. That pod is the one holding an
+    in-flight MCP tool call *and* an endpoint the front door is still routing to — Kubernetes
+    removes the Endpoint and sends SIGTERM concurrently, so without the sleep a rolling update
+    refuses calls the caller is still making.
+    """
+    text = (CHART / "templates" / "deployment-connectors.yaml").read_text()
+    assert "preStop:" in text, "a connector pod stops accepting while the front door still dials it"
+    assert "terminationGracePeriodSeconds: {{ $.Values.connectorGracePeriodSeconds }}" in text, (
+        "a connector pod keeps the 30 s default, which SIGKILLs through its own drain"
+    )
+    values = _values()
+    assert int(values["connectorGracePeriodSeconds"]) > int(values["connectorDrainSeconds"]), (
+        "the grace period does not outlast the drain, so the sleep is what gets SIGKILLed"
+    )
+
+
+def test_every_alert_carries_a_runbook_url_that_resolves() -> None:
+    """An alert at 03:00 with no link is a name and a sentence.
+
+    The runbook never mentioned a single alert by name (`grep -n "Chemclaw[A-Z]"` returned nothing)
+    and no rule carried a `runbook_url`, so the two halves of the on-call story existed and did not
+    know about each other. The descriptions were already good; this was a wiring problem.
+
+    Both directions, because either alone rots: a rule whose link points at a heading that was
+    renamed, and a heading nobody reaches because its alert lost its annotation.
+    """
+    rule = (CHART / "templates" / "prometheusrule.yaml").read_text()
+    runbook = (DEPLOY.parent / "docs" / "guides" / "runbook.md").read_text()
+    alerts = re.findall(r"- alert: (\w+)", rule)
+    assert alerts, "no alerts found — the extraction is broken, not the rules"
+    linked = set(
+        re.findall(
+            r"runbook_url: \{\{ \.Values\.monitoring\.alerts\.runbookBaseUrl \}\}#([a-z0-9]+)", rule
+        )
+    )
+    unlinked = sorted(a for a in alerts if a.lower() not in linked)
+    assert not unlinked, f"alerts with no runbook_url: {unlinked}"
+    # GitHub renders `#### ChemclawFoo` as the anchor `#chemclawfoo`, so the alert name *is* the
+    # link — no separate mapping to keep in step.
+    headings = {h.lower() for h in re.findall(r"^#{2,4} (Chemclaw\w+)\s*$", runbook, re.MULTILINE)}
+    missing = sorted(a for a in alerts if a.lower() not in headings)
+    assert not missing, f"alerts whose runbook_url points at no heading: {missing}"
+    stale = sorted(headings - {a.lower() for a in alerts})
+    assert not stale, f"runbook sections for alerts that no longer exist: {stale}"
+
+
+def test_the_liveness_alerts_read_the_port_the_monitors_actually_scrape() -> None:
+    """`ChemclawNoWorkerIsScraped` matches on `endpoint`, which is the PodMonitor's port name.
+
+    Nothing else in this file alerts on a process being *gone* — every other rule reads an
+    application counter, and a pod that is not running emits none, which is what a healthy idle
+    system also does. `up` and `absent()` are the only two shapes that invert that.
+
+    `kube_pod_status_ready` would say more and is not available: kube-state-metrics is scraped by
+    the *platform* Prometheus in `openshift-monitoring`, while a user-workload PrometheusRule is
+    evaluated by the user-workload instance, which does not hold those series. A rule written
+    against them would be permanently empty — green forever, which reads exactly like "the
+    condition never occurred".
+
+    The label the substitute leans on is the operator's, so this pins it against the monitor rather
+    than against a memory of what the operator does.
+    """
+    rule = (CHART / "templates" / "prometheusrule.yaml").read_text()
+    monitor = (CHART / "templates" / "podmonitor.yaml").read_text()
+    assert "absent(up{" in rule, "no rule fires for a pod that never became a target at all"
+    assert 'up{namespace="{{ .Release.Namespace }}"' in rule, (
+        "the liveness alerts are not scoped to this release's namespace"
+    )
+    endpoint = re.search(r'endpoint="([a-z-]+)"', rule)
+    assert endpoint is not None, "the absent() rule names no scrape endpoint"
+    assert f"- port: {endpoint.group(1)}" in monitor, (
+        f'the alert matches endpoint="{endpoint.group(1)}" and the PodMonitor scrapes no such port'
+    )
+    # The expressions, not the file: the comment above the rule explains *why* kube-state-metrics
+    # is not read here, and a text search would call that explanation a violation of itself.
+    assert "kube_pod_status_ready" not in _alert_expressions(), (
+        "a user-workload rule cannot read kube-state-metrics; that series is scraped by the "
+        "platform Prometheus and this rule would be empty forever"
+    )
+
+
+def test_the_chart_tells_an_operator_to_turn_user_workload_monitoring_on() -> None:
+    """The prerequisite that makes the whole monitoring stack work, documented nowhere.
+
+    On a stock OpenShift cluster user-workload monitoring is off, which makes every ServiceMonitor,
+    PodMonitor and PrometheusRule this chart ships an inert custom resource: `oc get servicemonitor`
+    lists them, nothing scrapes, no rule loads, and there is no error anywhere. A search across
+    `deploy/`, the runbook and `.github/` for `enableUserWorkload` or `cluster-monitoring-config`
+    returned zero hits — this is the single highest-probability way the stack ships and does
+    nothing.
+
+    Pinned on the exact ConfigMap and key rather than on prose, because "monitoring must be
+    enabled" is advice and `openshift-monitoring/cluster-monitoring-config` is an instruction.
+    """
+    notes = (CHART / "templates" / "NOTES.txt").read_text()
+    runbook = (DEPLOY.parent / "docs" / "guides" / "runbook.md").read_text()
+    for name, text in (("NOTES.txt", notes), ("the runbook", runbook)):
+        assert "cluster-monitoring-config" in text, f"{name} does not name the ConfigMap to edit"
+        assert "enableUserWorkload" in text, f"{name} does not name the key to set"
+    # The second switch, which decides whether the alerts reach anyone rather than whether the
+    # metrics are collected. Both are off by default and they fail in different places.
+    assert "enableUserAlertmanagerConfig" in runbook or "enableAlertmanagerConfig" in runbook, (
+        "the runbook explains collection and not routing; alerts would fire into the platform "
+        "Alertmanager and be dropped"
+    )
+
+
+def test_the_alertmanager_config_refuses_to_route_to_nothing() -> None:
+    """The route that closes the second of the three absences the rule file's header names.
+
+    Values-gated because a receiver is a deployment fact — a Slack webhook, a PagerDuty key — and
+    *refusing* when enabled without one, by the same rule as the egress and retention postures: an
+    object that exists and routes nowhere is worse than no object, because it reads as coverage.
+    """
+    text = (CHART / "templates" / "alertmanagerconfig.yaml").read_text()
+    assert "kind: AlertmanagerConfig" in text
+    assert "{{- fail " in text, "enabling the route with no receivers renders a no-op object"
+    alertmanager = _values()["monitoring"]["alertmanager"]
+    assert alertmanager["enabled"] is False, (
+        "the chart ships a routing object built around receivers it cannot know"
+    )
+    assert alertmanager["receivers"] == [], "the chart ships a receiver it invented"
+    assert "severity" in text, "the critical split does not read the label the rules carry"
+
+
+def test_the_dashboards_carry_the_label_their_reader_selects_on() -> None:
+    """A dashboard is only a dashboard to something that reads it, and the readers disagree.
+
+    The OpenShift console selects `console.openshift.io/dashboard: "true"`; a self-managed Grafana's
+    sidecar selects `grafana_dashboard: "1"`. Shipping the JSON with neither would be five files
+    nothing ever opens, which is the same "computed and read by nobody" failure the panels exist to
+    end.
+    """
+    import json
+
+    text = (CHART / "templates" / "configmap-dashboards.yaml").read_text()
+    assert "console.openshift.io/dashboard" in _values()["monitoring"]["dashboards"]["labels"]
+    assert '(.Files.Glob "dashboards/*.json").AsConfig' in text, (
+        "the ConfigMap does not carry the dashboard files"
+    )
+    boards = sorted((CHART / "dashboards").glob("*.json"))
+    assert boards, "the dashboards directory is empty"
+    for board in boards:
+        # Parsed rather than pattern-matched: a dashboard that is not JSON is a ConfigMap key the
+        # console silently ignores, and `AsConfig` would embed it happily.
+        parsed = json.loads(board.read_text())
+        assert parsed["title"] and parsed["panels"], f"{board.name} has no title or no panels"
+        for panel in parsed["panels"]:
+            assert panel["targets"], f"{board.name}: panel {panel['title']!r} queries nothing"
+
+
+def test_every_process_role_names_itself_in_its_traces() -> None:
+    """All four roles reported `service.name=chemclaw`, so a span could not say who emitted it.
+
+    `core/logging.py` argues for exactly this ("a deployment that wants the front door and each
+    worker to appear as separate services sets `OTEL_SERVICE_NAME` per Deployment") and the chart
+    set `CHEMCLAW_OTEL_ENABLED`, `_ENDPOINT`, `_LLM_SPANS`, `_INCLUDE_SENSITIVE_DATA` and nothing
+    else — so the advice was in the source and unfollowed by the only thing that could follow it.
+
+    The ordering assertion is the one that would fail silently: Kubernetes expands `$(VAR)` only
+    against variables declared *earlier in the same container*, so a pod whose attribute string
+    precedes `POD_NAME` exports the two literals with no error anywhere.
+    """
+    helpers = (CHART / "templates" / "_helpers.tpl").read_text()
+    body = helpers.split('define "chemclaw.otelResourceEnv"')[1].split("{{- end -}}")[0]
+    assert body.index("POD_NAME") < body.index("OTEL_RESOURCE_ATTRIBUTES"), (
+        "$(POD_NAME) is referenced before it is declared, so the pod exports the literal"
+    )
+    for template in (
+        "deployment-service.yaml",
+        "deployment-workers.yaml",
+        "deployment-connectors.yaml",
+    ):
+        text = (CHART / "templates" / template).read_text()
+        components = len(re.findall(r"name: CHEMCLAW_COMPONENT", text))
+        tagged = len(re.findall(r'include "chemclaw.otelResourceEnv"', text))
+        assert tagged == components, (
+            f"{template}: {components} process roles and {tagged} of them name themselves in a "
+            "trace; the rest report as the same service"
+        )
+
+
+def test_the_gate_parses_the_promql_rather_than_the_yaml() -> None:
+    """`kubeconform` validates that `expr` is a string, not that the string is PromQL.
+
+    So a syntax error passed `make helm-validate`, passed the API server, and was rejected by
+    Prometheus at rule-group load — taking the **whole group** with it, silently, with the object
+    still reading as `Valid` in the cluster. Nothing else in this repository parses PromQL, and the
+    dashboards' panel queries had no gate of any kind.
+
+    Both places are asserted, because a target CI does not run is not a gate.
+    """
+    makefile = (DEPLOY.parent / "Makefile").read_text()
+    workflow = (DEPLOY.parent / ".github" / "workflows" / "ci.yml").read_text()
+    target = makefile.split("helm-validate:", 1)[1].split("\n\n", 1)[0]
+    assert "promtool check rules" in target, "make helm-validate does not parse the PromQL"
+    assert "promtool" in workflow, "CI never installs promtool, so the target's check cannot run"
+    # The extraction has to reach the dashboards too, or the panels stay unchecked while the rules
+    # look covered.
+    assert "-dashboards" in makefile, (
+        "the gate unwraps the PrometheusRule and not the dashboard ConfigMap"
+    )
+
+
+def test_no_ingress_policy_reaches_another_release_s_pods() -> None:
+    """A `podSelector` is namespace-scoped, and `component` alone is not a name this release owns.
+
+    `connector-ingress` selected on `app.kubernetes.io/component` with no release labels, so in a
+    namespace holding a second Chemclaw release — a staging copy beside production is the ordinary
+    case — it applied to *their* connector pods as well, imposing an ingress rule naming our pods as
+    the permitted peer and cutting theirs off from their own front door. Its three sibling policies
+    in the same file all carry the `define "chemclaw.selectorLabels"` helper.
+    """
+    text = (CHART / "templates" / "networkpolicy.yaml").read_text()
+    documents = [d for d in text.split("\n---\n") if "kind: NetworkPolicy" in d]
+    assert len(documents) >= 3, "the NetworkPolicy split found fewer objects than the chart renders"
+    for document in documents:
+        name = re.search(r"name: \{\{ include \"chemclaw.name\" \. \}\}-?([a-z-]*)", document)
+        selector = document.split("podSelector:", 1)[1].split("policyTypes:", 1)[0]
+        assert 'include "chemclaw.selectorLabels"' in selector, (
+            f"the {name.group(1) if name else '?'} policy selects pods by component alone, so it "
+            "reaches another release's pods in the same namespace"
+        )
+
+
+def test_a_wedged_knowledge_sync_can_be_seen_from_outside_the_pod() -> None:
+    """The sidecar catches a failing refresh on purpose, and that made a stuck one invisible.
+
+    `loop` swallows a refresh failure so a dead git remote cannot kill the pod — correct — and the
+    consequence was that an expired push credential left the container logging one WARNING per
+    interval forever while serving a frozen corpus. No metric, no probe, no alert.
+    `ChemclawKnowledgeNotesLost` covers notes going *out*; the graph coming *in* had nothing.
+
+    The real fix is a last-success gauge the reading process exposes (`docs/planning/BACKLOG.md`).
+    This is the half that lives in `deploy/`: a heartbeat file on each successful refresh, and a
+    liveness probe reading its age, so a stopped loop becomes a restarting container instead of a
+    quiet one. Liveness and *not* readiness deliberately — a sidecar's readiness is the pod's, and a
+    three-hour-old corpus beats a connection error.
+    """
+    script = (DEPLOY / "knowledge-sync.sh").read_text()
+    helpers = (CHART / "templates" / "_helpers.tpl").read_text()
+    assert "staleness" in script, "the sync script cannot report how old its last success is"
+    assert "heartbeat=" in script and "${target}/" not in script.split("heartbeat=", 1)[1][:80], (
+        "the heartbeat lives inside the checkout, which `git clean -fd` empties at the start of "
+        "every refresh"
+    )
+    sidecar = helpers.split('define "chemclaw.knowledgeSidecar"')[1].split("{{- end -}}")[0]
+    assert "livenessProbe:" in sidecar, "a wedged sync sidecar still looks healthy"
+    assert "readinessProbe:" not in sidecar, (
+        "a stale corpus takes the front door out of its Service, which is worse than the staleness"
+    )

@@ -338,6 +338,13 @@ this system cannot caveat well enough, and it has no second caller.
 - **The durable campaign has never run a real optimization.** `objectives.py` holds exactly two
   entries: a RandomForest emulator over vendored Reizman data, and a solubility maximiser. Neither
   is an optimization a chemist runs, so nothing in §5 is validated against a real automated loop.
+  What *is* now proven against a real Temporal server is the loop's own bookkeeping rather than its
+  chemistry: `test_a_running_campaign_records_each_round_not_only_its_ending` drives the workflow
+  and asserts one campaign-record row per completed round, so a campaign that is cancelled or
+  killed keeps every evaluation it already paid for
+  (`D-2026-08-27-a-bound-that-multiplies-and-a-record-that-survives-the-cancel`). That closes the
+  durability question and leaves this one exactly where it was — the objective registry is still
+  two entries, and a loop nobody points at a real objective is still unvalidated as chemistry.
 - **The BO loop is still open at one end.** Nothing decides that an ingested `reaction` note *is*
   the execution of a proposed candidate. That needs a matching rule over conditions with tolerances
   on parameters an ELN records inconsistently, and getting it wrong attributes a result to an

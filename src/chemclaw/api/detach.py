@@ -113,9 +113,75 @@ class DetachableTurn:
             self._attached_or_discard(_DONE)
 
     def _attached_or_discard(self, item: Any) -> None:
-        """Deliver `item` if a reader may still come for it, without ever blocking teardown."""
+        """Deliver `item` if a reader may still come for it, without ever blocking teardown.
+
+        The drop is deliberate and, since `_next_event`, survivable. Teardown must not block —
+        a `finally` that awaits a full queue would park the turn's own cleanup behind a reader —
+        so a full queue loses whatever is offered here, `_DONE` included. That loss used to end
+        the stream: the reader was parked on `queue.get()` with the pump already finished and
+        nothing left to wake it. `_next_event` reads the pump's *state* rather than only its
+        marker, so the marker is now the fast path rather than the only path.
+        """
         with contextlib.suppress(asyncio.QueueFull):
             self._queue.put_nowait(item)
+
+    async def _next_event(self) -> Any:
+        """The next queued event, or `_DONE` once the turn is over — marker or no marker.
+
+        **The bug this closes was a live hang, and the trigger is an ordinary turn.** `_pump`
+        blocks on `await put` when the queue fills, so the moment its last blocking put returns
+        the queue is full again — and the `finally` one line later offers `_DONE` through
+        `put_nowait`, which is dropped. Reproduced at `_QUEUE_SIZE` and `2 * _QUEUE_SIZE` events
+        with a reader momentarily behind (a token-streamed answer to a slightly slow client):
+        the pump task finished, the queue drained to empty, and `events()` awaited a marker that
+        no longer existed. Nothing sends on that connection, so the SSE send timeout never fires
+        and the 15 s ping keeps succeeding; the stream stays open for the pod's lifetime holding
+        a slot against `--limit-concurrency`.
+
+        So end-of-stream is decided by the fact rather than by the message: the pump task being
+        done, with the queue drained, *is* the end of the turn. The marker is kept because it is
+        the common case and costs one comparison; racing the task is what makes the uncommon one
+        terminate. `asyncio.wait` rather than `wait_for`, because there is no timeout here to
+        pick — the two things that can happen are an event arriving and the turn ending.
+        """
+        # Fast path first: with something already queued there is no task juggling to do, which
+        # is every event of a healthy stream.
+        if not self._queue.empty():
+            return self._queue.get_nowait()
+        if self._task.done():
+            return _DONE
+        getter = asyncio.ensure_future(self._queue.get())
+        try:
+            await asyncio.wait({getter, self._task}, return_when=asyncio.FIRST_COMPLETED)
+            if getter.done():
+                return getter.result()
+        finally:
+            # Including on the reader's own cancellation, which is the detach path: an orphaned
+            # getter would otherwise outlive the stream it was reading for. Cancelling a woken
+            # `Queue.get` does not consume the item — asyncio re-wakes the next getter and leaves
+            # it queued — so the drain below still sees everything the pump delivered.
+            if not getter.done():
+                getter.cancel()
+        self._note_pump_failure()
+        return self._queue.get_nowait() if not self._queue.empty() else _DONE
+
+    def _note_pump_failure(self) -> None:
+        """Log a pump that ended by raising, which would otherwise be retrieved by nobody.
+
+        `run_turn` turns every `Exception` into an error event, so reaching here means the failure
+        was above it — and the task's exception is never retrieved, so asyncio reports it at
+        garbage-collection time under no session and no correlation id, or not at all.
+        `CancelledError` is excluded because it is the ordinary stop path.
+        """
+        if self._task.cancelled():
+            return
+        failure = self._task.exception()
+        if failure is not None:
+            logger.warning(
+                "the turn pump for session %s ended by raising; the stream is closed",
+                self._session_id,
+                exc_info=failure,
+            )
 
     async def events(self) -> AsyncIterator[dict[str, str]]:
         """The reader's view of the turn. Cancelling it detaches; the turn does not notice.
@@ -125,7 +191,7 @@ class DetachableTurn:
         """
         try:
             while True:
-                item = await self._queue.get()
+                item = await self._next_event()
                 if item is _DONE:
                     return
                 yield item
@@ -154,10 +220,27 @@ class DetachableTurn:
         The cancellation lands inside `run_turn` exactly where a disconnect used to land it, so
         the whole D-130 teardown — rollback, booking, ambient resets, the released permit — runs
         unchanged. Awaited so the caller's 200 means "stopped", not "asked nicely".
+
+        **The `Exception` arm says so out loud now, and used to say nothing at all.** A cancelled
+        turn ending in `CancelledError` is the expected outcome and stays quiet; anything else is
+        a teardown that failed — a rollback that raised, a booking that raised — and swallowing it
+        left the stop route answering 200 with the only record of the failure discarded. Still
+        suppressed, because the turn *is* stopped either way and the caller's answer is the same;
+        logged, because "stopped cleanly" and "stopped, and its teardown broke" are different
+        facts and only the server can keep the second one.
         """
         self._task.cancel()
-        with contextlib.suppress(asyncio.CancelledError, Exception):
+        try:
             await self._task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.warning(
+                "session %s's turn was stopped and its teardown raised; the turn is cancelled "
+                "either way",
+                self._session_id,
+                exc_info=True,
+            )
 
 
 class RunningTurns:

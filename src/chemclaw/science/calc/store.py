@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from chemclaw.core.chem import require_canonical_smiles
 from chemclaw.core.ids import stable_hash
+from chemclaw.core.metrics_bridge import record_metric
 
 logger = logging.getLogger(__name__)
 
@@ -415,26 +416,47 @@ async def cached_compute(
             key is still the identity, and a second calculation on the same geometry is a
             different row. Empty for a molecule-keyed calculator, which is not about a geometry.
 
+    **Metered here, and only here.** `was_cached` reaches `connectors/calc/compose.py` as a
+    per-job field and never became a number, so D-011 — "a persisted result is never recomputed",
+    the largest cost lever in this system — could be observed only by turning DEBUG on over the
+    hottest read there is. `chemclaw_calc_cache_total{outcome}` separates three states the boolean
+    collapses into two: a store `hit`, a `miss` this caller computed, and a `shared` miss that
+    another caller in this process was already computing. The third is the single-flight working,
+    and it reports `was_cached=True` to its caller, so on the boolean it was indistinguishable from
+    a hit — which is exactly the distinction anyone asking "is the cache earning its keep" needs.
+
     Returns:
-        `(result, was_cached)` — `was_cached` is True on a store hit, so callers
-        can count hits vs. misses for the metrics layer (Phase 2b).
+        `(result, was_cached)` — `was_cached` is True on a store hit *and* on a miss this call
+        joined to another caller's in-flight computation, because from this caller's side the
+        answer arrived without a computation being started.
     """
     hit = await store.get(key)
     if hit is not None:
         # DEBUG, not INFO: on the hot path (every calculator call), but it is the one place
         # that answers the recurring troubleshooting question "why did this recompute?".
         logger.debug("calc cache hit: %s", key.as_str())
+        record_metric(lambda m: m.increment("chemclaw_calc_cache_total", labels={"outcome": "hit"}))
         return hit.result, True
     slot = key.as_str()
     waiting = _IN_FLIGHT.get(slot)
     if waiting is not None:
         logger.debug("calc cache miss already computing elsewhere, awaiting: %s", slot)
+        # Counted before the await, not after: a waiter whose computer is cancelled raises here,
+        # and the fact worth counting is that a caller *joined* an in-flight computation instead of
+        # starting a second one — which happened whether or not that computation went on to
+        # succeed.
+        record_metric(
+            lambda m: m.increment("chemclaw_calc_cache_total", labels={"outcome": "shared"})
+        )
         result, _ = await asyncio.shield(waiting)
         return result, True
     future: asyncio.Future[tuple[ResultPayload, bool]] = asyncio.get_running_loop().create_future()
     _IN_FLIGHT[slot] = future
     try:
         logger.debug("calc cache miss, computing: %s", slot)
+        record_metric(
+            lambda m: m.increment("chemclaw_calc_cache_total", labels={"outcome": "miss"})
+        )
         # Monotonic, so a clock adjustment mid-calculation cannot record a negative or absurd cost.
         started = time.perf_counter()
         result = await compute()

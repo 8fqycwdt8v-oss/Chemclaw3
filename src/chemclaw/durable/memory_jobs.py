@@ -39,7 +39,7 @@ with workflow.unsafe.imports_passed_through():
 
 from chemclaw.core.identity_context import reset_current_identity, set_current_identity
 from chemclaw.durable.orchestrator import fan_out
-from chemclaw.durable.publish import BAD_DATA_RETRY, note_publish_retry
+from chemclaw.durable.publish import BAD_DATA_RETRY, note_publish_retry, queue_wait_timeout
 
 logger = logging.getLogger(__name__)
 
@@ -204,6 +204,7 @@ class PublishNoteWorkflow:
             publish_memory_note_activity,
             unit,
             start_to_close_timeout=timedelta(seconds=settings.note_write_timeout_seconds),
+            schedule_to_start_timeout=queue_wait_timeout(),
             retry_policy=note_publish_retry(),
         )
 
@@ -280,6 +281,7 @@ async def _synthesize(build_activity: Any, id_prefix: str) -> list[str]:
     units = await workflow.execute_activity(
         build_activity,
         start_to_close_timeout=timedelta(seconds=settings.memory_job_timeout_seconds),
+        schedule_to_start_timeout=queue_wait_timeout(),
         retry_policy=BAD_DATA_RETRY,
     )
     cap = await workflow.execute_local_activity(

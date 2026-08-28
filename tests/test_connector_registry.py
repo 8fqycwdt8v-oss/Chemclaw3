@@ -148,6 +148,64 @@ def test_malformed_yaml_is_a_named_configuration_error(
         discovered()
 
 
+# The opening of `Chemclaw3-mcp`'s `manifests-internal/calc/connector.yaml`, copied verbatim down to
+# the key that matters. A literal rather than an import: the point of the test below is that *this
+# repository* refuses the shape the other one ships, and reading the real file would make the check
+# depend on a sibling checkout that CI does not have.
+_BACKEND_MANIFEST = """
+mount: backend
+name: calc
+description: >-
+  Fast local calculators, request/response and stateless: GFN2-xTB single-point energies, geometry
+  optimization, the xTB pKa predictor and the CREST searches. No calculation cache, no artifact
+  store, no calibration ledger and no durable jobs.
+endpoint:
+  transport: http
+  url: http://127.0.0.1:8860/mcp
+  health_url: http://127.0.0.1:8860/healthz
+  request_timeout: 900
+  auth:
+    mode: bearer
+    token_env: CHEMCLAW_CALC_TOKEN
+  tools:
+    - compute_xtb_energy
+    - calculation_key
+  read_only:
+    - calculation_key
+  state_changing:
+    - compute_xtb_energy
+"""
+
+
+def test_a_backend_manifest_is_refused_rather_than_partially_adopted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`mount: backend` must fail this loader, because the alternative is a silent amputation.
+
+    `Chemclaw3-mcp` serves the physics behind the `calc` bundle, and its manifest is named `calc`
+    too — deliberately, because that repository requires the directory, the package, the manifest
+    name and the addressing key to be one string. Both trees therefore hold a `calc` manifest, and
+    `_bundle_dirs` resolves a name collision by taking the first directory on the path with no error
+    either way. So an operator who points `CHEMCLAW_CONNECTORS_DIR` at the fleet's manifests is one
+    ordering away from replacing this repository's `calc` with the *backend's* surface: the
+    calculation cache, the calibration ledger, the artifact store and every durable calc job
+    (`report_measurement`, `find_calculations`, `list_artifacts`, `fetch_artifact`,
+    `calculator_trust`, `calculator_outliers`, the solvent screens, the conformer ensembles) simply
+    stop being advertised, and the agent sees a smaller `calc` that answers.
+
+    `mount: backend` is what makes that mechanical instead of trusted, and the mechanism is
+    `ConnectorManifest`'s `extra="forbid"` — a key no model here declares. That refusal is a control
+    of this repository's, and until this test it was evidenced only by an error message somebody had
+    pasted into the other repository's manifest comment. Relaxing `extra="forbid"`, or adding a
+    `mount` field, turns the startup error back into a partial surface that loads.
+    """
+    _bundle(tmp_path, "calc", _BACKEND_MANIFEST)
+    _use(monkeypatch, tmp_path)
+    with pytest.raises(ConnectorError, match="mount") as raised:
+        discovered()
+    assert "calc/connector.yaml" in str(raised.value), "the error must name the file to fix"
+
+
 def test_each_transport_builds_its_matching_maf_tool(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

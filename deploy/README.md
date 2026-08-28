@@ -274,16 +274,20 @@ no collector at all; `traceparent` is what makes a distributed trace a tree.
 
 These three paragraphs used to read "Spans cover a turn and a job; dashboards track loop iterations,
 tool latency, and job status." None of that existed — the only spans were the agent framework's own
-model calls, and there are no dashboards in this repo to track anything
-(D-2026-08-01-a-turn-you-can-follow-across-a-process). What is *still* absent is named rather than
-implied: no span around a durable job (it spans two processes and a Temporal boundary, so it needs
-the workflow to carry the context), and no FastAPI/httpx/Temporal auto-instrumentation.
+model calls (D-2026-08-01-a-turn-you-can-follow-across-a-process). **The dashboard half of that
+sentence is now true**: `templates/configmap-dashboards.yaml` ships five, and between them every
+metric this system declares has either a panel or an alert. What is *still* absent is named rather
+than implied: no span around a durable job (it spans two processes and a Temporal boundary, so it
+needs the workflow to carry the context), and no FastAPI/httpx/Temporal auto-instrumentation.
 
 **The pipeline is first-party now, and one thing went with the framework.** `configure_telemetry`
 builds the `TracerProvider`, the `BatchSpanProcessor` and the OTLP span exporter itself rather than
 calling `agent_framework.observability.configure_otel_providers`, so removing that package cannot
-silently stop tracing — spans carry `service.name=chemclaw` and `service.version=<revision>`, and
-`OTEL_SERVICE_NAME` splits the processes into separate services if you want that. The framework's per-model
+silently stop tracing. **The chart now sets `OTEL_SERVICE_NAME` per Deployment** — `chemclaw-service`,
+`chemclaw-background-worker`, `chemclaw-connector-<name>`, `chemclaw-connector-worker-<name>` — so
+the four process roles are four services in the backend rather than the one they all reported as,
+with `service.version=<revision>` and `k8s.pod.name`/`k8s.namespace.name` from the downward API
+through `OTEL_RESOURCE_ATTRIBUTES`. The framework's per-model
 `gen_ai.client.token.usage` histogram stopped being exported the moment this pipeline replaced its
 own — a span pipeline exports no metrics — and nothing in `langchain`/`langgraph`/`langsmith` emits
 it. `CHEMCLAW_OTEL_LLM_SPANS: "true"` answers the same question in the pipeline that *is* here: one
@@ -293,7 +297,8 @@ LangChain instrumentation, with content suppressed unless
 Point the collector at Arize Phoenix to read those conventions natively — any OTLP backend receives
 them, and the instrumentation in this image is Apache-2.0 where Phoenix's server is ELv2.
 Metrics and logs are unchanged and are deliberately not exported over OTLP — `/metrics` is scraped
-per pod and logs are JSON on stdout.
+per pod and logs are JSON on **stderr** (`configure_logging` calls `basicConfig` with no `stream=`,
+whose default is `sys.stderr`; three documents including this one said stdout).
 
 **Metrics come from every process, not only the front door.** `templates/servicemonitor.yaml`
 collects the Services (the front door and each connector's MCP server, by their `http` port name);
@@ -301,8 +306,19 @@ collects the Services (the front door and each connector's MCP server, by their 
 bundle's — by the `metrics` port they declare. Until D-2026-08-01 the ServiceMonitor selected the
 front door alone, so everything the workers counted (durable jobs launched, PR-gate proposals and
 their failures, lost audit records) was recorded in each worker's own registry and read by nobody.
-Set `monitoring.additionalLabels` to whatever your Prometheus's `serviceMonitorSelector` and
-`podMonitorSelector` match; the defaults match nothing, which is the safe direction.
+`monitoring.additionalLabels` is for a **self-managed Prometheus Operator**, whose `Prometheus`
+resource carries a `serviceMonitorSelector`/`podMonitorSelector` these labels have to match. It is
+*not* what decides anything on OpenShift, which this file used to claim: user-workload monitoring
+selects every ServiceMonitor and PodMonitor in every user namespace with no label selector at all,
+so the empty default is correct there.
+
+**What does decide it on OpenShift is off by default and this chart cannot set it**: user-workload
+monitoring itself (`openshift-monitoring/cluster-monitoring-config`, `enableUserWorkload: true`).
+Without it every monitor and rule here is an inert custom resource that lists, scrapes nothing and
+alerts nothing, with no error anywhere. `templates/NOTES.txt` prints the procedure at install and
+`docs/guides/runbook.md` § "Make the monitoring stack actually collect this" is the long form —
+including the second switch, `enableUserAlertmanagerConfig`, without which the alerts fire into the
+platform Alertmanager and are dropped.
 
 **Logs are JSON in-cluster** (`CHEMCLAW_LOG_JSON`, on in the chart) and every line carries
 `correlation_id`, `actor` and `session_id` from the turn's ContextVars — so an ordinary WARNING
@@ -327,20 +343,53 @@ Entra `oid` cannot be a label — attribution needs a database. Neither records 
 is a deployment's own fact, so the ledger holds tokens and seconds and leaves the multiplication to
 whoever knows the numbers. Both are written only under `CHEMCLAW_SESSION_STORE=postgres`.
 
-**One alert exists because config validation can only see the shape it was handed.** The fleet's
-turn ceiling is checked at startup, but a `kubectl scale`, an HPA edited in the cluster, or a
-rollout leaving both generations up all push the live fleet past it while every pod's own
-configuration stays valid. `ChemclawFleetAboveItsTurnCeiling` compares
-`sum(chemclaw_turn_capacity)` — what the running pods actually admit — against
-`chemclaw_fleet_turn_ceiling`, and is self-disabling when no ceiling is declared.
+**A family of alerts exists because config validation can only see the shape it was handed** — no
+count here, because the one that was written said "one" while two were already deployed. Each
+fleet budget is checked at startup, and a `kubectl scale`, an HPA edited in the cluster, or a
+rollout leaving both generations up all push the live fleet past its ceiling while every pod's own
+configuration stays valid. Each alert therefore compares a *live* left-hand side against the
+declared ceiling and is self-disabling when none is declared:
+`ChemclawFleetAboveItsTurnCeiling` (`sum(chemclaw_turn_capacity)` against
+`chemclaw_fleet_turn_ceiling`), `ChemclawFleetAboveItsConnectionCeiling`
+(`sum(chemclaw_pg_pool_max_size)` against `chemclaw_pg_fleet_max_connections`), and
+`ChemclawCalcBackendOverCommitted` (`sum(chemclaw_calc_requests_in_flight)` against
+`chemclaw_calc_backend_max_concurrent_requests`).
+
+The last of those reads *held sessions* rather than a configured capacity, and the difference is
+forced rather than stylistic: two kinds of process dispatch to the calculation backend and they do
+not share a cap — a `calc` worker is bounded by `CHEMCLAW_WORKER_MAX_CONCURRENT_ACTIVITIES`, while
+that bundle's own MCP server pods dispatch straight from a tool call and are bounded by nothing
+local (`D-2026-08-27-a-per-worker-cap-is-not-a-backend-ceiling`). Its ceiling ships as `0`,
+undeclared, because it describes a pod in another release; set it to what that server admits.
+
+**Thirty-six alerts across eight groups, and five dashboards for what is left.** The rule file's own
+header names the three absences it was written against — "no PrometheusRule anywhere in the repo, no
+SLO, and no Alertmanager route" — and all three are now closed:
+`templates/prometheusrule.yaml` covers records, correctness, availability, cost, fleet liveness
+(`up`/`absent()`, the only rules that fire for a process that is *gone*), turn latency, the durable
+tier and the silent-degradation counters; `templates/alertmanagerconfig.yaml` is the route, gated on
+`monitoring.alertmanager.enabled` and refusing to render without receivers; and every rule carries a
+`runbook_url` into `docs/guides/runbook.md` § "When an alert fires", which indexes all thirty-six.
+`templates/configmap-dashboards.yaml` carries the rest, so no declared metric is left with no reader
+— `tests/test_deploy_chart.py::test_every_declared_metric_has_a_consumer` is what keeps that true
+rather than believed.
+
+`make helm-validate` now runs `promtool check rules` over both, which is a gate `kubeconform` could
+not be: it validates that an `expr` is a *string*, not that the string is PromQL, so a syntax error
+would pass CI and the API server and then be rejected by Prometheus at rule-group load — taking the
+whole group with it, silently, with the object still reading as `Valid`.
 
 ## CI/CD (F6-T4)
 
 Two workflows, both at the **repository root** — the only place GitHub Actions reads them from.
 Until D-117 these lived under `services/chemclaw/.github/`, where nothing executed them.
 
-- `ci.yml` — `make lint type cov` against a real Postgres, the seven validators, and a `chart` job
-  that renders the chart against the Kubernetes schemas (`helm template | kubeconform -strict`).
+- `ci.yml` — `make lint type cov` against a real Postgres, every validator the `ci` target names,
+  and a `chart` job that renders the chart against the Kubernetes schemas and the rules against
+  `promtool` (`helm template | kubeconform -strict`, then `promtool check rules`). **The count is
+  deliberately not written here.** It said "seven" while `ci.yml` ran eight plus `helm-validate`,
+  which is the same failure `CLAUDE.md` records for its own validator list and for the Makefile's
+  target count; `tests/test_repo_map.py` derives the real list from the `ci` target.
 - `image.yml` — on pull requests and `main`, **builds** the multi-target image and smoke-imports
   every component the entrypoint dispatches as a non-root UID, then asserts an unknown component
   exits 64. The component list is derived from the bundles present, so it cannot drift from what

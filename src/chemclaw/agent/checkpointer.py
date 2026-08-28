@@ -96,6 +96,7 @@ import asyncio
 import logging
 from typing import Any, cast, get_origin, get_type_hints
 
+import psycopg
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import (
     ChannelVersions,
@@ -113,6 +114,7 @@ from chemclaw.agent.session_store import _session_dsn
 from chemclaw.agent.state import ChemclawState
 from chemclaw.core.config import settings
 from chemclaw.core.db import register_pool, unregister_pool
+from chemclaw.core.metrics_bridge import degraded
 
 logger = logging.getLogger(__name__)
 
@@ -242,11 +244,47 @@ class SchemaStampedSaver(AsyncPostgresSaver):
         metadata: CheckpointMetadata,
         new_versions: ChannelVersions,
     ) -> RunnableConfig:
-        """Write the checkpoint with this build's first-party channel names in its metadata."""
+        """Write the checkpoint with this build's first-party channel names in its metadata.
+
+        **The `psycopg.Error` translation is the same one `core/db.connection()` makes, and it is
+        here because this pool is the one that does not go through it.** `api/runner._classify`
+        decides what a chemist is told from the exception's *type*, and it tests `ConnectionError`
+        and `TimeoutError` — which `psycopg_pool.PoolTimeout` is neither (measured: its MRO is
+        `PoolTimeout → OperationalError → DatabaseError → Error → Exception`). `core/db.py`
+        translates for exactly that reason at both its connect paths; the checkpointer's autocommit
+        pool bypasses them by design (the module docstring's three reasons), so the one Postgres
+        pool that is not `core/db`'s was the one whose outage told the chemist "internal error, do
+        not retry" — about the most retryable failure this system has.
+
+        **Counted before it is re-raised, because nothing counted a checkpoint write failure at
+        all.** Mid-turn this is silent loss of the turn's state: the graph carries on in memory, and
+        whatever the turn had accumulated cannot be resumed. `degraded` is the shape every other
+        swallow in this repository uses — except that this one does not swallow. The write did not
+        happen, so the caller must still fail; what `degraded` buys is that
+        `chemclaw_degraded_total{subsystem="checkpointer"}` moves before it does.
+
+        Raises:
+            ConnectionError: The checkpoint could not be written. Deliberately the same type
+                `core/db.py` raises, so a caller classifying a database outage cannot get a
+                different answer depending on which pool the statement went through.
+        """
         stamped = cast(
             CheckpointMetadata, {**metadata, STATE_CHANNELS_KEY: list(FIRST_PARTY_CHANNELS)}
         )
-        return await super().aput(config, checkpoint, stamped, new_versions)
+        try:
+            return await super().aput(config, checkpoint, stamped, new_versions)
+        except psycopg.Error as exc:
+            thread_id = (config.get("configurable") or {}).get("thread_id", "")
+            degraded(
+                logger,
+                "checkpointer",
+                "could not write turn state for session %s: %s",
+                thread_id,
+                type(exc).__name__,
+            )
+            raise ConnectionError(
+                f"checkpointer write failed for session {thread_id!r}: {exc}"
+            ) from exc
 
     async def aget_tuple(self, config: RunnableConfig) -> CheckpointTuple | None:
         """Load the checkpoint, refusing one that predates a channel this build declares.

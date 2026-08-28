@@ -142,24 +142,50 @@ def test_a_job_that_fails_inside_the_wait_is_framed_wherever_it_was_awaited() ->
     assert "2-methyltetrahydrofuran" in str(caught.value)
 
 
-def test_both_awaits_go_through_the_framing_function() -> None:
+# The functions in `connectors/jobs.py` whose whole purpose is to turn a failed workflow result
+# into a framed, readable cause. An `await handle.result()` anywhere else is the defect this file
+# exists for: a raw `WorkflowFailureError` reaching a caller that renders it as "the job failed".
+#
+# `failed_job_reason` joined `_await_briefly` on 2026-08-27. It is not a loosening — it is the same
+# walk, extracted so the *status* path can render a cause too. Measured before it existed, a failed
+# job polled through `get_durable_job_status` answered `summary=None, result={}`, while the two
+# other collectors both rendered the reason; that tool's docstring tells the model to poll, so the
+# one surface with no cause was the primary one.
+_FRAMES_A_FAILED_RESULT = frozenset({"_await_briefly", "failed_job_reason"})
+
+
+def test_every_workflow_result_await_frames_its_failure() -> None:
     """Structural, because the defect was a *missing call site* rather than a wrong one.
 
     A behavioural test can only cover the call sites it knows about; this asks the module whether
-    anything awaits a workflow result outside `_await_briefly`, which is the property that made
-    the re-joined branch wrong for a year.
+    anything awaits a workflow result outside the functions that frame the failure, which is the
+    property that made the re-joined branch wrong for a year.
+
+    Checked against the *enclosing function* rather than against a set of awaited attribute names.
+    That is stricter than the shape it replaces, not looser: the old check asserted that `result`
+    appeared nowhere in the module's awaited attributes at all, so it could only ever be satisfied
+    by there being exactly one framing function, and adding a second — however correct — read as a
+    regression. Naming the enclosing functions says what the rule actually is.
     """
     tree = ast.parse((_SRC / "connectors" / "jobs.py").read_text(encoding="utf-8"))
-    awaited = {
-        node.value.func.attr
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Await)
-        and isinstance(node.value, ast.Call)
-        and isinstance(node.value.func, ast.Attribute)
-    }
-    assert "result" not in awaited, (
-        "a workflow result is awaited outside `_await_briefly`, so its failure framing is optional "
-        "again — put the await inside `_await_briefly` instead"
+    unframed: list[str] = []
+    for parent in ast.walk(tree):
+        if not isinstance(parent, ast.AsyncFunctionDef | ast.FunctionDef):
+            continue
+        if parent.name in _FRAMES_A_FAILED_RESULT:
+            continue
+        for node in ast.walk(parent):
+            if (
+                isinstance(node, ast.Await)
+                and isinstance(node.value, ast.Call)
+                and isinstance(node.value.func, ast.Attribute)
+                and node.value.func.attr == "result"
+            ):
+                unframed.append(f"{parent.name}:{node.lineno}")
+    assert not unframed, (
+        f"a workflow result is awaited at {unframed}, outside the functions that frame its "
+        f"failure ({sorted(_FRAMES_A_FAILED_RESULT)}) — so a raw WorkflowFailureError reaches the "
+        "caller and its cause is rendered as nothing. Await it inside one of those instead."
     )
 
 
