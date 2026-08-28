@@ -2585,8 +2585,8 @@ def test_a_connector_pod_outlives_the_call_it_may_be_holding() -> None:
 
     `calc_sampling_timeout_seconds` (14400 s) is excluded deliberately and the exclusion is checked:
     the two CREST searches it bounds are reachable only from `connectors/calc/activities.py`, which
-    runs on a Temporal *worker* pod under `chemclaw.workerGracePeriod` with the broker's retry
-    behind it, never from a connector server's synchronous tool surface.
+    runs on a Temporal *worker* pod under the chart's workerGracePeriod helper, with the broker's
+    retry behind it, never from a connector server's synchronous tool surface.
     """
     from chemclaw.core.config import settings
 
