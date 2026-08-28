@@ -212,6 +212,17 @@ def test_prose_is_left_to_the_bare_numbers() -> None:
     assert returned_values("the pKa is about 4.76") == [4.76]
 
 
+def test_a_pathological_nesting_costs_the_labels_and_not_the_turn() -> None:
+    """`json.loads` raises `RecursionError` at ~1000 levels, and that is not a `ValueError`.
+
+    Left uncaught it escapes the trace producer and ends the turn's stream — so a result nobody
+    could have rendered anyway would cost the chemist the answer. Labels are a rendering; the
+    figures are still on the wire in `numbers`, which reads this with a regex and is unaffected.
+    """
+    deep = "[" * 5000 + "]" * 5000
+    assert labelled_values(deep) == []
+
+
 def test_a_boolean_is_not_a_quantity() -> None:
     """`bool` is an `int` in Python, and "converged 1" is a number nobody computed."""
     assert [v.label for v in labelled_values('{"converged": true, "energy": -35.5}')] == ["energy"]

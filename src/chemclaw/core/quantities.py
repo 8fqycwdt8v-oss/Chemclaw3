@@ -130,7 +130,12 @@ def labelled_values(text: str) -> list[Quantity]:
     """
     try:
         parsed = json.loads(text)
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, RecursionError):
+        # `RecursionError` is not a `ValueError`, and `json.loads` raises it at about 1000 levels
+        # of nesting — measured, not assumed. A tool result is arbitrary text, so that is reachable
+        # by a pathological payload, and without this line it escapes `ToolCallTrace.returned` and
+        # ends the turn's stream. The failure mode has to be "this result has no names", never
+        # "this turn has no answer": labels are a rendering, and no rendering is worth a turn.
         return []
     seen: dict[tuple[str, float], Quantity] = {}
     for quantity in _walk(parsed, prefix="", depth=0):
