@@ -417,7 +417,16 @@ class ConnectorJobWorkflow:
         is a question the `except` clause has to be able to ask. Instance state rather than a
         module global because it is per *execution*, and it is deterministic under replay — the
         instance is rebuilt and the same sequence of awaits re-runs, so the flag re-reaches the
-        same value at the same point in history.
+        same value at the same point in history. Checked rather than argued: both endings of this
+        workflow were replayed through `temporalio.worker.Replayer` against a live broker on
+        2026-08-28 with no non-determinism. That check is **not** in the suite, and deliberately:
+        a test that runs a workflow and then replays the history it just produced compares code
+        against a history that same code wrote, so the two agree by construction — measured, an
+        extra `await self._record_run(record)` injected into `_finish` replayed clean. Detecting a
+        code-versus-history mismatch needs an *archived* history, which is a CI job rather than a
+        unit test. What the suite holds instead is the effect
+        (`test_a_run_that_fails_after_recording_is_not_recorded_a_second_time`), which does go red
+        when the guard is removed.
         """
         self._recorded = False
 
