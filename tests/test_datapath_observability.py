@@ -196,12 +196,28 @@ def test_a_starved_source_reads_as_zero_rather_than_as_absent() -> None:
     leg that contributes and survives nothing is indistinguishable from a healthy one. Seeding the
     kept series at zero is what gives the ratio a denominator at the moment it matters; without it
     the starved source would simply be missing from the metric.
+
+    **Asserted as a delta and a presence, because the counter is process-global and this used to
+    assert an absolute.** `METRICS` lives for the pytest process, so any earlier test that books a
+    `lexical` chunk makes `== 0.0` false about a run in which nothing is wrong — and one does:
+    `tests/test_hybrid_retrieval.py::test_truncation_is_fair_across_sources` sweeps a fake `lexical`
+    source and keeps eight. Reproduced on unmodified code at `ee1455c` by naming the two files in
+    that order: `assert 8.0 == 0.0`. Alphabetical collection puts this file first, which is why a
+    whole-suite run never showed it and a targeted one did — the assertion was true of a collection
+    order rather than of the behaviour under test. The two halves the name promises are that the
+    series is *present* and that this call added *nothing* to it; neither is a statement about what
+    the rest of the run did.
     """
     graph_hit = _chunk("graph")
+    before_graph = _series_or_absent("chemclaw_evidence_source_kept_total", source="graph")
+    before_lexical = _series_or_absent("chemclaw_evidence_source_kept_total", source="lexical")
+
     record_kept_chunks([graph_hit], handed=[("graph", [graph_hit]), ("lexical", [])])
 
-    assert _series("chemclaw_evidence_source_kept_total", source="graph") >= 1.0
-    assert _series("chemclaw_evidence_source_kept_total", source="lexical") == 0.0
+    assert _series("chemclaw_evidence_source_kept_total", source="graph") - before_graph == 1.0
+    # Present in the exposition (`_series` raises if it is not) and unmoved: booked at zero rather
+    # than left out of the ratio's denominator, which is the whole claim in the name.
+    assert _series("chemclaw_evidence_source_kept_total", source="lexical") == before_lexical
 
 
 @pytest.mark.anyio
