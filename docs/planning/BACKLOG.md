@@ -98,23 +98,6 @@ topic).
       for the audit trail, where that question can be answered. What stays open is unchanged: the
       string is still the caller's to choose.
 
-- [ ] **The per-round campaign record is unbounded and best-effort** — [S], both halves found by
-      reviewing `D-2026-08-27-a-bound-that-multiplies-…` after it merged. (a) Each round's row
-      snapshots the *cumulative* history, so N rounds store a triangular number of observations:
-      measured at 173 B/observation, a 500-round batch-1 campaign holds **22.19 MB** against the
-      terminal write's 87.4 kB (254x), and 87.45 MB at batch 4. `retention.py` refuses to prune
-      `bo_campaigns` and `bo_suggestions` cascades from it, so nothing reclaims it. The snapshot is
-      what makes an interrupted campaign resumable, so the fix is not "store less per row" but
-      "record every Nth round", trading a bounded number of lost rounds for an N-fold reduction.
-      **Trigger:** the first deployment that runs durable campaigns at all — the capability map
-      records that none ever has, which is why this is [S] and not urgent. (b) The write is
-      best-effort: `record_suggestion` swallows `_TRANSIENT_WRITE_FAILURES` and returns normally,
-      so the activity succeeds on a round that never landed and Temporal never retries it. Making
-      the durable path's guarantee unconditional means letting that caller opt out of the swallow,
-      which is a change to a contract the inline tool depends on.
-
-## 2 — Answers that are wrong without saying so
-
 - [ ] **The fingerprint index is keyed by source and the citation is not, so two sources collapse
       to one note id** — [M], and it is the half `D-2026-08-27-a-fingerprint-is-keyed-by-its-source`
       deliberately left. Migration 063 made the write side `(source, id)`, which is what stops one
@@ -256,8 +239,21 @@ topic).
       `retention._DELETE_SESSIONS` takes `session_owners` then `session_turns`. The window is narrow
       — the route claims the live lease first and the prune re-checks it inside the DELETE — but a
       retention statement holding the owner row microseconds before the route's claim lands can
-      deadlock, and Postgres aborts one side. Worth ordering the two consistently rather than
-      arguing the window shut.
+      deadlock, and Postgres aborts one side.
+
+      **"Order the two consistently" was examined on 2026-08-28 and is not available**, which is
+      what this row now records instead of an instruction that cannot be followed. Each order is
+      required by its own invariant. Erasure and the single-session delete must remove
+      session-scoped rows *before* `session_owners`, because that table is the only way to find
+      which sessions were the person's — reversing it strands the rows rather than deleting them
+      (measured: `session_messages`, `session_events` and `checkpoints` each keep a row).
+      `_DELETE_SESSIONS` must take the ownership row *first*, because the lease deletion reads that
+      DELETE's `RETURNING` — which is what makes "a lease goes only if its ownership row went" true
+      rather than intended; deleting leases first would collect the lease of a live turn whose
+      ownership row the re-check then spares. Reversing either side trades a deadlock window for a
+      correctness bug, and the deadlock is one statement wide, self-healing on the retention side
+      (a Temporal activity retries) and has not been reproduced. **Keep both orders; the row stays
+      open only as the record that the obvious fix was tried and rejected.**
 
 - [ ] **`LEDGER_SOURCE` is a constant where the schema documents a registry source name** — [S].
       `ord_adapter.LEDGER_SOURCE = "eln-ord"` is hardcoded while `ingest_rejections.source` is
@@ -265,12 +261,6 @@ topic).
       sources would share one bucket and mis-attribute each other's refusals. The guarding test
       reads this repository's manifests, so a site adding a second ORD source fails the test rather
       than the code taking the name as an argument.
-
-- [ ] **Unconsumed digests are unbounded** — [S]. `digest-<owner>` has no `session_owners` row and
-      retention prunes `session_events` only where `consumed_at IS NOT NULL`, so a subscriber who
-      never calls `GET /digests` accumulates one row per subscription per cadence forever. Stated in
-      the digest docstring as deliberate, and worth an operator-visible bound now that the feature
-      is reachable at all.
 
 - [ ] **Two suite runs against one database corrupt each other's turn claims** — [S], environmental
       but real. `tests/test_api_sessions.py` uses a fixed session id, and a concurrent run's
@@ -340,7 +330,9 @@ topic).
       `durable/memory_jobs.py:82-86` calls `fetch_new_entries(datetime.min.replace(tzinfo=UTC))` on
       every ingest half inside `read_corpus`, so each of the three memory jobs (`build_campaign_notes_activity`,
       `build_playbook_notes_activity`, `build_optimization_notes_activity`) walks the whole record
-      from the beginning of time, and `all_reactions()` is called once per activity. On the two
+      from the beginning of time, once per activity. (This sentence also named `all_reactions()`,
+      which exists nowhere in `src/` — a reader following the anchor found nothing and had no way to
+      tell whether the row or the tree was wrong.) On the two
       file-drop exports this costs nothing; against a real warehouse ELN it is a full table scan
       per activity per scheduled run. `ElnAdapter` (`ingest/eln/adapter.py:128`) has exactly two
       methods and neither is a fetch-by-id, so there is no cheaper read to reach for — closing this
@@ -407,6 +399,32 @@ topic).
       reads: the composite half of the path was inert for a release and no test noticed, because
       every test started at a projector rather than at a hook. A live target is the only thing that
       would have made it obvious.
+
+      **And attaching one opens a data-protection question this repository cannot answer for it**
+      (found 2026-08-28, with the erasure sweep). `schema/result-store/001_core.sql` gives the
+      external store a `calculation_publication` table with its own `actor` and `session_id`
+      columns and an index on `actor`. `agent/leaver.py` reaches a database this system owns; it
+      cannot reach that one, and no ADR says who does. The outbox row on this side is now counted
+      and named in the erasure report as retained (`_RETAINED_IN_PAYLOAD`), so an operator sees
+      that the receipt stays — but the copy downstream is somebody else's sweep, and the first
+      deployment to point at a real store inherits the obligation. Settle it with that
+      deployment, not before: the answer depends on whose database it is.
+- [ ] **Five tables still say "nothing bounds it, and no decision is on record"** — [M].
+      `durable/retention.py`'s `_NOT_PRUNED` is the register that makes this visible, and it is
+      doing its job: it names every table in the schema and does not invent an answer where none was
+      taken. Eight entries carried that wording; the 2026-08-28 erasure pass closed three of them
+      (`note_proposals`, `plan_approvals`, `turn_costs` — all three are kept through a data-subject
+      erasure, so the decision *was* on record one module over, and a derived test now couples the
+      two registers). The remaining five are `molecule_fingerprints`, `reaction_fingerprints`,
+      `user_preferences`, `predictions` and `measurements`, plus a sixth question of a different
+      kind: `tool_result_blobs` has a window and it ships at 0 "as a deliberate uniformity rather
+      than a considered policy for this table", which `retention.py` itself flags as the
+      highest-volume table in the set.
+      Each needs its own answer rather than one sweep — a fingerprint is derived and rebuildable but
+      expensive to rebuild, a preference is the person's and goes on erasure rather than on a clock,
+      and `predictions`/`measurements` are the calibration ledger nothing has yet filled. What is
+      owed is five decisions, not five `DELETE`s, and the register is where each belongs.
+
 - [ ] **Nothing has measured how many rows a real corpus produces** — [M]. The volume risk named in
       `D-2026-08-25`: `cached_compute` publishes on every miss, and a conformer search projects one
       record with ~47 conformer rows plus their structures. Before publishing is enabled by default

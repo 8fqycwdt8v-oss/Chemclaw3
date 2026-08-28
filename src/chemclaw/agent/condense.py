@@ -575,7 +575,7 @@ async def condense_protocols(
 
     `asyncio.Semaphore` rather than `durable.orchestrator.fan_out`, which starts child *workflows*
     and is unreachable from a tool. The corpus-scale case is already served by
-    `OptimizationSynthesisWorkflow`, whose map is fully deterministic.
+    `OptimizationCampaignWorkflow`, whose map is fully deterministic.
 
     Args:
         protocols: The whole protocols to condense, in the order they should be compared.

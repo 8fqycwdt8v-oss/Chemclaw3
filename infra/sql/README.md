@@ -23,9 +23,12 @@ construction. See the note at the bottom.
 ## The tables
 
 One row per table. **Written by** names the module that owns its writes — the store, not every
-caller. **Disposal** is what bounds its growth, and a blank there means nothing does; the
-`docs/planning/BACKLOG.md` row for the tables retention neither prunes nor refuses is the record of
-which those are.
+caller. **Disposal** is what bounds its growth, and a blank there means nothing does. The register
+of record is `durable/retention.py`'s `_NOT_PRUNED`, which names **every** table in this schema and
+what bounds it — including, in its own words, the ones where nothing does and no decision is on
+file. (This sentence used to delegate to a `docs/planning/BACKLOG.md` row instead. That row was
+closed and deleted, as the rules for that file require, and the delegation outlived it — so the
+column an operator reads before writing a cleanup script pointed at nothing.)
 
 `tests/test_schema_inventory.py` checks this table against the SQL on disk, because an inventory
 nobody verifies is read, believed, and wrong — the only other table inventory in this repository
@@ -64,15 +67,15 @@ the pair applies in filename order and neither shadows the other.
 | `session_turns` | 018 | `agent/session_store.py` | released at turn end, and a lease keyed by `session_id` is overwritten in place rather than duplicated, so it does not accumulate. The lease a crashed worker never released is swept with its session's `session_owners` row, in the same transaction; a **live** lease is never touched |
 | `artifact_blobs` | 019 | `science/calc/postgres_artifacts.py` | `durable/artifact_eviction.py`, by idle window and size budget (both off by default) |
 | `calculation_artifacts` | 019 | `science/calc/postgres_artifacts.py` | cascades from `artifact_blobs` |
-| `plan_approvals` | 020 (+034) | `agent/plan_approval_store.py` | — (consumed rows are marked, not removed) |
+| `plan_approvals` | 020 (+034) | `agent/plan_approval_store.py` | refused: kept through erasure (consumed rows are marked, not removed) |
 | `job_records` | 023 (+033, 049, 055, 057, 061) | `durable/job_record_store.py` | **refused**: the table exists because a durable run's result used to expire with Temporal's history and take a campaign's evaluation record with it (D-157) |
 | `observations` | 025 (+062 index) | `memory/observations.py` | stale rows retired by status, not deleted |
-| `note_proposals` | 027 (+036, +058) | `kg/proposal_store.py` | — |
+| `note_proposals` | 027 (+036, +058) | `kg/proposal_store.py` | refused: kept through erasure |
 | `measurements` | 030 | `science/calc/calibration.py` | — |
-| `bo_campaigns` | 031 | `science/bo/campaign_record_store.py` | — |
+| `bo_campaigns` | 031 | `science/bo/campaign_record_store.py` | refused: kept through erasure |
 | `bo_suggestions` | 031 (+037) | `science/bo/campaign_record_store.py` | cascades from `bo_campaigns` |
 | `audit_anchors` | 032 | — (retired with the audit hash chain; nothing writes it) | never — the table is empty and kept only because the schema is forward-only |
-| `turn_costs` | 033 (+060 `outcome`/`error_code`/`model`/counts/`ttft_seconds`, +069 `compacted`/`context_unreducible`) | `agent/turn_cost_store.py` | — |
+| `turn_costs` | 033 (+060 `outcome`/`error_code`/`model`/counts/`ttft_seconds`, +069 `compacted`/`context_unreducible`) | `agent/turn_cost_store.py` | refused: kept through erasure |
 | `document_files` | 037 (+040, 041) | `ingest/documents/index.py` | `ingest/documents/sync.py`, mark-and-sweep: rows a *complete* crawl did not see are removed, so a file deleted from the share leaves the index. Never swept on an incomplete crawl — an unmounted share and an empty one look identical |
 | `document_chunks` | 037 (+038, 040, 041) | `ingest/documents/index.py` | cascades in effect from `document_files`: the same sweep deletes any *cutting* — `(doc_id, chunking_key)` — no remaining file row claims, and `upsert` applies the identical predicate to the documents it writes. Derived and rebuildable — dropping both tables and re-running the sync reconstructs them |
 | `tool_result_blobs` | 042 | `api/tool_results.py` | `durable/retention.py`, by `created_at` (`retention_tool_results_days`). 0 by default like every other window, so **an operator who has not stated one lets this grow** — and at up to a row per tool call it grows fastest of the three. It holds no record of anything (the answers are in `calculation_results` and `job_records`), so a plain age cutoff is the whole policy it needs |

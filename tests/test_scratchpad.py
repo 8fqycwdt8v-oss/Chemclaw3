@@ -28,6 +28,7 @@ from chemclaw.agent import checkpointer as ckpt
 from chemclaw.agent import scratchpad
 from chemclaw.agent.scratchpad import (
     MEMORY_ROOT,
+    STORE_TABLES,
     filesystem_permissions,
     memory_namespace,
     memory_prefix,
@@ -360,3 +361,39 @@ def test_closing_the_checkpointer_drops_the_store_that_sits_on_its_pool() -> Non
         return scratchpad._store
 
     assert asyncio.run(_run()) is None
+
+
+def test_the_store_table_list_is_derived_from_upstream_not_asserted_against_itself() -> None:
+    """`STORE_TABLES` is hand-written, and the checkpointer's twin of it is not. This is the parity.
+
+    `CHECKPOINT_TABLES` has had a derived proof since the erasure sweep was written
+    (`tests/test_message_migration.py`): the tables `AsyncPostgresSaver.setup()` creates are read
+    off upstream's own migration list, so a LangGraph minor adding a fourth one turns that test red
+    rather than letting a departing person's turn state outlive their erasure. The store had no
+    such proof — its two names were typed out in `agent/scratchpad.py` and asserted nowhere against
+    what `AsyncPostgresStore.setup()` actually creates.
+
+    The consequence is the same one, one table over: a new store table would land in the database,
+    escape `agent/leaver.py`'s erasure sweep *and* `durable/retention.py`'s disposal register, and
+    every test in this repository would stay green. The privileges test would go red — for a
+    missing grant, which is a different question with a different reader.
+
+    `store_migrations`/`vector_migrations` are excluded by name for the reason
+    `checkpoint_migrations` is: a ledger of which statements have run holds nobody's memories.
+    """
+    import re
+
+    from langgraph.store.postgres import base
+
+    created = {
+        match.group(1)
+        for statement in (*base.MIGRATIONS, *base.VECTOR_MIGRATIONS)
+        if (match := re.search(r"CREATE TABLE IF NOT EXISTS (\w+)", str(statement)))
+    }
+    assert created, "no CREATE TABLE found in the store's migrations — the parse is broken"
+
+    ledgers = {"store_migrations", "vector_migrations"}
+    assert set(STORE_TABLES) == created - ledgers, (
+        "the memory store creates a table the erasure sweep does not clear (or clears one it does "
+        "not create): " + str(sorted((created - ledgers) ^ set(STORE_TABLES)))
+    )

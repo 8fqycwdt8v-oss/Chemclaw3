@@ -171,6 +171,7 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.agent.session_store import SELECT_SESSION_ROWS
     from chemclaw.core.config import settings
     from chemclaw.core.db import connection, existing_tables
+    from chemclaw.core.logging import log_event
     from chemclaw.durable.heartbeat import beating
     from chemclaw.durable.registry import durable_activity, durable_workflow
 
@@ -248,6 +249,17 @@ _PRUNABLE: dict[str, tuple[str, str]] = {
 # says so rather than inventing an answer, because making the silence visible is this register's
 # job and resolving eight unrelated tables in a retention change is not.
 #
+# **Three of those findings were not findings, and that is worth naming rather than quietly
+# fixing.** `note_proposals`, `plan_approvals` and `turn_costs` each said *no decision is on
+# record* while `agent/leaver.py`'s `_RETAINED` tier had been keeping all three through a
+# data-subject erasure for exactly the reason the four "refused" entries above give — they name who
+# did what to the science. One argument, applied to seven tables in one register and to four of
+# them in the other, which is what two registers describing one set of tables does when nothing
+# joins them. `tests/test_retention.py`'s
+# `test_a_table_the_erasure_keeps_is_not_disposed_of_on_a_clock` is that join: it derives the
+# rule from `_RETAINED` rather than from four names typed out here, so the next table added to
+# the retained tier arrives with a disposal decision already made.
+#
 # Upstream's own version ledgers are out of scope here, and are named so the omission is deliberate
 # rather than another blank: `checkpoint_migrations` and the memory store's
 # `store_migrations`/`vector_migrations` are the `schema_migrations` of libraries this repo does not
@@ -319,11 +331,12 @@ _NOT_PRUNED: dict[str, str] = {
     "predictions": "**nothing bounds it** — the calibration ledger's evidence, where pruning a row "
     "changes a calibration rather than reclaiming space; no decision is on record",
     "measurements": "**nothing bounds it** — the calibration ledger's other half, same question",
-    "note_proposals": "**nothing bounds it** — the PR-gate's record of what was proposed and who "
-    "decided it; no decision is on record",
-    "plan_approvals": "**nothing bounds it** — consumed rows are marked, never removed",
-    "turn_costs": "**nothing bounds it** — what a person's turns cost, the record an operator "
-    "bills against; no decision is on record",
+    "note_proposals": "refused: the PR-gate's record of what was proposed and who decided it — "
+    "`leaver._RETAINED` keeps it through an erasure request, so a clock may not take it either",
+    "plan_approvals": "refused: who authorized a plan to spend anything, kept through erasure "
+    "(`leaver._RETAINED`); consumed rows are marked, never removed",
+    "turn_costs": "refused: what a person's turns cost, the record an operator bills against — "
+    "kept through erasure (`leaver._RETAINED`), so not disposable on a clock",
 }
 
 # The expired threads. The rule is the only correct one and has never changed: **a thread is expired
@@ -452,6 +465,51 @@ _SESSION_SCOPED_ROWS: dict[str, str] = {
     "tool_result_links": "session_id",
     **dict.fromkeys(CHECKPOINT_TABLES, "thread_id"),
 }
+
+
+# Which *other* window has to be set before an ownership row can ever become disposable, per
+# session-scoped table, as the ENV name an operator would set.
+#
+# **The dependency is invisible at the point where it bites, which is why it is written down.**
+# `_untouched_arms` refuses an ownership row while anything in `_SESSION_SCOPED_ROWS` still holds a
+# row for that session, and each of those tables empties on a window of its own. `tool_result_links`
+# is the sharp case: it has no window and no DELETE grant, so a link row disappears only behind its
+# blob, on `CHEMCLAW_RETENTION_TOOL_RESULTS_DAYS` — which defaults to 0 like every other window. So
+# a deployment that states a conversation policy and nothing else disposes of **no session that ever
+# called a tool**, for as long as it runs, and the sweep reports a clean pass every night while
+# doing it. That is a silence rather than a failure, and this map is what turns it into a line an
+# operator can read.
+_OWNERSHIP_DEPENDENCIES: dict[str, tuple[str, str]] = {
+    "session_messages": ("session_messages", "CHEMCLAW_RETENTION_SESSION_MESSAGES_DAYS"),
+    "session_events": ("session_events", "CHEMCLAW_RETENTION_SESSION_EVENTS_DAYS"),
+    "tool_result_links": ("tool_result_blobs", "CHEMCLAW_RETENTION_TOOL_RESULTS_DAYS"),
+    **dict.fromkeys(CHECKPOINT_TABLES, ("checkpoints", "CHEMCLAW_RETENTION_CHECKPOINTS_DAYS")),
+}
+
+
+def unwindowed_ownership_dependencies(present: set[str]) -> list[str]:
+    """The settings that must also be set before any session holding such a row can be forgotten.
+
+    Public because it answers a deployment question — "why is `session_owners` not shrinking?" —
+    and the answer is a list of ENV names rather than a stack trace. Derived from
+    `_SESSION_SCOPED_ROWS` so it cannot drift from the arms that actually hold the row back.
+
+    Args:
+        present: Which session-scoped tables exist on this connection's search path; an absent one
+            holds nothing and so blocks nothing.
+
+    Returns:
+        The ENV names, sorted and deduplicated, whose window is 0 while their table exists.
+    """
+    unset: set[str] = set()
+    for table in present:
+        dependency = _OWNERSHIP_DEPENDENCIES.get(table)
+        if dependency is None:
+            continue
+        windowed_table, env = dependency
+        if _window_days(windowed_table) == 0:
+            unset.add(env)
+    return sorted(unset)
 
 
 def _untouched_arms(present: set[str]) -> str:
@@ -803,6 +861,19 @@ async def _prune_session_owners(
     cap = settings.retention_max_sessions_per_pass
     async with conn.cursor() as cur:
         present = await existing_tables(cur, set(_SESSION_SCOPED_ROWS))
+        # Said once per pass, before the query rather than after a disappointing count: a zero here
+        # means "nothing was disposable", and an operator cannot tell that from "nothing is left".
+        blocked_by = unwindowed_ownership_dependencies(present)
+        if blocked_by:
+            log_event(
+                logger,
+                "retention.ownership_blocked",
+                "session_owners can only forget sessions that never wrote to the tables these "
+                "unset windows govern: %s",
+                ", ".join(blocked_by),
+                level=logging.WARNING,
+                unset_windows=", ".join(blocked_by),
+            )
         arms = _untouched_arms(present)
         await cur.execute(_DISPOSABLE_SESSIONS.format(arms=arms), (days, cap + 1))
         found = [str(row[0]) for row in await cur.fetchall()]

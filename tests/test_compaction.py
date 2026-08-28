@@ -83,6 +83,11 @@ def _thread(groups: int, *, with_tool_calls: bool = False, filler: str = "") -> 
     ]
 
 
+def _groups(messages: list[AnyMessage]) -> int:
+    """How many conversation groups survived — one per human message, the unit the window cuts."""
+    return sum(1 for message in messages if isinstance(message, HumanMessage))
+
+
 def test_the_window_is_inert_below_the_budget() -> None:
     """Under the trigger nothing is dropped — "reduce when applicable", not reduce always.
 
@@ -172,6 +177,61 @@ def test_the_window_bounds_the_thread_at_the_shipped_defaults() -> None:
         f"the surviving thread starts at {type(messages[0]).__name__}, not a human message"
     )
     assert calls_without_adjacent_results(messages) == set()
+
+
+def test_the_budget_is_the_control_at_the_shipped_defaults() -> None:
+    """Raising `agent_context_token_budget` raises what the model is allowed to keep.
+
+    **This is the property the shipped defaults did not have, and the reason `keep` now ships at
+    0.** The window cuts `max(by_tokens, by_groups)` — the *larger* cut — so a `keep` low enough to
+    bind makes the budget a trigger rather than a target, and the crossover is `budget / keep`:
+    8,333 tokens per group at the old 100,000/12, about 33 kB of prose in one turn. Ordinary turns
+    are nowhere near that, and the lossless edit ordered before this one pushes older groups further
+    below it still, so the group arm won essentially always. Measured over the thread below at the
+    old default: 1,944 tokens survived a 100,000 budget, and sweeping the budget from 10,000 to
+    300,000 changed that by nothing at all.
+
+    A knob that cannot move the thing it is named for is the defect this module exists to correct,
+    one level up — so it is asserted rather than described. Two budgets, one thread, strictly more
+    context at the larger one.
+    """
+    small, large = 20_000, 80_000
+    keep = settings.agent_keep_last_conversation_groups
+
+    kept = []
+    for budget in (small, large):
+        # 400 groups of ~315 tokens: well over both budgets, and each group far under the
+        # `budget / keep` crossover that decided which arm won at the old defaults.
+        messages = _thread(400, filler="x" * 1_200)
+        assert _count(messages) > large, "the fixture is inside both budgets; it proves nothing"
+        KeepLastConversationGroupsEdit(trigger=budget, keep=keep).apply(
+            messages, count_tokens=_count
+        )
+        assert _count(messages) <= budget, "the window did not bound at this budget"
+        kept.append(_count(messages))
+
+    assert kept[1] > kept[0], (
+        f"a 4x budget kept {kept[1]} tokens against {kept[0]} — the budget is not the control, "
+        "which is what a group floor low enough to bind does to it"
+    )
+
+
+def test_a_group_floor_still_binds_when_a_deployment_asks_for_one() -> None:
+    """`agent_keep_last_conversation_groups` ships at 0 and is not gone.
+
+    The arm is intact and a deployment that wants the model to see fewer *turns* than the budget
+    would allow sets it. Both halves are asserted, because "we turned it off" and "we removed it"
+    are different changes and only one of them was made.
+    """
+    budget = 80_000
+    floor = _thread(400, filler="x" * 1_200)
+    KeepLastConversationGroupsEdit(trigger=budget, keep=4).apply(floor, count_tokens=_count)
+    assert _groups(floor) == 4, "the floor arm did not bind when it was asked for"
+    assert _count(floor) < budget, "the fixture's four groups already fill the budget"
+
+    unfloored = _thread(400, filler="x" * 1_200)
+    KeepLastConversationGroupsEdit(trigger=budget, keep=0).apply(unfloored, count_tokens=_count)
+    assert _groups(unfloored) > 4, "keep=0 left no more than the explicit floor did"
 
 
 @pytest.mark.parametrize("groups", [1, 3, 12, 25])

@@ -1187,3 +1187,23 @@ acceptable, re-run the suspect *with the same seed and load*, or grep the partia
 index a progress percentage into a collection listing. And never let "flake" be the conclusion of a
 chain that starts with a guess about identity; it is the one classification that requires knowing
 exactly which test, since the whole claim is about that test's history.
+
+## 2026-08-28 — a subagent's baseline claim is a claim, and the baseline is cheap
+
+Four parallel audits produced unusually good work on this branch — three of the four defects they
+found were real, verified against a live database, and are now closed with tests that go red
+without the fix. One claim was not: an agent reported a named test as "failing on a clean
+baseline too — pre-existing, unrelated". I had started `make lint type test` on the untouched tree
+before any of them reported, and it came back **5,444 passed, 11 skipped, exit 0**.
+
+Had I not had that run in hand, the cheap move would have been to believe it — it is exactly the
+shape of a true statement, it names a real test, and accepting it costs nothing in the moment. What
+it would have cost later is a whole class of failure classified away in advance: every subsequent
+red in that file would have read as "the known pre-existing one".
+
+The rule is not "distrust subagents" — this session's evidence runs the other way. It is:
+**take the baseline before the first edit, always, and let it be the thing that adjudicates any
+claim about what was already broken.** It costs one backgrounded command started at the moment the
+work begins, and it is the only artifact that can tell "my change broke this" from "this was
+already broken" without argument. Related to the 2026-08-27 lesson about running the gate rather
+than a subset of it: same command, one run earlier.
