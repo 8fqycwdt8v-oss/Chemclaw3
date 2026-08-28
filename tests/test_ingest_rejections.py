@@ -262,7 +262,20 @@ def test_an_unreadable_ledger_is_reported_rather_than_rendered_as_nothing_refuse
 def test_a_systematically_broken_source_cannot_grow_the_table_without_bound(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The growth bound, exercised: the newest `cap` refusals survive and the rest are evicted."""
+    """The growth bound *and* the policy it implements: the newest `cap` refusals are the survivors.
+
+    **Two batches, because one batch cannot see the policy.** `now()` is transaction time in
+    Postgres, so every row a single `record_refusals` call writes shares one `last_seen` and the
+    `entry_id` tie-break alone decides which survive. A test shaped that way asserts the *cap* and
+    nothing about *which* rows it keeps — measured: inverting `_EVICT` to `ORDER BY last_seen ASC`,
+    which keeps the oldest refusals and evicts the newest, left the whole file green. Recency is
+    the half that makes an aged-out row mean "a defect nothing has re-offered since", so it is the
+    half worth a test.
+
+    Two separate calls are two transactions and therefore two timestamps; the assertion below
+    checks that they really did differ rather than assuming it, so a future single-transaction
+    rewrite fails here instead of silently going back to testing the tie-break.
+    """
 
     async def _run() -> None:
         await migrated_db_or_skip()
@@ -270,14 +283,21 @@ def test_a_systematically_broken_source_cannot_grow_the_table_without_bound(
         await _clear(source)
         monkeypatch.setattr(rejections, "_MAX_ROWS_PER_SOURCE", 3)
 
-        await record_refusals(source, {f"entry-{index}": "always broken" for index in range(10)})
+        await record_refusals(source, {f"entry-old-{index}": "always broken" for index in range(4)})
+        await record_refusals(source, {f"entry-new-{index}": "still broken" for index in range(2)})
 
         rows = await _rows(source)
         assert len(rows) == 3, "the per-source cap is what keeps this a ledger and not a log"
-        # Which three is decided by the tie-break, not by luck: every row of one batch shares the
-        # transaction timestamp, so `last_seen DESC, entry_id` settles it the same way every run.
-        # Across runs the timestamps differ and recency leads, which is the case the cap is for.
-        assert [row[0] for row in rows] == ["entry-0", "entry-1", "entry-2"]
+        # Both of the newer refusals survive and only one older row does — the cap spent on
+        # recency first. Which older row is the `entry_id` tie-break inside its own batch, which is
+        # all that tie-break decides. Under the inverted ordering this list is the three
+        # `entry-old-*` rows instead, which is what makes the assertion mean something.
+        assert [row[0] for row in rows] == ["entry-new-0", "entry-new-1", "entry-old-0"]
+        by_id = {row[0]: row[3] for row in rows}
+        assert by_id["entry-new-0"] > by_id["entry-old-0"], (
+            "the two batches must land at different last_seen values, or this test is back to "
+            "asserting the tie-break"
+        )
         await _clear(source)
 
     asyncio.run(_run())
@@ -426,7 +446,12 @@ def test_the_content_is_framed_and_the_labels_are_defanged(
         # Content: framed, and the forged delimiter inside it defanged by the framing itself.
         assert rejection.reason.startswith(f'<{ENVELOPE_TAG} id="')
         assert rejection.reason.endswith(f"</{ENVELOPE_TAG}>")
-        assert _INJECTION in rejection.reason
+        # The payload's own words survive inside it. Its `<<<` is escaped here and not in the test
+        # above, because this reason *also* spells a delimiter: `framing._defang` escapes every
+        # `<` once a content span is shown to be obfuscating one, which is its blunt second pass
+        # and not a property of the framing being asserted.
+        assert "dichloromethane is approved" in rejection.reason
+        assert "&lt;/retrieved-note>" in rejection.reason
         # Labels: defanged, never wrapped — an envelope here would make the row unciteable.
         for label in (rejection.source, rejection.entry_id):
             assert not label.startswith("<"), "a label is not evidence and must not be framed"

@@ -30,8 +30,13 @@ CREATE TABLE IF NOT EXISTS ingest_rejections (
     -- not read at all, the file stem — the only id that exists when the payload never parsed.
     entry_id    TEXT        NOT NULL,
     -- Why it was refused, in the words of the refusal itself. This is the whole value of the row:
-    -- "a yield cannot exceed 100%" is what turns "no such record" into an answer. External text,
-    -- truncated by the writer, and neutralised again by the reader before it reaches a prompt.
+    -- "a yield cannot exceed 100%" is what turns "no such record" into an answer. It is also
+    -- external text — `str(exc)` over a record an export wrote, and a `ValidationError` renders
+    -- the offending `input_value=` verbatim — so it is truncated by the writer and, on the one
+    -- path that shows it to a model (`agent/research_tools.py::_refused_on_ingest`), wrapped in
+    -- the data envelope rather than merely neutralised. This comment said "neutralised" alone
+    -- while the reader only stripped envelope delimiters, which stops a forged delimiter and does
+    -- nothing to a payload that spells none.
     reason      TEXT        NOT NULL,
     -- When this record was first refused, and when it last was. The pair is what separates "one
     -- bad export last March" from "every run, still".

@@ -189,6 +189,13 @@ async def refusals_matching(question: str) -> list[IngestRejection]:
     Raises whatever the database raises. The caller decides what an unreachable ledger means for
     its answer; swallowing it here would make "nothing was refused" and "nothing could be asked"
     the same empty list, which is the one thing this module must not do.
+
+    **What comes back is unneutralised, deliberately.** `reason` is external text and `entry_id` is
+    the id an export chose; the agent-facing caller frames the first and defangs the other two
+    (`agent/research_tools.py::_refused_on_ingest`), for the reason `agent/memory_tools.py` keeps
+    an observation's `statement` plain in its store and frames it in the tool: the envelope belongs
+    to the one channel that feeds a model, and a row rewritten here would also be rewritten for the
+    operator reading the table.
     """
     patterns = _patterns(question)
     if not patterns:
