@@ -375,8 +375,8 @@ def test_the_guard_checks_arguments_for_every_connector_tool_this_tree_can_resol
     in-process. A bundle added to this tree now arrives inside the guard rather than beside it.
 
     Left out, and each for a reason no assertion here could invent: a bundle served from
-    `Chemclaw3-mcp` ships no in-tree server module for those bundles, so their signatures are not readable
-    at any price; a generated launcher takes one `params` object, whose fields
+    `Chemclaw3-mcp` ships no in-tree server module for those bundles, so their signatures
+    are not readable at any price; a generated launcher takes one `params` object, whose fields
     `tests/test_storm_behaviour_coverage.py` validates against the model `build_job_tool`
     annotates; and the skills, harness and subagent tools are upstream's.
     """
