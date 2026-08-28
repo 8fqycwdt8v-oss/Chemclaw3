@@ -34,17 +34,41 @@ around what blocks the front door from booting.
 ## Plan
 
 - [x] Reproduce both failures and prove 5/5 with the server and token supplied by hand
-- [ ] `processes.sh` owns `calc`: export `CHEMCLAW_CALC_TOKEN`, start the backend on the port
+- [x] `processes.sh` owns `calc`: export `CHEMCLAW_CALC_TOKEN`, start the backend on the port
       `settings.calc_server_url` names (the address the client actually dials), same
       already-served guard as `chem`/`safety`, and persist the token to `connector-env.sh`
-- [ ] `up.sh` stops starting it: delete `start_calc`, keep `assert_credential_accepted calc`
+- [x] `up.sh` stops starting it: delete `start_calc`, keep `assert_credential_accepted calc`
       after `processes.sh` returns, route `restart calc` to `processes.sh` — the exact shape
       D-2026-08-27 gave `chem`/`safety`
-- [ ] Docs: the four-repo README process/restart tables, the runbook's live-up line
-- [ ] New ADR superseding the "unaffected" row + ledger row
-- [ ] Verify: `make live-down`, then the runbook's sequence verbatim in a clean shell -> 5/5
-- [ ] `make lint type test` green
+- [x] Docs: the four-repo README process/restart tables, the runbook's live-up line
+- [x] New ADR superseding the "unaffected" row + ledger row
+- [x] Verify: `make live-down`, then the runbook's sequence verbatim in a clean shell -> 5/5
+- [x] `make lint type test` green
 
 ## Review
 
-(filled in at the end)
+**Done, and measured at every step rather than argued.**
+
+`make live-up && make live-jobs`, from a torn-down lane and a cleared port with
+`CHEMCLAW_CALC_TOKEN` unset in the environment: **0/5 -> 5/5**. The lane now logs `calc started` /
+`calc ready` itself, and `processes.sh status` lists it beside `chem` and `safety`.
+
+Gate: `make lint` clean, `mypy --strict` clean across 734 files, `make test` **5753 passed, 14
+skipped** in 12m36s against real Postgres — identical to the pre-change baseline taken this
+session, so nothing regressed. The 14 skips are all named by the run: 9 need `helm`, 3 need
+untruncated git history, 2 attempted a real Anthropic call (the environment's `API-KEY` is present
+but the provider refuses it for want of credit).
+
+**What made this hard to see, and is worth carrying forward.** Every signal the lane offers said it
+was healthy — `/readyz` green, `make live-status` complete, no error at bring-up — because the one
+missing server is deliberately not a connector and so is outside everything that probes. The
+failure only exists at job time. D-2026-08-27 reasoned carefully about ownership and still got the
+`live-jobs` row wrong, because it asked what blocks the *front door* from booting and never asked
+what the durable half needs while running. Two dependency questions, one of which nobody had a
+habit of asking.
+
+**Not fixed, deliberately:** the backend has no startup readiness probe, so a misconfigured
+`calc_server_url` is still discovered at job time rather than at bring-up. Argued in the ADR's
+alternatives — the cache means a turn may never dial it, and a probe would make an optional
+dependency mandatory for every process importing the bundle. `CalcServerError` already names the
+cause precisely when it does happen.
