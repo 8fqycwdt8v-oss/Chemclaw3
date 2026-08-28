@@ -266,9 +266,17 @@ def test_the_turn_identity_reaches_the_calculation_backend(
     it, while a two-millisecond property lookup through a connector was fully attributed.
 
     Asserted over the wire, on a served app, for the reason the connector test above says: a header
-    contract is only real if the bytes land. The identity is stamped as a *connection* header here
-    rather than by a per-request hook, which is truthful only because this session is opened per
-    call — the connector's is held for a whole turn, which is why the two differ.
+    contract is only real if the bytes land. Every header asserted below travels on
+    `connectors.identity.turn_identity_hook` — the same hook `connectors/registry.py` installs on a
+    connector's own client — so the two transports do not differ in mechanism, and the origin-strip
+    guard that hook carries covers this one too. The connection headers `open_session` builds are
+    the bearer and nothing else, deliberately: httpx rebuilds a redirect from the previous request's
+    headers and drops only `Authorization`, so connection-borne identity is harvestable by a
+    redirect and hook-borne identity is not. What makes the hook's *ambient* read truthful here is
+    that this session is opened per call, so the identity it reads belongs to one caller.
+    (Measured: with the hook removed this test fails with no `x-chemclaw-*` header reaching the
+    served app at all — the earlier description of a connection header would have passed either
+    way.)
     """
     received: list[dict[str, str]] = []
     server = FastMCP("calc-probe")

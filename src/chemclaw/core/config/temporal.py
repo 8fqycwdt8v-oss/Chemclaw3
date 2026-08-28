@@ -83,18 +83,32 @@ class TemporalSettings(BaseSettings):
     # fault and now says so.
     activity_queue_wait_seconds: float = Field(default=3600.0, gt=0)
 
-    # Execution ceiling on one *scheduled* run (`durable/schedules.py`).
+    # Ceiling on one *scheduled* run (`durable/schedules.py`, as `run_timeout` — see there for why
+    # it cannot be `execution_timeout`, which would bound the whole `continue_as_new` chain).
     #
     # Every Schedule here is `ScheduleOverlapPolicy.SKIP`, which is right — a re-scan that overruns
     # its interval must finish rather than queue a redundant twin — and is exactly why a run that
     # never finishes is worse than a failed one: it skips every subsequent fire of that job family,
-    # indefinitely, and a skipped fire is not an error anywhere. This is the backstop that turns
-    # "silently stopped running" into a failed run visible in `describe_schedules`.
+    # indefinitely, and a skipped fire is not an error anywhere. The ceiling ends that wedge.
     #
-    # A day, because none of these jobs legitimately runs for one and each is resumable: the ELN and
-    # corpus syncs are cursored, retention and the reindex are idempotent, the digest advances a
-    # watermark. So a terminated run loses at most the chunk in flight, and the next fire picks it
-    # up — which is what makes a ceiling safe to state at all.
+    # **It does not make the kill visible, and this comment used to say it did.** `ScheduleHealth`
+    # carries no run outcome and `ScheduleInfo` does not supply one — `recent_actions` names the
+    # workflow and when it started, and a status would cost a `describe` per schedule on the front
+    # door's own event loop. Measured against a live broker: with the ceiling, a schedule whose
+    # every run is killed reports `runs_total` climbing, `last_run` advancing, `running_now` 0 and
+    # `skipped_overlap` 0 — byte-identical to a healthy job, while the wedge it replaces had a
+    # distinctive signature on that surface (`last_run` frozen, `running_now` stuck at 1,
+    # `skipped_overlap` climbing). So the kill is visible in the Temporal UI's per-workflow status
+    # and nowhere else here; surfacing it on `describe_schedules` is an open item.
+    #
+    # A day, because none of these jobs legitimately runs for one, and what a terminated run costs
+    # differs per job rather than being uniformly small: the ELN sync is cursored in `sync_cursors`
+    # and loses at most the chunk in flight; retention, the reindex and the digest are idempotent or
+    # advance a watermark; `label_sync` persists its progress in the stale set. `corpus_sync` and
+    # `document_sync` keep **no** row between runs and say so in their own module docstrings, so a
+    # terminated run of either restarts from its first page — cheap for the stat-only document
+    # crawl, a repeat of the whole drain for a corpus load. That is what makes bounding *one run*
+    # rather than the chain load-bearing rather than a detail.
     schedule_run_timeout_seconds: float = Field(default=86400.0, gt=0)
 
     # Bound on retries for ordinary activities under the shared bad-data retry policy

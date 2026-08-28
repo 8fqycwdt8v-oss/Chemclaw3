@@ -50,6 +50,10 @@ _DURABLE = Path(__file__).resolve().parents[1] / "src" / "chemclaw" / "durable"
 # at all.
 _QUEUE_BOUNDS = {"schedule_to_start_timeout", "schedule_to_close_timeout"}
 
+# The two SDK calls that put an activity task on a queue. `execute_local_activity` is deliberately
+# absent (see `_dispatch_calls`).
+_DISPATCH_NAMES = {"execute_activity", "start_activity"}
+
 
 def _dispatch_calls() -> list[tuple[str, set[str]]]:
     """Every `workflow.execute_activity`/`.start_activity` under `durable/`, with its keywords.
@@ -58,30 +62,50 @@ def _dispatch_calls() -> list[tuple[str, set[str]]]:
     worker's own task, is never dispatched to a queue, and Temporal rejects a schedule-to-start
     timeout on one.
 
-    **The receiver is matched, not only the method name**, and that is not defensive tidying: the
-    walk used to accept any object with an `execute_activity` attribute, and
-    `durable/interceptor.py` — a Temporal *worker* interceptor — delegates down its chain with
-    `self.next.execute_activity(input)`. That call schedules nothing; it is the SDK handing an
-    already-dispatched activity to the next link, and there is no queue wait to bound. Left
-    unnarrowed the rule reported it as an offender, which would have been closed either by an
-    exemption list or by passing a meaningless argument — both of which teach the next reader that
-    the rule is negotiable. Every real dispatch in this tree is written `workflow.execute_activity`
-    (measured: 31 of 31), which is the API this rule is about.
+    **One shape is excluded, rather than one shape allow-listed**, and the difference is what makes
+    the rule hold for code nobody has written yet. `durable/interceptor.py` — a Temporal *worker*
+    interceptor — delegates down its chain with `self.next.execute_activity(input)`. That call
+    schedules nothing; it is the SDK handing an already-dispatched activity to the next link, and
+    there is no queue wait to bound, so it is the one receiver this walk skips.
+
+    The walk used to do the opposite: it required the receiver to be the literal name `workflow`,
+    on the grounds that every real dispatch in this tree is written that way (measured: 31 of 31,
+    still true). That is a fact about today's tree, and this rule exists for tomorrow's. Measured
+    against the merged tree, three ordinary spellings walked straight past it, each carrying only a
+    `start_to_close_timeout` and each leaving the suite green: `from temporalio import workflow as
+    wf` then `wf.execute_activity(...)`; `from temporalio.workflow import execute_activity` then a
+    bare `execute_activity(...)`, which is an `ast.Name` and never reached the receiver check at
+    all; and a site under a `durable/` subpackage, which `glob` does not descend into. The floor
+    below cannot see any of them — an unmatched site does not raise the count — so it guards
+    against sites disappearing and is simply orthogonal to a site that was never seen.
     """
     calls: list[tuple[str, set[str]]] = []
-    for path in sorted(_DURABLE.glob("*.py")):
+    for path in sorted(_DURABLE.rglob("*.py")):
         tree = ast.parse(path.read_text())
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
             func = node.func
-            if not isinstance(func, ast.Attribute):
+            if isinstance(func, ast.Attribute):
+                if func.attr not in _DISPATCH_NAMES:
+                    continue
+                # `self.next.execute_activity(...)`: the interceptor chain, not a dispatch.
+                receiver = func.value
+                if (
+                    isinstance(receiver, ast.Attribute)
+                    and receiver.attr == "next"
+                    and isinstance(receiver.value, ast.Name)
+                    and receiver.value.id == "self"
+                ):
+                    continue
+            elif isinstance(func, ast.Name):
+                # `from temporalio.workflow import execute_activity` — a bare call.
+                if func.id not in _DISPATCH_NAMES:
+                    continue
+            else:
                 continue
-            if func.attr not in {"execute_activity", "start_activity"}:
-                continue
-            if not (isinstance(func.value, ast.Name) and func.value.id == "workflow"):
-                continue
-            calls.append((f"{path.name}:{node.lineno}", {kw.arg for kw in node.keywords if kw.arg}))
+            where = path.relative_to(_DURABLE).as_posix()
+            calls.append((f"{where}:{node.lineno}", {kw.arg for kw in node.keywords if kw.arg}))
     return calls
 
 

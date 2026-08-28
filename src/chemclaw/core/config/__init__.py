@@ -294,18 +294,31 @@ class Settings(
                     "max_connections can serve it."
                 )
         if self.calc_backend_max_concurrent_requests:
-            dispatched = self.calc_fleet_worker_processes * self.worker_max_concurrent_activities
+            # Three factors, not two: a solvent screen fans out inside one activity under
+            # `asyncio.Semaphore(calc_screen_max_parallel)` and each branch holds its own
+            # `calc_session` for the whole of its chain, so an activity is not one backend session.
+            # Measured over five solvents with the knob at 1/4/8: 1/4/6 concurrent sessions inside
+            # a single activity. `connectors/calc/compose.py` has exactly two concurrency sites,
+            # both bounded by this one knob and neither nested inside the other, so one extra
+            # factor is the whole correction.
+            dispatched = (
+                self.calc_fleet_worker_processes
+                * self.worker_max_concurrent_activities
+                * self.calc_screen_max_parallel
+            )
             if dispatched > self.calc_backend_max_concurrent_requests:
                 raise ValueError(
                     f"this deployment may dispatch {dispatched} concurrent calculations "
                     f"({self.calc_fleet_worker_processes} calc worker process(es) × "
-                    f"{self.worker_max_concurrent_activities} activities each) against a "
+                    f"{self.worker_max_concurrent_activities} activities each × "
+                    f"{self.calc_screen_max_parallel} media in flight per screen) against a "
                     f"calculation backend declaring "
                     f"{self.calc_backend_max_concurrent_requests}. That backend pins "
                     "OMP_NUM_THREADS=1 and is CPU-bound, so the surplus arrives as thrashing, then "
                     "as heartbeat timeouts, then as retries onto the same pod. Lower "
-                    "worker_max_concurrent_activities or the calc worker replica count, or raise "
-                    "calc_backend_max_concurrent_requests if that server can serve it."
+                    "worker_max_concurrent_activities, calc_screen_max_parallel or the calc worker "
+                    "replica count, or raise calc_backend_max_concurrent_requests if that server "
+                    "can serve it."
                 )
         if self.mid_turn_resume_enabled and (
             self.mid_turn_resume_timeout_seconds >= self.service_turn_timeout_seconds
