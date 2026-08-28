@@ -135,11 +135,13 @@ class SessionOwners(Protocol):
 
     async def list_for_owner(
         self, owner: str | None
-    ) -> list[tuple[str, datetime, datetime, str | None]]:
-        """`(session_id, created_at, updated_at, title)`, newest activity first.
+    ) -> list[tuple[str, datetime, datetime, str | None, str | None]]:
+        """`(session_id, created_at, updated_at, title, profile)`, newest activity first.
 
         Sessions with no messages are not listed — see `_OWNER_LIST` in
-        `chemclaw.agent.session_store` for both that and why the order is `updated_at`.
+        `chemclaw.agent.session_store` for both that and why the order is `updated_at`. `profile`
+        is what `GET /plans/pending` filters on before it reads any checkpoint; `None` means the
+        default profile.
         """
         ...
 

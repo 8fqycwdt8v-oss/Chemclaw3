@@ -673,9 +673,15 @@ class _FakeOwnerStore:
 
     async def list_for_owner(
         self, owner: str | None
-    ) -> list[tuple[str, datetime, datetime, str | None]]:
+    ) -> list[tuple[str, datetime, datetime, str | None, str | None]]:
         rows = [
-            (sid, self.created[sid], self.updated[sid], self.titles.get(sid))
+            (
+                sid,
+                self.created[sid],
+                self.updated[sid],
+                self.titles.get(sid),
+                self.profiles[sid],
+            )
             for sid, own in self.owners.items()
             if own == owner and sid in self.updated
         ]

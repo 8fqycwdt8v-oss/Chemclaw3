@@ -168,6 +168,28 @@ topic).
       completion in the background. The only real fix is a killable subprocess, with pickling and a
       new child-OOM failure mode to classify (~150-250 lines).
 
+- [ ] **A schedule whose every run is killed by the ceiling reads as healthy on
+      `describe_schedules`** — [M]. `durable/schedules.py:364` — `ScheduleHealth` carries `paused`,
+      `last_run`, `runs_total`, `skipped_overlap`, `running_now` and `note`, and no run outcome;
+      `_describe` reads none either, because `ScheduleInfo.recent_actions` names the workflow and
+      when it started and nothing more. Measured against a live broker: a schedule built like
+      `_build_schedule` whose every run is killed reports `runs_total` climbing, `last_run`
+      advancing, `running_now` 0 and `skipped_overlap` 0 — byte-identical to a healthy job, while
+      the wedge the ceiling replaced had a distinctive signature on that same surface (`last_run`
+      frozen, `running_now` stuck at 1, `skipped_overlap` climbing). So the ceiling is a real fix
+      and it moved the failure to a surface that says nothing. Recovering the status costs one
+      `describe` per schedule on the front door's own event loop, which is why it was not taken
+      here; `config/temporal.py` no longer claims otherwise, but
+      `D-2026-08-27-a-start-to-close-timeout-does-not-bound-the-wait.md` still does and wants a
+      superseding ADR — as do three further claims in the pair of 2026-08-27 ADRs that the tree has
+      since falsified or fixed: that "the ELN and corpus syncs are cursored" (`corpus_sync.py:14`
+      and `document_sync.py:213` say in their own words that they keep no `sync_cursors` row), that
+      "a run with no memo stamps nothing" (`CalcJobWorkflow` defaults the memo read to
+      `settings.service_actor_id`, so the durable path delivers `service-account`), and that the
+      queue-bound AST rule "fails on any dispatched activity call with neither queue bound" (it was
+      evadable by an import alias, a direct function import or a subpackage until
+      `tests/test_activity_queue_bound.py` was widened).
+
 ## 4 — Operating it
 
 - [ ] **`/readyz` now waits on Temporal inside a 1-second kubelet probe** — [M], found by the

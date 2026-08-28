@@ -35,7 +35,7 @@ from chemclaw.core.config import settings
 _LAST_SEEN: dict[str, tuple[float, bool]] = {}
 
 
-def record_reachability(connector: str, *, reachable: bool) -> None:
+def record_reachability(connector: str, *, reachable: bool, dialled: bool = False) -> None:
     """Remember what this process just learned about `connector`, for the open path to read.
 
     Called from both directions on purpose. The health sweep is the one that runs on a timer — the
@@ -44,9 +44,21 @@ def record_reachability(connector: str, *, reachable: bool) -> None:
     template activity on a worker) would otherwise have no verdict at all, and because an MCP
     handshake failing is a fact `/healthz` returning 200 cannot see.
 
-    Last writer wins, deliberately: the two observers watch different things and the fresher
-    observation is the one worth acting on.
+    **`dialled` says whether this observation cost a real MCP open, and it is what may restart the
+    breaker's window.** The timestamp is the start of the outage, not the time of the last look at
+    it: a *repeated* unreachable verdict from a cheap prober leaves the existing timestamp alone.
+    Without that, recovery path 2 in this module's docstring is unreachable in the deployment it
+    was written for — the shipped chart probes `/readyz` every ten seconds against a five-second
+    readiness cache and a thirty-second window, so three sweeps re-date the verdict inside every
+    window and it can never expire. Measured on that cadence, scaled: zero dials across sixty turns.
+
+    A *healthy* verdict always wins and always re-dates, from either observer, so recovery path 1 —
+    the sweep readmitting a connector that came back — is untouched. So is a first verdict: the
+    outage has to be dated by whoever notices it first.
     """
+    previous = _LAST_SEEN.get(connector)
+    if not reachable and not dialled and previous is not None and not previous[1]:
+        return
     _LAST_SEEN[connector] = (time.monotonic(), reachable)
 
 

@@ -158,13 +158,16 @@ async def list_sessions(
         # A full page is the only evidence there might be more — asking for one row beyond the
         # ceiling to know for sure would cost every listing an extra row to answer a question the
         # next request answers for free by coming back empty.
-        last_id, _, last_activity, _ = rows[-1]
+        last_id, _, last_activity = rows[-1][:3]
         response.headers[_NEXT_CURSOR] = encode_session_cursor(last_activity, last_id)
     return [
         SessionSummary(
             session_id=session_id, created_at=created_at, updated_at=updated_at, title=title
         )
-        for session_id, created_at, updated_at, title in rows
+        # The profile comes back on the same row and is not a session's *summary* — it is what
+        # `GET /plans/pending` filters on. Dropped here rather than added to `SessionSummary`,
+        # which describes a conversation to a person.
+        for session_id, created_at, updated_at, title, _ in rows
     ]
 
 

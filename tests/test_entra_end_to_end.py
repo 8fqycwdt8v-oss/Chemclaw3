@@ -485,5 +485,12 @@ def test_the_probes_stay_open_while_everything_else_is_closed() -> None:
     with _client() as client:
         for path in ("/healthz", "/readyz", "/metrics"):
             assert client.get(path).status_code in (200, 503), path
-        for path in ("/sessions", "/jobs", "/proposals", "/profiles", "/schedules"):
+        for path in (
+            "/sessions",
+            "/jobs",
+            "/proposals",
+            "/profiles",
+            "/schedules",
+            "/plans/pending",
+        ):
             assert client.get(path).status_code == 401, path

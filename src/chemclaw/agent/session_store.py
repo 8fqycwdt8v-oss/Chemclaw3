@@ -328,8 +328,15 @@ _OWNER_SELECT = "SELECT owner, profile FROM session_owners WHERE session_id = %s
 # statement rather than two that can drift. The casts are not decoration: psycopg sends an untyped
 # NULL, and Postgres cannot infer the type of a parameter that only ever appears beside another
 # parameter.
+#
+# `profile` rides along because it is the one thing about a session that says whether it can be
+# holding an undecided plan at all: the todo list only exists under a harness-enabled profile
+# (`agent/langgraph_agent`), so `GET /plans/pending` skips a session on this column instead of
+# paying a serialized checkpointer read to find nothing. It is already on the row, and one listing
+# both surfaces read is one listing they cannot disagree about — a second query filtered on
+# `profile` would be a second answer to "which sessions does this person have".
 _OWNER_LIST = (
-    "SELECT o.session_id, o.created_at, m.updated_at, o.title FROM session_owners o "
+    "SELECT o.session_id, o.created_at, m.updated_at, o.title, o.profile FROM session_owners o "
     "JOIN LATERAL ("
     "  SELECT max(created_at) AS updated_at FROM session_messages WHERE session_id = o.session_id"
     ") m ON m.updated_at IS NOT NULL "
@@ -645,8 +652,10 @@ class SessionOwnerStore:
 
     async def list_for_owner(
         self, owner: str | None
-    ) -> list[tuple[str, datetime, datetime, str | None]]:
+    ) -> list[tuple[str, datetime, datetime, str | None, str | None]]:
         """The owner's newest page of sessions — `page_for_owner` from the top.
+
+        `(session_id, created_at, updated_at, title, profile)` per row.
 
         Kept as its own name because it is the shape the front door's `SessionOwners` protocol
         declares and the only one a registry that cannot resume a listing has to implement. It
@@ -657,8 +666,8 @@ class SessionOwnerStore:
 
     async def page_for_owner(
         self, owner: str | None, *, after: str | None = None
-    ) -> list[tuple[str, datetime, datetime, str | None]]:
-        """One page of the owner's sessions as `(session_id, created_at, updated_at, title)`.
+    ) -> list[tuple[str, datetime, datetime, str | None, str | None]]:
+        """One page as `(session_id, created_at, updated_at, title, profile)`.
 
         Newest first, at most `service_max_listed_sessions` rows, resuming strictly after the row
         `after` names — see `_OWNER_LIST` for why the order is `updated_at` rather than
@@ -671,6 +680,10 @@ class SessionOwnerStore:
         rather than mirrored onto a column here, because the turn that would have to maintain a
         mirror already writes the row the derivation reads — a second write per turn is a second
         thing that can fall out of step.
+
+        `profile` is the fifth field rather than a second query — see `_OWNER_LIST` for what reads
+        it. `None` is a real value there and means the session runs the default profile, which is
+        exactly what `agent.profiles.get_profile(None)` resolves.
 
         A tuple rather than a record type, matching `lookup` above: this module is below the API
         layer that consumes it, so a shared shape would have to live somewhere neither of them owns.
@@ -696,7 +709,7 @@ class SessionOwnerStore:
                     (owner, stamp, stamp, last_id, settings.service_max_listed_sessions),
                 )
                 rows = await cur.fetchall()
-        return [(row[0], row[1], row[2], row[3]) for row in rows]
+        return [(row[0], row[1], row[2], row[3], row[4]) for row in rows]
 
     async def delete_session(self, session_id: str) -> dict[str, int]:
         """Delete one conversation and everything keyed by it, in one transaction.

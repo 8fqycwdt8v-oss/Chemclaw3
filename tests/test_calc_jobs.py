@@ -50,6 +50,7 @@ from chemclaw.connectors.identity import (
 )
 from chemclaw.connectors.queues import bundle_queue
 from chemclaw.core.chem import torsion_handle
+from chemclaw.core.config import settings
 from chemclaw.science.calc.store import InMemoryStore
 from tests.calc_server_fake import FakeCalcServer, install
 from tests.temporal_env import pydantic_client, start_env_or_skip
@@ -332,19 +333,55 @@ def test_the_remote_call_names_the_person_the_durable_run_is_for(
 def test_the_identity_is_unstamped_when_the_job_ends(
     monkeypatch: pytest.MonkeyPatch, server: FakeCalcServer
 ) -> None:
-    """A worker runs the next job in the same process, so a leaked stamp becomes a false one."""
-    asyncio.run(activities.run_xtb_calculation(EnsembleJobSpec(smiles="CCO"), "chemist-1", "job-1"))
-    assert HEADER_ACTOR not in turn_headers()
-    assert HEADER_CORRELATION not in turn_headers()
+    """The stamp is removed when the dispatch ends, on the returning path and the raising one.
+
+    **Read in the same task that set it, which is the whole reason this test can fail.** It used to
+    call `asyncio.run(...)` and then assert over `turn_headers()` in the caller's context —
+    `asyncio.run` wraps the coroutine in a `Task`, a `Task` runs in a *copy* of the context, and a
+    contextvar set inside one can never be visible to that assertion. Measured: replacing
+    `_acting_for`'s `try/finally` with a bare `yield`, or deleting only the `finally`, left every
+    test in this file green.
+    Both assertions below go red on that mutation.
+
+    The raising path is the one that matters more and had no test at all: an activity that fails
+    after binding is exactly where a `finally` earns its place.
+    """
+
+    async def _returned() -> dict[str, str]:
+        await activities.run_xtb_calculation(EnsembleJobSpec(smiles="CCO"), "chemist-1", "job-1")
+        return turn_headers()
+
+    returned = asyncio.run(_returned())
+    assert HEADER_ACTOR not in returned and HEADER_CORRELATION not in returned, returned
+
+    async def _raised() -> dict[str, str]:
+        async def _refuse(name: str, arguments: dict[str, object]) -> object:
+            raise RuntimeError("the backend refused this calculation")
+
+        monkeypatch.setattr(server, "call_tool", _refuse)
+        with pytest.raises(Exception, match="stopped answering"):
+            await activities.run_xtb_calculation(
+                EnsembleJobSpec(smiles="CCO"), "chemist-1", "job-1"
+            )
+        return turn_headers()
+
+    raised = asyncio.run(_raised())
+    assert HEADER_ACTOR not in raised and HEADER_CORRELATION not in raised, raised
 
 
-def test_a_run_with_no_memo_stamps_nothing_rather_than_a_placeholder(
+def test_a_direct_call_with_no_identity_stamps_nothing_rather_than_a_placeholder(
     monkeypatch: pytest.MonkeyPatch, server: FakeCalcServer
 ) -> None:
     """Absent identity stays absent: an empty header would let a log claim an anonymous caller.
 
     The defaults also keep a run started before these arguments existed decodable, which is why
     they are empty strings rather than a required field.
+
+    **Scoped to a direct caller, and it used to claim more than that.** This test calls the
+    activity, so what it can prove is what the activity's own defaults do. It was named for a *run*
+    with no memo, which is a different thing and is not what happens: `CalcJobWorkflow` defaults the
+    memo read to `settings.service_actor_id`, so the durable path delivers `service-account` rather
+    than nothing. The test below pins that half.
     """
     seen: list[dict[str, str]] = []
     answer = server.call_tool
@@ -397,3 +434,48 @@ def test_the_workflow_hands_the_activity_the_actor_off_the_runs_memo(
 
     asyncio.run(_run_workflow())
     assert seen == [("chemist-1", "job-correlation-1")]
+
+
+def test_a_durable_run_with_no_memo_is_attributed_to_the_service_identity(
+    server: FakeCalcServer,
+) -> None:
+    """The durable path's own no-identity behaviour, which is not the activity's.
+
+    `CalcJobWorkflow` reads `requested_by` off the memo with `settings.service_actor_id` as the
+    default — the same read `connectors/bo/workflows.py` makes, which is why it is that value and
+    not `""`. So "a run with no memo stamps nothing" is true of a direct caller and false here: the
+    activity is handed `("service-account", "")` and puts `X-Chemclaw-Actor: service-account` on the
+    wire with no correlation header, because `_acting_for`'s both-empty short circuit is not taken.
+
+    Nothing could reach this state today — `ConnectorJobWorkflow` sets the memo unconditionally and
+    `ConnectorJobInput.requested_by` is `Field(min_length=1)` off `require_actor()` — so this is a
+    characterisation of the fallback rather than a supported route. It is pinned because the
+    fallback is what an operator reading `actor=service-account` on an hours-long CREST run is
+    actually looking at, and because nothing else in this repository states which of the two
+    behaviours the durable path has.
+    """
+    seen: list[tuple[str, str]] = []
+    answer = _run(EnsembleJobSpec(smiles="CCO"))
+
+    @activity.defn(name="run_xtb_calculation")
+    async def _capture(spec: XtbJobSpec, actor: str = "", correlation_id: str = "") -> XtbJobResult:
+        """Stand in for the real activity and record the identity it was handed."""
+        seen.append((actor, correlation_id))
+        return answer
+
+    async def _run_workflow() -> None:
+        async with await start_env_or_skip() as env:
+            client = pydantic_client(env)
+            queue = bundle_queue("calc")
+            async with Worker(
+                client, task_queue=queue, workflows=[CalcJobWorkflow], activities=[_capture]
+            ):
+                await client.execute_workflow(
+                    CalcJobWorkflow.run,
+                    EnsembleJobSpec(smiles="CCO"),
+                    id="calc-no-memo-identity",
+                    task_queue=queue,
+                )
+
+    asyncio.run(_run_workflow())
+    assert seen == [(settings.service_actor_id, "")]

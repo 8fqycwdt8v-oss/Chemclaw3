@@ -748,6 +748,33 @@ def test_the_calculation_backend_ceiling_error_names_both_sides_and_every_factor
     assert "calc_backend_max_concurrent_requests" in message
 
 
+def test_a_screen_fanned_calc_fleet_is_counted_at_its_fan_out() -> None:
+    """One activity is not one backend session once a solvent screen fans out.
+
+    `compose.solvent_comparison` and `compose.species_solvent_comparison` are the two concurrency
+    sites in that module, and each branch holds its own `calc_session` for the whole of its chain
+    under `asyncio.Semaphore(calc_screen_max_parallel)`. So an activity presents up to that many
+    concurrent requests to `servers/calc`, and the product that omits it under-counts by exactly
+    that factor. Measured over five solvents with the knob at 1/4/8: 1/4/6 simultaneous sessions
+    inside a single activity (6, not 8, because only six media exist).
+
+    The fleet below is the one the exactly-at-the-ceiling test above declares legal — the same
+    three numbers, 16 against 16 — so what this pins is the fan-out and nothing else.
+    """
+    with pytest.raises(ValueError) as excinfo:
+        Settings(  # type: ignore[call-arg]
+            _env_file=None,
+            calc_fleet_worker_processes=2,
+            worker_max_concurrent_activities=8,
+            calc_backend_max_concurrent_requests=16,
+            calc_screen_max_parallel=4,
+        )
+    message = str(excinfo.value)
+    assert "64" in message and "16" in message
+    assert "4 media in flight per screen" in message, message
+    assert "calc_screen_max_parallel" in message
+
+
 def test_the_embedding_width_check_still_leaves_the_standalone_embedder_alone() -> None:
     """Widening the scope must not make it unconditional.
 
