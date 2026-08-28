@@ -159,8 +159,11 @@ async def conditions_for_similar_reaction(
     and a solvent swap otherwise dominates the score. So naming a ligand, base or solvent in the
     query adds features the indexed rows do not have and pushes a real precedent *below* the
     threshold. A three-part `reactants>agents>products` string is accepted and its agents are folded
-    in, which is exactly the case to avoid here: measured on one Buchwald, naming just the solvent
-    scores **0.85** against the same reaction indexed without it, and a real recipe names several.
+    in, which is exactly the case to avoid here. Measured on one Buchwald against itself indexed
+    without agents: naming **one solvent** scores 0.72-0.85 across six common ones (DMF 0.72, THF
+    and toluene 0.76, dioxane 0.80, t-BuOH 0.82, MeCN 0.85), and a **realistic recipe** — ligand,
+    base and solvent — scores **0.61**. So a query written the way a chemist describes a reaction
+    can miss the identical precedent at any sensible threshold.
 
     **Prefer this over `conditions_for_similar_product` when you have the whole reaction.** Product
     similarity cannot tell a Buchwald from a Suzuki that happens to make the same biaryl; this can.

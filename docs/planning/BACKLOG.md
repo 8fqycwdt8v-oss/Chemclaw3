@@ -412,6 +412,22 @@ it happens.
       valid across a re-standardization. Note the ordering constraint with the solvate row in §2 —
       any identifier minted before that fix inherits the collapse.
 
+- [ ] **A stalled append-only feed has no first-party signal** — [S]. `corpus_cursors`
+      (`infra/sql/063`) records where each feed's drain stopped, and nothing reads `updated_at`:
+      `ingest/labels/cursor.py:23` selects `after` only. The module declines a lag gauge for a
+      stated reason — a keyset position is opaque, so "how far behind" would have to be invented,
+      unlike `sync_cursors`' datetime twin which exports `chemclaw_ingest_cursor_lag_seconds`. What
+      was offered instead does not hold, and `cursor.py:17-22` now says so: `ReactionCorpusWorkflow`
+      returns **one** report aggregated over every source at the end of the whole `continue_as_new`
+      chain (`durable/corpus_sync.py:252`), not one per pass, and builds it without `has_more` — so
+      a feed whose source stopped exporting looks exactly like a feed with nothing new. Two shapes
+      would close it and they are not equivalent: a per-source outcome (fixes
+      `CorpusSyncOutcome`'s own docstring, which claims "per source" and aggregates), or a staleness
+      gauge over `corpus_cursors.updated_at` — age since the last *advance*, which is a real number
+      even when the position is opaque. **Trigger:** the first deployment that runs an
+      `append_only:` source, since no shipped binding sets it
+      (`D-2026-08-28-a-feed-is-a-corpus-that-does-not-stop`).
+
 - [ ] **The results store has no live target** — [M]. `D-2026-08-25-a-cache-is-not-a-record` ships
       the whole path — `src/chemclaw/publish/`, the canonical schema in `schema/result-store/`, two
       drivers, the outbox (migration 050) and the drain — and it is proven end to end against a

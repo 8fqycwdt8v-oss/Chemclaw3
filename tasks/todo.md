@@ -264,6 +264,17 @@ defects rather than nits.** Recorded here because each is a shape worth recognis
    `A400`, so a stalled cursor read as an advance and the same page would be re-read every fire.
    Fixed by computing `advanced` in `drain_corpus`, the one place both values are in scope.
 
+A second audit then caught two more, and both are the same failure mode as the measurement above:
+
+4. **A tool with no probe.** `test_probe_coverage` is a gate — every agent-callable tool must appear
+   in some eval probe's `expects_tools` or in `EXEMPT` with a pointer — and the new tool appeared in
+   neither, so `make test` was red on the first commit. Probe `rx-41` closes it.
+5. **The `0.85` agent-penalty figure was the most favourable case, quoted as if typical.** Measured
+   across six solvents the range is 0.72-0.85 (MeCN, which I happened to pick, is the *top* of it),
+   and a realistic ligand + base + solvent recipe scores **0.61** — below any sensible threshold,
+   against the identical reaction. Quoting the best case understated a warning, which is the wrong
+   direction to be wrong in. The docstring and the skill now carry the range and the recipe number.
+
 Smaller corrections from the same pass: a claim that the corpus and ELN writes produce
 "byte-identical rows" (they cannot — the labels differ by design), a claim that the workflow reports
 `read`/`recorded` *per pass* (it returns one aggregate for all sources at the end of the chain, so a
@@ -292,6 +303,12 @@ the Postgres-backed set **executed rather than skipping** — including the new 
 similarity case and two of the three `corpus_cursors` cases, which are exactly the assertions a
 skipped run would have turned green without checking. The 9 skips are 6 `helm is not installed` and
 3 `truncated history` in `test_migrations_are_additive`; none is a Postgres skip.
+
+**One further failure is environmental and that was checked rather than assumed.**
+`tests/test_reizman.py::test_bo_campaign_finds_high_yield` hits its wall-clock cap on this machine.
+The suite says so itself ("these are wall-clock caps, not assertion failures … re-run with
+`PYTEST_TIMEOUT_SCALE=4`"), and it reproduces on `origin/main`'s own content at 188.09 s against
+this branch's 188.72 s — the same timeout, so nothing here caused it.
 
 **The 2 errors are pre-existing and environmental, and that was checked rather than assumed.**
 `tests/test_prompt_caching.py`'s two live-credential tests error at fixture setup with

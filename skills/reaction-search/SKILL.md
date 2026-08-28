@@ -59,10 +59,13 @@ correctly but uses them well (G6).
     literature corpus versus this organisation's ELN) and cite different things, so a hit here is a
     patent or document reference rather than a `reaction-<id>` note.
     **Query it with `reactants>>products` only.** Both reaction indexes are built with the agent
-    slot excluded, so reagents in the query add features the rows do not have: measured on one
-    Buchwald, naming just the solvent scores 0.85 against the same reaction indexed without it. This
-    is the *inverse* of the corpus caveat below — there the risk is a corpus that encoded the recipe
-    as reactants, here it is a query that does.
+    slot excluded, so reagents in the query add features the rows do not have. Measured on one
+    Buchwald against itself indexed without agents: one solvent scores 0.72-0.85 depending which
+    (DMF 0.72, THF 0.76, MeCN 0.85), and a realistic ligand + base + solvent recipe scores **0.61** —
+    below any sensible threshold, against the identical reaction. If a query written from a full
+    recipe returns nothing, strip it to the core substrates and product and ask again before
+    reporting no precedent. This is the *inverse* of the corpus caveat below — there the risk is a
+    corpus that encoded the recipe as reactants, here it is a query that does.
   - `reagent_frequency(named_reaction=..., roles=["ligand"])` — *which ligands were used for
     Buchwald couplings?* Leave `roles` out and add `product_functional_group=...` for *which
     workhorse conditions were used when the product carries this group*.
