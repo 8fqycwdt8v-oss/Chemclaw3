@@ -49,7 +49,22 @@ from chemclaw.publish.solvents import canonical_solvent
 #
 # Bump when the meaning of an already-published field changes. A field merely *added* does not need
 # one: an older row simply has the default, which reads correctly as "not recorded".
-CONTRACT_VERSION = 1
+#
+# **2 — `max_gradient` was published under the wrong unit.** `_optimization` reported it as
+# `hartree/bohr` while `OptimizationResult.max_gradient` holds Hartree/Angstrom, so `to_canonical`
+# saw a canonical unit and passed the number through: every gradient published at version 1 is
+# 1.890x too large, wearing a correct-looking unit string, and therefore silently inside or outside
+# any range filter the column exists for.
+#
+# The bump is what makes the two populations separable *and* what makes the correction deliverable.
+# `result_publications` is keyed `(sink, calc_ref, schema_version)` with `ON CONFLICT DO NOTHING`,
+# so re-projecting a corrected document at the same version is a no-op — measured, the corrected
+# row was dropped even while the original was still `pending`. At a new version it enqueues.
+#
+# A consumer separating them without re-publishing can read `reported_unit`: `hartree/bohr` on a
+# `max_gradient` fact is the old, wrong population, `hartree/angstrom` the corrected one, because
+# `_fact` always records what the calculator actually said.
+CONTRACT_VERSION = 2
 
 # What a member is to the subject. Closed, because an unknown role is a projection bug rather than
 # a new kind of chemistry, and silently accepting one would put an unqueryable value in the column
