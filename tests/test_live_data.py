@@ -226,7 +226,7 @@ def _write_entry(directory: Any, payload: dict[str, Any]) -> None:
 
 @pytest.mark.anyio
 async def test_a_prose_condition_reaches_a_step(tmp_path: Any) -> None:
-    """The recovery half: a number stated only in a sentence still lands on the step it scopes to."""
+    """The recovery half: a number stated only in a sentence lands on the step it scopes to."""
     _write_entry(tmp_path, _entry_stating_conditions_only_in_prose())
 
     check = await check_prose_yields_its_numbers(tmp_path)
