@@ -1318,7 +1318,9 @@ def test_a_failed_reroll_costs_the_roll_not_the_verdict(monkeypatch: pytest.Monk
     client = _SequencedVerifierClient([_judged(0.68), TimeoutError(), _judged(0.74)])
     result = asyncio.run(verify_answer("An answer [[n1]].", [_chunk("n1")], client=client))
     assert client.calls == 3
-    assert result.confidence in (0.68, 0.74)  # the median of the two rolls that answered
+    # The *lower* of the two surviving rolls, exactly. `in (0.68, 0.74)` passed either way and so
+    # could not see that an even count was resolving upward — toward the weaker review posture.
+    assert result.confidence == 0.68
     assert result.verified_by == "judge"
     assert METRICS.value("chemclaw_verifier_degraded_total") == before, (
         "a failed reroll is the band's business, not a degradation to the citation gate"
