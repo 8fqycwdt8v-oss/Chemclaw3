@@ -181,10 +181,16 @@ async def drain_reaction_corpus(source: str, after: str) -> CorpusReport:
         f"reaction corpus {source}",
         settings.corpus_sync_heartbeat_timeout_seconds,
     )
-    # Every page, not only the last one: a run that is interrupted between pages must resume where
-    # it stopped rather than at the position the previous *run* left, and the write is one indexed
-    # upsert against thousands of rows of work.
-    if binding.append_only:
+    # Every page that *advanced*, not only the last one: a run interrupted between pages must
+    # resume where it stopped rather than at the position the previous *run* left, and the write is
+    # one indexed upsert against thousands of rows of work.
+    #
+    # **Gated on `advanced` rather than written unconditionally, and that gate is what gives
+    # `updated_at` a meaning.** Re-writing the same position each fire refreshes the timestamp, so a
+    # feed whose source stopped exporting would look freshly synced forever — and the staleness
+    # signal `ingest/labels/cursor.py` and `072` both name over that column could never fire. With
+    # the gate, `updated_at` answers "when did this feed last move", which is the question.
+    if binding.append_only and report.advanced:
         await store_corpus_cursor(source, report.cursor)
     return report
 
