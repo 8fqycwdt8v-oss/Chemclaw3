@@ -64,6 +64,20 @@ class ObservabilitySettings(BaseSettings):
     # than a cap plus an on/off flag, because "store nothing" is the cap at its floor and two
     # settings would be two ways to say one thing.
     stream_max_result_bytes: int = Field(default=131072, ge=0)
+    # How large one tool result may be, in UTF-8 bytes, and still ride along on its own
+    # `ToolResultEvent` as `result_inline` instead of costing a surface a second round trip.
+    #
+    # The preview/ref split is a rule about *large* results, and it was being applied to every
+    # result: a 300-byte ICH limit and a two-field pKa each paid a fetch to be rendered as anything
+    # but prose, for a payload several times smaller than the preview's own 200-character budget.
+    # Under this cap the text is on the event; over it, the field is empty and the ref is the only
+    # way to the result, exactly as before.
+    #
+    # 4 KiB, which is two orders of magnitude below `stream_max_result_bytes` and deliberately so:
+    # this must never become the path by which a 20,000-character evidence sweep reaches a browser
+    # on every turn. It is a shortcut for the small ones, and the number is what keeps it that.
+    # 0 disables it — the same one-knob rule as the cap above, where "never inline" is the floor.
+    stream_inline_result_bytes: int = Field(default=4096, ge=0)
     # The deployment's code/prompt/skill revision stamped onto every audit record (AG-14): the
     # Git SHA the running pod was built from, so a past agent result ties to the exact version that
     # produced it (reproducibility). The image build sets it — `deploy/Containerfile` takes a

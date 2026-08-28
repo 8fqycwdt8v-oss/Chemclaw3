@@ -293,6 +293,111 @@ def test_a_trace_with_no_sink_reports_no_ref() -> None:
     assert event.result_ref == ""
 
 
+def test_a_small_result_rides_along_and_a_large_one_does_not(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Under the inline cap the text is on the event; over it, the ref is the only way to it.
+
+    The preview/ref split is a rule about *large* results, and it was applied to every result: a
+    300-byte ICH limit paid a second round trip to be rendered as anything but prose. What is under
+    test is the boundary rather than the shortcut — that the cap is what decides, so this can never
+    quietly become the path a 40-chunk evidence sweep takes to a browser.
+    """
+    trace = runner_trace.ToolCallTrace()
+    _issued(trace, "s1", "screen_hazards")
+    (small,) = [
+        e
+        for e in fed(trace, FakeUpdate(contents=[_ResultContent(call_id="s1", result=_SCREEN)]))
+        if e.type == "tool_result"
+    ]
+    assert small.result_inline == _SCREEN
+
+    monkeypatch.setattr(settings, "stream_inline_result_bytes", 10)
+    _issued(trace, "s2", "screen_hazards")
+    (large,) = [
+        e
+        for e in fed(trace, FakeUpdate(contents=[_ResultContent(call_id="s2", result=_SCREEN)]))
+        if e.type == "tool_result"
+    ]
+    assert large.result_inline == ""
+    # And the preview is untouched by either outcome: this is a shortcut past a fetch, never a
+    # widening of the budget the preview keeps.
+    assert large.preview == _SCREEN[: settings.agent_audit_max_arg_chars]
+
+
+def test_the_inline_cap_is_measured_in_bytes_not_characters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A result of multi-byte characters is measured by what is actually sent.
+
+    The same rule the store's cap takes, for the same reason: µ is one character and two bytes, and
+    a cap that counted characters would put twice what an operator budgeted on the wire.
+    """
+    text = '{"unit": "' + "µ" * 40 + '"}'
+    monkeypatch.setattr(settings, "stream_inline_result_bytes", len(text))
+    trace = runner_trace.ToolCallTrace()
+    _issued(trace, "u1", "ich_impurity_limit")
+    (event,) = [
+        e
+        for e in fed(trace, FakeUpdate(contents=[_ResultContent(call_id="u1", result=text)]))
+        if e.type == "tool_result"
+    ]
+    assert len(text) < len(text.encode("utf-8"))
+    assert event.result_inline == ""
+
+
+def test_setting_the_inline_cap_to_zero_puts_nothing_on_the_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One knob rather than a cap plus a flag — "never inline" is the cap at its floor."""
+    monkeypatch.setattr(settings, "stream_inline_result_bytes", 0)
+    trace = runner_trace.ToolCallTrace()
+    _issued(trace, "z1", "screen_hazards")
+    (event,) = [
+        e
+        for e in fed(trace, FakeUpdate(contents=[_ResultContent(call_id="z1", result=_SCREEN)]))
+        if e.type == "tool_result"
+    ]
+    assert event.result_inline == ""
+
+
+def test_the_trace_names_the_values_a_result_returned() -> None:
+    """`values` carries the tool's own key for each number, beside the bare `numbers` list.
+
+    The two are not redundant: `numbers` feeds a grounding check that wants every figure and no
+    names, and `values` feeds a surface that wants names and refuses to guess them. A payload that
+    is not JSON keeps the first and loses the second, which is the honest report — the figures are
+    known and their names are not.
+    """
+    trace = runner_trace.ToolCallTrace()
+    _issued(trace, "p1", "predict_pka")
+    (event,) = [
+        e
+        for e in fed(
+            trace,
+            FakeUpdate(contents=[_ResultContent(call_id="p1", result='{"pka": 4.76, "sd": 1.6}')]),
+        )
+        if e.type == "tool_result"
+    ]
+    assert [(v.label, v.value, v.unit) for v in event.values] == [
+        ("pka", 4.76, ""),
+        ("sd", 1.6, ""),
+    ]
+    assert event.numbers == [4.76, 1.6]
+
+    _issued(trace, "p2", "find_notes")
+    (prose,) = [
+        e
+        for e in fed(
+            trace,
+            FakeUpdate(contents=[_ResultContent(call_id="p2", result="the pKa is about 4.76")]),
+        )
+        if e.type == "tool_result"
+    ]
+    assert prose.values == []
+    assert prose.numbers == [4.76]
+
+
 def test_an_oversize_result_is_refused_whole_and_says_so(
     caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
