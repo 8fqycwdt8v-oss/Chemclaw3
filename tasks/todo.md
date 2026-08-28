@@ -1,122 +1,74 @@
-# Consolidate the memory landscape, then close what the audit found
+# Task: `make live-up && make live-jobs` cannot run — the calc backend has no owner
 
-**Session:** 2026-08-28 · branch `claude/kemplaw-memory-investigation-lj1fzg`
+## The defect (measured, not argued)
 
-A deep investigation of every memory in this system (model context, turn state, transcript,
-scratchpad, durable memories, preferences, observations, knowledge) produced four measured
-defects and one consolidation. Four parallel audits verified each against HEAD and against a live
-Postgres; every claim below was re-checked by hand before being queued.
+`make live-jobs` is the durable half of the live lane. `cli/live_jobs.py` says in its own
+docstring that it exists to be runnable "where no model credential exists — which is most CI
+runners, and this repository's own agent containers", and `docs/guides/runbook.md` calls Stage A
+"the load-bearing one". Run as documented it fails at the first job:
 
-## A — the context policy: the budget is a trigger, not a control
+    make live-infra && make db-migrate && make live-up && make live-jobs
+    -> ConnectorJobError: the 'compute_reaction_energy' job ran and failed:
+       CalcServerError: the calculation service is not answering
 
-- [x] A1 `agent_keep_last_conversation_groups` -> `ge=0`, default `0` (no group floor).
-      Measured at the shipped defaults, 2,000 prose groups: retained goes 1,944 -> 99,954 tokens
-      against a 100,000 budget. The regression the `max()` arm exists to prevent stays closed:
-      20 x 60kB groups still cut to 90,366, not 180,180.
-- [x] A2 Correct the four measurably false sentences (compaction heading, `trigger` field,
-      `apply` docstring, and `core/config/agent.py`'s "raising N no longer raises what a request
-      can cost" — off by 50x).
-- [x] A3 `.env.example` mirrors the new default.
-- [x] A4 Test: the budget binds at the shipped defaults; a floor still bites when a deployment
-      sets one.
+`processes.sh` starts `chem` and `safety` from the fleet checkout and `worker-calc`, whose
+activities dial the `calc` **backend** at `settings.calc_server_url` (8860) on a cache miss. No
+lane starts that server for `make live-up`; only the four-repo lane does. `calc` is not a
+connector, so `check_connectors_at_startup` never probes it and `/readyz` is green with it down.
 
-## B — erasure returns a false green
+Starting it by hand gets a second, distinct failure — `processes.sh` exports dev tokens for
+`chem` and `safety` and none for `calc`, so the worker sends a bearer the server refuses:
 
-- [x] B1 A digest mailbox row is keyed `digest-<owner>` and has no `session_owners` row, so
-      `_ERASE`'s session_events arm cannot match it: a departing person's unread digests survive
-      while the report prints `session_events: 0`. Erase them, both actor spellings.
-- [x] B2 The completeness test's actor vocabulary is a hardcoded six names; `audit_anchors.reseal_by`
-      is a seventh and escapes it. Teach the vocabulary the name and classify the table.
+    CalcToolError: the calculation service refused this client's credential (HTTP 401)
 
-## C — one rule per table, in one place
+With both supplied by hand: **5/5 checks passed**. So the spine is sound; only the lane is.
 
-- [x] C1 `_RETAINED` implies "refused": three of the seven retained tables say *nothing bounds it,
-      no decision on record* while the same argument governs all seven. Fix the reasons and derive
-      the test from `_RETAINED` instead of hardcoding four names.
-- [x] C2 `store_vectors`' disposal reason states a deployment fact, not a decision; `scratchpad.py`
-      logs two tables where `setup()` made one.
-- [x] C3 `STORE_TABLES` has no upstream-derived backstop (the checkpointer's does). A LangGraph
-      minor adding a store table would escape both registers with every test green.
-- [x] C4 `session_owners` disposal silently requires `retention_tool_results_days`: with only a
-      messages window set, no session that ever called a tool is disposable. Make it visible.
+## Why this is D-2026-08-27's rule, not a new one
 
-## D — the landscape itself
+That ADR decides ownership by one test — *the lane that cannot start without a server owns it* —
+and applies it to `chem`/`safety` via the front door's boot dependency. Its consequences table
+lists `make live-jobs` as **"unaffected"**. That line is the error: the durable half has a
+run-time dependency on `calc` that nobody asked about, because the analysis was framed entirely
+around what blocks the front door from booting.
 
-- [x] D1 `infra/sql/README.md`: `bo_campaigns` reads "nothing bounds it" where the code refuses it
-      and a test pins the refusal; the Disposal legend delegates to a BACKLOG row that no longer
-      exists.
-- [x] D2 The chart's retention example omits one of the five windows.
-- [x] D3 Planning files: a row with its own trigger filed in BACKLOG; two pairs of rows describing
-      one subject from two files; four stale anchors (one names a class that does not exist, and a
-      docstring in `src/` repeats it).
-- [x] D4 ADR + ledger row.
+## Plan
 
-## Verification plan
-
-`make lint type test` green with Postgres up (baseline captured before any edit), plus the
-compaction measurement re-run against the new default and the erasure test proving the digest row
-goes.
+- [x] Reproduce both failures and prove 5/5 with the server and token supplied by hand
+- [x] `processes.sh` owns `calc`: export `CHEMCLAW_CALC_TOKEN`, start the backend on the port
+      `settings.calc_server_url` names (the address the client actually dials), same
+      already-served guard as `chem`/`safety`, and persist the token to `connector-env.sh`
+- [x] `up.sh` stops starting it: delete `start_calc`, keep `assert_credential_accepted calc`
+      after `processes.sh` returns, route `restart calc` to `processes.sh` — the exact shape
+      D-2026-08-27 gave `chem`/`safety`
+- [x] Docs: the four-repo README process/restart tables, the runbook's live-up line
+- [x] New ADR superseding the "unaffected" row + ledger row
+- [x] Verify: `make live-down`, then the runbook's sequence verbatim in a clean shell -> 5/5
+- [x] `make lint type test` green
 
 ## Review
 
-**All fourteen items are done.** Nothing was descoped; two things were deliberately *not* built and
-each says so below rather than being dropped quietly.
+**Done, and measured at every step rather than argued.**
 
-**What changed behaviourally.** Three of these are user-visible and the rest are the registers and
-the prose that describe them:
+`make live-up && make live-jobs`, from a torn-down lane and a cleared port with
+`CHEMCLAW_CALC_TOKEN` unset in the environment: **0/5 -> 5/5**. The lane now logs `calc started` /
+`calc ready` itself, and `processes.sh status` lists it beside `chem` and `safety`.
 
-1. A long conversation now sends the model up to the token budget instead of twelve turns. Measured
-   at the shipped defaults, 2,000 prose groups: 1,944 -> 99,954 tokens retained. The arm that
-   *bounds* the thread is untouched — 20 groups of 60 kB still cut to 90,366 against a 100,000
-   budget, not to the 180,180 the count-only version left.
-2. A departing person's unread digests, and their id inside a publication payload, no longer
-   survive an erasure that reports success.
-3. Erasing one person no longer deletes a tool result another person's session still links.
+Gate: `make lint` clean, `mypy --strict` clean across 734 files, `make test` **5753 passed, 14
+skipped** in 12m36s against real Postgres — identical to the pre-change baseline taken this
+session, so nothing regressed. The 14 skips are all named by the run: 9 need `helm`, 3 need
+untruncated git history, 2 attempted a real Anthropic call (the environment's `API-KEY` is present
+but the provider refuses it for want of credit).
 
-**How the erasure fixes were proven.** The three new tests were run against the *pre-fix*
-statements (restored at runtime, no file reverted) and all three fail; against the fix, all three
-pass. A test that passes both ways proves nothing, and this file's own history says so.
+**What made this hard to see, and is worth carrying forward.** Every signal the lane offers said it
+was healthy — `/readyz` green, `make live-status` complete, no error at bring-up — because the one
+missing server is deliberately not a connector and so is outside everything that probes. The
+failure only exists at job time. D-2026-08-27 reasoned carefully about ownership and still got the
+`live-jobs` row wrong, because it asked what blocks the *front door* from booting and never asked
+what the durable half needs while running. Two dependency questions, one of which nobody had a
+habit of asking.
 
-**Two things deliberately not built.**
-
-- *An orphaned `tool_result_links` row is beyond erasure permanently.* It names a session id no
-  ownership row resolves, so what it keeps alive is unattributable rather than somebody's, and the
-  age sweep collects the link with its blob. Recorded in the ADR as an accepted consequence rather
-  than filed as work.
-- *`delete_session` and the retention prune take their two rows in opposite orders.* The BACKLOG row
-  asked for them to be ordered consistently; examined, that is not available — each order is
-  required by its own invariant, and reversing either trades a one-statement deadlock window for a
-  correctness bug. The row now records that the obvious fix was tried and rejected, which is the
-  contribution the row was worth.
-
-**One audit finding was wrong and the baseline is what showed it.** A subagent reported
-`tests/test_deploy_chart.py::test_the_fleet_ceiling_...` as failing on a clean tree. The baseline
-run taken before any edit was **5,444 passed, 11 skipped, exit 0**. Prose about a test is evidence
-about what its author believed; the run is the evidence.
-
-
----
-
-## Follow-up: the review of this change (2026-08-28)
-
-Four adversarial passes over the merged diff. **Three defects in my own change, all now closed**,
-two false claims in its ADRs retracted in a new one, and one gap filed with its measurement.
-
-- [x] `jsonb_array_elements` on a non-array aborted the whole erasure — guarded, parametrized over
-      the five shapes Postgres refuses.
-- [x] The leaver's own orphaned link spared the leaver's own blob, under a report reading `0` —
-      the anti-join goes through `session_owners` now, paired with the test proving another
-      *person* still spares it.
-- [x] A `BACKLOG.md` section heading was deleted with a moved row, silently re-filing three rows.
-- [x] A test fixture that outlived its own test and was measured by the next one.
-- [x] `unwindowed_ownership_dependencies` claimed to be derived and was not — a test now joins the
-      two maps; and its `session_events` entry named a window that cannot unblock it.
-- [x] Corrected: the "three tables said no decision is on record" quotation (two did), the 90,366
-      figure (90,090 on the fixture the suite builds), the ordering row's overgeneralisation from
-      erasure to `delete_session`, and the counts in the unbounded-tables row.
-- [x] Hardened: the register assertion tested an English substring; the shipped compaction default
-      was pinned only by fixtures it could outgrow; a declared column nothing read now has to exist.
-- [ ] **Filed, not fixed**: no deployment declares `llm_context_window_tokens`, so the ~30k prefix
-      is uncharged and a request now measures ~135,700 against a configured 100,000 — and
-      `_record_overrun` cannot see it. Three candidate fixes, one of which changes what
-      `agent_context_token_budget` means. That is a decision with an owner.
+**Not fixed, deliberately:** the backend has no startup readiness probe, so a misconfigured
+`calc_server_url` is still discovered at job time rather than at bring-up. Argued in the ADR's
+alternatives — the cache means a turn may never dial it, and a probe would make an optional
+dependency mandatory for every process importing the bundle. `CalcServerError` already names the
+cause precisely when it does happen.
