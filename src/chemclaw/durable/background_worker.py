@@ -9,6 +9,24 @@ per bundle, each sized for its own work.
 A *connector's* own workflows are not here: they run on the bundle's own worker and
 queue (`connectors/calc/worker.py` on `connector-calc`), which is the point of the seam —
 this worker never imports a capability's dependency closure.
+
+**Why the chart pins this one to `replicas: 1`, and what that pin is actually protecting**
+(`D-2026-08-27-what-a-second-background-worker-would-race-on`). Not the database writes: one
+worker already runs `worker_max_concurrent_activities` activities and many workflow tasks at
+once, so a single replica was never a serialization guarantee for anything a second *process*
+could not also do. And the periodic jobs are each one Temporal Schedule under
+`ScheduleOverlapPolicy.SKIP` (`durable/schedules.py`), which the *server* enforces, so a second
+pod cannot produce a second concurrent run of one of them however many workers poll.
+
+What a single replica does buy is exclusion over state that lives **in the pod**, and after the
+PR-gate's cluster advisory lock closed the git half there is exactly one such dependency left:
+`NoteReindexWorkflow`. `retrieval/vector_index.py::reindex_notes` retires index rows for every
+note absent from *this pod's* knowledge checkout, which is an `emptyDir` refreshed by the pod's
+own sidecar — so two pods are two views of the corpus, and a note one has fetched and the other
+has not is indexed and retired in turn, each run logging that it retired a note that exists.
+Every other activity on this queue is either serialized by its Schedule, idempotent by upsert,
+claim-based, or prunes against a window far wider than a sidecar's lag. Raising the count means
+giving that prune a cluster-wide view of the corpus first.
 """
 
 import asyncio

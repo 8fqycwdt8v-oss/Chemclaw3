@@ -5,7 +5,20 @@ threading state through its payload. The cursor — the newest entry timestamp a
 ingested — lives in the `sync_cursors` table keyed by source (`infra/sql/007_…`): a
 scheduled run loads it, syncs everything newer, and stores the advanced value, so each
 firing is self-contained. Idempotent ingestion makes an occasional boundary re-fetch
-harmless, so this needs no locking.
+harmless.
+
+**This needs no locking, and the reason is that nothing advances one source's cursor
+concurrently** — not that the write would be safe if something did. The scheduled sync is one
+Temporal Schedule under `ScheduleOverlapPolicy.SKIP` firing one workflow whose activities are
+strictly sequential, and the only other starter (`cli.live_data.backfill`) passes an explicit
+`since`, so it never reads or writes this table. The write itself is last-writer-wins: two drains
+that both loaded one mark leave the *lagging* one's value, measured in `tests/test_cursor.py`
+against overlapping transactions on real Postgres. What makes that acceptable rather than merely
+unreached is its direction — every stored value is a mark somebody had already ingested through,
+so a lost update moves the cursor *back* and costs a re-ingest; it can never move it past an entry
+nobody read. The tests pin both halves, so a later high-water spelling of the upsert has to be a
+decision rather than a drift. See
+`docs/decisions/D-2026-08-27-what-a-second-background-worker-would-race-on.md`.
 """
 
 from datetime import UTC, datetime
@@ -25,7 +38,11 @@ _UPSERT = (
 )
 
 
-# The last cursor each source was seen holding, in this process. Not the *lag* — the cursor — so
+# The last cursor each source was seen holding, in this process — so the gauge is per *pod*, and an
+# alert on it has to aggregate (`min by (source)`) rather than read one series. At
+# `workers.background.replicas: 1` there is one series and the distinction is invisible; with two,
+# the pod that did not run the last sync reports a mark one scheduling interval older, or no series
+# at all until it runs its first. Not the *lag* — the cursor — so
 # the gauge below is `now() - cursor` computed at scrape time rather than at sync time: an operator
 # reading a frozen "3600 s behind" cannot tell a source that is an hour behind from a sync that
 # stopped running an hour ago, and those are the two states this metric exists to separate. The
