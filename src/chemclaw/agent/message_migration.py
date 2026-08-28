@@ -251,9 +251,17 @@ _SELECT_MAF = (
 # as a second parameter. Every SET expression in one UPDATE reads the row as it was before any of
 # them applied, so `message_original` cannot end up holding something other than the exact bytes
 # this row is losing — which a re-serialisation of what the SELECT decoded could not promise.
+# `AND message_shape = 'maf'` is what makes a second pass a no-op rather than a corruption, and it
+# is load-bearing because this pass takes no advisory lock (unlike `core.migrate`) while two things
+# can now start it: `make db-migrate` and the chart's post-upgrade Job. Without the predicate, two
+# overlapping passes both read the row, both convert, and the loser writes the *winner's already
+# converted* payload into `message_original` — so the column that exists to make the conversion
+# reversible holds a LangChain document, and the documented rollback then restores it under
+# `message_shape = 'maf'`, producing a row that lies about its own shape with the original gone.
+# With the predicate the second UPDATE matches nothing, which is the outcome the column promises.
 _MARK_CONVERTED = (
     "UPDATE session_messages SET message_original = message, message = %s, "
-    f"message_shape = '{LANGCHAIN_SHAPE}' WHERE id = %s"
+    f"message_shape = '{LANGCHAIN_SHAPE}' WHERE id = %s AND message_shape = '{MAF_SHAPE}'"
 )
 
 

@@ -9,6 +9,7 @@ library could not.
 """
 
 import asyncio
+import json
 from typing import Any
 
 import pytest
@@ -27,6 +28,7 @@ from chemclaw.agent.checkpointer import CHECKPOINT_TABLES, checkpointer, close_c
 from chemclaw.agent.langgraph_agent import build_langgraph_agent
 from chemclaw.agent.leaver import erase_actor
 from chemclaw.agent.message_migration import (
+    _MARK_CONVERTED,
     LANGCHAIN_SHAPE,
     MAF_SHAPE,
     UnconvertibleMessage,
@@ -249,6 +251,59 @@ def test_a_second_pass_converts_nothing() -> None:
     _run(convert_stored_messages())
 
     assert _run(convert_stored_messages()).converted == 0
+
+
+def test_two_overlapping_passes_cannot_overwrite_the_preserved_original() -> None:
+    """The row-level guard, driven the way two passes actually collide.
+
+    `test_a_second_pass_converts_nothing` proves the *selection* skips converted rows, which is
+    resumability. It cannot prove this: two passes that both read before either commits each hold a
+    row id they believe is unconverted, so the selection has already happened for both. Only the
+    `AND message_shape = 'maf'` predicate on the UPDATE decides what happens next.
+
+    Without it the loser writes the winner's already-converted payload into `message_original` —
+    the column whose whole purpose is to hold the pre-conversion bytes — and the documented
+    rollback then restores a LangChain document stamped `maf`, a row that lies about its own shape
+    with the original gone. Reachable because this pass takes no advisory lock while two things now
+    start it: `make db-migrate` and the chart's post-upgrade Job.
+    """
+    session_id = "sess-m6-overlap"
+    _run(_seeded(session_id))
+
+    async def _collide() -> tuple[dict[str, Any], dict[str, Any]]:
+        await migrated_db_or_skip()
+        async with db.connection(settings.postgres_dsn) as conn, conn.cursor() as cur:
+            await cur.execute(
+                "SELECT id, message FROM session_messages "
+                "WHERE session_id = %s ORDER BY id LIMIT 1",
+                (session_id,),
+            )
+            picked = await cur.fetchone()
+            assert picked is not None, "the fixture seeded no convertible row"
+            message_id, before = picked[0], picked[1]
+
+            # Both passes act on the id each has already selected — the state overlapping passes
+            # are in, not a second run after the first committed.
+            await cur.execute(
+                _MARK_CONVERTED, (json.dumps({"type": "human", "pass": 1}), message_id)
+            )
+            await cur.execute(
+                _MARK_CONVERTED, (json.dumps({"type": "human", "pass": 2}), message_id)
+            )
+            await conn.commit()
+
+            await cur.execute(
+                "SELECT message_original FROM session_messages WHERE id = %s", (message_id,)
+            )
+            kept = await cur.fetchone()
+            assert kept is not None
+            return before, kept[0]
+
+    before, preserved = _run(_collide())
+    assert preserved == before, (
+        "the second pass overwrote `message_original` with an already-converted payload; the "
+        "`AND message_shape` predicate on `_MARK_CONVERTED` is what prevents it"
+    )
 
 
 def test_a_row_the_converter_refuses_is_left_exactly_as_it_was() -> None:
