@@ -127,3 +127,10 @@ belonged to a sibling working concurrently.
 - [x] `tests/test_publish_projection.py`'s docstring measurement ("all 79 `_fact`
       call sites pass an already-canonical unit; one conversion observed") is
       stale — two sites convert on a live path now.
+
+## Known-red at HEAD (must be green before PR)
+
+- [ ] `tests/test_ingest_rejections.py::test_a_long_refusal_message_is_cut_and_says_so` fails.
+      Cause is mine, not the code's: commit 697f620 used `git add -A` and swept in an agent's
+      half-finished edit to `research_tools.py` and its test. The agent is still working the file.
+      Verify and re-commit when it reports; the final full-suite gate must be green before the PR.
