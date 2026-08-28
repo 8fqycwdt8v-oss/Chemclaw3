@@ -12,6 +12,7 @@ pinned stale), and it allows a real re-check before it starts refusing.
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -28,8 +29,15 @@ from tests.middleware import run_middleware, tool_request
 
 
 def _ctx(name: str, **arguments: Any) -> Any:
-    """The call as the guard reads it: a name and its arguments, which together are its key."""
-    return tool_request(name, dict(arguments))
+    """The call as the guard reads it: a name and its arguments, which together are its key.
+
+    Carries the *registered* tool object, which is what `ToolNode` passes for a name the graph
+    holds and what `metric_tool_name` resolves the metric label against — the measured loop was
+    7-8 `find_past_jobs` calls, a real tool. The name the graph does *not* hold is the model's own
+    string and must never reach a label; `tests/test_tool_label_bound.py` drives that case for
+    every `tool`-labelled metric at once, so it is not restated here.
+    """
+    return tool_request(name, dict(arguments), tool=SimpleNamespace(name=name, metadata={}))
 
 
 class _Tool:
