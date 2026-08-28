@@ -276,6 +276,22 @@ topic).
       database; it becomes a flake generator the day that stops being true. Fixture ids should carry
       the pid suffix `tests/pg.py` already uses for the schema.
 
+- [ ] **The corpus drain is the one ingest pass with no metric** — [S].
+      `chemclaw_ingest_records_total{source,outcome}` is emitted by the ELN sync
+      (`ingest/eln/sync.py:319`), the document sync (`ingest/documents/sync.py:312`) and the
+      labelling pass (`ingest/labels/enrich.py:195`, under `source="labels"`). `ReactionCorpusWorkflow`
+      emits none: `CorpusReport`'s `read`/`recorded`/`skipped` reach the activity's log line and
+      Temporal's history, and nothing else. So a dashboard built on `chemclaw_ingest_*` shows a flat
+      line for a healthy corpus feed, and `skipped` — the count of rows dropped for no usable SMILES
+      or no citation, which is the number that says a feeder regressed — has no series at all.
+      Found while writing `docs/guides/feeder-pipelines/`, whose §2.3 has to tell an operator this in
+      prose because the metric they would otherwise reach for does not exist.
+      **The fix is the wrapper the ELN sync already uses**, one call site, with `source` naming the
+      data source rather than the pass — the three outcomes partition the rows the pass saw, exactly
+      as `ingest/documents/sync.py:332` documents for its own. Do it when a deployment actually runs
+      a corpus feeder; until then the gap costs nobody anything, which is why it is [S] and here
+      rather than done.
+
 - [ ] **Settle `pytest-xdist` on a real runner** — [S].
       The `check` job is 87% one step: `make lint type cov` was **12m06s of a 13m56s job** on
       `d8c312a`, of which lint is 1s and type 68s (measured), so ~11 min is the suite itself.
