@@ -11,6 +11,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from chemclaw.core.turn_signals import RefusalReason
+
 
 class QueuedEvent(BaseModel):
     """The turn was accepted but is waiting for a free admission permit (D-166).
@@ -281,17 +283,22 @@ class ToolFailedEvent(BaseModel):
     message: str
     agent: str = _AGENT_FIELD
     # Which *kind* of failure this is, where the kind is a decision someone made rather than a
-    # fault. Today there is exactly one: `plan_gate`, the pre-execution approval refusing a
-    # state-changing call (`agent/plan_gate`). That refusal is the control working, and a consumer
-    # that folds it in with a database outage reports a correctly-gated turn as a broken one —
-    # which is what `evals/live.py` did, by matching one phrase of the refusal *sentence*, so a
-    # reword would have flipped the finding with every test still green.
+    # fault. A refusal is the control working, and a consumer that folds it in with a database
+    # outage reports a correctly-gated turn as a broken one — which is what `evals/live.py` did, by
+    # matching one phrase of the refusal *sentence*, so a reword would have flipped the finding
+    # with every test still green.
+    #
+    # **All five gates, not one.** This said `plan_gate` alone while `agent/audit.refusal_reason`
+    # already classified five, so the other four — a dry-run refusal the chemist themselves asked
+    # for, a role denial, a write no narrowed agent was given, a repeat the guard stopped — reached
+    # every surface indistinguishable from an unreachable pod. The set here IS that table's
+    # vocabulary — imported from `core.turn_signals`, not restated, so the two cannot drift.
     #
     # `None` is "an ordinary failure", which is every failure that was ever emitted before this
     # field existed. Additive, defaulted and a closed set, because this shape is a contract two
     # other repositories read (`Chemclaw3_ui`, `Chemclaw3_mock`): a surface that ignores it is
     # unchanged, and one that switches on it can be exhaustive.
-    reason: Literal["plan_gate"] | None = None
+    reason: RefusalReason | None = None
 
 
 class ToolResultEvent(BaseModel):
