@@ -4,7 +4,7 @@
 release is a versioned load: re-walking an unchanged one is a no-op, and a new one has to be walked
 from the top anyway. A live feed is the other case — every daily fire would read the whole corpus to
 find the rows added since yesterday — so a source whose binding says `append_only: true` keeps its
-position here, in `corpus_cursors` (`infra/sql/063_…`).
+position here, in `corpus_cursors` (`infra/sql/072_…`).
 
 **Its own table rather than a row in `sync_cursors`.** That column is `TIMESTAMPTZ` and its contract
 is a datetime watermark; a keyset position is a `TEXT` key in the source's own domain, which may be
@@ -20,6 +20,11 @@ it does not — that workflow returns one report aggregated over every source at
 `continue_as_new` chain. So a *stalled* feed has no first-party signal today: `updated_at` is here
 for an operator reading the table, and nothing reads it. Closing that means a per-source outcome or
 a staleness gauge over `updated_at`, and neither is invented here on the way past.
+
+What *is* done here is the half that makes such a gauge possible later: `drain_reaction_corpus`
+stores a position only when the drain advanced, so `updated_at` means "when this feed last moved"
+rather than "when it was last looked at". Written unconditionally — as the first draft did — the
+column refreshes on every fire and a stalled feed reads as freshly synced forever.
 """
 
 from chemclaw.core import db

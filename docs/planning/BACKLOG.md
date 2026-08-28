@@ -383,9 +383,13 @@ topic).
       would close it and they are not equivalent: a per-source outcome (fixes
       `CorpusSyncOutcome`'s own docstring, which claims "per source" and aggregates), or a staleness
       gauge over `corpus_cursors.updated_at` — age since the last *advance*, which is a real number
-      even when the position is opaque. **Trigger:** the first deployment that runs an
-      `append_only:` source, since no shipped binding sets it
-      (`D-2026-08-28-a-feed-is-a-corpus-that-does-not-stop`).
+      even when the position is opaque. **The second is now buildable and was not when this row was
+      written**: the cursor was stored on every page, so `updated_at` re-stamped on every fire and
+      measured when the feed was last *looked at* rather than when it last moved.
+      `D-2026-08-28-a-watermark-that-is-rewritten-has-no-age` gates that write on
+      `report.advanced`; what is left here is a reader.
+      **Trigger:** the first deployment that runs an `append_only:` source, since no shipped
+      binding sets it (`D-2026-08-28-a-feed-is-a-corpus-that-does-not-stop`).
 
 - [ ] **The results store has no live target** — [M]. `D-2026-08-25-a-cache-is-not-a-record` ships
       the whole path — `src/chemclaw/publish/`, the canonical schema in `schema/result-store/`, two

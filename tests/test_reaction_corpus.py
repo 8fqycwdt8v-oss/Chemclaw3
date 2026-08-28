@@ -436,31 +436,48 @@ def test_the_drain_without_a_reaction_store_writes_no_fingerprints_and_still_rec
 
 @pytest.mark.anyio
 async def test_corpus_reactions_is_searchable_with_no_search_code_of_its_own() -> None:
-    """The payoff for giving the table the same five columns `reaction_fingerprints` has.
+    """The payoff for giving the table the columns `reaction_fingerprints` has.
 
     `PostgresFingerprintStore` is table-parameterised, so pointing it at `corpus_reactions` buys
     Tanimoto ranking over the HNSW index without a line of new SQL — the property `corpus_molecules`
     was built for, applied to the other half. Driven against the real database rather than the
     in-memory double, because the thing under test is the migration and the index, and both of
     those are exactly what a doubled store cannot exercise.
+
+    **Two sources hold the same reaction id here, and that is the point of writing it this way.**
+    An earlier version wrote `id="pistachio:s1"` with no source — a leftover from the draft that
+    composed the key into one string — so it exercised neither the `(source, id)` primary key nor
+    the `source` column the hit has to carry for `Facet.reaction_keys` to narrow on it. Ranking two
+    same-id rows from different sources is what proves the key is the pair.
     """
     await migrated_db_or_skip()
     store = corpus_reactions()
 
     coupling = "Brc1ccccc1.NC1CCCCC1>>c1ccc(NC2CCCCC2)cc1"
-    await store.add(record_for_reaction("pistachio:s1", coupling))
-    await store.add(record_for_reaction("pistachio:s2", "CCO.CC(=O)O>>CCOC(C)=O"))
+    esterification = "CCO.CC(=O)O>>CCOC(C)=O"
+    await store.add(record_for_reaction("s1", coupling).model_copy(update={"source": "pistachio"}))
+    # Same entry id, different source, different chemistry — one row each, not one overwritten.
+    await store.add(
+        record_for_reaction("s1", esterification).model_copy(update={"source": "other-corpus"})
+    )
 
     hits = await find_similar_reactions(store, coupling, top_k=2)
 
-    assert hits.hits[0].id == "pistachio:s1"
+    assert (hits.hits[0].source, hits.hits[0].id) == ("pistachio", "s1")
     assert hits.hits[0].similarity == pytest.approx(1.0)
+
+    # The collision the pair key exists to prevent: both rows survive, told apart by source.
+    # Asserted over `all_records` rather than over the hits, because the esterification is
+    # legitimately below the similarity floor — a ranking that filtered it out would prove the
+    # threshold works, not that the second row exists.
+    stored = {(r.source, r.id) for r in await store.all_records() if r.id == "s1"}
+    assert stored == {("pistachio", "s1"), ("other-corpus", "s1")}
 
 
 def test_an_unparseable_species_is_still_fingerprinted_which_is_why_only_one_error_is_caught() -> (
     None
 ):
-    """The measurement behind `_fingerprint_reaction` catching `FingerprintInputError` alone.
+    """The measurement behind `_collect_fingerprint` catching `FingerprintInputError` alone.
 
     The molecule and reaction halves fail differently and the asymmetry is not obvious:
     `standard_smiles` returns a string RDKit cannot parse *unchanged*, so DRFP shingles it and
