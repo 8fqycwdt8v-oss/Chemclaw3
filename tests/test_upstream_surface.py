@@ -48,6 +48,30 @@ def test_the_todo_middleware_still_names_the_plan_channel_todos() -> None:
     )
 
 
+def test_a_todo_still_carries_a_status_and_still_spells_the_live_one_in_progress() -> None:
+    """`agent/plan_link.py` reads `todo["status"] == "in_progress"`, and both halves are upstream's.
+
+    The pin beside it covers the channel; this covers the *item*. `plan_link_from_todos` picks the
+    step a durable job is stamped with by finding the first todo whose `status` is the literal
+    `"in_progress"` — a key and a value `Todo` declares and nothing promises. A rename either side
+    fails **silently and permanently**: the generator matches nothing, every job stamps
+    `plan_step=""`, and `job_records` fills with runs that name no step while every first-party
+    test still passes, because they all construct their own todo dicts rather than asking upstream
+    what one looks like. That is the same fail-silent shape the `todos` pin above exists for, one
+    level down.
+    """
+    from typing import get_args
+
+    from langchain.agents.middleware.todo import Todo
+
+    hints = get_type_hints(Todo, include_extras=True)
+    assert "status" in hints, "a Todo no longer carries `status`; agent/plan_link.py reads it"
+    assert "in_progress" in get_args(hints["status"]), (
+        "`in_progress` is no longer one of Todo.status's values; agent/plan_link.py matches that "
+        "literal to decide which plan step a launched job is stamped with"
+    )
+
+
 def test_the_plan_is_written_by_a_tool_called_write_todos() -> None:
     """`plan_gate` refuses a gated call that arrives beside a plan rewrite, and knows it by name.
 
