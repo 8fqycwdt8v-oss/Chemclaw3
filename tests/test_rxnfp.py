@@ -14,6 +14,7 @@ from drfp import DrfpEncoder
 from chemclaw.core.chem import STANDARDIZATION_VERSION, standard_smiles
 from chemclaw.core.config import settings
 from chemclaw.ingest.eln.ord import Component, OrdReaction, Role
+from chemclaw.kg.note import note_id_for_reaction
 from chemclaw.science.fingerprints.rxnfp.fingerprint import (
     drfp_bitstring,
     reaction_definition,
@@ -21,6 +22,7 @@ from chemclaw.science.fingerprints.rxnfp.fingerprint import (
 from chemclaw.science.fingerprints.rxnfp.search import find_similar_reactions, record_for_reaction
 from chemclaw.science.fingerprints.store import (
     FingerprintError,
+    FingerprintRecord,
     InMemoryFingerprintStore,
     tanimoto,
 )
@@ -333,3 +335,110 @@ def test_a_reaction_hit_is_unaffected() -> None:
         assert search.verdict.startswith("1 indexed reaction(s) matched")
 
     asyncio.run(_run())
+
+
+# --- one entry id, two ELNs ----------------------------------------------------------------------
+
+
+def _sited(reaction_id: str, source: str, reaction_smiles: str) -> FingerprintRecord:
+    """One site's fingerprint of an entry id both sites happen to use."""
+    return record_for_reaction(reaction_id, reaction_smiles).model_copy(update={"source": source})
+
+
+def test_two_sources_sharing_an_entry_id_keep_two_fingerprints() -> None:
+    """`EXP-1001` at two sites is two experiments, and the index key has to be able to say so.
+
+    Keyed on the bare id, the second ingest overwrote the first and the first site's chemistry
+    stopped being findable at all — worse than the transcription tier's version of this defect
+    (D-2026-08-26), because there the losing row survived and only the citation was ambiguous.
+    The in-memory backend is asserted here for the same reason it is asserted anywhere: it is the
+    reference the Postgres backend is required to match, and `tests/test_rxnfp_postgres.py` runs
+    the identical scenario in SQL.
+    """
+
+    async def _run() -> None:
+        store = InMemoryFingerprintStore()
+        await store.add(_sited("EXP-1001", "eln-a", _ESTER_ETHYL))
+        await store.add(_sited("EXP-1001", "eln-b", _HALOGENATION))
+
+        assert len(await store.all_records()) == 2, "one site's chemistry was overwritten"
+        for smiles, source in ((_ESTER_ETHYL, "eln-a"), (_HALOGENATION, "eln-b")):
+            hits = (await find_similar_reactions(store, smiles, threshold=0.99)).hits
+            assert [(h.id, h.source) for h in hits] == [("EXP-1001", source)]
+
+    asyncio.run(_run())
+
+
+def test_a_hit_carries_the_source_its_citation_needs() -> None:
+    """A search knows which site it matched; a bare `reaction-<id>` citation cannot say it.
+
+    `note_id_for_reaction` is the one definition of that spelling, so the assertion is that the
+    two hits spell two different citations — not that either equals a literal.
+    """
+
+    async def _run() -> None:
+        store = InMemoryFingerprintStore()
+        await store.add(_sited("EXP-1001", "eln-a", _ESTER_ETHYL))
+        await store.add(_sited("EXP-1001", "eln-b", _HALOGENATION))
+
+        cited = {
+            note_id_for_reaction(hit.id, hit.source)
+            for smiles in (_ESTER_ETHYL, _HALOGENATION)
+            for hit in (await find_similar_reactions(store, smiles, threshold=0.99)).hits
+        }
+        assert len(cited) == 2, f"two runs, one citation: {cited}"
+        assert all(citation.startswith("reaction-") for citation in cited)
+
+    asyncio.run(_run())
+
+
+def test_a_single_source_deployment_is_unchanged() -> None:
+    """One enabled ELN has nothing to disambiguate, and pays nothing for the key change.
+
+    One row per entry id, and the citation is the bare `reaction-<id>` every merged note already
+    carries — the property that makes this migration safe to apply to a deployment that will never
+    enable a second source.
+    """
+
+    async def _run() -> None:
+        store = InMemoryFingerprintStore()
+        await store.add(_sited("EXP-1001", "eln-a", _ESTER_ETHYL))
+        await store.add(_sited("EXP-1001", "eln-a", _ESTER_PROPYL))  # the entry, amended
+
+        records = await store.all_records()
+        assert len(records) == 1
+        assert records[0].label == _ESTER_PROPYL
+        assert note_id_for_reaction("EXP-1001") == "reaction-EXP-1001"
+
+    asyncio.run(_run())
+
+
+def test_a_sourced_write_supersedes_the_row_migration_063_could_not_name() -> None:
+    """A row stored before the key had a source half is replaced, never duplicated.
+
+    `063` backfills every row a single-claimant `reaction_labels` row can name; what it leaves
+    under the empty source would otherwise sit beside its own replacement with identical bits and
+    one label, so a similarity search would report two precedents where a chemist has one run.
+    """
+
+    async def _run() -> None:
+        store = InMemoryFingerprintStore()
+        await store.add(record_for_reaction("EXP-1001", _ESTER_ETHYL))  # pre-063 row
+        await store.add(_sited("EXP-1001", "eln-a", _ESTER_ETHYL))
+
+        hits = (await find_similar_reactions(store, _ESTER_ETHYL, threshold=0.99)).hits
+        assert [(h.id, h.source) for h in hits] == [("EXP-1001", "eln-a")]
+
+    asyncio.run(_run())
+
+
+def test_a_source_name_that_cannot_be_split_back_out_is_refused() -> None:
+    """The citation separator is the one character a source name may not contain.
+
+    A source called `eln.a` would spell `reaction-eln.a.EXP-1001`, which splits on its first
+    separator into a source that is not the one it came from — an id that resolves, to the wrong
+    run. Refused where the citation is built, so the failure names the source rather than
+    surfacing as a missing record much later.
+    """
+    with pytest.raises(ValueError, match="separates"):
+        note_id_for_reaction("EXP-1001", "eln.a")

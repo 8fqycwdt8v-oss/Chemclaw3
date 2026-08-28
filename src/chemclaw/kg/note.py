@@ -77,16 +77,52 @@ def cited_links(text: str) -> list[tuple[str, str]]:
     return list(ordered)
 
 
-def note_id_for_reaction(record_id: str) -> str:
-    """The `reaction` note id for a fingerprint-index record id.
+# What separates a source name from an entry id inside a reaction citation. `.` because it must
+# survive `require_note_slug` (so `:` is out — and `split_link` reads a colon as a relation, which
+# would turn `[[reaction-eln-a:EXP-1001]]` into an edge of type `reaction-eln-a`) and because no
+# source name in this tree contains one, while `-` and `_` appear in every second entry id. The
+# split is on the *first* separator, which `note_id_for_reaction` keeps unambiguous by refusing a
+# source that carries one.
+REACTION_SOURCE_SEPARATOR = "."
+
+
+def note_id_for_reaction(record_id: str, source: str = "") -> str:
+    """The `reaction` note id for a fingerprint-index record id, optionally naming its source.
 
     One definition, because three callers were each spelling `f"reaction-{id}"` themselves and one
     of them did not. `connectors.rxnfp.similar_reactions` returned the raw index key while
     `retrieval.retrievers` and the ELN ingest both prefixed it, so a chemist handed a search hit
     straight to `expand_note` was told the note did not exist — while it sat on disk under the
     prefixed name. Two spellings of one id is how a search stops reaching the thing it found.
+
+    **`source` is what makes two sites' runs two citations** (D-2026-08-27). An ELN entry id is
+    unique to one site, so `EXP-1001` at two sites is two experiments and `reaction-EXP-1001` names
+    both and neither — `ingest.eln.records._one_of` refuses such a read rather than guessing, which
+    is honest and still leaves a chemist unable to open a run the search just found. Given the
+    source the search matched, this spells a citation that names exactly one of them.
+
+    Empty is the default and returns the bare form, which is what every caller in `src/` passes
+    today and what a single-source deployment keeps forever: one source, one row per entry id,
+    nothing to disambiguate, and every citation already in `knowledge/` unchanged.
+
+    **The qualified form is defined here and not yet resolved anywhere.** The readers that would
+    have to accept it — `agent.graph_tools.expand_note`, `agent.protocol_tools`,
+    `ingest.eln.records.read`, `ingest.labels.record.record_phase`, `retrieval.retrievers` and
+    `connectors.rxnfp.tools` — still spell and strip the bare form, so passing a source here today
+    produces an id nothing can look up. It lives here anyway, and only here, for the reason the
+    function exists at all: a spelling that is going to be needed and is left to its callers to
+    invent becomes three spellings. Adopting it is a knowledge-graph identity change and its own
+    decision; the ADR names it as the follow-up.
     """
-    return f"reaction-{record_id}"
+    if REACTION_SOURCE_SEPARATOR in source:
+        raise ValueError(
+            f"data source name {source!r} contains {REACTION_SOURCE_SEPARATOR!r}, which separates "
+            "the source from the entry id in a reaction citation; a citation built from it could "
+            "not be split back into the run it names"
+        )
+    if not source:
+        return f"reaction-{record_id}"
+    return f"reaction-{source}{REACTION_SOURCE_SEPARATOR}{record_id}"
 
 
 # Id namespaces that resolve *outside* the markdown graph (D-2026-08-25).
