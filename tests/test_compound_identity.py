@@ -403,6 +403,13 @@ def test_the_solvate_rule_changed_no_shipped_reagent() -> None:
     uronium cations). A fourth name appearing here means a solvate or a co-crystal is being deleted
     again; one of these three disappearing means the counterion rule has been broken from the other
     side, which is the direction nobody watches.
+
+    **What this does not do, because the docstring used to imply it did.** Mutation-tested: revert
+    the solvate rule entirely and this test stays green, because none of the 68 shipped structures
+    is a solvate — that is precisely the measurement it exists to record. It is a guard on the
+    *reagent table*, not on the rule. The rule itself is guarded by
+    `test_a_solvate_is_not_its_solvent`, and by the tie-break test, whose solute was chosen so
+    that the old rule loses it.
     """
     shipped = {r.smiles: r.name for r in map(resolve_compound_name, known_names()) if r}
     assert len(shipped) == 68, "the shipped table changed; re-measure before editing the set below"
