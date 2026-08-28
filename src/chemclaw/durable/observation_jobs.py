@@ -210,6 +210,14 @@ def _promotion_summary(observation: Observation) -> str:
 
 
 @durable_workflow("background")
+# **Deliberately left able to park** (D-2026-08-27), unlike its promotion sibling below. The
+# discriminator is the starter, not the shape: this half runs only from the `observations`
+# Schedule, which starts it with `schedule_run_timeout_seconds` — so a parked run is bounded at
+# a day rather than forever, nothing polls it, and the pass is a full re-mine with no cursor, so
+# a fire it skips costs a refresh of `last_seen` that the next fire redoes. Within that day a
+# fix redeploys and the parked run finishes; the retirement windows are weeks, so a day-late
+# pass is the same pass. Declaring here would trade nothing anyone can name for a failure state
+# no surface reports — `ScheduleHealth` carries no run outcome at all.
 @workflow.defn
 class ObservationSynthesisWorkflow:
     """Mine, then retire — the observations tier's periodic half.
@@ -256,7 +264,11 @@ class ObservationSynthesisWorkflow:
 
 
 @durable_workflow("background")
-@workflow.defn
+# Declared, where the synthesis half above is not: `synthesize_memory` starts this one for a
+# named chemist with no `execution_timeout` and returns an id to poll, so a plain exception
+# parks a run `get_durable_job_status` reports as `running` for ever. Re-running is cheap and
+# opens no duplicate PR — a re-proposed note is byte-identical. D-2026-08-27.
+@workflow.defn(failure_exception_types=[Exception])
 class ObservationPromotionWorkflow:
     """Promote the observations that have earned a playbook note — on demand, never on a timer.
 
