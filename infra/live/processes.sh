@@ -27,6 +27,9 @@ set -euo pipefail
 readonly REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 readonly LIVE_DIR="${CHEMCLAW_LIVE_DIR:-$REPO_ROOT/.live}"
 readonly RUN_DIR="$LIVE_DIR/run"
+# A recorded pid alone cannot say whether the process still behind it is ours; see the file.
+# shellcheck source=infra/live/pidfile.sh
+source "$REPO_ROOT/infra/live/pidfile.sh"
 readonly API_PORT="${CHEMCLAW_LIVE_API_PORT:-8000}"
 
 log() { printf '\033[36m[live]\033[0m %s\n' "$*"; }
@@ -135,8 +138,7 @@ python_bin() { ( cd "$REPO_ROOT" && uv run python -c 'import sys; print(sys.exec
 # limit: a pidfile is a per-lane record of a machine-wide resource. `start_fleet_bundles` says what
 # that costs and asks the address itself instead.
 running() {
-  local pidfile="$RUN_DIR/$1.pid"
-  [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null
+  pidfile_running "$1" "$RUN_DIR"
 }
 
 start() {
@@ -149,7 +151,7 @@ start() {
   # No subshell around the launch: with `( … & echo $! )` the recorded pid is the forked subshell,
   # which is exactly the off-by-one that made the signal above miss. `up()` has already cd'd.
   nohup "$@" >"$LIVE_DIR/$name.log" 2>&1 &
-  echo $! >"$pidfile"
+  record_pid "$name" $! "$RUN_DIR"
   log "$name started (pid $(cat "$pidfile"))"
 }
 
@@ -483,7 +485,7 @@ up() {
   else
     # Clear any pid file from an earlier run that *did* start it, so `status` reports the
     # front door as absent rather than as a process that died.
-    rm -f "$RUN_DIR/api.pid"
+    forget_pid api "$RUN_DIR"
     log "no ANTHROPIC_API_KEY and no openai_compatible endpoint — skipping the front door."
     log "  'make live-jobs' (Temporal + Postgres) runs without it; 'make live-probes' needs it."
   fi
@@ -514,7 +516,8 @@ down() {
       kill "$pid" 2>/dev/null || true
       log "$name stopped (pid $pid)"
     fi
-    rm -f "$pidfile" "$RUN_DIR/$name.port"
+    forget_pid "$name" "$RUN_DIR"
+    rm -f "$RUN_DIR/$name.port"
   done
   # The credentials belong to the processes that just stopped. Left behind, `processes.sh env`
   # would hand a later shell tokens for servers that are gone — a stale secret is a slower version
@@ -557,7 +560,7 @@ restart() {
   kill -9 "$pid" 2>/dev/null || true
   # Wait for the pid to actually go, so `up` does not see a still-live process and skip the start.
   for _ in $(seq 1 50); do kill -0 "$pid" 2>/dev/null || break; sleep 0.2; done
-  rm -f "$pidfile"
+  forget_pid "$name" "$RUN_DIR"
   log "$name killed (pid $pid)"
   up
   # `up` is conditional in places — it skips the front door with no model configured, and skips the

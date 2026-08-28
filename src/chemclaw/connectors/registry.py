@@ -204,13 +204,25 @@ def server_tools_module(connector: str) -> ModuleType | None:
     behind, so the directory persists as a PEP 420 namespace package, the import gets one level
     further, and the error names the module after all. Locally it returned `None` and CI raised, off
     the same commit.
+
+    **The bundle package is in that set for the case the two below it cannot reach: a manifest that
+    is not this repository's at all.** `CHEMCLAW_CONNECTORS_DIR` is a path list, and the four-repo
+    lane mounts `Chemclaw3-mcp/manifests` on it, so `discovered()` legitimately yields `props`,
+    `pyexec`, `rxnpredict` and `calc` — names for which no `chemclaw.connectors.<name>` package
+    exists, one level above the two cases this guard already knew. Measured 2026-08-28: the mock
+    model refused to start on the full-stack lane with `ModuleNotFoundError: No module named
+    'chemclaw.connectors.props'`, while every offline suite was green, because a suite that mounts
+    only this repository's own directory can never produce the case. Nothing real hides behind the
+    widening — a module cannot fail to import *itself* by name, so an `exc.name` equal to the bundle
+    package means the package is absent rather than broken.
     """
-    package = f"chemclaw.connectors.{connector}.server"
+    bundle = f"chemclaw.connectors.{connector}"
+    package = f"{bundle}.server"
     target = f"{package}.tools"
     try:
         return importlib.import_module(target)
     except ModuleNotFoundError as exc:
-        if exc.name in {target, package}:
+        if exc.name in {target, package, bundle}:
             return None
         raise
 

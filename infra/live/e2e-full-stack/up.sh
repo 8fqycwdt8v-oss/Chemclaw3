@@ -38,6 +38,9 @@ readonly HARNESS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly REPO_ROOT="$(cd "$HARNESS_DIR/../../.." && pwd)"
 readonly LIVE_DIR="${CHEMCLAW_LIVE_DIR:-$REPO_ROOT/.live}"
 readonly RUN_DIR="$LIVE_DIR/e2e/run"
+# A recorded pid alone cannot say whether the process still behind it is ours; see the file.
+# shellcheck source=infra/live/pidfile.sh
+source "$REPO_ROOT/infra/live/pidfile.sh"
 
 readonly MCP_REPO="${CHEMCLAW_MCP_REPO:-/workspace/8fqycwdt8v-oss/chemclaw3-mcp}"
 readonly MOCK_REPO="${CHEMCLAW_MOCK_REPO:-/workspace/8fqycwdt8v-oss/chemclaw3_mock}"
@@ -90,8 +93,7 @@ string-compares it to decide whether to start chemclaw.cli.mock_llm, so a traili
 # Whether *this lane* has a live process recorded under `name` — this lane's own bookkeeping, and
 # nothing about whether the address that process wants is free.
 running() {
-  local pidfile="$RUN_DIR/$1.pid"
-  [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null
+  pidfile_running "$1" "$RUN_DIR"
 }
 
 start() {
@@ -102,7 +104,7 @@ start() {
     return
   fi
   nohup "$@" >"$LIVE_DIR/e2e-$name.log" 2>&1 &
-  echo $! >"$pidfile"
+  record_pid "$name" $! "$RUN_DIR"
   log "$name started (pid $(cat "$pidfile"))"
 }
 
@@ -484,7 +486,7 @@ down() {
       kill -- "-$(ps -o pgid= "$pid" | tr -d ' ')" 2>/dev/null || kill "$pid" 2>/dev/null || true
       log "$name stopped (pid $pid)"
     fi
-    rm -f "$pidfile"
+    forget_pid "$name" "$RUN_DIR"
   done
   log "stopping this repo's connectors/workers/front door"
   bash "$REPO_ROOT/infra/live/processes.sh" down
@@ -521,7 +523,7 @@ restart() {
   local pid; pid="$(cat "$pidfile")"
   kill -9 "$pid" 2>/dev/null || true
   for _ in $(seq 1 50); do kill -0 "$pid" 2>/dev/null || break; sleep 0.2; done
-  rm -f "$pidfile"
+  forget_pid "$name" "$RUN_DIR"
   log "$name killed (pid $pid)"
   case "$name" in
     calc) start_calc "$(mcp_python_bin)" ;;

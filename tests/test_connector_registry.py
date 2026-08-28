@@ -464,6 +464,25 @@ def test_a_bundle_with_no_server_package_has_no_server_module() -> None:
     assert server_tools_module("chem") is None
 
 
+def test_a_manifest_from_another_repository_has_no_server_module() -> None:
+    """The third `None`, one package above the second, and the only one an offline suite cannot see.
+
+    `CHEMCLAW_CONNECTORS_DIR` is a path list, so the four-repo lane mounts
+    `Chemclaw3-mcp/manifests` beside this repository's own directory and `discovered()` yields
+    `props`, `pyexec`, `rxnpredict` and `calc`. For those there is no `chemclaw.connectors.<name>`
+    package at all — not a missing `server/` inside a bundle that exists, which is the case the
+    test above covers, but a bundle that is not this repository's.
+
+    **Measured 2026-08-28**: `tool_signatures()` reached `server_tools_module("props")` during the
+    mock model's startup validation and the full-stack lane died with `ModuleNotFoundError: No
+    module named 'chemclaw.connectors.props'`, while every offline suite stayed green — a suite
+    that mounts only this repository's directory can never produce the case, so no unit gate could
+    have caught it. This test names the shape rather than the checkout: it asks about a name that
+    is deliberately not a package here, which is exactly what a mounted external manifest is.
+    """
+    assert server_tools_module("not-a-bundle-in-this-repository") is None
+
+
 def test_a_jobs_only_bundle_has_no_server_module() -> None:
     """The other `None`: `results` declares no endpoint and ships no server, and never has."""
     assert server_tools_module("results") is None
