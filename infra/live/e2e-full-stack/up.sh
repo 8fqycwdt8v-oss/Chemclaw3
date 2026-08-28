@@ -191,27 +191,68 @@ assert_credential_accepted() {
 
 mcp_python_bin() { ( cd "$MCP_REPO" && uv sync --quiet && uv run python -c 'import sys; print(sys.executable)' ); }
 
-start_props() {
-  local python="$1"
-  # No --app-dir: `python` is the shared workspace venv's interpreter, which already has
-  # `chemclaw_mcp_props` on its path via uv's editable workspace install.
-  CHEMCLAW_PROPS_TOKEN="${CHEMCLAW_PROPS_TOKEN:-dev-token}" \
-    start props "$python" -m uvicorn chemclaw_mcp_props.app:app --host 127.0.0.1 --port 8850
-  wait_for props "http://127.0.0.1:8850/healthz"
-  assert_credential_accepted props "http://127.0.0.1:8850/mcp" "${CHEMCLAW_PROPS_TOKEN:-dev-token}"
+# Which published manifests this script is responsible for starting.
+#
+# **Derived from the directory that is mounted, not written down.** `D-2026-08-17-a-harness-that-
+# starts-two-of-five-servers-is-a-harness-that-tests-two` fixed the count of the day by adding the
+# missing servers by name — and the fleet then grew `pyexec`, whose manifest is published, mounted
+# on `CHEMCLAW_CONNECTORS_DIR` by the line above, and started by nobody. Measured: the front door
+# refused to boot with `connectors_required is set but these connectors are unreachable: pyexec`.
+# It failed closed, which is the posture working; it also means the lane could not come up at all
+# until somebody edited a list. A list that must be edited whenever the other repository gains a
+# server is a list that will be out of date again, so the answer is to stop keeping one.
+#
+# `chem` and `safety` are excluded because `infra/live/processes.sh` starts them and must
+# (D-2026-08-27-one-lane-starts-the-fleet); everything else in `manifests/` is this script's.
+# `calc` is not in this list at all and cannot be: it lives in `manifests-internal/`, is a backend
+# rather than a connector, and has its own start below.
+fleet_connectors_to_start() {
+  local dir
+  for dir in "$MCP_REPO"/manifests/*/; do
+    [ -f "$dir/connector.yaml" ] || continue
+    local name; name="$(basename "$dir")"
+    case "$name" in chem|safety) continue ;; esac
+    printf '%s\n' "$name"
+  done
 }
 
-start_rxnpredict() {
-  local python="$1"
-  # fake_a/fake_c: a deterministic tool surface with no model weights and no checkpoint download —
-  # exactly what CI-shaped hardware wants (no GPU, no HuggingFace egress). See
-  # engine/base_doubles.py::register_requested for how the env vars below reach the registry.
-  CHEMCLAW_RXNPREDICT_TOKEN="${CHEMCLAW_RXNPREDICT_TOKEN:-dev-token}" \
-    CHEMCLAW_RXNPREDICT_ENABLED_FORWARD_MODELS="${CHEMCLAW_RXNPREDICT_ENABLED_FORWARD_MODELS:-fake_a}" \
-    CHEMCLAW_RXNPREDICT_ENABLED_CONDITIONS_MODELS="${CHEMCLAW_RXNPREDICT_ENABLED_CONDITIONS_MODELS:-fake_c}" \
-    start rxnpredict "$python" -m uvicorn chemclaw_mcp_rxnpredict.app:app --host 127.0.0.1 --port 8857
-  wait_for rxnpredict "http://127.0.0.1:8857/healthz"
-  assert_credential_accepted rxnpredict "http://127.0.0.1:8857/mcp" "${CHEMCLAW_RXNPREDICT_TOKEN:-dev-token}"
+# The port a manifest declares, read from the manifest. Same shape as `processes.sh::fleet_port`,
+# and deliberately the same source: the address the server binds and the address Chemclaw3 dials
+# have to be one number, and a second copy of it here is how they would stop being.
+fleet_port() {
+  "$1" - "$MCP_REPO/manifests/$2/connector.yaml" <<'PY'
+import re, sys
+url = re.search(r"url:\s*(\S+)", open(sys.argv[1]).read()).group(1)
+print(re.search(r":(\d+)/mcp", url).group(1))
+PY
+}
+
+# Start one fleet connector by name, at the port and under the token its own manifest declares.
+#
+# No --app-dir: `python` is the shared workspace venv's interpreter, which already has every
+# `chemclaw_mcp_<name>` on its path via uv's editable workspace install.
+#
+# `rxnpredict` is the one server needing more than the pattern, and it gets it here rather than in
+# a function of its own: fake_a/fake_c give it a deterministic tool surface with no model weights
+# and no checkpoint download — exactly what CI-shaped hardware wants (no GPU, no HuggingFace
+# egress). See engine/base_doubles.py::register_requested for how those env vars reach the registry.
+start_fleet_connector() {
+  local python="$1" name="$2" port token var extra=()
+  port="$(fleet_port "$python" "$name")" \
+    || die "no port in $MCP_REPO/manifests/$name/connector.yaml"
+  var="CHEMCLAW_$(printf '%s' "$name" | tr '[:lower:]' '[:upper:]')_TOKEN"
+  token="${!var:-dev-token}"
+  export "$var=$token"
+  if [ "$name" = rxnpredict ]; then
+    extra=(
+      "CHEMCLAW_RXNPREDICT_ENABLED_FORWARD_MODELS=${CHEMCLAW_RXNPREDICT_ENABLED_FORWARD_MODELS:-fake_a}"
+      "CHEMCLAW_RXNPREDICT_ENABLED_CONDITIONS_MODELS=${CHEMCLAW_RXNPREDICT_ENABLED_CONDITIONS_MODELS:-fake_c}"
+    )
+  fi
+  start "$name" env "${extra[@]}" "$python" -m uvicorn "chemclaw_mcp_$name.app:app" \
+    --host 127.0.0.1 --port "$port"
+  wait_for "$name" "http://127.0.0.1:$port/healthz"
+  assert_credential_accepted "$name" "http://127.0.0.1:$port/mcp" "$token"
 }
 
 # Not a connector — see the fleet comment above. `calc_server_url` defaults to 8860.
@@ -359,10 +400,13 @@ up() {
   # this lane resolved is what makes one owner work from either lane's default.
   export CHEMCLAW_MCP_REPO="$MCP_REPO"
 
-  log "starting the Chemclaw3-mcp fleet (props, rxnpredict, calc; chem and safety via processes.sh)"
   local mcp_python; mcp_python="$(mcp_python_bin)"
-  start_props "$mcp_python"
-  start_rxnpredict "$mcp_python"
+  local fleet; fleet="$(fleet_connectors_to_start | tr '\n' ' ')"
+  log "starting the Chemclaw3-mcp fleet: ${fleet}and calc (chem and safety via processes.sh)"
+  local name
+  for name in $fleet; do
+    start_fleet_connector "$mcp_python" "$name"
+  done
   start_calc "$mcp_python"
 
   if [ "$mock_available" = true ]; then
@@ -480,8 +524,6 @@ restart() {
   rm -f "$pidfile"
   log "$name killed (pid $pid)"
   case "$name" in
-    props) start_props "$(mcp_python_bin)" ;;
-    rxnpredict) start_rxnpredict "$(mcp_python_bin)" ;;
     calc) start_calc "$(mcp_python_bin)" ;;
     mock-eln|mock-vendor)
       [ -d "$MOCK_REPO" ] || die "$name comes from Chemclaw3_mock, which is not at $MOCK_REPO.
@@ -493,7 +535,15 @@ CHEMCLAW_MOCK_REPO and re-run \`up\` rather than restarting into a stack that do
       esac
       ;;
     ui-bff) start_ui ;;
-    *) die "restart: unknown process '$name'" ;;
+    *)
+      # Any published fleet manifest this script started, by the same derivation `up` used — so a
+      # server added to the other repository is restartable here the day it is startable.
+      if fleet_connectors_to_start | grep -qx "$name"; then
+        start_fleet_connector "$(mcp_python_bin)" "$name"
+      else
+        die "restart: unknown process '$name'"
+      fi
+      ;;
   esac
 }
 
