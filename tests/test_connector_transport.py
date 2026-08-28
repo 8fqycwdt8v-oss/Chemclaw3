@@ -940,6 +940,30 @@ def test_a_server_that_cannot_name_its_build_says_so_rather_than_reporting_the_s
     assert _served_by(SimpleNamespace(tool=None)) == ""
 
 
+def test_a_handshake_publishes_what_its_tool_schemas_cost_every_turn() -> None:
+    """The half of the static prefix `tests/test_context_floor.py` cannot see.
+
+    That file ratchets every in-process tool schema a profile binds — 28,123 tokens on `default`,
+    and it caught a merge that grew the floor by 32%. An *endpoint* tool's schema is not in this
+    repository: it arrives from a running server at handshake, so a connector's docstrings grow
+    what every turn pays with nothing here able to fail. It cannot become a ratchet, because the
+    number belongs to a server this repository does not build — so it becomes a measurement, and
+    the sum of this family plus the ratcheted floor is what a turn costs before anybody speaks.
+    """
+    from chemclaw.core.metrics import METRICS
+
+    _stamped([_probe_tool()], connector="probe-fleet", revision="unknown")
+
+    published = [
+        line
+        for line in METRICS.render().splitlines()
+        if line.startswith("chemclaw_connector_tool_schema_tokens{")
+        and 'connector="probe-fleet"' in line
+    ]
+    assert len(published) == 1, f"the handshake published no schema cost: {published}"
+    assert float(published[0].split()[-1]) > 0, "a served tool measured as costing nothing"
+
+
 def _probe_tool() -> BaseTool:
     """An unstamped `BaseTool`, standing in for an in-process capability."""
     from langchain_core.tools import tool as make_tool
