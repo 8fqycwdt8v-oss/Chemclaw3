@@ -659,3 +659,86 @@ def test_a_missing_required_argument_is_the_same_defect_as_a_misspelled_one() ->
     """
     with pytest.raises(ValueError, match="requires"):
         _validate(Behaviour(name="t", calls=[ToolCall(tool="find_notes", arguments={})]))
+
+
+def test_a_session_that_was_never_locked_did_not_prove_a_release() -> None:
+    """E1 asked when the 409s stopped without asking that any 409 ever started.
+
+    E2 refuses to grade a kill that interrupted nothing (`at_kill == RUNNING`) and E3 refuses to
+    grade a bounce that did not happen (the postmaster's start time). E1 had no such guard: a lane
+    where the first turn had already finished answers the very first probe with 200, scores
+    "accepted after 0.0s" and passes CHAOS-1 having held no claim to release.
+    """
+    assert live_storm._release_was_observed([409, 409, 200], waited=0.4)
+    assert not live_storm._release_was_observed([200], waited=0.0)
+    assert not live_storm._release_was_observed([409, 409], waited=60.0)
+    assert not live_storm._release_was_observed([409, 200], waited=9.0)
+
+
+def test_a_broker_that_never_stopped_is_the_postgres_defect_one_family_over() -> None:
+    """E4 asserted the launch failed without asserting the broker had gone away.
+
+    That is exactly what `bootstrap.sh restart-postgres` turned out to be doing on a Docker lane —
+    logging a restart and restarting nothing, while E3 reported PASS with "24/24 in-flight turns
+    survived". A fix to one lane primitive is not a reason to keep trusting the sibling check that
+    could not have seen it break either.
+    """
+    refused = TurnResult(status=200, tools_failed=["compute_reaction_energy"])
+    assert live_storm._broker_outage_finding(stopped=True, result=refused).ok
+
+    not_stopped = live_storm._broker_outage_finding(stopped=False, result=refused)
+    assert not not_stopped.ok
+    assert "STILL REACHABLE" in not_stopped.observed
+
+
+# ------------------------------------------- assertions whose negative half is trivially satisfied
+
+
+def test_a_truncated_document_check_that_saw_no_call_saw_no_document() -> None:
+    """`not any(refusal word in preview)` is trivially true of a turn with no previews at all.
+
+    The `bool(result_previews)` guard in front of it was the whole defence, and it is satisfied by
+    a single empty-string preview — which the measured stream really does carry for `find_notes`.
+    So "the truncated document was completed and the tool ran on the cut value" was scored by a
+    turn in which nothing was announced. The call count is the missing positive half.
+    """
+    no_call = TurnResult(status=200, result_previews=[""])
+    assert not live_storm._partial_document_was_completed(no_call)
+
+    ran = TurnResult(status=200, announced=1, returned=1, result_previews=[""])
+    assert live_storm._partial_document_was_completed(ran)
+
+    refused = TurnResult(status=200, announced=1, returned=1, result_previews=["Error: invalid"])
+    assert not live_storm._partial_document_was_completed(refused)
+
+
+def test_a_sweep_that_offered_no_turns_lost_none_of_them() -> None:
+    """`lost == 0` is the same trivially-satisfied negative one level up.
+
+    `--sweep-turns 0` produces five rows in which nothing was offered, nothing was dropped, and
+    the accounting check passes over zero observations. A count of zero is only evidence when
+    something was counted.
+    """
+
+    def sweep(turns: int, unaccounted: int) -> list[dict[str, object]]:
+        return [{"cap": 2, "turns": turns, "unaccounted": unaccounted, "goodput": 1.0}]
+
+    assert not live_storm._accounting_is_clean(sweep(turns=0, unaccounted=0))
+    assert live_storm._accounting_is_clean(sweep(turns=48, unaccounted=0))
+    assert not live_storm._accounting_is_clean(sweep(turns=48, unaccounted=3))
+
+
+def test_a_sweep_where_nothing_answered_has_no_noise_to_be_small() -> None:
+    """Every cap at zero goodput measures a spread of zero, so the noise check passes.
+
+    `spread` divides by `max(median, 1e-9)`, so a cap that answered nothing reports a 0 % spread
+    rather than an undefined one — and "the sweep's own noise is small enough to read a knee
+    against" is then true of a sweep with nothing in it to read.
+    """
+    dead = [_row(2, 0.0, 0.0, repeats=3), _row(4, 0.0, 0.0, repeats=3)]
+    assert not live_storm._sweep_is_readable(dead)
+    assert _knee(dead) is None
+    assert "unreadable" in live_storm._knee_observation(dead)
+
+    alive = [_row(2, 1.0, 0.05, repeats=3), _row(4, 1.02, 0.05, repeats=3)]
+    assert live_storm._sweep_is_readable(alive)

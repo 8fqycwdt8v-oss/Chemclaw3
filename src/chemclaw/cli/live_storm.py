@@ -584,14 +584,21 @@ def _partial_document_was_completed(result: TurnResult) -> bool:
     which is the vacuous-check pattern in reverse: a check that cannot pass because it asks for
     something the system documents it does not do.
 
-    A `tool_result` came back, and it is not a refusal. If upstream ever starts rejecting the
-    document instead, this goes red and the finding is that the behaviour changed.
+    The declared call was announced and came back, and no preview says it refused. **The count is
+    the positive half and it was missing**: `not any(refusal word in preview)` is trivially true of
+    a turn with no previews at all, and the `bool(result_previews)` guard in front of it is
+    satisfied by a single *empty-string* preview — which is what the measured stream really
+    carries for `find_notes`. So this scored a turn that announced nothing. That is the shape of
+    the UI's `not.toContain('unreachable')` over a body naming no connector, in this file.
+
+    If upstream ever starts rejecting the document instead, this goes red and the finding is that
+    the behaviour changed.
     """
-    if result.status != 200:
-        return False
     if result.tools_failed:
         return False
-    return bool(result.result_previews) and not any(
+    if not _every_call_came_back(result, declared_calls("f-truncated-arguments")):
+        return False
+    return not any(
         any(word in preview.lower() for word in _REFUSAL_WORDS)
         for preview in result.result_previews
     )
@@ -813,6 +820,23 @@ async def _workflow_status(workflow_id: str) -> WorkflowExecutionStatus | None:
     return description.status
 
 
+def _release_was_observed(codes: Sequence[int], *, waited: float) -> bool:
+    """The session was actually held, and then let go quickly — both halves, in that order.
+
+    **The first half was missing and it is the same guard E2 and E3 each carry.** E2 refuses to
+    grade a kill that interrupted nothing (`at_kill == RUNNING`); E3 refuses to grade a bounce
+    whose postmaster start time did not move. E1 asked only when the 409s *stopped*, so a lane
+    where the first turn had already finished answers the very first probe with 200, records
+    "accepted after 0.0s", and passes the CHAOS-1 regression having held no claim to release.
+
+    Five seconds, not "half the lease": the claim is that the release is *explicit*, and an
+    explicit release is an order of magnitude away from a lease expiry, not a factor of two. A
+    threshold at lease/2 would have passed a release that never happened on a lane whose lease was
+    configured short.
+    """
+    return bool(codes) and codes[0] == 409 and codes[-1] == 200 and waited < 5.0
+
+
 async def _chaos_client_disconnect() -> Finding:
     """E1 · a client that walks away mid-turn must free the session at once, not after the lease.
 
@@ -865,8 +889,11 @@ async def _chaos_client_disconnect() -> Finding:
         # explicit release is an order of magnitude away from a lease expiry, not a factor of two.
         # A threshold at lease/2 would have passed a release that never happened on a lane whose
         # lease was configured short.
-        ok=codes[-1] == 200 and waited < 5.0,
-        observed=f"accepted after {waited:.1f}s (lease is {lease}s); status codes {codes[:4]}",
+        ok=_release_was_observed(codes, waited=waited),
+        observed=(
+            f"accepted after {waited:.1f}s (lease is {lease}s); status codes {codes[:4]}"
+            + ("" if codes[:1] == [409] else " — NEVER LOCKED, so no release was tested")
+        ),
         detail="CHAOS-1 regression: this was 63 s before the claim was released on disconnect",
     )
 
@@ -1032,6 +1059,10 @@ async def _chaos_broker_outage() -> Finding:
     case, because the launch cannot even be confirmed — and the outcome that must never happen is a
     turn where the failure is nowhere on the stream.
 
+    **And that the broker really went away**, which is E3's postmaster reading one family over:
+    a lane verb that logs a stop and stops nothing is a class this harness has already been caught
+    by once, in the sibling check, on the same day.
+
     **What is deliberately not scored: whether the turn also produced prose.** It does, and the
     prose says the job was launched — but that text is the mock's script, replayed regardless of
     what the tool returned, so failing the check on it would be measuring this harness rather than
@@ -1041,21 +1072,48 @@ async def _chaos_broker_outage() -> Finding:
     """
     await asyncio.to_thread(_lane, "bootstrap.sh", "stop-temporal")
     try:
+        stopped = not await _broker_is_reachable()
         (result,) = await storm("d-collide", turns=1, concurrency=1, timeout=120.0)
     finally:
         await asyncio.to_thread(_lane, "bootstrap.sh", "start-temporal")
         # Whatever died while the broker was gone comes back before anything else is measured.
         await asyncio.to_thread(_lane, "processes.sh", "up")
 
+    return _broker_outage_finding(stopped=stopped, result=result)
+
+
+async def _broker_is_reachable() -> bool:
+    """Whether a Temporal client can be built against the configured address, right now.
+
+    The analogue of E3's postmaster start time, and it is here for the same reason: measured
+    2026-08-28, `bootstrap.sh restart-postgres` had no compose branch and restarted nothing while
+    E3 reported PASS. A lane verb that silently does nothing is a class, not an incident, and the
+    sibling check over `stop-temporal` had no way to see it — it would have failed *safe*, which
+    is better than E3 did and still leaves the run unable to say whether it tested anything.
+    """
+    try:
+        await temporal_connect()
+    except Exception:  # any inability to reach the broker is the state this asks about
+        return False
+    return True
+
+
+def _broker_outage_finding(*, stopped: bool, result: TurnResult) -> Finding:
+    """E4's verdict: the broker was really gone, and the launch said so on the stream."""
     return Finding(
         family="E",
         name="a durable launch with no broker reaches the asker as an error, not as an answer",
-        ok=_bad_call_was_reported(result),
+        ok=stopped and _bad_call_was_reported(result),
         observed=(
+            f"broker {'stopped' if stopped else 'STILL REACHABLE — this check tested nothing'}; "
             f"HTTP {result.status}, answered={result.answered}, error={result.error_code}, "
             f"tools_failed={result.tools_failed[:2]}, result[0]={_first_preview(result)!r}"
         ),
-        detail=result.transport_error or "",
+        detail=(
+            result.transport_error or ""
+            if stopped
+            else "the lane's stop-temporal verb left the broker answering, so nothing was tested"
+        ),
     )
 
 
@@ -1345,6 +1403,20 @@ async def family_h_edges() -> list[Finding]:
     return findings
 
 
+def _accounting_is_clean(rows: Sequence[dict[str, Any]]) -> bool:
+    """No turn vanished — *and* turns were offered, which is the half a zero count cannot say.
+
+    `lost == 0` is another assertion whose negative form is trivially satisfied: `--sweep-turns 0`
+    produces rows in which nothing was offered, nothing was dropped, and the accounting passes
+    over zero observations. A count of zero is evidence only once something has been counted.
+    """
+    return (
+        bool(rows)
+        and all(int(row["turns"]) > 0 for row in rows)
+        and sum(int(row["unaccounted"]) for row in rows) == 0
+    )
+
+
 def _turn_outcomes(results: Sequence[TurnResult]) -> dict[str, int]:
     """Every turn in exactly one bucket, each counted independently rather than by subtraction.
 
@@ -1488,7 +1560,7 @@ async def family_a_admission(
         Finding(
             family="A",
             name="every offered turn ended with an answer or a stated reason",
-            ok=bool(rows) and lost == 0,
+            ok=_accounting_is_clean(rows),
             observed=(
                 f"{len(rows)} cap(s) swept, {lost} turn(s) that neither answered nor "
                 f"reported why (dropped or silently empty)"
@@ -1518,11 +1590,7 @@ async def family_a_admission(
             # passed with nothing measured and `_knee` then fired on the first pair that failed to
             # improve at all — the fabricated knee, reached through the door the ceiling does not
             # cover.
-            ok=(
-                bool(rows)
-                and _samples_per_cap(rows) >= _MIN_SAMPLES_PER_CAP
-                and noise(rows) <= _MAX_READABLE_NOISE
-            ),
+            ok=_sweep_is_readable(rows) and noise(rows) <= _MAX_READABLE_NOISE,
             observed=(
                 f"largest within-cap spread {noise(rows) * 100:.0f}% "
                 f"over {_samples_per_cap(rows)} sample(s) per cap "
@@ -1559,6 +1627,22 @@ _MAX_READABLE_NOISE = 0.15
 # One sample measures a spread of exactly zero, which is not a small noise floor — it is no
 # measurement at all, and it disarms both the ceiling above and the comparison inside `_knee`.
 _MIN_SAMPLES_PER_CAP = 2
+
+
+def _sweep_is_readable(rows: Sequence[dict[str, Any]]) -> bool:
+    """The sweep measured enough, at more than one sample, for a spread to mean anything.
+
+    Two ways a noise figure can be a number and not a measurement, and the check over it passed
+    both. One sample per cap measures a spread of exactly zero by construction. And `spread`
+    divides by `max(median, 1e-9)`, so a cap where *nothing answered* also reports 0 % rather than
+    an undefined value — which made "the sweep's own noise is small enough to read a knee against"
+    true of a sweep with nothing in it to read.
+    """
+    return (
+        bool(rows)
+        and _samples_per_cap(rows) >= _MIN_SAMPLES_PER_CAP
+        and all(float(row["goodput"]) > 0 for row in rows)
+    )
 
 
 def _samples_per_cap(rows: Sequence[dict[str, Any]]) -> int:
@@ -1598,7 +1682,7 @@ def _knee(rows: Sequence[dict[str, Any]]) -> int | None:
     could not see well enough to tell. Neither is the top of the range dressed up as an answer.
     """
     floor = noise(rows)
-    if _samples_per_cap(rows) < _MIN_SAMPLES_PER_CAP:
+    if not _sweep_is_readable(rows):
         return None
     if floor > _MAX_READABLE_NOISE:
         return None
@@ -1622,11 +1706,12 @@ def _knee_observation(rows: Sequence[dict[str, Any]]) -> str:
         return "no rows"
     floor = noise(rows)
     samples = _samples_per_cap(rows)
-    if samples < _MIN_SAMPLES_PER_CAP:
+    if not _sweep_is_readable(rows):
         return (
-            f"unreadable: {samples} sample(s) per cap measures a spread of zero by construction, "
-            f"so there is no noise floor to judge a step against — raise --sweep-repeats to at "
-            f"least {_MIN_SAMPLES_PER_CAP}"
+            f"unreadable: {samples} sample(s) per cap and goodput "
+            f"{[round(float(row['goodput']), 2) for row in rows]} — a spread needs more than one "
+            f"sample and a median above zero to be a measurement rather than a number. Raise "
+            f"--sweep-repeats to at least {_MIN_SAMPLES_PER_CAP}, and check that turns answered"
         )
     if floor > _MAX_READABLE_NOISE:
         return (
