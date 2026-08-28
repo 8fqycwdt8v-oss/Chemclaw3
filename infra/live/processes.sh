@@ -295,6 +295,95 @@ PY
 }
 
 
+# Write `$RUN_DIR/connector-env.sh` — the exports a second shell needs — readable only by this user.
+#
+# `$1` is `connector_env`'s own output, captured by the caller so its exit status is not discarded.
+# Everything else is read from the environment this invocation resolved.
+#
+# **Its own function because the block it replaced carried two defects that a reader of `up()`
+# could not see, and both were in the plumbing rather than in the content.**
+#
+# *The file was world-readable, beside a comment saying `0600`.* `( umask 077; … ) > "$file"` looks
+# like it creates the file owner-only and does not: bash forks the subshell, applies the compound
+# command's redirection **in the child, before running its body**, so the file is created under the
+# inherited umask and `umask 077` lands one syscall too late. Measured under a 022 umask: 0644, on a
+# file holding every connector's minted bearer token, the fleet's four tokens and — appended by a
+# second subshell that got this right and could no longer help — the probe's Entra access token.
+# The redirection is inside the umask here, on an inner group, which is the form that works.
+#
+# *And the block decided `up`'s exit status.* It ended on
+# `for key in $(fleet_token_vars); do [ -n "${!key:-}" ] && printf …; done`, so an unset **last**
+# variable made the loop, and therefore the subshell, return 1 — which `set -euo pipefail` turns
+# into the script dying immediately after writing the file and before the connectors, the workers
+# and the front door start. `CHEMCLAW_CALC_TOKEN` is the last name `fleet_token_vars` prints and
+# nothing in this script sets it, so the standalone `make live-up` path took it every time.
+# Measured: `up` exited 1 with the env file written and nothing running. The loops are `if` forms
+# now, whose status is 0 when the condition is false.
+#
+# The probe token is written here rather than appended afterwards, because it is minted earlier in
+# `up()` and was already known: one write path is one place that has to get the mode right.
+write_connector_env() {
+  local connector_exports="$1" key
+  ( umask 077
+    {
+      printf '%s\n' "$connector_exports"
+      printf 'export CHEMCLAW_CONNECTOR_URLS=%q\n' "$CHEMCLAW_CONNECTOR_URLS"
+      printf 'export CHEMCLAW_CHEM_TOKEN=%q\n' "$CHEMCLAW_CHEM_TOKEN"
+      printf 'export CHEMCLAW_SAFETY_TOKEN=%q\n' "$CHEMCLAW_SAFETY_TOKEN"
+      # The fleet checkout this invocation *resolved*, not the one a second shell would default to.
+      #
+      # `env` is documented above as the contract a second shell reads, and it carried only
+      # credentials — but `restart` re-runs `start_fleet_bundles`, which needs `MCP_REPO`, and a
+      # second shell that never set `CHEMCLAW_MCP_REPO` falls back to `$REPO_ROOT/../chemclaw3-mcp`.
+      # Measured: the storm's family A restarts the front door at every admission cap through this
+      # very verb, and the whole run died at the first one with "chem and safety are served by
+      # Chemclaw3-mcp, which is not at /home/user/Chemclaw3/../chemclaw3-mcp" — from a shell that had
+      # sourced `env` exactly as the runbook says to. A checkout path is the same kind of thing as a
+      # minted token: something this invocation settled that nobody downstream can re-derive.
+      printf 'export CHEMCLAW_MCP_REPO=%q\n' "$MCP_REPO"
+      # The model posture this lane came up under, for the same reason and with a sharper cost.
+      #
+      # `llm_configured` decides whether `up` starts the front door at all, and `restart` *is* `up`.
+      # So a second shell that sourced this file and ran `processes.sh restart api` — which the
+      # storm's family A does at every admission cap — killed the front door, found neither
+      # `ANTHROPIC_API_KEY` nor `openai_compatible`, skipped starting it, printed "live stack up",
+      # and **exited 0**. Measured exactly that way: `api killed (pid 12668)`, then
+      # `skipping the front door`, then `live stack up`, then `/readyz` refused the connection.
+      # Every turn measured after that point would have been measured against nothing.
+      #
+      # Only what is set is written, and only when it is set: an empty `CHEMCLAW_LLM_MODEL` exported
+      # into a second shell would fail `_llm_provider_config`'s validator rather than fall back.
+      for key in CHEMCLAW_LLM_PROVIDER CHEMCLAW_LLM_BASE_URL CHEMCLAW_LLM_MODEL; do
+        if [ -n "${!key:-}" ]; then printf 'export %s=%q\n' "$key" "${!key}"; fi
+      done
+      # The fleet's own bearer tokens, for every server whose manifest is mounted, plus the `calc`
+      # backend. `chem` and `safety` are above because this script mints them; these are *inherited*
+      # from whoever started the lane (`e2e-full-stack/up.sh` exports all four), and inherited is the
+      # half that was missing — the contract carried what it minted and dropped what it was given.
+      #
+      # **The cost was a green stack that could not calculate.** `calc` is a backend rather than a
+      # connector, so `/readyz` does not probe it and reports `connectors_unhealthy: 0` either way.
+      # Restart this repo's processes from a second shell without `CHEMCLAW_CALC_TOKEN` and every
+      # durable calculation fails at call time with `HTTP 401 from http://127.0.0.1:8860/mcp`, with
+      # nothing in the health surface to say so. Measured 2026-08-28 by the UI's mock-model tier:
+      # `ConnectorJobError: the 'compute_reaction_energy' job ran and failed: CalcToolError: the
+      # calculation service refused this client's credential`, against a front door reporting ready.
+      #
+      # Note `CHEMCLAW_CALC_MCP_TOKEN` is already written above and is **a different variable** — the
+      # in-tree `calc` *bundle*'s minted MCP credential, not the fleet backend's. Two names one letter
+      # apart, one carried and one not, is why this was invisible.
+      for key in $(fleet_token_vars); do
+        if [ -n "${!key:-}" ]; then printf 'export %s=%q\n' "$key" "${!key}"; fi
+      done
+      # The probe identity, in the enforced posture only. Empty is how the dev posture is spelled.
+      if [ -n "${CHEMCLAW_LIVE_PROBE_TOKEN:-}" ]; then
+        printf 'export CHEMCLAW_LIVE_PROBE_TOKEN=%q\n' "$CHEMCLAW_LIVE_PROBE_TOKEN"
+      fi
+    } > "$RUN_DIR/connector-env.sh"
+  )
+}
+
+
 up() {
   mkdir -p "$RUN_DIR"
   command -v uv >/dev/null 2>&1 || die "uv not found"
@@ -351,64 +440,8 @@ up() {
   start_fleet_bundles "$python"
   log "connector urls (with the fleet): $CHEMCLAW_CONNECTOR_URLS"
 
-  # Now every address and credential is known, so the file a second shell reads can be complete.
-  # `connector_env`'s own exports, then the fleet's two tokens and the URL map it rewrote.
-  ( umask 077
-    printf '%s\n' "$connector_exports"
-    printf 'export CHEMCLAW_CONNECTOR_URLS=%q\n' "$CHEMCLAW_CONNECTOR_URLS"
-    printf 'export CHEMCLAW_CHEM_TOKEN=%q\n' "$CHEMCLAW_CHEM_TOKEN"
-    printf 'export CHEMCLAW_SAFETY_TOKEN=%q\n' "$CHEMCLAW_SAFETY_TOKEN"
-    # The fleet checkout this invocation *resolved*, not the one a second shell would default to.
-    #
-    # `env` is documented above as the contract a second shell reads, and it carried only
-    # credentials — but `restart` re-runs `start_fleet_bundles`, which needs `MCP_REPO`, and a
-    # second shell that never set `CHEMCLAW_MCP_REPO` falls back to `$REPO_ROOT/../chemclaw3-mcp`.
-    # Measured: the storm's family A restarts the front door at every admission cap through this
-    # very verb, and the whole run died at the first one with "chem and safety are served by
-    # Chemclaw3-mcp, which is not at /home/user/Chemclaw3/../chemclaw3-mcp" — from a shell that had
-    # sourced `env` exactly as the runbook says to. A checkout path is the same kind of thing as a
-    # minted token: something this invocation settled that nobody downstream can re-derive.
-    printf 'export CHEMCLAW_MCP_REPO=%q\n' "$MCP_REPO"
-    # The model posture this lane came up under, for the same reason and with a sharper cost.
-    #
-    # `llm_configured` decides whether `up` starts the front door at all, and `restart` *is* `up`.
-    # So a second shell that sourced this file and ran `processes.sh restart api` — which the
-    # storm's family A does at every admission cap — killed the front door, found neither
-    # `ANTHROPIC_API_KEY` nor `openai_compatible`, skipped starting it, printed "live stack up",
-    # and **exited 0**. Measured exactly that way: `api killed (pid 12668)`, then
-    # `skipping the front door`, then `live stack up`, then `/readyz` refused the connection.
-    # Every turn measured after that point would have been measured against nothing.
-    #
-    # Only what is set is written, and only when it is set: an empty `CHEMCLAW_LLM_MODEL` exported
-    # into a second shell would fail `_llm_provider_config`'s validator rather than fall back.
-    local key
-    for key in CHEMCLAW_LLM_PROVIDER CHEMCLAW_LLM_BASE_URL CHEMCLAW_LLM_MODEL; do
-      [ -n "${!key:-}" ] && printf 'export %s=%q\n' "$key" "${!key}"
-    done
-    # The fleet's own bearer tokens, for every server whose manifest is mounted, plus the `calc`
-    # backend. `chem` and `safety` are above because this script mints them; these are *inherited*
-    # from whoever started the lane (`e2e-full-stack/up.sh` exports all four), and inherited is the
-    # half that was missing — the contract carried what it minted and dropped what it was given.
-    #
-    # **The cost was a green stack that could not calculate.** `calc` is a backend rather than a
-    # connector, so `/readyz` does not probe it and reports `connectors_unhealthy: 0` either way.
-    # Restart this repo's processes from a second shell without `CHEMCLAW_CALC_TOKEN` and every
-    # durable calculation fails at call time with `HTTP 401 from http://127.0.0.1:8860/mcp`, with
-    # nothing in the health surface to say so. Measured 2026-08-28 by the UI's mock-model tier:
-    # `ConnectorJobError: the 'compute_reaction_energy' job ran and failed: CalcToolError: the
-    # calculation service refused this client's credential`, against a front door reporting ready.
-    #
-    # Note `CHEMCLAW_CALC_MCP_TOKEN` is already written above and is **a different variable** — the
-    # in-tree `calc` *bundle*'s minted MCP credential, not the fleet backend's. Two names one letter
-    # apart, one carried and one not, is why this was invisible.
-    for key in $(fleet_token_vars); do
-      [ -n "${!key:-}" ] && printf 'export %s=%q\n' "$key" "${!key}"
-    done
-  ) > "$RUN_DIR/connector-env.sh"
-  if [ "${CHEMCLAW_LIVE_PROBE_TOKEN:-}" != "" ]; then
-    ( umask 077; printf 'export CHEMCLAW_LIVE_PROBE_TOKEN=%q\n' "$CHEMCLAW_LIVE_PROBE_TOKEN" \
-      >> "$RUN_DIR/connector-env.sh" )
-  fi
+  # The file a second shell reads, now that every address and credential is known.
+  write_connector_env "$connector_exports"
 
   # The connectors themselves: the front door refuses to report ready without them under
   # `connectors_required=true`, and the workers call them through the same URLs.

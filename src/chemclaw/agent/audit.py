@@ -360,6 +360,27 @@ def default_audit_sink() -> AuditSink:
     return PostgresAuditSink()
 
 
+def bounded_name(value: object) -> str:
+    """A tool name the model emitted, bounded by the same budget and deliberately not repr'd.
+
+    **Here rather than beside either caller, because two modules bound the same string.**
+    `agent/model_calls` bounds it for the invalid-tool-call log and the correction sent back to the
+    model; `agent/tool_authz.announce_tool_failures` bounds it for `ToolFailureSignal.tool`, which
+    `api/events.ToolFailedEvent` puts on the wire for two other repositories to render. Nothing
+    upstream limits what a model may call a tool — `ToolNode` invokes the middleware chain for a
+    name the graph does not hold, on purpose — so an unbounded name is model output on a client
+    stream, which is the case `bounded_repr` below states the budget exists for. Measured
+    2026-08-28: a 50,000-character invented tool name reached `ToolFailureSignal.tool` whole.
+
+    **Not** repr'd, unlike the argument document: `metric_tool_name` compares a name against the
+    ones the request actually bound, and a quoted name matches none of them — which would clamp
+    every label to `UNKNOWN_TOOL` and lose the distinction the clamp exists to keep.
+    """
+    limit = settings.agent_audit_max_arg_chars
+    text = str(value)
+    return text if len(text) <= limit else text[:limit] + "…"
+
+
 def bounded_repr(value: object) -> str:
     """Render a value as a single-line string bounded by the configured budget.
 

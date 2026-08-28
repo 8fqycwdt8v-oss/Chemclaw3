@@ -821,3 +821,38 @@ def test_the_trail_and_the_transcript_still_see_the_failure_the_model_is_spared(
     assert [failure.tool for failure in failures] == ["refuse_smiles"], (
         f"the chemist was never told the step failed; saw {signals}"
     )
+
+
+def test_an_invented_tool_name_is_bounded_before_it_reaches_the_turns_stream() -> None:
+    """Model output must not leave the process unbounded (2026-08-28 adversarial review).
+
+    `ToolNode` runs this middleware chain for a name the graph does not hold — deliberately, so an
+    interceptor can short-circuit an unregistered call — so `request.tool_call["name"]` here is
+    whatever the model invented, and nothing upstream limits its length. That string became
+    `ToolFailureSignal.tool`, then `api/events.ToolFailedEvent.tool`, then an SSE frame that
+    `Chemclaw3_ui` and `Chemclaw3_mock` both render.
+
+    The same string is *already* refused as a metric label (`agent/audit.metric_tool_name`, added
+    when a hallucinated call was measured minting a time series per invented name). The event field
+    beside it was not, which is a control applied to one of two exits. Measured before the fix: a
+    50,000-character name arrived on the stream whole.
+
+    `agent/audit.bounded_repr` states the rule this restores — the audit budget is "the tree's one
+    answer for a model-authored string" — and `bounded_name` is now that answer for both readers.
+    """
+    invented = "x" * 50_000
+
+    async def _raises(_request: Any) -> Any:
+        raise RuntimeError("boom")
+
+    async def _body() -> None:
+        with contextlib.suppress(RuntimeError):
+            await run_middleware(announce_tool_failures, tool_request(invented), _raises)
+
+    _, signals = asyncio.run(collect_signals(_body))
+    failures = [s for s in signals if isinstance(s, ToolFailureSignal)]
+    assert failures, "nothing was announced, so this asserts nothing about the bound"
+    assert len(failures[0].tool) <= settings.agent_audit_max_arg_chars + 1, (
+        f"{len(failures[0].tool)} characters of model-invented tool name reached the turn's "
+        "stream; the metric label is clamped and this field is not"
+    )

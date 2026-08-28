@@ -21,7 +21,7 @@ from typing import Any
 from langchain.agents.middleware import wrap_tool_call
 from langchain_core.messages import ToolMessage
 
-from chemclaw.agent.audit import refusal_reason, returned_failure
+from chemclaw.agent.audit import bounded_name, refusal_reason, returned_failure
 from chemclaw.agent.authz import (
     AuthorizationError,
     authorize_tool,
@@ -37,7 +37,20 @@ logger = logging.getLogger(__name__)
 
 # How much of a failure message reaches the trace. Long enough for a chemist to recognise the
 # problem, short enough that an unexpected exception's text cannot flood the stream.
-_FAILURE_CHARS = 300
+#
+# **Public, because a third producer of `ToolFailureSignal.message` lives outside this module.**
+# `agent/model_calls._report_repair` announces a call whose arguments never parsed, and that path
+# cannot reach any of the three functions below — the call never becomes a tool call, so there is
+# no exception and no `ToolMessage` to bound. It was therefore the one producer of that field with
+# no bound at all, sending the model's own output straight to the turn's stream, and for the
+# `openai_compatible` provider that output is the whole malformed argument document: LangChain's
+# `parse_tool_call` builds its error message as "Function <name> arguments:\n\n<arguments>\n\nare
+# not valid JSON", so the field that path prefers is the one carrying the payload. Measured
+# 2026-08-28: 50,112 characters on the SSE stream from one 50 kB malformed call.
+#
+# A name shared by two modules is the whole point rather than a concession — the alternative was
+# `model_calls` restating 300, which is how a bound becomes two bounds.
+FAILURE_CHARS = 300
 
 
 class DryRunRefusal(AuthorizationError):
@@ -136,7 +149,7 @@ def domain_error_result(exc: BaseException) -> str:
 
 def failure_detail(exc: BaseException) -> str:
     """What the *chemist's* transcript is told a tool raised, bounded so it cannot flood."""
-    return f"{type(exc).__name__}: {exc}"[:_FAILURE_CHARS]
+    return f"{type(exc).__name__}: {exc}"[:FAILURE_CHARS]
 
 
 def returned_failure_detail(message: ToolMessage) -> str:
@@ -149,10 +162,10 @@ def returned_failure_detail(message: ToolMessage) -> str:
 
     `message.text` rather than `message.content`: MCP content arrives as a list of content blocks,
     so a chemist reading `content` would get `[{'type': 'text', 'text': …}]` — a repr of the
-    transport where the explanation should be. Bounded by the same `_FAILURE_CHARS` for the same
+    transport where the explanation should be. Bounded by the same `FAILURE_CHARS` for the same
     reason: a remote error is exactly the text that can be arbitrarily long.
     """
-    return message.text[:_FAILURE_CHARS]
+    return message.text[:FAILURE_CHARS]
 
 
 def answered_failure(message: ToolMessage) -> ToolMessage:
@@ -399,7 +412,11 @@ async def announce_tool_failures(request: Any, handler: Callable[[Any], Any]) ->
         result = await handler(request)
     except Exception as exc:
         record_tool_failure(
-            request.tool_call["name"],
+            # `bounded_name`, because this is the model's own string and it leaves the process.
+            # `ToolNode` runs this chain for a name the graph does not hold, so the name here can
+            # be anything a model invents; the metric label was clamped for that reason and this
+            # field was not. Measured 2026-08-28: 50,000 characters onto the turn's SSE stream.
+            bounded_name(request.tool_call["name"]),
             failure_detail(exc),
             str(request.tool_call.get("id") or ""),
             refusal_reason(exc),

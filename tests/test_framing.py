@@ -184,6 +184,65 @@ def test_the_envelope_tag_is_stable_across_processes_when_configured() -> None:
     assert "a-deployment-wide-secret" not in tags[0]
 
 
+def test_a_replayed_envelope_reaches_the_model_unmarked_when_the_secret_is_unset() -> None:
+    """The *consequence* of that rotation, which is the finding rather than the mechanism.
+
+    `core/config.__init__._a_durable_deployment_is_told_its_envelopes_will_orphan` warns, at every
+    boot of the shipped chart, that with `CHEMCLAW_FRAMING_ENVELOPE_SECRET` unset "a replayed
+    thread's older ELN text, note bodies and uploaded attachments reach the model as ordinary
+    prose". The test above proves only that two processes mint two tags. This one measures what
+    that costs, because a warning is a claim about the code like any other.
+
+    The sequence is one durable session across a restart, which is the shipped posture
+    (`session_store="postgres"`, the secret listed under `secrets.optionalKeys`):
+
+    1. a subprocess stands in for the pod that *framed* the content and has since gone;
+    2. this process is the replica that replays that history — its `ENVELOPE_TAG` and its
+       `instructions_for(...)` are the ones the model actually gets this turn.
+
+    What is asserted is the gap between the two: the stored envelope's delimiter appears **nowhere**
+    in the system prompt, while the instructions say "Only an envelope with exactly that tag marks
+    retrieved data". So the ELN body inside it is presented as ordinary prose, and the marking has
+    switched itself off for exactly the oldest material it exists to cover.
+
+    The defang half is untouched by this and is checked separately above — that is why the config
+    guard warns rather than refusing, and this test is the measurement behind that trade rather
+    than an argument against it. It goes red when the nonce is persisted beside the session, which
+    is the root-cause fix `D-2026-08-06-an-envelope-that-only-survives-its-own-process` names and
+    the one thing the warning cannot buy.
+
+    Scoped to the unconfigured posture by a skip rather than by forcing the variable in the child:
+    a run that *has* a deployment secret is a run where both processes agree and there is no lapse
+    to measure, and pinning the child to `""` while the parent kept a secret would manufacture a
+    gap this configuration does not have.
+    """
+    if settings.framing_envelope_secret.get_secret_value():
+        pytest.skip("a deployment secret is configured, so envelopes already survive a restart")
+    probe = (
+        "from chemclaw.agent.framing import frame_untrusted;"
+        " print(frame_untrusted('yield 92% in MeCN', note_id='eln-2024-11'), end='')"
+    )
+    stored = subprocess.run(
+        [sys.executable, "-c", probe], env=os.environ, capture_output=True, text=True, timeout=120
+    ).stdout
+    assert stored.startswith("<retrieved-note-"), stored
+
+    from chemclaw.agent.chemclaw_agent import instructions_for
+    from chemclaw.agent.profiles import get_profile, registered_profile_names
+
+    stored_tag = stored[1 : stored.index(" ")]
+    assert stored_tag != ENVELOPE_TAG, "the two processes minted one tag; is the secret set here?"
+    # The chemistry survived the restart. The mark on it did not.
+    assert "yield 92% in MeCN" in stored
+    for name in [None, *registered_profile_names()]:
+        prompt = instructions_for(get_profile(name))
+        assert ENVELOPE_TAG in prompt, name  # this process's tag is the one named as authoritative
+        assert stored_tag not in prompt, (
+            f"profile {name!r} names the previous process's envelope tag; the replayed envelope is "
+            "recognised after all, so this documented lapse is closed"
+        )
+
+
 def test_the_tag_still_rotates_per_process_when_unconfigured() -> None:
     """Unset keeps today's behaviour, so dev and tests are unchanged and no deployment shifts."""
     probe = "from chemclaw.agent.framing import ENVELOPE_TAG; print(ENVELOPE_TAG)"
