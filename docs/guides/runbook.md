@@ -1043,7 +1043,11 @@ now interleave into one session history. The session's thread is what is at risk
 ### chemclaw.availability — chemists are being refused or degraded
 
 #### ChemclawTurnsFailing
-`critical`. More than one turn in ten ends in an opaque internal error. Break it down with
+`critical`, and only above `monitoring.alerts.turnsFloorPerSecond` of traffic — a ratio alone reads
+100% on a single error in an idle window, which is what this rule did before the floor existed. If
+the deployment is quieter than the floor, read `chemclaw_turns_finished_total` directly rather than
+waiting for a page that cannot come. More than one turn in ten ends in an opaque internal error.
+Break it down with
 `sum by (outcome) (rate(chemclaw_turns_finished_total[10m]))` — `errored` and `timed_out` are
 different problems — then the front-door dashboard's per-route error ratio.
 
@@ -1116,6 +1120,14 @@ is *gone* rather than misbehaving: crash loop, eviction, OOM kill, or a NetworkP
 admitting the scraper. The `pod` label names it; `oc describe pod` and the previous container's logs
 are the next two commands.
 
+Its `for:` is **derived from the chart's own cold-start budget**, not stated: `up` reports a target
+that did not answer and says nothing about readiness, and neither a PodMonitor's pod discovery nor an
+Endpoints object's `notReadyAddresses` waits for ready — so a pod is a target for the whole of its
+start. Every `probes.*.startup` block grants 300 s for importing RDKit and the agent stack, and the
+`for: 5m` this rule shipped with sat inside that, which made an ordinary rollout on a slow node a
+`critical` page. Raising a startup budget now moves this alert with it;
+`monitoring.alerts.targetDownMarginSeconds` is the headroom on top.
+
 Scoped by namespace rather than by `job`, because the `job` label the Prometheus Operator assigns
 differs between a ServiceMonitor and a PodMonitor. If the release namespace holds other workloads,
 narrow `monitoring.alerts.targetJobPattern`.
@@ -1156,7 +1168,9 @@ short-circuited after the last one; `make explain <session>` reconstructs the tu
 ### chemclaw.durable — the expensive half
 
 #### ChemclawDurableJobsFailing
-`critical`. More than `monitoring.alerts.jobFailureRatio` of jobs are ending `failed`. Break down by
+`critical`. More than `monitoring.alerts.jobFailureRatio` of jobs are ending `failed`, and — as with
+`ChemclawTurnsFailing` — only once job traffic clears `monitoring.alerts.jobsFloorPerSecond`, since
+one failed overnight search would otherwise be a 100% failure rate. Break down by
 connector with `sum by (connector, outcome) (rate(chemclaw_jobs_finished_total[30m]))`, then by
 activity with `chemclaw_activity_failures_total` — which counts one row per *attempt*, so a retry
 storm shows as a rate rather than only in the broker's history. The Temporal UI's event history is
@@ -1179,9 +1193,11 @@ incomplete. The scenario this exists for is three memory-synthesis jobs going gr
 while returning `[]`.
 
 #### ChemclawResultPublishFailing
-`critical`. A result could not be delivered to a configured sink. The calculation stands in the
-cache; the scientific record this deployment publishes to does not have it.
-`chemclaw_sink_delivery_seconds` and the sink's logs name which. §(xvi) is the attach procedure.
+`warning`, and the severity is the point: this is the *retryable* half. `publish/outbox.py` spends
+one attempt and leaves the row `pending`, so the result still has a route to its sink. The
+calculation stands in the cache either way; `chemclaw_sink_delivery_seconds` and the sink's logs name
+which sink, and §(xvi) is the attach procedure. `ChemclawResultsDeadLettered` is the same
+publication once the retries are gone, and that one is `critical`.
 
 #### ChemclawResultProjectionFailing
 `critical`, and **retrying will not help**: `publish/` could not turn a calculation into the typed
@@ -1189,21 +1205,44 @@ record its sink expects, which is a schema disagreement between this build and
 `schema/result-store/`. The result is dropped before any delivery is attempted.
 
 #### ChemclawResultsDeadLettered
-`warning`. Publications exhausted their retries and were retired to `failed`. Nothing will attempt
-them again; re-queueing is an operator action. They also never leave the queued-minus-published
-difference, which is why that difference is not a backlog and why the alert below reads an age.
+`critical`. Publications exhausted their retries and were retired to `failed`. Nothing will attempt
+them again; re-queueing is an operator action, so the scientific record this deployment publishes to
+is permanently missing a computed result — the same loss `ChemclawKnowledgeNotesLost` carries
+`critical` for. This pair used to run the other way round, with the retryable attempt paging
+`critical` and this terminal one arriving as a `warning`. They also never leave the
+queued-minus-published difference, which is why that difference is not a backlog and why the alert
+below reads an age.
 
 #### ChemclawResultOutboxStuck
 `warning`. The oldest undelivered publication for this sink is older than
 `monitoring.alerts.outboxStuckSeconds`. Read `chemclaw_outbox_pending{sink}` for the depth and
 `chemclaw_outbox_dead_lettered{sink}` for what has already been given up on.
 
+#### ChemclawOutboxBacklogUnreported
+`warning`, and it is the *absence* of the series the alert above reads. All three outbox gauge
+families are written together by one drain pass and are empty on a fresh process until that pass
+runs, so a drain that is not running at all produces no series — and a rule over
+`max by (sink) (…)` then has nothing to evaluate and stays green, which reads exactly like an empty
+queue. Check the `result-publish` Temporal Schedule first (§(x)) and the worker's logs second. A pod
+that is gone entirely raises `ChemclawTargetDown` beside this; only this one fires for a pod that is
+up with its drain not running.
+
+Its window and hold are `monitoring.alerts.silenceWindowPasses` and `silenceHoldPasses` multiplied
+by `CHEMCLAW_RESULT_PUBLISH_SCHEDULE_MINUTES`, so changing the cadence moves the alert with it. The
+hold is what stops a fresh install from paging before its first pass.
+
 ### chemclaw.degradation — something is quietly not working
 
 #### ChemclawSubsystemDegraded
-`warning`, and the umbrella over roughly forty deliberate exception swallows. The `subsystem` label
-names which one; the pod's log carries the exception. Turns keep being answered, which is exactly
-why this needs an alert rather than a panel.
+`warning`, and the umbrella over every deliberate exception swallow that goes through
+`metrics_bridge.degraded`. The `subsystem` label names which one; the pod's log carries the
+exception. Turns keep being answered, which is exactly why this needs an alert rather than a panel.
+
+It excludes `subsystem="evidence_source"`, which is a de-duplication rather than a gap:
+`retrieval/fanout.py` calls `degraded()` *and* increments
+`chemclaw_evidence_source_failures_total` on the same exception, so one broken retrieval leg used to
+raise this alert and `ChemclawEvidenceSourceFailing` together, at the same severity over the same
+window — of which only the second names the leg.
 
 #### ChemclawEvidenceSourceFailing
 `warning`. A retrieval leg is raising, so answers are composed from the remaining legs and cite
@@ -1212,6 +1251,13 @@ nothing from this one — and nothing in the answer says so. Read
 `source` label: a leg that fails, a leg that declines and a leg that legitimately matches nothing are
 three different states, and telling them apart is what
 `D-2026-08-01-a-cap-that-starves-a-source` was written about.
+
+#### ChemclawIngestLagUnreported
+`warning`, and the same shape as `ChemclawOutboxBacklogUnreported` one tier over: the cursor-lag
+family is populated by `load_cursor`/`store_cursor` and is empty until a sync runs, so "no sync ran
+at all" is an absence that `ChemclawIngestCursorStalled` cannot evaluate. Check the `eln-sync`
+Schedule and `chemclaw_ingest_records_total{source}`. A source that was never configured emits
+neither series and is not what this is about.
 
 #### ChemclawIngestCursorStalled
 `warning`. A source is further behind than `monitoring.alerts.ingestLagSeconds`, so the corpus

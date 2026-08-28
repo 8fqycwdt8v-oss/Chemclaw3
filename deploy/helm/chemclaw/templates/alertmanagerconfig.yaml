@@ -1,4 +1,20 @@
-{{- if and .Values.monitoring.enabled .Values.monitoring.alerts.enabled .Values.monitoring.alertmanager.enabled }}
+{{- /* **The four guards below were unreachable through the one door an operator is most likely to
+       open.** Every one of them lives inside this file, and this file rendered nothing at all
+       unless `monitoring.enabled` *and* `monitoring.alerts.enabled` were both true — so a release
+       that set `monitoring.alertmanager.enabled=true` while the rules it routes were off got zero
+       objects, zero output and zero error. Measured: `helm template … --set
+       monitoring.alerts.enabled=false --set monitoring.alertmanager.enabled=true` rendered no
+       AlertmanagerConfig and exited 0.
+
+       That is the shape `D-2026-08-26-a-knob-that-renders-nothing-is-not-a-knob` is about, and it
+       is worse here than for a plain no-op: the operator has just switched on the thing that
+       decides whether anyone is told, and silence is indistinguishable from success. A route with
+       no rules to route is also not a configuration anybody means, so it refuses and says which of
+       the two switches is off. */ -}}
+{{- if .Values.monitoring.alertmanager.enabled }}
+{{- if not (and .Values.monitoring.enabled .Values.monitoring.alerts.enabled) }}
+{{- fail "monitoring.alertmanager.enabled is true but monitoring.enabled/monitoring.alerts.enabled is false: this object routes the rules in templates/prometheusrule.yaml, and with those not rendered it would route nothing. Enable the rules, or set monitoring.alertmanager.enabled=false." }}
+{{- end }}
 {{- /* Where the alerts go, which was the second of the three absences `prometheusrule.yaml`'s own
        header names — "no PrometheusRule anywhere in the repo, no SLO, and no Alertmanager route" —
        and the one that decides whether the first is worth anything.
@@ -6,8 +22,8 @@
        **On OpenShift, a PrometheusRule in a user namespace fires into nothing by default.** The
        user-workload Prometheus forwards its alerts to the *platform* Alertmanager, whose routing
        tree a cluster admin owns and which normally has no receiver matching a namespace it has
-       never heard of — so the sixteen rules this chart shipped could all be firing while every one
-       of them was silently discarded downstream. Nothing in the cluster reports that: the alert is
+       never heard of — so every rule `templates/prometheusrule.yaml` ships could be firing while
+       every one of them was silently discarded downstream. Nothing in the cluster reports that: the alert is
        `firing` in the console and reaches no human. It is the same shape as the user-workload
        monitoring switch one level up, and it fails the same way — completely, and quietly.
 
