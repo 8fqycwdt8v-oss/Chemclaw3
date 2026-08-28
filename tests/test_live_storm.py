@@ -803,6 +803,7 @@ def test_a_sweep_where_nothing_answered_has_no_noise_to_be_small() -> None:
     alive = [_row(2, 1.0, 0.05, repeats=3), _row(4, 1.02, 0.05, repeats=3)]
     assert live_storm._sweep_is_readable(alive)
 
+
 # ------------------------------------------------------- the disconnect verdict (E1)
 
 
