@@ -15,6 +15,7 @@ import pytest
 import chemclaw.agent.research_tools as research_tools
 from chemclaw.agent.research_tools import gather_evidence
 from chemclaw.core.config import settings
+from chemclaw.core.metrics import METRICS
 from chemclaw.science.fingerprints.rxnfp.search import record_for_reaction
 from chemclaw.science.fingerprints.store import InMemoryFingerprintStore
 
@@ -402,3 +403,31 @@ def test_the_sweep_reports_what_each_source_contributed(
 
     assert sweep.sources.get("graph") == 1
     assert sweep.sources_skipped == {}
+
+
+def test_gather_evidence_records_the_kept_half_of_the_source_metric_pair(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`chemclaw_evidence_source_kept_total` must come from the real sweep, not only a direct call.
+
+    `retrieval.fanout.record_kept_chunks` is what makes the D-2026-08-01-a-cap-that-starves-a-
+    source shape alertable — a leg that hands over chunks and survives the merge with none — but
+    the metric had a function and no producer: nothing on the one production path it exists to
+    watch (`gather_evidence`) ever called it, so `tests/test_datapath_observability.py` exercising
+    the function directly was the only thing keeping the series alive.
+    """
+    (tmp_path / "reaction").mkdir()
+    (tmp_path / "reaction" / "reaction-a.md").write_text(
+        "---\nid: reaction-a\ntype: reaction\n---\nyield noted.\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
+
+    before = METRICS.value("chemclaw_evidence_source_kept_total")
+    sweep = asyncio.run(gather_evidence("yield"))
+    after = METRICS.value("chemclaw_evidence_source_kept_total")
+
+    assert sweep.chunks, "sanity: the sweep actually found something to keep"
+    assert after > before, (
+        "gather_evidence did not move chemclaw_evidence_source_kept_total — the metric has no "
+        "producer on its one production path"
+    )

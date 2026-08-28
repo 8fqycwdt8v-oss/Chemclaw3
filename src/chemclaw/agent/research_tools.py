@@ -26,7 +26,7 @@ from chemclaw.core.tool_registry import tool
 from chemclaw.ingest.eln.records import default_record_store
 from chemclaw.ingest.sources.registry import active_retrieve_sources
 from chemclaw.retrieval.evidence import EvidenceChunk, EvidenceSweep, SourceRetriever
-from chemclaw.retrieval.fanout import sweep_sources
+from chemclaw.retrieval.fanout import record_kept_chunks, sweep_sources
 from chemclaw.retrieval.hybrid import reciprocal_rank_fusion
 from chemclaw.retrieval.retrievers import FingerprintReactionRetriever
 from chemclaw.science.fingerprints.store import default_reaction_store
@@ -293,6 +293,13 @@ async def gather_evidence(
         for chunk in ranked
     ]
     kept, truncated_by = _within_budget(framed)
+    # The post-merge, post-cap half of the pair `EvidenceSweep.sources` documents itself as
+    # incomplete without: `chemclaw_evidence_source_chunks_total` (via `sweep_sources` above) counts
+    # what a leg *handed over*, and this is what it *kept* after RRF/interleave and the budget —
+    # the distinction `D-2026-08-01-a-cap-that-starves-a-source` exists to make alertable. Every
+    # source asked is passed, not just the ones represented in `kept`, so a starved leg reads as a
+    # zero rather than being absent from the ratio's denominator.
+    record_kept_chunks(kept, (name for name, _ in sources))
     return EvidenceSweep(
         chunks=kept,
         truncated_by=truncated_by,
