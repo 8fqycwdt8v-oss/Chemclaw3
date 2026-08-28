@@ -96,6 +96,24 @@ topic).
 
 ## 2 — Answers that are wrong without saying so
 
+- [ ] **A retracted ELN entry stays current evidence, and closing it is a five-part change** — [M].
+      A withdrawn entry that simply disappears from an export is invisible to a cursor-based sync,
+      so the run it produced keeps answering as current. This was built and then deleted on review
+      (`D-2026-08-27-a-withdrawn-entry-is-a-fact-the-sync-must-carry`), and the deletion is what
+      makes the real cost visible — the sweep was the easy part. Whoever rebuilds it needs all five:
+      (a) a producer — an *explicit* tombstone field, never absence, because an ELN fetch is a delta
+      and "not seen this run" is the normal state of every entry ever ingested; (b)
+      `durable/eln_sync.py::_BoundedIngest` must expose a public `inner`, or the capability walk
+      stops at the production wrapper and the sweep silently cannot fire; (c) the unfiltered path in
+      `retrieval/retrievers.py::FingerprintReactionRetriever.retrieve`, which consults the record
+      store only when a filter is given — the ordinary `gather_evidence` sweep is unfiltered; (d)
+      `connectors/rxnfp/server/tools.py::similar_reactions`, which never asks the store at all; and
+      (e) `expand_note`, so a reader sees the withdrawal rather than a normal-looking record.
+      Measured with (a) and (b) in place and the rest absent: `is_current` False, `eligible()` empty,
+      and the retracted reaction still returned by the unfiltered sweep. Migration 066's column is
+      reserved for this and 068 says so; `tests/test_eln.py` fails a re-add that does not bring the
+      readers.
+
 - [ ] **The `chem` enumerations and `compute_fukui_at` are served; the merge has landed and what
       remains is a live-lane confirmation** — [S]. `Chemclaw3-mcp#18` merged 2026-08-27 (commit
       `90e7486`): `enumerate_tautomers`, `enumerate_protonation_states`, `enumerate_stereoisomers`,
