@@ -137,6 +137,71 @@ topic).
 
 ## 4 — Operating it
 
+- [ ] **`/readyz` now waits on Temporal inside a 1-second kubelet probe** — [M], found by the
+      correctness review of the branch that added the queue probe. `readyz` calls
+      `probe_connectors()` on every poll, and a jobs-only bundle now routes to a
+      `DescribeTaskQueue` RPC. Measured: 0.013 s with the broker reachable, **2.001 s with it
+      blackholed**. `deployment-service.yaml`'s `readinessProbe` sets no `timeoutSeconds`, so
+      Kubernetes uses 1 s with `failureThreshold` 3 — about 30 s of an unreachable broker takes the
+      front door out of its Service. The ADR is careful that `unknown` never *gates*; the latency
+      it introduces gates one layer down. Note `/readyz` could already exceed 1 s on a blackholed
+      connector endpoint, so the fix is probably an explicit `timeoutSeconds` plus a bound on the
+      sweep, not reverting the probe.
+
+- [ ] **The ORD pre-flight maps the whole fetch, once per drain chunk** — [M]. `_unmappable` maps
+      every entry `fetch_new_entries` returns, and `eln_sync_batch_size` is applied by
+      `_BoundedIngest` *after* the adapter returns. The docstring prices this as "~6.5 ms on a full
+      100-entry chunk"; the per-entry figure is right and the unit is not. Measured: **0.374 s over
+      5,000 entries** (75 µs each), ~26% of the whole fetch. A 100k-entry backfill drains in ~1,000
+      activity attempts each re-mapping all 100k — roughly two hours of pure re-mapping added to
+      the drain. `record_refusals` is likewise handed the whole directory's refusals every chunk and
+      issues one upsert round trip per row in a Python loop.
+
+- [ ] **A tool composite publishes twice and pins to its first computation** — [S].
+      `publish/hooks.py::_composite_ref` hashes the raw validated kwargs, and its docstring claims a
+      default omitted and a default passed explicitly derive one ref. True for literal defaults,
+      false for the sentinel defaults both tool composites use: measured, `predict_logd` with
+      `ph=None` and `ph=7.4` produce different refs for the same measurement, as do
+      `compute_thermochemistry` at `temperature_k=0.0` and `298.15`. Conversely `publish_tool_result`
+      passes no `calc_version` or `params_hash`, while the outbox's identity is
+      `(sink, calc_ref, schema_version)` — so after a calculator or epoch change the re-run's
+      *different* result is silently dropped as a duplicate. Both older hooks supply a
+      version-bearing ref.
+
+- [ ] **The session list advertises a cursor it then refuses** — [S]. `list_sessions` emits
+      `X-Next-Cursor` on a full page outside the branch that checks the registry can resume, so a
+      deployment with a custom non-durable registry gets a `200` with a cursor and a `422` when it
+      follows it. Only reachable through `create_app(owner_store=...)`, so the blast radius is
+      small; the route is nonetheless internally inconsistent.
+
+- [ ] **`delete_session` and the owner prune take two rows in opposite orders** — [S], not
+      reproduced. `_session_delete_statements` deletes `session_turns` then `session_owners`;
+      `retention._DELETE_SESSIONS` takes `session_owners` then `session_turns`. The window is narrow
+      — the route claims the live lease first and the prune re-checks it inside the DELETE — but a
+      retention statement holding the owner row microseconds before the route's claim lands can
+      deadlock, and Postgres aborts one side. Worth ordering the two consistently rather than
+      arguing the window shut.
+
+- [ ] **`LEDGER_SOURCE` is a constant where the schema documents a registry source name** — [S].
+      `ord_adapter.LEDGER_SOURCE = "eln-ord"` is hardcoded while `ingest_rejections.source` is
+      documented as the registry source name and the eviction cap is per-source, so two ORD data
+      sources would share one bucket and mis-attribute each other's refusals. The guarding test
+      reads this repository's manifests, so a site adding a second ORD source fails the test rather
+      than the code taking the name as an argument.
+
+- [ ] **Unconsumed digests are unbounded** — [S]. `digest-<owner>` has no `session_owners` row and
+      retention prunes `session_events` only where `consumed_at IS NOT NULL`, so a subscriber who
+      never calls `GET /digests` accumulates one row per subscription per cadence forever. Stated in
+      the digest docstring as deliberate, and worth an operator-visible bound now that the feature
+      is reachable at all.
+
+- [ ] **Two suite runs against one database corrupt each other's turn claims** — [S], environmental
+      but real. `tests/test_api_sessions.py` uses a fixed session id, and a concurrent run's
+      `SessionTurnClaims().release(...)` clears this run's claim — observed once as a spurious 204
+      where 409 was expected, never reproduced serially. Harmless today because CI runs one job per
+      database; it becomes a flake generator the day that stops being true. Fixture ids should carry
+      the pid suffix `tests/pg.py` already uses for the schema.
+
 - [ ] **Settle `pytest-xdist` on a real runner** — [S].
       The `check` job is 87% one step: `make lint type cov` was **12m06s of a 13m56s job** on
       `d8c312a`, of which lint is 1s and type 68s (measured), so ~11 min is the suite itself.
