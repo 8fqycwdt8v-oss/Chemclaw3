@@ -34,6 +34,8 @@ from chemclaw.agent.model_calls import (
     model_call_middleware,
 )
 from chemclaw.core.metrics import METRICS
+from chemclaw.core.turn_signals import ToolFailureSignal
+from tests.signals import collect_signals
 
 
 def _openai_error(kind: str, status: int, message: str, code: str | None = None) -> Exception:
@@ -316,6 +318,84 @@ def test_a_second_unparseable_reply_is_returned_with_an_error_rather_than_a_thir
     assert answer.result[0].tool_calls == broken.tool_calls
     assert answer.result[0].text == "I will compute that.I will compute that."
     assert "twice" in caplog.text
+
+
+def test_an_unrepaired_call_reaches_the_chemists_stream_and_not_only_the_log() -> None:
+    """A call that never parses must announce itself on the turn, not just to an operator.
+
+    **This is the storm's F-family failure, and the observation is the test.** A truncated argument
+    document produced `HTTP 200, answered=False, error=empty_answer, tools_failed=[]` — a blank box
+    for the person who asked, while `chemclaw_invalid_tool_calls_total` moved and an ERROR was
+    logged. Both of those are an operator's record; neither is on the transcript.
+
+    The ordinary announcement cannot cover this and that is structural: `announce_tool_failures`
+    wraps the *tool* middleware, and a call whose arguments never parsed never reaches a tool, so
+    nothing below the repair can see it. `collect_signals` runs the middleware where a stream
+    writer actually resolves, which is the only way to tell "published" from "published nowhere".
+    """
+    broken = AIMessage(
+        content="",
+        invalid_tool_calls=[
+            {
+                "name": "predict_pka",
+                "args": '{"smiles": "CC',
+                "id": "call-1",
+                "error": "Unterminated string",
+                "type": "invalid_tool_call",
+            }
+        ],
+    )
+
+    async def _handler(request: ModelRequest[Any]) -> Any:
+        return ModelResponse(result=[broken])
+
+    async def _drive() -> Any:
+        return await RepairInvalidToolCalls().awrap_model_call(
+            _request([HumanMessage("what is the pKa")], [_NamedTool("predict_pka")]), _handler
+        )
+
+    _, signals = asyncio.run(collect_signals(_drive))
+
+    failures = [s for s in signals if isinstance(s, ToolFailureSignal)]
+    assert failures, "the turn published nothing; the chemist sees an empty answer with no cause"
+    assert [f.tool for f in failures] == ["predict_pka"]
+    assert "did not parse" in failures[0].message
+    # `reason` names one of the five gates, and every one of them refuses by raising. Nothing
+    # refused this call — it is a fault in the model's output, and naming a gate would be false.
+    assert failures[0].reason is None
+
+
+def test_a_repaired_call_announces_no_failure() -> None:
+    """The negative half: a repair that worked must leave the transcript alone.
+
+    Without this the assertion above is satisfied by announcing on every retry, which would put a
+    failure in front of the chemist for a turn that recovered inside one model call.
+    """
+    broken = AIMessage(
+        content="",
+        invalid_tool_calls=[
+            {
+                "name": "predict_pka",
+                "args": '{"smiles": "CC',
+                "id": "call-1",
+                "error": "Unterminated string",
+                "type": "invalid_tool_call",
+            }
+        ],
+    )
+    good = AIMessage(content="the pKa is 4.2", tool_calls=[])
+    replies = [broken, good]
+
+    async def _handler(request: ModelRequest[Any]) -> Any:
+        return ModelResponse(result=[replies.pop(0)])
+
+    async def _drive() -> Any:
+        return await RepairInvalidToolCalls().awrap_model_call(
+            _request([HumanMessage("what is the pKa")], [_NamedTool("predict_pka")]), _handler
+        )
+
+    _, signals = asyncio.run(collect_signals(_drive))
+    assert not [s for s in signals if isinstance(s, ToolFailureSignal)]
 
 
 def test_a_clean_reply_costs_no_extra_model_call() -> None:

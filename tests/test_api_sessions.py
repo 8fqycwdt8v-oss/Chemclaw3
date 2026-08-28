@@ -9,6 +9,7 @@ registry that holds a dict. CI provides Postgres; the offline sandbox skips (`te
 """
 
 import asyncio
+import os
 from typing import Any
 
 import pytest
@@ -31,6 +32,21 @@ from tests.pg import create_checkpoint_tables, migrated_db_or_skip
 
 _ALICE = Principal(oid="alice-sessions", upn="alice@corp", roles=frozenset())
 _BOB = Principal(oid="bob-sessions", upn="bob@corp", roles=frozenset())
+
+
+def _sid(name: str) -> str:
+    """A session id unique to this process, for the same reason `tests/pg.py` suffixes the schema.
+
+    These ids used to be literals, and a session id is *not* schema-scoped the way a table is:
+    `SessionTurnClaims` and `SessionOwnerStore` key on the id itself, so two concurrent runs of this
+    module against one database operate on the same rows. Measured as a spurious 204 where a 409
+    was expected — a second run's `release()` cleared the first run's claim between its `claim()`
+    and its assertion. Serially it never reproduced, which is exactly what made it worth removing
+    by construction rather than by retry: the failure appears only when someone starts running
+    suites in parallel, and reads as a flake in the route rather than as a collision in the
+    fixture.
+    """
+    return f"sess-api-{name}-{os.getpid()}"
 
 
 def _no_connectors(_profile: str | None = None) -> list[Any]:
@@ -99,7 +115,7 @@ def test_the_session_list_pages_past_its_ceiling_and_stays_a_bare_array(
     the paging — a list of objects, each still carrying exactly the four fields it always had.
     """
     asyncio.run(migrated_db_or_skip())
-    sessions = [f"sess-api-page-{index}" for index in range(5)]
+    sessions = [_sid(f"page-{index}") for index in range(5)]
     for session_id in sessions:
         asyncio.run(_conversation(session_id, _ALICE.oid))
     monkeypatch.setattr(settings, "service_max_listed_sessions", 2)
@@ -151,7 +167,7 @@ def test_an_owner_deletes_their_own_session_and_it_stops_existing() -> None:
     """
     asyncio.run(migrated_db_or_skip())
     asyncio.run(create_checkpoint_tables())
-    session_id = "sess-api-delete-mine"
+    session_id = _sid("delete-mine")
     asyncio.run(_conversation(session_id, _ALICE.oid))
 
     client = _client(_durable_app())
@@ -174,15 +190,15 @@ def test_a_stranger_cannot_delete_a_session_and_learns_nothing_by_trying() -> No
     """
     asyncio.run(migrated_db_or_skip())
     asyncio.run(create_checkpoint_tables())
-    session_id = "sess-api-delete-not-yours"
+    session_id = _sid("delete-not-yours")
     asyncio.run(_conversation(session_id, _ALICE.oid))
 
     app = _durable_app()
     assert _client(app, _BOB).delete(f"/sessions/{session_id}").status_code == 404
     assert asyncio.run(_rows_for(session_id)) > 0, "a stranger's DELETE removed rows anyway"
     # Indistinguishable from the id that was never minted, which is the point.
-    assert _client(app, _BOB).delete("/sessions/sess-api-never-existed").status_code == 404
-    assert _client(app, _ALICE).delete("/sessions/sess-api-never-existed").status_code == 404
+    assert _client(app, _BOB).delete(f"/sessions/{_sid('never-existed')}").status_code == 404
+    assert _client(app, _ALICE).delete(f"/sessions/{_sid('never-existed')}").status_code == 404
 
 
 def test_a_session_with_a_turn_in_flight_refuses_the_delete() -> None:
@@ -199,7 +215,7 @@ def test_a_session_with_a_turn_in_flight_refuses_the_delete() -> None:
     """
     asyncio.run(migrated_db_or_skip())
     asyncio.run(create_checkpoint_tables())
-    session_id = "sess-api-delete-busy"
+    session_id = _sid("delete-busy")
     asyncio.run(_conversation(session_id, _ALICE.oid))
     asyncio.run(SessionTurnClaims().claim(session_id, "another-worker", 60))
 

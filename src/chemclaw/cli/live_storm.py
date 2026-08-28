@@ -771,6 +771,24 @@ async def _chaos_worker_killed_mid_job() -> Finding:
     )
 
 
+async def _postmaster_start_time() -> str:
+    """When the server behind `postgres_dsn` last started, as the server itself reports it.
+
+    The identity of a *running postmaster*, which is the only thing that can distinguish a restart
+    from a script that merely logged one. A restart gives the new server a new start time; a no-op
+    leaves it byte-identical, and no count of surviving turns can tell those apart.
+
+    Through `core.db.connection` like every other read in this file, not a bare `psycopg.connect`:
+    `chemclaw.cli` does not own the Postgres stack (`tests/test_third_party_layering.py`), and it
+    does not need to — this harness never enters `pooling()`, so the helper is a dedicated connect
+    here, which is the property the read wants. The pool that must not answer this is the *front
+    door's*, and that is in another process entirely.
+    """
+    async with db_connection(settings.postgres_dsn) as conn:
+        row = await (await conn.execute("select pg_postmaster_start_time()")).fetchone()
+    return str(row[0]) if row else ""
+
+
 async def _chaos_postgres_bounce() -> Finding:
     """E3 · restart Postgres under load; the pool must reconnect rather than stay poisoned.
 
@@ -778,7 +796,18 @@ async def _chaos_postgres_bounce() -> Finding:
     a database that goes away mid-query has taken the answer with it, and pretending it did not is
     the failure this repository keeps naming. What must hold is that the failure is bounded in
     time: a fresh turn afterwards has to work, without restarting the front door.
+
+    **It also asserts that the bounce happened, and that half is not decoration.** Measured
+    2026-08-28: `bootstrap.sh restart-postgres` had no compose branch, so on a Docker lane —
+    the only lane this environment can run — it logged "postgres not running", then "postgres
+    already accepting connections", then "postgres up", and restarted nothing;
+    `pg_postmaster_start_time()` was byte-identical either side. This check reported **PASS** with
+    "24/24 in-flight turns survived the bounce", which is exactly what a run doing nothing scores.
+    The lane primitive is fixed, and a fix to a primitive is not a reason to keep trusting the
+    check that could not see it break: the postmaster's own start time is read before and after,
+    and a bounce that did not happen is now a failure of *this* check rather than a silent pass.
     """
+    before = await _postmaster_start_time()
     load = asyncio.create_task(storm("a-cheap", turns=24, concurrency=8))
     await asyncio.sleep(1.5)
     await asyncio.to_thread(_lane, "bootstrap.sh", "restart-postgres")
@@ -794,16 +823,24 @@ async def _chaos_postgres_bounce() -> Finding:
             break
         await asyncio.sleep(1.0)
     waited = time.monotonic() - started
+    after = await _postmaster_start_time()
+    bounced = bool(before) and bool(after) and before != after
 
     return Finding(
         family="E",
         name="the front door recovers from a Postgres restart without being restarted itself",
-        ok=recovered and waited < 45.0,
+        ok=bounced and recovered and waited < 45.0,
         observed=(
+            f"postmaster start time {before!r} -> {after!r} "
+            f"({'restarted' if bounced else 'NOT RESTARTED — this check proved nothing'}); "
             f"{survived}/{len(during)} in-flight turns survived the bounce; "
             f"a fresh turn answered {waited:.1f}s after it"
         ),
-        detail="in-flight losses are expected; a pool that never reconnects is not",
+        detail=(
+            "in-flight losses are expected; a pool that never reconnects is not"
+            if bounced
+            else "the lane's restart-postgres verb did not restart anything, so nothing was tested"
+        ),
     )
 
 

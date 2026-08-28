@@ -100,6 +100,7 @@ from chemclaw.core.config import settings
 from chemclaw.core.logging import log_event
 from chemclaw.core.metrics import Metrics
 from chemclaw.core.metrics_bridge import record_metric
+from chemclaw.core.turn_signals import record_tool_failure
 
 logger = logging.getLogger(__name__)
 
@@ -541,6 +542,26 @@ def _report_repair(request: ModelRequest[Any], repaired: Any) -> None:
     if not failures:
         return
     _count_invalid(request, failures, [], attempt="second")
+    # The chemist's stream, and not only the metric and the log line beside it.
+    #
+    # **Measured by the storm's F family:** a truncated argument document produced `HTTP 200,
+    # answered=False, error=empty_answer, tools_failed=[]` — an empty answer with nothing naming a
+    # cause. Both records above existed and neither is on the transcript: `chemclaw_invalid_tool_
+    # calls_total` is an operator's number and this ERROR is an operator's line, while the person
+    # who asked the question got a blank box. The reason the ordinary path does not cover it is
+    # structural rather than an oversight — `announce_tool_failures` wraps the *tool* middleware,
+    # and a call whose arguments never parsed never reaches a tool, so nothing below here can see
+    # it. This is the only point that holds both the failure and a live turn.
+    #
+    # `reason=None` deliberately: `RefusalReason` names the five gates, and every one of them
+    # refuses by *raising*. Nothing refused this call. It is a fault in the model's output, and
+    # calling it a refusal would put a gate's name on a turn no gate touched.
+    for call in failures:
+        detail = call.error or call.arguments
+        record_tool_failure(
+            call.name,
+            f"the model's arguments for this call did not parse, twice: {detail}",
+        )
     log_event(
         logger,
         "model.invalid_tool_calls_unrepaired",

@@ -32,6 +32,12 @@ readonly REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 readonly LIVE_DIR="${CHEMCLAW_LIVE_DIR:-$REPO_ROOT/.live}"
 readonly PGDATA="${CHEMCLAW_LIVE_PGDATA:-/var/lib/postgresql/chemclaw-live}"
 readonly PGPORT="${CHEMCLAW_LIVE_PGPORT:-5432}"
+# How long a restarted database may take to accept connections again. A named, overridable value
+# rather than a literal in the loop, because it is the bound a chaos round waits out: too short and
+# the E family reports a failure that is a slow container, too long and a genuinely dead one costs
+# the round. 90 matches the budget `start_temporal`'s compose branch already uses, and the `die`
+# tails the container's own log so a timeout says what happened rather than only that it happened.
+readonly PG_READY_TIMEOUT="${CHEMCLAW_LIVE_PG_READY_TIMEOUT:-90}"
 readonly TEMPORAL_PORT="${CHEMCLAW_LIVE_TEMPORAL_PORT:-7233}"
 readonly TEMPORAL_UI_PORT="${CHEMCLAW_LIVE_TEMPORAL_UI_PORT:-8081}"
 # Pinned, not `@latest`: the version the stack was verified against is part of the record, and a
@@ -165,6 +171,19 @@ run_sql() {
 }
 
 start_postgres() {
+  if compose_service_id postgres >/dev/null; then
+    log "starting the compose postgres container"
+    docker compose -f "$REPO_ROOT/infra/docker-compose.yml" start postgres >/dev/null
+    for _ in $(seq 1 "$PG_READY_TIMEOUT"); do
+      if pg_isready -h 127.0.0.1 -p "$PGPORT" >/dev/null 2>&1; then
+        log "postgres up on $PGPORT (compose)"
+        return
+      fi
+      sleep 1
+    done
+    die "the compose postgres container did not accept connections on $PGPORT within ${PG_READY_TIMEOUT}s
+$(docker compose -f "$REPO_ROOT/infra/docker-compose.yml" logs --tail 20 postgres 2>&1 || true)"
+  fi
   if pg_isready -h 127.0.0.1 -p "$PGPORT" >/dev/null 2>&1; then
     log "postgres already accepting connections on $PGPORT"
   else
@@ -187,6 +206,11 @@ start_postgres() {
 }
 
 stop_postgres() {
+  if compose_service_id postgres >/dev/null; then
+    log "stopping the compose postgres container"
+    docker compose -f "$REPO_ROOT/infra/docker-compose.yml" stop postgres >/dev/null
+    return
+  fi
   [ -f "$PGDATA/postmaster.pid" ] || { log "postgres not running"; return; }
   as_postgres "$PGBIN/pg_ctl -D '$PGDATA' -m fast -w stop >/dev/null"
   log "postgres stopped"
@@ -206,10 +230,26 @@ stop_postgres() {
 # So the check that exists to prove the system survives a broker outage never caused one, and then
 # blamed a timeout. Measured: the container read `Up 2 hours` throughout. Widening the window — the
 # obvious fix — would have preserved both halves of the lie.
-compose_temporal_id() {
+compose_temporal_id() { compose_service_id temporal; }
+
+# The id of a compose-managed service container, or failure if this lane is not the compose one.
+#
+# **Generalised from `compose_temporal_id` after measuring what the Postgres verbs did.** That
+# function existed because `stop-temporal`/`start-temporal` were native-only and silently no-op'd
+# on a Docker lane. The identical bug was still live for Postgres, and its cost was larger: the
+# storm's E family asks whether the front door survives a database bounce, and on the only lane
+# this environment can run, `restart-postgres` **bounced nothing** — measured 2026-08-28,
+# `pg_postmaster_start_time()` byte-identical before and after, while the script logged
+# "postgres not running", then "postgres already accepting connections", then "postgres up".
+# The check had been reporting PASS with "24/24 in-flight turns survived the bounce" over a
+# disturbance that never happened, which is a bound a run doing nothing also meets.
+#
+# One function rather than two, because the second copy is what let the first one's lesson go
+# unapplied here for as long as it did.
+compose_service_id() {
   docker_available || return 1
   local id
-  id="$(docker compose -f "$REPO_ROOT/infra/docker-compose.yml" ps -aq temporal 2>/dev/null)"
+  id="$(docker compose -f "$REPO_ROOT/infra/docker-compose.yml" ps -aq "$1" 2>/dev/null)"
   [ -n "$id" ] || return 1
   printf '%s' "$id"
 }

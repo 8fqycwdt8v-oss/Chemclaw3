@@ -12,6 +12,25 @@
 #
 # Usage: up.sh [up|down|status|restart <name>]
 # Sibling checkout paths: CHEMCLAW_MCP_REPO, CHEMCLAW_MOCK_REPO, CHEMCLAW_UI_REPO.
+#
+# **Two things this lane used to conflate, and they are unrelated.** It required a real Anthropic
+# credential *and* all three sibling checkouts, in one `die` each, so a session holding neither
+# could not run any of it — although the pieces that need neither are most of the lane. They are
+# now separate knobs, because "which model" and "which checkouts" are separate questions:
+#
+#   * **Model.** `CHEMCLAW_LLM_PROVIDER=openai_compatible` (plus `CHEMCLAW_LLM_BASE_URL` and
+#     `CHEMCLAW_LLM_MODEL`) runs the lane against `chemclaw.cli.mock_llm`, which
+#     `infra/live/processes.sh` already starts on the exact base URL `http://127.0.0.1:8820/v1`.
+#     No credential is involved. Anything else keeps the original requirement verbatim.
+#   * **Chemclaw3_mock.** Absent, the lane still comes up — without `mock-eln`, `mock-vendor`, the
+#     `eln-json`/`eln-ord` data sources and the corpus backfill. It says so by name on the way up,
+#     because the alternative is a green bring-up over a corpus that is not there: the 2026-08-17
+#     run graded the whole `grounded` suite against an empty ORD corpus while `/readyz` was green,
+#     which is the same failure one step earlier.
+#
+# A degraded bring-up is never silent and never partial-by-accident: `CHEMCLAW_CONNECTORS_REQUIRED`
+# stays `true` (processes.sh pins it), so a connector this lane *does* declare and cannot reach is
+# still a hard startup failure.
 
 set -euo pipefail
 
@@ -33,6 +52,35 @@ die() { printf '\033[31m[e2e] %s\033[0m\n' "$*" >&2; exit 1; }
 require_repo() {
   local path="$1" name="$2"
   [ -d "$path" ] || die "$name checkout not found at $path — set the env var or clone it there"
+}
+
+# Whether the lane is pointed at an OpenAI-compatible endpoint rather than at Anthropic.
+#
+# The same predicate `infra/live/processes.sh::llm_configured` uses for its half of the decision,
+# written here as its own function because this lane asks a narrower question: not "is a model
+# configured" but "is a model configured that needs no credential from us". Both readings of an
+# unset `CHEMCLAW_LLM_PROVIDER` are the shipped default, `anthropic`.
+mock_model_lane() { [ "${CHEMCLAW_LLM_PROVIDER:-anthropic}" = "openai_compatible" ]; }
+
+# Resolve, and require, whatever the configured provider actually needs.
+#
+# Split from the single unconditional `die` this used to be. The Anthropic arm is unchanged, down
+# to the message. The openai_compatible arm requires the two settings `core/config/llm.py`'s
+# `_llm_provider_config` validator requires, and checks them *here* rather than letting the front
+# door fail its own validation three subprocesses later — a bring-up that dies in `processes.sh`
+# reports a uvicorn traceback, and this reports the two variable names.
+resolve_model_credential() {
+  if mock_model_lane; then
+    [ -n "${CHEMCLAW_LLM_BASE_URL:-}" ] && [ -n "${CHEMCLAW_LLM_MODEL:-}" ] || die \
+      "CHEMCLAW_LLM_PROVIDER=openai_compatible needs CHEMCLAW_LLM_BASE_URL and CHEMCLAW_LLM_MODEL.
+For the scripted mock, the base URL must be exactly http://127.0.0.1:8820/v1 — processes.sh
+string-compares it to decide whether to start chemclaw.cli.mock_llm, so a trailing slash or
+'localhost' brings the front door up pointed at nothing."
+    log "model: $CHEMCLAW_LLM_MODEL at $CHEMCLAW_LLM_BASE_URL (no credential needed)"
+    return
+  fi
+  export ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-$(printenv 'API-KEY' 2>/dev/null || true)}"
+  [ -n "$ANTHROPIC_API_KEY" ] || die "no ANTHROPIC_API_KEY and no 'API-KEY' env var to map it from"
 }
 
 # ---------------------------------------------------------------------------- process helpers
@@ -242,8 +290,20 @@ start_ui() {
 
 up() {
   require_repo "$MCP_REPO" "Chemclaw3-mcp"
-  require_repo "$MOCK_REPO" "Chemclaw3_mock"
   require_repo "$UI_REPO" "Chemclaw3_ui"
+  # Chemclaw3_mock is the one checkout this lane can do without, so its absence is a posture rather
+  # than an error — declared once, here, and read by every arm below instead of each re-testing the
+  # directory. What it costs is named on the way up rather than left to be discovered as an empty
+  # corpus or a connector that is simply not in the list.
+  local mock_available=false
+  if [ -d "$MOCK_REPO" ]; then
+    mock_available=true
+  else
+    log "Chemclaw3_mock is not at $MOCK_REPO — running the three-repo posture. NOT RUN, and not"
+    log "  skipped-green: mock-eln (:8090), mock-vendor (:8091, search_building_blocks/get_price),"
+    log "  the eln-json and eln-ord data sources, the seeded ELN/ORD corpus and its backfill, and"
+    log "  the Entra mock tenant. Any check over those measures nothing. Set CHEMCLAW_MOCK_REPO."
+  fi
   mkdir -p "$RUN_DIR"
 
   log "bringing up infra (Postgres/pgvector + Temporal + note repo)"
@@ -263,12 +323,24 @@ up() {
   local own_connectors
   own_connectors="$(cd "$REPO_ROOT" && uv run python -c \
     'import chemclaw.connectors, pathlib; print(pathlib.Path(chemclaw.connectors.__file__).parent)')"
-  export ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-$(printenv 'API-KEY' 2>/dev/null || true)}"
-  [ -n "$ANTHROPIC_API_KEY" ] || die "no ANTHROPIC_API_KEY and no 'API-KEY' env var to map it from"
-  export CHEMCLAW_CONNECTORS_DIR="$own_connectors:$MCP_REPO/manifests:$HARNESS_DIR/manifests"
-  export CHEMCLAW_DATA_SOURCES="graph,eln-json,eln-ord"
-  export CHEMCLAW_ELN_EXPORT_DIR="$MOCK_REPO/data/eln/exports"
-  export CHEMCLAW_ORD_EXPORT_DIR="$MOCK_REPO/data/eln/exports/ord"
+  resolve_model_credential
+  # `$HARNESS_DIR/manifests` holds exactly one bundle — `mock-vendor`, which names
+  # http://127.0.0.1:8091/mcp. With the mock checkout absent nothing serves that address, and
+  # `CHEMCLAW_CONNECTORS_REQUIRED=true` (pinned by processes.sh, and deliberately not relaxed here)
+  # makes an unreachable declared connector a hard startup failure of the front door. So the
+  # manifest directory is dropped with the server rather than left declared and dead.
+  export CHEMCLAW_CONNECTORS_DIR="$own_connectors:$MCP_REPO/manifests"
+  if [ "$mock_available" = true ]; then
+    export CHEMCLAW_CONNECTORS_DIR="$CHEMCLAW_CONNECTORS_DIR:$HARNESS_DIR/manifests"
+    export CHEMCLAW_DATA_SOURCES="graph,eln-json,eln-ord"
+    export CHEMCLAW_ELN_EXPORT_DIR="$MOCK_REPO/data/eln/exports"
+    export CHEMCLAW_ORD_EXPORT_DIR="$MOCK_REPO/data/eln/exports/ord"
+  else
+    # `graph` alone. The two ELN adapters read their export directories off disk rather than over
+    # HTTP, so leaving them enabled against a path that does not exist is not a lighter version of
+    # having the corpus — it is a source that fails every sync.
+    export CHEMCLAW_DATA_SOURCES="graph"
+  fi
   # Both halves of each token matter and they are set in two different places: the `start_*`
   # function gives the *server* the value it verifies, and this export gives the *front door* the
   # value it sends. Setting only the first is a specific and quiet failure — `/healthz` is
@@ -293,10 +365,12 @@ up() {
   start_rxnpredict "$mcp_python"
   start_calc "$mcp_python"
 
-  log "starting Chemclaw3_mock (ELN mock + mock-vendor MCP tool)"
-  local mock_python; mock_python="$(mock_venv_bin)"
-  start_mock_eln "$mock_python"
-  start_mock_vendor "$mock_python"
+  if [ "$mock_available" = true ]; then
+    log "starting Chemclaw3_mock (ELN mock + mock-vendor MCP tool)"
+    local mock_python; mock_python="$(mock_venv_bin)"
+    start_mock_eln "$mock_python"
+    start_mock_vendor "$mock_python"
+  fi
 
   log "starting this repo's connectors, chem, safety, workers and front door"
   bash "$REPO_ROOT/infra/live/processes.sh" up
@@ -312,7 +386,14 @@ up() {
   log "starting Chemclaw3_ui (BFF + SPA)"
   start_ui
 
-  backfill_corpus
+  # The corpus is Chemclaw3_mock's; with no mock checkout there is nothing to drain, and a
+  # backfill against a source that is not attached would report "0 records" as though the drain
+  # had run and found nothing.
+  if [ "$mock_available" = true ]; then
+    backfill_corpus
+  else
+    log "skipping the corpus backfill — no Chemclaw3_mock checkout, so there is no ELN/ORD corpus"
+  fi
 
   log "full stack up. UI: http://127.0.0.1:5173 · front door: http://127.0.0.1:${CHEMCLAW_LIVE_API_PORT:-8000} · logs: $LIVE_DIR"
 }
@@ -402,8 +483,15 @@ restart() {
     props) start_props "$(mcp_python_bin)" ;;
     rxnpredict) start_rxnpredict "$(mcp_python_bin)" ;;
     calc) start_calc "$(mcp_python_bin)" ;;
-    mock-eln) start_mock_eln "$(mock_venv_bin)" ;;
-    mock-vendor) start_mock_vendor "$(mock_venv_bin)" ;;
+    mock-eln|mock-vendor)
+      [ -d "$MOCK_REPO" ] || die "$name comes from Chemclaw3_mock, which is not at $MOCK_REPO.
+This lane was brought up in its three-repo posture, so that process was never started. Set
+CHEMCLAW_MOCK_REPO and re-run \`up\` rather than restarting into a stack that does not have it."
+      case "$name" in
+        mock-eln) start_mock_eln "$(mock_venv_bin)" ;;
+        mock-vendor) start_mock_vendor "$(mock_venv_bin)" ;;
+      esac
+      ;;
     ui-bff) start_ui ;;
     *) die "restart: unknown process '$name'" ;;
   esac

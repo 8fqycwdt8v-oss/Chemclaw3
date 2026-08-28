@@ -1,10 +1,13 @@
 # The four-repo end-to-end lane
 
 Brings up this backend together with the three companion repos so a chemist's turn actually
-crosses every boundary the architecture claims it can: a real browser, a real LangGraph turn
-against a real Anthropic model, a real MCP connector fleet, and
-mocked ELN/ORD data sources. Nothing here runs in `make ci` — like the rest of `infra/live/`, it
-is a manual lane run against a checkout, not a diff.
+crosses every boundary the architecture claims it can: a real browser, a real LangGraph turn, a
+real MCP connector fleet, and mocked ELN/ORD data sources. Nothing here runs in `make ci` — like
+the rest of `infra/live/`, it is a manual lane run against a checkout, not a diff.
+
+Two of those four repos are optional in different senses, and the lane is explicit about both:
+**the model** may be real or scripted, and **Chemclaw3_mock** may be absent. See "The two postures"
+below — each says what it costs, by name, rather than quietly running less.
 
 Closes the gap `tasks/todo.md` used to name: *"the cross-repo sequence `Chemclaw3_mock` →
 `Chemclaw3` → `Chemclaw3_ui`... not started."*
@@ -42,13 +45,45 @@ egress. See `chemclaw_mcp_rxnpredict.engine.base_doubles.register_requested`.
 
 - `uv`, `npm`, `python3` on `PATH`.
 - Docker, *or* the native fallback `infra/live/bootstrap.sh` builds (see its own header comment).
-- Sibling checkouts of the three companion repos. Point at them with:
-  - `CHEMCLAW_MCP_REPO` (default `/workspace/8fqycwdt8v-oss/chemclaw3-mcp`)
-  - `CHEMCLAW_MOCK_REPO` (default `/workspace/8fqycwdt8v-oss/chemclaw3_mock`)
-  - `CHEMCLAW_UI_REPO` (default `/workspace/8fqycwdt8v-oss/chemclaw3_ui`)
-- An Anthropic credential: `ANTHROPIC_API_KEY`, or an env var literally named `API-KEY` (this
-  script maps it — see `CLAUDE.md`'s "Local live/e2e credentials" note for where that comes from
-  in this environment).
+- Sibling checkouts. Point at them with:
+  - `CHEMCLAW_MCP_REPO` (default `/workspace/8fqycwdt8v-oss/chemclaw3-mcp`) — **required**
+  - `CHEMCLAW_UI_REPO` (default `/workspace/8fqycwdt8v-oss/chemclaw3_ui`) — **required**
+  - `CHEMCLAW_MOCK_REPO` (default `/workspace/8fqycwdt8v-oss/chemclaw3_mock`) — **optional**, see below
+- A model, one of two ways — the lane needs exactly one and says which it took:
+
+## The two postures, and what each costs
+
+**Model.** By default the lane runs a real Anthropic model and needs `ANTHROPIC_API_KEY`, or an env
+var literally named `API-KEY` which it maps (see `CLAUDE.md`'s "Local live/e2e credentials" note).
+Set `CHEMCLAW_LLM_PROVIDER=openai_compatible` with `CHEMCLAW_LLM_BASE_URL` and `CHEMCLAW_LLM_MODEL`
+and it runs against `chemclaw.cli.mock_llm` instead, with **no credential and no LLM calls at all**:
+
+```sh
+CHEMCLAW_LLM_PROVIDER=openai_compatible \
+CHEMCLAW_LLM_BASE_URL=http://127.0.0.1:8820/v1 \
+CHEMCLAW_LLM_MODEL=mock make live-e2e-full-stack
+```
+
+The base URL must be **exactly** `http://127.0.0.1:8820/v1` — `infra/live/processes.sh` string-
+compares it to decide whether to start the mock, so `localhost` or a trailing slash brings the front
+door up pointed at nothing. What the scripted model cannot answer is any question about answer
+*quality*: it emits tool calls without *choosing* them, so a graded probe would measure the script.
+Mechanical verdicts — an HTTP status, a row count, a workflow state, a tool identifier in the trace
+— are what it is for.
+
+**Chemclaw3_mock.** Absent, the lane still comes up, in a three-repo posture, and logs by name what
+is therefore **not run** — never skipped-green:
+
+| Not run without the mock checkout | |
+| --- | --- |
+| `mock-eln` (:8090) | the ELN/ORD HTTP surface and the Entra mock tenant |
+| `mock-vendor` (:8091) | the `search_building_blocks` and `get_price` connector |
+| `eln-json`, `eln-ord` data sources | `CHEMCLAW_DATA_SOURCES` drops to `graph` |
+| the seeded corpus and its backfill | there is nothing to drain |
+
+`mock-vendor`'s manifest directory is dropped together with its server rather than left declared:
+`CHEMCLAW_CONNECTORS_REQUIRED=true` stays on, so a declared connector nothing serves would be a hard
+startup failure of the front door — which is the posture working, not a reason to relax it.
 
 ## Running it
 
@@ -67,7 +102,8 @@ rather than reporting an unknown process.
 
 ## The corpus is backfilled on bring-up, and it takes hours
 
-The last thing `up` does is start an `ElnSyncWorkflow` from the epoch. Without it the ORD half of
+The last thing `up` does — **when a Chemclaw3_mock checkout is present**; with none there is no
+corpus and the step is skipped, saying so — is start an `ElnSyncWorkflow` from the epoch. Without it the ORD half of
 the seeded data is **permanently invisible**: all ~10,000 exports share one mtime (the moment the
 repo was cloned) and carry older payload timestamps, so the incremental cursor passes them on its
 first firing and no later run can qualify them again. The bring-up only *starts* the drain and

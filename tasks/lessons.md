@@ -1233,3 +1233,33 @@ And the second-order rule, which is the one that actually caught these: **review
 work adversarially, against a live system, with someone else's eyes.** Four parallel passes cost
 one message and found what one careful author plus a green gate did not. The gate proves the change
 did not break what was already tested; it says nothing about what the change itself introduced.
+
+## 2026-08-28 — a chaos check must observe the disturbance, not only the recovery
+
+`bootstrap.sh restart-postgres` restarted nothing on a Docker lane. `stop_postgres` guarded on a
+`$PGDATA` a compose lane does not have, so it returned reporting "postgres not running" about a
+database that was serving; `start_postgres` then found `pg_isready` already true and reported
+"postgres up". Three log lines, each true as a sentence, describing a restart that never happened.
+`pg_postmaster_start_time()` was byte-identical either side.
+
+The storm's E-family bounce check drives that verb, and it scored **PASS** — "24/24 in-flight turns
+survived the bounce; a fresh turn answered 2.1s after it". Both halves are exactly what a run doing
+nothing scores. Every E3 result before today is not evidence.
+
+Two rules, and the second is the one worth carrying.
+
+**A lane primitive that branches on Docker must branch in every verb.** An earlier pass had found
+precisely this for `stop-temporal`/`start-temporal` and fixed it — but wrote the fix as a fix to
+*Temporal*, adding `compose_temporal_id()`, rather than as a fix to a class. So the second copy of
+the same defect sat next to the first one, in the same file, and was not looked for. When a fix is
+"this function forgot the other branch", the next question is always *which other functions have
+the same shape*, and the answer belongs in the same commit.
+
+**A check that disturbs something must assert the disturbance, separately from the recovery.** This
+is the general form and it is not specific to Docker. A recovery assertion alone is satisfied by a
+system that was never disturbed, so it cannot distinguish "survived the bounce" from "there was no
+bounce" — and it fails in the friendly direction, which is why it can sit green for months. The fix
+is to read an identity of the thing being disturbed (here the postmaster's own start time, on a
+connection outside the pool under test) before and after, and fail the check when it did not move.
+Fixing the primitive is not a substitute: the next primitive to silently no-op will be a different
+one, and this assertion is the only thing that notices.

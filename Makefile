@@ -399,7 +399,7 @@ live-down:  ## Stop the live processes.
 live-status:  ## Show which live processes are running.
 	bash infra/live/processes.sh status
 
-live-e2e-full-stack:  ## Full four-repo pass: this backend + Chemclaw3-mcp + Chemclaw3_mock + Chemclaw3_ui.
+live-e2e-full-stack:  ## Full pass: this backend + Chemclaw3-mcp + Chemclaw3_ui (+ Chemclaw3_mock, and a real or scripted model).
 	bash infra/live/e2e-full-stack/up.sh up
 
 live-e2e-full-stack-down:  ## Stop the four-repo pass.
