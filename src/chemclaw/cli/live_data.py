@@ -525,20 +525,27 @@ _PROSE_TIME = re.compile(r"for\s+(\d+(?:\.\d+)?)\s*h\b")
 
 
 async def check_prose_yields_its_numbers(eln_export_dir: Path) -> Check:
-    """Conditions stated only in a procedure's prose still reach the structured record.
+    """A condition stated only in prose reaches the record — as a **step**, not as a setpoint.
 
     **The one place in this corpus where a value is *derived* rather than copied**, which is why it
     is worth a check of its own: everything else here asserts that a number survived a hop, and
     this asserts that a number was recovered from a sentence at all.
 
-    The free-text fixtures are deliberately paired for exactly this. A `-1` record states "stirred
-    at 82 °C for 4.0 h" in step 2 and carries **no** `temperature_c`/`time_h` fields; its `-2` twin
-    carries both fields and its prose says only "stirred under nitrogen". So the `-1` half has no
-    structured value to fall back on — if the extraction fails, the condition is simply gone, and
-    nothing downstream can tell the difference between "ran at 82 °C" and "temperature unrecorded".
+    Which field it may be recovered *into* is decided, and the decision is the whole point.
+    `D-2026-08-26-a-transcription-may-not-infer-a-setpoint` removed the headline prose fallback
+    after measuring what it produced: a reaction run at 80 °C for 12 h, stored as 0 °C for 0.5 h,
+    because a procedure begins by charging a vessel and the *addition* temperature is simply the
+    first number it states. So `OrdReaction.temperature_c`/`.time_h` are the structured field or
+    absent, and the regex result lives on `ReactionStep`, where "0 °C" belongs to the charging step
+    and says so.
 
-    Only records whose prose states both are checked, and the count is reported, because a silent
-    denominator is how a check that stopped matching anything keeps passing.
+    Both halves are asserted here, because each without the other is a check that passes for the
+    wrong reason: a record carrying no step temperature would mean the prose was lost entirely, and
+    a record carrying a *headline* setpoint it never stated would mean the fallback is back.
+
+    Only records whose prose states both a temperature and a time are checked, and the count is
+    reported, because a silent denominator is how a check that stopped matching anything keeps
+    passing.
     """
     adapter = JsonExportAdapter(str(eln_export_dir))
     raws = await adapter.fetch_new_entries(_EPOCH)
@@ -555,18 +562,40 @@ async def check_prose_yields_its_numbers(eln_export_dir: Path) -> Check:
         except Exception:
             continue
         checked += 1
-        # `is not None` on both, and not a truthiness test: one fixture reads "cooled to 0 °C",
-        # and `0.0 or None` would report the extraction as a failure that it is not.
-        want = (float(temperature.group(1)), float(time_h.group(1)))
-        got = (reaction.temperature_c, reaction.time_h)
-        if got != want:
-            wrong.append(f"{raw.entry_id}: prose says {want}, record carries {got}")
+        # `is not None` on the step values, and not a truthiness test: one fixture reads "cooled to
+        # 0 °C", and `0.0 or None` would report the extraction as a failure that it is not.
+        steps_carry = any(step.temperature_c is not None for step in reaction.steps) and any(
+            step.duration_h is not None for step in reaction.steps
+        )
+        # The setpoint may be present only if the entry stated it in its own field. Read from the
+        # payload rather than assumed absent, so an entry that legitimately carries both is not
+        # counted as a regression.
+        stated = (
+            raw.payload.get("temperature_c") is not None,
+            raw.payload.get("time_h") is not None,
+        )
+        setpoint_invented = (
+            reaction.temperature_c is not None and not stated[0],
+            reaction.time_h is not None and not stated[1],
+        )
+        if not steps_carry:
+            wrong.append(
+                f"{raw.entry_id}: prose states "
+                f"{(float(temperature.group(1)), float(time_h.group(1)))} and no step carries both"
+            )
+        elif any(setpoint_invented):
+            wrong.append(
+                f"{raw.entry_id}: headline setpoint "
+                f"{(reaction.temperature_c, reaction.time_h)} was derived from prose, which "
+                f"D-2026-08-26 forbids"
+            )
     return Check(
-        name="prose yields its numbers",
+        name="prose reaches the steps, and never the setpoint",
         passed=checked > 0 and not wrong,
         observed=(
-            f"{checked - len(wrong)}/{checked} procedures state a temperature and a time in prose "
-            f"and carry both" + (f" · first miss: {wrong[0]}" if wrong else "")
+            f"{checked - len(wrong)}/{checked} procedures state a temperature and a time in prose, "
+            f"carry both on a step, and invent no setpoint"
+            + (f" · first miss: {wrong[0]}" if wrong else "")
         ),
     )
 
