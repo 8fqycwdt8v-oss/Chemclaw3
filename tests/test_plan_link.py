@@ -245,3 +245,78 @@ def test_the_stamp_is_attached_exactly_when_the_harness_is() -> None:
     audit = object()
     assert stamp_plan_link in tool_governance_middleware(audit, harness_on)
     assert stamp_plan_link not in tool_governance_middleware(audit, harness_off)
+
+
+def test_the_link_is_bound_inside_a_real_compiled_graph() -> None:
+    """The one property a hand-built `ToolCallRequest` cannot establish: that this works at all.
+
+    Every other test in this file calls the middleware directly with a request whose `state` the
+    test itself wrote — which proves the selection rule and proves nothing about whether a tool
+    running inside `build_langgraph_agent`'s compiled graph is handed `todos` in the first place.
+    `tests/test_state_channels.py` exists because that exact gap produced three defects in one
+    week: "a middleware was tested by calling its hook directly, the hook returned the right dict,
+    and the channel it wrote did not exist on the graph." LangGraph drops such a write in silence,
+    and the read here fails the same way — `plan_link_from_todos` would see no `todos`, return
+    `("", "")`, and every job would stamp an empty step while all seven tests above stayed green.
+
+    So this drives the real thing: the real builder, the real `TodoListMiddleware`, the real
+    `write_todos` tool writing the real channel, and a real `ToolNode` invoking a real tool whose
+    body reads the ambient link the way `connectors/jobs.py` does.
+
+    **Measured, because "it covers a gap" is a claim like any other.** Detaching
+    `TodoListMiddleware` in `agent_middleware()` — so the plan channel is never created and a tool
+    is handed no `todos`, while this module, its predicate and every request built by hand stay
+    untouched — fails **this test alone**: 1 failed, 11 passed. Every other test in this file,
+    including the one asserting the stamp is attached, goes green against a graph where the stamp
+    can never see a plan. That is the whole of what a hand-built `state` cannot tell you.
+
+    `harness_autonomy="execute"` rather than `plan_only`, deliberately: it keeps the plan gate out
+    of the way (an unapproved plan would refuse a state-changing call before the stamp was ever
+    reached) *and* it proves the attachment predicate this module chose — the stamp follows the
+    harness, not the gate, because the todo list exists in either autonomy.
+    """
+    from chemclaw.agent.audit import NullAuditSink
+    from chemclaw.agent.langgraph_agent import build_langgraph_agent
+    from chemclaw.agent.profiles import AgentProfile
+    from chemclaw.agent.state import turn_config, turn_input
+    from chemclaw.core.tool_registry import _REGISTRY, register_tool
+    from tests.fakes_langgraph import ScriptedChatModel
+
+    seen: list[tuple[str, str]] = []
+
+    async def plan_link_probe() -> str:
+        """Record the ambient plan link, exactly as a job launcher reads it."""
+        seen.append(get_current_plan_link())
+        return "recorded"
+
+    plan = [
+        {"content": "gather the evidence", "status": "completed"},
+        {"content": "run the conformer search", "status": "in_progress"},
+        {"content": "propose a note", "status": "pending"},
+    ]
+    register_tool(plan_link_probe)
+    try:
+        graph = build_langgraph_agent(
+            # `ScriptedChatModel` takes a tool call as `{"name", "args"}` and a plain string as
+            # the final answer; it mints the call ids itself.
+            ScriptedChatModel(
+                [
+                    # The model writes the plan, then acts on the step it just marked in flight —
+                    # two assistant messages, which is what puts `todos` in state before the call.
+                    {"name": "write_todos", "args": {"todos": plan}},
+                    {"name": "plan_link_probe", "args": {}},
+                    "done",
+                ]
+            ),
+            profile=AgentProfile(
+                name="plan-link-probe", harness_enabled=True, harness_autonomy="execute"
+            ),
+            audit_sink=NullAuditSink(),
+        )
+        asyncio.run(graph.ainvoke(turn_input("run the search"), turn_config()))
+    finally:
+        _REGISTRY.pop("plan_link_probe", None)
+
+    assert seen == [
+        ("run the conformer search", plan_identity([str(t["content"]) for t in plan]))
+    ], "the tool body saw no plan link, so `todos` did not reach it through the compiled graph"
