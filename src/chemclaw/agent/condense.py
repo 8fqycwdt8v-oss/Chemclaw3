@@ -36,7 +36,7 @@ is the same shape — a model call over `EvidenceChunk`s — and lives here for 
 its two stated reasons are the replay and the envelope: a summarizer rewrites retrieved evidence
 into prose in the model's own voice, which destroys `agent.framing`'s untrusted-content envelope
 and is then re-read on every subsequent turn. A tool result is a different position on both counts.
-It arrives as a `ToolMessage`, framed on the way out; it crosses the seven `wrap_tool_call`
+It arrives as a `ToolMessage`, framed on the way out; it crosses the `wrap_tool_call`
 middlewares, so it is audited, authorized, dry-run-refused and repeat-guarded; it carries citations
 per row; it is cleared by `ClearToolUsesEdit` like any other result rather than becoming history;
 and it can be withdrawn by taking one name out of the registry. The compaction policy is untouched

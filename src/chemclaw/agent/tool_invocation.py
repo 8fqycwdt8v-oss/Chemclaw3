@@ -1,8 +1,13 @@
 """Run one tool through the governed chain when no graph is driving (M13 Step 6).
 
-A chat turn's tool call is wrapped by seven `wrap_tool_call` middlewares — two error converters,
-the audit trail, the authorization gate, the dry-run and repeat guards, and the failure announcer
-— and LangChain composes them inside `create_agent`'s tool node. A Temporal activity replaying a
+A chat turn's tool call is wrapped by the `wrap_tool_call` middlewares — two error converters, the
+untrusted-content framer, the audit trail, the authorization gate, the dry-run and repeat guards,
+and the failure announcer — and LangChain composes them inside `create_agent`'s tool node. They are
+named rather than counted here: the number was written as "seven" and went stale the first time one
+was added, which is the shape `D-2026-08-01-the-count-lives-in-the-test-not-in-the-prose` rejects.
+`tests/test_middleware_order.py::_EXPECTED_ORDER` is the one place the sequence is stated.
+
+A Temporal activity replaying a
 template's `tool` step has the same obligation and no tool node: the whole point of
 `durable/template_activities.py` is that a template's calls are governed *identically* to a
 conversation's, because a template naming a role-gated tool must not run it for anyone who can run
