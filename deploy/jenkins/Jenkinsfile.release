@@ -35,6 +35,8 @@ pipeline {
          description: 'One `server=sha256:...` per line, from the Chemclaw3-mcp pipeline. Empty = leave the fleet as it is.')
     booleanParam(name: 'ALLOW_ANY_EGRESS_DESTINATION', defaultValue: false,
                  description: 'State that any-destination egress is intended (the chart refuses to render without a posture).')
+    booleanParam(name: 'ACCEPT_UNBOUNDED_GROWTH', defaultValue: false,
+                 description: 'State that the durable tables growing forever is intended (the chart refuses to render without a retention posture).')
     string(name: 'CLUSTER_CREDENTIALS_ID', defaultValue: 'chemclaw-openshift', description: 'Cluster API token credential.')
     string(name: 'DATABRICKS_CREDENTIALS_ID', defaultValue: 'chemclaw-databricks', description: 'Databricks PAT credential.')
     string(name: 'CLUSTER_API', defaultValue: '', description: 'Cluster API URL (openshift target).')
@@ -136,6 +138,7 @@ pipeline {
                 oc login --token="\${CLUSTER_TOKEN}" --server='${params.CLUSTER_API}' >/dev/null
                 NAMESPACE='${params.NAMESPACE}' DRY_RUN='${params.DRY_RUN}' \
                 ALLOW_ANY_EGRESS_DESTINATION='${params.ALLOW_ANY_EGRESS_DESTINATION}' \
+                ACCEPT_UNBOUNDED_GROWTH='${params.ACCEPT_UNBOUNDED_GROWTH}' \
                   deploy/jenkins/targets/openshift.sh release.json
               """
             }

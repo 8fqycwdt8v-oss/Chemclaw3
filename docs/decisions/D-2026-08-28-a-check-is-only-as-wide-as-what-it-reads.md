@@ -1,4 +1,4 @@
-# D-2026-08-28-a-check-is-only-as-wide-as-what-it-reads — five findings in the deployment tier
+# D-2026-08-28-a-check-is-only-as-wide-as-what-it-reads — six findings in the deployment tier
 
 ## Status
 
@@ -9,7 +9,7 @@ off the template source and labelled as such.
 
 ## Context
 
-Five findings, and each one is the same sentence: **a control was documented for a surface wider
+Six findings, and each one is the same sentence: **a control was documented for a surface wider
 than the one it actually reads.** None was a wrong answer; each was an answer to a narrower
 question than the one its own docstring, comment or values file asks.
 
@@ -20,6 +20,7 @@ question than the one its own docstring, comment or values file asks.
 | 3 | `make deps-audit`'s classification | `pip-audit`'s *output*, only when it exits non-zero | whether the locked closure is clean |
 | 4 | `bootstrap.sh status` | the `temporal` CLI | the lane, on either backend |
 | 5 | nine rendered-chart tests | nothing — they skip in every environment | "the CI half" of the chart's assertions |
+| 6 | the Jenkins delivery target's pre-flight | the egress posture | the postures the chart refuses to render without |
 
 ### 1 · A migration that a replay would reject, invisible to the re-runnability check
 
@@ -122,6 +123,22 @@ on rendered chart YAML") to track closing this. That row does not exist and no r
 the prose contract resolves backticked *paths*, ADR ids, config keys and metric names, and a row
 title is none of those.
 
+### 6 · The delivery path pre-flights one of the two postures
+
+`D-2026-08-26-a-knob-that-renders-nothing-is-not-a-knob` put a `fail` in `networkpolicy.yaml` *and*
+one in `config.yaml`, and every other caller treats them as the pair they are: the Makefile's three
+renders, `docs/guides/runbook.md` and `deploy/README.md` all pass both flags.
+`deploy/jenkins/targets/openshift.sh` grew `egress_flags` for the first and nothing for the second
+— `grep -rn retention deploy/jenkins/` returned nothing — and neither pipeline had a parameter that
+could state it.
+
+The failure is loud rather than silent; what is wrong is *where* it lands. The egress twin is
+caught in a pre-flight naming both remedies; the retention one comes out of `helm upgrade` after
+the image has been built and pushed, and `Jenkinsfile`'s own `Render the chart` stage could not be
+made to pass at all for a release whose values file had not written a window. One `posture_flags`
+replaces `egress_flags`, because a second copy is what let the first one's lesson go unapplied to
+its twin.
+
 ## Decision
 
 **A check is only as wide as what it reads, so the reach is asserted rather than described.** Each
@@ -137,6 +154,9 @@ exemption is exact and carries the operator's recovery.
 - `bootstrap.sh status` asks the port; `restart-postgres` verifies the act it was asked for.
 - The `chart` job runs `tests/test_deploy_chart.py` and `tests/test_helm_chart.py` under the Helm
   it already installs.
+- `egress_flags` becomes `posture_flags` and asks both questions, with `ACCEPT_UNBOUNDED_GROWTH`
+  beside `ALLOW_ANY_EGRESS_DESTINATION` in both pipelines — same default (`false`), same opt-in
+  shape, same assertions in `tests/test_jenkins_delivery.py`.
 
 ## Consequences
 

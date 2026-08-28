@@ -41,6 +41,11 @@ pipeline {
                  description: 'Run `make ci` here too. Off because GitHub Actions is the gate; on for a Jenkins-only estate.')
     booleanParam(name: 'ALLOW_ANY_EGRESS_DESTINATION', defaultValue: false,
                  description: 'State that any-destination egress is intended. The chart refuses to render without a stated posture.')
+    // The retention half of the same decision. It had no parameter, so the render stage below
+    // refused for any release whose values file did not already state a window — after the image
+    // was built and pushed, with nothing in the parameter set able to answer it.
+    booleanParam(name: 'ACCEPT_UNBOUNDED_GROWTH', defaultValue: false,
+                 description: 'State that the durable tables growing forever is intended. The chart refuses to render without a stated retention posture (retention.windows in the values file is the other answer).')
     string(name: 'REGISTRY_CREDENTIALS_ID', defaultValue: 'chemclaw-registry',
            description: 'Jenkins username/password credential for the registry.')
     string(name: 'CLUSTER_CREDENTIALS_ID', defaultValue: 'chemclaw-openshift',
@@ -187,6 +192,9 @@ dry run    ${params.DRY_RUN}"""
           def flags = env.IMAGE_DIGEST ? "--set image.digest=${env.IMAGE_DIGEST} --set image.repository=${params.IMAGE_REGISTRY}/${params.IMAGE_NAME}" : ''
           if (fileExists(env.VALUES_FILE)) { flags += " --values ${env.VALUES_FILE}" }
           if (params.ALLOW_ANY_EGRESS_DESTINATION) { flags += ' --set networkPolicy.allowAnyDestination=true' }
+          // Both refusals, or the render fails on the one nobody passed. `deploy/README.md` and
+          // the Makefile's three renders have always paired them; this stage had only the first.
+          if (params.ACCEPT_UNBOUNDED_GROWTH) { flags += ' --set retention.unboundedGrowthAccepted=true' }
           sh """
             set -euo pipefail
             helm template chemclaw deploy/helm/chemclaw ${flags} > rendered.yaml
@@ -228,6 +236,7 @@ dry run    ${params.DRY_RUN}"""
                 oc login --token="\${CLUSTER_TOKEN}" --server='${params.CLUSTER_API}' >/dev/null
                 NAMESPACE='${params.NAMESPACE}' DRY_RUN='${params.DRY_RUN}' \
                 ALLOW_ANY_EGRESS_DESTINATION='${params.ALLOW_ANY_EGRESS_DESTINATION}' \
+                ACCEPT_UNBOUNDED_GROWTH='${params.ACCEPT_UNBOUNDED_GROWTH}' \
                   deploy/jenkins/targets/openshift.sh release.json
               """
             }
