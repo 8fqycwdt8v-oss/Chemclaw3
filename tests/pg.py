@@ -85,3 +85,29 @@ async def migrated_db_or_skip() -> None:
     except psycopg.OperationalError as exc:  # pragma: no cover - env-dependent
         pytest.skip(f"Postgres unavailable (start it: sudo dockerd; make up): {exc}")
     await migrate()
+
+
+async def create_checkpoint_tables() -> None:
+    """Create the LangGraph checkpointer's tables in the isolation schema.
+
+    **A test that reads a checkpoint table has to create it, and cannot infer that from a green
+    local run.** `AsyncPostgresSaver.setup()` creates these, not a migration in `infra/sql` — so a
+    database that has never run the agent does not have them, which is exactly what CI's throwaway
+    container is and exactly what a dev database that has run `make chat` is not. The isolation
+    DSN puts `public` second on the `search_path` (`schema_dsn`, for the `vector` type), so on a
+    dev database an unqualified `checkpoints` *resolves through `public`* and every such test
+    passes locally while failing in CI. Measured: `tests/test_api_sessions.py`'s three delete tests
+    were green against the sandbox database and red on the runner, one commit apart, on identical
+    code.
+
+    Through the saver's own migration statements rather than `setup()`, which opens a pool of its
+    own against `settings.postgres_dsn` and would land outside the isolation schema. They are
+    `CREATE TABLE IF NOT EXISTS`, so this is safe beside any other test that needs them, and the
+    shape under test is the shape production has.
+    """
+    from langgraph.checkpoint.postgres import base
+
+    async with await connect(settings.postgres_dsn) as conn:
+        for statement in base.MIGRATIONS[1:4]:
+            await conn.execute(statement)
+        await conn.commit()

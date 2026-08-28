@@ -81,6 +81,38 @@ _TOUCHES = (
 _TABLE_FREE = (re.compile(r"^CREATE EXTENSION", re.I),)
 
 
+def _split_on_statement_ends(body: str) -> list[str]:
+    """Split SQL on the semicolons that end a statement, ignoring those inside a string literal.
+
+    A plain `body.split(";")` tears any statement whose *prose* contains a semicolon into
+    fragments — and the one construct in this directory that carries prose is `COMMENT ON`, whose
+    whole purpose is to explain a column in sentences. Two migrations wrote one ("... could
+    resolve; a sourced write supersedes ...", "... withdrawn; NULL means not retracted"), and each
+    fragment then matched no pattern at all.
+
+    That failed loudly rather than silently, because `test_every_migration_statement_is_one_the
+    _rule_understands` exists — but the failure it reported named the migrations, not this
+    function, which is why the fix belongs here rather than in a new `_TOUCHES` entry: the
+    construct was already listed, and the text was never one statement to begin with.
+
+    SQL escapes a quote inside a literal by doubling it, and a doubled quote is just two state
+    flips in a row, so tracking a single boolean is sufficient and `''` needs no special case.
+    """
+    out: list[str] = []
+    current: list[str] = []
+    in_literal = False
+    for char in body:
+        if char == "'":
+            in_literal = not in_literal
+        if char == ";" and not in_literal:
+            out.append("".join(current))
+            current = []
+        else:
+            current.append(char)
+    out.append("".join(current))
+    return out
+
+
 def _statements() -> list[tuple[str, str, str]]:
     """Every migration statement as `(file name, migration number, normalised SQL)`.
 
@@ -90,7 +122,7 @@ def _statements() -> list[tuple[str, str, str]]:
     out: list[tuple[str, str, str]] = []
     for path in sorted(_SQL.glob("*.sql")):
         body = _LINE_COMMENT.sub(" ", path.read_text(encoding="utf-8"))
-        for raw in body.split(";"):
+        for raw in _split_on_statement_ends(body):
             statement = " ".join(raw.split())
             if statement:
                 out.append((path.name, path.name.split("_")[0], statement))
@@ -170,6 +202,30 @@ def test_the_inventory_lists_no_table_that_does_not_exist() -> None:
     assert not phantom, (
         f"infra/sql/README.md documents tables no migration creates: {sorted(phantom)}"
     )
+
+
+def test_a_semicolon_inside_a_comment_does_not_end_the_statement() -> None:
+    """The splitter must read SQL, not text that mostly looks like SQL.
+
+    `COMMENT ON` is the one construct here that carries sentences, so it is the one that will
+    contain a semicolon, an apostrophe, or both. Splitting naively turned one such comment into
+    two fragments that named no table — which would have stopped crediting its migration to its
+    table, the exact decay the surrounding tests exist to catch.
+
+    Driven directly rather than through the corpus: a migration that happens to contain no
+    semicolon in its prose today would make this pass for the wrong reason tomorrow.
+    """
+    body = (
+        "ALTER TABLE t ADD COLUMN c TEXT;\n"
+        "COMMENT ON COLUMN t.c IS 'one; two, and the site''s own third';\n"
+        "CREATE INDEX t_c_idx ON t (c);\n"
+    )
+    statements = [" ".join(raw.split()) for raw in _split_on_statement_ends(body)]
+    assert [s for s in statements if s] == [
+        "ALTER TABLE t ADD COLUMN c TEXT",
+        "COMMENT ON COLUMN t.c IS 'one; two, and the site''s own third'",
+        "CREATE INDEX t_c_idx ON t (c)",
+    ]
 
 
 def test_every_migration_statement_is_one_the_rule_understands() -> None:

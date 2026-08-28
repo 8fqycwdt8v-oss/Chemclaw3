@@ -43,6 +43,15 @@ invisible — so `unchecked_arguments` reports it by name and `main` prints it o
 too. `job` steps stay left to the launch itself: a connector job's payload is validated against its
 declared params model in `prepare_job_launch`.
 
+**The report stays, and the gap is now closed elsewhere.** `make live-template-args`
+(`chemclaw.cli.validate_template_args_live`) opens real connector sessions and checks the same
+arguments against what each running server advertises, which is the only authority that exists for
+a bundle we do not run. It is a *live-lane* target, deliberately not part of `ci`: this module runs
+offline and must keep doing so, and a gate that needs a network is a gate that goes red for reasons
+that are not about the diff. The two share `ToolArguments` and `argument_problems`, so the rule and
+its wording have one definition; only the authority they read differs. See
+`docs/decisions/D-2026-08-27-an-argument-check-needs-a-live-session.md`.
+
 Read-only; touches nothing.
 """
 
@@ -121,33 +130,57 @@ def _resolvable_signatures() -> dict[str, inspect.Signature]:
     return signatures
 
 
-def _argument_problems(
-    template: Template, step: ToolStep, signature: inspect.Signature
-) -> list[str]:
-    """Check one tool step's argument *keys* against the parameters the tool actually takes.
+class ToolArguments(NamedTuple):
+    """What a tool accepts, in the only three terms an argument check needs.
+
+    Extracted because there are now two authorities for the same question and they must give the
+    same answer in the same words. This gate reads a local `inspect.Signature`; the live gate
+    (`chemclaw.cli.validate_template_args_live`) reads a running server's `args_schema`, which is
+    the only authority that exists for a bundle we declare and do not run. Both build one of these
+    and hand it to `argument_problems`, so "wrong key" and "missing required argument" have one
+    definition rather than one per lane — two lanes disagreeing about what a template's arguments
+    mean would be worse than the gap the second one closes.
+    """
+
+    accepted: frozenset[str]
+    required: frozenset[str]
+    takes_any_key: bool
+    """True when the tool absorbs any keyword (`**kwargs`, or an open JSON schema): the unknown-key
+    check is then vacuous and is skipped, while the missing-required check still applies."""
+
+    @classmethod
+    def of_signature(cls, signature: inspect.Signature) -> "ToolArguments":
+        """Read a local implementation's parameters — this gate's authority."""
+        named = [
+            p
+            for p in signature.parameters.values()
+            if p.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+        ]
+        return cls(
+            accepted=frozenset(p.name for p in named),
+            required=frozenset(p.name for p in named if p.default is inspect.Parameter.empty),
+            takes_any_key=any(
+                p.kind is inspect.Parameter.VAR_KEYWORD for p in signature.parameters.values()
+            ),
+        )
+
+
+def argument_problems(template: Template, step: ToolStep, accepts: ToolArguments) -> list[str]:
+    """Check one tool step's argument *keys* against the arguments the tool actually takes.
 
     Keys only, never values: a template's argument may be a `${...}` reference whose type is known
     only once the run substitutes it, so type-checking here would reject correct templates. A wrong
     key, by contrast, is wrong at every possible substitution.
     """
-    named = [
-        p
-        for p in signature.parameters.values()
-        if p.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
-    ]
-    takes_any_key = any(
-        p.kind is inspect.Parameter.VAR_KEYWORD for p in signature.parameters.values()
-    )
     problems: list[str] = []
     given = set(step.arguments)
-    accepted = {p.name for p in named}
-    unknown = sorted(given - accepted)
-    if unknown and not takes_any_key:
+    unknown = sorted(given - accepts.accepted)
+    if unknown and not accepts.takes_any_key:
         problems.append(
             f"template {template.name!r} step {step.id!r} passes argument(s) {unknown} that "
-            f"{step.tool!r} does not take; it accepts: {sorted(accepted)}"
+            f"{step.tool!r} does not take; it accepts: {sorted(accepts.accepted)}"
         )
-    missing = sorted({p.name for p in named if p.default is inspect.Parameter.empty} - given)
+    missing = sorted(accepts.required - given)
     if missing:
         problems.append(
             f"template {template.name!r} step {step.id!r} omits required argument(s) {missing} "
@@ -209,6 +242,11 @@ def unchecked_arguments(surface: _Surface | None = None) -> dict[str, list[str]]
     Takes the signatures `main` already resolved for `validate_templates`, for the reason
     `_Surface` gives: deriving them is the expensive half of this gate and the answer is the same
     for every template and for both callers.
+
+    **This is a note about *this lane*, not a statement that nothing checks these.**
+    `make live-template-args` does, against the running servers. Keeping the note is still right:
+    the live lane is not run on a diff, so what an offline gate did not check remains something its
+    reader has to be told.
     """
     signatures = surface.signatures if surface is not None else _resolvable_signatures()
     unchecked: dict[str, list[str]] = {}
@@ -245,7 +283,9 @@ def _step_problems(template: Template, surface: _Surface | None = None) -> list[
                 f"{step.tool!r}; available: {sorted(tools)}"
             )
         elif isinstance(step, ToolStep) and step.tool in signatures:
-            problems.extend(_argument_problems(template, step, signatures[step.tool]))
+            problems.extend(
+                argument_problems(template, step, ToolArguments.of_signature(signatures[step.tool]))
+            )
         elif isinstance(step, JobStep) and step.job not in jobs:
             problems.append(
                 f"template {template.name!r} step {step.id!r} runs unknown job "

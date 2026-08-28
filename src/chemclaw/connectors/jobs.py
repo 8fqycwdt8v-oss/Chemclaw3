@@ -387,6 +387,11 @@ def build_job_tool(connector: str, job: JobSpec) -> CapabilityTool:
                     plan_step=plan_step,
                     plan_hash=plan_hash,
                     publish_to_graph=job.publish_to_graph,
+                    # The job's own declared ceiling, copied from the manifest exactly as
+                    # `publish_to_graph` is; `None` where it declared none. The `min` against the
+                    # deployment's maximum is taken in the worker that starts the child
+                    # (`durable/connector_job.py::child_execution_timeout`), not here.
+                    timeout_seconds=job.timeout_seconds,
                 ),
                 id=workflow_id,
                 task_queue=settings.background_task_queue,

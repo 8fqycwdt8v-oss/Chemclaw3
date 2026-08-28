@@ -206,7 +206,10 @@ def test_a_nested_identity_is_read_one_level_down() -> None:
     assert context.actor == "oid-7"
     assert context.session_id == "sess-t"
     assert context.correlation_id == "template-run-1"
-    assert context.roles == frozenset({"process-chemist"})
+    # Roles are NOT lifted from the payload — a relayed workflow argument is not a verified role
+    # claim, so binding it would let anyone who can enqueue the activity forge a privileged role
+    # (security review). The actor crosses for attribution; roles bind empty (fail-closed).
+    assert context.roles == frozenset()
 
 
 def test_the_real_template_step_inputs_are_the_shape_the_walk_reads() -> None:
@@ -239,7 +242,7 @@ def test_the_real_template_step_inputs_are_the_shape_the_walk_reads() -> None:
             "s-tmpl",
             "template-run-1",
         ), type(step).__name__
-        assert context.roles == frozenset({"process-chemist"}), type(step).__name__
+        assert context.roles == frozenset(), type(step).__name__  # never lifted from the payload
 
 
 def test_a_model_authored_payload_cannot_supply_an_identity() -> None:

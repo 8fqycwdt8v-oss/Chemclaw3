@@ -58,14 +58,20 @@ def _envelope_nonce() -> str:
     Unset falls back to the per-process random value, which is what dev and tests want and what
     every existing deployment already has.
 
-    **Nothing warns about the combination that matters**, and this docstring said `Settings` did
-    until 2026-08-26: `framing_envelope_secret` is named in exactly three files — this one, its own
-    config section, and `core/logging.py`'s redaction inventory — so no validator anywhere pairs it
-    with `session_store_dsn`. That pairing is where envelopes orphan: a durable session replays
-    material written under a previous process's random nonce, the tag no longer matches, and the
-    marking silently lapses for the oldest content. Queued in `BACKLOG.md` with that anchor rather
-    than added here, because a startup warning is `Settings`' to raise and it has no warning
-    mechanism yet — every guard there raises.
+    **`Settings` now says so at startup, and until 2026-08-27 this docstring claimed that while it
+    was false** — `framing_envelope_secret` was named in three files (this one, its own config
+    section, `core/logging.py`'s redaction inventory) and no validator anywhere paired it with the
+    session store. `_a_durable_deployment_is_told_its_envelopes_will_orphan`, in
+    `core/config/__init__.py`, is that pairing: `session_store="postgres"` with the secret unset
+    logs a warning naming both settings and the fix. It **warns rather than refuses**, and the ADR
+    behind it measures why — the shipped chart is exactly this configuration, so raising would fail
+    every existing release on `helm upgrade`
+    (`D-2026-08-27-a-warning-is-the-shape-a-guard-takes-when-raising-would-break-a-deployment`).
+
+    The guard keys on `session_store`, not on `session_store_dsn` as the backlog row that asked for
+    it did: the DSN is set only by a site that *splits* the session store off `postgres_dsn`, so a
+    guard reading it would have been inert in the shipped chart, which is the one deployment it had
+    to cover.
     """
     secret = settings.framing_envelope_secret.get_secret_value()
     if secret:

@@ -172,6 +172,20 @@ class ConnectorJobInput(BaseModel):
     plan_step: str = ""
     plan_hash: str = ""
     publish_to_graph: bool = False
+    # The job's *declared* ceiling (`JobSpec.timeout_seconds`), copied from the manifest at the
+    # launch site exactly as `publish_to_graph` is — never derived here, because the manifest is on
+    # disk and a workflow may not read it. `None` means the manifest declared none, which is every
+    # manifest shipped today and every history written before this field existed.
+    #
+    # Deliberately the declared number rather than the already-resolved ceiling: the `min` against
+    # the deployment's setting is applied by `child_execution_timeout` in the worker that is about
+    # to start the child, so lowering `connector_job_timeout_seconds` binds a job that is *still
+    # queued* rather than only the ones launched afterwards. Carrying the resolved value would
+    # freeze a deployment's ceiling into the payload at launch time.
+    #
+    # Additive and defaulted because it crosses the Temporal wire and histories are in flight —
+    # the same rule `plan_step` and `ConnectorJobResult.calc_refs` above follow.
+    timeout_seconds: float | None = Field(default=None, gt=0)
 
 
 class ConnectorJobResult(BaseModel):
@@ -379,11 +393,54 @@ def wrapper_execution_timeout() -> timedelta:
     The direct path (`connectors/jobs.py`) gives the wrapper no execution timeout at all and is
     right to — the child is already bounded. This exists for the template path, which wants a
     ceiling on the step and must not make it the child's own.
+
+    **It stays the deployment's global number even for a job that lowered its own ceiling, and
+    that is deliberate.** The relation this function owes is one-directional — strictly above
+    whatever the child gets — and since a declared ceiling can only *lower* the child's
+    (`child_execution_timeout`), the global value clears every one of them by construction.
+    Deriving it from the job's own number instead would shrink the wrapper in step with the child
+    and hand back the headroom the four post-child steps need, which is the failure this function
+    was written for. The cost of not deriving it is that a wedged *wrapper* under a short job is
+    still bounded by the fleet-wide number — but the child, which is where the work is, fails
+    first and the wrapper's own failure path then runs, which is the outcome that matters.
     """
     return timedelta(
         seconds=settings.connector_job_timeout_seconds
         + settings.activity_timeout_seconds * _FINISH_STEPS
     )
+
+
+def child_execution_timeout(declared: float | None) -> timedelta:
+    """The ceiling one connector job's child actually gets: the lower of the two claims about it.
+
+    Two parties have a say and they are not symmetric. The deployment sets the **maximum** any job
+    may run for (`connector_job_timeout_seconds`), sized off the longest job in the fleet; a bundle
+    may state what its own job costs (`JobSpec.timeout_seconds`), which is knowledge core does not
+    have. Taking the minimum gives the bundle the only power that is safe to give it — the power to
+    ask for *less* — while a declaration above the setting is clamped rather than obeyed, so a
+    manifest in this repository still cannot grant itself runtime the operator did not fund.
+
+    Why it matters that a job can lower: one global ceiling bounds a twenty-second job and a
+    four-hour job identically, so with a bundle's worker down the short one sits `running` for the
+    fleet-wide ceiling and says nothing, because the only thing that would end it is a number sized
+    for something else entirely.
+
+    `None` — the state of every shipped manifest — returns exactly the setting, so a job that
+    declares nothing is bounded precisely as it was before this function existed.
+
+    A module-level function rather than an expression inside `_run_child`, for the reason
+    `job_record_for` above is one: everything around it needs a live Temporal server to exercise,
+    and "the deployment keeps the maximum" is a property the offline suite should be able to hold
+    on its own.
+
+    Args:
+        declared: The job's own ceiling in seconds, or `None` where its manifest declared none.
+
+    Returns:
+        The execution timeout to hand the child workflow.
+    """
+    ceiling = settings.connector_job_timeout_seconds
+    return timedelta(seconds=ceiling if declared is None else min(declared, ceiling))
 
 
 @durable_workflow("background")
@@ -542,7 +599,9 @@ class ConnectorJobWorkflow:
             # `BAD_DATA_RETRY`, so genuine transients are retried where they can be classified, and
             # a worker that dies mid-child is re-delivered by Temporal without any workflow retry.
             retry_policy=RetryPolicy(maximum_attempts=1),
-            execution_timeout=timedelta(seconds=settings.connector_job_timeout_seconds),
+            # The lower of the deployment's ceiling and the job's own declared one — see
+            # `child_execution_timeout`. A job that declares nothing gets the setting unchanged.
+            execution_timeout=child_execution_timeout(job.timeout_seconds),
         )
         return result
 

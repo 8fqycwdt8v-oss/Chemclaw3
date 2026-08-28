@@ -84,7 +84,15 @@ async def check_eval_drift() -> list[DriftAlert]:
 
 
 @durable_workflow("background")
-@workflow.defn
+# Declared, and it is the one scheduled job here that is: its output is a claim about a moment.
+# The other periodic jobs re-do their work on the next fire, so a parked run that unblocks a
+# day later is still doing the right thing. This one computed its alerts *before* it parked —
+# the activity result is replayed from history, not recomputed — so a resumed run delivers a
+# day-old regression verdict onto the operator channel as though it were current, including
+# one the deployment has since fixed. That is worse than no alert, and it also defeats the
+# must-deliver stance `run()` below already states: delivery failure is meant to be *visible*
+# as a failed run, which a park is not. D-2026-08-27.
+@workflow.defn(failure_exception_types=[Exception])
 class EvalDriftWorkflow:
     """Run a drift check and deliver one alert per drifted metric to the system channel."""
 

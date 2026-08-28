@@ -454,8 +454,21 @@ def _metric_label(request: ModelRequest[Any], name: str) -> str:
     `wrap_tool_call` request carries, and a `ModelRequest` has no such object — it has the list of
     tools this call was made with, which is the same registry one step earlier.
 
+    **Why it is worth refusing rather than merely bounding.** `/metrics` is unauthenticated by
+    design (a Prometheus scrape carries no identity), and retrieved content — ELN rows, share
+    documents, notes — is a prompt-injection surface this tree already frames as untrusted. So
+    "emit a tool call named <secret>" turns a verbatim label into an exfiltration channel, and the
+    per-counter series cap then blinds the metric permanently once the invented names fill it.
+    The 2026-08-28 security review reached the same conclusion independently and by the same
+    route, which is why this is stated here rather than left implied.
+
     The bucket is `audit.UNKNOWN_TOOL` rather than a local literal, so an unregistered name lands
-    in the one series both paths already agree on instead of a second spelling of it.
+    in the one series both paths already agree on instead of a second spelling of it. **The cost of
+    that choice, stated rather than discovered:** `unknown` is a legal tool name, so a tool actually
+    called that would be indistinguishable from this bucket, where an angle-bracketed
+    `<unknown>` could not be. `agent/audit.py::metric_tool_name` already has exactly that property
+    on `chemclaw_tool_calls_total`, so changing it is one decision over both metrics and one
+    constant, not a second spelling introduced here.
     """
     for tool in request.tools or ():
         served = getattr(tool, "name", None)

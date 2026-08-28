@@ -34,6 +34,7 @@ import contextlib
 import fcntl
 import hashlib
 import logging
+import os
 import re
 import shutil
 from collections.abc import AsyncIterator, Iterator
@@ -41,7 +42,7 @@ from pathlib import Path
 
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
-from chemclaw.core.logging import log_event
+from chemclaw.core.logging import log_event, secret_env_names
 from chemclaw.core.metrics_bridge import degraded
 from chemclaw.kg.graph import invalidate_cache
 from chemclaw.kg.submission import NoteSubmission, NoteSubmitter, SubmissionOutcome
@@ -72,6 +73,21 @@ _GATE_TRAILER = "Chemclaw-PR-Gate: submission"
 # rather than a setting — a knob here would cost an `.env.example` row, a Helm ConfigMap entry and
 # two pinning tests to let an operator move a directory nothing outside this file knows about.
 _WORKTREE_DIR_NAME = "chemclaw-worktrees"
+
+
+def _git_child_env() -> dict[str, str]:
+    """This process's environment with its own secret values scrubbed, for a git child.
+
+    Least privilege: git needs `PATH`, `HOME`, `SSH_*`, `GIT_*`, any proxy and the notes-remote
+    credential — all of which stay — but never this process's LLM key, database DSNs, Temporal key
+    or the framing-envelope HMAC. A configured git remote, a credential helper or a `git` hook runs
+    with the child's environment, so leaving those there would hand them to code this process does
+    not control. The scrubbed names come from `secret_env_names()`, which reads the same inventory
+    the log redaction does, so the set cannot drift from it; the notes-remote token is not in that
+    inventory and so survives, which is what keeps `push` working.
+    """
+    scrub = secret_env_names()
+    return {name: value for name, value in os.environ.items() if name not in scrub}
 
 
 def _git_dir(repo_dir: str) -> Path:
@@ -348,6 +364,7 @@ class GitNoteSubmitter:
             *args,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=_git_child_env(),
         )
         try:
             _, stderr = await asyncio.wait_for(
@@ -435,6 +452,7 @@ class GitNoteSubmitter:
             *argv,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=_git_child_env(),
         )
         try:
             stdout, _ = await asyncio.wait_for(

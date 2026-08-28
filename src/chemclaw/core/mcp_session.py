@@ -308,6 +308,8 @@ def short_connect_client(
             headers=headers,
             auth=auth,
             follow_redirects=True,
+            # the calc backend is a loopback/in-cluster Service; ignore ambient proxies
+            trust_env=False,
             event_hooks={"request": [request_hook]} if request_hook is not None else {},
             timeout=httpx.Timeout(
                 bound.read,

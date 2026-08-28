@@ -11,12 +11,16 @@ added, and `task`, the subagent seam three merged ADRs argue about. Nobody remov
 the corpus was written against the capability the system had when the corpus was written, and
 nothing re-derived it afterwards.
 
-**Two lists, and they mean different things.** `EXEMPT` is a claim that another suite covers the
-tool as a *conversation* rather than as a turn. `GRANDFATHERED` claims nothing — it records tools
-that were already on the surface when this gate arrived, so the gate could be introduced without
-blocking unrelated work. Eighteen of those came from a single merge that added eighteen tools and
-32% to the static context floor, which is exactly the event this file exists to make visible and
-which landed while the file was still on a branch.
+**There used to be a second list beside `EXEMPT`, and it is gone because it was paid off.**
+`GRANDFATHERED` recorded the tools already on the surface when this gate arrived, so the gate could
+be introduced without blocking unrelated work; seventeen of them came from the single merge that
+added seventeen tools and 32% to the static context floor, which is exactly the event this file
+exists to make visible and which landed while the file was still on a branch. Every one of them is
+now probed by `data/evals/probes/multistep-calculation.yaml`, so the list is deleted rather than
+left empty — a debt list that outlives its debt reads as live state, which is the rule
+`DEFERRED.md`, `BACKLOG.md` and `test_context_floor.py::KNOWN_OVERSIZED` all run on. Nothing about
+enforcement changes: a tool added after this gate existed could never reach that list anyway, so
+the only thing it ever held was a closed, dated record.
 
 **The exemption list is the design decision, and an exemption must name what covers it instead.**
 Some tools genuinely should not appear in an `expects_tools` line — `write_todos` is the plan
@@ -80,75 +84,9 @@ def _profiles_loaded() -> None:
     load_profiles()
 
 
-#: Tools that predate this gate and have no probe yet — debt, not coverage.
-#:
-#: **Distinct from `EXEMPT`, and the distinction is the whole point.** An exemption is a claim that
-#: another suite covers the tool as a conversation. This list claims nothing: it is a set of tools
-#: that were on the surface before this file existed, recorded so the gate can be introduced without
-#: either blocking unrelated work or quietly pretending the corpus is complete.
-#:
-#: Eighteen of them arrived in one merge — the GFN multi-step work — which is precisely the event
-#: this gate was built to make visible, and it landed while the gate was still on a branch. Draining
-#: this list is a `BACKLOG.md` row.
-#:
-#: **This literal is a dated baseline and is never edited.** The live debt is `_grandfathered()`
-#: below, *computed* as this set minus whatever now has a probe — so a tool leaves the moment
-#: its probe is written, with no edit here, and nothing can be added to it at all.
-#:
-#: The first attempt asserted `len(GRANDFATHERED) <= 18`, which does not say "only shrinks": drain
-#: one entry and a merge may add a fresh unprobed tool with the gate still green. The second
-#: attempt froze a copy — `frozenset(GRANDFATHERED)` — which is worse, because it is derived from
-#: the same literal and can never differ from it; a test built on it passed against a deliberately
-#: planted addition. Only a baseline the working set cannot influence expresses the invariant.
-_GRANDFATHERED_AT_INTRODUCTION: frozenset[str] = frozenset(
-    {
-        "compute_ensemble_property",
-        "describe_topology",
-        "enumerate_bond_cleavages",
-        "enumerate_degradants",
-        "enumerate_protonation_states",
-        "enumerate_stereoisomers",
-        "enumerate_tautomers",
-        "rank_species",
-        "refine_ensemble",
-        "run_bond_strength_survey",
-        "run_degradant_triage",
-        "run_ensemble_free_energy",
-        "run_microspecies_profile",
-        "run_regioselectivity_in_conformer",
-        "run_stereoisomer_ranking",
-        "run_tautomer_resolution",
-        "survey_bond_strengths",
-    }
-)
-
-
-def _grandfathered() -> frozenset[str]:
-    """The debt as it stands right now: the baseline, less everything that has since been probed."""
-    return _GRANDFATHERED_AT_INTRODUCTION - _expected_tools()
-
-
-def test_the_grandfathered_set_can_only_shrink() -> None:
-    """The baseline is a closed record, so the live debt is a subset of it by construction.
-
-    There is nothing here to keep in step by hand — a probe written for a grandfathered tool
-    removes it, and a tool added to the surface after this gate existed can never reach the set at
-    all, because the only way in is editing a literal marked as a dated baseline.
-
-    What is left to assert is that the record has not gone stale in the other direction: a name in
-    the baseline that is no longer a tool at all is a line describing debt that no longer exists.
-    """
-    assert _grandfathered() <= _GRANDFATHERED_AT_INTRODUCTION
-    stale = sorted(_GRANDFATHERED_AT_INTRODUCTION - available_tool_names())
-    assert not stale, (
-        f"{stale} are in the grandfathered baseline but are no longer agent-callable tools. "
-        "Delete them — a debt list that outlives the debt reads as live state."
-    )
-
-
 def test_every_agent_callable_tool_is_probed_or_exempt() -> None:
     """The first direction: a tool the corpus has never heard of is a tool nothing measures."""
-    unprobed = sorted(available_tool_names() - _expected_tools() - set(EXEMPT) - _grandfathered())
+    unprobed = sorted(available_tool_names() - _expected_tools() - set(EXEMPT))
     assert not unprobed, (
         f"{len(unprobed)} agent-callable tool(s) appear in no probe's `expects_tools`:\n  "
         + "\n  ".join(unprobed)

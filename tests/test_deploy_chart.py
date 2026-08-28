@@ -802,7 +802,9 @@ _POD_SPECS: dict[str, int] = {
     "deployment-service.yaml": 1,
     "deployment-workers.yaml": 1,
     "deployment-connectors.yaml": 2,  # the MCP server and the bundle's Temporal worker
-    "migrate-job.yaml": 1,
+    # The pre-upgrade DDL Job and the post-upgrade stored-message conversion
+    # (D-2026-08-27-a-conversion-that-cannot-be-rolled-back-is-not-a-pre-upgrade-step).
+    "migrate-job.yaml": 2,
     "schedules-job.yaml": 1,
 }
 
@@ -837,9 +839,9 @@ def test_every_container_drops_its_capabilities() -> None:
         .count('include "chemclaw.containerSecurityContext"')
         for name in [*_POD_SPECS, "_helpers.tpl"]
     )
-    # 6 main containers (one per pod spec, two in the connectors file) + 3 helper-defined
-    # containers: the knowledge-sync init, the refresh sidecar, and the note-repo init.
-    assert containers == 9, f"{containers} containers declare a security context, expected 9"
+    # 7 main containers (one per pod spec, two each in the connectors and migrate files) + 3
+    # helper-defined containers: the knowledge-sync init, the refresh sidecar, the note-repo init.
+    assert containers == 10, f"{containers} containers declare a security context, expected 10"
 
 
 def test_the_restricted_profile_itself_is_not_a_toggle() -> None:
@@ -1779,6 +1781,13 @@ def test_an_unstated_egress_posture_refuses_to_render() -> None:
     )
     assert guard in policy, "the egress posture can be left unstated"
     assert "{{- fail " in policy, "the guard warns rather than refusing"
+    # A quoted boolean is the failure the emptiness check alone could not see: Go templates treat a
+    # non-empty string as truthy and `empty` treats it as non-empty, so `--set-string
+    # allowAnyDestination=false` rendered the allow-any policy while reading as off. The type guard
+    # refuses a string outright so the emptiness logic only ever sees a real bool.
+    assert 'kindIs "string" .Values.networkPolicy.allowAnyDestination' in policy, (
+        "a quoted allowAnyDestination (--set-string) would render allow-any while reading as off"
+    )
     assert _values()["networkPolicy"]["allowAnyDestination"] is False, (
         "the shipped default grants a permission the release never wrote down"
     )
@@ -2928,4 +2937,22 @@ def test_a_wedged_knowledge_sync_can_be_seen_from_outside_the_pod() -> None:
     assert "livenessProbe:" in sidecar, "a wedged sync sidecar still looks healthy"
     assert "readinessProbe:" not in sidecar, (
         "a stale corpus takes the front door out of its Service, which is worse than the staleness"
+    )
+
+
+def test_service_account_does_not_automount_the_api_token() -> None:
+    """The ServiceAccount refuses the projected API token no component uses.
+
+    No code under `src/` calls the Kubernetes API, so the token every pod would otherwise mount is
+    unused attack surface. The cluster default is to mount it, so the guard must be an explicit
+    `false` in values and a rendered field on the ServiceAccount — an omission is the insecure
+    posture. Entra workload identity uses a federated token, not this mount, so this is orthogonal
+    to identity.
+    """
+    assert _values()["serviceAccount"]["automountServiceAccountToken"] is False
+    config = (CHART / "templates" / "config.yaml").read_text()
+    assert "kind: ServiceAccount" in config
+    assert (
+        "automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}"
+        in config
     )

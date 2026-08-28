@@ -58,6 +58,17 @@ def drfp_bitstring(reaction_smiles: str) -> str:
     treat an unfingerprintable *argument* as an empty answer without also absorbing a store
     that cannot be searched.
     """
+    # Bound each species before DRFP parses it: `DrfpEncoder.encode` runs its *own* RDKit parse,
+    # so the `core/chem` size gate that protects `standard_smiles` does not reach it — an oversized
+    # species (measured: ~20k atoms) hangs or crashes the writer here regardless. A real reaction
+    # SMILES never carries a component this large; refusing it is the same class of guard
+    # `require_molecule` applies, at the one boundary DRFP owns.
+    for token in reaction_smiles.replace(">", ".").split("."):
+        if len(token) > settings.molecule_max_smiles_length:
+            raise FingerprintInputError(
+                f"reaction SMILES contains a {len(token)}-character species, over the "
+                f"{settings.molecule_max_smiles_length} limit: {reaction_smiles[:80]!r}…"
+            )
     standardized = _standardize_species(reaction_smiles)
     try:
         folded = DrfpEncoder.encode(standardized, n_folded_length=settings.drfp_bits)[0]

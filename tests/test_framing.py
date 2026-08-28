@@ -84,6 +84,18 @@ def test_instructions_name_the_exact_delimiter_framing_uses() -> None:
     envelope.
     """
     assert f"<{ENVELOPE_TAG}>" in _INSTRUCTIONS
+    # And under *every* profile, not only the default: a profile's `instructions:` replace
+    # `_INSTRUCTIONS`, so the envelope rule must ride in the appended `_SAFETY_RULES` or a
+    # specialist runs with the injection defense's instruction half deleted (A2-F2).
+    from chemclaw.agent.chemclaw_agent import instructions_for
+    from chemclaw.agent.profile_discovery import load_profiles
+    from chemclaw.agent.profiles import get_profile, registered_profile_names
+
+    load_profiles()
+    for name in registered_profile_names():
+        instr = instructions_for(get_profile(name))
+        assert f"<{ENVELOPE_TAG}>" in instr, f"profile {name!r} lost the envelope rule"
+        assert "Refused:" in instr, f"profile {name!r} lost the Refused: semantics"
     framed = frame_untrusted("x", note_id="y")
     assert framed.startswith(f'<{ENVELOPE_TAG} id="y">')
     assert framed.endswith(f"</{ENVELOPE_TAG}>")

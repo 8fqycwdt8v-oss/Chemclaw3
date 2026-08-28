@@ -1,100 +1,86 @@
-# The cross-session "plans waiting on you" inbox
+# Security review — FIX PHASE (mandate: everything, phased; 4 design changes approved)
 
-Two repositories, one capability: a chemist who closed a tab must be able to find the plan the
-agent is blocked on, without remembering which conversation it was in.
+Baseline: Chemclaw3 make test = 5278 passed, 3 BO timeouts (load-induced, pass in isolation).
+17 audits complete, all High findings re-verified (several with my own PoCs). Findings in
+scratchpad/findings/. One branch/commit/PR per repo: claude/codebase-security-review-bqzlee.
 
-## Where this came from
+## Approved design changes (do NOT re-ask): core egress guard · plan-approval binding ·
+## pyexec reachability · role re-resolution server-side.
+## Pause only for a NEW design decision not on that list.
 
-`Chemclaw3_ui`'s `/review` page carries an empty slot and a paragraph explaining it
-(`src/components/ReviewQueue.tsx`): the durable-hold section was deleted with the routes behind it
-(`D-2026-08-27-a-hold-nothing-can-open-is-not-a-hold`), and
+## SEQUENCING RULE (from egress agent): LLM-path fixes land BEFORE arming the core egress guard,
+## or first `make chat` fails and someone disables the guard.
 
-> The gate that *does* block work is the plan approval, which is answered per session on
-> `POST /sessions/{id}/plan/decision` and currently lives only as an inline card in a live turn.
+## ===== CHEMCLAW3 (core) =====
+### Batch 1 — LLM path + egress (must precede the guard)
+- [ ] llm.py: default llm_provider -> openai_compatible (or require base_url on anthropic branch) [A4-F1/D2-C1]
+- [ ] evals/live_judge.py: route through build_chat_model, no bare AsyncAnthropic [A4-F2]
+- [ ] trust_env=False on every first-party httpx client + test [A4-F4]
+- [ ] tiktoken: bake cache + TIKTOKEN_CACHE_DIR in Containerfile/chart; pin token_count_method [A4-F3/D1]
+### Batch 2 — RCE / priv-esc / injection (High)
+- [ ] checkpointer.py: JsonPlusSerializer(allowed_msgpack_modules=None) + chart env + upstream test [A3-F1]
+- [ ] interceptor.py + report_workflow + template_activities: bind frozenset() roles; re-resolve [A7-F2 / role re-resolve]
+- [ ] core/chem.py require_molecule: length + GetNumAtoms cap (fixes SIGSEGV, 8 sites) [A8-F1]
+- [ ] plan_gate: bind approval to declared tools (plan-approval binding) [A2-F1]
+- [ ] chemclaw_agent.instructions_for: layer _SAFETY_RULES onto profiles + test every profile [A2-F2]
+- [ ] model_calls: clamp invalid-tool-call metric label to served surface [A5-F1]
+- [ ] find_past_jobs: frame plan_step; job_status: owner check; template run id: +requester/roles [A2-F3/F4/F5]
+- [ ] frame connector tool output + NoteRef.source/tags + ELN condense table defang [A2-F6/F7, A8-F4]
+### Batch 3 — DoS / auth robustness (Med)
+- [ ] attachments/document expand: bound actual extracted bytes; front-door expand ceiling 64MB [A1-H1]
+- [ ] auth.py + middleware: log route template not raw path (redaction DoS) [A1-H2/A5]
+- [ ] Postgres TLS required (pg_require_tls, default True) [A3-F2]
+- [ ] Temporal TLS guard under entra_required [A7-F1]
+- [ ] compare_digest on bytes (webhook + anywhere str) [A1-M1]
+- [ ] require_actor/authorize_trigger: reject "" actor [A2-F9]
+- [ ] core netguard.py (derived allowlist) armed after config, AFTER batch 1 [A4 design]
+### Batch 4 — publish/driver hardening + Med/Low
+- [ ] sink http verify_tls/https enforce; postgres sink TLS; driver module allowlist [A7-F4/F5/F6]
+- [ ] git subprocess: scrubbed env + GIT_TERMINAL_PROMPT=0 [A7-F7]
+- [ ] roles claim shape validation; framing secret required w/ postgres+replicas [A1-L1/A6-F4]
+- [ ] 4 calc jobs expensive:true [A8-F6/A2-F10]
+- [ ] record_failure uses superseded not dependencies [A8-F2]
 
-The reload half of that harm is closed — `App.tsx` re-reads `GET /sessions/{id}/plan` and
-re-attaches the decision — but only for a conversation somebody opens. **Nothing answers "which of
-my conversations is waiting on me", because no route asks that question across sessions.** Every
-plan route is `/sessions/{id}/…`.
+## ===== CHEMCLAW3-MCP =====
+- [ ] egress.py: add _socket to no_egress FORBIDDEN_MODULES; drop .localhost suffix rule [B1-F1/F2]
+- [ ] egress.py: guard getnameinfo/gethostbyaddr; arm before app import [B1-F3/F6]
+- [ ] kit app.py: redact caller-safe ValueError; session cap/reaper [B1-F4/F5]
+- [ ] shared SMILES bound (length+atoms) in each server's require_molecule [B3-C1]
+- [ ] chem render_structure: atom cap + admission ceiling [B3-C2]
+- [ ] error truncation (120 chars) [B3-C3]
+- [ ] pyexec: PID+net namespace / seccomp; ship+test securityContext; re-ratify read_only [B2 / pyexec design]
+- [ ] rxnlabel HF_HUB_OFFLINE/TRANSFORMERS_OFFLINE + test [D1-F2/B3-RL-3]
+- [ ] rxnpredict fetch_models pin to SHA not "main"; verify SHA256SUMS in readiness [B3-RP-1/RP-2]
+- [ ] ship fleet Deployment w/ securityContext+limits+probes+automount:false [D3-D2/A6-D2]
+- [ ] Makefile suppression reason fix [D1-F1]
 
-## The decision that shapes the route
+## ===== CHEMCLAW3_UI =====
+- [ ] Markdown img: local-only override; pin img-src in csp.test [C2-F1] (closes A8 exfil chain)
+- [ ] transcript localStorage key by account oid [C2-F2]
+- [ ] BFF: drop x-forwarded-*/x-real-ip/x-original-url; add set-cookie+CORS to BFF_OWNED [C1-M2/M3]
+- [ ] BFF: probe upstream auth posture, refuse anon under msal [C1-HIGH-1]
+- [ ] BFF: book metrics/log on close; rate-limit client-events [C1-M4/F3]
+- [ ] docker-compose ALLOW_DEV_AUTH default fix + test [C3-F3]
+- [ ] server sourcemap off; ci.yml permissions: contents:read; npm audit fix nanoid [C3/D1]
 
-`api/runner._pending_plan_approval` emits the decision card whenever a plan-gated turn ends with a
-non-empty plan holding no *live* approval. That predicate is right for a card inside a turn and
-wrong for an inbox: an approval is spent at the end of the turn it authorized, so every finished
-plan-gated conversation would sit in the inbox forever — the mirror of the permanently-empty inbox
-`ISSUES.md` records as the failure worth not repeating.
+## ===== INFRA (in the repo that owns each) =====
+- [ ] networkpolicy.yaml: truthiness not empty(); string-false test [D3-NP-3]
+- [ ] secrets.create: randAlphaNum not CHANGE-ME [D3-SEC-1]
+- [ ] Jenkins: params via withEnv not sh interpolation; pin lib clone to SHA [D3-CI-1/CI-2]
+- [ ] automountServiceAccountToken:false; readOnlyRootFilesystem where possible [D3-PS-1/PS-3]
+- [ ] values-restricted.yaml worked egress example [D3-NP-2]
 
-So the inbox lists a narrower set: **a plan nobody has decided at all** — no row in
-`plan_approvals` for this session and this plan hash. A spent approval and a rejection are both
-answers; the conversation is where a *re*-approval is asked for, by the card at the turn's end.
-What that misses is stated in the route's docstring rather than left to be discovered: a plan
-re-proposed byte-identically after its approval was spent has a row, so it does not list.
-
-## Chemclaw3 (backend)
-
-- [x] `SessionOwnerStore.list_for_owner` also returns each session's `profile` (already a column),
-      so a session that cannot hold a plan is skipped without a checkpoint read.
-- [x] One read path for a session's plan, shared by `GET /sessions/{id}/plan` and the inbox, so the
-      two surfaces cannot disagree about what a plan is or whether it was decided (`_read_plan`).
-- [x] `GET /plans/pending` → `{plans, considered, gated, unread}`. The three counts are what make an
-      empty list unambiguous: `gated == 0` means this deployment does not gate plans at all,
-      `unread > 0` means the scan hit its bound and the answer is partial.
-- [x] Bound the scan (`service_max_plan_scans`): `AsyncPostgresSaver` serializes every statement
-      behind one `asyncio.Lock`, so an unbounded per-session checkpoint read would hold the
-      checkpointer against every concurrent turn on the pod.
-- [x] Tests: the filter (undecided lists, approved/rejected/spent do not), ownership scoping, the
-      counts, the bound, and the empty envelope under `session_store="memory"` —
-      `tests/test_plan_inbox.py`, eight cases.
-- [x] ADR + `docs/decisions/README.md` row.
-
-## Chemclaw3_ui (frontend)
-
-- [x] Whitelist `GET /api/plans/pending` in `server/routes.ts`, with a test pinning it.
-- [x] `api.listPendingPlans` + types.
-- [x] `/review` grows the section its own docstring says is deliberately empty: title, when, the
-      plan's steps, and a link into the conversation. It does **not** decide in place — the same
-      reason the deleted holds section gave, and here the plan's own reasoning is one click away.
-- [x] The three empty states rendered distinctly (not gated / nothing waiting / partial), plus the
-      failure, which is a fourth and was the whole defect in the section this replaces.
-- [x] Correct `USER-STORIES.md` F3 and `ISSUES.md`, both of which still describe the deleted
-      `GET /approvals` inbox as the answer.
+## Verify: make lint type test green per repo (BO timeouts expected under load — run isolated).
+## Then per-repo SECURITY-REVIEW-2026-08-28.md + ADRs for test-enforced invariants.
 
 ## Review
+(filled at end)
 
-**What the work turned on.** One decision, taken twice before it was right. The obvious route is
-"list the sessions whose plan holds no live approval" — the predicate
-`runner._pending_plan_approval` already uses. It is wrong for an inbox, and the reason is D-167: an
-approval is consumed at the end of the turn it authorized, so *no live approval* is the resting
-state of every finished plan-gated conversation. That route ships a permanently full inbox, which is
-the mirror of the permanently empty one `Chemclaw3_ui`'s `ISSUES.md` records. The filter is "no
-decision recorded" instead, and what that misses is written into the route's docstring rather than
-discovered later.
-
-**What measurement changed.** Two things were read rather than assumed:
-
-- `harness_enabled` defaults to **False**, so in a default deployment no session has a todo list at
-  all and the inbox is structurally empty. That is what made the `gated` count non-negotiable: an
-  empty list had to be able to say it is a property of the configuration.
-- `AsyncPostgresSaver` serializes every statement behind one `asyncio.Lock`
-  (`agent/checkpointer.py`'s own docstring, reason 2). So concurrency buys nothing here and the
-  scan needed a bound, and the profile prune stopped being an optimisation — it is what keeps the
-  route free in the deployment that cannot ever have a row.
-
-**What I did not build, and why it is written down.** A durable "pending" table would answer the
-query in one statement and be exact. It is a second piece of state saying what the checkpoint and
-`plan_approvals` already determine — the DARK-1 shape. Deriving "blocked" from plan-gate refusals in
-`audit_events` is the most faithful signal and is the named restart condition in the ADR; it needs a
-reader on a table that has none and an INSERT-only grant, which is a bigger decision than a route.
-
-**What I got wrong on the way.** I read a mid-run `F` in the suite as a timing flake in
-`test_connector_transport.py` from the test index, and ran that file alone to "confirm" it. The
-actual failure was `test_config.py::test_env_example_documents_every_field` — my new setting was not
-in `.env.example`. A guess about which test failed is not a diagnosis, and the run's own summary was
-twelve minutes away. Logged in `tasks/lessons.md`.
-
-**Verification.** `make lint` clean; `mypy --strict` over `src examples tests` clean;
-`pytest` 5,293 passed / 9 skipped with Postgres up (the skips are `helm` not installed and the
-truncated-history migration checks — no Postgres-gated test skipped). UI: `tsc -b`, `eslint`,
-`prettier --check` and 730 vitest tests green, and the `/review` axe pass runs against the new
-section in both themes with the e2e fixture serving a pending plan.
+## Review (2026-08-28)
+Delivered across 3 repos on branch claude/codebase-security-review-bqzlee:
+- Chemclaw3 core: 9 committed batches (all Critical/High + key Mediums), each with a regression test.
+- Chemclaw3-mcp: 13 fixes via agent, `make check` green (1492 passed), pushed.
+- Chemclaw3_ui: 13 fixes via agent, 725 tests pass, pushed.
+Design forks recorded not band-aided: plan-approval->tool binding (BACKLOG §1); role-forgery signed
+payload (D-2026-08-28). Full-suite re-run in progress to confirm the globally-armed egress guard and
+config guards cause no regression. SECURITY-REVIEW-2026-08-28.md is the consolidated report.

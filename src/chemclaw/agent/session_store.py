@@ -23,6 +23,13 @@ the message history above, `SessionOwnerStore` (who owns a session id — the fa
 LRU loses on restart), and `SessionTurnClaims` (which process is running a turn on it right now —
 the fact the in-process 409 guard loses at the pod boundary, D-121).
 
+The owner store also answers the two questions a conversation list has beyond "which are mine":
+**where does the page stop** (`page_for_owner` + `encode_session_cursor`, a keyset cursor, because
+this list reorders itself as it is read) and **how does one go away**
+(`SessionOwnerStore.delete_session`, the session-scoped counterpart to `leaver.erase_actor`'s
+actor-scoped sweep, over the table set that module already enumerates). See
+`D-2026-08-27-a-session-list-is-a-cursor-and-a-session-is-deletable`.
+
 **`get_messages` has no `LIMIT` and must not grow one.** That used to be a data-safety rule, because
 the read repaired tool-call pairings and wrote the repair back. It is now a rendering rule: the
 reader is a person reloading a conversation, and a transcript that silently omits its own beginning
@@ -37,10 +44,13 @@ based retention is the policy statement a deployment actually makes, and it dele
 pairing components (`droppable_rows`, D-145).
 """
 
+import base64
+import binascii
 import logging
 from collections.abc import AsyncIterator, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from datetime import datetime
+from functools import cache
 from typing import Any
 
 import psycopg
@@ -61,6 +71,7 @@ from chemclaw.agent.message_migration import (
 )
 from chemclaw.core import db
 from chemclaw.core.config import settings
+from chemclaw.core.db import existing_tables
 from chemclaw.core.identity_context import get_current_correlation_id
 from chemclaw.core.metrics_bridge import degraded
 
@@ -301,6 +312,23 @@ _OWNER_SELECT = "SELECT owner, profile FROM session_owners WHERE session_id = %s
 # conversations it could not tell apart from ones whose transcript had failed to load — both are an
 # empty array from outside. One join answers "what was the last activity" and "was there any".
 #
+# **The `after` arm is the cursor, and it is a keyset rather than an offset.** The ceiling
+# (`service_max_listed_sessions`) used to be the end of the list: a chemist with more sessions than
+# it could never reach the older ones, from any client, because nothing said where the page
+# stopped. `OFFSET` is the obvious fix and is wrong here — this list *reorders itself as it is
+# read*, since a session moves to the top the moment its owner speaks in it, so an offset page
+# boundary skips the rows that moved down and repeats the ones that moved up. Comparing against the
+# sort key instead cannot: `(m.updated_at, o.session_id) < (%s, %s)` names a position in the
+# ordering rather than a count of rows before it. The pair is compared row-wise, so the session id
+# breaks the tie two sessions whose last message shares a timestamp would otherwise be ordered by
+# arbitrarily — a strict total order is what makes "everything after this row" unambiguous.
+#
+# The arm is self-disabling through `%s::timestamptz IS NULL`, the shape
+# `kg/proposal_store._SELECT_MANY` established, so the first page and a resumed one are the same
+# statement rather than two that can drift. The casts are not decoration: psycopg sends an untyped
+# NULL, and Postgres cannot infer the type of a parameter that only ever appears beside another
+# parameter.
+#
 # `profile` rides along because it is the one thing about a session that says whether it can be
 # holding an undecided plan at all: the todo list only exists under a harness-enabled profile
 # (`agent/langgraph_agent`), so `GET /plans/pending` skips a session on this column instead of
@@ -313,6 +341,8 @@ _OWNER_LIST = (
     "  SELECT max(created_at) AS updated_at FROM session_messages WHERE session_id = o.session_id"
     ") m ON m.updated_at IS NOT NULL "
     "WHERE o.owner IS NOT DISTINCT FROM %s "
+    "  AND (%s::timestamptz IS NULL "
+    "       OR (m.updated_at, o.session_id) < (%s::timestamptz, %s::text)) "
     "ORDER BY m.updated_at DESC, o.session_id DESC LIMIT %s"
 )
 # First writer wins, in one statement and without a read first. A title is derived from a session's
@@ -320,6 +350,145 @@ _OWNER_LIST = (
 # the turn route call this unconditionally and stay correct. Naming a conversation after how it
 # started rather than where it drifted to is what makes a sidebar scannable.
 _OWNER_TITLE = "UPDATE session_owners SET title = %s WHERE session_id = %s AND title IS NULL"
+
+# What one session's rows are, table by table, when the session itself is what is being deleted.
+#
+# **The table *set* is not declared here — it is `chemclaw.agent.leaver._ERASE`'s** (see
+# `_session_delete_statements`). Only the predicate is: erasure reaches a session through its
+# owner, this reaches one session by name, and the two questions have different answers for four
+# of the twelve tables (`_ACTOR_SCOPED_ONLY`). Writing the set out a second time is how the two
+# drift, and this repository has the receipt for that failure mode — `tool_result_links` was
+# invisible to the erasure check for months because a *derived* completeness test could not see a
+# table whose columns name no person.
+#
+# `tool_result_blobs` is the one statement that is not a bare `session_id = ...`, and both halves
+# of it are load-bearing. The blob is content-addressed, so two sessions that ran the same tool
+# over the same arguments share one row; the `NOT EXISTS` arm is what keeps deleting *this*
+# conversation from unlinking *another* one's stored result (a cascade takes the link rows with the
+# blob, so an unconditional delete would remove a row belonging to a session nobody asked to
+# delete). The consequence is stated rather than hidden: this session's own link row survives when
+# its bytes are shared, because `infra/sql/grants/app_privileges.sql` withholds DELETE on
+# `tool_result_links` on purpose — a link may only disappear behind its blob. What is left is a row
+# naming a session id that no longer resolves to anything, and `durable/retention.py`'s age sweep
+# collects it with the blob.
+_SESSION_DELETE: dict[str, str] = {
+    "tool_result_blobs": (
+        "DELETE FROM tool_result_blobs b WHERE EXISTS ("
+        "  SELECT 1 FROM tool_result_links l"
+        "   WHERE l.content_hash = b.content_hash AND l.session_id = %(session_id)s"
+        ") AND NOT EXISTS ("
+        "  SELECT 1 FROM tool_result_links l"
+        "   WHERE l.content_hash = b.content_hash AND l.session_id <> %(session_id)s)"
+    ),
+    "session_messages": "DELETE FROM session_messages WHERE session_id = %(session_id)s",
+    "session_events": "DELETE FROM session_events WHERE session_id = %(session_id)s",
+    "session_turns": "DELETE FROM session_turns WHERE session_id = %(session_id)s",
+    "session_owners": "DELETE FROM session_owners WHERE session_id = %(session_id)s",
+}
+
+# The tables in the erasure set that a *session* delete must leave alone, and why. Each one is
+# keyed by the person rather than by the conversation, so deleting one conversation would take data
+# from every other one the same chemist has.
+_ACTOR_SCOPED_ONLY: dict[str, str] = {
+    "store": "an agent memory outlives the session it was written in — that is what it is for",
+    "store_vectors": "the embedding half of the same memory",
+    "subscriptions": "a standing query belongs to the person, not to one conversation",
+    "user_preferences": "a preference is the person's, and survives every session they close",
+}
+
+
+@cache
+def _session_delete_statements() -> tuple[tuple[str, str], ...]:
+    """The per-table DELETEs for one session, in the order an actor's erasure uses.
+
+    **Derived from `leaver._ERASE` rather than listed again**, because the question "which tables
+    hold a session's data" already has one answer in this codebase and a second copy of it is a
+    copy that goes stale in silence. Every table there is either session-scoped (a predicate in
+    `_SESSION_DELETE`, or the checkpointer's `thread_id`, which *is* the session id) or deliberately
+    actor-scoped (`_ACTOR_SCOPED_ONLY`); a table that is neither raises here, so the next writer to
+    add one to the erasure sweep is told that this delete has no opinion about it yet, rather than
+    finding out from a session whose rows outlived it.
+
+    The order is `_ERASE`'s too, for `_ERASE`'s reason: everything keyed by the session goes before
+    the ownership row that is the only way to find the session again.
+
+    Both imports are deferred, and have to be: `leaver` and `checkpointer` each import this module
+    at import time, so naming either of them at module scope here is an import cycle that fails on
+    whichever one is loaded first.
+
+    Returns:
+        `(table, statement)` pairs, each statement taking one `session_id` parameter.
+
+    Raises:
+        RuntimeError: the erasure sweep names a table this delete has not classified.
+    """
+    from chemclaw.agent.checkpointer import CHECKPOINT_TABLES
+    from chemclaw.agent.leaver import _ERASE
+
+    scoped = dict(_SESSION_DELETE)
+    for table in CHECKPOINT_TABLES:
+        # The checkpointer keys graph state by `thread_id`, and a thread id is a session id.
+        scoped[table] = f"DELETE FROM {table} WHERE thread_id = %(session_id)s"
+    unclassified = [
+        table for table, _ in _ERASE if table not in scoped and table not in _ACTOR_SCOPED_ONLY
+    ]
+    if unclassified:
+        raise RuntimeError(
+            f"chemclaw.agent.leaver erases {unclassified} and chemclaw.agent.session_store does "
+            "not say whether deleting one session should: add a predicate to _SESSION_DELETE or "
+            "a reason to _ACTOR_SCOPED_ONLY"
+        )
+    return tuple((table, scoped[table]) for table, _ in _ERASE if table in scoped)
+
+
+def encode_session_cursor(updated_at: datetime, session_id: str) -> str:
+    """This row's position in the session listing, as one opaque token.
+
+    The cursor is the *sort key* — the row's last activity and its session id — and nothing else,
+    which is what makes it stable: it names a place in the ordering rather than a page number, so
+    it keeps meaning the same thing when rows are added, removed, or reordered by a chemist
+    speaking in an old conversation, and it survives a change to the page size. The row it was
+    minted from need not still exist.
+
+    Base64url of the two fields, because a caller must not be able to *read* it and conclude
+    anything: an id-plus-timestamp pair spelled in the clear invites a client to construct one, and
+    a constructed cursor is a client that breaks the day the ordering gains a third component.
+    It is deliberately **not** signed. A cursor is not a capability — every page is re-scoped to
+    the caller's own sessions by `owner IS NOT DISTINCT FROM`, so the worst a forged one can do is
+    move the forger around their own list.
+
+    Args:
+        updated_at: The row's last-activity timestamp, exactly as the listing ordered by it.
+        session_id: The row's session id, the tiebreak within one timestamp.
+
+    Returns:
+        A URL-safe token to hand back as `after`.
+    """
+    raw = f"{updated_at.isoformat()}|{session_id}".encode()
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def decode_session_cursor(cursor: str) -> tuple[datetime, str]:
+    """The `(updated_at, session_id)` position a cursor names.
+
+    Raises:
+        ValueError: the token is not one this service minted — bad base64, bad UTF-8, a missing
+            separator, or a timestamp `datetime.fromisoformat` refuses. One error type for all of
+            them, because the caller's answer is the same in every case and the difference is not
+            something a client should be told.
+    """
+    padded = cursor + "=" * (-len(cursor) % 4)
+    try:
+        raw = base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8")
+    except (binascii.Error, UnicodeDecodeError, ValueError) as exc:
+        raise ValueError("not a session cursor") from exc
+    stamp, separator, session_id = raw.partition("|")
+    if not separator or not session_id:
+        raise ValueError("not a session cursor")
+    try:
+        return (datetime.fromisoformat(stamp), session_id)
+    except ValueError as exc:
+        raise ValueError("not a session cursor") from exc
 
 
 def _session_dsn() -> str:
@@ -484,12 +653,26 @@ class SessionOwnerStore:
     async def list_for_owner(
         self, owner: str | None
     ) -> list[tuple[str, datetime, datetime, str | None, str | None]]:
-        """The owner's sessions, newest first.
+        """The owner's newest page of sessions — `page_for_owner` from the top.
 
         `(session_id, created_at, updated_at, title, profile)` per row.
 
-        Capped by `service_max_listed_sessions`, and ordered by `updated_at` — see `_OWNER_LIST`
-        for why that is not `created_at`, and why a session with no messages is not listed at all.
+        Kept as its own name because it is the shape the front door's `SessionOwners` protocol
+        declares and the only one a registry that cannot resume a listing has to implement. It
+        holds no query of its own: a first page that was assembled by a second statement is a first
+        page that can order its rows differently from every page after it.
+        """
+        return await self.page_for_owner(owner)
+
+    async def page_for_owner(
+        self, owner: str | None, *, after: str | None = None
+    ) -> list[tuple[str, datetime, datetime, str | None, str | None]]:
+        """One page as `(session_id, created_at, updated_at, title, profile)`.
+
+        Newest first, at most `service_max_listed_sessions` rows, resuming strictly after the row
+        `after` names — see `_OWNER_LIST` for why the order is `updated_at` rather than
+        `created_at`, why a session with no messages is not listed at all, and why the resume is a
+        keyset comparison rather than an `OFFSET`.
 
         This table is already the durable answer to "which sessions exist and who owns them", so
         listing reads it directly rather than adding a second registry that could disagree with the
@@ -504,12 +687,79 @@ class SessionOwnerStore:
 
         A tuple rather than a record type, matching `lookup` above: this module is below the API
         layer that consumes it, so a shared shape would have to live somewhere neither of them owns.
+        The cursor for each row is derivable from that tuple (`encode_session_cursor`), so the page
+        carries no field the caller has to be told how to combine.
+
+        Args:
+            owner: The principal whose sessions to list; `None` is the shared dev principal's real
+                SQL NULL and matches itself.
+            after: A cursor from `encode_session_cursor`, or None for the newest page.
+
+        Returns:
+            At most one page, newest activity first.
+
+        Raises:
+            ValueError: `after` is not a cursor this service minted.
         """
+        stamp, last_id = decode_session_cursor(after) if after else (None, None)
         async with self._connection() as conn:
             async with conn.cursor() as cur:
-                await cur.execute(_OWNER_LIST, (owner, settings.service_max_listed_sessions))
+                await cur.execute(
+                    _OWNER_LIST,
+                    (owner, stamp, stamp, last_id, settings.service_max_listed_sessions),
+                )
                 rows = await cur.fetchall()
         return [(row[0], row[1], row[2], row[3], row[4]) for row in rows]
+
+    async def delete_session(self, session_id: str) -> dict[str, int]:
+        """Delete one conversation and everything keyed by it, in one transaction.
+
+        The counterpart to `chemclaw.agent.leaver.erase_actor`, at the other scope: erasure answers
+        "someone left", this answers "I do not want this conversation any more". It runs the same
+        table set for the same reason — an ownership row deleted without the rows it keys leaves
+        messages, events and graph state that *nothing can reach and nothing can find again*, since
+        every session-scoped sweep in this system starts from `session_owners`.
+
+        **The transaction is what makes that true rather than intended.** Twelve statements that
+        commit one at a time can be interrupted after any of them, and the interruption that
+        matters is the one that has already deleted the ownership row.
+
+        A method on this store, not a free function: the ownership row is the key every other table
+        here is reached by, and this store is the thing that owns it. It deletes only what this
+        session's id names — an actor-scoped row (a memory, a preference, a subscription) belongs
+        to the person and outlives their conversations (`_ACTOR_SCOPED_ONLY`).
+
+        Missing tables are skipped rather than raising, exactly as the erasure sweep skips them:
+        the checkpointer's three are created by `AsyncPostgresSaver.setup()` and not by a
+        migration, so a deployment that has never run the graph does not have them, and deleting a
+        conversation must not be the one operation such a deployment cannot perform.
+
+        Args:
+            session_id: The conversation to delete.
+
+        Returns:
+            `{table: rows deleted}`, one key per table in the sweep — zero where a table held
+            nothing or does not exist here, so an operator comparing two runs sees the same keys.
+        """
+        statements = _session_delete_statements()
+        removed: dict[str, int] = {}
+        async with self._connection() as conn:
+            async with conn.cursor() as cur:
+                present = await existing_tables(cur, {table for table, _ in statements})
+                for table, statement in statements:
+                    if table not in present:
+                        removed[table] = 0
+                        continue
+                    await cur.execute(statement, {"session_id": session_id})
+                    removed[table] = cur.rowcount if cur.rowcount > 0 else 0
+            await conn.commit()
+        log.info(
+            "deleted session %s: %d row(s) across %d table(s)",
+            session_id,
+            sum(removed.values()),
+            len([table for table, count in removed.items() if count]),
+        )
+        return removed
 
 
 class SessionTurnClaims:

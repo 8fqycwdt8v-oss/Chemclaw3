@@ -74,7 +74,7 @@ SHELL := bash
 
 .DEFAULT_GOAL := help
 
-.PHONY: help install lint type test cov check ci chat db-migrate db-grants schedules-apply kg-validate proposals-reconcile synthesize eval eval-strict eval-baseline eval-baseline-check eln-validate skill-validate connector-validate datasource-validate sink-validate sink-schema template-validate connectors prose-validate helm-validate explain user-erase reindex reindex-full up down phoenix-up phoenix-down phoenix-publish deps-audit live-infra live-infra-down live-up live-down live-status live-jobs live-probes live-verifier-margin trajectory-census live-data live-plan-gate live-degradation live-storm live-soak live-soak-report leak-probe mutants mutant-results mutant-stats
+.PHONY: help install lint type test cov check ci chat db-migrate db-grants schedules-apply kg-validate proposals-reconcile synthesize eval eval-strict eval-baseline eval-baseline-check eln-validate skill-validate connector-validate datasource-validate sink-validate sink-schema template-validate connectors prose-validate helm-validate explain user-erase reindex reindex-full up down phoenix-up phoenix-down phoenix-publish deps-audit live-infra live-infra-down live-up live-down live-status live-jobs live-probes live-template-args live-verifier-margin trajectory-census live-data live-plan-gate live-degradation live-storm live-soak live-soak-report leak-probe mutants mutant-results mutant-stats
 
 help:  ## List every target with its one-line description (the default).
 	@# Reads the `## ` comments beside each target, so a new target documents itself the day it is
@@ -413,6 +413,16 @@ live-jobs:  ## Run a real durable job end to end (Temporal + connector worker + 
 
 live-probes:  ## Ask the running front door the live probe set (needs ANTHROPIC_API_KEY).
 	uv run python -m chemclaw.cli.live_probes $(ARGS)
+
+# The half of `template-validate` that needs a session. `make template-validate` reads a tool's
+# parameters out of this tree and cannot answer for a bundle we declare and do not run — seven
+# shipped steps, reported by name as `unchecked_arguments` and unchecked. This opens the real
+# connectors and checks the same arguments against what each running server advertises. Live-lane,
+# never `ci`: `ci` must stay offline, and the row that asked for this proposed `connector-validate`,
+# which is inside `ci` and would have answered `[]` for exactly those bundles.
+# Exit 3 (not 1) means it could not reach something — reported, never counted as checked.
+live-template-args:  ## Check every template's tool arguments against the running connector servers.
+	uv run python -m chemclaw.cli.validate_template_args_live $(ARGS)
 
 live-verifier-margin:  ## Re-roll the raw judge and measure its margin at the threshold (needs a model credential).
 	uv run python -m chemclaw.cli.verifier_margin $(ARGS)

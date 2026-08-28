@@ -53,6 +53,7 @@ from chemclaw.api.middleware import (
     _add_request_observability,
     _add_security_headers,
     _database_unavailable,
+    _refuse_public_llm_exposure,
     _refuse_unauthenticated_exposure,
     _subsystem_unavailable,
 )
@@ -214,6 +215,7 @@ def create_app(
         A configured `FastAPI` application.
     """
     _refuse_unauthenticated_exposure()
+    _refuse_public_llm_exposure()
     # `openapi_url=None` for the same reason as `docs_url`/`redoc_url`: FastAPI serves the schema
     # from a plain `Route`, not an `APIRoute`, so `require_principal` never applied to it and
     # `tests/test_route_auth_coverage.py` could not see it — the full route/parameter/model surface
@@ -379,9 +381,13 @@ def create_app(
     # opens a pool reports on it rather than only the one process that happened to have the
     # binding — the workers and connector servers pool too and were reporting nothing
     # (D-2026-08-05-the-connection-budget-is-a-fleet-number).
+    # `unhealthy`, not `state == "unreachable"`: a jobs-only bundle whose task queue has no poller
+    # is `unpolled`, which is down in the way that matters (D-2026-08-27). The predicate lives on
+    # the model so this gauge and the `connectors_required` gate cannot drift into two definitions
+    # of the same word; `unknown` — the probe itself could not run — is neither, by the same ADR.
     METRICS.bind_gauge(
         "chemclaw_connectors_unhealthy",
-        lambda: float(sum(1 for item in app.state.connector_health if item.state == "unreachable")),
+        lambda: float(sum(1 for item in app.state.connector_health if item.unhealthy)),
     )
     # The same probe result, by connector — the half `chemclaw_connector_unhealthy`'s own
     # declaration says `open_reachable` "had in hand and discarded", and which nothing had ever

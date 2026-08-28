@@ -119,6 +119,15 @@ _COLUMNS = (
     "id, statement, scope, evidence_note_ids, projects_seen, origin, status, first_seen, last_seen"
 )
 
+# **This ORDER BY and `observations_open_rank_idx` are one decision, and they must move together.**
+# Migration `025` indexed `(status, last_seen DESC)` under a comment claiming the retrieval bucket
+# wants open observations newest-first. It never did — support leads here, deliberately
+# (`open_observations` says why) — so the index covered the `status` filter and nothing else, and
+# every read of the bucket fetched all open rows and top-N sorted them on an expression no index
+# knew about: 234 ms over 924 324 open rows, inside a conversation turn. Migration `062` adds
+# `(status, cardinality(evidence_note_ids) DESC, last_seen DESC)`, which is this sort exactly, and
+# takes the same read to 0.076 ms. Change either key here and the plan silently falls back to that
+# sort; `tests/test_observations.py` fails instead, in both the text and the plan.
 _SELECT_OPEN = f"""
 SELECT {_COLUMNS} FROM observations
  WHERE status = 'open' ORDER BY cardinality(evidence_note_ids) DESC, last_seen DESC LIMIT %s

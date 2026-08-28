@@ -63,7 +63,13 @@ def _webhook_signature_ok(body: bytes, header: str) -> bool:
     if not secret or not header.startswith("sha256="):
         return False
     expected = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
-    return hmac.compare_digest(expected, header.removeprefix("sha256="))
+    # Compare as *bytes*: `compare_digest` raises TypeError on a `str` carrying a codepoint > 0xFF,
+    # and the header is attacker-supplied, so `sha256=` + a non-Latin-1 character would otherwise
+    # turn a signature check into an unhandled 500 (a repeatable 5xx an operator alerts on) instead
+    # of a clean rejection. `encode()` makes any input comparable and the check still fails closed.
+    return hmac.compare_digest(
+        expected.encode(), header.removeprefix("sha256=").encode("utf-8", "surrogateescape")
+    )
 
 
 async def list_note_proposals(

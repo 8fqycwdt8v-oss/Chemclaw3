@@ -685,6 +685,25 @@ def register_secret_env(name: str) -> None:
         _RUNTIME_SECRET_ENVS.add(name)
 
 
+def secret_env_names() -> frozenset[str]:
+    """The `CHEMCLAW_*` environment-variable names this process holds a secret *value* under.
+
+    Derived from the same `_SECRET_SETTINGS` inventory the log redaction reads, so a credential
+    added there is scrubbed from a subprocess environment by the same edit rather than a second one
+    that can drift. The use is least privilege: a child process (today, the KG git commands in
+    `kg/git_submitter.py`) has no need of this process's LLM credential, database DSNs, Temporal key
+    or the framing-envelope HMAC, and a git remote, credential helper or hook that reads its
+    environment must not find them there.
+
+    `_KNOWLEDGE_REPO_TOKEN_ENV` is deliberately *not* here and not in `_SECRET_SETTINGS`: git's
+    own credential for the notes remote reaches it through the remote URL or a credential helper, so
+    a git child may legitimately need that one, and scrubbing it would break `push`. Runtime-
+    registered connector tokens are likewise omitted — they belong to MCP sessions, not a git child.
+    """
+    prefix = str(type(settings).model_config.get("env_prefix", ""))
+    return frozenset(f"{prefix}{name}".upper() for name in _SECRET_SETTINGS)
+
+
 def _configured_by(env_name: str) -> str:
     """The `Settings` value that environment variable configures, or `""` if it configures none.
 

@@ -45,7 +45,15 @@ async def reindex_notes_activity() -> int:
 
 
 @durable_workflow("background")
-@workflow.defn
+# Declared, and it is the *webhook* starter rather than the Schedule that decides it. A
+# scheduled run carries `schedule_run_timeout_seconds`, so parking it is bounded; but
+# `agent.durable_tools.request_note_reindex` starts this workflow from a merge notification
+# with **no `execution_timeout`**, keyed by calendar minute. A plain exception there parks that
+# run for ever, its id is stuck RUNNING so `ALLOW_DUPLICATE_FAILED_ONLY` can never reuse it,
+# and every subsequent merge adds another immortal run re-polling its poisoned task at ~10 s
+# for the life of the deployment — while hybrid retrieval keeps serving the stale index this
+# module's own header calls worse than no index at all. D-2026-08-27.
+@workflow.defn(failure_exception_types=[Exception])
 class NoteReindexWorkflow:
     """Refresh the derived note index so hybrid retrieval sees the current graph.
 

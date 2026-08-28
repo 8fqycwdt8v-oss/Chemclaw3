@@ -57,6 +57,18 @@ def predict_pka(smiles: str) -> str:
     return "4.2"
 
 
+class _NamedTool:
+    """The minimum a bound tool needs to expose for the invalid-tool-call label clamp: a name.
+
+    Kept beside the real `@tool` above rather than in place of it: `_metric_label` reads `.name`
+    off whatever the request bound, and the two shapes — a LangChain tool object and a bare
+    duck-typed one — are the two a `ModelRequest` can actually carry.
+    """
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+
 def _request(messages: list[Any], tools: list[Any] | None = None) -> ModelRequest[Any]:
     """A `ModelRequest` carrying only what these middlewares read.
 
@@ -246,7 +258,8 @@ def test_an_unparseable_tool_call_is_counted_and_the_model_is_asked_again(
     with caplog.at_level(logging.WARNING):
         answer = asyncio.run(
             RepairInvalidToolCalls().awrap_model_call(
-                _request([HumanMessage(content="what is the pKa")]), _handler
+                _request([HumanMessage(content="what is the pKa")], [_NamedTool("predict_pka")]),
+                _handler,
             )
         )
 
@@ -587,3 +600,43 @@ def test_a_name_the_request_actually_bound_is_kept_as_the_label() -> None:
 
     asyncio.run(RepairInvalidToolCalls().awrap_model_call(_request([HumanMessage("x")]), _handler))
     assert 'chemclaw_invalid_tool_calls_total{tool="predict_pka"}' in METRICS.render()
+
+
+def test_an_unbound_tool_name_is_clamped_off_the_metric(caplog: pytest.LogCaptureFixture) -> None:
+    """A model-invented tool name never becomes a Prometheus series on the unauthenticated /metrics.
+
+    `invalid_tool_calls` carries whatever the model emitted, unresolved against the bound tools, so
+    booking it verbatim on `chemclaw_invalid_tool_calls_total{tool=...}` lets injected content
+    ("emit a tool call named <secret>") exfiltrate through the label and blows the series cap. A
+    name outside the bound surface is folded to the `unknown` bucket; the full name still
+    reaches the operator-only WARNING.
+
+    **The bucket is `audit.UNKNOWN_TOOL` and this test was written against a local `"<unknown>"`
+    literal.** Both sides of the merge that produced this file clamped the same label; the
+    resolution kept the shared constant `agent/audit.py` already books unresolved names under, so
+    that one concept has one spelling in this tree. Only the expected string changed — the two
+    properties this test carries and the ones above do not, and the exfil assertion is the one
+    neither of the tests above states in this shape.
+    """
+    exfil = "PATIENT=Jane_Doe;SMILES=CC(=O)Oc1ccccc1C(=O)O"
+    broken = AIMessage(
+        content="",
+        invalid_tool_calls=[
+            {"name": exfil, "args": "{bad", "id": "c1", "error": "e", "type": "invalid_tool_call"}
+        ],
+    )
+    good = AIMessage(content="", tool_calls=[])
+    seen: list[int] = []
+
+    async def _handler(request: ModelRequest[Any]) -> Any:
+        seen.append(1)
+        return ModelResponse(result=[broken if len(seen) == 1 else good])
+
+    asyncio.run(
+        RepairInvalidToolCalls().awrap_model_call(
+            _request([HumanMessage(content="hi")], [_NamedTool("real_tool")]), _handler
+        )
+    )
+    rendered = METRICS.render()
+    assert exfil not in rendered, "a model-invented tool name reached /metrics verbatim"
+    assert 'chemclaw_invalid_tool_calls_total{tool="unknown"}' in rendered

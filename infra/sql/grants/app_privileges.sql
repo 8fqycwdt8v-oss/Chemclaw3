@@ -122,11 +122,19 @@ BEGIN
     -- higher ordinal behind, and without the DELETE the label index keeps answering "this reaction
     -- used TEA" from a species the current record no longer has. `reaction_labels` itself stays in
     -- the insert/update group above — a reaction is never unrecorded, only re-recorded.
+    --
+    -- `ingest_rejections` is the one table whose DELETE is not a retention sweep's and not a
+    -- derived index's: the ledger bounds *itself*, evicting the least recently refused row of a
+    -- source inside the same transaction that writes a new one
+    -- (D-2026-08-27-a-refused-record-is-a-question-somebody-will-ask). A corpus with one
+    -- systematically broken field would otherwise write a row per record per run, and no sweep
+    -- runs often enough to be the answer to that. The eviction is the only DELETE any code issues
+    -- against it.
     EXECUTE format(
         'GRANT INSERT, UPDATE, DELETE ON '
         'session_messages, session_events, session_turns, subscriptions, user_preferences, '
         'artifact_blobs, document_files, document_chunks, note_index, tool_result_blobs, '
-        'reaction_species, result_publications TO %I', app_role);
+        'reaction_species, result_publications, ingest_rejections TO %I', app_role);
 
     -- The tables LangGraph creates for itself, which no migration in `infra/sql` declares and which
     -- therefore fell through every enumeration above until they were named here.

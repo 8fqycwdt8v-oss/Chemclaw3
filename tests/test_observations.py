@@ -16,13 +16,16 @@ time.
 import asyncio
 from pathlib import Path
 
+import psycopg
 import pytest
 
 from chemclaw.core.config import settings
 from chemclaw.ingest.eln.ord import Component, OrdReaction, OutcomeClass, Role
 from chemclaw.kg.note import Note
+from chemclaw.memory import observations as store
 from chemclaw.memory.observation_mining import mine_corpus, mine_interactions
 from chemclaw.memory.observations import Observation
+from tests.pg import migrated_db_or_skip
 
 _ESTER = ("CCO", "CC(=O)O", "CCOC(C)=O")
 
@@ -348,6 +351,90 @@ def test_the_migration_forbids_self_citation_in_sql_too() -> None:
     sql = Path("infra/sql/025_observations.sql").read_text(encoding="utf-8")
     assert "observations_evidence_is_merged_notes" in sql
     assert "NOT LIKE '%observation-%'" in sql
+
+
+def _open_read_order_by() -> str:
+    """The ORDER BY the shipped retrieval-bucket statement actually carries.
+
+    Read out of `_SELECT_OPEN` rather than restated, because a restatement is a second copy of the
+    thing under test: the defect this guards against is precisely a *declaration* that no longer
+    describes the query it names.
+    """
+    _, _, tail = store._SELECT_OPEN.partition("ORDER BY ")
+    clause, _, _ = tail.partition(" LIMIT")
+    return " ".join(clause.split())
+
+
+def test_the_open_index_declares_the_sort_the_open_read_performs() -> None:
+    """The index and the ORDER BY are one decision — so a change to either fails here.
+
+    Migration `025` indexed `(status, last_seen DESC)` while calling it the index for "open
+    observations newest-first", and the bucket has never sorted that way: support leads, so the
+    index served the `status` filter and the sort ran in memory on every read. That mismatch was
+    invisible because nothing compared the two texts. This does, and it runs with no database, so
+    the offline sandbox catches it too — the plan assertion below cannot.
+    """
+    order_by = _open_read_order_by()
+    assert order_by == "cardinality(evidence_note_ids) DESC, last_seen DESC"
+    index = " ".join(
+        Path("infra/sql/062_observations_open_index.sql").read_text(encoding="utf-8").split()
+    )
+    assert f"ON observations (status, {order_by})" in index, (
+        f"`observations_open_rank_idx` no longer matches _SELECT_OPEN's `ORDER BY {order_by}`. "
+        "The index has to move with the sort, or the bucket goes back to reading every open row "
+        "and sorting it in memory (D-2026-08-27-an-index-must-match-the-sort-it-serves)"
+    )
+
+
+def test_the_open_read_is_served_by_the_index_rather_than_by_a_sort() -> None:
+    """The half only a planner can answer: the index is *chosen*, not merely present.
+
+    An index the planner never picks is worse than none — it is a claim that something is
+    optimised. So this runs the shipped statement through `EXPLAIN` on a populated table and asks
+    for the plan, not for rows. 500 rows is above the ~50 where the index starts winning and far
+    below where it stops being a fair question; without it the same plan is a sequential scan and a
+    top-N heapsort, which is 234 ms at a million open rows and 6 ms at ten thousand — inside a
+    conversation turn either way.
+
+    Postgres-backed, so it skips where no database is reachable; the text check above is what holds
+    offline.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        async with await psycopg.AsyncConnection.connect(settings.postgres_dsn) as conn:
+            try:
+                await conn.execute("DELETE FROM observations")
+                await conn.execute(
+                    """
+                    INSERT INTO observations (id, statement, scope, evidence_note_ids,
+                                              projects_seen, origin, status)
+                    SELECT 'observation-' || lpad(i::text, 10, '0'), 'noticed ' || i,
+                           'transformation:reaction-' || i,
+                           (SELECT array_agg('reaction-' || (i * 13 + g))
+                              FROM generate_series(1, 1 + i % 7) AS g),
+                           ARRAY['alpha', 'beta'], 'corpus-mining',
+                           CASE WHEN i % 20 = 0 THEN 'retired' ELSE 'open' END
+                      FROM generate_series(1, 500) AS i
+                    """
+                )
+                await conn.execute("ANALYZE observations")
+                cursor = await conn.execute("EXPLAIN " + store._SELECT_OPEN, (10,))
+                plan = "\n".join(line for (line,) in await cursor.fetchall())
+                assert plan.strip(), "EXPLAIN returned no plan to assert on"
+                assert "observations_open_rank_idx" in plan, (
+                    "the retrieval bucket's read is not using `observations_open_rank_idx`; the "
+                    f"planner chose:\n{plan}"
+                )
+                assert "Sort" not in plan, (
+                    "the retrieval bucket is still sorting every open row in memory — the index "
+                    f"does not cover the sort it was built for:\n{plan}"
+                )
+            finally:
+                await conn.execute("DELETE FROM observations")
+                await conn.commit()
+
+    asyncio.run(_run())
 
 
 def test_a_promoted_observation_cites_its_evidence_by_the_ids_it_counted() -> None:

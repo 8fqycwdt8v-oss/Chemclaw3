@@ -253,11 +253,17 @@ async def require_principal(request: Request) -> Principal:
         # because an unauthenticated probe of a public endpoint is ordinary internet traffic; the
         # counter is what makes a *rate* of them alertable.
         _count_auth_failure("missing")
-        # **The route template, never `request.url.path`.** This ran before any credential was
-        # checked, so the path it logged was an unauthenticated caller's own string: measured at
-        # 6,054 characters, straight into `SecretRedactingFilter`'s regex scan with the logging
-        # lock held. It is the same hazard `_RequestObservability` cites for its `route` label,
-        # and the same answer — `route_template` is bounded by the route table.
+        # **The route template, never `request.url.path` — not even a truncated one.** This runs on
+        # the *no-bearer* path, before any credential is checked, so what it logged was an
+        # unauthenticated caller's own string: measured at 6,054 characters, straight into
+        # `SecretRedactingFilter`, whose opaque-token patterns are superlinear in input length,
+        # with the logging lock held — a 32 KB request line stalls the pod. Truncating to a few
+        # hundred characters bounds that cost and leaves the *other* half standing: the survivor is
+        # still caller-authored text on a log line, so it still carries whatever a log consumer
+        # will interpret, at whatever rate an unauthenticated client cares to send. It is the same
+        # hazard `_RequestObservability` cites for its `route` label and it takes the same answer —
+        # `route_template` comes from the route table, so it is bounded in length *and* in
+        # alphabet, and an unrouted request reads `<unmatched>` rather than the string it invented.
         logger.info("request to %s carried no bearer token", route_template(request.scope))
         raise HTTPException(status_code=401, detail="missing bearer token")
     try:

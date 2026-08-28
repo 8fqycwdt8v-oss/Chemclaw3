@@ -12,6 +12,14 @@ obvious readings of it are wrong in opposite directions:
 The subscription therefore remembers which ids it sent *at the watermark's date*, which separates
 "dated today and already sent" from "dated today and new" without choosing between the two
 failures. These tests pin all three cases plus the bound on what is remembered.
+
+The second half of this file is about the *other* end of the same watermark: for the whole first
+life of this job nothing could read what it delivered, so the watermark advanced past matches no
+surface could show and `_is_new` could never re-qualify them
+(`D-2026-08-27-a-digest-nobody-can-read-is-not-delivered`). `GET /digests` is the reader, and these
+tests pin what makes the acknowledgement above honest — one owner reads their own mailbox and no
+one else's, the read is the consume, the claim is kind-scoped, retention can then age the row out,
+and the oid the route derives is the oid a watch is saved under.
 """
 
 import asyncio
@@ -20,14 +28,22 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from fastapi.testclient import TestClient
 
-from chemclaw.agent.subscriptions import Subscription
+from chemclaw.agent.session_events import claim_unconsumed, record_session_event
+from chemclaw.agent.subscriptions import Subscription, for_owner, watch_for
+from chemclaw.api.app import create_app
+from chemclaw.api.auth import Principal, require_principal
+from chemclaw.core import db
 from chemclaw.core.config import settings
-from chemclaw.durable.digest import _is_new, _matches, collect_digests
+from chemclaw.core.identity_context import reset_current_identity, set_current_identity
+from chemclaw.durable.digest import DIGEST_KIND, _is_new, _matches, collect_digests, digest_channel
+from chemclaw.durable.retention import prune_expired_rows
 from chemclaw.kg.graph import invalidate_cache
 from chemclaw.kg.note import Note
 from chemclaw.kg.render import render_note
 from chemclaw.kg.search import query_terms
+from tests.pg import migrated_db_or_skip
 
 
 def _note(note_id: str, valid_from: date | None) -> Any:
@@ -165,3 +181,161 @@ def test_matching_is_unchanged_by_tokenizing_the_query_once_per_subscription() -
 
     typed = Subscription(id=1, owner="c", query="biaryl", last_seen_at=None, note_type="playbook")
     assert _matches(note, typed, query_terms("biaryl")) is False
+
+
+def _digest_client(oid: str) -> TestClient:
+    """The front door with `oid` as the authenticated caller — the only thing `/digests` reads.
+
+    No graph factory and no connectors: this route touches neither, and giving it a fake agent
+    would be scenery around the one thing under test.
+    """
+    app = create_app(connector_factory=lambda _profile: [])
+    app.dependency_overrides[require_principal] = lambda: Principal(oid=oid, upn=f"{oid}@corp")
+    return TestClient(app)
+
+
+async def _consumed_at(channel: str) -> list[object]:
+    """Every row in `channel`'s mailbox with its `consumed_at` — read without claiming anything."""
+    async with db.connection(settings.postgres_dsn) as conn, conn.cursor() as cur:
+        await cur.execute(
+            "SELECT consumed_at FROM session_events WHERE session_id = %s ORDER BY id", (channel,)
+        )
+        return [row[0] for row in await cur.fetchall()]
+
+
+def test_a_digest_is_read_by_its_owner_and_by_nobody_else() -> None:
+    """`GET /digests` delivers the caller's own mailbox, once, and never another chemist's.
+
+    The reproduction this closes (`D-2026-08-27-a-digest-nobody-can-read-is-not-delivered`): the
+    only consumer of a digest row was `GET /sessions/{id}/events`, which 404s the synthetic
+    `digest-<owner>` id and claims only the two job-outcome kinds — so the exact claim it makes
+    returned `[]` against a real digest row and left it unconsumed, while `acknowledge_digest` had
+    already moved the watermark past the notes it named.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        alice, bob = "digest-alice", "digest-bob"
+        for owner in (alice, bob):
+            await claim_unconsumed(digest_channel(owner))  # start clean
+        await record_session_event(
+            digest_channel(alice), DIGEST_KIND, {"query": "suzuki", "note_ids": ["reaction-1"]}
+        )
+
+        with _digest_client(bob) as client:
+            assert client.get("/digests").json() == [], "bob read alice's digest"
+        # Not merely filtered out of bob's answer — untouched, so it is still alice's to read.
+        assert await _consumed_at(digest_channel(alice)) == [None]
+
+        with _digest_client(alice) as client:
+            first = client.get("/digests")
+            second = client.get("/digests")
+        assert first.json() == [{"query": "suzuki", "note_ids": ["reaction-1"]}]
+        assert second.json() == [], "the claim is the consume; a digest must not re-deliver"
+        assert await _consumed_at(digest_channel(alice)) != [None], "the row was left unconsumed"
+
+    asyncio.run(_run())
+
+
+def test_only_the_digest_kind_is_claimed_from_the_mailbox() -> None:
+    """The claim is destructive, so this route must scope it — job push-back is not its to consume.
+
+    A digest mailbox is per *user* and a job's is per *session*, so today no row of another kind
+    shares this channel. That is a property of who writes, not of this route: claiming everything
+    here would destroy any future one silently, which is precisely how the mailbox's own docstring
+    says a kind-selective consumer must not be written.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        owner = "digest-mixed"
+        channel = digest_channel(owner)
+        await claim_unconsumed(channel)
+        await record_session_event(channel, DIGEST_KIND, {"query": "q", "note_ids": ["n-1"]})
+        await record_session_event(channel, "job_completed", {"job_id": "j-1"})
+
+        with _digest_client(owner) as client:
+            assert client.get("/digests").json() == [{"query": "q", "note_ids": ["n-1"]}]
+
+        leftover = await claim_unconsumed(channel)
+        assert [event.kind for event in leftover] == ["job_completed"]
+
+    asyncio.run(_run())
+
+
+def test_a_read_digest_becomes_prunable_and_an_unread_one_does_not() -> None:
+    """Reading is what lets retention age a digest out — and not reading is what kept it forever.
+
+    `durable/retention.py`'s `session_events` predicate is `consumed_at IS NOT NULL`, which is
+    right (an undelivered `job_completed` must survive its window). Its consequence, while nothing
+    could read a digest, was that every digest row ever written was immortal.
+    """
+
+    async def _run() -> tuple[list[object], list[object]] | None:
+        await migrated_db_or_skip()
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(settings, "retention_session_events_days", 7)
+        monkeypatch.setattr(settings, "retention_session_messages_days", 0)
+        monkeypatch.setattr(settings, "retention_tool_results_days", 0)
+        monkeypatch.setattr(settings, "retention_checkpoints_days", 0)
+        try:
+            read_owner, unread_owner = "digest-read", "digest-unread"
+            for owner in (read_owner, unread_owner):
+                await claim_unconsumed(digest_channel(owner))
+            for owner in (read_owner, unread_owner):
+                await record_session_event(
+                    digest_channel(owner), DIGEST_KIND, {"query": "q", "note_ids": ["n-1"]}
+                )
+            with _digest_client(read_owner) as client:
+                assert len(client.get("/digests").json()) == 1
+            # Older than the window, so age is not what separates the two rows below.
+            async with db.connection(settings.postgres_dsn) as conn:
+                await conn.execute(
+                    "UPDATE session_events SET created_at = now() - make_interval(days => 90) "
+                    "WHERE session_id = ANY(%s)",
+                    ([digest_channel(read_owner), digest_channel(unread_owner)],),
+                )
+                await conn.commit()
+
+            await prune_expired_rows()
+            return (
+                await _consumed_at(digest_channel(read_owner)),
+                await _consumed_at(digest_channel(unread_owner)),
+            )
+        finally:
+            monkeypatch.undo()
+
+    outcome = asyncio.run(_run())
+    assert outcome is not None
+    read_rows, unread_rows = outcome
+    assert read_rows == [], "a digest the owner read was still not prunable"
+    assert unread_rows == [None], "an unread digest was destroyed before anyone could read it"
+
+
+def test_a_watch_is_owned_by_the_oid_the_route_reads() -> None:
+    """The two ends of the mailbox address agree, and neither restates the other.
+
+    `/digests` derives its channel from `principal.oid`; the digest job addresses one from
+    `subscriptions.owner`, which `watch_for` takes from `require_actor()`. Those are the same
+    identity only because `require_principal` binds the principal into the identity context
+    (`api/middleware.bind_request_actor` → `set_current_identity`) — an invariant worth a test
+    rather than a paragraph, since a mismatch would leave every digest written to a mailbox the
+    owner cannot name and would look exactly like the defect this route closes.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        oid = "digest-oid-8e1f"
+        tokens = set_current_identity(oid, frozenset())
+        try:
+            await watch_for("suzuki biaryl")
+        finally:
+            reset_current_identity(tokens)
+        saved = [s for s in await for_owner(oid) if s.query == "suzuki biaryl"]
+        assert [s.owner for s in saved] == [oid]
+        # And that owner is what the digest job would address, which is what the route reads.
+        assert digest_channel(saved[0].owner) == digest_channel(
+            Principal(oid=oid, upn="x@corp").oid
+        )
+
+    asyncio.run(_run())

@@ -111,11 +111,14 @@ _STAMPED_CALC_TYPES: tuple[str, ...] = tuple(
     sorted({calc_type for calc_type, _ in _KEYED.values()})
 )
 
-# The one stamped type with no projector, declared for the same reason as `_NOT_YET_PUBLISHED`
-# above. A Hessian's scientific value is realised in `ThermochemistryResult`, which is a *tool*
-# composite — neither cached nor a job — so publishing frequencies needs a third hook and a
-# decision, not a projector. Tracked in `docs/planning/BACKLOG.md`.
-_PRIMITIVES_NOT_PUBLISHED: frozenset[str] = frozenset({"xtb.hess"})
+# Stamped types with no projector, declared for the same reason as `_NOT_YET_PUBLISHED` above.
+# **Empty, and kept empty on purpose.** `xtb.hess` was its one entry, and
+# `D-2026-08-27-a-composite-needs-a-hook-not-a-projector` emptied it in both halves: the row itself
+# now projects (`_hessian` — an electronic energy, an atom count, and the gradient that says whether
+# the geometry differentiated was stationary), and the *frequencies*, which no arrangement of that
+# projector could ever have produced because the row carries no masses, reach the store through the
+# third hook as part of `ThermochemistryResult`.
+_PRIMITIVES_NOT_PUBLISHED: frozenset[str] = frozenset()
 
 # The routes the hooks build, `<connector>.<job>`, read off the manifests so a new job cannot be
 # added without this file seeing it.
@@ -1053,4 +1056,320 @@ def test_the_shipped_driver_satisfies_the_shipped_sink() -> None:
     assert isinstance(driver, Warehouse), (
         "the shipped Postgres driver fails the shipped sink's own runtime check; "
         f"missing: {sorted(set(dir(Warehouse)) - set(dir(driver)) - {'_is_runtime_protocol'})}"
+    )
+
+
+# --- the third hook: a tool composite -----------------------------------------------------------
+#
+# Everything above this line starts at one of the two hooks that already existed — the cache-miss
+# path and the job envelope. `D-2026-08-27-a-composite-needs-a-hook-not-a-projector` added a third,
+# and these start at it: a real tool call through the real MCP tool manager, with the publish hook
+# installed the way `connector_app` installs it, rather than a call to `publish_tool_result`. The
+# reason is the one this file's own docstring gives — a projector that no path can reach passes
+# every test that starts at a projector, and so does a hook that nothing calls.
+
+
+def _publishing(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
+    """Turn publishing on the way a deployment does, and capture what reaches the queue.
+
+    `settings.result_sinks` is the knob rather than `publishing_enabled` itself, because two modules
+    read that function and patching one of them is how a hook can look wired and not be — which is
+    exactly how the first draft of these tests passed with the tool hook never firing. Only the
+    queue *write* is stubbed: the projection, the routing and the record are the real ones.
+    """
+    from chemclaw.core.config import settings
+    from chemclaw.publish import outbox
+
+    queued: list[Any] = []
+
+    async def _enqueue(records: list[Any]) -> int:
+        queued.extend(records)
+        return len(records)
+
+    monkeypatch.setattr(settings, "result_sinks", "test-sink")
+    monkeypatch.setattr(outbox, "enqueue", _enqueue)
+    return queued
+
+
+def _calc_stack(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """The `calc` tool surface with its publish hook installed, over a fake calculation server.
+
+    Importing the bundle's `app` module is what runs `connector_app`, which is what installs the
+    hook — so this asserts the wiring a pod actually gets rather than calling the installer here.
+    """
+    import chemclaw.connectors.calc.server.app  # noqa: F401  runs `connector_app`, installing it
+    import chemclaw.connectors.calc.server.tools as calc_tools
+    from chemclaw.connectors.calc import compose
+    from chemclaw.science.calc.artifacts import InMemoryArtifactStore
+    from chemclaw.science.calc.store import InMemoryStore
+    from tests.calc_server_fake import FakeCalcServer, install
+
+    install(monkeypatch, FakeCalcServer())
+    monkeypatch.setattr(calc_tools, "default_store", lambda: InMemoryStore())
+    monkeypatch.setattr(compose, "default_artifact_store", InMemoryArtifactStore)
+    return calc_tools
+
+
+def test_a_hessian_cache_miss_publishes_what_its_row_actually_holds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The primitive half, driven through `cached_compute` rather than through `_hessian`.
+
+    `xtb.hess` was the one `calc_type` the calculation server stamps that no prefix matched, so
+    every Hessian this system has ever computed was dropped at the enqueue with a debug line. This
+    runs the composite's own `hessian()` — remote key, store miss, remote compute, `store.put`,
+    `publish_stored_result` — and reads what came out the far end.
+
+    **What is asserted is what the row holds, which is not a frequency.** A wavenumber is an
+    eigenvalue of the *mass-weighted* matrix and a `HessianPayload` carries no elements, so
+    nothing keyed on this row can produce one. That is the measurement behind the third hook.
+    """
+    from chemclaw.connectors.calc import compose
+    from chemclaw.science.calc.artifacts import InMemoryArtifactStore
+    from chemclaw.science.calc.store import InMemoryStore
+    from tests.calc_server_fake import FakeCalcServer, install
+
+    install(monkeypatch, FakeCalcServer())
+    queued = _publishing(monkeypatch)
+
+    async def _take_one() -> Any:
+        store = InMemoryStore()
+        structure = await compose.embed("CCO")
+        return await compose.hessian(store, structure, None, artifacts=InMemoryArtifactStore())
+
+    payload, cached = asyncio.run(_take_one())
+
+    assert cached is False, "the publish hook is on the miss path; this run has to be a miss"
+    records = [record for record in queued if record.calc_type.startswith("xtb.hess")]
+    assert len(records) == 1, "a computed Hessian reached no results store"
+    facts = {fact.property: fact for fact in records[0].properties}
+    assert facts["electronic_energy"].value == payload.electronic_energy_hartree
+    assert facts["atom_count"].value == payload.atom_count
+    assert "wavenumber" not in facts and not records[0].points, (
+        "a Hessian row cannot yield a frequency — it carries no masses. If this passes, the "
+        "projector is inventing one"
+    )
+    # The one payload in this system that is bytes rather than numbers. `result_publications` is a
+    # queue nobody prunes, so the packed arrays are dropped on the way in — the matrix is already
+    # content-addressed in the artifact store, and re-projecting it could not produce a frequency
+    # either. Measured on the JSON document: 9,217 bytes against 184 at nine atoms, 108 KB against
+    # 185 at 33, and 1,394,499 against 186 at 120 — the arrays are (3N)^2 doubles and everything
+    # else about a Hessian is a constant handful of scalars.
+    assert not {"hessian_npy", "dipole_derivatives_npy"} & set(records[0].payload), (
+        "the packed arrays rode into the outbox document"
+    )
+    assert records[0].payload["structure_id"] == payload.structure_id, (
+        "everything that is not an array still rides along untouched"
+    )
+
+
+def test_a_published_gradient_is_converted_into_the_unit_the_registry_keeps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The predicate column is canonical or it is a lie, and it was a lie for `max_gradient`.
+
+    `_fact`'s docstring predicted this exactly: every call site passed a unit that already *was* the
+    property's canonical unit, "so the conversion is an identity on every live path", and the
+    first projector reporting in something else "lands off ... with the unit string still right".
+    Both calculators that report a gradient report it per Angstrom
+    (`OptimizationResult.max_gradient`, `HessianPayload.max_gradient_hartree_per_angstrom`) while
+    the registry keeps `max_gradient` in Hartree/bohr — so `_optimization` was publishing every
+    gradient 1.89x too large. Asserted over both projectors, from the real cache hook, against an
+    independently written constant rather than against the one `properties.py` holds.
+    """
+    from chemclaw.connectors.calc import compose
+    from chemclaw.science.calc.artifacts import InMemoryArtifactStore
+    from chemclaw.science.calc.store import InMemoryStore
+    from tests.calc_server_fake import FakeCalcServer, install
+
+    bohr_radius_angstrom = 0.529177210903
+
+    install(monkeypatch, FakeCalcServer())
+    queued = _publishing(monkeypatch)
+
+    async def _relax_and_differentiate() -> None:
+        store = InMemoryStore()
+        structure = await compose.embed("CCO")
+        relaxed, _ = await compose.relax(store, structure, None)
+        await compose.hessian(store, relaxed.structure, None, artifacts=InMemoryArtifactStore())
+
+    asyncio.run(_relax_and_differentiate())
+
+    gradients = [
+        fact for record in queued for fact in record.properties if fact.property == "max_gradient"
+    ]
+    assert len(gradients) == 2, "both the optimization and the Hessian report a gradient"
+    for fact in gradients:
+        assert fact.unit == "hartree/angstrom", "the reported unit must be the calculator's own"
+        assert fact.value == pytest.approx(fact.reported_value * bohr_radius_angstrom), (
+            "`value` is the column a chemist writes a convergence predicate against, so it is in "
+            "the registry's Hartree/bohr; `reported_value` is what the calculator said"
+        )
+
+
+def test_a_thermochemistry_tool_call_publishes_the_frequencies_it_computed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The third hook, from the only place it can be observed: a real tool call.
+
+    `compute_thermochemistry` is a *tool* composite — no cache row (its key would name the geometry
+    its refinement loop settles on) and no job envelope — so neither existing hook can see it, and
+    its projector had never once been called in production. The call goes through the MCP tool
+    manager, which is what `FastMCP.call_tool` delegates to, with the hook installed by
+    `connector_app`; nothing here calls `publish_tool_result`.
+
+    The numbers asserted are the ones the tool handed back, not re-derived: a publish path that
+    republished a stale or re-computed value would be worse than none.
+    """
+    calc_tools = _calc_stack(monkeypatch)
+    queued = _publishing(monkeypatch)
+
+    result = asyncio.run(
+        calc_tools.server._tool_manager.call_tool("compute_thermochemistry", {"smiles": "CCO"})
+    )
+
+    records = [record for record in queued if record.payload_kind == "ThermochemistryResult"]
+    assert len(records) == 1, "a thermochemistry the agent asked for reached no results store"
+    record = records[0]
+    assert record.calc_type == "calc.compute_thermochemistry", (
+        "the route says where it came from; the shape is carried beside it"
+    )
+    facts = {fact.property: fact for fact in record.properties}
+    assert facts["gibbs_free_energy"].value == result.gibbs_free_energy_hartree
+    assert facts["zero_point_energy"].value == result.zero_point_energy_kcal
+    published = [point.value for point in record.points if point.property == "wavenumber"]
+    assert published == [mode.wavenumber_cm for mode in result.modes], (
+        "the frequencies published must be the frequencies returned, in order"
+    )
+    assert published, "the whole point of this hook is that a frequency reaches a results store"
+
+
+# The tool that produces each declared tool composite, and the arguments it needs. Paired with
+# `TOOL_COMPOSITES` by the test below rather than trusted, so a shape can be declared publishable
+# only if some tool actually publishes it — the completeness half of
+# `test_every_projector_is_claimed_by_exactly_one_hook`, which proves the set is not too *small*.
+_TOOL_COMPOSITE_CALLS: dict[str, tuple[str, dict[str, Any]]] = {
+    "ThermochemistryResult": ("compute_thermochemistry", {"smiles": "CCO"}),
+    "LogdResult": ("predict_logd", {"smiles": "CC(=O)Nc1ccc(O)cc1"}),
+}
+
+
+@pytest.mark.parametrize("payload_kind", sorted(_TOOL_COMPOSITE_CALLS))
+def test_every_declared_tool_composite_is_published_by_a_real_tool_call(
+    payload_kind: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A declaration that no tool can produce is the same defect one level up.
+
+    `TOOL_COMPOSITES` is what the tool hook publishes, and the derivation test beside it proves
+    nothing is *missing* from it. This is the other direction: each declared shape has to come out
+    of a tool call through the real surface, or the set names something nothing emits — which is
+    how `_CALC_TYPE_PROJECTORS` came to hold four spellings no version of this system ever wrote.
+    """
+    from chemclaw.publish.hooks import TOOL_COMPOSITES
+
+    assert set(_TOOL_COMPOSITE_CALLS) == set(TOOL_COMPOSITES), (
+        "every declared tool composite needs a call that produces it; missing "
+        f"{sorted(set(TOOL_COMPOSITES) - set(_TOOL_COMPOSITE_CALLS))}"
+    )
+    calc_tools = _calc_stack(monkeypatch)
+    queued = _publishing(monkeypatch)
+    tool, arguments = _TOOL_COMPOSITE_CALLS[payload_kind]
+
+    asyncio.run(calc_tools.server._tool_manager.call_tool(tool, arguments))
+
+    published = [record for record in queued if record.payload_kind == payload_kind]
+    assert len(published) == 1, f"{tool} published no {payload_kind}"
+    assert published[0].calc_type == f"calc.{tool}"
+    assert published[0].properties, "a record with no facts says nothing was found"
+
+
+def test_asking_the_same_composite_twice_is_one_record(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A tool composite has no cache key, so its identity is the request that produced it.
+
+    The job hook answers this with the workflow id, which is itself derived from the job and its
+    arguments; without a workflow the same derivation is the route plus a hash of the validated
+    arguments. Two identical questions must therefore collapse to one row on the outbox's
+    `ON CONFLICT DO NOTHING`, while a second temperature must not — it is a second measurement.
+    """
+    calc_tools = _calc_stack(monkeypatch)
+    queued = _publishing(monkeypatch)
+
+    async def _three_calls() -> None:
+        manager = calc_tools.server._tool_manager
+        await manager.call_tool("compute_thermochemistry", {"smiles": "CCO"})
+        await manager.call_tool("compute_thermochemistry", {"smiles": "CCO"})
+        await manager.call_tool(
+            "compute_thermochemistry", {"smiles": "CCO", "temperature_k": 310.0}
+        )
+
+    asyncio.run(_three_calls())
+
+    refs = [record.calc_ref for record in queued if record.payload_kind == "ThermochemistryResult"]
+    assert len(refs) == 3
+    assert refs[0] == refs[1], "the same question twice must address one record"
+    assert refs[2] != refs[0], "a second temperature is a second measurement, not a duplicate"
+
+
+def test_a_results_store_that_cannot_be_reached_fails_neither_the_tool_nor_the_calculation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The polarity every hook here shares: the science is done, so publishing cannot take it back.
+
+    Driven from both new paths at once, with the queue write raising rather than returning — which
+    is what a local outbox on a database that has gone away does. `enqueue` swallows its own
+    failures, so this raises from *underneath* it, at `enqueue_payload`, to prove the guard rather
+    than the guard's neighbour.
+    """
+    from chemclaw.publish import hooks
+    from chemclaw.science.calc.store import InMemoryStore
+
+    calc_tools = _calc_stack(monkeypatch)
+    _publishing(monkeypatch)
+
+    refused: list[str] = []
+
+    async def _refuse(**kwargs: Any) -> int:
+        refused.append(str(kwargs.get("payload_kind")))
+        raise ConnectionError("the results store is not there")
+
+    monkeypatch.setattr(hooks, "enqueue_payload", _refuse)
+    monkeypatch.setattr(calc_tools, "default_store", lambda: InMemoryStore())
+
+    result = asyncio.run(
+        calc_tools.server._tool_manager.call_tool("compute_thermochemistry", {"smiles": "CCO"})
+    )
+    assert result.gibbs_free_energy_hartree, "the tool must return its science regardless"
+    # Without this the assertion above is vacuous: a hook that never fired also cannot fail a tool,
+    # which is exactly the state this whole change was fixing.
+    assert refused == ["ThermochemistryResult"], "the failing publish was never attempted"
+
+
+def test_every_projector_is_claimed_by_exactly_one_hook() -> None:
+    """The completeness check the third hook needs, and the reason it cannot be forgotten.
+
+    `TOOL_COMPOSITES` is a declaration in `publish/hooks.py`, because a serving process has no
+    reason to hold the calculation server's key contract or `XtbJobResult`'s member fields. This
+    test holds both, so the declaration is *derived* here and compared: a shape whose projector no
+    `_CALC_TYPE_PROJECTORS` prefix reaches and no job envelope carries is a tool composite by
+    definition, and one that is not declared fails here rather than shipping with a projector
+    nothing calls — which is what `ThermochemistryResult` and `LogdResult` both did for a release.
+
+    Written against `_CALC_TYPE_PROJECTORS` rather than against the fake's `_KEYED` deliberately:
+    the fake does not declare `compute_atomic_descriptors` or `compute_surface_potential`, and
+    deriving from it would misclassify two cached primitives as composites.
+    """
+    from chemclaw.publish.hooks import TOOL_COMPOSITES
+    from chemclaw.publish.project import _CALC_TYPE_PROJECTORS
+
+    cached = {projector for _prefix, projector in _CALC_TYPE_PROJECTORS}
+    derived = {
+        kind
+        for kind, projector in PAYLOAD_PROJECTORS.items()
+        if projector not in cached and kind not in _ENVELOPE_MEMBERS
+    }
+    assert derived == set(TOOL_COMPOSITES), (
+        "a shape with a projector, no cache prefix and no job envelope reaches a results store "
+        "only through the tool hook. Undeclared: "
+        f"{sorted(derived - set(TOOL_COMPOSITES))}; stale: "
+        f"{sorted(set(TOOL_COMPOSITES) - derived)}"
     )

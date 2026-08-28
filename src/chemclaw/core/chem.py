@@ -19,14 +19,14 @@ answers about a molecule the chemist thinks it has already seen.
 conventional order, because a bespoke normalization is a bespoke notion of sameness:
 
 1. `Cleanup` — sanitize, disconnect metals, normalize functional-group spellings (nitro, N-oxide).
-2. `FragmentParent` — keep the largest organic fragment, which strips counterions and solvates.
+2. `FragmentParent` — keep the largest organic fragment, which strips counterions.
 3. `Uncharger` — neutralize what can be neutralized, so a carboxylate meets its acid.
 4. `TautomerEnumerator.Canonicalize` — one representative per tautomer set.
 
 Steps 2 and 3 say **"the counterion is not part of the identity"**, and that claim holds for an
 amine hydrochloride and for sodium benzoate but not for every species a chemist writes. It fails
-in three directions, each of which deletes the reagent rather than normalizing it, and
-`_identity_survives_stripping` is the one gate that holds them off:
+in four directions, each of which deletes the compound rather than normalizing it, and
+`standardize` holds them off with `_metal_is_the_compound` and a count of organic fragments:
 
 - **Nothing organic is left to be the compound.** A wholly inorganic reagent has no organic parent
   to keep, so the strip discards half the formula: NaOH and KOH both became water, CsF became a
@@ -41,13 +41,20 @@ in three directions, each of which deletes the reagent rather than normalizing i
   hexane, MeMgBr to diethyl ether, PhLi to dibutyl ether, and AlMe3 — whose Al–C bond `Cleanup`
   does break — plain methane. A pyrophoric reagent and an alkane sharing one compound id is the
   worst instance of this defect, since a hazard screen reads that id.
+- **Both fragments are organic, so "largest" is a coin toss.** A solvate, a hydrate written with an
+  organic partner, or a co-crystal has no counterion to discard: `standard_smiles("CCN.C1CCOC1")`
+  returned `C1CCOC1`, so an ethylamine/THF solvate and neat THF shared one `compound_id` — the same
+  note, the same fingerprint row. Nothing in the structure says which fragment is "the compound",
+  and `FragmentParent`'s answer — whichever weighs more — is a property of the *pair*, so adding a
+  bulkier solvent silently changes which substance the record is about
+  (`D-2026-08-27-a-solvate-is-not-its-solvent`).
 
-Two properties separate the three from the salts that must keep collapsing, and neither is "does it
+Three properties separate the four from the salts that must keep collapsing, and none is "does it
 contain a metal": a **d- or f-block metal** is what the flask is for, while a group-1/2 counterion
-only balances a charge (`_REACTIVE_METALS`); and a **metal–carbon bond** is the reagent itself,
-while the same metals in an ionic salt have none (`_is_organometallic`). Sodium benzoate and LDA
-fail both tests and still collapse. See `_is_organic` for why "organic" is a C–H/C–C test and not
-"contains a carbon".
+only balances a charge (`_REACTIVE_METALS`); a **metal–carbon bond** is the reagent itself, while
+the same metals in an ionic salt have none (`_is_organometallic`); and a salt has **exactly one**
+organic fragment, while a solvate has two or more. Sodium benzoate and LDA fail all three and still
+collapse. See `_is_organic` for why "organic" is a C–H/C–C test and not "contains a carbon".
 
 **There are two questions here, and conflating them is how this goes wrong in the other
 direction.** Applying the pipeline everywhere neutralizes species a chemist meant as ions, and a
@@ -73,6 +80,7 @@ import rdkit
 from rdkit import Chem
 from rdkit.Chem.MolStandardize import rdMolStandardize
 
+from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.core.ids import stable_hash
 
@@ -81,7 +89,7 @@ from chemclaw.core.ids import stable_hash
 # search rather than being silently compared against rows built under a newer one — the guard
 # `science/fingerprints/store.py` already applies to a changed radius or bit width, extended to the
 # other thing that decides what a row *is*.
-STANDARDIZATION_VERSION = "std5"
+STANDARDIZATION_VERSION = "std6"
 
 # The d- and f-block by atomic number — Sc→Zn, Y→Cd, La→Hg (lanthanides included) and Ac onward.
 # A block rather than a hand-picked element list, because the property being asserted is a block
@@ -154,7 +162,7 @@ def _standardized(smiles: str) -> str | None:
     component of every ingested reaction, and every product/reactant pair in chain detection. Pure
     in its argument, so the cache is sound; bounded, so a long-lived worker cannot grow into it.
     """
-    mol = Chem.MolFromSmiles(smiles)
+    mol = _bounded_mol(smiles)
     if mol is None:
         return None
     return str(Chem.MolToSmiles(standardize(mol)))
@@ -198,12 +206,11 @@ def _is_organometallic(mol: Chem.Mol) -> bool:
     return False
 
 
-def _identity_survives_stripping(original: Chem.Mol, cleaned: Chem.Mol) -> bool:
-    """Whether keeping only the parent fragment still names the same compound.
+def _metal_is_the_compound(original: Chem.Mol, cleaned: Chem.Mol) -> bool:
+    """Whether the species' metal is the chemistry, so neither stripping nor neutralizing applies.
 
-    All three ways it can fail delete the reagent rather than normalize it (see the module
-    docstring). The two molecules are not interchangeable, and each check deliberately asks the
-    stage that still holds its evidence:
+    Two of the four failure modes in the module docstring are this one question asked of two
+    different molecules, and each check deliberately asks the stage that still holds its evidence:
 
     - the **cleaned** one for a reactive metal, because `Cleanup` is what disconnects the metal into
       the fragment that would then be thrown away, and the check exists to see that fragment;
@@ -212,12 +219,16 @@ def _identity_survives_stripping(original: Chem.Mol, cleaned: Chem.Mol) -> bool:
       cleaned the evidence has been destroyed for exactly the ones no other check catches. AlMe3 is
       the case that decides it: aluminium is outside `_REACTIVE_METALS`, so reading the cleaned
       molecule standardizes trimethylaluminium to methane.
+
+    It gates the neutralization as well as the strip, because the charges on a metal complex are
+    what balance its metal: `Cleanup` leaves Pd(OAc)2 as `[Pd+2]` beside two acetates, and
+    protonating those acetates would invent a species carrying a net +2 nobody wrote. Measured,
+    `Uncharger` happens to be a no-op on Pd(OAc)2 and on n-BuLi today — the gate is here so that
+    stays true by construction rather than by luck.
     """
     if _is_organometallic(original):
-        return False  # the M–C bond is the reagent; the hydrocarbon left without it is not
-    if any(atom.GetAtomicNum() in _REACTIVE_METALS for atom in cleaned.GetAtoms()):
-        return False  # a metal complex: the metal is the chemistry, not a counterion
-    return any(_is_organic(fragment) for fragment in Chem.GetMolFrags(cleaned, asMols=True))
+        return True  # the M–C bond is the reagent; the hydrocarbon left without it is not
+    return any(atom.GetAtomicNum() in _REACTIVE_METALS for atom in cleaned.GetAtoms())
 
 
 def standardize(mol: Chem.Mol) -> Chem.Mol:
@@ -225,12 +236,41 @@ def standardize(mol: Chem.Mol) -> Chem.Mol:
 
     Separate from the SMILES helpers so a caller that already holds a molecule — and a test that
     wants to check one stage — does not have to round-trip through a string.
+
+    **The number of organic fragments is what decides whether the strip runs**, because that number
+    is the difference between a salt and a solvate. Exactly one organic fragment means every other
+    fragment is a counterion or a water of crystallization, and discarding them is what the pipeline
+    is for. **Two or more means the structure names no winner**: an ethylamine/THF solvate, a
+    co-crystal and an organic-acid salt all read alike, so `FragmentParent`'s tiebreak — whichever
+    fragment weighs more — makes the compound the record is about a property of the *pair* rather
+    than of the compound (`D-2026-08-27-a-solvate-is-not-its-solvent`). Keeping the species whole
+    costs a cache miss; picking wrong writes a false record into the graph behind a human signature,
+    and D-2026-08-01 already chose which of those to pay. Zero organic fragments is the wholly
+    inorganic reagent D-2026-08-01 rescued — there is no parent to keep, so the strip is skipped for
+    a third reason.
+
+    **`Uncharger` is gated on the same count, one step looser**, and the two thresholds are
+    different questions rather than one written twice. It runs whenever *some* fragment is organic,
+    including on the kept-whole solvate — which is load-bearing, not incidental: nicotine bitartrate
+    is written both as an ion pair and as a neutral co-crystal, and a species that is no longer
+    stripped would otherwise get one `compound_id` per spelling, trading this defect for the one
+    D-2026-07-31 exists to prevent. It does **not** run on a wholly inorganic species, and that
+    half was measured the hard way — coupling it to the metal gate alone was built, and reverted,
+    because `rxnfp` standardizes a salt one `.`-separated ion at a time, so `Uncharger` met bare
+    `[OH-]` and `[BH4-]` and returned water and *borane*: D-2026-08-01's NaOH and NaBH4 defect
+    reappearing an ion at a time. A wholly inorganic ion's charge balances a counterion that may
+    already have been split off it; only an organic acid/base pair can be neutralized without
+    inventing a different reagent.
     """
     cleaned = rdMolStandardize.Cleanup(mol)
-    if _identity_survives_stripping(mol, cleaned):
-        cleaned = rdMolStandardize.FragmentParent(cleaned)
-        cleaned = rdMolStandardize.Uncharger().uncharge(cleaned)
-    return _TAUTOMERS.Canonicalize(cleaned)
+    if _metal_is_the_compound(mol, cleaned):
+        return _TAUTOMERS.Canonicalize(cleaned)
+    organic = sum(1 for f in Chem.GetMolFrags(cleaned, asMols=True) if _is_organic(f))
+    if organic == 0:
+        return _TAUTOMERS.Canonicalize(cleaned)  # no organic parent to keep, nothing to neutralize
+    if organic == 1:
+        cleaned = rdMolStandardize.FragmentParent(cleaned)  # the rest are counterions
+    return _TAUTOMERS.Canonicalize(rdMolStandardize.Uncharger().uncharge(cleaned))
 
 
 class InvalidSmilesError(ChemclawError):
@@ -239,6 +279,37 @@ class InvalidSmilesError(ChemclawError):
     A `ChemclawError`, so a batch boundary catches it as bad data and the Temporal
     retry policy treats it as a fast, non-retryable failure (never a retry loop).
     """
+
+
+def _oversized(smiles: str, mol: Chem.Mol | None) -> bool:
+    """Whether a string or its parsed molecule is past the size the writer can survive.
+
+    The one size gate, shared by the strict `require_molecule` and the lenient parse-or-passthrough
+    helpers, so no caller reintroduces the crash by writing its own bare `MolFromSmiles`. RDKit's
+    canonical-SMILES writer and the tautomer canonicalizer are unbounded-recursive and SIGSEGV
+    (uncatchable, takes the whole process) on a large linear molecule; length is the cheap
+    pre-filter and atom count the real bound. See `fingerprints.molecule_max_smiles_length` /
+    `molecule_max_atoms`.
+    """
+    if len(smiles) > settings.molecule_max_smiles_length:
+        return True
+    return mol is not None and mol.GetNumAtoms() > settings.molecule_max_atoms
+
+
+def _bounded_mol(smiles: str) -> Chem.Mol | None:
+    """Parse `smiles`, returning None if it is unparseable **or** too large to write safely.
+
+    The lenient counterpart to `require_molecule`: the ELN/memory callers key on whatever string
+    they are given and must not abort on one odd label, but they must equally never hand an
+    oversized molecule to `MolToSmiles`/`standardize` — so an over-limit input is treated exactly
+    like an unparseable one (passthrough), not crashed on.
+    """
+    if len(smiles) > settings.molecule_max_smiles_length:
+        return None
+    mol = Chem.MolFromSmiles(smiles)
+    if mol is None or _oversized(smiles, mol):
+        return None
+    return mol
 
 
 def canonical_smiles(smiles: str) -> str:
@@ -250,7 +321,7 @@ def canonical_smiles(smiles: str) -> str:
     given and never want ingestion to abort on one odd label. Where an unparseable
     structure must instead be rejected, use `require_canonical_smiles`.
     """
-    mol = Chem.MolFromSmiles(smiles)
+    mol = _bounded_mol(smiles)
     return Chem.MolToSmiles(mol) if mol is not None else smiles
 
 
@@ -291,9 +362,23 @@ def require_molecule(smiles: str) -> Chem.Mol:
         raise InvalidSmilesError(f"invalid SMILES (empty or contains whitespace): {smiles!r}")
     if not stripped.isascii():
         raise InvalidSmilesError(f"invalid SMILES (non-ASCII characters): {smiles!r}")
+    # Refuse an oversized string *before* handing it to RDKit: the canonical-SMILES writer and the
+    # tautomer canonicalizer overflow the C stack (SIGSEGV, uncatchable) on a large linear molecule,
+    # so length is a cheap pre-filter and atom count is the real bound. See
+    # `fingerprints.molecule_max_smiles_length` / `molecule_max_atoms` for why the number is here.
+    if len(stripped) > settings.molecule_max_smiles_length:
+        raise InvalidSmilesError(
+            f"SMILES exceeds {settings.molecule_max_smiles_length} characters "
+            f"({len(stripped)}); pass a smaller molecule"
+        )
     mol = Chem.MolFromSmiles(stripped)
     if mol is None or mol.GetNumAtoms() == 0:
         raise InvalidSmilesError(f"invalid SMILES: {smiles!r}")
+    if _oversized(stripped, mol):
+        raise InvalidSmilesError(
+            f"molecule has {mol.GetNumAtoms()} atoms, over the {settings.molecule_max_atoms} "
+            f"limit; RDKit canonicalization is unbounded-recursive and would crash the process"
+        )
     return mol
 
 

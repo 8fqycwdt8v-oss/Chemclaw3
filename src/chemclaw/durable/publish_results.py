@@ -237,6 +237,14 @@ async def _drain_result_publications() -> PublishOutcome:
 
 
 @durable_workflow("background")
+# **Deliberately left able to park** (D-2026-08-27). This module has already argued that a
+# workflow failure is the wrong signal for it — a sink outage leaves its rows `pending`, and
+# `result_publications.attempts` plus the `queued_total − published_total` backlog say what is
+# wrong more precisely than a red run would. Those signals are undisturbed by a park, a
+# failure or a timeout alike, so the run's own end state carries nothing an operator reads. It
+# runs only from the `result-publish` Schedule (bounded by `schedule_run_timeout_seconds`),
+# nothing polls it, and the outbox is durable, so no delivery is lost by a run that never
+# finishes — only delayed to the next fire.
 @workflow.defn
 class PublishResultsWorkflow:
     """Carry queued results to their external stores on a cadence."""
