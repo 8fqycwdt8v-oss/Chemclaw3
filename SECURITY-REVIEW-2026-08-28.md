@@ -61,6 +61,24 @@ companion repos carry their own.
   an empty actor was accepted as authenticated; the knowledge-merged webhook MAC is now compared as
   bytes (a non-ASCII header turned it into a 500); the four "expensive half" calc jobs now carry
   `expensive: true` so `authorize_trigger` gates them.
+- **Result sinks refused a non-loopback cleartext transport** under the enforced posture. The HTTP
+  sink carried a bearer credential and confidential records over `http://`; the Postgres sink
+  defaulted to libpq `prefer` (silent plaintext fallback). Both now refuse off loopback under
+  `entra_required` — the same rule already applied to the system's own database and broker — reusing
+  the shared `require_pg_tls` guard. (`publish/drivers/http.py`, `publish/drivers/postgres.py`)
+- **The KG git child inherited this process's secrets.** Every git command (fetch/push, a credential
+  helper, a hook) ran with the LLM key, the database DSNs, the Temporal key and the framing HMAC in
+  its environment, none of which git needs. Scrubbed via a new `secret_env_names()` driven by the
+  same inventory the log redaction reads; the notes-remote token is deliberately outside it, so
+  `push` still authenticates. (`kg/git_submitter.py`, `core/logging.py`)
+- **Every pod mounted an unused Kubernetes API token.** No component calls the API, so
+  `automountServiceAccountToken: false` is now set on the ServiceAccount; Entra workload identity is
+  untouched (it uses a federated token, not the mount). (`deploy/helm/chemclaw`)
+- **Both delivery pipelines interpolated free-text parameters into `sh`** (CWE-78): a release
+  parameter carrying a shell metacharacter ran on the Jenkins agent. Each pipeline gained a
+  first `Validate parameters` stage that rejects any free-text parameter (and each malformed
+  `MCP_DIGESTS` line) outside a conservative allowlist, before any `sh` runs. (`Jenkinsfile`,
+  `deploy/jenkins/Jenkinsfile.release`)
 
 ## Verified sound (checked, not assumed — do not "fix" these)
 - No SQL injection anywhere (~150 execution sites; full-text uses `websearch_to_tsquery` as a bound
@@ -70,6 +88,15 @@ companion repos carry their own.
   PR-gate's git path is injection-safe (slug validation + `--` + resolve-after-materialize). The
   audit trail cannot be skipped and its actor is not model-writable. `hmac.compare_digest` at every
   auth boundary. No `verify=False` anywhere.
+- **The prompt-injection envelope (`agent/framing.py`) is sound.** The authoritative tag is a
+  per-deployment HMAC nonce (or per-process random) content cannot guess, and `_defang` neutralises
+  every ASCII spelling of the tag *and* its invisible-character obfuscations, in both the content
+  and the id channels. A homoglyph or fullwidth lookalike is not the authoritative tag, so it cannot
+  close the real envelope — the design honours only the exact nonce'd tag.
+- **The chart's templated `CHANGE-ME` secret is a deliberate non-functional sentinel**, gated on
+  `secrets.create` (a dev convenience; production supplies values via ExternalSecret/SealedSecret,
+  `create=false`). A random placeholder would be *worse* — it would let a mis-set deployment run
+  with a silent, rotating secret instead of failing visibly. Left as is.
 
 ## Companion repos (summary; see each repo's own review)
 - **Chemclaw3-mcp:** egress-guard bypasses closed (`_socket`, the `.localhost` suffix, reverse-DNS,
