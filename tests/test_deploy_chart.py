@@ -1471,6 +1471,40 @@ def test_every_action_is_pinned_to_a_commit_not_a_tag() -> None:
     assert not unpinned, f"actions referenced by a mutable tag: {unpinned}"
 
 
+def test_the_mutation_run_is_scheduled_and_has_a_database_to_run_against() -> None:
+    """The two properties of `mutants.yml` whose loss is silent, and one of them manufactures a lie.
+
+    The schedule is the whole point: `make mutants` sat in the `Makefile` for months with nothing
+    running it, so the seven invariant-bearing modules had a mutation control that had executed once
+    (`D-2026-08-27-a-survivor-is-not-a-failing-build`).
+
+    The Postgres service is the subtler half. Six of the eighteen files in
+    `pytest_add_cli_args_test_selection` gate on `tests/pg.py::migrated_db_or_skip`, so without a
+    database they skip and still report green — and every mutant in `science/calc/store.py` and
+    `agent/audit_store.py` is then scored SURVIVED for a reason that has nothing to do with the
+    mutation. Dropping the service would not break the job; it would make it report invented
+    survivors in two of the seven modules it exists for, which is worse than not running it.
+    """
+    document: Any = yaml.safe_load(
+        (DEPLOY.parent / ".github" / "workflows" / "mutants.yml").read_text()
+    )
+    # `on` is YAML 1.1's boolean `True` once parsed, which is why this reads oddly.
+    triggers = document[True]
+    assert triggers.get("schedule"), "mutants.yml has no schedule; it is a target nobody runs again"
+
+    job = document["jobs"]["mutants"]
+    assert "postgres" in job.get("services", {}), (
+        "the mutation job has no Postgres service, so the six database-backed test files in "
+        "`pytest_add_cli_args_test_selection` skip and their mutants are scored as survivors"
+    )
+    assert "CHEMCLAW_POSTGRES_DSN" in job.get("env", {}), (
+        "the mutation job provisions Postgres and does not point the suite at it"
+    )
+    assert any("db-migrate" in step.get("run", "") for step in job["steps"]), (
+        "the mutation job never migrates the database it provisions"
+    )
+
+
 def test_every_downloaded_binary_is_checksummed_before_it_runs() -> None:
     """A release asset is mutable in a way a git tag is not, and both of these execute as root.
 

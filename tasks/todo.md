@@ -1,99 +1,226 @@
-# Logging and monitoring review — 2026-08-27
+# Blind-spot remediation — 22 findings across four repositories
 
-## What this was
+Source: a 46-agent audit (4 repo maps → 10 dimension hunts → 30 adversarial verifications →
+synthesis). 31 candidates raised, 8 dropped as already tracked in an ADR/BACKLOG/DEFERRED, 1
+dropped on verification, **22 confirmed**. Findings are numbered BS-01…BS-22 in the report.
 
-A deep review of logging and monitoring across all three repositories, against a stated goal that is
-*not* GxP: **no audit trail is required**, but every task must be elaborately logged and monitoring
-must be good enough to identify issues in routine operation. Ten parallel review teams, each given
-one surface and told to measure rather than read. Their evidence is what every item below cites.
+Four pull requests, one per repository, each merged when its own CI is green.
 
-The finding that frames the rest: **this system's observability was built to prove things and not to
-diagnose them.** The audit trail is a good forensic record; the metric registry is unusually
-disciplined (declared labels, a cardinality cap, a static test in both directions). What neither
-could answer is "what is wrong right now, and where" — because the surfaces that carry that answer
-were either shaped so they could not hold it, or were never wired at all.
+## The pattern the audit found
 
-Three measurements make the point better than any summary:
+Controls asserted in prose, a docstring, or a one-time manual run, never mechanically re-checked.
+Every fix below either makes the machine enforce the claim or deletes the claim.
 
-- A **successful durable job emits zero log records**, and a failed one emits zero first-party
-  records and moves no metric. Measured live against a real broker; Postgres held one `job_records`
-  row for two jobs, because the failing path raises before the row is written.
-- `grep perf_counter|monotonic` across `ingest/`, `retrieval/`, `memory/`, `kg/`, `publish/` and
-  `core/` returns **two hits, both a cache TTL**. Not one duration is measured in ~26,000 lines.
-- `JsonFormatter` built a fixed seven-key payload and never read `record.__dict__`, so **every
-  `extra=` field was discarded**. There was exactly one `extra=` logging call in the tree, and it
-  was the one line designed to be alerted on.
+---
 
-## Confirmed sound — not to be "fixed"
+## Chemclaw3 (core) — 12 items
 
-Recorded because a review that only lists faults invites someone to rebuild what already works.
-`ServiceMonitor`, `PodMonitor` and `PrometheusRule` all exist and are correct (16 valid alerts,
-every process role scraped, NetworkPolicy right in both directions, the worker grace-period
-invariant genuinely pinned by a test). Every metric name the runbook cites is real. The chemist's
-message text is never logged. `/healthz` returning 200 unconditionally is correct for liveness, and
-readiness deliberately not probing Temporal is documented and right. The loop cap's
-measured-not-inferred design is the model the rest of this work follows. The UI has zero stray
-`console.log` calls, its error taxonomy is careful, and its error-path test coverage is real.
+### Runtime correctness
 
-## Plan
+- [x] **BS-01 (high)** `execute_activity` bounds how long a job runs once started, never how long it
+      waits to start. 31 call sites in `durable/` set `start_to_close_timeout` and nothing else; a
+      queue nobody polls waits forever, and `ScheduleOverlapPolicy.SKIP` then silently skips every
+      later fire of that job family. `notify.py:102` already carries the fix and the measurement
+      (75 s against a 30 s timeout) — generalize it. Add `execution_timeout` to the Schedules.
+- [x] **BS-02 (high)** `_acting_as` (`durable/template_activities.py:170`) binds actor and
+      session_id and drops `correlation_id`, which `StepIdentity` already carries as a required
+      field. Every durable-job log line books `correlation_id='-'`. Same bug class the function's
+      own docstring describes for session_id.
+- [x] **BS-03 (high)** `core/mcp_session.open_session` sends only `Authorization`, so the calc
+      backend — the one server running minutes-to-hours CREST/xTB work — receives no actor,
+      session, correlation or `traceparent`. `connectors/identity.turn_headers()` already builds
+      exactly the right dict.
 
-- [x] Ten review teams, one per surface; findings in the session scratchpad.
-- [x] **Foundation** (`core/logging.py`, `core/metrics.py`) — the two chokepoint files, done first
-      and alone so the parallel workstreams only add call sites. Committed as `d7c70f6`.
-      Redaction of `extra=` deliberately landed *before* the formatter began publishing it: the
-      other order opens a leak, and a handler whose format string referenced an extra was measured
-      printing a DSN with its password.
-- [x] **Front door** — access log, request-scoped correlation, RED metrics, the turn record, and the
-      `DetachableTurn` hang (the only correctness defect the review found: `_DONE` discarded when
-      the queue is full, reproduced at n=256 and n=512, no hang after across n=250..519).
-- [x] **Agent layer** — refusals distinguishable from crashes, an LLM error taxonomy, the tool span
-      that reported UNSET on every returned failure, `plan_step` on the trail.
-- [x] **Durable layer** — a worker interceptor binding the ambient trio and emitting lifecycle
-      records, job outcome counters, Temporal SDK metrics, the trace that stopped dead at every job.
-      Measured before and after: 0 first-party log records for a job, then 16.
-- [x] **Data paths** — sync run records, ingest lag, retrieval latency and *surviving* chunks,
-      embedding and database instrumentation, the outbox backlog formula that was wrong three ways.
-- [x] **Deploy** — dashboards, Alertmanager routing, the undocumented OpenShift prerequisite that
-      makes the whole stack inert, `up`/`absent` alerts, and the connector probes that SIGKILL a
-      cold-starting pod after 30 s. 16 alerts to 38.
-- [x] **Chemclaw3-mcp** — a log configuration the fleet actually owns, per-tool metrics, an error id,
-      `servers/calc` instrumentation, the silent egress guard, a real readiness check.
-- [x] **Chemclaw3_ui** — correlation read-back, a client logger, a BFF access log, and the four
-      silent failure paths. 548 tests to 602.
-- [ ] Verify `make lint type test` green in each repo; PR and merge per repo.
+### Resilience
+
+- [x] **BS-18 (medium)** No circuit breaker: the per-turn connector connect path never consults the
+      readiness state `/readyz` already computes, so every turn pays the full connect timeout
+      against a connector known to be down.
+- [x] **BS-07 (medium)** No admission control on the calc backend. Worker concurrency is capped per
+      worker; replica count multiplies it against one shared pod. The fleet-ceiling check already
+      exists for LLM turns and the Postgres pool — extend it, don't invent a new mechanism.
+
+### Enforcement
+
+- [x] **BS-04 (high)** The control keeping `manifests-internal` (`mount: backend`) out of the
+      agent-facing connector surface is evidenced by a pasted error transcript in a docstring.
+      Assert it: load the real manifest text and prove `ConnectorManifest` refuses it.
+- [x] **BS-16 (medium)** `make mutants` is excluded from `ci` with no schedule, so the seven
+      invariant-bearing modules have no automated mutation backstop. Add a scheduled job.
+- [x] **BS-08 (low, core half)** Port registry: `bo` sits at 8816, outside the range Chemclaw3-mcp
+      documents as core's. Make the boundary checkable rather than narrated.
+
+### Documentation that has outlived its subject
+
+- [x] **BS-13 (medium)** `values.yaml` calls the unset `framing_envelope_secret` fallback
+      "predictable"; it is `secrets.token_hex(8)` — per-process random. The real failure is silent
+      envelope mismatch across restarts and replicas, which is worse than what the comment says.
+- [x] **BS-11 (low)** BACKLOG row for the `CalculationKey` collision is stale — closed by Field
+      patterns in #248, a lighter fix than the row proposes. Delete it (repo rule: same commit).
+- [x] **BS-12 (low)** BACKLOG row for the two unreachable chart credentials is stale — both are in
+      `secrets.optionalKeys` now. Delete it.
+- [x] **BS-10 (low)** `connectors/README.md` uses "chem has only a server" as its example; chem's
+      server moved to Chemclaw3-mcp and the bundle now has none.
+
+---
+
+## Chemclaw3-mcp — 5 items
+
+- [ ] **BS-05 (high)** No `pip-audit` step and no Dependabot. Core proved this pattern out after it
+      caught real CVEs.
+- [ ] **BS-14 (medium)** GitHub Actions on floating `@v4`/`@v5` tags. Core SHA-pins every action
+      with a `# vX.Y.Z` comment, and Dependabot keeps the pins current — adopt both halves.
+- [ ] **BS-17 (medium)** Zero OpenTelemetry instrumentation, so the `traceparent` core sends is
+      received and discarded. Either continue the trace in `mcp_server_kit.connector_app` or stop
+      claiming universal trace continuity. (Prefer continuing it — the header already arrives.)
+- [ ] **BS-07 (medium, fleet half)** `servers/calc` offloads every heavy primitive through a bare
+      `asyncio.to_thread` with no bound, so aggregate load is whatever the callers send.
+- [ ] **BS-08 (low, fleet half)** The documented port block is wrong about core's range and no test
+      checks it.
+
+---
+
+## Chemclaw3_ui — 8 items
+
+- [ ] **BS-06 (high impact)** `Composer.tsx:845` sends on Enter with no `isComposing` guard, so
+      committing a CJK candidate submits mid-composition. One-line fix, real user segment blocked.
+- [ ] **BS-19 (medium)** `errors.ts:92` maps every 429 to a terminal, non-retryable
+      `budget_exhausted`, and nothing reads `Retry-After` — collapsing a transient rate limit into
+      a permanent budget cap. The same conflation was already fixed for SSE events at `errors.ts:114`.
+- [ ] **BS-20 (medium)** `MAX_MESSAGE_CHARS` is a compile-time copy of an ENV-tunable backend
+      setting. The RuntimeConfig bridge that would carry it already exists for `authMode`.
+- [ ] **BS-21 (medium)** The structure sketcher has no accessible keyboard path and, unlike 19 other
+      a11y decisions in this codebase, the gap is nowhere acknowledged. Document the SMILES route as
+      the deliberate alternative and cover it.
+- [ ] **BS-22 (low)** Scientific values render through bare `.toLocaleString()`, so a pKa reads
+      `1,234.5` or `1.234,5` by browser locale. The CSV path already gets this right.
+- [ ] **BS-09 (medium)** README and `server/proxy.ts` still describe "disconnect cancels the turn",
+      superseded by `D-2026-08-27-a-disconnect-is-a-detach-not-a-stop`.
+- [ ] **BS-05 (high)** No `npm audit` gate and no Dependabot.
+- [ ] **BS-14 (medium)** Actions on floating tags.
+
+---
+
+## Chemclaw3_mock — 2 items
+
+- [ ] **BS-15 (medium)** The mock Entra tenant mints one key at import with no way to inject an
+      outage, a malformed body, or a rotation — while core's `test_entra_end_to_end.py` calls it
+      "the companion piece" for exactly those three behaviours. Add the fault injection, or correct
+      the claim. (Prefer adding it: the live lane is where those paths are otherwise never run.)
+- [ ] **BS-05 (high)** No dependency scanning of any kind.
+
+---
+
+## Verification bar
+
+Per repo, before its PR is opened:
+
+- `make lint type test` green in core (Docker up, so the ~216 Postgres-backed tests actually run —
+  a green run that skipped them is not evidence); `make check` in Chemclaw3-mcp; the repo's own
+  gate elsewhere. Report what was skipped, always.
+- Every behavioural fix carries a test that fails without it. A fix whose only evidence is that the
+  suite still passes has not been shown to do anything.
+- An ADR for each decision that is a design choice rather than a repair: BS-01, BS-03, BS-07,
+  BS-18, and the BS-15 posture call.
 
 ## Review
 
-**What the parallel teams cost, and what it bought.** Seven workstreams writing concurrently found
-things a serial pass would not have: the durable team's fix started writing `job_records` rows for
-failed jobs, which silently made the front door's `_recorded_status` *wrong* — it hardcoded
-`"completed"` on reasoning that had just stopped being true, so a failed job whose Temporal history
-aged out would have reported as completed with an empty summary. That is worse than the silence it
-replaced, and it was caught only because the team that caused it flagged its own hand-off.
+**Chemclaw3, BS-01/02/03 (2026-08-27).** All three fixed, each with a test that was run against the
+unfixed code first. Three ADRs:
+`D-2026-08-27-a-start-to-close-timeout-does-not-bound-the-wait`,
+`D-2026-08-27-a-step-runs-under-the-correlation-id-it-was-launched-with`,
+`D-2026-08-27-the-backend-is-told-who-is-asking`.
 
-The cost was real too: two teams claimed migration `059` (the rule is tested, and `037`/`043` are
-grandfathered by name rather than tolerated), one team's `git stash` briefly swept every other
-team's uncommitted work, and three template tests went stale the moment `refused` became a fourth
-audit outcome. All recovered; none silent.
+- **BS-01.** One shared `queue_wait_timeout()` (`durable/publish.py`) passed as
+  `schedule_to_start_timeout` at all 30 unbounded dispatched-activity call sites; `notify.py`'s
+  stricter `schedule_to_close` stays. **Schedule-to-start, not schedule-to-close**: the latter caps
+  every attempt together and would have deleted the retry budget everywhere. Measured on the test
+  server: a ScheduleToStart timeout is *not* retried (3 attempts, 10 s bound → one failure at
+  10.028 s), and before the change the same workflow against an unserved queue was still running
+  when the test was killed at 90 s. Schedules gained `execution_timeout`.
+- **BS-02.** `_acting_as` now binds the correlation id too. **The finding's premise was partly
+  wrong and the test says so**: audit rows were *not* affected (`agent/audit.py` falls back to the
+  id each step activity passes explicitly, so an audit-row test passes with the fix removed). The
+  real victims are the ambient's readers — log lines, `ambient_provenance` on PR-gated proposals,
+  and `ConnectorJobInput.correlation_id` for jobs a template launches. `memory_jobs` and
+  `report_workflow` have no correlation id available to bind; the report half is a new BACKLOG row
+  rather than an invented id. *#258's `durable/interceptor.py` reaches the same end more widely* —
+  measured against the real step inputs it binds all four ambients around every activity — so on a
+  worker `_acting_as` is now redundant in full, not just in the third ambient. It is kept because
+  neutering it fails two tests that prove a step cannot run a tool its requester could not run, and
+  those call the activity directly; collapsing the two is its own change, with a BACKLOG row.
+- **BS-03.** *Half of this was reached first by #258, and that half is main's.* `open_session`
+  takes a `request_hook` and `calc_session` supplies
+  `connectors.identity.turn_identity_hook(calc_server_url)` — the *same* hook the connector
+  registry installs, so the origin-strip guard stays one control. This branch had built a second,
+  locally defined hook over a shared `core/http.same_origin`; both are dropped in the merge
+  (`same_origin` had one caller left and a docstring naming two). What survived is the half #258
+  did not find: the durable path had *no ambient identity to send at all*, because
+  `CalcJobWorkflow` never read the memo core already sets. It reads it now and `_acting_for` stamps
+  it for the whole dispatch, which is what the hook then reads. The reaction labeller stays
+  anonymous — `ingest` may not import `connectors` — and main carries its own BACKLOG row for it.
 
-**Three things measurement overturned.**
+**Chemclaw3, BS-18/07 (2026-08-27, resilience).** Both fixed, each with a test run against the
+unfixed tree first. Two ADRs:
+`D-2026-08-27-the-breaker-is-the-readiness-verdict-already-taken`,
+`D-2026-08-27-a-per-worker-cap-is-not-a-backend-ceiling`.
 
-1. I recorded the duplicate migration number as "not a defect, renumbering would invent a rule".
-   `test_no_two_migrations_claim_one_number` exists. The rule is real and the renumber was right.
-2. A full-suite abort was attributed to machine contention. It was not: the same crash reproduced
-   under a 6x timeout. `test_the_logger_sweep_survives_concurrent_getlogger` created a *unique*
-   logger per loop on four threads while sweeping `loggerDict` 2,000 times — quadratic against an
-   unbounded dict, over a million loggers by iteration 494, never reaching 2,000.
-3. Fixing that by bounding the churn made it finish in half a second and **stop catching the
-   defect** — reintroducing the live-view iteration still passed. Fast and vacuous is worse than
-   slow and meaningful, so the shipped version provokes the mutation from inside the iteration and
-   was verified in both directions.
+- **BS-18.** The premise held exactly: `probe_connectors` had three consumers and the open path was
+  none of them, and the two halves could not see each other because the snapshot lives on
+  `app.state`. So the fix is a reader, not a mechanism — `connectors/reachability.py` is one dict,
+  a recorder and a predicate, in its own module only because `health → registry → transport` would
+  otherwise be a cycle. **Skip the dial outright rather than shrink the timeout**: a shrunk bound
+  still pays a handshake attempt per connector per turn and needs a second underivable number.
+  Recovery is two independent paths (the sweep records `healthy`; a verdict expires after
+  `connector_breaker_window_seconds`), because a breaker with one path back is an outage amplifier.
+  What a turn *reports* is unchanged — the degradation event and the counter still fire, since how
+  we found out is not the chemist's business.
+- **BS-07.** Extended the existing shape rather than inventing a third: same `Settings` validator,
+  same self-disabling `0`, same derived chart factor (`chemclaw.calcWorkerProcesses`). **The
+  runtime gauge had to be live rather than a configured capacity**, and that is a finding rather
+  than a preference: the `calc` bundle's own MCP server pods dispatch to the same backend straight
+  from a tool call with no per-process cap, so no product covers them —
+  `chemclaw_calc_requests_in_flight` counts held sessions and is the only number that sees both
+  halves. The shipped ceiling is `0` (inert) deliberately: it describes a pod in another release
+  whose CPU this chart cannot see, and a number invented here would be a guess shaped like a
+  statement. Settings live in `temporal.py`, not `calculators.py` — the calculation server reads
+  that section's names under the same env prefix.
 
-**What was declined.** A TTL memo on the credential inventory (it failed three tests encoding a real
-invariant: a value becoming secret mid-process must be redacted on the *next* line). Identity
-headers on the labelling client (`ingest -> connectors` is not a permitted edge; the question of
-where a non-connector MCP client's identity stamping belongs is in `BACKLOG.md`). `model_calls` and
-`compactions` columns on `turn_costs` (no in-lane producer, and a column nothing can write is the
-D-2026-08-26 failure). `shed`/`refused_budget`/`conflict` as turn outcomes (they precede
-`turns_started_total`, so they would double-count and break the started/finished pairing).
+**Chemclaw3, BS-04/16/08/13/11/12/10 (2026-08-27, claims and their checkability).** Six fixed, one
+premise disputed. One ADR: `D-2026-08-27-a-survivor-is-not-a-failing-build`.
 
+- **BS-04.** The control is real and now has a regression test that fails without it: a literal copy
+  of `manifests-internal/calc/connector.yaml`'s shape is loaded through the *loader*
+  (`registry.discovered`), not just the model, because the loader is what a deployment actually
+  runs, and the assertion is that the error names both the key and the file. Verified by relaxing
+  `ConnectorManifest`'s `extra="forbid"` to `"ignore"` — the test then reports DID NOT RAISE.
+  **The second half of the finding is disputed**: this repository's `CLAUDE.md` contains no pasted
+  error transcript, and neither does anything under `src/`, `docs/` or `tests/`. `grep -rn
+  'manifests-internal\|mount: backend\|Extra inputs are not permitted'` over the tree returns one
+  hit, in an archived audit table about an unrelated `.env` field. The transcript is in the *other*
+  repository's manifest comment, which is another lane's.
+- **BS-16.** The measurement is what shaped this, and it contradicted the obvious design twice. A
+  gate on `no_tests == 0` and `timeout == 0` was written first, from `D-2026-08-08`'s numbers — and
+  over all seven modules this checkout has **34 and 2**, so it would have failed on its first fire.
+  Then the same commit run twice gave 618 and 634 killed of 825 (74.9% / 76.8%): sixteen mutants
+  changed verdict with no edit between the runs, so the survivor set is not reproducible to better
+  than two points and the floor is sized against that spread rather than tucked under the best run.
+  The job is cheap (2m57s warm, 3m45s cold), needs **real Postgres** or it manufactures survivors in
+  two of the seven modules, and files a labelled issue on failure rather than trusting the
+  scheduled-workflow email.
+- **BS-08.** The real range is **8810–8819**: `molfp` 8811, `rxnfp` 8812, `calc` 8815, `bo` 8816,
+  and the `make connectors` composite on 8810. `chem` (8858) and `safety` (8859) are outside it on
+  purpose — their servers are `Chemclaw3-mcp`'s, so their addresses come from the fleet's registry.
+  `tests/test_connector_ports.py` derives the set from the shipped manifests and asserts both
+  directions of the disjointness; verified by moving `bo` to 8880 and `chem` to 8813, which fails
+  one test each.
+- **BS-13.** Both copies of the wrong claim corrected. The unset fallback is `secrets.token_hex(8)`,
+  per process — so the failure is envelopes that stop matching across a restart or between replicas,
+  not a guessable tag, and a durable session's oldest retrieved content is then read as prose.
+- **BS-11.** Deleted. The `Field` patterns from #248 make the flat form a bijection: `calc_type`
+  bars `@` and `:`, both hashes bar `:`, and `calc_version` is deliberately left free of both
+  (`esol-delaney@2004` needs the `@`). `tests/test_store.py` parses the flat form back to prove it.
+  The `stable_hash` rekeying the row proposed was considered and rejected in that commit.
+- **BS-12.** Deleted; both `llmFallbackApiKey` and `temporalApiKey` are under `secrets.optionalKeys`.
+- **BS-10.** `molfp` is the bundle that genuinely has only a server today; `chem` moved to the next
+  paragraph, which is where the "hosted elsewhere" shape already lives.

@@ -67,6 +67,26 @@ class ConnectorSettings(BaseSettings):
     # every turn — the unbounded form made teardown hostage to a session that would not unwind.
     connector_teardown_timeout_seconds: float = Field(default=5.0, gt=0)
 
+    # How long a verdict of "this connector is unreachable" is trusted, so a turn does not pay the
+    # open bound above against a host already known to be down
+    # (`D-2026-08-27-the-breaker-is-the-readiness-verdict-already-taken`).
+    #
+    # The state this reads is not new: `connectors.health` probes every enabled bundle at startup
+    # and again on every `/readyz`, and until now the per-turn open path ignored it entirely — so a
+    # dark connector cost `connector_open_timeout_seconds` on *every* turn for the whole outage,
+    # with no backoff, while the answer was already sitting in the readiness snapshot.
+    #
+    # 30 s, and the number is a recovery bound rather than a savings one. Recovery has two paths and
+    # this bounds the slower: the readiness sweep re-probes a recovered connector and records it
+    # healthy, which readmits it on the next turn (≤ one kubelet interval plus
+    # `service_readiness_cache_seconds`), and a deployment whose sweep does not run — the CLI, a
+    # template activity in a worker — falls back to this window expiring and dialling for real. A
+    # breaker with no recovery path amplifies the outage it was added for, so the expiry is the
+    # half that must not be omitted.
+    #
+    # 0 disables it: every turn dials every connector, which is the behaviour before this existed.
+    connector_breaker_window_seconds: float = Field(default=30.0, ge=0)
+
     # Whole-run ceiling for one connector job's child workflow (`ConnectorJobWorkflow`).
     # Generous, because a connector job is by definition the long-running kind, but bounded so a
     # wedged connector workflow eventually fails instead of pinning a run forever. Deliberately

@@ -16,6 +16,7 @@ import pytest
 from temporalio.client import (
     Client,
     Schedule,
+    ScheduleActionStartWorkflow,
     ScheduleAlreadyRunningError,
     ScheduleOverlapPolicy,
     ScheduleState,
@@ -254,6 +255,22 @@ def test_every_schedule_skips_an_overrunning_run(monkeypatch: pytest.MonkeyPatch
         schedule = _build_schedule(job)
         assert schedule.policy is not None
         assert schedule.policy.overlap is ScheduleOverlapPolicy.SKIP, job.schedule_id
+
+
+def test_every_schedule_bounds_one_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A scheduled run has an execution ceiling, because SKIP makes an endless one invisible.
+
+    The pair with the test above is the point: `SKIP` is right, and it is exactly what turns a run
+    that never ends into a job family that silently stops running — every subsequent fire is
+    skipped, and a skipped fire is an error nowhere. The ceiling is what makes that state a failed
+    run instead.
+    """
+    for job in planned_schedules():
+        action = _build_schedule(job).action
+        assert isinstance(action, ScheduleActionStartWorkflow)
+        assert action.execution_timeout == timedelta(
+            seconds=settings.schedule_run_timeout_seconds
+        ), job.schedule_id
 
 
 def test_co_scheduled_jobs_are_spread_deterministically() -> None:

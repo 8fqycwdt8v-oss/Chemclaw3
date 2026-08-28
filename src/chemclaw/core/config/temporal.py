@@ -58,6 +58,45 @@ class TemporalSettings(BaseSettings):
     # activities are longer than this states its own budget in its own workflow, as `calc` does.
     activity_timeout_seconds: float = Field(default=30.0, gt=0)
 
+    # How long an activity task may sit on a queue *before a worker picks it up*, as
+    # `schedule_to_start_timeout` on every core activity (`durable/publish.py::queue_wait_timeout`).
+    #
+    # `start_to_close_timeout` does not bound this and reading it as if it did is what left every
+    # durable job unbounded: it starts counting at the *first attempt*, so a task nobody polls — the
+    # background fleet scaled to zero, a rolling update, a queue named in config but served by no
+    # pod — waits forever. `durable/notify.py` measured that shape (a workflow still RUNNING after
+    # 75 s against a 30 s start-to-close) for one call; it is a property of the timeout, not of that
+    # call.
+    #
+    # **Measured against the test server, because the retry interaction decides whether this is
+    # safe:** a ScheduleToStart timeout is *not* retried. An activity with `maximum_attempts=3` and
+    # a 10 s bound against an unserved queue failed once, at 10.028 s — so this bound converts an
+    # infinite wait into one loud failure and leaves `start_to_close` and the retry policy to mean
+    # exactly what they meant before. That is why it is this timeout rather than
+    # `schedule_to_close_timeout`, which would have capped every attempt *together* and silently
+    # deleted the retries at 31 call sites.
+    #
+    # An hour, deliberately far above any healthy queue delay: a wait on `background-jobs` is
+    # ordinary backpressure — eight concurrent slots, activities that hold one for up to a quarter
+    # of an hour — and turning backpressure into a non-retryable failure would be worse than the
+    # wedge this exists to end. What an hour cannot be is normal, so a run that hits it is a fleet
+    # fault and now says so.
+    activity_queue_wait_seconds: float = Field(default=3600.0, gt=0)
+
+    # Execution ceiling on one *scheduled* run (`durable/schedules.py`).
+    #
+    # Every Schedule here is `ScheduleOverlapPolicy.SKIP`, which is right — a re-scan that overruns
+    # its interval must finish rather than queue a redundant twin — and is exactly why a run that
+    # never finishes is worse than a failed one: it skips every subsequent fire of that job family,
+    # indefinitely, and a skipped fire is not an error anywhere. This is the backstop that turns
+    # "silently stopped running" into a failed run visible in `describe_schedules`.
+    #
+    # A day, because none of these jobs legitimately runs for one and each is resumable: the ELN and
+    # corpus syncs are cursored, retention and the reindex are idempotent, the digest advances a
+    # watermark. So a terminated run loses at most the chunk in flight, and the next fire picks it
+    # up — which is what makes a ceiling safe to state at all.
+    schedule_run_timeout_seconds: float = Field(default=86400.0, gt=0)
+
     # Bound on retries for ordinary activities under the shared bad-data retry policy
     # (`workflows.publish.BAD_DATA_RETRY`). Bad data is non-retryable by type; this caps the
     # *transient* retries so an unclassified deterministic failure (a bug, not a network blip)
@@ -130,6 +169,41 @@ class TemporalSettings(BaseSettings):
     # 60 s: comfortably above the ~15 s beat it implies and far below every start-to-close budget it
     # sits under, so a dead worker is detected in a minute rather than in ten.
     background_activity_heartbeat_timeout_seconds: float = Field(default=60.0, gt=0)
+
+    # **The two halves of the calculation backend's admission budget**
+    # (`D-2026-08-27-a-per-worker-cap-is-not-a-backend-ceiling`). Same shape as the fleet turn
+    # ceiling and the Postgres connection budget one subject over, and for the same reason: the cap
+    # that exists is per *process* — `worker_max_concurrent_activities` — while the thing being
+    # protected is a single shared pod, so `replicas × that cap` is what `servers/calc` actually
+    # sees and nothing computed it. Scaling the `calc` worker, an ordinary operational lever,
+    # multiplied concurrent CPU-bound load on that pod invisibly; `OMP_NUM_THREADS=1` is pinned
+    # there against intra-run contention, so the surplus arrives as thrashing, which trips
+    # heartbeat timeouts, whose retries land back on the same overloaded pod.
+    #
+    # **Declared here rather than in `calculators.py`**, beside the per-process cap they multiply:
+    # this is a budget for the *worker fleet*, and `tests/test_config.py` refuses a calculator
+    # field whose only reader is a config validator — for the sharp reason that the calculation
+    # server reads that section's names under the same env prefix.
+    #
+    # `calc_fleet_worker_processes` is how many worker processes may run `calc` activities at once
+    # — the chart derives it from that bundle's `workerReplicas`, so it is the same number
+    # Kubernetes obeys rather than a second copy of the topology. **0 is legal and means what it
+    # says**: a release with no `calc` worker Deployment dispatches nothing durably, and rendering
+    # a floor of 1 there would refuse a deployment over calculations it never makes.
+    #
+    # `calc_backend_max_concurrent_requests` is what that pod will serve, and it is a **provisioning
+    # statement**, not a preference: it belongs to the server's own admission semaphore
+    # (`Chemclaw3-mcp` `servers/calc`) and is declared here so a deployment that exceeds it fails
+    # `Settings()` in every pod, naming both sides, instead of finding out under load. 0 declares no
+    # ceiling, which makes the startup check and the alert inert — the same self-disabling
+    # convention the other two budgets use, and the reason a dev run needs neither.
+    #
+    # The check covers the *durable* half only, which is the half that can be derived. The `calc`
+    # bundle's own MCP server pods dispatch to the same backend from a tool call, with no
+    # per-process cap to multiply, so the runtime pair — `sum(chemclaw_calc_requests_in_flight)`
+    # against `chemclaw_calc_backend_max_concurrent_requests` — is what sees both.
+    calc_fleet_worker_processes: int = Field(default=1, ge=0)
+    calc_backend_max_concurrent_requests: int = Field(default=0, ge=0)
 
     @model_validator(mode="after")
     def _temporal_mtls_is_complete(self) -> Self:

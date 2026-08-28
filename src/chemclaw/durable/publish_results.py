@@ -32,7 +32,7 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.publish.record import ResultRecord
     from chemclaw.publish.registry import ResultSinkError, build, enabled
 
-from chemclaw.durable.publish import BAD_DATA_RETRY
+from chemclaw.durable.publish import BAD_DATA_RETRY, queue_wait_timeout
 
 logger = logging.getLogger(__name__)
 
@@ -235,6 +235,7 @@ class PublishResultsWorkflow:
                 seconds=settings.result_publish_timeout_seconds
                 * max(1, len(settings.result_sink_list))
             ),
+            schedule_to_start_timeout=queue_wait_timeout(),
             # Without a heartbeat timeout the beats the activity now sends do nothing for failure
             # detection, and the budget above is the longest of the three core background
             # activities — `result_publish_timeout_seconds` times the number of sinks. A worker

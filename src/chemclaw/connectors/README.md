@@ -18,9 +18,11 @@ directory; it is not editing core.
 The queue is deliberately absent from the manifest: it is `connector-<name>`, derived at dispatch,
 because a bundle's worker serves only what the bundle's own modules registered (D-150).
 
-**The variance is information.** `calc` has workflows, activities and a worker; `chem` has only a
+**The variance is information.** `calc` has workflows, activities and a worker; `molfp` has only a
 server. That says which capabilities own long-running work, so do not flatten it into a uniform
-template.
+template. (`chem` used to be the second half of that sentence and is now the *next* paragraph's
+example instead: its server moved to `Chemclaw3-mcp` wholesale, so the bundle here has neither
+`server/` file — which is a third shape, not a smaller version of the second.)
 
 **A bundle whose server somebody else runs has neither `server/` file.** It declares an `endpoint:`
 like any other, and the deployment says the address is not ours to render

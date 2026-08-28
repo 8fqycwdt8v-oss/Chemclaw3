@@ -27,6 +27,16 @@ A failed open leaves the session not-connected and its tool set empty, which giv
 semantics wanted: the connector contributes no tools this turn, the turn proceeds without them, and
 the *next* turn tries again — so a connector that comes back needs no restart to be picked up.
 
+**"The next turn tries again" was every turn, for the whole outage, at full price**
+(`D-2026-08-27-the-breaker-is-the-readiness-verdict-already-taken`). Degrading is the right
+behaviour and paying `connector_open_timeout_seconds` to rediscover it is not: this process already
+knows, because `connectors.health` probes the same fleet at startup and on every `/readyz`, and
+because the previous turn's own failed open is a verdict too. So the open consults
+`connectors.reachability` first and skips the dial while a recent verdict says the host is down.
+The connector is still reported unreachable for that turn — the degradation notice, the log line
+and `chemclaw_connectors_unreachable_total` are unchanged, because what a chemist and an operator
+must be told does not depend on how we found out.
+
 **And a call that times out is cancelled rather than merely abandoned.** The manifest's
 `request_timeout` bounds this side's wait; on its own it bounds nothing on the connector's, because
 the SDK raises locally and sends no `notifications/cancelled` while this session stays open for the
@@ -45,6 +55,7 @@ from langchain_mcp_adapters.sessions import Connection, create_session
 from langchain_mcp_adapters.tools import load_mcp_tools
 from mcp.shared.exceptions import McpError
 
+from chemclaw.connectors.reachability import recently_unreachable, record_reachability
 from chemclaw.core.config import settings
 from chemclaw.core.mcp_session import cancel_on_timeout
 
@@ -157,7 +168,9 @@ class HeldConnectorSession:
     connect timeouts before the model is called).
 
     A connector that fails to open leaves `tools` empty and its name in `unreachable`: the turn
-    proceeds without it and the next turn tries again.
+    proceeds without it and the next turn tries again — unless a verdict from the last
+    `connector_breaker_window_seconds` already says it is down, in which case the dial is skipped
+    and the same outcome is reached for free.
     """
 
     def __init__(self, spec: ConnectorSpec) -> None:
@@ -188,13 +201,31 @@ class HeldConnectorSession:
         manifest sizes for the slowest tool call (600 s for `calc`). A connector that accepts the
         socket and then never finishes its handshake used to hold every turn for that full read
         bound before the first token; past this bound it is an ordinary unreachable connector.
+
+        **And the bound is not paid at all against a host already known to be down.** The open's
+        outcome is recorded either way, so a dark connector costs one turn its open timeout rather
+        than every turn of the outage, and a connector that comes back is readmitted by the next
+        readiness sweep or by that verdict expiring (`connectors.reachability`).
         """
+        if recently_unreachable(self._spec.name):
+            # Not `absorb_connect_failure`: nothing was attempted, and a line saying the connector
+            # is unreachable "(TimeoutError: …)" would describe a dial that never happened.
+            # `connected` stays False because `_task` is None, so the caller reports and counts
+            # this connector exactly as it reports one that was dialled and failed.
+            logger.warning(
+                "connector %s was found unreachable within the last %.0fs; not dialling it this "
+                "turn — its tools are unavailable",
+                self._spec.name,
+                settings.connector_breaker_window_seconds,
+            )
+            return []
         self._task = asyncio.create_task(self._hold(), name=f"connector:{self._spec.name}")
         try:
             async with asyncio.timeout(settings.connector_open_timeout_seconds):
                 await self._opened.wait()
         except TimeoutError as exc:
             await self._shut_down()
+            record_reachability(self._spec.name, reachable=False)
             absorb_connect_failure(self._spec.name, exc)
             return []
         except BaseException:
@@ -203,6 +234,9 @@ class HeldConnectorSession:
             # orphaned task holding an MCP session is the leak this class exists to make impossible.
             await self._shut_down()
             raise
+        # Both outcomes are recorded, and the healthy one is not an optimisation: it is what lets a
+        # connector that recovered be readmitted in a process whose readiness route never runs.
+        record_reachability(self._spec.name, reachable=self._failure is None)
         if self._failure is not None:
             absorb_connect_failure(self._spec.name, self._failure)
         return self._tools

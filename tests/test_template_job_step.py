@@ -23,6 +23,7 @@ argue about: that the run *terminates*.
 """
 
 import asyncio
+import logging
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -34,14 +35,17 @@ from temporalio import activity, workflow
 from chemclaw.agent.authz import AuthorizationError
 from chemclaw.connectors.registry import ConnectorError, enabled
 from chemclaw.core.config import settings
+from chemclaw.core.logging import ContextFilter
 from chemclaw.durable.registry import registered_activities
 from chemclaw.durable.template_activities import (
     JobStepInput,
     ResolvedJob,
     StepIdentity,
+    _acting_as,
     authorize_job_step,
 )
 from chemclaw.durable.template_job import TemplateWorkflow
+from chemclaw.kg.proposal import ambient_provenance
 
 _FIXTURE_DIR = Path(__file__).parent / "fixtures" / "connectors"
 
@@ -73,6 +77,48 @@ def _step(job: str, **arguments: object) -> JobStepInput:
         arguments=dict(arguments),
         identity=StepIdentity(actor="chemist-1", roles=[], correlation_id="template-run-1"),
     )
+
+
+def test_a_step_runs_under_the_correlation_id_its_run_was_launched_with() -> None:
+    """The third ambient `_acting_as` dropped, read through the consumers that actually read it.
+
+    `StepIdentity.correlation_id` is `min_length=1` and its comment says it ties the run's audit
+    events together; nothing stamped it, so every consumer of the *ambient* id saw none. The two
+    asserted here are the ones that hurt: `ambient_provenance` is what the PR-gate records on a note
+    a template proposes (`connectors/jobs.py` reads the same getter for the id it hands a launched
+    job), and `ContextFilter` is what puts the id on a log line — it writes `"-"` when there is
+    none, which is why a paged engineer looking at a running durable job had nothing to grep back to
+    the turn behind it. The audit trail is deliberately *not* asserted: `agent/audit.py` falls back
+    to the id each step activity passes it explicitly, so its rows were right all along and would
+    pass this test with the stamp removed.
+
+    The teardown half is asserted too, because a bracket that leaks leaks one run's identity into
+    whatever the worker picks up next.
+    """
+    identity = StepIdentity(
+        actor="chemist-1", roles=[], correlation_id="template-run-1", session_id="s-tmpl"
+    )
+    context = ContextFilter()
+
+    def _stamped() -> str:
+        """The correlation id `ContextFilter` puts on a *fresh* record right now.
+
+        A fresh record per reading, because the filter stamps with `setdefault` rather than
+        assignment (`core/logging.py`) — so re-filtering the record from inside the bracket would
+        read the id it already carries and would pass however the bracket behaved.
+        """
+        record = logging.LogRecord("t", logging.INFO, __file__, 1, "still running", None, None)
+        context.filter(record)
+        # Defaulted because the attribute is stamped by the filter, not declared on the
+        # record — an unstamped record reads `""` here and fails, which is the point.
+        return str(getattr(record, "correlation_id", ""))
+
+    with _acting_as(identity):
+        assert ambient_provenance() == ("chemist-1", "s-tmpl", "template-run-1")
+        assert _stamped() == "template-run-1"
+
+    assert ambient_provenance() == ("", "", "")
+    assert _stamped() == "-"
 
 
 def test_a_declared_job_resolves_to_its_connector_and_queue(fixture_bundle: str) -> None:

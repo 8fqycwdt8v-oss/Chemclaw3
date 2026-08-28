@@ -29,6 +29,7 @@ the hit path, so that is the one worth watching.
 """
 
 import logging
+import threading
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
@@ -49,6 +50,7 @@ from chemclaw.core.mcp_session import (
     invoke,
     open_session,
 )
+from chemclaw.core.metrics import METRICS
 from chemclaw.core.metrics_bridge import degraded
 from chemclaw.science.calc.store import (
     CALCULATION_EPOCH,
@@ -117,6 +119,40 @@ class CalcToolError(ChemclawError):
 # and the wording a chemist reads.
 
 
+#: How many sessions to the calculation server this process is holding open right now — the live
+#: half of that backend's admission budget
+#: (`D-2026-08-27-a-per-worker-cap-is-not-a-backend-ceiling`). Not a registry counter, because a
+#: gauge has to read *current* state and this has to fall on every exit path, a failed open
+#: included: a count that only came down on success would climb by one per attempt during an
+#: outage and fire the saturation alert on an idle pod.
+#:
+#: Locked rather than argued to be safe. Today every dispatcher is one event loop, so `+= 1` would
+#: be fine — but `+= 1` is three bytecodes, the argument is about which threads exist rather than
+#: about this file, and the failure it would produce is a gauge that never returns to zero, which
+#: is the exact defect the lock costs two lines to make impossible.
+_IN_FLIGHT = 0
+_IN_FLIGHT_LOCK = threading.Lock()
+
+
+def _dispatching(delta: int) -> None:
+    """Move the in-flight count by `delta`, so a scrape sees the sessions actually held."""
+    global _IN_FLIGHT
+    with _IN_FLIGHT_LOCK:
+        _IN_FLIGHT += delta
+
+
+# Bound at import, because importing this module is what makes a process able to dispatch: a `calc`
+# worker (via its activities) and that bundle's own MCP server pods both do, and neither shares the
+# other's concurrency cap. The same rule `core.db.pooling` follows for the pool gauges — a process
+# cannot acquire the resource without also acquiring its witness — and the reason those gauges were
+# missing from eleven of seventeen pods before it did.
+METRICS.bind_gauge("chemclaw_calc_requests_in_flight", lambda: float(_IN_FLIGHT))
+METRICS.bind_gauge(
+    "chemclaw_calc_backend_max_concurrent_requests",
+    lambda: float(settings.calc_backend_max_concurrent_requests),
+)
+
+
 @asynccontextmanager
 async def calc_session(timeout_seconds: float | None = None) -> AsyncIterator[ClientSession]:
     """Open one MCP session to the calculation server, and name its failures for a chemist.
@@ -132,7 +168,15 @@ async def calc_session(timeout_seconds: float | None = None) -> AsyncIterator[Cl
     client bound shorter than the server's own means the server finishes a calculation nobody is
     still waiting for. Left unset it is `calc_server_timeout_seconds`, which is right for
     everything that is not sampling.
+
+    **This is also where the backend's load is counted**, because it is the one place every remote
+    calculation passes through — `remote_call`, `remote_version` and `cached_remote` all open their
+    session here. The count is of sessions held rather than of round trips in flight, which is the
+    honest reading of what the server is being asked to hold: a session is one connection on that
+    pod for as long as the block runs, and `cached_remote` deliberately keeps one open across its
+    key lookup so a miss does not pay a second connect.
     """
+    _dispatching(+1)
     try:
         async with open_session(
             settings.calc_server_url,
@@ -167,6 +211,8 @@ async def calc_session(timeout_seconds: float | None = None) -> AsyncIterator[Cl
             "outage rather than a problem with what was asked; the same request will work once "
             "it is back."
         ) from exc
+    finally:
+        _dispatching(-1)
 
 
 async def _call(session: ClientSession, tool: str, arguments: dict[str, Any]) -> Any:

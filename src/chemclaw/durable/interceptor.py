@@ -109,7 +109,7 @@ class ActivityContext:
 
     A tiny value object rather than a tuple because four fields positionally is exactly how the
     session id and the actor got stamped by different subsets of the template step activities —
-    the drift `template_activities.stamp_identity` was written to end.
+    the drift `template_activities._acting_as` was written to end.
     """
 
     __slots__ = ("actor", "correlation_id", "roles", "session_id")
@@ -281,7 +281,7 @@ class _ObservedActivity(ActivityInboundInterceptor):
             _IN_FLIGHT -= 1
             # Unbound in the reverse order they were bound, and unconditionally: a contextvar left
             # set leaks one run's identity into whatever this worker picks up next, which is the
-            # failure `template_activities.stamp_identity` already carries a `finally` for.
+            # failure `template_activities._acting_as` already carries a `finally` for.
             if correlation_token is not None:
                 reset_current_correlation_id(correlation_token)
             reset_current_session_id(session_token)

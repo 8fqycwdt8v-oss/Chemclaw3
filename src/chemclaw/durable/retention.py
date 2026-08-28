@@ -149,7 +149,7 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.durable.heartbeat import beating
     from chemclaw.durable.registry import durable_activity, durable_workflow
 
-from chemclaw.durable.publish import BAD_DATA_RETRY
+from chemclaw.durable.publish import BAD_DATA_RETRY, queue_wait_timeout
 
 logger = logging.getLogger(__name__)
 
@@ -704,6 +704,7 @@ class RetentionWorkflow:
         return await workflow.execute_activity(
             prune_expired_rows,
             start_to_close_timeout=timedelta(seconds=settings.retention_timeout_seconds),
+            schedule_to_start_timeout=queue_wait_timeout(),
             # Without a heartbeat timeout the heartbeats the activity now sends do nothing for
             # failure detection: a worker that dies mid-sweep would be noticed only when the
             # ten-minute start-to-close budget expired. `connectors/calc/workflows.py` states the

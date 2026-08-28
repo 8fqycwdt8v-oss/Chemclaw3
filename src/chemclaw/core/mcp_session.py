@@ -58,15 +58,15 @@ from mcp.types import (
     PingRequest,
 )
 
-# How long to wait for the TCP/TLS handshake, as distinct from how long a tool may take to answer.
-# Deliberately not a config field: it is a property of "is this host there at all", the same for
-# every server, and a deployment that needs a longer one has a network problem a setting would only
-# hide. Short, because a dark server must degrade quickly.
 # An `httpx` request hook: one coroutine taking the outbound request, called on every hop of a
 # redirect chain. Named here so both this module's two seams and their callers spell one type, and
 # so the parameter reads as what it is rather than as an opaque callable.
 RequestHook = Callable[[httpx.Request], Awaitable[None]]
 
+# How long to wait for the TCP/TLS handshake, as distinct from how long a tool may take to answer.
+# Deliberately not a config field: it is a property of "is this host there at all", the same for
+# every server, and a deployment that needs a longer one has a network problem a setting would only
+# hide. Short, because a dark server must degrade quickly.
 CONNECT_TIMEOUT_SECONDS = 5.0
 
 # How much looser the HTTP read timeout is than the MCP session's own bound. The two must not be

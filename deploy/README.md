@@ -343,12 +343,24 @@ Entra `oid` cannot be a label — attribution needs a database. Neither records 
 is a deployment's own fact, so the ledger holds tokens and seconds and leaves the multiplication to
 whoever knows the numbers. Both are written only under `CHEMCLAW_SESSION_STORE=postgres`.
 
-**One alert exists because config validation can only see the shape it was handed.** The fleet's
-turn ceiling is checked at startup, but a `kubectl scale`, an HPA edited in the cluster, or a
-rollout leaving both generations up all push the live fleet past it while every pod's own
-configuration stays valid. `ChemclawFleetAboveItsTurnCeiling` compares
-`sum(chemclaw_turn_capacity)` — what the running pods actually admit — against
-`chemclaw_fleet_turn_ceiling`, and is self-disabling when no ceiling is declared.
+**A family of alerts exists because config validation can only see the shape it was handed** — no
+count here, because the one that was written said "one" while two were already deployed. Each
+fleet budget is checked at startup, and a `kubectl scale`, an HPA edited in the cluster, or a
+rollout leaving both generations up all push the live fleet past its ceiling while every pod's own
+configuration stays valid. Each alert therefore compares a *live* left-hand side against the
+declared ceiling and is self-disabling when none is declared:
+`ChemclawFleetAboveItsTurnCeiling` (`sum(chemclaw_turn_capacity)` against
+`chemclaw_fleet_turn_ceiling`), `ChemclawFleetAboveItsConnectionCeiling`
+(`sum(chemclaw_pg_pool_max_size)` against `chemclaw_pg_fleet_max_connections`), and
+`ChemclawCalcBackendOverCommitted` (`sum(chemclaw_calc_requests_in_flight)` against
+`chemclaw_calc_backend_max_concurrent_requests`).
+
+The last of those reads *held sessions* rather than a configured capacity, and the difference is
+forced rather than stylistic: two kinds of process dispatch to the calculation backend and they do
+not share a cap — a `calc` worker is bounded by `CHEMCLAW_WORKER_MAX_CONCURRENT_ACTIVITIES`, while
+that bundle's own MCP server pods dispatch straight from a tool call and are bounded by nothing
+local (`D-2026-08-27-a-per-worker-cap-is-not-a-backend-ceiling`). Its ceiling ships as `0`,
+undeclared, because it describes a pod in another release; set it to what that server admits.
 
 **Thirty-six alerts across eight groups, and five dashboards for what is left.** The rule file's own
 header names the three absences it was written against — "no PrometheusRule anywhere in the repo, no
