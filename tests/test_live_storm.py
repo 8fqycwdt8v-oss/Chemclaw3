@@ -744,27 +744,32 @@ def test_the_zero_live_model_claim_is_a_finding_rather_than_a_note() -> None:
 
 
 def test_a_shed_turn_is_not_in_the_zero_live_model_denominator() -> None:
-    """A turn refused at admission never reaches a model, so it belongs in neither side.
+    """A turn that never opened a stream never reached a model, so it is in neither side.
 
     The reconciliation's first version counted every turn `run_turn` was entered for. Family A
-    exists to shed: it holds 48 concurrent against caps of 2, 4, 8, 16 and 32. Measured on the
-    2026-08-28 run it shed 173 turns doing exactly that, and the check read `607 mock request(s)
-    served against 818 turn(s) driven` and failed on a lane where every model call really had been
+    exists to shed: it holds 48 concurrent against caps of 2, 4, 8, 16 and 32, and on the
+    2026-08-28 runs it shed 172 turns doing exactly that — so the check read `599 mock request(s)
+    served against 819 turn(s) driven` and failed on a lane where every model call really had been
     served by the mock. A floor that any admission sweep breaks is not a floor.
+
+    **Counted forwards, after two subtractions that were each wrong about a different failure.**
+    Enumerating shed *statuses* missed 503; taking any non-200 *response* missed the case the
+    sweep actually produces, where the turn times out and there is no status to test at all. The
+    numbers below are that measured run: 819 offered, 607 having opened a stream.
     """
     live_storm._turns_driven = 818
-    live_storm._turns_refused = 211
+    live_storm._turns_answered = 607
     try:
         assert live_storm.turns_driven() == 818
-        assert live_storm.turns_reaching_a_model() == 607
+        assert live_storm.turns_that_answered() == 607
         assert live_storm._mock_reconciliation(
-            served=607, turns=live_storm.turns_reaching_a_model()
+            served=607, turns=live_storm.turns_that_answered()
         ).ok
         # The offered count would have failed it, which is the regression this pins.
         assert not live_storm._mock_reconciliation(served=607, turns=live_storm.turns_driven()).ok
     finally:
         live_storm._turns_driven = 0
-        live_storm._turns_refused = 0
+        live_storm._turns_answered = 0
 
 
 def test_a_family_that_raises_does_not_take_the_whole_run_with_it() -> None:

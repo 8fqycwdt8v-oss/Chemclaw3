@@ -1392,3 +1392,29 @@ of it instead of on it.
 
 Corollary, cheap and worth doing every time: after a fix that a live observation motivated, re-run
 the live observation before committing. It cost one restart and caught a fix that did not work.
+
+## Three wrong denominators, and the shape they shared
+
+**2026-08-28, the zero-live-model reconciliation.** The check compares the mock's request counter
+against "turns this run drove". I fixed the denominator three times and was wrong three times:
+
+1. **Turns offered** — a turn shed at admission never reaches a model. Failed on any sweep.
+2. **Offered minus an enumerated set of shed statuses** (429, 409) — but `_turn_outcomes`, the
+   authority in the same file, buckets 429 **and 503**. The counter moved by zero.
+3. **Offered minus any non-200 response** — misses what family A mostly produces: turns that time
+   out with no response at all, so there is no status to test.
+4. **Turns that opened a stream** — over-counts: a turn can be answered 200, stream, and be refused
+   before a model is asked anything. Measured 121 streamed against 116 served.
+
+Every one of the first three is a **subtraction**: "everything, minus the ways it can fail." That
+phrasing needs an exhaustive list of failure modes, and I never had one — each attempt discovered a
+mode the previous had missed. The fix that held is counted **forwards** from the one event with no
+exceptions in it: a turn that produced an answer certainly asked a model at least once.
+
+**The rule: when a bound is defined by subtracting failures, you are asserting you have enumerated
+them. Prefer a bound counted forwards from something that cannot happen without the thing you are
+measuring** — it is loose, and loose in the safe direction beats tight and wrong.
+
+Second lesson, same episode: I shipped attempts 2 and 3 after a green unit test, and the storm found
+both. The unit test drove the counters I set by hand, so it could only confirm the arithmetic I had
+already assumed. It never drove `run_turn` against a front door that sheds.

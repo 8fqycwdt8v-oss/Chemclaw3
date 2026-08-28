@@ -123,7 +123,7 @@ _TERMINAL = {
 # client (`G`'s stream cap, `E1`'s disconnect) are *not* counted — an undercount can only make the
 # reconciliation easier to satisfy, never falsely fail.
 _turns_driven = 0
-_turns_refused = 0
+_turns_answered = 0
 
 
 def turns_driven() -> int:
@@ -131,17 +131,24 @@ def turns_driven() -> int:
     return _turns_driven
 
 
-def turns_reaching_a_model() -> int:
+def turns_that_answered() -> int:
     """Turns the front door accepted, which is the count that must have produced a model call.
 
-    **Any non-200 is the condition, not an enumerated list of shed statuses.** `run_turn` returns
-    the moment the status is not 200, before it reads a single SSE line, so no model was asked
-    anything whatever the code was. Enumerating was tried and was wrong: the first version counted
-    429 and 409, while `_turn_outcomes` — the authority in this file on what a shed looks like —
-    buckets 429 **and 503**, so a 503-shedding sweep moved the counter not at all and the check
-    still failed on a lane where every model call had been served by the mock.
+    **A turn that answered certainly asked a model at least once. Nothing else here is certain,
+    and three attempts to find a wider bound each broke on a different case.** Subtracting the
+    "shed" statuses missed 503; subtracting any non-200 *response* missed the turns that time out
+    with no status at all, which is what family A mostly produces; counting turns that opened a
+    stream over-counted, because a turn can be answered 200, stream, and be refused before a model
+    is asked anything — measured, 121 streamed against 116 served.
+
+    So the floor is counted forwards from the one event with no exceptions in it. It is loose on
+    purpose: an undercount can only make the reconciliation easier to satisfy, never falsely fail,
+    and the *tight* proof of the zero-live-model claim is not this ratio at all — it is
+    `_require_mock_lane`, which checks the configured base URL, asserts `ANTHROPIC_API_KEY` is
+    unset, and drives a probe turn to watch this counter move. This check is what would catch a
+    second endpoint serving alongside the mock; it is not what establishes the posture.
     """
-    return _turns_driven - _turns_refused
+    return _turns_answered
 
 
 @dataclass
@@ -231,8 +238,6 @@ async def run_turn(client: httpx.AsyncClient, message: str, *, dry_run: bool = F
         ) as response:
             result.status = response.status_code
             if response.status_code != 200:
-                global _turns_refused
-                _turns_refused += 1
                 await response.aread()
                 return result
             async for line in response.aiter_lines():
@@ -253,6 +258,9 @@ async def run_turn(client: httpx.AsyncClient, message: str, *, dry_run: bool = F
                     result.failure_messages.append(str(event.get("message", "")))
                 elif kind == "answer":
                     result.answered = bool(str(event.get("text", "")).strip())
+                    if result.answered:
+                        global _turns_answered
+                        _turns_answered += 1
                 elif kind == "error":
                     result.error_code = str(event.get("code", "unknown"))
     except (httpx.HTTPError, KeyError, ValueError) as exc:
@@ -2062,7 +2070,7 @@ async def run_storm(
     await _require_mock_lane()
     await asyncio.to_thread(_lane, "processes.sh", "restart", "mock-llm")
     _turns_driven = 0
-    _turns_refused = 0
+    _turns_answered = 0
 
     findings: list[Finding] = []
     sweep: list[dict[str, Any]] = []
@@ -2105,9 +2113,7 @@ async def run_storm(
             )
         )
     # Always, whatever `--families` selected: the claim is about the run, not about a scenario.
-    findings.append(
-        _mock_reconciliation(served=await mock_requests(), turns=turns_reaching_a_model())
-    )
+    findings.append(_mock_reconciliation(served=await mock_requests(), turns=turns_that_answered()))
     return findings, sweep
 
 
