@@ -111,6 +111,22 @@ load_profiles()
 #: The ~640 that remain are what a second pKa calculator costs, and the pull request says why the
 #: turn is worth it: it answers a question the fast one cannot (which proton), rather than the same
 #: question better — measured, the two are level on error.
+#:
+#: **Examined on 2026-08-27 and deliberately left at 29,500**
+#: (`D-2026-08-27-eighteen-names-for-a-primitive-set`). That is the pass the 2026-08-25 paragraph
+#: above asks for, and it did not produce a reduction, so it does not produce a lower number: the
+#: `default` prefix measures **28,114** both before and after it. What the pass established is where
+#: the reduction actually lives. Eleven of the eighteen names that raised this ceiling are what the
+#: default profile pays for; the other six are `chem` *endpoint* tools, whose schemas come from a
+#: running server and are therefore invisible to `_floor` — so the seventeen-name surface the
+#: backlog row worries about is 5,787 tokens here, not the whole of it. Dropping those eleven from
+#: `default` (they are already named by the `computation` profile) measures **22,327, −21%**, and
+#: that is a `data/profiles` edit rather than a tool change. Two of the nine `run_*` templates are
+#: single-job wrappers worth 681 tokens between them; `run_bond_strength_survey` and
+#: `survey_bond_strengths`, the pair the row names, are two capabilities and stay two.
+#:
+#: **Lowering this constant is the commit that proves a reduction happened, so it is not lowered by
+#: a commit that only measured one.**
 CEILINGS: dict[str, int] = {"__default__": 29_500}
 
 #: How much of the floor one tool may be. A schema above this is not expensive, it is *badly
