@@ -38,6 +38,7 @@ this system cannot read. Both are counted, per extension, and reported. Silence 
 import asyncio
 import logging
 import os
+import time
 from collections import Counter
 from datetime import UTC, datetime
 from typing import Protocol, runtime_checkable
@@ -46,6 +47,8 @@ from pydantic import BaseModel, Field
 
 from chemclaw.core.embeddings import embed_texts, embedding_config_key
 from chemclaw.core.ids import stable_hash
+from chemclaw.core.logging import log_event
+from chemclaw.core.metrics_bridge import record_metric
 from chemclaw.ingest.documents.binding import DocumentShareBinding
 from chemclaw.ingest.documents.chunk import chunk_document
 from chemclaw.ingest.documents.crawl import CrawlResult, FileRef, crawl_share
@@ -123,6 +126,14 @@ class ReembedReport(BaseModel):
     # to prevent, so the count of ones it could not fix has to be visible too.
     failed: int = 0
     has_more: bool = False
+    # **The pass stopped with work left, and `has_more` cannot say so.** `has_more` is gated on
+    # progress deliberately — a batch where every chunk failed is deterministic, so returning
+    # "there is more" would hand the caller the identical batch forever — but that gate makes a
+    # total provider outage arrive at the caller as `has_more=False`, which is byte-identical to
+    # "everything is up to date" and is what makes the drain report COMPLETED while the corpus
+    # still holds superseded vectors. This is the third state, so the two the caller had are not
+    # asked to mean three things.
+    stalled: bool = False
 
 
 class _Parsed(BaseModel):
@@ -290,6 +301,79 @@ def _chunks_for(documents: list[_Parsed], binding: DocumentShareBinding) -> list
     ]
 
 
+def _count_records(source: str, outcome: str, count: int) -> None:
+    """Add `count` to this source's tally of one outcome.
+
+    A named function rather than a lambda in the loop below, because a lambda closing over a loop
+    variable is bound late — the classic defect where all three updates land on the last outcome.
+    """
+    record_metric(
+        lambda m: m.increment(
+            "chemclaw_ingest_records_total", count, {"source": source, "outcome": outcome}
+        )
+    )
+
+
+def _record_pass(report: SyncReport, duration_s: float) -> None:
+    """Emit the one record a sweep leaves behind: the whole report as fields, plus its duration.
+
+    **`SyncReport` was returned and never logged.** A pass over a terabyte share emitted a few
+    WARNINGs about what it could not read and was otherwise silent, so the only way to see what a
+    scheduled sweep did was to open the workflow result in the Temporal UI — which
+    `durable/publish.py` already concedes "is not something anyone watches". Twelve counters,
+    including the per-extension skips this module's own docstring calls the answer that is never
+    silence, existed and reached nobody.
+
+    One line per bounded pass, not per file: log volume stays a function of the pass, which is the
+    rule `_summarise_skips` states. Every field of the report rides as a structured field so the
+    line can be filtered and aggregated rather than only grepped, and `duration_s` and
+    `next_cursor` are on it because neither is derivable from anything else the run leaves behind.
+
+    The three outcomes on `chemclaw_ingest_records_total` partition the candidates this pass saw,
+    and the split is by *what happened to the corpus*, not by severity: `ingested` is a file with an
+    index row, `rejected` is one that was opened or reached and could not be read (the population
+    that is invisible to a chemist and that OCR or a permission fix would recover), `skipped` is one
+    this pass deliberately did not process — unchanged since last time, over the size limit, or a
+    format the allowlist turns away. `deduplicated` is not its own outcome because such a file does
+    get an index row and is counted in `indexed`.
+    """
+    rejected = report.skipped_scan + report.skipped_unreadable
+    skipped = report.unchanged + report.skipped_oversized + sum(report.skipped_unsupported.values())
+    for outcome, count in (
+        ("ingested", report.indexed),
+        ("rejected", rejected),
+        ("skipped", skipped),
+    ):
+        _count_records(report.source, outcome, count)
+    log_event(
+        logger,
+        "ingest.finished",
+        "%s: indexed=%d unchanged=%d deduplicated=%d rejected=%d in %.3fs",
+        report.source,
+        report.indexed,
+        report.unchanged,
+        report.deduplicated,
+        rejected,
+        duration_s,
+        source=report.source,
+        duration_s=round(duration_s, 3),
+        next_cursor=report.cursor,
+        scanned=report.scanned,
+        indexed=report.indexed,
+        unchanged=report.unchanged,
+        deduplicated=report.deduplicated,
+        embedded_chunks=report.embedded_chunks,
+        pruned=report.pruned,
+        skipped_scan=report.skipped_scan,
+        skipped_unreadable=report.skipped_unreadable,
+        skipped_oversized=report.skipped_oversized,
+        empty=report.empty,
+        skipped_unsupported=report.skipped_unsupported,
+        failed_roots=report.failed_roots,
+        has_more=report.has_more,
+    )
+
+
 async def sync_share(
     source: str,
     binding: DocumentShareBinding,
@@ -298,7 +382,12 @@ async def sync_share(
     after: str = "",
     limit: int = 1000,
 ) -> SyncReport:
-    """Bring one bounded slice of the share into the index, starting past `after`.
+    """Bring one bounded slice of the share into the index, starting past `after`, and record it.
+
+    The pass is timed and reported here rather than by each of its four early returns: a pass that
+    crawled nothing, one that found nothing changed and one that indexed a thousand files all leave
+    exactly one `ingest.finished` record, which is what makes the absence of a record mean
+    something. See `_record_pass`.
 
     Args:
         source: The data-source name; the index partitions on it and the citations carry it.
@@ -311,6 +400,21 @@ async def sync_share(
         What was indexed, deduplicated and skipped, plus the resume cursor and whether more remain.
         Pruning is *not* done here — see `prune_share`, which needs a whole drain to be safe.
     """
+    started = time.perf_counter()
+    report = await _index_slice(source, binding, index, after=after, limit=limit)
+    _record_pass(report, time.perf_counter() - started)
+    return report
+
+
+async def _index_slice(
+    source: str,
+    binding: DocumentShareBinding,
+    index: DocumentIndex,
+    *,
+    after: str,
+    limit: int,
+) -> SyncReport:
+    """The pass itself — crawl, diff, parse, embed, upsert. See `sync_share` for the contract."""
     crawl: CrawlResult = await asyncio.to_thread(crawl_share, binding, after=after, limit=limit)
     report = SyncReport(
         source=source,
@@ -442,31 +546,53 @@ async def reembed_stale(
         )
     # A full pass means there may be more — **but only if this pass made progress**. A batch where
     # every chunk failed would otherwise return the identical batch forever, which is the same wedge
-    # one layer up.
+    # one layer up. `stalled` is what keeps that gate from being read as "up to date": stale rows
+    # remain, and this pass is declining to spin on them rather than reporting them handled.
+    stalled = bool(stale) and not refreshed
+    if stalled:
+        logger.error(
+            "re-embedding made no progress: all %d chunk(s) in this batch failed, so the drain "
+            "stops here with stale vectors still in the index. Until this is fixed the affected "
+            "chunks are compared against queries embedded by the current model",
+            len(stale),
+        )
     return ReembedReport(
-        embedded=len(refreshed), failed=failed, has_more=len(stale) == limit and bool(refreshed)
+        embedded=len(refreshed),
+        failed=failed,
+        has_more=len(stale) == limit and bool(refreshed),
+        stalled=stalled,
     )
 
 
 async def _reembed_individually(
     stale: list[StaleChunk],
 ) -> tuple[list[tuple[StaleChunk, list[float]]], int]:
-    """Embed one chunk at a time so a single unembeddable one costs only itself."""
+    """Embed one chunk at a time so a single unembeddable one costs only itself.
+
+    **The distinct reasons are summarised once, at WARNING** — `_summarise_skips`'s pattern, for
+    the same reason and against the same failure. The per-chunk line stays at DEBUG because 500
+    identical lines saying the endpoint is down is not more information than one; but until this,
+    DEBUG was *all* there was: the caller's ERROR carried a count and nothing else, so "the
+    provider is unreachable" and "these particular chunks are unembeddable content" reached an
+    operator as the same number, and the first is an outage while the second is a corpus fact.
+    """
     refreshed: list[tuple[StaleChunk, list[float]]] = []
-    failed = 0
+    reasons: Counter[str] = Counter()
     for chunk in stale:
         try:
             vector = await asyncio.to_thread(embed_texts, [chunk.content])
         except Exception as exc:
-            # DEBUG per chunk, because the caller already reports this population: an embedding
-            # endpoint that is down fails every chunk in the batch, and the batch is
-            # `document_reembed_batch_size` — 500 identical lines saying once that the endpoint is
-            # down, ahead of the one ERROR that says what it costs. Not summarised twice.
             logger.debug("chunk %s#%d could not be embedded: %s", chunk.doc_id, chunk.ordinal, exc)
-            failed += 1
+            reasons[type(exc).__name__] += 1
             continue
         refreshed.append((chunk, vector[0]))
-    return refreshed, failed
+    if reasons:
+        logger.warning(
+            "re-embedding: %d chunk(s) failed individually — %s",
+            sum(reasons.values()),
+            ", ".join(f"{reason} x{count}" for reason, count in sorted(reasons.items())),
+        )
+    return refreshed, sum(reasons.values())
 
 
 async def prune_share(

@@ -144,13 +144,21 @@ unfixed code first. Three ADRs:
   real victims are the ambient's readers — log lines, `ambient_provenance` on PR-gated proposals,
   and `ConnectorJobInput.correlation_id` for jobs a template launches. `memory_jobs` and
   `report_workflow` have no correlation id available to bind; the report half is a new BACKLOG row
-  rather than an invented id.
-- **BS-03.** `open_session` takes `identity_headers` (passed in, because `core` imports no
-  sibling), `calc_session` supplies the existing `turn_headers()`, and the redirect guard comes
-  with them over one shared `core/http.same_origin`. The durable path had *no ambient identity to
-  send*: `CalcJobWorkflow` now reads the memo core already sets and the activity stamps it. The
-  reaction labeller stays anonymous — `ingest` may not import `connectors` — and the ADR records
-  what moving the builder into `core` would cost.
+  rather than an invented id. *#258's `durable/interceptor.py` reaches the same end more widely* —
+  measured against the real step inputs it binds all four ambients around every activity — so on a
+  worker `_acting_as` is now redundant in full, not just in the third ambient. It is kept because
+  neutering it fails two tests that prove a step cannot run a tool its requester could not run, and
+  those call the activity directly; collapsing the two is its own change, with a BACKLOG row.
+- **BS-03.** *Half of this was reached first by #258, and that half is main's.* `open_session`
+  takes a `request_hook` and `calc_session` supplies
+  `connectors.identity.turn_identity_hook(calc_server_url)` — the *same* hook the connector
+  registry installs, so the origin-strip guard stays one control. This branch had built a second,
+  locally defined hook over a shared `core/http.same_origin`; both are dropped in the merge
+  (`same_origin` had one caller left and a docstring naming two). What survived is the half #258
+  did not find: the durable path had *no ambient identity to send at all*, because
+  `CalcJobWorkflow` never read the memo core already sets. It reads it now and `_acting_for` stamps
+  it for the whole dispatch, which is what the hook then reads. The reaction labeller stays
+  anonymous — `ingest` may not import `connectors` — and main carries its own BACKLOG row for it.
 
 **Chemclaw3, BS-18/07 (2026-08-27, resilience).** Both fixed, each with a test run against the
 unfixed tree first. Two ADRs:

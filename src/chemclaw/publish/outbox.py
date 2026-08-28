@@ -31,6 +31,7 @@ from psycopg.types.json import Jsonb
 
 from chemclaw.core import db
 from chemclaw.core.config import settings
+from chemclaw.core.logging import log_event
 from chemclaw.core.metrics_bridge import record_metric
 from chemclaw.publish.record import CONTRACT_VERSION, Publication, ResultRecord
 from chemclaw.publish.registry import enabled_names, publishing_enabled
@@ -86,21 +87,52 @@ _MARK_DELIVERED = """
 # increment** — `_CLAIM` already did, which is what makes the count correct under two concurrent
 # runs. A retired row is kept, never deleted: it is the record that something was not published,
 # and the backfill CLI's `--requeue` is how it comes back.
+#
+# `RETURNING state` is what makes the dead-letter count exact rather than inferred. Retirement
+# happens inside the `CASE`, so from outside the statement a row that spent its last attempt and a
+# row with attempts left are one `UPDATE` — which is why nothing counted dead letters at all, and
+# why the queued-minus-published difference could never be a backlog: a retired row leaves the
+# queue and increments nothing on the published side, forever.
 _MARK_FAILED = """
     UPDATE result_publications
     SET last_error = %s,
         state = CASE WHEN attempts >= %s THEN 'failed' ELSE 'pending' END
     WHERE id = ANY(%s)
+    RETURNING state
 """
 
-_PENDING_COUNT = """
-    SELECT sink, count(*) FROM result_publications WHERE state = 'pending' GROUP BY sink
+# The backlog, per sink, in the two numbers that are actually a backlog. `count(*)` and
+# `min(enqueued_at)` are both served by the partial index `result_publications_pending`
+# (`(sink, enqueued_at) WHERE state = 'pending'`), so this is an index-only scan and the age is one
+# read of its leading edge per sink.
+_PENDING = """
+    SELECT sink, count(*), EXTRACT(EPOCH FROM (now() - min(enqueued_at)))
+    FROM result_publications WHERE state = 'pending' GROUP BY sink
 """
 
+# Dead letters, per sink. Deliberately a second statement: there is no partial index on `failed`,
+# so folding it into the query above with a `FILTER` would take the pending read off its index too.
+# Read on the drain pass (every `result_publish_schedule_minutes`), never on a scrape.
+_DEAD_LETTERED = """
+    SELECT sink, count(*) FROM result_publications WHERE state = 'failed' GROUP BY sink
+"""
 
-def _connect() -> AbstractAsyncContextManager[psycopg.AsyncConnection[TupleRow]]:
-    """The configured connection, with the shared statement timeout (one place, DRY)."""
-    return db.connection(settings.postgres_dsn)
+# The last backlog reading, per sink, for the three gauge families below. Refreshed by the drain,
+# read by every scrape — which is the whole point: a gauge that queried per scrape is the objection
+# that argued against having one at all.
+_PENDING_GAUGE: dict[str, float] = {}
+_OLDEST_GAUGE: dict[str, float] = {}
+_DEAD_GAUGE: dict[str, float] = {}
+
+
+def _connect(operation: str) -> AbstractAsyncContextManager[psycopg.AsyncConnection[TupleRow]]:
+    """The configured connection, with the shared statement timeout (one place, DRY).
+
+    `operation` labels `chemclaw_db_query_duration_seconds`, so the enqueue, the claim and the two
+    retirement writes are separable in the latency distribution — they have very different shapes
+    (an enqueue is per record, a claim is one indexed update) and pooling them would hide both.
+    """
+    return db.connection(settings.postgres_dsn, operation=operation)
 
 
 async def enqueue(records: list[ResultRecord]) -> int:
@@ -118,13 +150,15 @@ async def enqueue(records: list[ResultRecord]) -> int:
     try:
         sinks = enabled_names()
     except Exception:
-        logger.warning("publish: cannot resolve enabled sinks; nothing queued", exc_info=True)
+        logger.warning(
+            "publish[enqueue:sinks]: cannot resolve enabled sinks; nothing queued", exc_info=True
+        )
         record_metric(lambda m: m.increment("chemclaw_result_publish_failures_total"))
         return 0
 
     written = 0
     try:
-        async with _connect() as conn:
+        async with _connect("outbox_enqueue") as conn:
             for record in records:
                 document = Jsonb(record.model_dump(mode="json"))
                 for sink in sinks:
@@ -135,7 +169,7 @@ async def enqueue(records: list[ResultRecord]) -> int:
             await conn.commit()
     except Exception:
         logger.warning(
-            "publish: could not queue %d record(s) for %s",
+            "publish[enqueue:write]: could not queue %d record(s) for %s",
             len(records),
             ", ".join(sinks),
             exc_info=True,
@@ -241,10 +275,15 @@ async def claim(sink: str, limit: int) -> list[tuple[int, str, dict[str, Any]]]:
     run picks them up — at-least-once, which is exactly what the content-addressed upserts on the
     far end are built for.
     """
-    async with _connect() as conn:
+    async with _connect("outbox_claim") as conn:
         cursor = await conn.execute(_CLAIM, (sink, settings.result_publish_max_attempts, limit))
         rows = await cursor.fetchall()
         await conn.commit()
+    # The drain pass *is* the refresh point, and this is where a pass reaches the outbox — one
+    # extra indexed read per sink per pass, against a `COUNT(*)` on every 15-second scrape. Taken
+    # after the claim rather than before it so the reading excludes the rows this pass is about to
+    # deliver, which is what makes a falling backlog visible from one pass to the next.
+    await refresh_backlog()
     return [(int(row[0]), str(row[1]), row[2]) for row in rows]
 
 
@@ -252,7 +291,7 @@ async def mark_delivered(ids: list[int]) -> None:
     """Record that these rows reached their sink."""
     if not ids:
         return
-    async with _connect() as conn:
+    async with _connect("outbox_mark_delivered") as conn:
         await conn.execute(_MARK_DELIVERED, (ids,))
         await conn.commit()
     record_metric(lambda m: m.increment("chemclaw_results_published_total", len(ids)))
@@ -267,18 +306,105 @@ async def mark_failed(ids: list[int], reason: str) -> None:
     """
     if not ids:
         return
-    async with _connect() as conn:
-        await conn.execute(_MARK_FAILED, (reason[:2000], settings.result_publish_max_attempts, ids))
+    async with _connect("outbox_mark_failed") as conn:
+        cursor = await conn.execute(
+            _MARK_FAILED, (reason[:2000], settings.result_publish_max_attempts, ids)
+        )
+        states = [str(row[0]) for row in await cursor.fetchall()]
         await conn.commit()
+    retired = sum(1 for state in states if state == "failed")
+    # **This is one delivery attempt per row, and it is not the only thing on this counter.**
+    # `chemclaw_result_publish_failures_total` also carries a sink-resolution failure, a local
+    # queue-write failure and the enqueue activity's own failure — four unrelated events on one
+    # series, which is exactly the argument this module makes for keeping projection failures
+    # apart. The counter cannot be split without a label it does not declare, so every site says
+    # which stage it is in its log line instead; `stage=delivery` is this one.
     record_metric(lambda m: m.increment("chemclaw_result_publish_failures_total", len(ids)))
+    if retired:
+        record_metric(lambda m: m.increment("chemclaw_results_dead_lettered_total", retired))
+    log_event(
+        logger,
+        "publish.attempt_failed",
+        "publish[delivery]: %d row(s) failed an attempt, %d retired to dead-letter: %s",
+        len(ids),
+        retired,
+        reason[:200],
+        level=logging.WARNING if retired else logging.INFO,
+        stage="delivery",
+        rows=len(ids),
+        dead_lettered=retired,
+    )
 
 
-async def pending_counts() -> dict[str, int]:
-    """How much is waiting, per sink — the gauge an operator watches for a stuck destination."""
-    async with _connect() as conn:
-        cursor = await conn.execute(_PENDING_COUNT)
-        rows = await cursor.fetchall()
-    return {str(row[0]): int(row[1]) for row in rows}
+async def refresh_backlog(dsn: str | None = None) -> None:
+    """Re-read the backlog and republish the three gauges. Called on the drain pass. Never raises.
+
+    **The documented backlog formula was wrong three ways, and this is what replaces it.**
+    `durable/publish_results.py` said the backlog is
+    `chemclaw_results_queued_total - chemclaw_results_published_total`, "already exact". Executed:
+    queued=10, published=0, failures=50, and the true pending row count was **0**.
+
+    - A row retired to `failed` never increments `published`, so the difference reads 10 forever;
+      `failures_total` cannot correct it because `mark_failed` adds `len(ids)` *per attempt*
+      (10 rows x 5 attempts = 50).
+    - **The two counters live in different processes.** `queued` is incremented in the connector
+      worker that finished the calculation and `published` in the `background-jobs` worker that
+      drains, while `METRICS` is an in-memory per-process singleton — so restarting either pod
+      resets one side of the subtraction, and restarting the calc worker makes it *negative*.
+    - `publish/backfill.py` increments `queued` from a short-lived CLI nothing ever scrapes.
+
+    A count and an *age*, because they answer different questions: five rows that turn over every
+    second and five rows that have not moved since Tuesday are the same count and a different
+    incident. The age is what the "a gauge would need a `COUNT(*)` on every scrape" objection never
+    applied to — `min(enqueued_at)` over the pending partial index is a read of its leading edge.
+
+    Sinks that have gone to zero are *kept* at zero rather than dropped from the gauges, because a
+    disappearing series and a series reading zero are not the same thing to an alert: a rule on
+    "pending > 0 for 30m" silently stops evaluating when the label vanishes.
+
+    Never raises: this is telemetry running inside a drain whose real work is delivery, and a
+    backlog read that failed must not fail the pass that would reduce the backlog.
+    """
+    target = dsn if dsn is not None else settings.postgres_dsn
+    try:
+        async with db.connection(target, operation="outbox_backlog") as conn:
+            cursor = await conn.execute(_PENDING)
+            pending = await cursor.fetchall()
+            cursor = await conn.execute(_DEAD_LETTERED)
+            dead = await cursor.fetchall()
+    except Exception:
+        logger.warning("publish: could not read the outbox backlog; gauges keep their last value")
+        return
+    _replace(_PENDING_GAUGE, {str(row[0]): float(row[1]) for row in pending})
+    _replace(_OLDEST_GAUGE, {str(row[0]): float(row[2] or 0.0) for row in pending})
+    _replace(_DEAD_GAUGE, {str(row[0]): float(row[1]) for row in dead})
+
+
+def _replace(gauge: dict[str, float], reading: dict[str, float]) -> None:
+    """Update a gauge family in place, keeping known sinks that have fallen to zero."""
+    gauge.update(dict.fromkeys(gauge, 0.0))
+    gauge.update(reading)
+
+
+def bind_backlog_gauges() -> None:
+    """Publish the three backlog gauge families off the last reading (no query on a scrape).
+
+    Called at import, like the ingest cursor lag's: the readings live in this module, so any
+    process that drains the outbox is exactly the process that should report its depth, and there
+    is no startup hook that could be forgotten.
+    """
+    record_metric(lambda m: m.bind_gauge_family("chemclaw_outbox_pending", lambda: _PENDING_GAUGE))
+    record_metric(
+        lambda m: m.bind_gauge_family(
+            "chemclaw_outbox_oldest_pending_seconds", lambda: _OLDEST_GAUGE
+        )
+    )
+    record_metric(
+        lambda m: m.bind_gauge_family("chemclaw_outbox_dead_lettered", lambda: _DEAD_GAUGE)
+    )
+
+
+bind_backlog_gauges()
 
 
 __all__ = [
@@ -288,5 +414,5 @@ __all__ = [
     "enqueue_payload",
     "mark_delivered",
     "mark_failed",
-    "pending_counts",
+    "refresh_backlog",
 ]

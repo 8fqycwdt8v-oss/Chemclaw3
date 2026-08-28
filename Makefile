@@ -28,6 +28,41 @@ AUDIT_FOUND := Found [0-9]+ known vulnerabilit
 # `uvx` failing to fetch the tool, and `pip-audit` dying inside `requests`.
 AUDIT_UNREACHABLE := ConnectionError|Failed to fetch|Max retries exceeded|Temporary failure in name resolution|Name or service not known|Network is unreachable
 
+# Turn a rendered chart on stdin into the one `groups:` document `promtool check rules` reads.
+#
+# `promtool` wants a bare rule file; a `PrometheusRule` wraps its groups in `spec:`, and a dashboard
+# hides its queries in a JSON string inside a ConfigMap. Both are unwrapped here so one `promtool`
+# invocation covers every PromQL expression this chart ships — the alerts *and* the panels.
+#
+# Alert rules are passed through whole rather than reduced to their `expr`: `promtool` checks the
+# `for:`/`labels:`/`annotations:` shape too, and a template that emitted a malformed annotation
+# would otherwise pass. Panels have no rule shape, so each becomes a synthetic recording rule whose
+# name carries the dashboard and panel it came from, which is what makes a failure locatable.
+#
+# Inlined as a variable rather than a file under `deploy/`, because `src/` is all the code
+# (`tests/test_repo_map.py::test_no_import_package_sits_beside_data`) and this is a gate's argument,
+# not a program anything imports.
+export PROMQL_FROM_RENDER
+define PROMQL_FROM_RENDER
+import json, re, sys, yaml
+rules = []
+for doc in yaml.safe_load_all(sys.stdin):
+    if not doc:
+        continue
+    if doc.get("kind") == "PrometheusRule":
+        rules += [r for g in doc["spec"]["groups"] for r in g["rules"]]
+    elif doc.get("kind") == "ConfigMap" and doc["metadata"]["name"].endswith("-dashboards"):
+        for key, body in sorted(doc.get("data", {}).items()):
+            board = re.sub(r"[^a-z0-9]+", "_", key.lower())
+            for panel in json.loads(body)["panels"]:
+                for i, target in enumerate(panel.get("targets", [])):
+                    rules.append({"record": "panel:%s:%d:%d" % (board, panel["id"], i),
+                                  "expr": target["expr"]})
+if not rules:
+    sys.exit("no PromQL found in the render - the extraction is broken, not the chart")
+yaml.safe_dump({"groups": [{"name": "chart", "rules": rules}]}, sys.stdout, sort_keys=False)
+endef
+
 # Enforce exit-on-error and pipefail for all recipes: a failing command in a pipeline does not
 # pass silently when followed by a successful command. This is critical for the helm-validate
 # target: if `helm template` fails and emits empty output, `kubeconform` would otherwise see no
@@ -176,6 +211,7 @@ helm-validate:  ## Render the Helm chart and validate it against the Kubernetes 
 	@# not something that slips through as "skipped".
 	@command -v helm >/dev/null || { echo "helm not installed - see docs/guides/runbook.md"; exit 1; }
 	@command -v kubeconform >/dev/null || { echo "kubeconform not installed - see docs/guides/runbook.md"; exit 1; }
+	@command -v promtool >/dev/null || { echo "promtool not installed - see docs/guides/runbook.md"; exit 1; }
 	@# `--set networkPolicy.allowAnyDestination=true` because the chart refuses to render until a
 	@# release states where its pods may talk (`templates/networkpolicy.yaml`), and
 	@# `--set retention.unboundedGrowthAccepted=true` because it refuses until a release states what
@@ -211,6 +247,28 @@ helm-validate:  ## Render the Helm chart and validate it against the Kubernetes 
 	  case "$$render" in *chemclaw-connector-rxnfp*) ;; *) \
 	    echo "FAIL: overriding one connector removed another's pods"; exit 1;; esac; \
 	  echo "external-connector render OK: no pods, dialled at the given URL, siblings untouched"
+	@# The PromQL, which nothing checked. `kubeconform` validates that `expr` is a *string*, not
+	@# that the string parses — so a syntax error in a rule is accepted here, accepted by the API
+	@# server, and then rejected by Prometheus at rule-group load, taking the **whole group** with
+	@# it. That failure is silent from the cluster's side: the object exists and is `Valid` by every
+	@# check this repo ran, and the alerts in it simply never evaluate.
+	@#
+	@# Both renders, because a rule behind a flag is a rule nothing else parses: the shipped
+	@# defaults, and the one with the Temporal SDK exporter on, which is the only shape that renders
+	@# `ChemclawWorkerNotPolling`. The dashboards go through the same check for the same reason at
+	@# one remove — over a hundred panel queries that no other gate reads, where a mistyped one is a
+	@# blank panel rather than an error.
+	@set -e; \
+	  work=$$(mktemp -d); trap 'rm -rf "$$work"' EXIT; \
+	  printf '%s\n' "$$PROMQL_FROM_RENDER" > "$$work/extract.py"; \
+	  for flag in "" "--set monitoring.temporalSdkMetrics.enabled=true"; do \
+	    helm template chemclaw deploy/helm/chemclaw \
+	      --set networkPolicy.allowAnyDestination=true \
+	      --set retention.unboundedGrowthAccepted=true $$flag \
+	      > "$$work/render.yaml"; \
+	    uv run python "$$work/extract.py" < "$$work/render.yaml" > "$$work/rules.yaml"; \
+	    promtool check rules "$$work/rules.yaml"; \
+	  done
 
 upstream-check:  ## Re-check every upstream shape this repo borrows (run on any langchain/langgraph/deepagents bump).
 	@# The whole point of `tests/test_upstream_surface.py` is that a dependency bump becomes one

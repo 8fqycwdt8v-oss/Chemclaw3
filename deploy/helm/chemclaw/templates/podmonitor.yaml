@@ -30,9 +30,34 @@ spec:
   selector:
     matchLabels:
       {{- include "chemclaw.selectorLabels" . | nindent 6 }}
+  {{- /* Copy two of the pod's own labels onto every sample. Without them a series says which
+         *pod* it came from and not which *role*, so "p95 across the connector servers" or "which
+         component is down" needed a naming convention on the pod name to answer. `component` is
+         the one label that distinguishes the four process roles this release runs, and `instance`
+         is what separates two releases sharing a namespace. The operator sanitises the dots, so
+         they arrive as `app_kubernetes_io_component` / `app_kubernetes_io_instance`. */}}
+  podTargetLabels:
+    - app.kubernetes.io/component
+    - app.kubernetes.io/instance
   podMetricsEndpoints:
     - port: metrics
       path: {{ .Values.monitoring.path | quote }}
       interval: {{ .Values.monitoring.interval | quote }}
       scrapeTimeout: {{ .Values.monitoring.scrapeTimeout | quote }}
+{{- if .Values.monitoring.temporalSdkMetrics.enabled }}
+    {{- /* The Temporal SDK's own exporter, on its own port because it is a listener inside the SDK
+           core rather than a route on `chemclaw.core.worker_http`. It is the only source of the
+           queue-side numbers no first-party counter can produce — task-slot occupancy, poller
+           counts, schedule-to-start latency — which is why `ChemclawWorkerNotPolling` is gated on
+           the same switch: a worker that has stopped polling still answers `/healthz` and still
+           serves the endpoint above, so nothing else in this release can see it.
+
+           `path: /metrics` written out rather than reusing `monitoring.path`: that value is *this*
+           application's route and the SDK's exporter does not read it. Two things that happen to
+           agree are not one thing. */}}
+    - port: temporal-metrics
+      path: /metrics
+      interval: {{ .Values.monitoring.interval | quote }}
+      scrapeTimeout: {{ .Values.monitoring.scrapeTimeout | quote }}
+{{- end }}
 {{- end }}

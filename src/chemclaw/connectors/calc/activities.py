@@ -132,11 +132,21 @@ def _acting_for(actor: str, correlation_id: str) -> Iterator[None]:
     session, and this path has neither: `ConnectorJobWorkflow`'s memo carries the actor and the
     correlation id, and the conversation stays core's to join through `job_records`.
 
-    What reads it is `core.mcp_session.open_session`, through the identity headers
-    `connectors/calc/remote.py::calc_session` passes: the calculation server logged `actor=-
-    session=-` on every durable run, so the longest, most incident-prone calls in the fleet were
-    the ones nothing could trace back to a person. Off the durable path — a direct call, a test —
-    both are empty and nothing is stamped, which keeps "no identity" honest rather than fabricated.
+    What reads it is the request hook `connectors/calc/remote.py::calc_session` hands
+    `core.mcp_session.open_session` — `connectors.identity.turn_identity_hook`, the same hook every
+    connector's own client carries, which reads exactly this ambient. The calculation server logged
+    `actor=- session=-` on every durable run, so the longest, most incident-prone calls in the
+    fleet were the ones nothing could trace back to a person. Off the durable path — a direct call,
+    a test — both are empty and nothing is stamped, which keeps "no identity" honest rather than
+    fabricated.
+
+    **`durable/interceptor.py` does not cover this one, and that is by its design rather than an
+    oversight.** It binds the ids an activity's argument *models* declare and skips plain strings
+    outright, so that a model-authored payload can never supply an identity — measured,
+    `activity_context([spec, "chemist-1", "job-corr-1"])` binds nothing at all. The actor and the
+    correlation id arrive here as bare arguments precisely because `spec` is the model-authored
+    payload whose digest is the cache key, and identity must not be able to change it. So this
+    bracket is the only producer on this path, not a second one.
     """
     if not actor and not correlation_id:
         yield

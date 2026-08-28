@@ -495,6 +495,49 @@ async def _still_running(handle: Any) -> bool:
     return bool(description.status == WorkflowExecutionStatus.RUNNING)
 
 
+async def failed_job_reason(handle: Any) -> str:
+    """Why a durable run that did not complete ended the way it did, in one readable sentence.
+
+    **The third collector had no reason to give, and it is the one the model actually uses.** Two
+    of the three places that report a finished durable job already render the cause — the in-turn
+    wait below (`_await_briefly`) and the wrapper's own session push-back
+    (`ConnectorJobWorkflow._notify_failure`, which carried `"reason": "unknown ALPB solvent
+    '2-methyltetrahydrofuran'; …"` in the live 2026-08-04 failure). The third,
+    `agent/durable_tools.py::job_status`, returns a bare status word for anything that is not
+    `completed`: measured, a failed job answered `summary=None, result={}`. That tool's docstring
+    instructs the model to *poll*, so it is the primary path, and for a job that outlived its turn
+    with a dropped push-back it is the only one — "failed", with no reason, is everything anyone
+    ever gets.
+
+    This is the same walk, extracted so there is one answer to "why did it fail" rather than three.
+    `handle.result()` on a *closed* execution is a history read rather than a wait, so this costs
+    one round trip and is safe to call on the status path.
+
+    `exc.__cause__` and not `exc`, exactly as `_await_briefly` does it: the client wraps every
+    workflow failure in `WorkflowFailureError("Workflow execution failed")`, which is the generic
+    sentence this exists to replace, and `failure_reason` deliberately does not name that client
+    type (it is imported inside the workflow sandbox — see its docstring).
+
+    Args:
+        handle: A `WorkflowHandle` for a run believed to have ended badly. Typed `Any` because the
+            handle's own generic parameters differ per caller and none of them is used here.
+
+    Returns:
+        The failure's own sentence, or `""` if the run actually completed — which a caller should
+        treat as "no reason to report" rather than as a missing one.
+    """
+    try:
+        await handle.result()
+    except WorkflowFailureError as exc:
+        return failure_reason(exc.__cause__ or exc)
+    except Exception as exc:
+        # A cancelled, terminated or timed-out run reaches the client as its own exception type
+        # rather than as `WorkflowFailureError`. `failure_reason` degrades to the type name when
+        # there is no message, which for `Cancelled` is the whole honest answer.
+        return failure_reason(exc)
+    return ""
+
+
 async def _await_briefly(
     handle: Any, budget: float, job_name: str, workflow_id: str
 ) -> ConnectorJobResult | None:

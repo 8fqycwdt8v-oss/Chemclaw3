@@ -52,6 +52,7 @@ methods this class must answer for are whatever upstream declares this week, and
 is a list of what upstream declared the week it was written.
 """
 
+import logging
 from collections.abc import Callable
 from pathlib import PurePosixPath
 from typing import Any
@@ -65,6 +66,10 @@ from deepagents.backends.protocol import (
 )
 
 from chemclaw.agent.authz import AuthorizationError
+from chemclaw.core.logging import log_event
+from chemclaw.core.metrics_bridge import record_metric
+
+logger = logging.getLogger(__name__)
 
 # What a refused read returns. A result rather than an exception, because these are model-facing
 # tool results: a refusal the model can read keeps the turn going, where a raised error surfaces as
@@ -125,8 +130,8 @@ class NarrowedSkillsBackend(FilesystemBackend):
         reference doc alike. A path with no segments is the tree root, which is neither permitted
         nor refused: listing it is how discovery starts, and `ls` filters what comes back.
         """
-        parts = PurePosixPath(path.strip("/")).parts
-        return not parts or self._permits(parts[0])
+        skill = _skill_of(path)
+        return not skill or self._permits(skill)
 
     def ls(self, path: str) -> LsResult:
         """List the tree, keeping only entries belonging to a permitted skill."""
@@ -137,13 +142,37 @@ class NarrowedSkillsBackend(FilesystemBackend):
         return LsResult(error=result.error, entries=kept)
 
     def read(self, file_path: str, offset: int = 0, limit: int = 2000) -> ReadResult:
-        """Read a file, refusing anything outside a permitted skill.
+        """Read a file, refusing anything outside a permitted skill — and say which, either way.
 
         The half that makes this a gate rather than a listing: the model is handed skill paths in
         its system prompt and could otherwise ask for one it was never shown.
+
+        **Both branches are recorded, because neither was.** This module and `skill_access` between
+        them held zero `logger.` calls and zero metric calls, so "the agent is not following the
+        procedure" — a top-three support question — could not be answered at its first step: *was
+        the skill even offered, and did the model read it?* An INFO per body read is the answer to
+        the second half, and it is cheap because a skill is read once per turn at most, not per
+        model call.
+
+        A refusal is a WARNING and a count, not an INFO, because the role gate lives here — this is
+        the enforcement point (the class docstring says why), and an enforcement point whose
+        refusals are silent is a control nobody can audit. It names the path rather than the skill,
+        since a refused path may name no skill that exists; that is the same reason the message the
+        *model* gets refuses to say whether the skill exists at all.
         """
+        skill = _skill_of(file_path)
         if not self._allows(file_path):
+            record_metric(lambda m: m.increment("chemclaw_skill_reads_denied_total"))
+            log_event(
+                logger,
+                "skill.read_denied",
+                "refused a read of %s: it is outside the skills this turn may reach",
+                file_path,
+                level=logging.WARNING,
+                path=file_path,
+            )
             return ReadResult(error=REFUSED, file_data=None)
+        log_event(logger, "skill.read", "the model read %s", file_path, skill=skill, path=file_path)
         return super().read(file_path, offset, limit)
 
     def glob(self, pattern: str, path: str | None = None) -> GlobResult:
@@ -215,6 +244,16 @@ class NarrowedSkillsBackend(FilesystemBackend):
     def upload_files(self, *args: Any, **kwargs: Any) -> Any:
         """Refuse, for the reason `write` gives."""
         raise SkillsReadOnlyRefusal(_READ_ONLY)
+
+
+def _skill_of(path: str) -> str:
+    """The skill a path belongs to — its first segment, which is what `_allows` gates on.
+
+    Empty for the tree root, which belongs to no skill. One definition beside `_allows` so the
+    name a log line reports and the name the gate decided on are the same string.
+    """
+    parts = PurePosixPath(path.strip("/")).parts
+    return parts[0] if parts else ""
 
 
 def _path_of(hit: Any) -> str:

@@ -54,7 +54,6 @@ import httpx
 
 from chemclaw.agent.turn_flags import is_dry_run
 from chemclaw.connectors.manifest import BearerAuth, ConnectorAuth, NoAuth
-from chemclaw.core.http import same_origin
 from chemclaw.core.identity_context import (
     get_current_actor,
     get_current_correlation_id,
@@ -83,6 +82,11 @@ STAMPED_HEADERS = (
     HEADER_CORRELATION,
     HEADER_DRY_RUN,
 )
+
+# The port an origin means when the URL does not spell one out, so a plain `http` host and the
+# same host written with an explicit `:80` compare equal — the same normalization httpx's own
+# `_same_origin` does before it strips `Authorization`.
+_DEFAULT_PORTS = {"http": 80, "https": 443}
 
 
 class MissingConnectorCredential(RuntimeError):
@@ -154,6 +158,11 @@ class _EnvBearerAuth(httpx.Auth):
         yield request
 
 
+def _origin(url: httpx.URL) -> tuple[str, str, int]:
+    """The (scheme, host, port) an identity header may travel to, default port filled in."""
+    return (url.scheme, url.host, url.port or _DEFAULT_PORTS.get(url.scheme, 0))
+
+
 def turn_identity_hook(endpoint_url: str) -> Callable[[httpx.Request], Awaitable[None]]:
     """Build the `httpx` request hook that stamps the turn's identity for one connector endpoint.
 
@@ -170,10 +179,7 @@ def turn_identity_hook(endpoint_url: str) -> Callable[[httpx.Request], Awaitable
     carries identity and nothing else strips. Declining to *re-add* them on a foreign origin is not
     enough, because the copied originals arrive anyway; the hook therefore removes them. The client
     also refuses to follow redirects at all (`registry.connector_http_client`) — this is the second
-    layer, for the day someone restores the flag from the MCP SDK's default. "Same origin" is
-    `core.http.same_origin`, shared with the session `core.mcp_session.open_session` opens for the
-    calculation backend on the same terms: two transports asking one question must not be able to
-    answer it differently.
+    layer, for the day someone restores the flag from the MCP SDK's default.
 
     Args:
         endpoint_url: The connector's effective endpoint URL — the one origin its identity headers
@@ -182,10 +188,11 @@ def turn_identity_hook(endpoint_url: str) -> Callable[[httpx.Request], Awaitable
     Returns:
         The request hook to install on that connector's client.
     """
+    allowed = _origin(httpx.URL(endpoint_url))
 
     async def stamp(request: httpx.Request) -> None:
         """Stamp the turn's identity, or remove it if this request left the connector's origin."""
-        if not same_origin(str(request.url), endpoint_url):
+        if _origin(request.url) != allowed:
             for header in STAMPED_HEADERS:
                 request.headers.pop(header, None)
             return

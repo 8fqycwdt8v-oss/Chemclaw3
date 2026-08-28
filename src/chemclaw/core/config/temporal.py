@@ -149,6 +149,27 @@ class TemporalSettings(BaseSettings):
     # ends, so its ceiling is about memory, not connections, and its chart entry says so.
     worker_max_concurrent_activities: int = Field(default=8, ge=1)
 
+    # The heartbeat timeout for core's own *long* background activities — the note reindex, the
+    # retention sweep, the result-publication drain (`durable/note_index.py`,
+    # `durable/retention.py`, `durable/publish_results.py`).
+    #
+    # `connectors/calc/workflows.py` states the rule these three were missing: "without a heartbeat
+    # timeout those heartbeats do nothing for failure detection", so a worker that dies mid-activity
+    # is noticed only when the *start-to-close* budget expires — 600 s for the reindex and the
+    # sweep, and `result_publish_timeout_seconds x len(result_sink_list)` for the drain. On work
+    # that normally finishes in seconds that is the difference between a retry and an idle
+    # afternoon.
+    #
+    # One setting for all three rather than one each, because they are one kind of thing: a core
+    # background activity with no internal unit boundary to report progress at, wrapped in
+    # `durable/heartbeat.py::beating`, which derives its beat from exactly this number so the beat
+    # and the timeout cannot drift. A capability whose activity is a different kind of thing states
+    # its own, as `calc` does with `xtb_job_heartbeat_timeout_seconds`.
+    #
+    # 60 s: comfortably above the ~15 s beat it implies and far below every start-to-close budget it
+    # sits under, so a dead worker is detected in a minute rather than in ten.
+    background_activity_heartbeat_timeout_seconds: float = Field(default=60.0, gt=0)
+
     # **The two halves of the calculation backend's admission budget**
     # (`D-2026-08-27-a-per-worker-cap-is-not-a-backend-ceiling`). Same shape as the fleet turn
     # ceiling and the Postgres connection budget one subject over, and for the same reason: the cap

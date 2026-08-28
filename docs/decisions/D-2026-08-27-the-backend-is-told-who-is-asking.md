@@ -5,6 +5,16 @@
 Accepted. Third finding of the same blind-spot audit as
 `D-2026-08-27-a-start-to-close-timeout-does-not-bound-the-wait`.
 
+**The transport half was reached independently and first**, by
+`D-2026-08-27-a-job-that-fails-leaves-no-row`, which arrived on `main` while this branch was in
+flight and passes `turn_identity_hook` into `open_session` as a `request_hook`. That design is the
+better of the two and is the one recorded below: this branch had built a second, locally-defined
+origin-scoped hook over a shared `core/http.same_origin`, which is a second copy of a security
+control — the very thing the reused hook exists to prevent. It is dropped, `same_origin` with it
+(one caller left, and its own docstring named two). What is this ADR's alone is the **durable
+half**, which that change did not find: the ambient identity the hook reads did not exist on the
+job path at all.
+
 ## Context
 
 Two transports leave this process carrying a tool call, and only one of them said who was asking.
@@ -39,30 +49,27 @@ actor and no correlation id.
 
 ## Decision
 
-**One header builder, passed in rather than reached for.** `open_session` takes an
-`identity_headers` parameter and merges it under the bearer (credential last, so a caller cannot
-displace it). `calc_session` supplies `connectors.identity.turn_headers()` — the *same* function the
-connector hook uses, never a second one. A second builder in `core` is the failure this repository
-already records as two live definitions of one thing; and `core` may import no sibling
+**One hook, passed in rather than reached for.** `open_session` takes a `request_hook` parameter
+and installs it on the `httpx` client it builds; `calc_session` supplies
+`connectors.identity.turn_identity_hook(settings.calc_server_url)` — the *same* hook
+`connectors/registry.connector_http_client` installs, never a second one. That hook already
+produces exactly the set that was missing: the actor, the session, the correlation id, the dry-run
+flag and the W3C `traceparent`. A second builder in `core` is the failure this repository already
+records as two live definitions of one thing; and `core` may import no sibling
 (`tests/test_layering.py`), so the parameter is what keeps one definition and one direction.
 
-**Connection headers are honest here and would not be on a connector.** A connector session is held
-open for a whole turn, so its identity must be stamped per request by a hook that runs in the
-transport's own task. `open_session` opens a session **per call**, which is why the connection's
-headers are that caller's from `initialize()` onwards.
+**A hook rather than connection headers, and the reason is that the guard travels with it.**
+`short_connect_client` follows redirects deliberately (an ingress redirecting `/mcp` to `/mcp/` is
+ordinary), an httpx hook runs on every hop, and httpx builds each hop from the previous request's
+headers, dropping `Authorization` alone. So identity attached to this connection would be handed to
+a redirecting server along with everything else — precisely the hazard `turn_identity_hook`
+documents and *removes* for (removing on a foreign hop, not declining to re-add, because the copies
+arrive anyway). Reusing that hook is what makes the origin guard one control rather than two: a
+second copy is how one of them stops matching `connectors.identity.STAMPED_HEADERS`.
 
-**The redirect hazard comes with them, so the guard comes with them.** `short_connect_client`
-follows redirects deliberately (an ingress redirecting `/mcp` to `/mcp/` is ordinary), an httpx hook
-runs on every hop, and httpx builds each hop from the previous request's headers, dropping
-`Authorization` alone. Attaching identity to the connection without a guard would hand a redirecting
-server the caller's Entra object id — precisely what `turn_identity_hook` documents. `open_session`
-therefore installs an origin-scoped request hook that *removes* the caller's headers on a foreign
-hop (removing, not declining to re-add: the copies arrive anyway).
-
-"Same origin" now has one definition, `core/http.py::same_origin`, used by both transports.
-`connectors/identity.py`'s private `_origin` is deleted in favour of it — two transports asking one
-question must not be able to answer it differently, which is the same argument `is_loopback_url`
-already sits in that module for.
+Reading the ambient per request is truthful here for the same reason it is on a connector: the
+transport's tasks inherit the context of whoever opened the connection, and `open_session` opens a
+session **per call**, so that context belongs to exactly one caller from `initialize()` onwards.
 
 **The durable path is threaded explicitly, off the memo.** `CalcJobWorkflow` reads
 `workflow.memo_value("requested_by", …)` and `("correlation_id", …)` and passes both as activity
@@ -78,9 +85,16 @@ session. This path has neither — the memo carries the actor and the correlatio
 conversation stays core's to join through `job_records`, the same boundary
 `connectors/bo/activities.py` states.
 
+It is also **not** superseded by `durable/interceptor.py`, which now binds these same ambients for
+every activity on every worker. That interceptor reads argument *models* and skips plain strings
+outright, so a model-authored payload can never supply an identity; measured against the real
+argument shape, `activity_context([spec, "chemist-1", "job-corr-1"])` binds nothing. The actor and
+the correlation id arrive here as bare arguments for exactly that reason — `spec` is the payload
+whose digest is the cache key — so this bracket is the only producer on this path.
+
 **The reaction labeller is deliberately left anonymous.** `chemclaw.ingest` may not import
 `chemclaw.connectors` (`tests/test_layering.py` allows `ingest -> core|kg|retrieval|science` and
-nothing else), so it cannot reach `turn_headers`. It is also a scheduled drain with no turn behind
+nothing else), so it cannot reach `turn_identity_hook`. It is also a scheduled drain with no turn behind
 it, so what it would send is a dry-run flag and nothing else. Making it possible means moving the
 builder — and the dry-run ambient it reads — down into `core`, which is a bigger move than this
 finding justifies. That is the trigger if a second such caller ever appears.
@@ -89,7 +103,10 @@ finding justifies. That is the trigger if a second such caller ever appears.
 
 - `tests/test_connector_transport.py` proves the headers over the wire, against a served app on a
   real port through the real `calc_session`, exactly as the connector's own contract is proven —
-  a header contract is only real if the bytes land — and pins the origin guard in both directions.
+  a header contract is only real if the bytes land. Beside it, one test asserts the wiring that has
+  no other cover: that the `request_hook` `open_session` is handed actually reaches
+  `httpx.AsyncClient(event_hooks=…)`, checked through the real hook so the origin guard is proven
+  in both directions on this transport. Both were verified to fail with that one line removed.
 - `tests/test_calc_jobs.py` proves the durable half at both ends: the workflow hands the activity
   the memo's actor and correlation id, and the activity's outbound calls carry them; two further
   tests pin that the stamp is removed at the end of the job (a worker runs the next job in the same

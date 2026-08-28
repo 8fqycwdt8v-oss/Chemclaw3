@@ -35,6 +35,19 @@ half of the test: a returned failure is recorded under `error` like a raised one
 column means the same thing for a tool that runs in this process and one that runs behind a
 connector.
 
+**And a refusal is not a failure, which made four outcomes.** Every governance gate — authorization,
+the dry-run guard, the undeclared-write refusal, the plan gate, the repeat guard — stops a call by
+raising, so all five landed in the `except Exception` clause as `outcome='error'` beside a genuine
+`KeyError` in a parser. The log line was no better: it interpolated the exception *instance*, so
+even the class was lost and the only thing separating "the system declined, on purpose" from
+"something broke" was free-text prose in an unindexed column. The audit **row** kept the class,
+because `_truncate` reprs a non-string — so the database was strictly more diagnostic than the log,
+inverting this module's own rule that the log is the floor and the sink is the durable record.
+`refused` is the fourth outcome, `refusal_reason` is the classification, and both the class name and
+the reason now reach the log line. The reason is counted from *here* rather than from the five
+gates: four of them moved no metric at all, and a gate that has to remember to count itself is a
+gate that eventually does not.
+
 Note: tool arguments and confirmed-answer payloads are user free text, so audit records may
 contain PII. `agent_audit_max_arg_chars` bounds what is stored; treat the trail accordingly.
 """
@@ -45,12 +58,15 @@ import reprlib
 import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
+from functools import cache
 from typing import Any, Protocol, runtime_checkable
 
 from langchain.agents.middleware import AgentMiddleware, wrap_tool_call
 from langchain_core.messages import ToolMessage
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
+from chemclaw.agent.plan_link import plan_link_from_todos
 from chemclaw.connectors.transport import SERVED_BY
 from chemclaw.core.config import settings
 from chemclaw.core.identity_context import (
@@ -59,22 +75,103 @@ from chemclaw.core.identity_context import (
 )
 from chemclaw.core.metrics_bridge import record_metric
 from chemclaw.core.session_context import get_current_session_id
-from chemclaw.core.tracing import start_span
+from chemclaw.core.tracing import SpanHandle, start_span
 
 logger = logging.getLogger(__name__)
 
+# The outcome a call earns when a governance gate stopped it. Beside `ok`, `error` and `cancelled`
+# rather than folded into `error`, because a refusal and a crash are different events with
+# different remedies and the trail recorded them identically.
+REFUSED = "refused"
 
-def _observe_tool_latency(elapsed_ms: float) -> None:
-    """Record one tool call's duration in the process histogram.
+
+@cache
+def _refusal_types() -> tuple[tuple[type[BaseException], str], ...]:
+    """The governance refusals, most specific first, each paired with the reason it records.
+
+    **One table, read from one place.** Four of the five gates moved no metric at all, and the
+    fifth counted itself — so "why did the agent not do the thing" was answerable only by a `LIKE`
+    scan of an unindexed free-text column. Classifying here rather than in each gate is the same
+    move the audit trail itself is: the decision is recorded once, by the middleware every call
+    passes through, so a new gate cannot forget to count itself as long as it raises one of these.
+
+    **Imported inside the function because `agent/tool_authz.py` imports this module.** The gates
+    are recorded *by* the trail, so the dependency runs one way at import time and the other way at
+    classification time. Cached because the tuple is fixed for the life of the process and this
+    sits on the exception path of every tool call.
+
+    Order is the classification: every type above the last is an `AuthorizationError` subclass, so
+    a linear scan gives the most specific reason. What reaches the base is a plain role denial from
+    `authz.authorize_tool` and `skill_backend.SkillsReadOnlyRefusal` — both exactly "you may not".
+    """
+    from chemclaw.agent.authz import AuthorizationError
+    from chemclaw.agent.plan_gate import PlanNotApprovedError
+    from chemclaw.agent.repeat_guard import RepeatedCallRefusal
+    from chemclaw.agent.tool_authz import DryRunRefusal, UndeclaredWriteRefusal
+
+    return (
+        (DryRunRefusal, "dry_run"),
+        (UndeclaredWriteRefusal, "undeclared_write"),
+        (PlanNotApprovedError, "plan_gate"),
+        (RepeatedCallRefusal, "repeat"),
+        (AuthorizationError, "authz"),
+    )
+
+
+def refusal_reason(exc: BaseException) -> str | None:
+    """Which gate refused this call, or `None` when the exception is a genuine failure.
+
+    The one predicate that separates "the system declined, on purpose, and said so" from "something
+    broke". Both arrived as `outcome='error'` and as a log line reading `tool X failed after N ms`
+    whose only distinguishing content was the exception's *message* — `audit.py` interpolated the
+    exception instance, so even the class was lost, and a `DryRunRefusal` could not be told from a
+    `KeyError` in a parser by any query an operator can write.
+    """
+    for kind, reason in _refusal_types():
+        if isinstance(exc, kind):
+            return reason
+    return None
+
+
+def _observe_tool_latency(name: str, elapsed_ms: float) -> None:
+    """Record one tool call's duration in the process histogram, under the tool's own name.
 
     Here rather than in `chemclaw.api.runner` because this is the only place that sees a tool call
     *complete* — the runner sees the model announce one and never learns when it returned. Failed
     calls are observed too: a tool that fails after 30 s is exactly the sample that explains a slow
     turn, and dropping it would make the histogram flatter the worse things get.
+
+    **Labelled by tool, which it was not.** One distribution pooled a minutes-long xTB call through
+    the calc connector with a sub-millisecond `read_attachment`, so per-tool p95 — the single most
+    useful number for "why is this turn slow", and the question this histogram's own docstring says
+    it exists to answer — could not be read off it. The label space is the registered tool surface,
+    which is bounded by configuration rather than by anything a caller sends.
     """
     record_metric(
-        lambda metrics: metrics.observe("chemclaw_tool_duration_seconds", elapsed_ms / 1000.0)
+        lambda metrics: metrics.observe(
+            "chemclaw_tool_duration_seconds", elapsed_ms / 1000.0, labels={"tool": name}
+        )
     )
+
+
+def _count_outcome(name: str, outcome: str, reason: str | None) -> None:
+    """Count one finished tool call, and the gate that stopped it when one did.
+
+    Both counters move from here — one site, inside the middleware every call passes — rather than
+    from the five gates, for the reason `_refusal_types` gives: a gate that has to remember to
+    count itself is a gate that eventually does not.
+    """
+    record_metric(
+        lambda metrics: metrics.increment(
+            "chemclaw_tool_calls_total", labels={"tool": name, "outcome": outcome}
+        )
+    )
+    if reason is not None:
+        record_metric(
+            lambda metrics: metrics.increment(
+                "chemclaw_tool_refusals_total", labels={"reason": reason}
+            )
+        )
 
 
 class AuditEvent(BaseModel):
@@ -96,6 +193,15 @@ class AuditEvent(BaseModel):
     # and deriving one from the harness's active todo step is a *heuristic* — a provenance field
     # that is sometimes an inference is worse than an empty one, so it stays empty until it can be
     # authored honestly.
+    #
+    # **`plan_step` below is not this field arriving late, and filling this one from it was
+    # considered and refused.** They are different questions: this one promises a *reason*, and the
+    # step is a position in a list — a call made during "run the conformer search" was not
+    # necessarily made *because of* it. Copying one into the other would be exactly the inference
+    # the paragraph above declines, and would spend the one column that is honest about being
+    # empty. What changed is that `chemclaw.cli.explain` no longer renders this: an operator tool
+    # whose "why" column is structurally blank teaches its reader that the trail sometimes knows
+    # and here did not, which is false in both halves. It renders the answerable question instead.
     purpose: str = ""
     actor: str
     # Which specialist made this call — the `AgentProfile` name of the running subagent, empty for
@@ -114,17 +220,48 @@ class AuditEvent(BaseModel):
     # (still unanswerable) answer; filling it with an agent name would spend the one column that is
     # honest about being empty.
     agent: str = ""
+    # The plan step this call served — the `content` of the first `in_progress` todo, or empty when
+    # the call was not made from a plan step (`agent/plan_link.plan_link_from_todos`, the same rule
+    # and the same function a durable job's `job_records.plan_step` is stamped from).
+    #
+    # **Read off the request's todo list rather than off the ambient link, because the ambient link
+    # is not bound here.** `stamp_plan_link` sits innermost in the governed chain and resets in a
+    # `finally`, while this middleware is outermost — measured, `get_current_plan_link()` reads
+    # `("", "")` at the moment the row is written. Reading the same `request.state["todos"]` the
+    # plan gate enforces against is not a second answer to "what was the plan": it is the same
+    # function over the same list, one middleware further out.
+    #
+    # It is also the *wider* answer, deliberately. A refused call never reaches `stamp_plan_link`
+    # at all (the gate raises above it), so the contextvar could never have named the step a
+    # refusal interrupted — which is the row an operator most wants the step on.
+    plan_step: str = ""
     tool: str
     arguments: str
-    # "ok" | "error" | "cancelled". Deliberately a plain string with no CHECK behind it: the column
-    # has none (`infra/sql/006`), and adding one to an append-only table to police three
+    # "ok" | "refused" | "error" | "cancelled". Deliberately a plain string with no CHECK behind it:
+    # the column has none (`infra/sql/006`), and adding one to an append-only table to police four
     # literals would cost a migration on every future outcome. The producer is this module alone.
+    #
+    # `refused` is the fourth, and it is the one that had to be *added* rather than merely
+    # documented: a governance gate stopping a call and a parser raising `KeyError` were the same
+    # `error`, in a column an auditor reads as "did this work". The classification is
+    # `refusal_reason`, applied in `_recording` from the exception's type — never from its message,
+    # which is what the log line was reduced to being distinguished by.
     outcome: str
     # Result summary on success, the exception text — or the failure the tool *returned*, for a
     # connector tool, which never raises — on failure, why the attempt was cut short on a
     # cancellation.
     detail: str = ""
     latency_ms: float
+    # When the tool call *started*, stamped here rather than defaulted by the INSERT.
+    #
+    # **The trail used to carry the flusher's clock.** `PostgresAuditSink.record` buffers and
+    # returns, `audit_events.ts` defaults to `now()` at INSERT and `id` is a `BIGSERIAL` assigned at
+    # the same moment — so under load a turn's rows were both timestamped and *ordered* by whenever
+    # a batch happened to drain, and `chemclaw explain` reconstructs a turn by that order. The start
+    # rather than the end because that is the order the model emitted the calls in, which is the
+    # causal order a reconstruction is trying to show; a long call that overlaps three short ones
+    # still sorts where it was asked for.
+    ts: datetime = Field(default_factory=lambda: datetime.now(UTC))
     # The deployment revision (Git SHA / image digest) in effect for this call (AG-14): ties a past
     # result to the exact prompt/skill/config version that produced it. "unknown" until a deployment
     # sets `deployment_revision`.
@@ -261,6 +398,24 @@ def _served_by(request: Any) -> str:
     return f"{served.get('connector', '')}@{served.get('revision', '') or 'unknown'}"
 
 
+def _plan_step(request: Any) -> str:
+    """The plan step this call serves, read off the request's own todo list.
+
+    The framework-facing half of `AuditEvent.plan_step`, beside `_served_by` and split from
+    `_recording` for the same reason: what crosses into the recording is a plain string, never a
+    library object, so the trail's contents cannot come to depend on which engine ran.
+
+    `plan_link_from_todos` is the *same* function `agent/plan_link.py` stamps a durable job with and
+    the same list the plan gate enforces against, so a tool call and the job it launched cannot
+    disagree about which step they served. Only the step is taken: the plan *hash* is a job's join
+    to an approval decision, and an audit row already carries the session the plan belongs to.
+
+    A request with no todos — a profile without the harness, a subagent, a template step — gives the
+    empty string, which reads as "this call was not made from a plan step".
+    """
+    return plan_link_from_todos((request.state or {}).get("todos") or [])[0]
+
+
 def make_audit_middleware(
     *,
     correlation_id: str,
@@ -293,6 +448,7 @@ def make_audit_middleware(
             sink=audit_sink,
             revision=revision,
             tool_revision=_served_by(request),
+            plan_step=_plan_step(request),
         ) as recorded:
             result = await handler(request)
             recorded.result = getattr(result, "content", result)
@@ -334,18 +490,19 @@ async def _recording(
     sink: AuditSink,
     revision: str,
     tool_revision: str = "",
+    plan_step: str = "",
 ) -> AsyncIterator[_Recorded]:
     """The trail itself, with no framework in it — both engines' middlewares are wrappers.
 
     Everything that makes this the *record* lives here: the identity precedence, the span, the
-    latency histogram, the three outcomes, and the shielded write that survives a teardown. A
+    latency histogram, the four outcomes, and the shielded write that survives a teardown. A
     second copy of it for the second engine would be the one duplication this system cannot
     afford — an audit trail that disagrees with itself depending on a config flag is not a trail,
     and the `cancelled` outcome exists precisely because a subtle omission here went unnoticed
     until it was measured (D-130).
 
-    What each engine supplies is only the three things it alone knows: the tool's name, its
-    arguments, and — inside the block — its result.
+    What each engine supplies is only the four things it alone knows: the tool's name, its
+    arguments, the plan step the request was carrying, and — inside the block — its result.
     """
     args = _truncate(arguments)
     # The real actor is the turn's authenticated Entra user (F4-T5); fall back to the static
@@ -358,6 +515,11 @@ async def _recording(
     # build time would be shared by every user on the pod. Empty off the request path.
     event_session = get_current_session_id() or ""
     start = time.perf_counter()
+    # The wall clock beside the monotonic one, because they answer different questions and neither
+    # substitutes: `start` measures the call, `started_at` *dates* it. The row carries this rather
+    # than letting the INSERT default to `now()`, which under a batching sink is the flusher's
+    # clock — see `AuditEvent.ts`.
+    started_at = datetime.now(UTC)
 
     def event_for(outcome: str, detail: str, elapsed_ms: float) -> AuditEvent:
         """This call's record under `outcome` — the identity fields resolved once, above."""
@@ -365,6 +527,7 @@ async def _recording(
             correlation_id=event_cid,
             session_id=event_session,
             actor=event_actor,
+            plan_step=plan_step,
             tool=name,
             arguments=args,
             outcome=outcome,
@@ -372,84 +535,124 @@ async def _recording(
             latency_ms=elapsed_ms,
             revision=revision,
             tool_revision=tool_revision,
+            ts=started_at,
         )
 
+    def finished(span: SpanHandle, outcome: str, reason: str | None, detail: str) -> float:
+        """Close out one call: stamp the span, observe the latency, count the outcome.
+
+        Every exit path below does these three things and only the values differ, so they are
+        written once — the omission that produced the `cancelled` outcome (D-130) was exactly a
+        path that forgot one of them.
+
+        The span is stamped **here, inside the `with`**, because a span cannot be marked after it
+        has ended. `Status(ERROR)` only where OpenTelemetry would not set one itself: a raised
+        exception already sets it on the way out, so this covers the two failures that do not
+        raise — a returned failure (an MCP tool never raises) and a cancellation, which is a
+        `BaseException` that `use_span` does not catch. Both were measured `UNSET` while the audit
+        row said otherwise, so an operator filtering a collector by `status=ERROR` saw neither.
+
+        A **refusal is deliberately not an `ERROR` span** where the choice is ours. It raises, so
+        OpenTelemetry marks it anyway; the `outcome` attribute is what lets an operator take
+        policy decisions back out of an error view, and `chemclaw_tool_refusals_total{reason}` is
+        where they are actually counted.
+        """
+        elapsed_ms = (time.perf_counter() - start) * 1000.0
+        span.set_attribute("outcome", outcome)
+        if outcome in ("error", "cancelled") and detail:
+            span.failed(detail)
+        _observe_tool_latency(name, elapsed_ms)
+        _count_outcome(name, outcome, reason)
+        return elapsed_ms
+
     recorded = _Recorded()
-    try:
-        # One span per tool call, which with the turn span above it is the whole first-party
-        # trace: "this question took 40 seconds and 31 of them were one xTB call" is the
-        # question an operator actually asks, and nothing could answer it. Deliberately not a
-        # span per loop iteration or per retriever — the finding was that the docs *overstate*
-        # the tracing, and answering that with more unread spans is the same mistake mirrored.
-        with start_span("chemclaw.tool", **{"tool.name": name}):
+    # One span per tool call, which with the turn span above it is the whole first-party
+    # trace: "this question took 40 seconds and 31 of them were one xTB call" is the
+    # question an operator actually asks, and nothing could answer it. Deliberately not a
+    # span per loop iteration or per retriever — the finding was that the docs *overstate*
+    # the tracing, and answering that with more unread spans is the same mistake mirrored.
+    #
+    # `correlation.id` rides on it so a trace and the audit trail can be joined in both
+    # directions; the tool's name was already here. Nothing else — a span attribute travels
+    # to the collector, so the rule is `/metrics`'s: identifiers, never an argument.
+    with start_span("chemclaw.tool", **{"tool.name": name, "correlation.id": event_cid}) as span:
+        try:
             yield recorded
-    except asyncio.CancelledError:
-        # The turn was torn down while this tool was still running — a client disconnect or the
-        # front door's wall-clock deadline, which both deliver exactly this (D-130). Its own
-        # clause because `CancelledError` derives from `BaseException`, so the handler below
-        # never saw it and an interrupted attempt left no row in the trail at all.
-        elapsed_ms = (time.perf_counter() - start) * 1000.0
-        _observe_tool_latency(elapsed_ms)
-        logger.warning(
-            "tool %s was cancelled after %.0f ms [cid=%s actor=%s] (args=%s)",
-            name,
-            elapsed_ms,
-            event_cid,
-            event_actor,
-            args,
-        )
-        await _emit_shielded(
-            sink,
-            event_for(
-                "cancelled",
+        except asyncio.CancelledError:
+            # The turn was torn down while this tool was still running — a client disconnect
+            # or the front door's wall-clock deadline, which both deliver exactly this
+            # (D-130). Its own clause because `CancelledError` derives from `BaseException`,
+            # so the handler below never saw it and an interrupted attempt left no row in the
+            # trail at all.
+            detail = (
                 "the turn was torn down while this tool was running (client disconnect or "
-                "turn deadline); whether its side effect completed is not known here",
+                "turn deadline); whether its side effect completed is not known here"
+            )
+            elapsed_ms = finished(span, "cancelled", None, detail)
+            logger.warning(
+                "tool %s was cancelled after %.0f ms [cid=%s actor=%s] (args=%s)",
+                name,
                 elapsed_ms,
-            ),
-        )
-        raise
-    except Exception as exc:
-        elapsed_ms = (time.perf_counter() - start) * 1000.0
-        _observe_tool_latency(elapsed_ms)
-        logger.warning(
-            "tool %s failed after %.0f ms [cid=%s actor=%s]: %s (args=%s)",
+                event_cid,
+                event_actor,
+                args,
+            )
+            await _emit_shielded(sink, event_for("cancelled", detail, elapsed_ms))
+            raise
+        except Exception as exc:
+            # A gate refusing and a parser raising both land here, and they are not the same
+            # event: `refusal_reason` is what separates them, off the exception's *type*.
+            reason = refusal_reason(exc)
+            outcome = REFUSED if reason is not None else "error"
+            detail = _truncate(exc)
+            elapsed_ms = finished(span, outcome, reason, detail)
+            # The class name beside the message, which is the whole fix on the log side: `%s`
+            # on the exception instance rendered only its prose, so no log query could tell a
+            # `DryRunRefusal` from a `KeyError`. The row always kept the class (`_truncate`
+            # reprs a non-string), which is how the sink came to be more diagnostic than the
+            # floor it is supposed to sit on.
+            logger.warning(
+                "tool %s %s after %.0f ms [cid=%s actor=%s]: %s: %s (args=%s)",
+                name,
+                "was refused" if reason is not None else "failed",
+                elapsed_ms,
+                event_cid,
+                event_actor,
+                type(exc).__name__,
+                exc,
+                args,
+            )
+            await _emit(sink, event_for(outcome, detail, elapsed_ms))
+            raise
+        if recorded.returned_error is not None:
+            # The handler returned, and what it returned was a failure. Recorded exactly like
+            # a raised one — same outcome, same WARNING — because the difference between
+            # raising and returning is a property of the tool's transport, and an auditor
+            # reading the `outcome` column is asking about the call's effect.
+            detail = recorded.returned_error
+            elapsed_ms = finished(span, "error", None, detail)
+            logger.warning(
+                "tool %s returned a failure after %.0f ms [cid=%s actor=%s]: %s (args=%s)",
+                name,
+                elapsed_ms,
+                event_cid,
+                event_actor,
+                recorded.returned_error,
+                args,
+            )
+            await _emit(sink, event_for("error", detail, elapsed_ms))
+            return
+        detail = _truncate(recorded.result) if recorded.result is not None else ""
+        elapsed_ms = finished(span, "ok", None, "")
+        logger.info(
+            "tool %s ok in %.0f ms [cid=%s actor=%s] (args=%s)",
             name,
             elapsed_ms,
             event_cid,
             event_actor,
-            exc,
             args,
         )
-        await _emit(sink, event_for("error", _truncate(exc), elapsed_ms))
-        raise
-    elapsed_ms = (time.perf_counter() - start) * 1000.0
-    _observe_tool_latency(elapsed_ms)
-    if recorded.returned_error is not None:
-        # The handler returned, and what it returned was a failure. Recorded exactly like a raised
-        # one — same outcome, same WARNING — because the difference between raising and returning is
-        # a property of the tool's transport, and an auditor reading the `outcome` column is asking
-        # about the call's effect.
-        logger.warning(
-            "tool %s returned a failure after %.0f ms [cid=%s actor=%s]: %s (args=%s)",
-            name,
-            elapsed_ms,
-            event_cid,
-            event_actor,
-            recorded.returned_error,
-            args,
-        )
-        await _emit(sink, event_for("error", recorded.returned_error, elapsed_ms))
-        return
-    detail = _truncate(recorded.result) if recorded.result is not None else ""
-    logger.info(
-        "tool %s ok in %.0f ms [cid=%s actor=%s] (args=%s)",
-        name,
-        elapsed_ms,
-        event_cid,
-        event_actor,
-        args,
-    )
-    await _emit(sink, event_for("ok", detail, elapsed_ms))
+        await _emit(sink, event_for("ok", detail, elapsed_ms))
 
 
 async def _emit_shielded(sink: AuditSink, event: AuditEvent) -> None:

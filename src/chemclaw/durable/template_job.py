@@ -306,6 +306,18 @@ class TemplateWorkflow:
                     # a reason nobody gave.
                     rationale=step.purpose or f"template step {step.id!r} (job {step.job})",
                     requested_by=identity.actor,
+                    # **The two ids the template path dropped, and the reason its failures were
+                    # completely silent.** `StepIdentity` has carried both since it was written —
+                    # `session_id` from `TemplateRunInput` and `correlation_id` set to this run's
+                    # own workflow id — and this call built a `ConnectorJobInput` without either.
+                    # `ConnectorJobWorkflow._notify_failure` short-circuits on `if not
+                    # job.session_id: return`, so a connector job that failed inside a template
+                    # told the launching chat nothing; combined with the failure record it also
+                    # wrote no row and moved no metric, leaving the run in Temporal's expiring
+                    # history alone. Passing them through is the whole fix: every obligation the
+                    # wrapper carries keys off one of these two fields.
+                    session_id=identity.session_id,
+                    correlation_id=identity.correlation_id,
                     publish_to_graph=resolved.publish_to_graph,
                 ),
                 # Named from the run's *execution*, not just its id — `TemplateWorkflow` is also

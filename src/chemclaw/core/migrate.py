@@ -54,10 +54,15 @@ an artefact of the QM cache having been the first thing to need a table.
 
 import asyncio
 import hashlib
+import logging
+import time
 from pathlib import Path
 
 from chemclaw.core.config import settings
 from chemclaw.core.db import connect
+from chemclaw.core.logging import configure_logging, log_event
+
+logger = logging.getLogger(__name__)
 
 # The ledger's own DDL. Applied first and not itself tracked — it is the tracker.
 _LEDGER_FILE = "000_schema_migrations.sql"
@@ -155,6 +160,7 @@ async def migrate(dsn: str | None = None) -> list[str]:
     """
     target = dsn if dsn is not None else migration_dsn()
     applied: list[str] = []
+    started = time.perf_counter()
     # Every file read up front, in one worker thread rather than ~30 hops. `connect`, not
     # `connection`: a migration wants its own connection with no statement timeout (an index build
     # may run long), which is precisely what the pool must not hand out to a request path — and it
@@ -167,7 +173,30 @@ async def migrate(dsn: str | None = None) -> list[str]:
         # concurrent deploy fail, and doing the DDL under the 300 s budget would let one ALTER
         # TABLE queue in front of live traffic for five minutes.
         await conn.execute(_SET_LOCAL_TIMEOUT, (_ms(settings.pg_migration_lock_wait_seconds),))
+        # Announced *before* the wait, which is the whole point: this runs as a
+        # `pre-install,pre-upgrade` hook Job, and a deploy blocked on a peer migrator for the full
+        # 300 s budget produced byte-identical output to one running normally — nothing at all,
+        # until a single `print` after everything had already completed. "Which migration is it
+        # stuck on?" is the first question an operator asks of a stalled release, and until this
+        # the answer was not in the logs at any level.
+        log_event(
+            logger,
+            "migrate.waiting",
+            "waiting for the migration advisory lock (up to %.0fs)",
+            settings.pg_migration_lock_wait_seconds,
+            lock_wait_budget_s=settings.pg_migration_lock_wait_seconds,
+            files=len(sources),
+        )
         await conn.execute("SELECT pg_advisory_xact_lock(%s)", (_MIGRATION_LOCK_KEY,))
+        log_event(
+            logger,
+            "migrate.locked",
+            "hold the migration lock after %.3fs; applying up to %d file(s)",
+            time.perf_counter() - started,
+            len(sources),
+            waited_s=round(time.perf_counter() - started, 3),
+            files=len(sources),
+        )
         await conn.execute(_SET_LOCAL_TIMEOUT, (_ms(settings.pg_migration_lock_timeout_seconds),))
         # Bootstrap the ledger before anything can be tracked against it.
         await conn.execute(sources[_LEDGER_FILE])
@@ -196,16 +225,43 @@ async def migrate(dsn: str | None = None) -> list[str]:
                         f"add a new migration file instead"
                     )
                 continue
+            # Named before it runs, not after: a `CREATE INDEX` or an `ALTER TABLE` queued behind
+            # a long read holds `ACCESS EXCLUSIVE` and takes the table down while it waits, so the
+            # file whose name is missing from the tail of the log is exactly the one to look at.
+            # An "applied" line printed afterwards can only ever name the files that finished.
+            log_event(logger, "migrate.applying", "applying %s", name, file=name)
+            file_started = time.perf_counter()
             await conn.execute(text)
             await conn.execute(
                 "INSERT INTO schema_migrations (filename, checksum) VALUES (%s, %s)",
                 (name, checksum),
             )
             applied.append(name)
+            log_event(
+                logger,
+                "migrate.applied",
+                "applied %s in %.0fms",
+                name,
+                (time.perf_counter() - file_started) * 1000,
+                file=name,
+                duration_ms=round((time.perf_counter() - file_started) * 1000, 1),
+            )
         await conn.commit()
+    log_event(
+        logger,
+        "migrate.finished",
+        "applied %d migration(s) in %.0fms",
+        len(applied),
+        (time.perf_counter() - started) * 1000,
+        applied=len(applied),
+        duration_ms=round((time.perf_counter() - started) * 1000, 1),
+    )
     return applied
 
 
 if __name__ == "__main__":
+    # The hook Job's only reader is a log collector, so configure logging before anything can be
+    # logged — without this the module's own records go nowhere and the run is as silent as it was.
+    configure_logging()
     names = asyncio.run(migrate())
     print(f"applied migrations: {', '.join(names) or '(none — already up to date)'}")

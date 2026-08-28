@@ -1,0 +1,412 @@
+{
+  "__comment": "The HTTP surface: request rate, error ratio and per-route latency across 23 route templates.",
+  "annotations": {
+    "list": []
+  },
+  "editable": false,
+  "graphTooltip": 1,
+  "panels": [
+    {
+      "id": 1,
+      "type": "singlestat",
+      "title": "Requests/second",
+      "datasource": "prometheus",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 0,
+        "y": 0
+      },
+      "span": 2,
+      "format": "reqps",
+      "decimals": 2,
+      "valueName": "current",
+      "sparkline": {
+        "show": true
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(chemclaw_http_requests_total[5m]))",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "singlestat",
+      "title": "5xx ratio (5m)",
+      "datasource": "prometheus",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 4,
+        "y": 0
+      },
+      "span": 2,
+      "format": "percentunit",
+      "decimals": 2,
+      "valueName": "current",
+      "sparkline": {
+        "show": true
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(chemclaw_http_requests_total{status_class=\"5xx\"}[5m])) / clamp_min(sum(rate(chemclaw_http_requests_total[5m])), 0.001)",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "singlestat",
+      "title": "4xx ratio (5m)",
+      "datasource": "prometheus",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 8,
+        "y": 0
+      },
+      "span": 2,
+      "format": "percentunit",
+      "decimals": 2,
+      "valueName": "current",
+      "sparkline": {
+        "show": true
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(chemclaw_http_requests_total{status_class=\"4xx\"}[5m])) / clamp_min(sum(rate(chemclaw_http_requests_total[5m])), 0.001)",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "singlestat",
+      "title": "Request p95",
+      "datasource": "prometheus",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 12,
+        "y": 0
+      },
+      "span": 2,
+      "format": "s",
+      "decimals": 2,
+      "valueName": "current",
+      "sparkline": {
+        "show": true
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(chemclaw_http_request_duration_seconds_bucket[5m])))",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "singlestat",
+      "title": "Event streams open",
+      "datasource": "prometheus",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 16,
+        "y": 0
+      },
+      "span": 2,
+      "format": "short",
+      "decimals": 2,
+      "valueName": "current",
+      "sparkline": {
+        "show": true
+      },
+      "targets": [
+        {
+          "expr": "sum(chemclaw_event_streams_open)",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "singlestat",
+      "title": "Event stream capacity",
+      "datasource": "prometheus",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 20,
+        "y": 0
+      },
+      "span": 2,
+      "format": "short",
+      "decimals": 2,
+      "valueName": "current",
+      "sparkline": {
+        "show": true
+      },
+      "targets": [
+        {
+          "expr": "sum(chemclaw_event_stream_capacity)",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "graph",
+      "title": "Requests by status class",
+      "datasource": "prometheus",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 4
+      },
+      "span": 6,
+      "fill": 1,
+      "stack": true,
+      "linewidth": 2,
+      "nullPointMode": "null",
+      "legend": {
+        "show": true,
+        "current": true,
+        "max": true,
+        "values": true
+      },
+      "tooltip": {
+        "shared": true,
+        "sort": 2,
+        "value_type": "individual"
+      },
+      "yaxes": [
+        {
+          "format": "reqps",
+          "show": true,
+          "min": 0
+        },
+        {
+          "format": "short",
+          "show": false
+        }
+      ],
+      "xaxis": {
+        "mode": "time",
+        "show": true
+      },
+      "targets": [
+        {
+          "expr": "sum by (status_class) (rate(chemclaw_http_requests_total[5m]))",
+          "legendFormat": "{{status_class}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "graph",
+      "title": "Error ratio by route",
+      "datasource": "prometheus",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 4
+      },
+      "span": 6,
+      "fill": 0,
+      "stack": false,
+      "linewidth": 2,
+      "nullPointMode": "null",
+      "legend": {
+        "show": true,
+        "current": true,
+        "max": true,
+        "values": true
+      },
+      "tooltip": {
+        "shared": true,
+        "sort": 2,
+        "value_type": "individual"
+      },
+      "yaxes": [
+        {
+          "format": "percentunit",
+          "show": true,
+          "min": 0
+        },
+        {
+          "format": "short",
+          "show": false
+        }
+      ],
+      "xaxis": {
+        "mode": "time",
+        "show": true
+      },
+      "targets": [
+        {
+          "expr": "sum by (route) (rate(chemclaw_http_requests_total{status_class=\"5xx\"}[5m])) / clamp_min(sum by (route) (rate(chemclaw_http_requests_total[5m])), 0.001)",
+          "legendFormat": "{{route}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "type": "graph",
+      "title": "Request p95 by route",
+      "datasource": "prometheus",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 12
+      },
+      "span": 12,
+      "fill": 0,
+      "stack": false,
+      "linewidth": 2,
+      "nullPointMode": "null",
+      "legend": {
+        "show": true,
+        "current": true,
+        "max": true,
+        "values": true
+      },
+      "tooltip": {
+        "shared": true,
+        "sort": 2,
+        "value_type": "individual"
+      },
+      "yaxes": [
+        {
+          "format": "s",
+          "show": true,
+          "min": 0
+        },
+        {
+          "format": "short",
+          "show": false
+        }
+      ],
+      "xaxis": {
+        "mode": "time",
+        "show": true
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, route) (rate(chemclaw_http_request_duration_seconds_bucket[5m])))",
+          "legendFormat": "{{route}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "type": "graph",
+      "title": "Refused before the handler",
+      "datasource": "prometheus",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 20
+      },
+      "span": 12,
+      "fill": 0,
+      "stack": false,
+      "linewidth": 2,
+      "nullPointMode": "null",
+      "legend": {
+        "show": true,
+        "current": true,
+        "max": true,
+        "values": true
+      },
+      "tooltip": {
+        "shared": true,
+        "sort": 2,
+        "value_type": "individual"
+      },
+      "yaxes": [
+        {
+          "format": "reqps",
+          "show": true,
+          "min": 0
+        },
+        {
+          "format": "short",
+          "show": false
+        }
+      ],
+      "xaxis": {
+        "mode": "time",
+        "show": true
+      },
+      "targets": [
+        {
+          "expr": "sum by (route) (rate(chemclaw_request_validation_failures_total[15m]))",
+          "legendFormat": "{{route}} validation",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (reason) (rate(chemclaw_auth_failures_total[15m]))",
+          "legendFormat": "auth {{reason}}",
+          "refId": "B"
+        },
+        {
+          "expr": "sum by (resource) (rate(chemclaw_authz_refusals_total[15m]))",
+          "legendFormat": "authz {{resource}}",
+          "refId": "C"
+        },
+        {
+          "expr": "sum(rate(chemclaw_requests_rate_limited_total[15m]))",
+          "legendFormat": "rate limited",
+          "refId": "D"
+        },
+        {
+          "expr": "sum(rate(chemclaw_requests_too_large_total[15m]))",
+          "legendFormat": "too large",
+          "refId": "E"
+        },
+        {
+          "expr": "sum(rate(chemclaw_attachment_parses_shed_total[15m]))",
+          "legendFormat": "attachment parse shed",
+          "refId": "F"
+        },
+        {
+          "expr": "sum(rate(chemclaw_event_streams_rejected_total[15m]))",
+          "legendFormat": "stream rejected",
+          "refId": "G"
+        },
+        {
+          "expr": "sum(rate(chemclaw_group_claim_overage_total[15m]))",
+          "legendFormat": "group claim overage",
+          "refId": "H"
+        }
+      ]
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 16,
+  "style": "dark",
+  "tags": [
+    "chemclaw"
+  ],
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "timezone": "utc",
+  "title": "Chemclaw front door",
+  "uid": "chemclaw-front-door",
+  "version": 1
+}

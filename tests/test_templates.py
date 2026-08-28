@@ -718,7 +718,7 @@ def test_a_connector_tool_step_the_requester_may_not_call_is_refused(
 
     assert calls == [], "the tool body ran despite the refusal"
     (event,) = sink.events
-    assert event.outcome == "error", "a denied connector step left no audit row"
+    assert event.outcome == "refused", "a denied connector step left no audit row"
 
 
 def test_a_step_result_is_something_temporal_can_carry() -> None:

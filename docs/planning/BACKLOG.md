@@ -479,6 +479,38 @@ it happens.
       in the same sweep, reported as `unpolled` and counted like `unreachable`, is the runtime twin
       of the manifest check `connector-validate` now does — and it catches the row above too.
 
+- [ ] **The knowledge graph coming *in* has no signal, only the graph going *out*** — [S].
+      `ChemclawKnowledgeNotesLost` alerts on a note that failed to reach the PR-gate. Nothing covers
+      the other direction: `deploy/knowledge-sync.sh`'s `loop` catches a failed refresh so a dead
+      remote cannot kill the pod (correct), and the pod then serves a frozen corpus indefinitely
+      while logging one WARNING per interval into a stream nobody tails. On an expired push
+      credential — the exact cause `templates/prometheusrule.yaml` names for the notes alert — the
+      graph silently stops moving and every answer keeps citing it.
+      **The deploy half shipped**: the script stamps a heartbeat on each successful refresh and the
+      sidecar has an `exec` liveness probe reading its age, so a wedged loop becomes a restarting
+      container instead of a quiet one (`tests/test_deploy_chart.py`). That is a degraded
+      substitute and says so — a container restart is not a metric, it needs kube-state-metrics to
+      alert on, and those series are not in the user-workload Prometheus that evaluates our rules.
+      **What is left is in `src/`**: a `chemclaw_knowledge_sync_age_seconds` gauge bound through
+      `Metrics.bind_gauge_family` on the process that *reads* the tree — it already resolves
+      `settings.knowledge_path`, so the age of the newest note there is one `stat()` — plus its
+      rule, which then works on any cluster because it reads a first-party series. The sidecar's
+      heartbeat and that gauge answer the same question from the two sides of one volume; ship the
+      gauge and the probe becomes belt-and-braces rather than the only signal.
+
+- [ ] **The background worker is a singleton with no PDB, and the PDB is not the fix** — [M].
+      `poddisruptionbudget.yaml` covers the front door alone and argues that correctly in the
+      template: `minAvailable: 1` over a one-replica Deployment makes the pod un-evictable and
+      blocks every node drain forever, which is worse than no policy. So the row is not "add a PDB".
+      It is that core's background worker cannot safely run two replicas — the schedules, the
+      re-index and the sync jobs assume one holder — so a node drain ends whatever it was running
+      and Temporal re-delivers only after the activity's start-to-close timeout elapses.
+      What it needs is a distributed checkout lock so a second replica is safe, at which point a
+      `maxUnavailable: 1` PDB becomes meaningful. Until then the honest state is one replica, a
+      derived grace period long enough to drain (`chemclaw.workerGracePeriod`, shipped), and this
+      row. Raised by the 2026-08-27 deployment-monitoring review, which checked the PDB's argument
+      and found it sound; the singleton underneath it is the defect.
+
 ---
 
 ## 5 — Where the field moved past us
@@ -777,21 +809,59 @@ repository nobody can list. Nothing is broken — every proposal genuinely is a 
 a backfill and an incremental sync arguably want different submission shapes (one branch per batch,
 or a bulk proposal a reviewer expands). Found by the 2026-08-18 corpus-fidelity pass.
 
-## Surface `invalid_tool_calls` — an unparseable tool call is currently a silent no-op
+## A revoked credential fails the two live prompt-caching tests opaquely
 
-LangChain puts a tool call whose arguments do not parse into `AIMessage.invalid_tool_calls` rather
-than `tool_calls`. Nothing in `src/` reads that field, so the agent — which iterates `tool_calls` —
-drops the call without a `tool_failed`, a `tool_result`, or any other trace. Proven outside the
-stack via `langchain_openai.chat_models.base._convert_dict_to_message`: truncated arguments yield
-`tool_calls: []` and a populated `invalid_tool_calls` carrying the parse error.
+`tests/test_prompt_caching.py` guards its two live tests on `"API-KEY" in os.environ` — that the
+variable is *set*, not that it *works*. With a revoked key both fail several frames deep inside the
+Anthropic client with a raw `AuthenticationError`, so `make test` goes red in a way that reads as a
+prompt-caching regression. Observed 2026-08-18: the environment's key is well-formed, present, and
+answered `401` by the API.
 
-A truncated argument document is what a real model emits when a stream is cut or a token budget
-runs out, so this is reachable in production, not only under the storm's mock. With no prose the
-turn ends as `empty_answer`; **with prose it proceeds as though no tool were needed**, which is
-`D-2026-08-04-a-failure-that-says-nothing-is-read-as-proceed` exactly.
+Skipping on an auth error is the wrong fix — it would hide a real outage, and these tests exist
+because a belief about caching was measurably wrong once. The right one is a message that names the
+cause, so a reader learns the credential is dead rather than that the cache broke. Same distinction
+`D-2026-08-17-a-harness-that-starts-two-of-five-servers-is-a-harness-that-tests-two` draws about
+`/readyz`: holding a credential is not the same as holding one the other side accepts.
 
-Fix in the middleware chain: after the model call, convert each `invalid_tool_calls` entry into a
-visible failure the model can also correct from. Do not jump from `after_model` — see
-`D-2026-08-15-an-after-model-counter-is-a-counter-that-can-be-skipped`. Verify with
-`make live-storm`'s `f-malformed-json` check, which currently fails. Found by the 2026-08-17
-full-stack run — see `tasks/live-test/full-stack-e2e-2026-08-17.md`.
+## The labelling client is the one MCP leg with no identity or trace on the wire
+
+`core/mcp_session.open_session` grew a `request_hook` seam so a caller can stamp the outbound
+request, and `connectors/calc/remote.py` uses it: that leg now carries the W3C `traceparent`, the
+correlation id, the actor and the session, plus the origin-strip guard that removes them again if a
+redirect leaves the endpoint's origin. `ingest/labels/labeller.py:216` is the only other
+`open_session` caller and still sends `Authorization` alone, so a labelling drain — hours long,
+inside a durable activity — is invisible to the trace and unjoinable to the audit trail.
+
+It is not one line. `turn_identity_hook` lives in `connectors/identity.py` and sits on top of both
+`agent.turn_flags` (for the dry-run flag) and `connectors.manifest`, and neither
+`ingest -> connectors` nor `ingest -> agent` is an edge `tests/test_layering.py` permits. So closing
+it means deciding where identity stamping for a **non-connector** MCP client belongs: the labelling
+server is an endpoint this system dials, not a connector bundle, and the hook it needs is a strict
+subset of the connector one (no `ConnectorAuth`, no dry-run flag). The likely shape is a
+core-level `trace_and_identity_headers()` that `connectors/identity.py` composes rather than owns —
+which is a small change once the question is answered and a layering exception if it is not.
+Found by the 2026-08-27 logging and monitoring review.
+
+## Two producers bind a template step's ambient identity, and only one of them is needed
+
+`durable/interceptor.py` binds the actor, the roles, the session and the correlation id around
+*every* activity on every worker, reading them one level into a nested `identity` field — which is
+exactly the shape `durable/template_activities.py`'s `ToolStepInput`, `AgentStepInput` and
+`JobStepInput` use. Measured against those real models, `activity_context` returns the same four
+values `template_activities._acting_as:161` binds, over a scope that strictly contains the
+bracket's. So on a worker the bracket is redundant in full.
+
+It is still there, and deleting it is not a tidy-up: with the bracket neutered, four tests fail, and
+two of them — `test_an_expensive_job_step_is_refused_for_an_unentitled_requester` and
+`test_an_entitled_requester_passes_the_same_gate` in `tests/test_template_job_step.py` — are the
+proof that a template step cannot run a tool its requester could not run. They invoke
+`authorize_job_step` directly, where no interceptor runs, so collapsing the two producers means
+moving a security control's proof onto a worker harness. That is the whole of the work and the whole
+of the risk; decide it deliberately rather than by deletion. The two cannot drift while both stand,
+because both read `StepIdentity`'s own fields.
+
+The same question does **not** apply to `connectors/calc/activities.py::_acting_for`: the
+interceptor skips plain string arguments by design, so it binds nothing there and that bracket is
+the only producer on the calc job path.
+
+Found resolving the merge of #256's branch with #258.

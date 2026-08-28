@@ -37,6 +37,15 @@ spec:
   selector:
     matchLabels:
       {{- include "chemclaw.selectorLabels" . | nindent 6 }}
+  {{- /* Copy two of the Service's own labels onto every sample. Without them a series says which
+         *pod* it came from and not which *role*, so "p95 across the connector servers" or "which
+         component is down" needed a naming convention on the pod name to answer. `component` is
+         the one label that distinguishes the four process roles this release runs, and `instance`
+         is what separates two releases sharing a namespace. The operator sanitises the dots, so
+         they arrive as `app_kubernetes_io_component` / `app_kubernetes_io_instance`. */}}
+  targetLabels:
+    - app.kubernetes.io/component
+    - app.kubernetes.io/instance
   endpoints:
     {{- /* By port *name*, not number: every Service names it `http`, and a name survives a port
            change that a hardcoded number would silently miss. */}}

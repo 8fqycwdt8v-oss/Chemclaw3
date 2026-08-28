@@ -224,10 +224,20 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      # No uv here on purpose: `make helm-validate` shells out to `helm` and `kubeconform` and runs
-      # no Python at all. Installing uv without ever calling `uv sync` leaves the action's cache
-      # path empty, and its post-job save then fails the whole job — a green validation reported as
-      # a red check.
+      # uv, because `make helm-validate` no longer runs only binaries: it unwraps the render to
+      # feed `promtool` and that unwrapping is Python. This step used to be absent with a comment
+      # saying so, whose real content was the trap — installing uv and never calling `uv sync`
+      # leaves the action's cache path empty and its post-job save then fails the whole job, a green
+      # validation reported as a red check. `uv sync --locked` below is what makes the cache real.
+      - name: Install uv
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+        with:
+          python-version: "3.11"
+          enable-cache: true
+
+      - name: Sync dependencies
+        run: uv sync --locked
+
       - name: Install Helm
         uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
         with:
@@ -250,6 +260,29 @@ jobs:
           echo "${KUBECONFORM_SHA256}  /tmp/kubeconform.tar.gz" | sha256sum -c -
           tar -xzf /tmp/kubeconform.tar.gz -C /tmp kubeconform
           sudo install -m 0755 /tmp/kubeconform /usr/local/bin/kubeconform
+
+      - name: Install promtool
+        # The gate `kubeconform` cannot be: it validates that an alert's `expr` is a *string*, not
+        # that the string is PromQL. A syntax error therefore passed CI, passed the API server, and
+        # was rejected by Prometheus at rule-group load — taking the whole group with it, silently,
+        # with the object still reading as `Valid` in the cluster. `promtool check rules` is the
+        # only thing that parses it, and it now covers the rendered dashboards' queries too.
+        #
+        # Checksummed for the same reason as `kubeconform` above, and against the release's own
+        # `sha256sums.txt` rather than against one download. `promtool` ships only inside the full
+        # Prometheus tarball, which is why this pulls ~100 MB for one 40 MB binary; extracting the
+        # single path keeps the runner's disk out of it.
+        env:
+          PROMETHEUS_VERSION: v3.1.0
+          PROMETHEUS_SHA256: 9a9d1e115d1745826b13aec3f1409780b9fcf1d4206746cb4faee46ca5add70c
+        run: |
+          set -euo pipefail
+          curl -sSLo /tmp/prometheus.tar.gz \
+            "https://github.com/prometheus/prometheus/releases/download/${PROMETHEUS_VERSION}/prometheus-${PROMETHEUS_VERSION#v}.linux-amd64.tar.gz"
+          echo "${PROMETHEUS_SHA256}  /tmp/prometheus.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/prometheus.tar.gz -C /tmp --strip-components=1 \
+            "prometheus-${PROMETHEUS_VERSION#v}.linux-amd64/promtool"
+          sudo install -m 0755 /tmp/promtool /usr/local/bin/promtool
 
       - name: Render + validate the Helm chart
         run: make helm-validate

@@ -1,0 +1,507 @@
+{
+  "__comment": "The Temporal tier: what is running, what is failing, and whether the workers are polling.",
+  "annotations": {
+    "list": []
+  },
+  "editable": false,
+  "graphTooltip": 1,
+  "panels": [
+    {
+      "id": 1,
+      "type": "singlestat",
+      "title": "Jobs in flight",
+      "datasource": "prometheus",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 0,
+        "y": 0
+      },
+      "span": 2,
+      "format": "short",
+      "decimals": 2,
+      "valueName": "current",
+      "sparkline": {
+        "show": true
+      },
+      "targets": [
+        {
+          "expr": "sum(chemclaw_jobs_in_flight)",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "singlestat",
+      "title": "Job success ratio (30m)",
+      "datasource": "prometheus",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 4,
+        "y": 0
+      },
+      "span": 2,
+      "format": "percentunit",
+      "decimals": 2,
+      "valueName": "current",
+      "sparkline": {
+        "show": true
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(chemclaw_jobs_finished_total{outcome=\"completed\"}[30m])) / clamp_min(sum(rate(chemclaw_jobs_finished_total[30m])), 0.001)",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "singlestat",
+      "title": "Job p95",
+      "datasource": "prometheus",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 8,
+        "y": 0
+      },
+      "span": 2,
+      "format": "s",
+      "decimals": 2,
+      "valueName": "current",
+      "sparkline": {
+        "show": true
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(chemclaw_job_duration_seconds_bucket[30m])))",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "singlestat",
+      "title": "Temporal probe failures (1h)",
+      "datasource": "prometheus",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 12,
+        "y": 0
+      },
+      "span": 2,
+      "format": "short",
+      "decimals": 2,
+      "valueName": "current",
+      "sparkline": {
+        "show": true
+      },
+      "targets": [
+        {
+          "expr": "sum(increase(chemclaw_durable_unreachable_total[1h]))",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "singlestat",
+      "title": "Activities cancelled on drain (1h)",
+      "datasource": "prometheus",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 16,
+        "y": 0
+      },
+      "span": 2,
+      "format": "short",
+      "decimals": 2,
+      "valueName": "current",
+      "sparkline": {
+        "show": true
+      },
+      "targets": [
+        {
+          "expr": "sum(increase(chemclaw_worker_activities_cancelled_on_drain_total[1h]))",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "singlestat",
+      "title": "Push-backs dropped (1h)",
+      "datasource": "prometheus",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 20,
+        "y": 0
+      },
+      "span": 2,
+      "format": "short",
+      "decimals": 2,
+      "valueName": "current",
+      "sparkline": {
+        "show": true
+      },
+      "targets": [
+        {
+          "expr": "sum(increase(chemclaw_pushback_dropped_total[1h]))",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "graph",
+      "title": "Job outcomes by connector",
+      "datasource": "prometheus",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 4
+      },
+      "span": 6,
+      "fill": 0,
+      "stack": false,
+      "linewidth": 2,
+      "nullPointMode": "null",
+      "legend": {
+        "show": true,
+        "current": true,
+        "max": true,
+        "values": true
+      },
+      "tooltip": {
+        "shared": true,
+        "sort": 2,
+        "value_type": "individual"
+      },
+      "yaxes": [
+        {
+          "format": "reqps",
+          "show": true,
+          "min": 0
+        },
+        {
+          "format": "short",
+          "show": false
+        }
+      ],
+      "xaxis": {
+        "mode": "time",
+        "show": true
+      },
+      "targets": [
+        {
+          "expr": "sum by (connector, outcome) (rate(chemclaw_jobs_finished_total[30m]))",
+          "legendFormat": "{{connector}} {{outcome}}",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate(chemclaw_jobs_started_total[30m]))",
+          "legendFormat": "started",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "graph",
+      "title": "Job duration p95 by connector",
+      "datasource": "prometheus",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 4
+      },
+      "span": 6,
+      "fill": 0,
+      "stack": false,
+      "linewidth": 2,
+      "nullPointMode": "null",
+      "legend": {
+        "show": true,
+        "current": true,
+        "max": true,
+        "values": true
+      },
+      "tooltip": {
+        "shared": true,
+        "sort": 2,
+        "value_type": "individual"
+      },
+      "yaxes": [
+        {
+          "format": "s",
+          "show": true,
+          "min": 0
+        },
+        {
+          "format": "short",
+          "show": false
+        }
+      ],
+      "xaxis": {
+        "mode": "time",
+        "show": true
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, connector) (rate(chemclaw_job_duration_seconds_bucket[30m])))",
+          "legendFormat": "{{connector}} p95",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (connector) (rate(chemclaw_job_runtime_seconds_total[30m]))",
+          "legendFormat": "{{connector}} runtime seconds/second",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "type": "graph",
+      "title": "Activity failures by activity",
+      "datasource": "prometheus",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 12
+      },
+      "span": 6,
+      "fill": 0,
+      "stack": false,
+      "linewidth": 2,
+      "nullPointMode": "null",
+      "legend": {
+        "show": true,
+        "current": true,
+        "max": true,
+        "values": true
+      },
+      "tooltip": {
+        "shared": true,
+        "sort": 2,
+        "value_type": "individual"
+      },
+      "yaxes": [
+        {
+          "format": "reqps",
+          "show": true,
+          "min": 0
+        },
+        {
+          "format": "short",
+          "show": false
+        }
+      ],
+      "xaxis": {
+        "mode": "time",
+        "show": true
+      },
+      "targets": [
+        {
+          "expr": "sum by (activity) (rate(chemclaw_activity_failures_total[15m]))",
+          "legendFormat": "{{activity}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "type": "graph",
+      "title": "Work that went missing",
+      "datasource": "prometheus",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 12
+      },
+      "span": 6,
+      "fill": 0,
+      "stack": false,
+      "linewidth": 2,
+      "nullPointMode": "null",
+      "legend": {
+        "show": true,
+        "current": true,
+        "max": true,
+        "values": true
+      },
+      "tooltip": {
+        "shared": true,
+        "sort": 2,
+        "value_type": "individual"
+      },
+      "yaxes": [
+        {
+          "format": "reqps",
+          "show": true,
+          "min": 0
+        },
+        {
+          "format": "short",
+          "show": false
+        }
+      ],
+      "xaxis": {
+        "mode": "time",
+        "show": true
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(chemclaw_fan_out_children_dropped_total[30m]))",
+          "legendFormat": "fan-out children",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate(chemclaw_pushback_dropped_total[30m]))",
+          "legendFormat": "push-backs",
+          "refId": "B"
+        },
+        {
+          "expr": "sum(rate(chemclaw_rejoin_describe_failed_total[30m]))",
+          "legendFormat": "rejoin describe",
+          "refId": "C"
+        },
+        {
+          "expr": "sum(rate(chemclaw_worker_activities_cancelled_on_drain_total[30m]))",
+          "legendFormat": "cancelled on drain",
+          "refId": "D"
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "type": "graph",
+      "title": "Temporal worker task slots",
+      "datasource": "prometheus",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 20
+      },
+      "span": 6,
+      "fill": 0,
+      "stack": false,
+      "linewidth": 2,
+      "nullPointMode": "null",
+      "legend": {
+        "show": true,
+        "current": true,
+        "max": true,
+        "values": true
+      },
+      "tooltip": {
+        "shared": true,
+        "sort": 2,
+        "value_type": "individual"
+      },
+      "yaxes": [
+        {
+          "format": "short",
+          "show": true,
+          "min": 0
+        },
+        {
+          "format": "short",
+          "show": false
+        }
+      ],
+      "xaxis": {
+        "mode": "time",
+        "show": true
+      },
+      "targets": [
+        {
+          "expr": "sum by (pod, worker_type) (temporal_worker_task_slots_available)",
+          "legendFormat": "{{pod}} {{worker_type}} available",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (pod, worker_type) (temporal_worker_task_slots_used)",
+          "legendFormat": "{{pod}} {{worker_type}} used",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "type": "graph",
+      "title": "Temporal pollers",
+      "datasource": "prometheus",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 20
+      },
+      "span": 6,
+      "fill": 0,
+      "stack": false,
+      "linewidth": 2,
+      "nullPointMode": "null",
+      "legend": {
+        "show": true,
+        "current": true,
+        "max": true,
+        "values": true
+      },
+      "tooltip": {
+        "shared": true,
+        "sort": 2,
+        "value_type": "individual"
+      },
+      "yaxes": [
+        {
+          "format": "short",
+          "show": true,
+          "min": 0
+        },
+        {
+          "format": "short",
+          "show": false
+        }
+      ],
+      "xaxis": {
+        "mode": "time",
+        "show": true
+      },
+      "targets": [
+        {
+          "expr": "sum by (pod, poller_type) (temporal_num_pollers)",
+          "legendFormat": "{{pod}} {{poller_type}}",
+          "refId": "A"
+        }
+      ]
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 16,
+  "style": "dark",
+  "tags": [
+    "chemclaw"
+  ],
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "timezone": "utc",
+  "title": "Chemclaw durable jobs",
+  "uid": "chemclaw-durable-jobs",
+  "version": 1
+}

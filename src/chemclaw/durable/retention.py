@@ -146,6 +146,7 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.agent.session_store import SELECT_SESSION_ROWS
     from chemclaw.core.config import settings
     from chemclaw.core.db import connection, existing_tables
+    from chemclaw.durable.heartbeat import beating
     from chemclaw.durable.registry import durable_activity, durable_workflow
 
 from chemclaw.durable.publish import BAD_DATA_RETRY, queue_wait_timeout
@@ -423,6 +424,26 @@ def _window_days(table: str) -> int:
 @durable_activity("background")
 @activity.defn
 async def prune_expired_rows() -> RetentionOutcome:
+    """Run one retention sweep, heartbeating so a dead worker is noticed in a minute not ten.
+
+    A thin wrapper rather than a heartbeat inside the sweep, because the sweep has no boundary
+    worth reporting at: it walks a closed table map and the slow part is one `DELETE` inside one of
+    them, so "which table are we on" is neither stable nor interesting. That is exactly the "opaque
+    single call" case `durable/heartbeat.py` was extracted for, and its `finally` guarantees the
+    work is not left running detached if the beat itself fails.
+
+    Without this the only thing that would notice a worker dying mid-sweep is
+    `retention_timeout_seconds` — ten minutes, on a job whose whole point is to run unattended on a
+    schedule.
+    """
+    return await beating(
+        _prune_expired_rows(),
+        "retention sweep",
+        settings.background_activity_heartbeat_timeout_seconds,
+    )
+
+
+async def _prune_expired_rows() -> RetentionOutcome:
     """Delete rows past their table's retention window; return the per-table counts.
 
     Each table is pruned **and committed** in its own statement, so one failure cannot roll back
@@ -684,5 +705,13 @@ class RetentionWorkflow:
             prune_expired_rows,
             start_to_close_timeout=timedelta(seconds=settings.retention_timeout_seconds),
             schedule_to_start_timeout=queue_wait_timeout(),
+            # Without a heartbeat timeout the heartbeats the activity now sends do nothing for
+            # failure detection: a worker that dies mid-sweep would be noticed only when the
+            # ten-minute start-to-close budget expired. `connectors/calc/workflows.py` states the
+            # rule; core's own long work simply never applied it. The beat is derived from this
+            # same number (`durable/heartbeat.py::beating`), so the two cannot drift.
+            heartbeat_timeout=timedelta(
+                seconds=settings.background_activity_heartbeat_timeout_seconds
+            ),
             retry_policy=BAD_DATA_RETRY,
         )

@@ -183,6 +183,17 @@ def _acting_as(identity: StepIdentity) -> Iterator[None]:
     identity again inside it. Three `set`/`reset` pairs written out at three call sites would also
     be three chances to forget a reset, which leaks one run's identity into whatever the worker
     picks up next.
+
+    **This is no longer the only thing that binds them, and saying so is the point.**
+    `durable/interceptor.py` wraps *every* activity on every worker and reads the same three ids
+    off the same `identity` field — measured against the real `ToolStepInput`, `AgentStepInput` and
+    `JobStepInput`, it binds exactly what this bracket binds, over a scope that strictly contains
+    it. So on a worker this is redundant, and it cannot drift, because both read
+    `StepIdentity`'s own fields rather than restating them. What it still covers is an activity
+    invoked *directly* — which is how the two authorization tests over `authorize_job_step` prove
+    that a step cannot run a tool its requester could not run. Collapsing the two into one producer
+    means moving those tests onto a worker harness, and that is a decision with a security control
+    in its blast radius rather than a tidy-up (`docs/planning/BACKLOG.md`).
     """
     identity_token = set_current_identity(identity.actor, frozenset(identity.roles))
     session_token = set_current_session_id(identity.session_id)

@@ -50,6 +50,7 @@ from chemclaw.api.detach import RunningTurns
 from chemclaw.api.middleware import (
     _add_body_size_limit,
     _add_cors,
+    _add_request_observability,
     _add_security_headers,
     _database_unavailable,
     _refuse_unauthenticated_exposure,
@@ -221,6 +222,13 @@ def create_app(
     app = FastAPI(
         title="Chemclaw", docs_url=None, redoc_url=None, openapi_url=None, lifespan=_lifespan
     )
+    # **First, which is what makes it innermost.** `add_middleware` inserts at position 0 and the
+    # stack is built outermost-first, so the earliest call is the middleware closest to the router:
+    # inside `_SecurityHeaders` (so the 500 it answers carries them, which Starlette's own
+    # `ServerErrorMiddleware` above every user middleware could not), and outside FastAPI's
+    # `ExceptionMiddleware` (so the 401s, 404s, 422s and 429s the handlers produce are recorded as
+    # the responses they are). See `_RequestObservability`.
+    _add_request_observability(app)
     _add_security_headers(app)
     _add_body_size_limit(app)
     _add_cors(app)
@@ -332,6 +340,20 @@ def create_app(
         lambda: float(settings.service_fleet_max_concurrent_turns),
     )
     METRICS.bind_gauge("chemclaw_live_sessions", lambda: float(len(app.state.live_sessions)))
+    # The push-back streams' saturation pair, the same shape `chemclaw_turns_in_flight` and
+    # `chemclaw_turn_capacity` make for turns — and absent for as long as the stream cap has
+    # existed. Only *rejections* were counted (`chemclaw_event_streams_rejected_total`), so "are we
+    # near the per-pod cap" was unanswerable until the cap was already being hit, which is the one
+    # moment the answer is no longer useful. Summed over the per-user ledger rather than kept as a
+    # second counter, for the reason the gauges above read live structures: there is nothing to
+    # keep in sync.
+    METRICS.bind_gauge(
+        "chemclaw_event_streams_open", lambda: float(sum(app.state.event_streams.values()))
+    )
+    METRICS.bind_gauge(
+        "chemclaw_event_stream_capacity",
+        lambda: float(settings.service_max_event_streams_total),
+    )
     # Out-of-process capability is a new failure mode, so it gets a signal an operator can alert
     # on. Refreshed by the readiness probe (and at startup), read from the snapshot here — a
     # gauge must not perform network I/O when Prometheus scrapes it.

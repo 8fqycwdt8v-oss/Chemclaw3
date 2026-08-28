@@ -68,3 +68,22 @@ own launcher edit; it is a `BACKLOG.md` row rather than something smuggled in he
   passes either way and would be evidence of nothing.
 - A durable template run's log lines, proposals and launched jobs now carry the id that leads back
   to the turn that started them.
+
+**`main` reached the same end by a wider route while this was in flight**, and the two now overlap.
+`D-2026-08-27-a-job-that-fails-leaves-no-row` added `durable/interceptor.py`, which binds the same
+three ambients around *every* activity on every worker, reading them from the activity's own
+argument — one level into a nested `identity` field, which is exactly the shape the three step
+inputs use. Measured against the real `ToolStepInput`, `AgentStepInput` and `JobStepInput`, it binds
+the same actor, roles, session and correlation id this bracket binds, over a scope that strictly
+contains it. On a worker, therefore, `_acting_as` is redundant in full — not only in the third
+ambient this ADR added.
+
+It is kept anyway, and the reason is stated rather than assumed: with the bracket neutered, four
+tests fail, and two of them (`test_an_expensive_job_step_is_refused_for_an_unentitled_requester`
+and `test_an_entitled_requester_passes_the_same_gate`) are the ones that prove a template step
+cannot run a tool its requester could not run. They invoke the activity directly, where no
+interceptor runs. Collapsing the two producers into one therefore means moving a security
+control's proof onto a worker harness — a decision with its own blast radius, taken in its own
+change (`docs/planning/BACKLOG.md`), not inside a merge. The two cannot drift in the meantime:
+both read `StepIdentity`'s own fields, so there is one source of truth even though there are two
+readers of it.

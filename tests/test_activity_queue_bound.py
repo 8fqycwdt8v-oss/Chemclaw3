@@ -51,14 +51,24 @@ _DURABLE = Path(__file__).resolve().parents[1] / "src" / "chemclaw" / "durable"
 _QUEUE_BOUNDS = {"schedule_to_start_timeout", "schedule_to_close_timeout"}
 
 
-def _unbounded_activity_calls() -> list[str]:
-    """Every `execute_activity`/`start_activity` call under `durable/` with no bound on the wait.
+def _dispatch_calls() -> list[tuple[str, set[str]]]:
+    """Every `workflow.execute_activity`/`.start_activity` under `durable/`, with its keywords.
 
     `execute_local_activity` is deliberately not walked: a local activity runs inside the workflow
     worker's own task, is never dispatched to a queue, and Temporal rejects a schedule-to-start
     timeout on one.
+
+    **The receiver is matched, not only the method name**, and that is not defensive tidying: the
+    walk used to accept any object with an `execute_activity` attribute, and
+    `durable/interceptor.py` — a Temporal *worker* interceptor — delegates down its chain with
+    `self.next.execute_activity(input)`. That call schedules nothing; it is the SDK handing an
+    already-dispatched activity to the next link, and there is no queue wait to bound. Left
+    unnarrowed the rule reported it as an offender, which would have been closed either by an
+    exemption list or by passing a meaningless argument — both of which teach the next reader that
+    the rule is negotiable. Every real dispatch in this tree is written `workflow.execute_activity`
+    (measured: 31 of 31), which is the API this rule is about.
     """
-    offenders: list[str] = []
+    calls: list[tuple[str, set[str]]] = []
     for path in sorted(_DURABLE.glob("*.py")):
         tree = ast.parse(path.read_text())
         for node in ast.walk(tree):
@@ -69,15 +79,26 @@ def _unbounded_activity_calls() -> list[str]:
                 continue
             if func.attr not in {"execute_activity", "start_activity"}:
                 continue
-            passed = {kw.arg for kw in node.keywords if kw.arg}
-            if not passed & _QUEUE_BOUNDS:
-                offenders.append(f"{path.name}:{node.lineno}")
-    return offenders
+            if not (isinstance(func.value, ast.Name) and func.value.id == "workflow"):
+                continue
+            calls.append((f"{path.name}:{node.lineno}", {kw.arg for kw in node.keywords if kw.arg}))
+    return calls
 
 
 def test_every_durable_activity_call_bounds_the_queue_wait() -> None:
-    """No activity in the durable layer may be scheduled with only a start-to-close budget."""
-    assert _unbounded_activity_calls() == []
+    """No activity in the durable layer may be scheduled with only a start-to-close budget.
+
+    The floor is asserted beside the rule, because a structural test that matches nothing passes.
+    Narrowing the walk to `workflow.`-receiver calls is exactly the edit that could silently empty
+    it, so the count it must not fall below is stated here rather than trusted.
+    """
+    calls = _dispatch_calls()
+    assert len(calls) >= 30, (
+        f"the walk found only {len(calls)} dispatch sites under durable/, which is fewer than this "
+        "tree has ever had — the matcher has stopped seeing them and this rule is now vacuous"
+    )
+    unbounded = [where for where, passed in calls if not passed & _QUEUE_BOUNDS]
+    assert unbounded == []
 
 
 def test_an_activity_nobody_polls_fails_instead_of_waiting_forever(

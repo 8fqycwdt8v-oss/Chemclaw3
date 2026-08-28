@@ -71,6 +71,22 @@ rather than in the guard because this is the only place that can see one happen.
 `RecordContextCompaction` is the reader that can say the mechanism fired — it compares the full
 thread on the request's state against the list the edits actually produced, so the number is
 measured downstream of the policy rather than asserted beside it.
+
+**One number was not enough, because the two edits are not the same kind of act.** Clearing a tool
+result is lossless and the model can re-fetch; dropping a conversation group is *destructive* and
+the model simply no longer sees what was said. "The agent forgot what I told it three turns ago"
+and "the agent re-ran a tool it had already run" are those two edits, and one unlabelled counter
+answers neither. A label cannot be added to an already-declared counter from this side of
+`core/metrics.py`, so the distinction is published as a structured record instead — one
+`context.compacted` event per turn, on the high-water reduction, naming the reclaimed tokens, the
+tool results cleared *and the tools they belonged to*, and the number of conversation groups
+dropped. Counts and names, never content.
+
+**And nothing here may end a turn.** There used to be no `try` in this module at all, so a raising
+edit or a `count_tokens_approximately` that choked on an unfamiliar message shape killed the turn as
+a generic internal error — losing the answer, the tokens already spent and every tool the turn had
+run, in order to save tokens. `GuardedEdit` and `_record_reduction` degrade instead, and the request
+proceeds uncompacted, which is the direction with a chance of being answered.
 """
 
 import logging
@@ -90,7 +106,8 @@ from langchain_core.messages.utils import count_tokens_approximately, trim_messa
 
 from chemclaw.agent.repeat_guard import current_watch, forget_calls
 from chemclaw.core.config import settings
-from chemclaw.core.metrics_bridge import record_metric
+from chemclaw.core.logging import log_event
+from chemclaw.core.metrics_bridge import degraded, record_metric
 
 logger = logging.getLogger(__name__)
 
@@ -208,7 +225,13 @@ class KeepLastConversationGroupsEdit(ContextEdit):
         cut = min(max(by_tokens, by_groups), starts[-1])
         if cut <= 0:
             return
-        logger.info(
+        # DEBUG, not INFO, and the demotion is the point. Both edits are non-destructive, so this
+        # runs on *every* model call of a turn and re-derives the same standing cut — a 30-step turn
+        # logged one reduction thirty times at INFO. The turn-level record an operator actually
+        # reads is `_record_reduction`'s single `context.compacted` event, emitted once per turn on
+        # the high-water mark. This line stays because it is the only place the *window*'s own
+        # arithmetic is visible when someone is debugging the cut itself.
+        logger.debug(
             "context budget exceeded: dropping %d of %d message(s) to fit %d tokens; "
             "%d of %d conversation groups survive",
             cut,
@@ -260,6 +283,53 @@ def disabled_summarizer(model: Any, backend: Any) -> Any:
     return SummarizationMiddleware(model=model, backend=backend, trigger=None)
 
 
+@dataclass(slots=True)
+class GuardedEdit(ContextEdit):
+    """One context edit, wrapped so that a failure inside it costs the reduction and not the turn.
+
+    **There was no `try` anywhere in this module**, and the failure mode that leaves is the wrong
+    way round: a raising edit — a bad slice, a `count_tokens` that chokes on a message shape nobody
+    anticipated, an upstream change to `response_metadata` — propagates out of
+    `ContextEditingMiddleware.wrap_model_call` and ends the turn as a generic internal error. The
+    chemist loses the answer, the tokens already spent and every tool the turn had run, to save
+    tokens.
+
+    Continuing **uncompacted** is the safe direction and not merely the lenient one. The request is
+    then whatever it was: possibly over the provider's limit, in which case the call fails with the
+    provider's own context-length error — which is now classified, counted and *told to the
+    chemist as such* (`agent/model_calls.py`). More often it is under the limit and simply
+    expensive, because both triggers sit well below the hard ceiling. So the degraded path has a
+    good chance of answering, and the failed path has none.
+
+    Wrapping both edits rather than only the first-party one: `ClearToolUsesEdit` is upstream's and
+    is called with this repository's placeholder, triggers and `keep`, so it is exactly as capable
+    of raising on an unexpected message shape. Two real callers, which is what makes this a wrapper
+    rather than an inlined `try`.
+    """
+
+    edit: ContextEdit
+    """The edit to run; its failures are absorbed, its work is not otherwise touched."""
+
+    def apply(self, messages: list[AnyMessage], *, count_tokens: TokenCounter) -> None:
+        """Run the edit, or record that it could not run and leave `messages` as they are.
+
+        In-place mutation is the `ContextEdit` protocol, so an edit that raised half-way through
+        may leave a partially reduced list. That is accepted rather than rolled back: every
+        reduction here is a *suffix* operation on a list the middleware already deep-copied, so a
+        partial result is a smaller valid thread rather than a corrupt one, and copying the list a
+        second time to protect against a case that has never happened is a per-model-call cost.
+        """
+        try:
+            self.edit.apply(messages, count_tokens=count_tokens)
+        except Exception:
+            degraded(
+                logger,
+                "compaction",
+                "the %s context edit failed; this model call proceeds uncompacted",
+                type(self.edit).__name__,
+            )
+
+
 def context_compaction_middleware() -> list[Any]:
     """The context policy, as the middleware list `build_langgraph_agent` splices in.
 
@@ -275,25 +345,32 @@ def context_compaction_middleware() -> list[Any]:
     return [
         ContextEditingMiddleware(
             edits=[
+                # Both wrapped, so a raising edit costs the reduction rather than the turn — see
+                # `GuardedEdit`. The wrapper is applied here rather than inside each edit because
+                # one of the two is upstream's.
                 # Upstream counts the newest *tool results*, where D-025's setting counts tool-call
                 # *groups*. The difference is real and the setting's name is the half that is wrong;
                 # renaming an ENV-visible knob to fix a name would cost every deployment that sets
                 # it, so the name stays and `core/config/agent.py` says what it now means.
-                ClearToolUsesEdit(
-                    # Its own trigger, well below the budget the window uses. The two edits are
-                    # different instruments: this one is lossless — the `tool_use` record survives
-                    # and the model can re-fetch — so it is cheap enough to run early, and every
-                    # token it reclaims early is a conversation group the window below never has to
-                    # delete. Sharing one threshold meant nothing reduced until 100k and then both
-                    # fired together, which is the expensive edit doing work the free one could
-                    # have done.
-                    trigger=settings.agent_tool_result_clear_trigger,
-                    keep=settings.agent_keep_last_tool_groups,
-                    placeholder=TOOL_RESULT_PLACEHOLDER,
+                GuardedEdit(
+                    ClearToolUsesEdit(
+                        # Its own trigger, well below the budget the window uses. The two edits
+                        # are different instruments: this one is lossless — the `tool_use` record
+                        # survives and the model can re-fetch — so it is cheap enough to run
+                        # early, and every token it reclaims early is a conversation group the
+                        # window below never has to delete. Sharing one threshold meant nothing
+                        # reduced until 100k and then both fired together, which is the expensive
+                        # edit doing work the free one could have done.
+                        trigger=settings.agent_tool_result_clear_trigger,
+                        keep=settings.agent_keep_last_tool_groups,
+                        placeholder=TOOL_RESULT_PLACEHOLDER,
+                    )
                 ),
-                KeepLastConversationGroupsEdit(
-                    trigger=settings.agent_context_token_budget,
-                    keep=settings.agent_keep_last_conversation_groups,
+                GuardedEdit(
+                    KeepLastConversationGroupsEdit(
+                        trigger=settings.agent_context_token_budget,
+                        keep=settings.agent_keep_last_conversation_groups,
+                    )
                 ),
             ]
         ),
@@ -302,6 +379,29 @@ def context_compaction_middleware() -> list[Any]:
 
 
 def _record_reduction(request: ModelRequest[Any]) -> None:
+    """Publish this model call's reduction, never letting the observation break the call.
+
+    The guard is the whole of this function, and it is separate from `GuardedEdit` because it
+    covers a different failure: this reads `request.state`, estimates two message lists with
+    `count_tokens_approximately`, and inspects `response_metadata` for upstream's cleared-marker —
+    all over shapes this module does not own. A raising *observer* ending a turn would be the worst
+    possible trade, since removing it entirely changes nothing a chemist receives.
+
+    The repeat guard's `forget_calls` is inside the guard too, deliberately. Losing it means a
+    cleared result may earn a refusal it should have been forgiven — one refused tool call, worded
+    and recoverable — where letting the exception out means the turn dies.
+    """
+    try:
+        _publish_reduction(request)
+    except Exception:
+        degraded(
+            logger,
+            "compaction",
+            "could not measure this model call's context reduction; the call itself is unaffected",
+        )
+
+
+def _publish_reduction(request: ModelRequest[Any]) -> None:
     """Publish this model call's reduction, if there was one.
 
     The full thread is read off `request.state`, which the edits above leave alone — `override`
@@ -333,7 +433,8 @@ def _record_reduction(request: ModelRequest[Any]) -> None:
     # forgiven at most once per turn: the edits are non-destructive, so this observer re-derives
     # the same standing reduction on every model call, and forgiving it every time reset the
     # guard's counters as fast as repeats accumulated (`repeat_guard.TurnCallWatch`).
-    forget_calls(_cleared_calls(request.messages))
+    cleared = _cleared_calls(request.messages)
+    forget_calls(cleared)
     # The metrics are high-water-marked on the turn's watch for the same re-derivation reason: a
     # 30-step turn with one standing reduction is one compaction, not thirty, and a reclaimed
     # token is reclaimed once. Off the request path there is no watch and each call reports
@@ -344,13 +445,72 @@ def _record_reduction(request: ModelRequest[Any]) -> None:
         record_metric(
             lambda m: m.increment("chemclaw_context_reclaimed_tokens_total", float(reclaimed))
         )
+        _announce(request, reclaimed, cleared)
         return
     if watch.peak_reclaimed == 0:
         record_metric(lambda m: m.increment("chemclaw_context_compactions_total"))
+        _announce(request, reclaimed, cleared)
     delta = float(reclaimed) - watch.peak_reclaimed
     if delta > 0:
         record_metric(lambda m: m.increment("chemclaw_context_reclaimed_tokens_total", delta))
         watch.peak_reclaimed = float(reclaimed)
+
+
+def _announce(
+    request: ModelRequest[Any], reclaimed: int, cleared: list[tuple[str, str, Any]]
+) -> None:
+    """Say, once per turn, what this reduction actually removed — and which of the two edits did it.
+
+    **One counter cannot answer either question a compaction raises.**
+    `chemclaw_context_compactions_total` is unlabelled and the middleware composes two edits with
+    opposite consequences: `ClearToolUsesEdit` is *lossless* — the `tool_use` record survives and
+    the model can re-fetch — while `KeepLastConversationGroupsEdit` is **destructive**, deleting
+    conversation turns from what the model can see. "The agent forgot what I told it three turns
+    ago" and "the agent re-ran a tool it had already run" are precisely those two edits, and one
+    number distinguishes them not at all. A label cannot be added to a declared counter from here,
+    so the distinction lands as a structured record instead, where both halves are separate fields.
+
+    **Counts and names, never content.** The tools whose results were cleared are named because
+    "which tool's answer did the model lose" is the actionable half of the second question; their
+    arguments and their payloads are not, and `_cleared_calls` returns both. A log line is not a
+    place to re-publish a chemist's question or a corpus excerpt.
+
+    Groups dropped is derived here rather than reported by the edit, because only this function sees
+    both lists: a group is a `HumanMessage` and everything answering it, and the window only ever
+    removes a prefix, so the difference in `HumanMessage` counts *is* the number of conversation
+    turns the model no longer sees. Zero means the destructive edit did not fire — the reduction was
+    entirely the lossless one, which is the good case and worth being able to see.
+
+    Once per turn, on the high-water compaction, for the reason the metrics are high-water-marked:
+    the edits are non-destructive, so this same standing reduction is re-derived on every model
+    call of the turn and a per-call line would repeat it thirty times.
+    """
+    tools = sorted({name for _call_id, name, _args in cleared})
+    dropped = _group_count(request.state.get("messages") or []) - _group_count(request.messages)
+    log_event(
+        logger,
+        "context.compacted",
+        "reclaimed ~%d tokens: cleared %d tool result(s) (%s) and dropped %d conversation group(s)",
+        reclaimed,
+        len(cleared),
+        ", ".join(tools) or "none",
+        dropped,
+        reclaimed_tokens=reclaimed,
+        tool_results_cleared=len(cleared),
+        # A comma-joined string rather than a list, because a log stack indexes scalars.
+        tools_cleared=", ".join(tools),
+        conversation_groups_dropped=dropped,
+    )
+
+
+def _group_count(messages: Sequence[AnyMessage]) -> int:
+    """How many conversation groups a message list holds — one per `HumanMessage`.
+
+    The same definition `KeepLastConversationGroupsEdit` cuts on, stated once: a group is a human
+    message and everything that answers it, which is why a cut on that boundary can never separate
+    a tool call from its result.
+    """
+    return sum(1 for message in messages if isinstance(message, HumanMessage))
 
 
 def _cleared_calls(messages: Sequence[AnyMessage]) -> list[tuple[str, str, Any]]:

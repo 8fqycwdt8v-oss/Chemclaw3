@@ -61,6 +61,15 @@ class StoreSettings(BaseSettings):
     # deliberately connect without a statement timeout (an index build may be slow), via
     # `db.connect()` rather than by omitting an argument.
     pg_statement_timeout_seconds: float = Field(default=30.0, ge=0)
+    # When a unit of work on a borrowed connection is slow enough to be worth a line in the log.
+    # A *warning threshold*, not a bound — `pg_statement_timeout_seconds` is the bound, and it
+    # cancels; this only says so. The two are deliberately far apart: the timeout is the point at
+    # which a query has failed, and this is the point at which one is still succeeding while
+    # costing a pooled connection long enough to matter to everything else waiting for one.
+    # `chemclaw_db_query_duration_seconds` is the distribution; this is the line naming the call
+    # site, because a histogram bucket cannot say *which* `operation` was slow on the run that a
+    # human is reading the log of. 0 disables it.
+    pg_slow_query_seconds: float = Field(default=2.0, ge=0)
     # How long a migration's DDL may *wait for a table lock* (libpq `lock_timeout`) before giving
     # up. Deliberately not `statement_timeout`, and the distinction is the whole point: an
     # `ALTER TABLE` needs `ACCESS EXCLUSIVE`, and a lock request that queues behind one long read

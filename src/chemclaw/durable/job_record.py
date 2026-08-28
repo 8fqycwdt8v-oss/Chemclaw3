@@ -85,6 +85,18 @@ class JobRecord(BaseModel):
     # and `<connector>.<job>` is a route rather than a shape. Empty means the run did not say,
     # which is every row written before this column and which the projector reads as "infer".
     payload_kind: str = ""
+    # How the run ended: `completed` or `failed` (D-2026-08-27-a-job-that-fails-leaves-no-row).
+    #
+    # This table used to be reachable only from `ConnectorJobWorkflow._finish`, and a failing job
+    # raises before it — so a failed run wrote no row at all and the only durable trace of it was
+    # Temporal's expiring history. Measured live: two runs, one success and one `ValueError`, left
+    # one row. Defaulted to `completed` because that is what every row written before this field is,
+    # not because a caller may omit it.
+    state: str = "completed"
+    # The application's own account of *why* it failed, from `connector_job.py::failure_reason` —
+    # the first application-level frame of Temporal's nested chain, which is the sentence written
+    # for the chemist rather than the library internals beneath it. Empty for a run that succeeded.
+    failure_reason: str = ""
     completed_at: datetime | None = None
 
 
@@ -109,6 +121,12 @@ class JobRecordSummary(BaseModel):
     # The plan step the run served (D-2026-08-27), in the listing so "which step was this for"
     # needs no second lookup. Empty when the run was not launched from a plan step.
     plan_step: str = ""
+    # How the run ended, in the *listing* and not only in the full record. Required here the moment
+    # failures started being written at all: without it a failed run appears in `find_past_jobs`
+    # beside the successful ones with an empty summary and nothing saying it failed, which is a
+    # worse answer than the one that omitted it. `failure_reason` stays off the summary — the
+    # listing says *that* a run failed, and opening the record says why.
+    state: str = "completed"
     completed_at: datetime | None = None
 
 
@@ -203,10 +221,33 @@ async def record_job(record: JobRecord) -> None:
     `job_id`, so a retry after a committed-but-timed-out write replaces the row and increments once.
     """
     await default_job_record_sink().record(record)
+    # The counterpart `chemclaw_jobs_started_total` never had. Booked in the activity beside the
+    # runtime counter and for the identical reason the paragraph above gives: an increment in the
+    # workflow body would be re-counted on every replay, and one at the top of this activity would
+    # be booked once per *attempt*. Every run reaches here now, failures included, so this is the
+    # one series that carries a success rate — and the `outcome` label is what makes "all my CREST
+    # jobs are failing" distinguishable from "nobody is running jobs", which nothing could say.
+    record_metric(
+        lambda m: m.increment(
+            "chemclaw_jobs_finished_total",
+            labels={"connector": record.connector, "outcome": record.state},
+        )
+    )
     if record.runtime_seconds:
         record_metric(
             lambda m: m.increment(
                 "chemclaw_job_runtime_seconds_total",
+                record.runtime_seconds,
+                {"connector": record.connector},
+            )
+        )
+        # A *distribution* beside the accumulating counter, which is not a duplicate of it: a
+        # counter answers "how much compute has this connector consumed" and can never answer "what
+        # does a slow one cost", because a total divided by a count is a mean and the interesting
+        # runs are in the tail. This is the most expensive work in the system and it had no p95.
+        record_metric(
+            lambda m: m.observe(
+                "chemclaw_job_duration_seconds",
                 record.runtime_seconds,
                 {"connector": record.connector},
             )

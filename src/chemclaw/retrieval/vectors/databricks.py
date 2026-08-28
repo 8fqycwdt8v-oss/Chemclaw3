@@ -115,22 +115,32 @@ def _client_class() -> Any:
     before giving up. A `VectorStoreConfigError` because no retry can install a package: the
     operator has to act, and the message is the action.
     """
+    refused: list[str] = []
     for module_name, attribute in (
         ("databricks.vector_search.client", "VectorSearchClient"),
         ("databricks.ai_search.client", "AISearchClient"),
     ):
         try:
             module = importlib.import_module(module_name)
-        except ImportError:
+        except ImportError as exc:
+            # **Why each import failed is kept**, because "not installed" is only one of the
+            # reasons an `ImportError` reaches here. A package that *is* installed but whose own
+            # dependency is missing or ABI-incompatible raises `ImportError` from inside itself,
+            # and swallowing it produced an error message telling the operator to install
+            # something they had already installed — sending them to fix the wrong thing while the
+            # search leg stayed dark.
+            refused.append(f"{module_name}: {exc}")
             continue
         client = getattr(module, attribute, None)
         if client is not None:
             return client
+        refused.append(f"{module_name}: imported, but has no {attribute}")
     raise VectorStoreConfigError(
         "the vector store provider is 'databricks' but neither `databricks-vectorsearch` nor its "
-        "successor is installed. It is deliberately not a runtime dependency of this repository — "
-        "a store nobody configured must not weigh on every pod — so install it in the image that "
-        "reaches the workspace, or set CHEMCLAW_VECTOR_STORE_PROVIDER=pgvector"
+        "successor could be loaded. It is deliberately not a runtime dependency of this "
+        "repository — a store nobody configured must not weigh on every pod — so install it in "
+        "the image that reaches the workspace, or set CHEMCLAW_VECTOR_STORE_PROVIDER=pgvector. "
+        f"What each attempt said: {'; '.join(refused)}"
     )
 
 

@@ -43,6 +43,7 @@ from chemclaw.connectors.identity import (
     HEADER_ACTOR,
     HEADER_CORRELATION,
     HEADER_SESSION,
+    turn_identity_hook,
 )
 from chemclaw.connectors.manifest import ConnectorManifest, HttpEndpoint, StdioEndpoint
 from chemclaw.connectors.registry import (
@@ -55,6 +56,7 @@ from chemclaw.connectors.registry import (
 )
 from chemclaw.connectors.server import connector_app
 from chemclaw.connectors.transport import SERVED_BY, ConnectorSpec, _stamped
+from chemclaw.core import mcp_session
 from chemclaw.core.config import settings
 from chemclaw.core.identity_context import (
     reset_current_correlation_id,
@@ -62,7 +64,7 @@ from chemclaw.core.identity_context import (
     set_current_correlation_id,
     set_current_identity,
 )
-from chemclaw.core.mcp_session import _origin_scoped, cancel_on_timeout, invoke
+from chemclaw.core.mcp_session import cancel_on_timeout, invoke
 from chemclaw.core.session_context import reset_current_session_id, set_current_session_id
 from tests.conftest import _free_port
 
@@ -312,27 +314,46 @@ def test_the_turn_identity_reaches_the_calculation_backend(
     ), received
 
 
-def test_the_backend_session_takes_its_identity_back_off_a_foreign_hop() -> None:
-    """A redirect must not carry the caller's identity to an origin nobody named.
+def test_the_backend_client_actually_runs_the_hook_it_was_handed() -> None:
+    """`open_session`'s whole identity story is one line of wiring, and nothing else asserts it.
 
-    The same hazard `turn_identity_hook` guards for a connector, on the transport `core` owns: an
-    httpx hook runs on every hop and httpx builds each hop from the previous request's headers,
-    dropping `Authorization` alone. These headers are attached to the connection, so the copies
-    arrive on the foreign hop whatever a hook chooses to *add* — which is why the guard removes.
+    `core.mcp_session` deliberately owns no origin guard and no header builder of its own: it takes
+    the *same* `connectors.identity.turn_identity_hook` the connector registry installs, because
+    two copies is how one of them stops matching `STAMPED_HEADERS`. What is left to get wrong here
+    is therefore not the policy but the plumbing — a `request_hook` that never reaches
+    `httpx.AsyncClient(event_hooks=...)` sends `Authorization` alone and fails silently, which is
+    exactly the state this connection was in.
+
+    Asserted through the real hook so the redirect half comes with it: httpx runs a hook on every
+    hop and builds each hop from the previous request's headers, dropping `Authorization` alone —
+    so a backend answering `302` toward an origin nobody named would otherwise harvest the caller's
+    identity from a connection header no other mechanism strips.
     """
-    stamped = {HEADER_ACTOR: "user-42", HEADER_SESSION: "session-xyz"}
-    strip = _origin_scoped("http://127.0.0.1:8860/mcp", tuple(stamped))
+    client = mcp_session.short_connect_client(
+        30.0, turn_identity_hook("http://127.0.0.1:8860/mcp")
+    )(headers=None, timeout=None, auth=None)
+    (hook,) = client.event_hooks["request"]
 
+    stamped = {HEADER_ACTOR: "user-42", HEADER_SESSION: "session-xyz"}
     same = httpx.Request("POST", "http://127.0.0.1:8860/mcp/", headers=stamped)
     foreign = httpx.Request("POST", "http://evil.example/mcp", headers=stamped)
 
-    async def _both() -> None:
-        """Run the hook over one same-origin hop and one foreign one."""
-        await strip(same)
-        await strip(foreign)
+    identity = set_current_identity("user-42", frozenset({"process-chemist"}))
+    session_token = set_current_session_id("session-xyz")
+    try:
 
-    asyncio.run(_both())
+        async def _both() -> None:
+            """Run the client's own hook over one same-origin hop and one foreign one."""
+            await hook(same)
+            await hook(foreign)
+
+        asyncio.run(_both())
+    finally:
+        reset_current_session_id(session_token)
+        reset_current_identity(identity)
+
     assert same.headers.get(HEADER_ACTOR) == "user-42"
+    assert same.headers.get(HEADER_SESSION) == "session-xyz"
     assert HEADER_ACTOR not in foreign.headers and HEADER_SESSION not in foreign.headers
 
 

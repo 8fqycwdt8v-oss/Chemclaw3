@@ -54,8 +54,9 @@ from tests.fakes import scripted
 #   scratchpad write and a `task` spawn cross the audit row and the authorization gate exactly like
 #   any other tool call.
 # - `AnthropicPromptCachingMiddleware` is last because it too replaces an upstream entry in place,
-#   and upstream's sits in the tail after the compaction group. The two do not contend: caching
-#   marks the system prompt and tool schemas, which compaction never touches.
+#   and upstream's sits in the tail after the compaction group — behind even the model-call
+#   observers, which are new names and land with the rest of this repository's block. The two do
+#   not contend: caching marks the system prompt and tool schemas, which compaction never touches.
 # - `enforce_loop_cap` appears on *every* build, harness or not
 #   (`D-2026-08-27-the-cap-is-a-property-of-the-loop-not-of-the-mode`): the runaway it bounds is
 #   the model-call loop itself, which exists in both modes. Its position carries no nesting
@@ -76,6 +77,14 @@ _EXPECTED_ORDER = (
     "refuse_repeated_calls",
     "ContextEditingMiddleware",
     "RecordContextCompaction",
+    # The two model-call observers, innermost of this repository's block and therefore closest to
+    # the provider call (`D-2026-08-27-a-refusal-is-not-a-crash`). Below the compaction group
+    # deliberately: the context edits also run in `wrap_model_call`, so recording from above them
+    # would fold this repository's own token counting into the histogram an operator reads as "how
+    # slow is the endpoint". The repair is outside the recorder so a repaired turn books both model
+    # calls, which is what happened.
+    "RepairInvalidToolCalls",
+    "RecordModelCalls",
     "AnthropicPromptCachingMiddleware",
 )
 

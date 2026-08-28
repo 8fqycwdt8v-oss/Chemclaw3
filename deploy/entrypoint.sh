@@ -49,6 +49,19 @@ case "${component}" in
     args+=(--limit-concurrency "${CHEMCLAW_SERVICE_MAX_CONNECTIONS:-256}")
     args+=(--timeout-keep-alive "${CHEMCLAW_SERVICE_KEEPALIVE_SECONDS:-15}")
     args+=(--h11-max-incomplete-event-size "${CHEMCLAW_SERVICE_MAX_HEADER_BYTES:-32768}")
+    # `--no-access-log`, now that the application emits its own. uvicorn's line was the *only*
+    # record of an HTTP request in this system and it carried client address, method, raw path and
+    # status: no latency, no route template, no actor, no session, no correlation id — the three
+    # ambient ids rendered `-` on every line, because nothing bound them at request scope.
+    # `_RequestObservability` books all of that plus the two RED metrics, so keeping uvicorn's line
+    # would be two records per request where the shorter one is strictly a subset.
+    #
+    # It is also the line that carried a *measured* denial of service: the raw path is
+    # attacker-controlled and goes through the redaction filter, and a 115 KB request line stalled
+    # the pod for 21 s holding the stdlib logging lock — reachable **unauthenticated**, because
+    # uvicorn logs before any application code runs. The first-party line logs the route
+    # *template* resolved after routing, which has none of that property.
+    args+=(--no-access-log)
     exec uvicorn chemclaw.api.app:create_app --factory "${args[@]}"
     ;;
   background-worker)

@@ -99,18 +99,26 @@ def test_a_step_runs_under_the_correlation_id_its_run_was_launched_with() -> Non
         actor="chemist-1", roles=[], correlation_id="template-run-1", session_id="s-tmpl"
     )
     context = ContextFilter()
-    record = logging.LogRecord("t", logging.INFO, __file__, 1, "still running", None, None)
 
-    with _acting_as(identity):
-        assert ambient_provenance() == ("chemist-1", "s-tmpl", "template-run-1")
+    def _stamped() -> str:
+        """The correlation id `ContextFilter` puts on a *fresh* record right now.
+
+        A fresh record per reading, because the filter stamps with `setdefault` rather than
+        assignment (`core/logging.py`) — so re-filtering the record from inside the bracket would
+        read the id it already carries and would pass however the bracket behaved.
+        """
+        record = logging.LogRecord("t", logging.INFO, __file__, 1, "still running", None, None)
         context.filter(record)
         # Defaulted because the attribute is stamped by the filter, not declared on the
         # record — an unstamped record reads `""` here and fails, which is the point.
-        assert getattr(record, "correlation_id", "") == "template-run-1"
+        return str(getattr(record, "correlation_id", ""))
+
+    with _acting_as(identity):
+        assert ambient_provenance() == ("chemist-1", "s-tmpl", "template-run-1")
+        assert _stamped() == "template-run-1"
 
     assert ambient_provenance() == ("", "", "")
-    context.filter(record)
-    assert getattr(record, "correlation_id", "") == "-"
+    assert _stamped() == "-"
 
 
 def test_a_declared_job_resolves_to_its_connector_and_queue(fixture_bundle: str) -> None:
@@ -377,7 +385,7 @@ def test_a_refused_launch_is_audited_as_an_error_before_it_raises(
     with pytest.raises(AuthorizationError):
         asyncio.run(authorize_job_step(_step(costly_bundle, subject="toluene")))
     (event,) = events
-    assert (event.tool, event.actor, event.outcome) == (costly_bundle, "chemist-1", "error")
+    assert (event.tool, event.actor, event.outcome) == (costly_bundle, "chemist-1", "refused")
 
 
 def test_a_step_with_bad_arguments_fails_before_any_workflow_starts(fixture_bundle: str) -> None:

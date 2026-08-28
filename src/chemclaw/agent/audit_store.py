@@ -39,11 +39,17 @@ from chemclaw.core.config import settings
 
 logger = logging.getLogger(__name__)
 
+# `ts` is bound explicitly rather than left to the column default, and that is the point of it
+# being in this list. `record` buffers and returns, so `DEFAULT now()` dated every row at *flush*
+# time and `id` — a `BIGSERIAL` also assigned at flush — ordered them the same way. `chemclaw
+# explain` reconstructs a turn from that order, so under load the trail's story about a turn was
+# the flusher's rather than the tools'. The value comes from `agent/audit.py::_recording`, stamped
+# when the call started.
 _INSERT = """
     INSERT INTO audit_events
-        (correlation_id, session_id, purpose, actor, agent, tool, arguments, outcome, detail,
-         latency_ms, revision, tool_revision)
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        (ts, correlation_id, session_id, purpose, plan_step, actor, agent, tool, arguments,
+         outcome, detail, latency_ms, revision, tool_revision)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
 """
 
 
@@ -55,9 +61,11 @@ def _count_lost(lost: float, metrics: Any) -> None:
 def _row(event: AuditEvent) -> tuple[object, ...]:
     """One event as the parameter tuple `_INSERT` binds."""
     return (
+        event.ts,
         event.correlation_id,
         event.session_id,
         event.purpose,
+        event.plan_step,
         event.actor,
         event.agent,
         event.tool,

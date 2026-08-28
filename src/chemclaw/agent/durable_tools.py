@@ -52,6 +52,7 @@ from temporalio.types import MethodAsyncNoParam
 
 from chemclaw.agent.authz import authorize_trigger, require_actor
 from chemclaw.agent.framing import frame_untrusted
+from chemclaw.connectors.jobs import failed_job_reason
 from chemclaw.core.config import settings
 from chemclaw.core.errors import SubsystemUnavailableError
 from chemclaw.core.identity_context import get_current_roles
@@ -429,24 +430,39 @@ async def job_status(job_id: str, *, wait_seconds: float = 0.0) -> DurableJobSta
             return DurableJobStatus(job_id=job_id, status=ended)
         return completed_job_status(job_id, result)
     if status != "completed":
-        return DurableJobStatus(job_id=job_id, status=status)
+        # A status word alone was everything the model got for a failed run — measured,
+        # `summary=None, result={}`. Both of the other two collectors render the cause, and this is
+        # the one the tool's own docstring tells the model to poll, so for a job that outlived its
+        # turn with a dropped push-back it is the *only* one. `failed_job_reason` is that same walk,
+        # extracted so there is one answer to "why did it fail" rather than three.
+        return DurableJobStatus(
+            job_id=job_id, status=status, summary=await failed_job_reason(handle) or None
+        )
     return completed_job_status(job_id, await handle.result())
 
 
 async def _recorded_status(job_id: str) -> DurableJobStatus | None:
     """The stored record for `job_id` as a status, or None when nothing was recorded.
 
-    The record is only ever written for a run that *completed* (the workflow raises before
-    reaching the write otherwise), so a row here means "completed", never a status this has to
-    reconstruct.
+    **This used to hardcode `"completed"`**, on the stated reasoning that "the record is only ever
+    written for a run that completed (the workflow raises before reaching the write otherwise)".
+    That was true and stopped being true on 2026-08-27, when the failure path started writing a row
+    of its own — precisely so a failed job would stop being invisible. Left as it was, the fix would
+    have made this surface *wrong* rather than merely silent: a failed job whose Temporal history
+    had aged out would report as **completed, with an empty summary**, which is worse than the
+    "failed, no reason" it replaced. The record now says which it was, so read it.
+
+    `failure_reason` is surfaced as the summary for a failed row for the same reason
+    `failed_job_reason` exists on the live path: the state word without the cause is the answer
+    nobody can act on, and this is the branch that serves a run the broker has already forgotten.
     """
     record = await lookup_job_record(job_id)
     if record is None:
         return None
     return DurableJobStatus(
         job_id=job_id,
-        status="completed",
-        summary=record.summary,
+        status=record.state,
+        summary=record.summary or (record.failure_reason or None),
         calc_refs=record.calc_refs,
         # Projected on the way out as well as on the way in, and the difference is *old rows*: a
         # record written before D-2026-08-21 holds the whole geometry, so a months-old conformer

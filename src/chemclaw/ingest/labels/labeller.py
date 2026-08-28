@@ -217,6 +217,16 @@ class RxnLabelServer:
                 settings.rxnlabel_server_url,
                 token_env=settings.rxnlabel_server_token_env,
                 timeout_seconds=settings.rxnlabel_server_timeout_seconds,
+                # **No `request_hook` here, and the reason is a layering boundary rather than an
+                # oversight.** `connectors/calc/remote.py` passes `turn_identity_hook`, so its leg
+                # carries `traceparent`, the correlation id, the actor and the session; this one
+                # sends `Authorization` alone and is therefore untraceable, which matters because a
+                # labelling drain runs for hours inside a durable activity. The hook cannot simply
+                # be imported: it lives in `connectors/identity.py` on top of both
+                # `agent.turn_flags` and `connectors.manifest`, and `ingest -> connectors` is not an
+                # edge `tests/test_layering.py` permits. Closing it means deciding where a
+                # *non-connector* MCP client's identity stamping belongs — a real design question,
+                # not a line to add here. `docs/planning/BACKLOG.md` carries it.
             ) as session:
                 payload = await invoke(session, tool, arguments)
         except McpCredentialRefused as exc:
