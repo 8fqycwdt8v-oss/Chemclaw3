@@ -24,17 +24,17 @@ Status: `pending` · `running` · `PASS` · `FAIL` · `skipped (reason)`
 
 | # | Stage | Command | Status | Evidence |
 | --- | --- | --- | --- | --- |
-| S0 | Baseline, all repos | see below | running | `.live/baseline/*.log` |
-| S1 | Four-repo bring-up | `make live-e2e-full-stack` | pending | `.live/e2e-*.log` |
+| S0 | Baseline, all repos | see below | **PASS** (4/4 repos) | `.live/baseline/*.log` |
+| S1 | Four-repo bring-up | `make live-e2e-full-stack` | running | `.live/e2e-*.log` |
 | S1b | Wiring check | `/readyz`, `chemclaw_connectors_unhealthy` | pending | — |
 | S2 | Durable path, no LLM | `make live-jobs` | pending | — |
 | S3 | Template args vs live | `make live-template-args` | pending | — |
-| S4 | Real-model probes | `make live-probes` | pending | `tasks/live-test/transcripts/` |
-| S5 | Plan gate | `make live-plan-gate` | pending | `tasks/live-test/m12-plan-gate/` |
-| S6 | UI full-stack | `npm run test:e2e:full-stack` | pending | — |
+| S4 | Real-model probes | `make live-probes` | **blocked (F1)** | `tasks/live-test/transcripts/` |
+| S5 | Plan gate | `make live-plan-gate` | blocked (F1), mock route TBD | `tasks/live-test/m12-plan-gate/` |
+| S6 | UI full-stack | `npm run test:e2e:full-stack` | **blocked (F1)** | — |
 | S7 | Storm | `make live-storm` | pending | `tasks/live-test/storm.md` |
 | S8 | Corpus convergence | `make live-data`, polled | pending | `.live/e2e-corpus-backfill.log` |
-| S9 | Degradation (Temporal down) | `make live-degradation` | pending | `tasks/live-test/m12-degradation/` |
+| S9 | Degradation (Temporal down) | `make live-degradation` | blocked (F1), mock route TBD | `tasks/live-test/m12-degradation/` |
 | S10 | Soak + drift | `make live-soak`, `make live-soak-report` | pending | `.live/soak.jsonl` |
 
 **Sequencing that matters.** S1 starts the ORD corpus backfill, which drains for 2h+ — so S2–S7 run
@@ -49,14 +49,45 @@ skips a large set and still prints green.
 
 - Infra: `make live-infra` up (postgres, temporal, temporal-ui containers healthy); `make db-migrate`
   applied **71 migrations**, `converted 0 stored message(s)`.
-- Chemclaw3: `make lint` **PASS** (exit 0, 734 files formatted) · `make type` **PASS** (exit 0, `mypy --strict` clean over **734 source files**) · `make test` → running, Postgres up
+- Chemclaw3: `make lint` **PASS** · `make type` **PASS** (`mypy --strict`, **734 source files**) · `make test` **PASS** — **5753 passed, 14 skipped**, 829s, exit 0, Postgres up (`.live/baseline/cc3-test.log`).
+  The 14 skips are named, not folded into the pass: **9** `helm is not installed`, **3** truncated
+  git history (`fetch-depth: 0`), **2** the credential finding F1 below.
 - Chemclaw3-mcp: `make check` **PASS**, exit 0 — ruff clean, `mypy --strict` clean over **120 source files**, **1521 passed / 7 skipped** in 334s, `pip-audit`: no known vulnerabilities (`.live/baseline/mcp-check.log`)
 - Chemclaw3_ui: `typecheck` **PASS** (exit 0) · `lint` **PASS** (exit 0) · `test` **PASS** — 74 files, **761 tests passed**, 40.1s (`.live/baseline/ui-*.log`)
 - Chemclaw3_mock: `pytest` → **PASS**, 39 passed, exit 0 (`.live/baseline/mock-test.log`); venv built at `/home/user/Chemclaw3_mock/.venv`, which the lane needs for `mock-eln`/`mock-vendor`
 
 ## Findings
 
-None yet.
+### F1 — the model credential is present but unfunded (blocks 4 of 11 stages)
+
+**Measured twice, independently.** The baseline surfaced it as two skips in
+`tests/test_prompt_caching.py`, and a direct call confirms it:
+
+```
+POST https://api.anthropic.com/v1/messages  ->  http_status=400
+{"type":"error","error":{"type":"invalid_request_error",
+ "message":"Your credit balance is too low to access the Anthropic API. ..."},
+ "request_id":"req_011CeVpRiCPHUynVbPAgmywp"}
+```
+
+So `API-KEY` exists and `up.sh` maps it (it only asserts the variable is non-empty, line 267),
+but **no real turn can complete**. This is a lane/account fact, not a code defect — there is
+nothing in any of the four repositories to fix, and it is the user's call to resolve.
+
+Caught at baseline rather than at S4 after a two-hour bring-up, which is what the baseline is for.
+
+**Consequence for the stage table**, split by what each stage actually measures:
+
+- *Blocked on real-model behaviour* — S4 probes and S6 UI full-stack. Both score what a real
+  model chose to do (`full-stack.spec.ts`: "did the turn call `predict_pka` and cite its result").
+  A mock cannot stand in without measuring something else and calling it the same name.
+- *Possibly recoverable against the mock* — S5 plan gate and S9 degradation. Both measure
+  **harness mechanics** (plan -> approve -> execute -> re-gate; `capability_degraded` precedes the
+  first token), not model quality. `core/config/llm.py` has an `openai_compatible` provider with
+  `llm_base_url`, and `cli/mock_llm.py` already serves one on :8820 for the storm. Whether the
+  lane supports pointing the front door at it is the next tick's question.
+- *Unaffected* — S1, S1b, S2, S3, S7, S8, S10. The durable path, the manifest checks, the storm
+  and the soak all run with **no LLM call at all** by design.
 
 ## What this run is not evidence about
 
