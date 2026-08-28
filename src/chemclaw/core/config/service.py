@@ -100,6 +100,16 @@ class ServiceSettings(BaseSettings):
     # populate a sidebar — an unbounded list would be a slow query rendering a list nobody
     # scrolls.
     service_max_listed_sessions: int = Field(default=100, gt=0)
+    # Cap on how many of those sessions `GET /plans/pending` reads a plan for. Bounded separately
+    # from the listing because the cost is a different kind: each read is a checkpointer statement,
+    # and `AsyncPostgresSaver` serializes every statement behind one `asyncio.Lock`
+    # (`agent/checkpointer.py`), so an inbox that scanned a full listing would hold the checkpointer
+    # against every concurrent turn on the pod for the length of the scan. Sessions that cannot
+    # hold a plan — a profile with the harness off — are skipped before the read and do not spend
+    # the budget. What the scan did not reach comes back as `unread` rather than being silently
+    # dropped, because a partial inbox that looks complete is the failure this route exists to
+    # avoid.
+    service_max_plan_scans: int = Field(default=25, gt=0)
     # Admission control on concurrent agent turns (AG-15). Each turn holds one permit for its
     # whole streamed run, so at most this many turns hit the shared internal LLM endpoint at
     # once; a turn that cannot get a permit within the admission timeout is shed with 503
