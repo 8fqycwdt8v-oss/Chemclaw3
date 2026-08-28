@@ -29,6 +29,16 @@
 {{- /* `empty` on both sides, so the test reads as "these two say the same thing", which is
        exactly the contradiction: neither stated (silent allow-all) or both stated (a destination
        list that the flag beside it makes meaningless). */ -}}
+{{- /* `allowAnyDestination` must be a real boolean. Go templates treat every non-empty string as
+       truthy, and `empty` treats a non-empty string as non-empty — so a QUOTED boolean
+       (`allowAnyDestination: "false"`, or `--set-string allowAnyDestination=false`, the single most
+       common YAML mistake) reads as "off" in an operator's values file while rendering the allow-any
+       policy. That is exactly the "reads-restricted, permits-everything" object this guard exists to
+       prevent, reintroduced by the type of the value. Refuse a string outright so the emptiness
+       logic below only ever sees a bool, for which `empty false == true` and the check is sound. */ -}}
+{{- if kindIs "string" .Values.networkPolicy.allowAnyDestination }}
+{{- fail (printf "networkPolicy.allowAnyDestination must be a boolean, not the string %q — a quoted boolean is truthy in Helm and would render an allow-any egress policy while reading as off. Set it as `allowAnyDestination: true`/`false` (no quotes), and do not pass it via --set-string." .Values.networkPolicy.allowAnyDestination) }}
+{{- end }}
 {{- if eq (empty .Values.networkPolicy.egressDestinations) (empty .Values.networkPolicy.allowAnyDestination) }}
 {{- fail "networkPolicy: set exactly one of `egressDestinations` (a list of NetworkPolicyPeer objects saying where these pods may talk) or `allowAnyDestination: true` (any destination on egressPorts, which is not a safe end state but is now a stated one). Neither is set, or both are." }}
 {{- end }}

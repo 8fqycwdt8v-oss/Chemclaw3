@@ -84,11 +84,16 @@ class SourcesSettings(BaseSettings):
     document_sync_schedule_minutes: int = 360
     # The ceiling on a zip-container document's *expanded* size. `.docx`/`.xlsx`/`.pptx` are zips,
     # so a binding's `max_file_bytes` bounds only what the file weighs on the share: a 110 KB
-    # workbook whose sheet XML expands 280× is under every limit and still exhausts the worker's
+    # workbook whose sheet XML expands 280× is under every limit and still exhausts the pod's
     # memory. Applies to uploads too, where the ratio matters more — the chat pod's own
-    # `attachment_max_bytes` is measured in megabytes. 512 MB is far above any real document and
-    # far below what OOMs a pod.
-    document_max_expanded_bytes: int = 512 * 1024 * 1024
+    # `attachment_max_bytes` is in megabytes. The number is reconciled against where the parse runs.
+    # 512 MB was "far below what OOMs a pod" for the *worker* (4 GiB limit) and false for the *front
+    # door*, which is where `POST /sessions/{id}/attachments` parses and which the chart caps at
+    # 1 GiB: measured, a 1.78 MB upload declaring a legal ~150 MB expansion cleared this and both
+    # other gates, and two concurrent parses (the parse-slot cap) took the pod over its limit.
+    # 64 MB is still far above any real document (a 64 MB *expanded* .docx is enormous) and, at the
+    # ~5-6x RSS the parsers cost, leaves two concurrent parses well inside 1 GiB.
+    document_max_expanded_bytes: int = 64 * 1024 * 1024
     # The ceiling on one whole-document read (`ShareDocumentRetriever.read_document`), in
     # characters of *indexed text* rather than bytes on disk: what is being bounded is what reaches
     # a model's context, and the chunks are the only copy left by then.

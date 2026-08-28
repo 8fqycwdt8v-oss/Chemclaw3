@@ -53,6 +53,7 @@ from chemclaw.api.middleware import (
     _add_request_observability,
     _add_security_headers,
     _database_unavailable,
+    _refuse_public_llm_exposure,
     _refuse_unauthenticated_exposure,
     _subsystem_unavailable,
 )
@@ -214,6 +215,7 @@ def create_app(
         A configured `FastAPI` application.
     """
     _refuse_unauthenticated_exposure()
+    _refuse_public_llm_exposure()
     # `openapi_url=None` for the same reason as `docs_url`/`redoc_url`: FastAPI serves the schema
     # from a plain `Route`, not an `APIRoute`, so `require_principal` never applied to it and
     # `tests/test_route_auth_coverage.py` could not see it — the full route/parameter/model surface

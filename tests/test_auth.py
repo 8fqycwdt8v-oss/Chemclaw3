@@ -387,6 +387,9 @@ def test_unauthenticated_exposed_boots_only_with_explicit_opt_in(
     monkeypatch.setattr(settings, "entra_required", False)
     monkeypatch.setattr(settings, "service_host", "0.0.0.0")
     monkeypatch.setattr(settings, "service_allow_insecure", True)
+    # A non-loopback bind must name an internal LLM endpoint or _refuse_public_llm_exposure fires
+    # (the anthropic default would reach the public API); this test is about auth exposure.
+    monkeypatch.setattr(settings, "llm_base_url", "http://internal-llm:8000/v1")
     with caplog.at_level(logging.WARNING, logger="chemclaw.api.app"):
         app = create_app()
     assert any("authorization gates OPEN" in r.message for r in caplog.records)
@@ -400,6 +403,23 @@ def test_entra_required_exposed_boots_without_warning(
     """The production posture (enforcement on, exposed bind) boots cleanly — nothing to warn."""
     monkeypatch.setattr(settings, "entra_required", True)
     monkeypatch.setattr(settings, "service_host", "0.0.0.0")
+    monkeypatch.setattr(settings, "llm_base_url", "http://internal-llm:8000/v1")
     with caplog.at_level(logging.WARNING, logger="chemclaw.api.app"):
         create_app()
     assert not any("authorization gates OPEN" in r.message for r in caplog.records)
+
+
+def test_exposed_anthropic_default_refuses_to_boot(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A network-exposed process on the anthropic default (public API) fails closed at boot.
+
+    The client fails closed on a missing credential but not on the *destination*: without an
+    llm_base_url the anthropic branch dials https://api.anthropic.com, so a real deployment would
+    send confidential chemistry to a third-party SaaS. Loopback dev is untouched; naming an internal
+    endpoint (or openai_compatible) satisfies it.
+    """
+    monkeypatch.setattr(settings, "entra_required", True)
+    monkeypatch.setattr(settings, "service_host", "0.0.0.0")
+    monkeypatch.setattr(settings, "llm_provider", "anthropic")
+    monkeypatch.setattr(settings, "llm_base_url", "")
+    with pytest.raises(RuntimeError, match="public Anthropic API"):
+        create_app()

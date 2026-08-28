@@ -884,6 +884,50 @@ def test_the_shipped_republish_budget_is_strictly_inside_the_job_ceiling() -> No
     )
 
 
+def test_enforced_posture_refuses_a_plaintext_temporal_broker() -> None:
+    """A plaintext non-loopback broker is refused under entra_required.
+
+    It opens an unauthenticated gRPC channel, and identity rides inside the workflow payload.
+    """
+    base: dict[str, Any] = {
+        "_env_file": None,
+        "entra_required": True,
+        "entra_audience": "api://x",
+        "entra_tenant_id": "t",
+        "llm_provider": "openai_compatible",
+        "llm_base_url": "http://llm:8000/v1",
+        "llm_model": "m",
+        "harness_enabled": True,
+    }
+    with pytest.raises(ValueError, match="temporal"):
+        Settings(temporal_address="temporal.prod:7233", **base)
+    # a CA (or api key, or a loopback address) satisfies it
+    Settings(temporal_address="temporal.prod:7233", temporal_tls_ca="/ca.pem", **base)
+    Settings(temporal_address="localhost:7233", **base)
+
+
+def test_enforced_posture_refuses_a_plaintext_postgres_dsn() -> None:
+    """A plaintext-or-unverified non-loopback DSN is refused under entra_required.
+
+    The connection carries the transcripts, the turn checkpoints and the audit trail.
+    """
+    base: dict[str, Any] = {
+        "_env_file": None,
+        "entra_required": True,
+        "entra_audience": "api://x",
+        "entra_tenant_id": "t",
+        "llm_provider": "openai_compatible",
+        "llm_base_url": "http://llm:8000/v1",
+        "llm_model": "m",
+        "harness_enabled": True,
+        "temporal_tls_ca": "/ca.pem",
+    }
+    with pytest.raises(ValueError, match="sslmode"):
+        Settings(postgres_dsn="postgresql://u:p@pg.prod:5432/db", **base)
+    Settings(postgres_dsn="postgresql://u:p@pg.prod:5432/db?sslmode=verify-full", **base)
+    Settings(postgres_dsn="postgresql://chemclaw:chemclaw@localhost:5432/chemclaw", **base)
+
+
 # The prompt-injection envelope's nonce and the durable session store
 # (`D-2026-08-27-a-warning-is-the-shape-a-guard-takes-when-raising-would-break-a-deployment`).
 # Every other cross-section rule in `core/config/__init__.py` refuses; this one announces, because

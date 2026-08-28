@@ -293,7 +293,14 @@ def test_a_report_carries_its_requester_into_retrieval() -> None:
             )
 
     asyncio.run(_run())
-    assert seen == [("alice@corp", frozenset({"chemclaw.sharedrive.reader"}))]
+    # The *actor* crosses into the activity (so a gated source is not silently skipped for lack of
+    # any identity, and the run is attributed), but the *roles* do NOT: a workflow payload is
+    # relayed data, not a verified claim, and binding `requested_roles` from it would let anyone who
+    # can enqueue this workflow read entitlement-gated sources as any role (security review). Roles
+    # bind to the empty set — fail-closed — so an entitlement-gated share now stays skipped for a
+    # defensible reason rather than a forgeable one. Restoring role-scoped durable retrieval needs a
+    # signed payload (a Temporal codec), a separate decision.
+    assert seen == [("alice@corp", frozenset())]
 
 
 def test_a_section_with_no_requester_stamps_no_identity() -> None:
@@ -384,3 +391,35 @@ def test_a_dropped_fan_out_child_still_appears_in_the_draft(
     # And the count the chemist is told matches the count they asked for.
     assert result.data["sections"] == len(requested)
     assert "with 3 section(s)" in result.summary
+
+
+def test_forged_payload_roles_do_not_reach_the_gate() -> None:
+    """A privileged role named in the workflow payload does not satisfy authorization.
+
+    The core of the durable privilege-escalation finding: `authz._has_required_role` reads the
+    ambient roles contextvar, and the report/template/interceptor binders used to fill it from an
+    untrusted payload field. Anyone able to enqueue the workflow could then claim any role. Binding
+    is now empty regardless of the payload.
+    """
+    from chemclaw.core.identity_context import get_current_roles
+
+    seen: list[frozenset[str]] = []
+
+    async def _record(section: ReportSection, retrievers: object) -> SynthesizedSection:
+        seen.append(get_current_roles())
+        return SynthesizedSection(
+            heading=section.heading, memory_layer=section.memory_layer, evidence=[]
+        )
+
+    async def _run() -> None:
+        with mock.patch.object(report_workflow, "gather_section", _record):
+            await report_workflow.retrieve_section(
+                SectionRequest(
+                    section=ReportSection(heading="H", query="q", memory_layer="evidence"),
+                    requested_by="mallory@evil.example",
+                    requested_roles=["Chemclaw.Admin", "Chemclaw.Privileged"],
+                )
+            )
+
+    asyncio.run(_run())
+    assert seen == [frozenset()], "a payload-declared privileged role reached the gate"

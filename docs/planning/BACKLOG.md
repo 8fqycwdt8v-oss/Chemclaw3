@@ -63,6 +63,25 @@ topic).
 
 ## 1 — Untrusted input reaching a privileged surface
 
+- [ ] **A standing plan approval authorizes any state-changing tool, not the plan's steps** — [L],
+  from the 2026-08 security review (proven live). `plan_gate.enforce_plan_approval` refuses a
+  state-changing call unless an approval exists for the current plan's identity — `plan_identity`,
+  a hash of the todo *contents* — but it never compares the *tool being called* to anything in the
+  plan. So once a human approves a one-line read-only plan ("look up the melting point of aspirin"),
+  every tool in `authz.side_effecting_tools()` executes for the rest of that turn:
+  `propose_knowledge_note` (a knowledge-graph write / git push), `synthesize_memory`, every durable
+  calc/BO launch. Combined with the unframed injection surfaces (connector output, `find_past_jobs`
+  `plan_step`, ELN notes) this is the injection amplifier — untrusted text that reaches the model
+  during an approved turn reaches the full write surface while the chemist believes they approved a
+  lookup. The clean fix is **not** a patch: the plan is prose todos with no per-step tool
+  declaration, so binding an approval to "its tools" requires the harness to enumerate the
+  side-effecting tools each step will use (a `write_todos`/prompt schema change), capture that set
+  on the `plan_approvals` row at approval, and refuse a call whose tool is outside it. Scanning the
+  todo prose for tool names was rejected as fragile in both directions (a legitimate plan that does
+  not spell the exact registered name would fail to authorize its own tool, making `plan_only`
+  unusable — the worst outcome the gate's own docstring names). Until the declaration exists, the
+  gate binds plan *content* only. Deliberately left as a feature rather than shipped as a heuristic.
+
 - [ ] **The unauthenticated `X-Chemclaw-Actor` header becomes durable attribution** — [M], and
       **narrower than this row used to claim**. It does not reach `job_records` or the audit trail:
       the durable path takes the actor as an argument sourced from core's validated front-door
@@ -256,6 +275,22 @@ topic).
       where 409 was expected, never reproduced serially. Harmless today because CI runs one job per
       database; it becomes a flake generator the day that stops being true. Fixture ids should carry
       the pid suffix `tests/pg.py` already uses for the schema.
+
+- [ ] **The corpus drain is the one ingest pass with no metric** — [S].
+      `chemclaw_ingest_records_total{source,outcome}` is emitted by the ELN sync
+      (`ingest/eln/sync.py:319`), the document sync (`ingest/documents/sync.py:312`) and the
+      labelling pass (`ingest/labels/enrich.py:195`, under `source="labels"`). `ReactionCorpusWorkflow`
+      emits none: `CorpusReport`'s `read`/`recorded`/`skipped` reach the activity's log line and
+      Temporal's history, and nothing else. So a dashboard built on `chemclaw_ingest_*` shows a flat
+      line for a healthy corpus feed, and `skipped` — the count of rows dropped for no usable SMILES
+      or no citation, which is the number that says a feeder regressed — has no series at all.
+      Found while writing `docs/guides/feeder-pipelines/`, whose §2.3 has to tell an operator this in
+      prose because the metric they would otherwise reach for does not exist.
+      **The fix is the wrapper the ELN sync already uses**, one call site, with `source` naming the
+      data source rather than the pass — the three outcomes partition the rows the pass saw, exactly
+      as `ingest/documents/sync.py:332` documents for its own. Do it when a deployment actually runs
+      a corpus feeder; until then the gap costs nobody anything, which is why it is [S] and here
+      rather than done.
 
 - [ ] **Settle `pytest-xdist` on a real runner** — [S].
       The `check` job is 87% one step: `make lint type cov` was **12m06s of a 13m56s job** on

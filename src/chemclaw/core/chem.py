@@ -80,6 +80,7 @@ import rdkit
 from rdkit import Chem
 from rdkit.Chem.MolStandardize import rdMolStandardize
 
+from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.core.ids import stable_hash
 
@@ -161,7 +162,7 @@ def _standardized(smiles: str) -> str | None:
     component of every ingested reaction, and every product/reactant pair in chain detection. Pure
     in its argument, so the cache is sound; bounded, so a long-lived worker cannot grow into it.
     """
-    mol = Chem.MolFromSmiles(smiles)
+    mol = _bounded_mol(smiles)
     if mol is None:
         return None
     return str(Chem.MolToSmiles(standardize(mol)))
@@ -280,6 +281,37 @@ class InvalidSmilesError(ChemclawError):
     """
 
 
+def _oversized(smiles: str, mol: Chem.Mol | None) -> bool:
+    """Whether a string or its parsed molecule is past the size the writer can survive.
+
+    The one size gate, shared by the strict `require_molecule` and the lenient parse-or-passthrough
+    helpers, so no caller reintroduces the crash by writing its own bare `MolFromSmiles`. RDKit's
+    canonical-SMILES writer and the tautomer canonicalizer are unbounded-recursive and SIGSEGV
+    (uncatchable, takes the whole process) on a large linear molecule; length is the cheap
+    pre-filter and atom count the real bound. See `fingerprints.molecule_max_smiles_length` /
+    `molecule_max_atoms`.
+    """
+    if len(smiles) > settings.molecule_max_smiles_length:
+        return True
+    return mol is not None and mol.GetNumAtoms() > settings.molecule_max_atoms
+
+
+def _bounded_mol(smiles: str) -> Chem.Mol | None:
+    """Parse `smiles`, returning None if it is unparseable **or** too large to write safely.
+
+    The lenient counterpart to `require_molecule`: the ELN/memory callers key on whatever string
+    they are given and must not abort on one odd label, but they must equally never hand an
+    oversized molecule to `MolToSmiles`/`standardize` — so an over-limit input is treated exactly
+    like an unparseable one (passthrough), not crashed on.
+    """
+    if len(smiles) > settings.molecule_max_smiles_length:
+        return None
+    mol = Chem.MolFromSmiles(smiles)
+    if mol is None or _oversized(smiles, mol):
+        return None
+    return mol
+
+
 def canonical_smiles(smiles: str) -> str:
     """RDKit canonical SMILES, or the input unchanged if it does not parse.
 
@@ -289,7 +321,7 @@ def canonical_smiles(smiles: str) -> str:
     given and never want ingestion to abort on one odd label. Where an unparseable
     structure must instead be rejected, use `require_canonical_smiles`.
     """
-    mol = Chem.MolFromSmiles(smiles)
+    mol = _bounded_mol(smiles)
     return Chem.MolToSmiles(mol) if mol is not None else smiles
 
 
@@ -330,9 +362,23 @@ def require_molecule(smiles: str) -> Chem.Mol:
         raise InvalidSmilesError(f"invalid SMILES (empty or contains whitespace): {smiles!r}")
     if not stripped.isascii():
         raise InvalidSmilesError(f"invalid SMILES (non-ASCII characters): {smiles!r}")
+    # Refuse an oversized string *before* handing it to RDKit: the canonical-SMILES writer and the
+    # tautomer canonicalizer overflow the C stack (SIGSEGV, uncatchable) on a large linear molecule,
+    # so length is a cheap pre-filter and atom count is the real bound. See
+    # `fingerprints.molecule_max_smiles_length` / `molecule_max_atoms` for why the number is here.
+    if len(stripped) > settings.molecule_max_smiles_length:
+        raise InvalidSmilesError(
+            f"SMILES exceeds {settings.molecule_max_smiles_length} characters "
+            f"({len(stripped)}); pass a smaller molecule"
+        )
     mol = Chem.MolFromSmiles(stripped)
     if mol is None or mol.GetNumAtoms() == 0:
         raise InvalidSmilesError(f"invalid SMILES: {smiles!r}")
+    if _oversized(stripped, mol):
+        raise InvalidSmilesError(
+            f"molecule has {mol.GetNumAtoms()} atoms, over the {settings.molecule_max_atoms} "
+            f"limit; RDKit canonicalization is unbounded-recursive and would crash the process"
+        )
     return mol
 
 
