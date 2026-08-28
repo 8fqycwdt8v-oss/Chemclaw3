@@ -125,6 +125,30 @@ run() {
       cp "$LIVE_DIR/soak-round.log" "$LIVE_DIR/soak-round-$round.log" 2>/dev/null || true
     fi
 
+    # **The two scrapes go to files, not to the environment.**
+    #
+    # They used to be `SOAK_METRICS="$(curl … /metrics)"` as a command prefix, and that is a
+    # ceiling rather than a style: Linux caps a *single* environment string at MAX_ARG_STRLEN
+    # (128 KiB), far below the 2 MiB `ARG_MAX` this host reports, and the front door's exposition
+    # passes it once the per-tool series multiply. Measured 2026-08-28 — rounds 1 to 5 each ran and
+    # each reported `24/24 checks passed`, while every one of them died here with
+    #
+    #     soak.sh: line 128: /usr/bin/curl: Argument list too long
+    #     soak.sh: line 128: .venv/bin/python3: Argument list too long
+    #
+    # and wrote **nothing**. The record is the only artefact a soak produces — the rounds are
+    # disposable and the series is the point — so this is the soak silently doing no work at all
+    # while every round reported success. It is also the third distinct way this script has lost its
+    # own record (see the header's defects 1 and 2), which is why the fix moves the payload off the
+    # exec boundary entirely rather than trimming it to fit.
+    #
+    # `json.dumps` still builds the line from values the shell provides, so a malformed line remains
+    # impossible; what changed is only how the two large values get there.
+    local scrape mockstats
+    scrape="$(mktemp)"; mockstats="$(mktemp)"
+    curl -s --max-time 5 "http://127.0.0.1:$API_PORT/metrics" > "$scrape" 2>/dev/null || true
+    curl -s --max-time 5 "http://127.0.0.1:$MOCK_PORT/__mock/stats" > "$mockstats" 2>/dev/null || true
+
     SOAK_ROUND="$round" \
     SOAK_SECS="$(( $(date +%s) - start ))" \
     SOAK_RC="$rc" \
@@ -132,8 +156,8 @@ run() {
     SOAK_DISK_GB="${disk:-}" \
     SOAK_RSS_KB="$(ps -o rss= -p "$(cat "$LIVE_DIR/run/api.pid" 2>/dev/null)" 2>/dev/null | tr -d ' ')" \
     SOAK_ROWS="$(sample_rows)" \
-    SOAK_METRICS="$(curl -s --max-time 5 "http://127.0.0.1:$API_PORT/metrics" || true)" \
-    SOAK_MOCK="$(curl -s --max-time 5 "http://127.0.0.1:$MOCK_PORT/__mock/stats" || true)" \
+    SOAK_METRICS_FILE="$scrape" \
+    SOAK_MOCK_FILE="$mockstats" \
       "$python" - >>"$RECORD" <<'PY'
 import json, os
 
@@ -149,7 +173,13 @@ def number(name):
 
 
 def blob(name):
-    raw = os.environ.get(name, "").strip()
+    """A small JSON value carried in the environment. `SOAK_ROWS` is row counts and stays here."""
+    return _json_or_none(os.environ.get(name, ""))
+
+
+def _json_or_none(raw):
+    """Parse a scrape's body, or None. An empty or partial scrape is a missing field, never a crash."""
+    raw = (raw or "").strip()
     if not raw:
         return None
     try:
@@ -163,9 +193,19 @@ def blob(name):
 # alone after round 30 of the first run: RSS was climbing and the question "is the session LRU still
 # filling, or is it full and RSS growing anyway" could not be answered from the record — it needed a
 # live scrape, which by definition the record had not kept. The distinction is the whole diagnosis.
+def slurp(name):
+    """The scrape at the path in `name`, or "" — a scrape that timed out costs its own field."""
+    path = os.environ.get(name, "")
+    try:
+        with open(path, encoding="utf-8") as handle:
+            return handle.read()
+    except OSError:
+        return ""
+
+
 gauges = {}
 pool = {}
-for line in os.environ.get("SOAK_METRICS", "").splitlines():
+for line in slurp("SOAK_METRICS_FILE").splitlines():
     if not line.startswith("chemclaw_") or "{" in line:
         continue
     name, _, value = line.partition(" ")
@@ -188,12 +228,13 @@ print(
             "gauges": gauges or None,
             "rows": blob("SOAK_ROWS"),
             "disk_gb": number("SOAK_DISK_GB"),
-            "mock": blob("SOAK_MOCK"),
+            "mock": _json_or_none(slurp("SOAK_MOCK_FILE")),
         },
         separators=(",", ":"),
     )
 )
 PY
+    rm -f "$scrape" "$mockstats"
     log "round $round: rc=$rc ${checks:-no checks line} ($(( $(date +%s) - start ))s)"
     round=$(( round + 1 ))
   done
