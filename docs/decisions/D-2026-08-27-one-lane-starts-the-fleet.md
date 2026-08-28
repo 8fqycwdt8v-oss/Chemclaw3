@@ -75,15 +75,15 @@ and with it every target that drives one:
 
 | target | needs the front door | status if the fleet leaves `processes.sh` |
 | --- | --- | --- |
-| `make live-probes` | yes — 259 probes in `data/evals/probes/` | unrunnable |
+| `make live-probes` | yes — 278 probes in `data/evals/probes/` | unrunnable |
 | `make live-plan-gate`, `make live-degradation` | yes | unrunnable |
 | `make live-storm`, `make live-soak` | yes | unrunnable |
 | `make leak-probe` | yes | unrunnable |
 | `make live-verifier-margin` | re-rolls the judge over probe transcripts | no transcripts to re-roll |
 | `make live-jobs`, `make live-data` | no (Temporal + Postgres) | unaffected |
 
-51 of the 259 probes name a `chem` or `safety` tool in `expects_tools` (`screen_hazards` alone in
-31), which is the number one would guess at. It is the wrong number: the loss is 259, because the
+58 of the 278 probes name a `chem` or `safety` tool in `expects_tools` (`screen_hazards` alone in
+32), which is the number one would guess at. It is the wrong number: the loss is 278, because the
 dependency is a *boot* dependency, not a tool dependency.
 
 The lane that cannot start without those two servers is `processes.sh`. That decides ownership.
@@ -131,7 +131,7 @@ should be starting them twice. Stop the other server, or run `make live-e2e-full
 
 ## Consequences
 
-- `make live-up` alone is unchanged in what it exercises: 259 probes, the storm, the soak, the leak
+- `make live-up` alone is unchanged in what it exercises: 278 probes, the storm, the soak, the leak
   probe, the plan-gate and degradation suites. That was the whole point of taking the measurement.
 - Running the fleet's own `make run-chem` (or a hand-started server on 8858/8859) beside
   `make live-up` now **fails the bring-up** instead of silently appearing to work. That is the

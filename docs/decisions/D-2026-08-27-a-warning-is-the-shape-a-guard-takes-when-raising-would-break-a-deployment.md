@@ -18,8 +18,9 @@ changing an existing deployment's behaviour silently is worse.
 
 What it did not ship is anything that *says* the deployment is in that state. `framing.py`'s own
 docstring then asserted, until 2026-08-26, that `Settings` warned about the pairing — the claim was
-false when written. `grep -rl framing_envelope src/` returns three files (`agent/framing.py`, its
-config section, `core/logging.py`'s redaction inventory) and none of them is a validator. This ADR
+false when written. `grep -rl framing_envelope src/` returned three files (`agent/framing.py`, its
+config section, `core/logging.py`'s redaction inventory) and none of them was a validator — it
+returns four now, and the fourth is the validator this ADR adds, which is the change. This ADR
 answers the question `BACKLOG.md` left open: is a durable deployment with no envelope secret an
 error, a warning, or nothing?
 

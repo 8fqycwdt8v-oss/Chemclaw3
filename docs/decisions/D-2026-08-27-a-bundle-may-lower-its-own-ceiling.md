@@ -103,13 +103,13 @@ tree was checked against the longest activity its own workflow starts:
 
 | Bundle | Job | Longest activity under it |
 | --- | --- | --- |
-| `calc` | all nine | one `run_xtb_calculation`, `xtb_job_timeout_seconds` = 15,000 s — the *same* budget for every job, because they share `CalcJobWorkflow` |
+| `calc` | all twelve | one `run_xtb_calculation`, `xtb_job_timeout_seconds` = 15,000 s — the *same* budget for every job, because they share `CalcJobWorkflow` |
 | `results` | `republish_calculations` | `result_republish_timeout_seconds` = 14,400 s |
 | `bo` | `start_optimization_campaign` | 300 s, but `n_rounds` × 2 activities and a continue-as-new chain, bounded only by `bo_max_rounds` = 500 |
 
 Against an 18,000 s ceiling, none of these can honestly declare less. `calc` is the interesting one
 and the finding worth carrying: a per-*job* ceiling cannot help `calc` today because its per-*job*
-cost is not expressed anywhere either — all nine jobs share one activity budget sized for the
+cost is not expressed anywhere either — all twelve jobs share one activity budget sized for the
 worst of them, so `compute_reaction_energy` over two small species is bounded by a CREST search's
 number twice over. Making that bundle's short jobs genuinely short is a change to
 `connectors/calc/workflows.py`'s activity budget, not to its manifest, and it is a separate

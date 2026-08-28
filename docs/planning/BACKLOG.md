@@ -96,6 +96,21 @@ topic).
 
 ## 2 — Answers that are wrong without saying so
 
+- [ ] **The fingerprint index is keyed by source and the citation is not, so two sources collapse
+      to one note id** — [M], and it is the half `D-2026-08-27-a-fingerprint-is-keyed-by-its-source`
+      deliberately left. Migration 063 made the write side `(source, id)`, which is what stops one
+      site's chemistry being overwritten by another's. The read side still spells the bare form:
+      `retrieval/retrievers.py` and `connectors/rxnfp/server/tools.py` both call
+      `note_id_for_reaction(match.id)`, so a two-source deployment now returns **two hits that cite
+      one id**, and `records._one_of` raises `AmbiguousReactionRecord` when a reader expands it.
+      Better than silently citing the wrong run, which is what 063 fixed, and still not an answer.
+      The qualified form and its separator were written and then deleted rather than left as a dead
+      parameter no caller passed
+      (`D-2026-08-27-a-withdrawn-entry-is-a-fact-the-sync-must-carry`), so this starts from the six
+      readers rather than from the spelling: they move together or the id means two things at once.
+      Not urgent while one ELN is enabled anywhere; the ambiguity is loud when it happens, which is
+      the one improvement 063 already bought.
+
 - [ ] **A retracted ELN entry stays current evidence, and closing it is a five-part change** — [M].
       A withdrawn entry that simply disappears from an export is invisible to a cursor-based sync,
       so the run it produced keeps answering as current. This was built and then deleted on review
