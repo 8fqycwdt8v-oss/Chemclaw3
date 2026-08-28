@@ -37,7 +37,7 @@ from typing import Any
 
 import httpx
 from temporalio.api.enums.v1 import PendingActivityState
-from temporalio.client import WorkflowExecutionStatus
+from temporalio.client import Client, WorkflowExecutionStatus
 
 from chemclaw.cli.storm_behaviours import BEHAVIOURS
 from chemclaw.connectors.jobs import build_job_tool, job_workflow_id
@@ -47,6 +47,7 @@ from chemclaw.core.db import _redact
 from chemclaw.core.db import connection as db_connection
 from chemclaw.core.logging import configure_logging
 from chemclaw.core.temporal_client import connect as temporal_connect
+from chemclaw.core.temporal_client import connect_options
 from chemclaw.durable.connector_job import child_workflow_id_for
 
 logger = logging.getLogger(__name__)
@@ -1197,16 +1198,29 @@ async def _chaos_broker_outage() -> Finding:
 
 
 async def _broker_is_reachable() -> bool:
-    """Whether a Temporal client can be built against the configured address, right now.
+    """Whether the broker answers a **fresh** connection at the configured address, right now.
 
     The analogue of E3's postmaster start time, and it is here for the same reason: measured
     2026-08-28, `bootstrap.sh restart-postgres` had no compose branch and restarted nothing while
     E3 reported PASS. A lane verb that silently does nothing is a class, not an incident, and the
     sibling check over `stop-temporal` had no way to see it — it would have failed *safe*, which
     is better than E3 did and still leaves the run unable to say whether it tested anything.
+
+    **It must not go through `core.temporal_client.connect`, and its first version did.** That
+    function is a deliberate per-process singleton — "a `Client` is a long-lived multiplexed
+    channel, not a per-call object" — so `if _CLIENT is not None: return _CLIENT` answers from
+    memory without touching the network. Family D launches durable jobs and warms it, and family E
+    runs after D. Measured 2026-08-28: `bootstrap.sh stop-temporal` really did stop the container
+    (`infra-temporal-1` reported `exited`) and this probe still returned `True`, so E4 reported
+    "broker STILL REACHABLE — this check tested nothing" on a run where the broker was genuinely
+    gone. The guard written to catch a check that observes nothing was itself observing a cache.
+
+    So the probe opens its own client from the same `connect_options()` and does not keep it. The
+    caching is right for the product and wrong for a question about the world.
     """
     try:
-        await temporal_connect()
+        options = await asyncio.to_thread(connect_options)
+        await Client.connect(settings.temporal_address, **options)
     except Exception:  # any inability to reach the broker is the state this asks about
         return False
     return True
