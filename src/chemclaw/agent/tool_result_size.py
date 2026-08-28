@@ -202,7 +202,19 @@ async def bound_tool_results(request: Any, handler: Callable[[Any], Any]) -> Any
     result = await handler(request)
     if not isinstance(result, ToolMessage):
         return result
-    tool = str(request.tool_call["name"])
+    # The **registered** tool's name, never the one the model emitted. `ToolNode` runs this chain
+    # for a name the graph does not hold — it answers such a call with its own 1,061-character "not
+    # a valid tool, try one of […]" message, which is a `ToolMessage` and is bounded like any other
+    # — so a label taken from `tool_call["name"]` mints one permanent time series per string a
+    # model invents, on an endpoint that is unauthenticated by design. Measured with the ceiling
+    # lowered (it is `ge=0` and ENV-overridable, so every legal value has to hold):
+    # `chemclaw_tool_results_truncated_total{tool="made_up_yyyy…"} 1`.
+    # `audit.metric_tool_name` carries the whole argument, and this is its third caller.
+    #
+    # The same string names the tool in the notice the model reads and in the line below, and
+    # that is deliberate rather than incidental: for a name the graph dispatched the two are the
+    # same string, and for one it did not, `unknown` is what the notice should say too.
+    tool = metric_tool_name(request)
     content, removed = bounded_content(result.content, tool, settings.agent_max_tool_result_chars)
     if not removed:
         return result

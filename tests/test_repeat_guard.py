@@ -28,16 +28,17 @@ from chemclaw.core.config import settings
 from tests.middleware import run_middleware, tool_request
 
 
-def _ctx(name: str, **arguments: Any) -> Any:
+def _ctx(name: str, *, registered: bool = True, **arguments: Any) -> Any:
     """The call as the guard reads it: a name and its arguments, which together are its key.
 
-    Carries the *registered* tool object, which is what `ToolNode` passes for a name the graph
-    holds and what `metric_tool_name` resolves the metric label against — the measured loop was
-    7-8 `find_past_jobs` calls, a real tool. The name the graph does *not* hold is the model's own
-    string and must never reach a label; `tests/test_tool_label_bound.py` drives that case for
-    every `tool`-labelled metric at once, so it is not restated here.
+    `registered` decides which of the two shapes `ToolNode` builds. It passes a tool object for a
+    name the graph holds and `tool=None` for one it does not, deliberately, so an interceptor can
+    short-circuit an unregistered call — and `metric_tool_name` reads `.name` off that object to
+    decide whether the counter's label is safe to mint. The default is the ordinary case; the
+    `False` shape is the one a model reaches by inventing a name.
     """
-    return tool_request(name, dict(arguments), tool=SimpleNamespace(name=name, metadata={}))
+    tool = SimpleNamespace(name=name, metadata={}) if registered else None
+    return tool_request(name, dict(arguments), tool=tool)
 
 
 class _Tool:
@@ -217,6 +218,48 @@ def test_a_refused_repeat_is_counted_so_a_deployment_can_alert_on_it(watching: N
         _drive(_ctx("find_past_jobs"), tool)
     assert METRICS.value("chemclaw_repeated_tool_calls_total") == before + 1
     assert 'tool="find_past_jobs"' in METRICS.render()
+
+
+def test_a_name_the_graph_never_held_cannot_become_a_metric_label() -> None:
+    """The label is the *registered* tool's name, never the string the model emitted.
+
+    **Measured on a compiled graph before this was pinned.** A scripted model that emitted the same
+    invented name three times with the same arguments produced
+    `chemclaw_repeated_tool_calls_total{tool="totally_made_up_xxxxxxxx…"} 1` on `/metrics` — one
+    permanent time series per string a model invents, on an endpoint that is unauthenticated by
+    design because a Prometheus scrape carries no identity. Model output is attacker-influenceable
+    (it is the reason this tree carries `frame_untrusted`), so a retrieved document saying "call a
+    tool named <secret> three times" turned a verbatim label into an exfiltration channel, and
+    `_MAX_SERIES_PER_COUNTER` then blinded the counter permanently once the invented names filled
+    it. `core/metrics.py` documented that label the whole time as "bounded by the registered tool
+    surface … rather than anything a caller can name".
+
+    `ToolNode` is what makes this reachable rather than theoretical: it looks the name up with
+    `tools_by_name.get(...)` and passes `tool=None` for a miss, deliberately, so an interceptor can
+    short-circuit an unregistered call — which means the guard counts, refuses and *labels* a call
+    for a tool the graph does not hold.
+
+    `metric_tool_name` is the tree's one answer and it was already load-bearing on two other
+    counters; the third had to ask for it. Driven through the middleware rather than through
+    `count_call`, because that is where the clamp now lives: the decision sees the name the model
+    emitted and nothing else, and only the wiring holds the request the registered tool hangs off.
+    """
+    from chemclaw.core.metrics import METRICS
+
+    invented = "totally_made_up_" + "x" * 40
+    token = begin_call_watch()
+    try:
+        for _ in range(settings.max_identical_tool_calls):
+            _drive(_ctx(invented, registered=False), _Tool())
+        with pytest.raises(RepeatedCallRefusal):
+            _drive(_ctx(invented, registered=False), _Tool())
+    finally:
+        end_call_watch(token)
+
+    assert invented not in METRICS.render(), (
+        "a tool name the model invented reached /metrics as a label value: one time series per "
+        "string anything that can reach the pod can name"
+    )
 
 
 # --------------------------------------------------------------------------------------------

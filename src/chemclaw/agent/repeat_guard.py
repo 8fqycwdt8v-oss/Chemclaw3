@@ -36,7 +36,7 @@ from typing import Any
 
 from langchain.agents.middleware import wrap_tool_call
 
-from chemclaw.agent.audit import metric_tool_name
+from chemclaw.agent.audit import bounded_repr, metric_tool_name
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.core.metrics_bridge import record_metric
@@ -182,14 +182,25 @@ def count_call(name: str, arguments: Any) -> RepeatedCallRefusal | None:
     let through is still recorded against the next one. Off the request path there is no counter
     and this is a no-op — the CLI, the tests and the classic agent all take that branch.
 
-    The *metric* is deliberately not booked here, and it used to be. `name` is the model's own
-    string — `ToolNode` invokes the middleware chain for a name the graph does not hold — so
-    `chemclaw_repeated_tool_calls_total{tool=name}` minted one permanent time series per invented
-    name on the unauthenticated `/metrics`, while `_COUNTER_LABELS` documented that label as
-    "bounded by the registered tool surface". Measured: three identical calls to a 141-character
-    hallucinated name rendered it verbatim. The clamp needs the *registered tool object*, which
-    only the transport request carries, so the counter moved to `refuse_repeated_calls` — this
-    function stays framework-free, which is the whole reason it is separate.
+    **The metric is not here, and that is the one thing this function deliberately does not own.**
+    It used to increment `chemclaw_repeated_tool_calls_total{tool=name}` — with `name` the model's
+    own string, because that is all this signature has. `ToolNode` runs the governance chain for a
+    name the graph does not hold (it passes `tool=None` so an interceptor can short-circuit an
+    unregistered call), so the guard counted, refused and *labelled* a call for a tool that does
+    not exist: measured on a compiled graph, a scripted model emitting one invented name three
+    times minted `chemclaw_repeated_tool_calls_total{tool="totally_made_up_xxxx…"}` on an endpoint
+    that is unauthenticated by design. The clamp needs the registered tool object, which lives on
+    the request, which is the wiring's — so the increment moved there rather than a second string
+    being threaded through a decision that has no use for it.
+
+    Args:
+        name: The tool the model named. The key, the log line and the sentence sent back to the
+            model are all about *what was asked for*, so this is the model's own string and stays
+            so — two spellings of one question have to count as one question.
+        arguments: The call's arguments, canonicalized into the key by `_key`.
+
+    Returns:
+        The refusal this call earned, or `None`. A refusal returned is what the wiring counts.
     """
     watch = _calls.get()
     if watch is None:
@@ -200,7 +211,12 @@ def count_call(name: str, arguments: Any) -> RepeatedCallRefusal | None:
     seen = counts[key]
     if seen <= settings.max_identical_tool_calls:
         return None
-    logger.info("refusing repeat %d of %s in one turn", seen, name)
+    # The model's own string, bounded on the way into the record for the reason `bounded_repr` is
+    # public: nothing upstream caps what a model may call a tool, and the repr is also what keeps an
+    # embedded newline from splitting one refusal into two log lines. What the model asked for is
+    # the forensic fact and belongs here; it is only the unbounded metric *label* that is refused,
+    # one caller up.
+    logger.info("refusing repeat %d of %s in one turn", seen, bounded_repr(name))
     return RepeatedCallRefusal(
         f"{name} was already called with these exact arguments {seen - 1} time(s) in this turn "
         f"and returned the same thing each time, so it was not called again. It will not answer "
