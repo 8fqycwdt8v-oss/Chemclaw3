@@ -38,7 +38,7 @@ from fastapi import Depends, HTTPException, Request
 
 from chemclaw.agent.session import TurnSession
 from chemclaw.api.auth import Principal, require_principal
-from chemclaw.api.middleware import bind_request_session
+from chemclaw.api.middleware import bind_request_session, clip_for_log
 from chemclaw.api.state import LiveSession, SessionOwners, state
 from chemclaw.core.config import settings
 from chemclaw.core.logging import log_event
@@ -69,7 +69,14 @@ def _refuse(
     `reason` is a source literal naming which of the gate's arms fired, so an operator reading the
     trail can tell "someone else's session" from "no such session" without re-deriving it from the
     route and the actor.
+
+    **`target` is the caller's own id and is clipped before it is logged.** It reaches here
+    straight off the path, unbounded and by definition unrecognised — that is what the gate just
+    refused — and it was interpolated into the message at full length: measured at 8,000
+    characters, an 8,093-character record for `SecretRedactingFilter` to regex-scan with the
+    logging lock held. A refused id is worth recording; the bytes past a real id's length are not.
     """
+    clipped = clip_for_log(target)
     METRICS.increment("chemclaw_authz_refusals_total", labels={"resource": resource})
     log_event(
         logger,
@@ -77,12 +84,12 @@ def _refuse(
         "refused %s access to %s %s (%s); answered 404",
         principal.oid or "-",
         resource,
-        target,
+        clipped,
         reason,
         level=logging.WARNING,
         resource=resource,
         reason=reason,
-        target=target,
+        target=clipped,
         actor=principal.oid,
     )
 

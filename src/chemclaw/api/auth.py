@@ -25,7 +25,7 @@ from jwt import PyJWKClient
 from jwt.exceptions import PyJWKClientConnectionError, PyJWKClientError
 from pydantic import BaseModel, Field
 
-from chemclaw.api.middleware import bind_request_actor
+from chemclaw.api.middleware import bind_request_actor, route_template
 from chemclaw.api.rate_limit import RateLimited, enforce_request_budget
 from chemclaw.core.config import settings
 from chemclaw.core.identity_context import GROUP_ROLE_PREFIX
@@ -253,7 +253,12 @@ async def require_principal(request: Request) -> Principal:
         # because an unauthenticated probe of a public endpoint is ordinary internet traffic; the
         # counter is what makes a *rate* of them alertable.
         _count_auth_failure("missing")
-        logger.info("request to %s carried no bearer token", request.url.path)
+        # **The route template, never `request.url.path`.** This ran before any credential was
+        # checked, so the path it logged was an unauthenticated caller's own string: measured at
+        # 6,054 characters, straight into `SecretRedactingFilter`'s regex scan with the logging
+        # lock held. It is the same hazard `_RequestObservability` cites for its `route` label,
+        # and the same answer — `route_template` is bounded by the route table.
+        logger.info("request to %s carried no bearer token", route_template(request.scope))
         raise HTTPException(status_code=401, detail="missing bearer token")
     try:
         principal = await asyncio.to_thread(validate_token, header[len("Bearer ") :])

@@ -31,7 +31,7 @@ from chemclaw.api.events import (
     ToolFailedEvent,
 )
 from chemclaw.api.middleware import _CORRELATION_ID, _UNMATCHED_ROUTE, _request_correlation_id
-from chemclaw.api.runner import _OUTCOMES, _settle_outcome, _TurnLedger
+from chemclaw.api.runner import _OUTCOMES, _deadline_passed, _settle_outcome, _TurnLedger
 from chemclaw.core.config import settings
 from chemclaw.core.metrics import METRICS
 from tests.test_service import _app, _FakeAgent
@@ -188,18 +188,19 @@ def test_requests_and_duration_are_counted_by_route_and_status_class(client: Tes
 def test_the_route_status_series_stay_inside_the_registry_cap() -> None:
     """The label set is bounded by the route table, and the bound is *checked* rather than assumed.
 
-    `core/metrics._MAX_SERIES_PER_COUNTER` is 64: past it a new series is refused, counted on
+    Past `core/metrics._MAX_SERIES_PER_COUNTER` a new series is refused, counted on
     `chemclaw_metric_series_dropped_total` and said once — loud, but the metric undercounts from
     then on. `route` is the FastAPI template plus one fixed `<unmatched>`, so nothing a caller sends
     can grow this; only a new route can.
 
     **Measured, across 158 front-door tests: 35 series, and no route produced more than three
     status classes** (`2xx`, `4xx`, `5xx` — no route in this app redirects, and 1xx never reaches
-    an ASGI `http.response.start`). Three per route is therefore the honest worst case, and at 21
-    labels that is 63 against a cap of 64 — safe today and **one route away from not being**. So
-    the arithmetic is asserted here rather than written in a comment: the route that would make the
-    counter start dropping series turns this red, and the fix is to raise the cap in
-    `core/metrics.py` (128 is the obvious next value), not to loosen this test.
+    an ASGI `http.response.start`). Three per route is therefore the honest worst case, and the
+    arithmetic is asserted against the constant rather than written out in prose: this docstring
+    used to spell the cap and the margin as numbers, and both went stale in the same commit that
+    raised the cap — it still said the margin was one route when the constant had doubled. The
+    route that would make the counter start dropping series turns this red, and the fix is to raise
+    the cap in `core/metrics.py`, not to loosen this test.
     """
     from fastapi.routing import APIRoute
 
@@ -426,15 +427,17 @@ def test_every_outcome_is_reachable_and_none_is_invented() -> None:
     """
 
     async def _produced() -> set[str]:
-        # On a loop, because `timed_out` is decided against the loop's own clock — the same clock
-        # `asyncio.timeout` schedules itself on.
-        past = asyncio.get_running_loop().time() - 1.0
+        # Still on a loop, though `timed_out` no longer reads the clock here: the flag is sampled
+        # in `run_turn`'s `except` clause at the instant the cancellation lands, because settling
+        # runs after the rollback and a Stop at `deadline − ε` behind a slow teardown used to
+        # cross the deadline while being torn down. `tests/test_api_review_runner.py` is where
+        # that instant is pinned; this asserts only that the enum is closed in both directions.
         return {
             _settle_outcome(_ledger(answered=True, answer_parts=["ok"])),
             _settle_outcome(_ledger(answer_parts=["partial"], loop_capped=True, answered=True)),
             _settle_outcome(_ledger(answered=False)),
             _settle_outcome(_ledger(error_code="storage_unavailable")),
-            _settle_outcome(_ledger(cancelled=True, deadline=past)),
+            _settle_outcome(_ledger(cancelled=True, timed_out=True)),
             _settle_outcome(_ledger(cancelled=True)),
         }
 
@@ -496,13 +499,20 @@ def test_a_wall_clock_kill_is_told_apart_from_a_stop() -> None:
 
     The caller cannot tell the turn afterwards — its own `except TimeoutError` runs after the cost
     row is booked — so the deadline is passed in and compared against the same loop clock the
-    timeout schedules itself on.
+    timeout schedules itself on. **Where that comparison is taken is the whole of it**: it is
+    sampled in the `except` clause beside `cancelled = True` and read here, because settling runs
+    after the rollback and a Stop delivered just short of the deadline crossed it while being torn
+    down. `tests/test_api_review_runner.py` pins the instant; this pins the pair.
     """
 
     async def _run() -> tuple[str, str]:
         now = asyncio.get_event_loop().time()
-        expired = _settle_outcome(_ledger(cancelled=True, deadline=now - 1.0))
-        stopped = _settle_outcome(_ledger(cancelled=True, deadline=now + 3600.0))
+        expired = _settle_outcome(
+            _ledger(cancelled=True, timed_out=_deadline_passed(now - 1.0), deadline=now - 1.0)
+        )
+        stopped = _settle_outcome(
+            _ledger(cancelled=True, timed_out=_deadline_passed(now + 3600.0), deadline=now + 3600.0)
+        )
         return expired, stopped
 
     assert asyncio.run(_run()) == ("timed_out", "abandoned")

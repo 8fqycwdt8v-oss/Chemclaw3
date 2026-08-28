@@ -1626,6 +1626,46 @@ def test_every_session_scoped_route_is_ownership_gated() -> None:
             )
 
 
+def test_the_per_connector_health_gauge_actually_renders_a_series(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`chemclaw_connector_unhealthy` was declared, panelled, and bound by nothing.
+
+    A gauge *family* renders only what its bound source returns, so an unbound one contributes no
+    lines to `/metrics` at all — and the "Connector reachability" panel querying
+    `max by (connector) (chemclaw_connector_unhealthy)` was therefore a graph that could never
+    draw. Empty for a healthy fleet and empty for a broken one is exactly the failure the
+    unlabelled count beside it exists to end, reproduced one level up by the metric that was
+    supposed to say *which*.
+
+    Asserted over the rendered exposition rather than over the binding, because the binding is not
+    the thing that was missing — the series was.
+    """
+    from chemclaw.api import app as service_app
+    from chemclaw.connectors.health import ConnectorHealth
+
+    async def _mixed() -> list[ConnectorHealth]:
+        return [
+            ConnectorHealth(name="calc", state="unreachable", detail="connection refused"),
+            ConnectorHealth(name="molfp", state="healthy"),
+            ConnectorHealth(name="results", state="unprobed"),
+        ]
+
+    monkeypatch.setattr(service_app, "probe_connectors", _mixed)
+    monkeypatch.setattr(service_app, "check_connectors_at_startup", _mixed)
+    monkeypatch.setattr(settings, "session_store", "memory")
+
+    with TestClient(service_app.create_app(connector_factory=_no_connectors)) as client:
+        exposition = client.get("/metrics").text
+    assert 'chemclaw_connector_unhealthy{connector="calc"} 1' in exposition, exposition
+    assert 'chemclaw_connector_unhealthy{connector="molfp"} 0' in exposition, exposition
+    # `unprobed` is deliberately 0 rather than absent: `connectors/health.py` does not count it as
+    # unhealthy, and omitting it would make "no series" mean both "reachable" and "never asked".
+    assert 'chemclaw_connector_unhealthy{connector="results"} 0' in exposition, exposition
+    # And the unlabelled count it has to agree with, from the same probe result.
+    assert "chemclaw_connectors_unhealthy 1" in exposition, exposition
+
+
 def test_readyz_does_not_name_the_connector_fleet_to_an_unauthenticated_caller(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

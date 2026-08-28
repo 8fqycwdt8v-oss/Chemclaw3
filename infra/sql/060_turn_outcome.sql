@@ -14,10 +14,13 @@
 --
 -- Additive and defaulted throughout, per `infra/sql/README.md`: every existing row keeps its
 -- meaning, the previous image can still write (nothing here is `NOT NULL` without a default), and
--- `completed` stays exactly where it was because dashboards read it. It is now *derived* from
--- `outcome` by the one writer, so the two cannot disagree.
+-- `completed` stays exactly where it was because dashboards read it. It is **not** derived from
+-- `outcome`: it is `ledger.answered`, and deriving it was tried and reverted, because a turn that
+-- delivers a partial answer and then hits the runaway cap is `loop_capped` *and* answered. So the
+-- two can disagree, and that disagreement is the information -- reading either alone loses it.
 
--- One of `chemclaw.api.runner._OUTCOMES`, written by `_settle_outcome` and nothing else:
+-- One of `chemclaw.api.runner._OUTCOMES`, written by `api.runner._settle_outcome` for a chat turn
+-- and by `durable.template_activities._book_step_spend` for a harness step:
 -- `answered` / `loop_capped` / `empty_answer` / `errored` / `timed_out` / `abandoned`.
 --
 -- **No CHECK constraint, deliberately.** The vocabulary is enforced in the one function that

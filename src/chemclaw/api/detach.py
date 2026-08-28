@@ -80,6 +80,10 @@ class DetachableTurn:
         self._attached = True
         self._stopper: asyncio.Task[None] | None = None
         self._task = asyncio.create_task(self._pump(source), name=f"turn:{session_id}")
+        # **On the task, not on a reader's path.** See `_note_pump_failure`: the two places a
+        # reader could retrieve it are both places a reader may never reach, and a turn that
+        # detached has no reader at all. A done callback runs on every ending there is.
+        self._task.add_done_callback(self._note_pump_failure)
 
     @property
     def running(self) -> bool:
@@ -120,7 +124,7 @@ class DetachableTurn:
         so a full queue loses whatever is offered here, `_DONE` included. That loss used to end
         the stream: the reader was parked on `queue.get()` with the pump already finished and
         nothing left to wake it. `_next_event` reads the pump's *state* rather than only its
-        marker, so the marker is now the fast path rather than the only path.
+        marker, so the marker is the ordinary terminator rather than the only one.
         """
         with contextlib.suppress(asyncio.QueueFull):
             self._queue.put_nowait(item)
@@ -140,12 +144,29 @@ class DetachableTurn:
 
         So end-of-stream is decided by the fact rather than by the message: the pump task being
         done, with the queue drained, *is* the end of the turn. The marker is kept because it is
-        the common case and costs one comparison; racing the task is what makes the uncommon one
-        terminate. `asyncio.wait` rather than `wait_for`, because there is no timeout here to
-        pick — the two things that can happen are an event arriving and the turn ending.
+        how nearly every stream actually ends — it reaches the reader through the getter below,
+        not through the queue-non-empty branch, which the comment there measures — and racing the
+        task is what makes the exception terminate. `asyncio.wait` rather than `wait_for`, because
+        there is no timeout here to pick — the two things that can happen are an event arriving
+        and the turn ending.
         """
-        # Fast path first: with something already queued there is no task juggling to do, which
-        # is every event of a healthy stream.
+        # **The queue-non-empty path is the *rare* one, and this comment used to claim the
+        # opposite** ("every event of a healthy stream"). A healthy stream is one whose reader
+        # outruns its producer, so the queue is empty at nearly every read. Measured over 101
+        # reads, with the producer pausing 1 ms between tokens — slower than that is what a real
+        # provider does: this branch ran **once** and the task-juggling path below ran **100**
+        # times. Only a synthetic burst with no await at all inverts it (67 against 34), which is
+        # the shape the old comment was written from.
+        #
+        # So the per-event cost is real and is paid on nearly every event: an `ensure_future` plus
+        # an `asyncio.wait` measured at ~22 µs against ~0.4 µs for a bare `await queue.get()`.
+        # It stays, and what it buys is stated rather than assumed. Removing the getter task means
+        # the marker must be *guaranteed*, and the only way to guarantee a `put_nowait` into a
+        # full queue is to drop an event to make room — trading a hang that is now fixed for a
+        # hole in the stream the chemist is reading. A reserved marker slot (a semaphore of
+        # `_QUEUE_SIZE` permits over a queue of `_QUEUE_SIZE + 1`) would buy it honestly, and is a
+        # second synchronisation primitive in a module whose last two defects were both races —
+        # not worth 20 µs on a path whose events arrive a millisecond apart.
         if not self._queue.empty():
             return self._queue.get_nowait()
         if self._task.done():
@@ -162,20 +183,34 @@ class DetachableTurn:
             # it queued — so the drain below still sees everything the pump delivered.
             if not getter.done():
                 getter.cancel()
-        self._note_pump_failure()
         return self._queue.get_nowait() if not self._queue.empty() else _DONE
 
-    def _note_pump_failure(self) -> None:
-        """Log a pump that ended by raising, which would otherwise be retrieved by nobody.
+    def _note_pump_failure(self, task: "asyncio.Task[None]") -> None:
+        """Log a pump that ended by raising, and *retrieve* it so asyncio does not shout at GC.
 
-        `run_turn` turns every `Exception` into an error event, so reaching here means the failure
-        was above it — and the task's exception is never retrieved, so asyncio reports it at
-        garbage-collection time under no session and no correlation id, or not at all.
+        `run_turn` turns every `Exception` into an error event, so a failure reaching here was
+        above it — and until this ran as a done callback, nothing retrieved it. Measured across
+        eight raise scenarios: **0 calls, 0 log records, and `task._log_traceback is True` in all
+        eight**, which is asyncio's flag for "I will print `Task exception was never retrieved` at
+        garbage-collection time" — under no session, no correlation id, and possibly never. That
+        is the exact outcome the docstring said this prevented.
+
+        The reason it never ran is that it was called on one branch of `_next_event`, and a raising
+        pump does not reach that branch — in any of the eight, `_QUEUE_SIZE` and past it included:
+        `_pump`'s own `finally` offers `_DONE` first, so the parked getter wakes with the marker
+        and returns one line earlier. The two reader-side
+        placements the review offered (that branch, or `events()`'s `finally`) share a deeper
+        problem anyway — a detached turn has no reader, and a reader that is cancelled mid-stream
+        never runs another line of this class. A done callback is the one hook that fires on every
+        ending, exactly once, whether anybody was watching or not.
+
         `CancelledError` is excluded because it is the ordinary stop path.
         """
-        if self._task.cancelled():
+        if task.cancelled():
             return
-        failure = self._task.exception()
+        # Called for its side effect as much as its value: retrieving the exception is what clears
+        # asyncio's `_log_traceback`, and it must happen even when there is nothing to log.
+        failure = task.exception()
         if failure is not None:
             logger.warning(
                 "the turn pump for session %s ended by raising; the stream is closed",
@@ -233,7 +268,14 @@ class DetachableTurn:
         try:
             await self._task
         except asyncio.CancelledError:
-            pass
+            # **Whose cancellation was that?** `await self._task` raises the same `CancelledError`
+            # for "the turn I just cancelled ended" and for "the stop route's own handler was
+            # cancelled while waiting" — a client that gave up on the stop request, a pod draining
+            # — and swallowing the second is swallowing a cancellation addressed to this frame,
+            # which asyncio requires to propagate. The task's own state tells them apart: it is
+            # `cancelled()` only in the first case, and merely not-done in the second.
+            if not self._task.cancelled():
+                raise
         except Exception:
             logger.warning(
                 "session %s's turn was stopped and its teardown raised; the turn is cancelled "

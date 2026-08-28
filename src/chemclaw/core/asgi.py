@@ -108,7 +108,7 @@ class BodySizeLimit:
         rise had a rate and nothing to look at: not the method, not the path, not which of the two
         arms fired. `warning`, because the caller is being refused and somebody has to decide
         whether it is an attack or an attachment cap set too low; no path and no header is
-        included, for the reason `_route_template` gives in `api/middleware.py` — a request line is
+        included, for the reason `route_template` gives in `api/middleware.py` — a request line is
         attacker-controlled and the redaction filter is where that becomes a pod stall.
         """
         record_metric(lambda m: m.increment("chemclaw_requests_too_large_total"))
