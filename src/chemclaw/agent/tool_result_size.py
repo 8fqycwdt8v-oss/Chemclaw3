@@ -44,6 +44,7 @@ from typing import Any
 from langchain.agents.middleware import wrap_tool_call
 from langchain_core.messages import ToolMessage
 
+from chemclaw.agent.audit import metric_tool_name
 from chemclaw.core.config import settings
 from chemclaw.core.logging import log_event
 from chemclaw.core.metrics_bridge import record_metric
@@ -190,6 +191,13 @@ async def bound_tool_results(request: Any, handler: Callable[[Any], Any]) -> Any
     A failing result is bounded too. An error is normally short, but a tool that fails by returning
     a provider's whole HTML error page is the same problem in a different dress, and nothing about
     the size argument depends on the status.
+
+    **Two names, on purpose.** The notice the model reads and the operator log name what the model
+    *asked for*, because that is the forensic fact; the metric label is `metric_tool_name`'s
+    clamped one, because `request.tool_call["name"]` is the model's own string and `ToolNode`
+    invokes this chain for a name the graph does not hold. That the two coincide for every
+    registered tool is why this was not a live leak — and coincidence is not the bound
+    `_COUNTER_LABELS` claims for this label, so it is now stated by the code.
     """
     result = await handler(request)
     if not isinstance(result, ToolMessage):
@@ -198,8 +206,9 @@ async def bound_tool_results(request: Any, handler: Callable[[Any], Any]) -> Any
     content, removed = bounded_content(result.content, tool, settings.agent_max_tool_result_chars)
     if not removed:
         return result
+    label = metric_tool_name(request)
     record_metric(
-        lambda m: m.increment("chemclaw_tool_results_truncated_total", 1.0, {"tool": tool})
+        lambda m: m.increment("chemclaw_tool_results_truncated_total", 1.0, {"tool": label})
     )
     log_event(
         logger,

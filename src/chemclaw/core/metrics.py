@@ -794,11 +794,17 @@ _COUNTER_LABELS: dict[str, tuple[str, ...]] = {
     # but tracked for debugging). `durable` is a cross-replica race on the shared turn claim.
     "chemclaw_turns_conflict_total": ("scope",),
     # Bounded by the registered tool surface, which is configuration (the enabled connectors and
-    # profile) rather than anything a caller can name.
+    # profile) rather than anything a caller can name — and, like the three below it, that bound is
+    # `agent/audit.py::metric_tool_name` rather than a property of the call site. It was a property
+    # of the call site here, which is to say it was not one: `count_call` booked the model's own
+    # `tool_call["name"]`, and three identical calls to a 141-character invented name rendered it
+    # verbatim on the unauthenticated `/metrics`.
     "chemclaw_repeated_tool_calls_total": ("tool",),
-    # The same bound and for the same reason: a tool name here is one the registry served, never a
-    # string a caller invented (`agent/tool_result_size.py` reads the request's tool name, which is
-    # the one the graph dispatched).
+    # The same clamp and for the same reason. This one was never independently reachable — an
+    # unregistered call's error result is far under the truncation ceiling, so the label happened to
+    # equal the registered name — and a coincidence is not the bound this comment claims, so the
+    # code states it now. `tests/test_tool_label_bound.py` holds every metric in this group at once,
+    # derived from these declarations, so a sixth arrives with a test rather than with a comment.
     "chemclaw_tool_results_truncated_total": ("tool",),
     # A retriever's own `name`, and the bound is the same kind as `connector`: a source is a
     # registry entry a deployment activates, never a string a caller supplies. The shipped set is

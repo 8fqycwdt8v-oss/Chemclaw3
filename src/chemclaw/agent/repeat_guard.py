@@ -36,6 +36,7 @@ from typing import Any
 
 from langchain.agents.middleware import wrap_tool_call
 
+from chemclaw.agent.audit import metric_tool_name
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.core.metrics_bridge import record_metric
@@ -180,6 +181,15 @@ def count_call(name: str, arguments: Any) -> RepeatedCallRefusal | None:
     **Counting is the side effect**, and it happens before the threshold test, so a call that is
     let through is still recorded against the next one. Off the request path there is no counter
     and this is a no-op — the CLI, the tests and the classic agent all take that branch.
+
+    The *metric* is deliberately not booked here, and it used to be. `name` is the model's own
+    string — `ToolNode` invokes the middleware chain for a name the graph does not hold — so
+    `chemclaw_repeated_tool_calls_total{tool=name}` minted one permanent time series per invented
+    name on the unauthenticated `/metrics`, while `_COUNTER_LABELS` documented that label as
+    "bounded by the registered tool surface". Measured: three identical calls to a 141-character
+    hallucinated name rendered it verbatim. The clamp needs the *registered tool object*, which
+    only the transport request carries, so the counter moved to `refuse_repeated_calls` — this
+    function stays framework-free, which is the whole reason it is separate.
     """
     watch = _calls.get()
     if watch is None:
@@ -191,9 +201,6 @@ def count_call(name: str, arguments: Any) -> RepeatedCallRefusal | None:
     if seen <= settings.max_identical_tool_calls:
         return None
     logger.info("refusing repeat %d of %s in one turn", seen, name)
-    record_metric(
-        lambda m: m.increment("chemclaw_repeated_tool_calls_total", labels={"tool": name})
-    )
     return RepeatedCallRefusal(
         f"{name} was already called with these exact arguments {seen - 1} time(s) in this turn "
         f"and returned the same thing each time, so it was not called again. It will not answer "
@@ -210,8 +217,19 @@ async def refuse_repeated_calls(request: Any, handler: Callable[[Any], Any]) -> 
     `RepeatedCallRefusal` is a `ChemclawError`, so `surface_domain_errors` is what turns it into
     the message the model reads. That keeps one converter responsible for how a refusal reaches the
     model, instead of this gate having its own opinion about it.
+
+    **The metric is booked here rather than in `count_call`, because the label has to be clamped
+    and only this side can clamp it.** The decision keys on the name the model sent — two different
+    invented names are two different repeats — while the label must be the name the *graph* holds,
+    or `/metrics` grows by one series per string a model invents. `metric_tool_name` is the same
+    clamp `chemclaw_tool_calls_total` and `chemclaw_tool_duration_seconds` already use, so all
+    three `tool` labels resolve one way.
     """
     refusal = count_call(request.tool_call["name"], request.tool_call.get("args"))
     if refusal is not None:
+        tool = metric_tool_name(request)
+        record_metric(
+            lambda m: m.increment("chemclaw_repeated_tool_calls_total", labels={"tool": tool})
+        )
         raise refusal
     return await handler(request)

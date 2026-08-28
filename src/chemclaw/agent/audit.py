@@ -138,7 +138,7 @@ def refusal_reason(exc: BaseException) -> RefusalReason | None:
 UNKNOWN_TOOL = "unknown"
 
 
-def metric_tool_name(request: Any, name: str) -> str:
+def metric_tool_name(request: Any) -> str:
     """The tool name safe to use as a metric label — the registered one, or a fixed bucket.
 
     **`name` is the model's string, and a metric label must not be.** `ToolNode` invokes this chain
@@ -151,7 +151,10 @@ def metric_tool_name(request: Any, name: str) -> str:
     carries `frame_untrusted` — so an injected document could grow the registry until the pod died.
 
     The registered tool's **own** name is used rather than the caller's, so the label cannot differ
-    from it by case, whitespace or an invisible character while still resolving.
+    from it by case, whitespace or an invisible character while still resolving. It therefore takes
+    no `name` argument: it had one, every caller passed `request.tool_call["name"]`, and the body
+    never read it — a parameter whose value is exactly the string this function exists to refuse
+    reads like the clamp is a comparison, and it is not.
 
     The audit *row* keeps the model's raw string (truncated), because what the model actually asked
     for is the forensic fact; it is only the unbounded *label* that is refused.
@@ -497,7 +500,7 @@ def make_audit_middleware(
             revision=revision,
             tool_revision=_served_by(request),
             plan_step=_plan_step(request),
-            metric_name=metric_tool_name(request, request.tool_call["name"]),
+            metric_name=metric_tool_name(request),
         ) as recorded:
             result = await handler(request)
             recorded.result = getattr(result, "content", result)

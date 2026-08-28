@@ -834,6 +834,110 @@ def test_no_calculator_setting_is_declared_without_a_reader() -> None:
     )
 
 
+# The three ways this tree consumes a setting, and the only three. An attribute read anywhere in
+# `src/` (`settings.x`, `self.x` inside a section or validator); the field *name* as a string, which
+# is the `getattr`/`model_copy(update=...)` form; or the `CHEMCLAW_`-prefixed environment variable
+# in `deploy/`, which is how the chart's `config.yaml`, `_helpers.tpl` and `entrypoint.sh` consume
+# the ones no Python line ever reads.
+def _settings_fields_declared_on_disk() -> dict[str, str]:
+    """Every field annotated on a `*Settings` class under `core/config/`, mapped to its module.
+
+    Read off the source rather than off `model_fields`, because the failure this guards is a field
+    left *declared* — and a declaration is a line in a file, which is where the reviewer looks.
+    Scoped to class bodies whose class name ends in `Settings`, so the sections' module-level
+    constants (`NOTE_INDEX_SOURCES`, `SCHEMA_VECTOR_DIM`) are not mistaken for knobs.
+    """
+    import ast
+
+    section_dir = Path(__file__).resolve().parent.parent / "src/chemclaw/core/config"
+    declared: dict[str, str] = {}
+    for path in sorted(section_dir.glob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ClassDef) or not node.name.endswith("Settings"):
+                continue
+            for statement in node.body:
+                if isinstance(statement, ast.AnnAssign) and isinstance(statement.target, ast.Name):
+                    declared.setdefault(statement.target.id, path.name)
+    return declared
+
+
+def _consumed_names() -> tuple[set[str], set[str], str]:
+    """What `src/` reads as an attribute, what it names as a string, and `deploy/` as text."""
+    import ast
+
+    root = Path(__file__).resolve().parent.parent
+    attributes: set[str] = set()
+    literals: set[str] = set()
+    for path in (root / "src").rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Attribute):
+                attributes.add(node.attr)
+            elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+                literals.add(node.value)
+    deployment = "".join(
+        path.read_text(encoding="utf-8", errors="ignore")
+        for path in (root / "deploy").rglob("*")
+        if path.is_file()
+    )
+    return attributes, literals, deployment
+
+
+def _unread_settings(declared: dict[str, str]) -> list[str]:
+    """Which of `declared` nothing in this repository consumes, by any of the three routes."""
+    attributes, literals, deployment = _consumed_names()
+    return sorted(
+        name
+        for name in declared
+        if name not in attributes
+        and name not in literals
+        and f"CHEMCLAW_{name.upper()}" not in deployment
+    )
+
+
+def test_no_setting_anywhere_is_declared_without_a_consumer() -> None:
+    """A knob nobody reads is not clutter — it is a control an operator sets and nothing obeys.
+
+    `test_no_calculator_setting_is_declared_without_a_reader` above makes this argument for one
+    section and says the general form cannot be written, "because elsewhere a field with no
+    first-party reader can be legitimate — something a library or a chart consumes". That is true
+    of a reader in `src/` and false of a *consumer*: the chart consumes a setting by its
+    `CHEMCLAW_`-prefixed environment variable, in files this repository also owns. Counting those
+    makes the general check exact, with no allowlist — measured across all fields the sections
+    declare, the exempt set is empty.
+
+    Worth the generalisation because this repository has twice deleted whole clusters of settings
+    nothing read while documentation described them in the present tense: the seven specialist and
+    challenge-panel settings (D-2026-08-15), the three compaction settings whose policy lived in a
+    removed framework (D-2026-08-11), and the fourteen `hpc_*` fields
+    (`D-2026-08-26-semiempirical-is-the-whole-tier`). Every one of them had a `.env.example` row, so
+    the parity tests above were green throughout; the parity that was broken is the one nothing
+    checked.
+    """
+    declared = _settings_fields_declared_on_disk()
+    assert len(declared) > 100, "the sections parsed to almost no fields, so this proves nothing"
+
+    unread = _unread_settings(declared)
+
+    assert not unread, (
+        "declared on a `*Settings` class and consumed by nothing in `src/` or `deploy/`: "
+        + ", ".join(f"{name} ({declared[name]})" for name in unread)
+        + ". Give it a consumer or delete it — an ENV an operator can set with no effect is a "
+        "control that does not exist."
+    )
+
+
+def test_the_unread_settings_guard_fires_for_a_knob_nobody_has_added_yet() -> None:
+    """A guard that is green because it can never fail is not a guard.
+
+    The check above is only meaningful if its three consumption routes can all miss. Asserted by
+    handing it a field name this tree does not contain, rather than by editing a section.
+    """
+    invented = "probe_setting_no_module_and_no_chart_reads"
+    assert _unread_settings({invented: "probe.py"}) == [invented]
+
+
 def test_note_reindex_is_derived_from_the_source_list_unless_overridden() -> None:
     """Enabling an index-backed leg must enable the reindex that builds what it queries.
 

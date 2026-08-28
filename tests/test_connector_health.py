@@ -291,6 +291,15 @@ def test_the_unhealthy_gauge_counts_an_unpolled_bundle_and_not_an_unknown_one(
     `chemclaw_connectors_unhealthy` is the alerting half of this signal, and it read
     `state == "unreachable"` at a second site: a new down-state that the gate honoured and the gauge
     did not would be two definitions of "down" in one deployment.
+
+    **Both halves, because for one release there were three definitions and the third disagreed.**
+    The count moved onto `ConnectorHealth.unhealthy` when `unpolled` was added, and
+    `chemclaw_connector_unhealthy` — the family whose whole job is to say *which* connector the
+    count is about — kept `state == "unreachable"`. Measured on this fixture before the fix:
+    `chemclaw_connectors_unhealthy 1` beside `chemclaw_connector_unhealthy{connector="durable"} 0`,
+    so the alert fired and the panel an operator opens to answer "which one" showed a healthy
+    fleet. That is worse than the unbound family this metric was added to replace: an empty graph
+    reads as broken, a graph of zeroes reads as fine.
     """
     from fastapi.testclient import TestClient
 
@@ -314,3 +323,9 @@ def test_the_unhealthy_gauge_counts_an_unpolled_bundle_and_not_an_unknown_one(
 
     # Exactly one: `unpolled` counts, and `healthy`, `unprobed` and `unknown` do not.
     assert "\nchemclaw_connectors_unhealthy 1\n" in exposition, exposition
+    # And the family names *that* one, on the same predicate — `unpolled` is down here too.
+    assert 'chemclaw_connector_unhealthy{connector="durable"} 1' in exposition, exposition
+    for reachable in ("alpha", "quiet", "slow"):
+        assert f'chemclaw_connector_unhealthy{{connector="{reachable}"}} 0' in exposition, (
+            exposition
+        )

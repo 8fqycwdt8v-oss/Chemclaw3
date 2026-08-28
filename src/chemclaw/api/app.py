@@ -400,12 +400,16 @@ def create_app(
     # `unprobed` reads 0 rather than being omitted, matching the count above: a connector with no
     # health route is deliberately not counted as unhealthy (`connectors/health.py`), and dropping
     # it from the family instead would make "no series" mean both "reachable" and "never asked".
+    #
+    # `item.unhealthy`, the same predicate as the count — and it was `state == "unreachable"` here
+    # while the count above had already moved off that spelling. Measured: a bundle whose task
+    # queue has no poller rendered `chemclaw_connectors_unhealthy 1` beside
+    # `chemclaw_connector_unhealthy{connector="durable"} 0`, so the alert fired and the panel that
+    # says *which* connector it is about showed a healthy fleet. Three definitions of "down" in one
+    # deployment is what the comment on the count gauge exists to forbid; this was the third.
     METRICS.bind_gauge_family(
         "chemclaw_connector_unhealthy",
-        lambda: {
-            item.name: 1.0 if item.state == "unreachable" else 0.0
-            for item in app.state.connector_health
-        },
+        lambda: {item.name: 1.0 if item.unhealthy else 0.0 for item in app.state.connector_health},
     )
 
     # The routes, one module per resource (`chemclaw/api/routes/`). Order mirrors the audience:
