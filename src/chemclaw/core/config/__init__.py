@@ -77,6 +77,7 @@ from chemclaw.core.config.sources import SourcesSettings
 from chemclaw.core.config.store import StoreSettings
 from chemclaw.core.config.temporal import TemporalSettings
 from chemclaw.core.egress import pin_langsmith_egress
+from chemclaw.core.netguard import arm_from_settings as arm_egress_guard
 
 # The package's public surface, exactly what the single-file module exported: the composed class,
 # its singleton, every section mixin (a few are imported directly, e.g. `EvalSettings`), and the
@@ -478,3 +479,12 @@ settings = Settings()
 # `chemclaw.core.egress` documents why the pin needs both the in-process global and the environ
 # write, and why it overrides rather than defaults.
 pin_langsmith_egress(allowed=settings.langsmith_tracing_allowed)
+
+# The in-process egress guard, armed beside the LangSmith pin and for the same reason: this module
+# is the one import every entrypoint makes, so arming here makes the guard a property of the system
+# rather than of a launcher. The allowlist is derived from the destinations this deployment dials
+# (the LLM gateway, Postgres, Temporal, the connector endpoints, the IdP), so a host outside it —
+# a dependency fetching model weights, a usage ping, a DNS licence check — is refused. It is defence
+# in depth behind the NetworkPolicy for the "only LLM traffic leaves" invariant and cannot cover a
+# child process or a compiled extension's own syscalls; `chemclaw.core.netguard` documents both.
+arm_egress_guard(settings)

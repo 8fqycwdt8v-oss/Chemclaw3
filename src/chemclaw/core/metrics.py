@@ -62,6 +62,7 @@ def _escape(value: str) -> str:
 # the exposition always carries HELP/TYPE lines (a scrape without them is much harder to read).
 _COUNTERS: dict[str, str] = {
     "chemclaw_turns_started_total": "Turns admitted and started.",
+    "chemclaw_egress_refused_total": "Outbound connections the in-process egress guard refused.",
     # Per-source evidence accounting (M10). A leg that returns nothing on one query is normal; a
     # leg that returns nothing on *every* query is a broken deployment, and before this there was
     # no way to tell those apart from outside — which is exactly the blind spot
@@ -803,6 +804,7 @@ _MAX_SERIES_PER_COUNTER = 128
 
 _GAUGES: dict[str, str] = {
     "chemclaw_turns_in_flight": "Turns currently streaming.",
+    "chemclaw_egress_guard_armed": "1 when the in-process egress guard is installed, else 0.",
     "chemclaw_turn_capacity": "Configured maximum concurrent turns (the admission cap).",
     # The right-hand side of the only question the per-process cap cannot answer. `sum()` of the
     # gauge above across pods is what the fleet is *admitting* right now; this is what it was
