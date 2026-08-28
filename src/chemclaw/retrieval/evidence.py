@@ -112,7 +112,10 @@ class EvidenceSweep(BaseModel):
     # `D-2026-08-01-a-cap-that-starves-a-source` measured. The metric pair
     # (`chemclaw_evidence_source_chunks_total` and `chemclaw_evidence_source_kept_total`) carries
     # both halves, so the ratio is alertable across turns while this field stays what a single
-    # answer's reader needs.
+    # answer's reader needs. The kept half counts a source's own hits whose note reached the
+    # answer, not the chunks labelled with its name — a note two sources found survives once,
+    # under the earlier source's label, and crediting that label made an agreeing leg read as a
+    # starved one.
     sources: dict[str, int] = Field(default_factory=dict)
     # Sources that declined the question, by name -> the reason they gave (`RetrieverSkip`).
     # Distinct from `sources_failed` because the fixes differ: a failure is an outage, a skip is

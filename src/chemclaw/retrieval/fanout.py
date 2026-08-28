@@ -40,7 +40,6 @@ the index of the source it ran, and the fan-in restores that order before return
 import logging
 import operator
 import time
-from collections import Counter
 from collections.abc import Iterable
 from typing import Annotated, Any
 
@@ -174,38 +173,52 @@ def _record_seconds(name: str, seconds: float) -> None:
     )
 
 
-def record_kept_chunks(kept: Iterable[EvidenceChunk], asked: Iterable[str]) -> None:
-    """Count the chunks that **survived** the merge and both caps, per source.
+def record_kept_chunks(
+    kept: Iterable[EvidenceChunk],
+    handed: Iterable[tuple[str, list[EvidenceChunk]]],
+) -> None:
+    """Count, per source, how much of what it **handed over** reached the answer.
 
-    `chemclaw_evidence_source_chunks_total` counts what a retriever *handed over* — `EvidenceSweep`
+    `chemclaw_evidence_source_chunks_total` counts what a retriever handed over — `EvidenceSweep`
     says so in as many words ("Counts are pre-merge") — which is measured before RRF or the
     round-robin interleave and before the budget cap. So it does not cover the defect its own ADR
     names: `D-2026-08-01-a-cap-that-starves-a-source` measured *surviving* chunks (graph 38,
     lexical 0, vector 2), and under a pre-merge counter a leg that contributes thirty chunks and
-    survives none reads as perfectly healthy. Reintroduce `retrieval_source_weights` at the value
-    that ADR itself measured and not one series here moves.
+    survives none reads as perfectly healthy. The alert is the ratio `kept / chunks` going to zero
+    for one source, which is that ADR's table expressed as a number a dashboard can hold.
 
-    The alert is the ratio `kept / chunks` going to zero for one source, which is that ADR's table
-    expressed as a number a dashboard can hold.
+    **Counted from the source's own hit-list, not from the surviving chunk's `retriever` label**,
+    and that is the whole of the correction. Both merge modes collapse a note found twice —
+    `_interleave_dedup` keeps the first `(note, content)` it meets, RRF keeps "the first one
+    encountered across the lists (stable input order)" — so the surviving chunk carries the
+    *earlier* source's name and a label-counted numerator credits list order rather than
+    contribution. Measured over the shipped 38-note corpus with `graph,vector,lexical` enabled
+    against a real note index, ten research queries, **nothing truncated on any of them**: every
+    hit every leg handed over reached the answer, and the label-counted ratio still read
+    graph 38/38, vector 42/73 and **lexical 8/73** in `hybrid` mode — 0.00 on four queries out of
+    ten — with graph 25/38, vector 38/73, lexical 25/73 in `graph` mode. A leg that agrees with an
+    earlier one was indistinguishable from a leg the cap had emptied, which is the one distinction
+    this counter exists to make.
 
-    **Every asked source is seeded at zero**, and that is a deliberate exception to this registry's
-    rule against invented zero series. It is not invented: a source that was asked and kept nothing
-    is an *observation*, and without the seeded series the ratio has no denominator at exactly the
-    moment it matters — a starved leg would be absent from the metric rather than reading zero.
+    So a source is credited for each of its own hits whose note is in the answer, however that
+    note got there. The ratio then stays in `[0, 1]` per source, and the sum across sources may
+    exceed the number of chunks returned — deliberately, because corroboration is not waste.
+
+    **Every asked source is booked**, including at zero, and that is a deliberate exception to this
+    registry's rule against invented zero series. It is not invented: a source that was asked and
+    kept nothing is an *observation*, and without the seeded series the ratio has no denominator at
+    exactly the moment it matters — a starved leg would be absent from the metric rather than
+    reading zero.
 
     Args:
-        kept: The chunks that reached the caller, after merging and both budget caps.
-        asked: Every source name this sweep asked, so a starved one is present as a zero.
+        kept: The chunks that reached the caller, after merging and both budget caps, **before
+            framing** — `gather_evidence` rewrites `source_note_id` on its way out, and an id
+            compared across that rewrite is the silent-zero this function is fixing.
+        handed: `(name, hits)` per source, exactly as the sweep returned them.
     """
-    surviving: Counter[str] = Counter(chunk.retriever for chunk in kept)
-    named = set(asked)
-    for name in named:
-        _record_kept(name, surviving.get(name, 0))
-    # A chunk whose `retriever` is not among the asked names would otherwise be dropped silently;
-    # counting it keeps the two series comparable rather than quietly under-reporting the numerator.
-    for name in surviving:
-        if name not in named:
-            _record_kept(name, surviving[name])
+    surviving = {chunk.source_note_id for chunk in kept}
+    for name, hits in handed:
+        _record_kept(name, sum(1 for hit in hits if hit.source_note_id in surviving))
 
 
 def _record_kept(name: str, count: int) -> None:

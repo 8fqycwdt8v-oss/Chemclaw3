@@ -861,6 +861,17 @@ repository nobody can list. Nothing is broken — every proposal genuinely is a 
 a backfill and an incremental sync arguably want different submission shapes (one branch per batch,
 or a bulk proposal a reviewer expands). Found by the 2026-08-18 corpus-fidelity pass.
 
+**Re-measured 2026-08-28, and the rate is not steady — it degrades with the branch count.** Against
+a local bare remote (so: the git mechanics alone, no forge latency), `propose_note` cost a mean of
+362 ms per note over 40 notes with the memory store and 409 ms with the Postgres store and its
+cluster advisory lock. Over 200 consecutive notes the quartile means were 312 / 316 / 337 / 402 ms —
+**+29% by the fourth quartile**, monotone, on a remote that ends the run holding 201 branches. The
+1.81 s figure above is that floor plus a real forge's round trips; what this adds is that the
+per-note cost is not O(1) in the size of the branch set the earlier proposals left behind, which is
+the half of "a repository nobody can list" that costs time rather than attention. ELN transcription
+no longer comes through here (D-2026-08-25), so the live one-note-per-record path is
+`cli/backfill_corpus.py` — one PR-gated note per document, by design.
+
 ## The labelling client is the one MCP leg with no identity or trace on the wire
 
 `core/mcp_session.open_session` grew a `request_hook` seam so a caller can stamp the outbound

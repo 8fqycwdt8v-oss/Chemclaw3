@@ -338,10 +338,16 @@ def test_a_non_positive_source_weight_is_refused_by_the_config() -> None:
     Both were meaningless under the multiplier this replaced too — `0` deleted a source from every
     sweep silently, which is the starvation the knob exists to prevent — so refusing them is the
     config stating what the arithmetic always required.
+
+    **Positivity was never the binding constraint, and this test used to be the whole control.**
+    A weight of `0.1` is positive and still empties a leg: measured, its best hit fuses behind five
+    other sources' complete tails and it keeps zero chunks under the evidence cap. The refusal is
+    now a band, and a non-positive weight fails it as the extreme case it always was — see
+    `tests/test_hybrid_retrieval.py::test_an_allowed_source_weight_cannot_starve_a_leg_to_zero`.
     """
     from chemclaw.core.config.retrieval import RetrievalSettings
 
-    with pytest.raises(ValidationError, match="must be positive"):
+    with pytest.raises(ValidationError, match=r"must lie in \[0\.5, 2\.0\]"):
         RetrievalSettings(retrieval_source_weights={"graph": 0.0})
     assert RetrievalSettings(retrieval_source_weights={"graph": 1.5}).retrieval_source_weights
 

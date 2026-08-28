@@ -555,10 +555,16 @@ _COUNTERS: dict[str, str] = {
         "Records seen by an ingest pass, by source and outcome (ingested / rejected / skipped)."
     ),
     "chemclaw_evidence_source_kept_total": (
-        "Chunks from each source that survived merge and the evidence budget. Read against "
-        "`chemclaw_evidence_source_chunks_total`, which counts what a leg *handed over* before "
-        "RRF and the cap — so a leg contributing 30 and surviving 0, which is exactly the state "
-        "D-2026-08-01 was written about, still read as healthy on the pre-merge counter alone."
+        "Hits each source handed over whose note reached the answer, after merge and the evidence "
+        "budget. Read against `chemclaw_evidence_source_chunks_total`, which counts what a leg "
+        "handed over before RRF and the cap — so a leg contributing 30 and surviving 0, which is "
+        "exactly the state D-2026-08-01 was written about, still read as healthy on the pre-merge "
+        "counter alone. Counted from the source's own hit-list rather than from the surviving "
+        "chunk's retriever label, because both merge modes collapse a note two sources found and "
+        "keep the earlier one's label: measured over the shipped corpus with nothing truncated, "
+        "the label-counted lexical leg read 8 of 73 in hybrid mode and 0 on four queries in ten. "
+        "The sum across sources may therefore exceed the chunks returned — corroboration is not "
+        "waste."
     ),
     "chemclaw_vector_unresolved_points_total": (
         "Ranked points an external vector store returned that no `document_chunks` row could "

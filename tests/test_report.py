@@ -502,6 +502,43 @@ def test_an_all_healthy_section_is_not_marked_failed() -> None:
     assert gathered.supported is True
 
 
+def test_a_report_sweep_books_both_halves_of_the_source_metric_pair() -> None:
+    """The report path booked the denominator and not the numerator, on every section it ran.
+
+    `sweep_sources` is shared with `gather_evidence`, so every section increments
+    `chemclaw_evidence_source_chunks_total` for each source it asks. Nothing here ever called
+    `record_kept_chunks`, and `gather_section` applies no cap at all — every hit it is handed
+    reaches the draft. So a deployment that runs reports depressed
+    `kept / chunks` for every source it swept, by exactly the report traffic, and that ratio is
+    the one alert `D-2026-08-01-a-cap-that-starves-a-source` asked for: a leg being starved and a
+    leg being reported on look the same on it.
+    """
+    from chemclaw.core.metrics import METRICS
+
+    section = ReportSection(heading="Esterification", query="ester", memory_layer="evidence")
+    healthy = _FakeRetriever(
+        "ester",
+        [
+            EvidenceChunk(
+                content="Ethyl acetate, 85%", source_note_id="reaction-a", retriever="fake"
+            )
+        ],
+    )
+
+    handed_before = METRICS.value("chemclaw_evidence_source_chunks_total")
+    kept_before = METRICS.value("chemclaw_evidence_source_kept_total")
+    gathered = asyncio.run(gather_section(section, [healthy]))
+    handed_after = METRICS.value("chemclaw_evidence_source_chunks_total")
+    kept_after = METRICS.value("chemclaw_evidence_source_kept_total")
+
+    assert gathered.evidence, "sanity: the section actually retrieved something"
+    assert handed_after - handed_before == 1, "sanity: the shared sweep booked what was handed over"
+    assert kept_after - kept_before == 1, (
+        "the report sweep booked the ratio's denominator and not its numerator — every section "
+        "run makes each source it asks look starved"
+    )
+
+
 # --- a chunk is placed as a cell, not as markup (A9-F1) -------------------------------
 
 

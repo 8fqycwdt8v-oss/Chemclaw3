@@ -42,7 +42,9 @@ class RetrievalSettings(BaseSettings):
     # behavior. A weight is applied in *rank* space (`k + rank / weight`) rather than as a
     # multiplier on the fused score — `retrieval.hybrid.reciprocal_rank_fusion` carries the
     # measurement of why, and it is the difference between "graph rank 3 fuses like rank 2" and
-    # "the dense leg contributes nothing". ENV override is JSON, e.g.
+    # "the dense leg contributes nothing". **Bounded to `[0.5, 2.0]`**, because rank space is not
+    # starvation-proof by itself: a positive weight of 0.1 was accepted and kept zero chunks of a
+    # six-source sweep — see `_weights_cannot_starve_a_source`. ENV override is JSON, e.g.
     # CHEMCLAW_RETRIEVAL_SOURCE_WEIGHTS='{"graph": 1.5, "vector": 0.8}'.
     retrieval_source_weights: dict[str, float] = Field(default_factory=dict)
     # How much of a source note's body an excerpt carries — shared by the report harness's
@@ -212,20 +214,41 @@ class RetrievalSettings(BaseSettings):
 
     @field_validator("retrieval_source_weights")
     @classmethod
-    def _weights_are_positive(cls, value: dict[str, float]) -> dict[str, float]:
-        """Refuse a zero or negative tier factor, which the fusion cannot express.
+    def _weights_cannot_starve_a_source(cls, value: dict[str, float]) -> dict[str, float]:
+        """Refuse a tier factor outside the band in which no weight can starve a leg.
 
         A weight divides the rank, so `0` is a division by zero and a negative one inverts the
         source's own ordering — a deployment would be asking for its worst hit first. Both were
         also meaningless under the multiplier this replaced (`0` silently deleted a source from
-        every sweep, which is precisely the starvation the knob is meant to prevent), so this is
-        the config saying out loud what the arithmetic always required.
+        every sweep), so refusing them is the config saying what the arithmetic always required.
+
+        **Positive is not enough, which is what this validator was missing.** A source at weight
+        `w` fuses its rank-1 hit at *effective* rank `1/w`, so a small enough weight puts a leg's
+        best hit behind every other source's complete tail. Measured over six sources of eight
+        hits each against the shipped 40-chunk cap, every other weight at the default 1.0: at
+        `0.5` the weighted leg's best hit is at fused index 6 of 48 and it keeps 4 chunks; at
+        `0.2`, index 21 and 1 chunk; at **`0.1`, index 40 — behind all five other sources'
+        eight-hit tails — and it keeps 0**. That is one leg contributing nothing at all, which is
+        `D-2026-08-01-a-cap-that-starves-a-source` reintroduced by the knob written to prevent it,
+        and `retrieval.hybrid` asserted it could not happen.
+
+        `[1/W, W]` with `W = 2` is the band that makes the assertion true. A source's own best hit
+        fuses at effective rank at most `W`; another source's rank `r` fuses at effective rank at
+        least `r / W`, so it precedes only while `r <= W²` — at most four chunks per other source,
+        whatever the ranks. A sweep of `S` sources therefore keeps every leg's best hit inside any
+        cap above `4 (S - 1)`: eleven sources at `gather_evidence_max_chunks`'s 40, against the
+        four a deployment runs today. The ENV comment's own example (`graph: 1.5, vector: 0.8`)
+        is inside it, and so is every ratio a tier needs — what is outside is only the range in
+        which a "tier" is a deletion.
         """
-        bad = sorted(name for name, weight in value.items() if weight <= 0)
+        floor, ceiling = 1.0 / _WEIGHT_SPREAD, _WEIGHT_SPREAD
+        bad = sorted(name for name, weight in value.items() if not floor <= weight <= ceiling)
         if bad:
             raise ValueError(
-                f"retrieval_source_weights must be positive; {bad} are not. A weight is a tier "
-                "factor applied in rank space, so zero or less names no ordering at all"
+                f"retrieval_source_weights must lie in [{floor}, {ceiling}]; {bad} do not. A "
+                "weight divides the rank, so one outside this band pushes a source's own best "
+                "hit behind another source's whole tail and the cap starves the leg — measured, "
+                "a weight of 0.1 keeps zero chunks of a six-source sweep"
             )
         return value
 
@@ -252,6 +275,12 @@ class RetrievalSettings(BaseSettings):
     note_reindex_schedule_minutes: float = Field(default=60.0, gt=0)
     note_reindex_timeout_seconds: float = Field(default=600.0, gt=0)
 
+
+# How far a hybrid-fusion tier factor may reach, either way: weights live in `[1/W, W]`.
+# `_weights_cannot_starve_a_source` carries the measurement that fixes the number — inside this
+# band at most `W**2` chunks of any other source can precede a source's own best hit, so no
+# weighting can empty a leg under the evidence cap.
+_WEIGHT_SPREAD = 2.0
 
 # The `vector(N)` width every embedding column in this schema was migrated with —
 # `note_index.embedding` (`infra/sql/012`) and `document_chunks.embedding` (`infra/sql/037`).

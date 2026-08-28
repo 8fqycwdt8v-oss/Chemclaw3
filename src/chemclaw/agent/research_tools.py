@@ -404,10 +404,16 @@ async def gather_evidence(
     # The post-merge, post-cap half of the pair `EvidenceSweep.sources` documents itself as
     # incomplete without: `chemclaw_evidence_source_chunks_total` (via `sweep_sources` above) counts
     # what a leg *handed over*, and this is what it *kept* after RRF/interleave and the budget —
-    # the distinction `D-2026-08-01-a-cap-that-starves-a-source` exists to make alertable. Every
-    # source asked is passed, not just the ones represented in `kept`, so a starved leg reads as a
-    # zero rather than being absent from the ratio's denominator.
-    record_kept_chunks(kept, (name for name, _ in sources))
+    # the distinction `D-2026-08-01-a-cap-that-starves-a-source` exists to make alertable.
+    #
+    # Handed the **unframed** survivors, which `framed` being a positional copy of `ranked` makes
+    # exact: `_within_budget` keeps a prefix, so `ranked[: len(kept)]` is the same evidence with
+    # the ids the sources actually returned. Comparing a framed id against a source's own would
+    # reintroduce, for any id `defang` touches, the silent zero this call is being fixed for.
+    record_kept_chunks(
+        ranked[: len(kept)],
+        [(name, hits) for (name, _), hits in zip(sources, ranked_lists, strict=True)],
+    )
     # Counted before the refusals are read, deliberately: a rejection is not a retrieved chunk and
     # must not enter the accounting a starved-source alert reads.
     refused, refusals_unavailable = await _refused_on_ingest(query)

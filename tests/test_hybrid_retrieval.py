@@ -271,3 +271,70 @@ def test_a_single_source_keeps_its_own_ranking(monkeypatch: pytest.MonkeyPatch) 
     out = asyncio.run(research_tools.gather_evidence("q")).chunks
 
     assert [chunk.source_note_id for chunk in out] == ["n0", "n1", "n2"]
+
+
+# --- the tier knob may not starve a leg --------------------------------------------------------
+
+
+def test_an_allowed_source_weight_cannot_starve_a_leg_to_zero() -> None:
+    """The knob meant to tune the merge could reintroduce the defect the merge exists to prevent.
+
+    `reciprocal_rank_fusion` divides the rank by the weight, so a source at weight `w` fuses its
+    rank-1 hit at *effective* rank `1/w`. Measured over six sources of eight hits each against the
+    shipped 40-chunk cap, with every other weight at the default 1.0:
+
+    | lexical weight | its best hit's fused index (0-based, of 48) | lexical chunks kept |
+    | --- | --- | --- |
+    | 1.0   |  1 | 7 |
+    | 0.5   |  6 | 4 |
+    | 0.2   | 21 | 1 |
+    | 0.125 | 36 | 1 |
+    | 0.1   | 40 | **0** |
+
+    At 0.1 the leg's own best hit sits behind all five other sources' complete eight-hit tails and
+    the cap ends before it — "one leg contributing nothing at all", which is exactly what
+    `D-2026-08-01-a-cap-that-starves-a-source` is about and what `hybrid.py` claimed no weight
+    could do. The config is where that is refused, because the fusion cannot know the cap.
+    """
+    from pydantic import ValidationError
+
+    from chemclaw.core.config.retrieval import RetrievalSettings
+
+    with pytest.raises(ValidationError, match="0.5"):
+        RetrievalSettings(retrieval_source_weights={"lexical": 0.1})
+    with pytest.raises(ValidationError, match="2"):
+        RetrievalSettings(retrieval_source_weights={"graph": 8.0})
+    # The ENV comment's own worked example stays expressible — the bound is what makes its
+    # documented property true, not a narrowing of what a deployment wanted to say.
+    assert RetrievalSettings(
+        retrieval_source_weights={"graph": 1.5, "vector": 0.8}
+    ).retrieval_source_weights
+
+
+def test_no_allowed_weighting_pushes_a_source_behind_four_of_anyone_else() -> None:
+    """The bound the range buys, measured at both of its extremes.
+
+    With every weight in `[1/W, W]`, a source's own best hit fuses at effective rank at most `W`,
+    and another source's rank `r` fuses at effective rank at least `r / W` — so it can precede only
+    while `r <= W²` (equality included, because a tie breaks on the note id and may break either
+    way). At `W = 2` that is four chunks per other source, so a sweep of `S` sources keeps every
+    leg's best hit inside any cap above `4 (S - 1)`; at the shipped 40-chunk cap that holds to
+    eleven sources.
+
+    Asserted at the worst case the range can express: one source at the floor against five at the
+    ceiling. Measured, the floored leg's best hit lands at fused index 16 of 48 — inside the
+    bound, and inside the cap.
+    """
+    names = ("graph", "vector", "lexical", "share", "warehouse", "vendored")
+    lists = [_ranked(f"{name}-", name, [0.5] * 8) for name in names]
+    weights = dict.fromkeys(["graph", "vector", "share", "warehouse", "vendored"], 2.0)
+    weights["lexical"] = 0.5
+
+    fused = reciprocal_rank_fusion(lists, k=settings.retrieval_fusion_k, weights=weights)
+    order = [chunk.retriever for chunk in fused]
+
+    for name in weights:
+        first = order.index(name)
+        assert first <= 4 * (len(lists) - 1), f"{name}'s best hit is at fused position {first}"
+    kept = Counter(order[: settings.gather_evidence_max_chunks])
+    assert all(kept[name] > 0 for name in weights), f"a leg was starved: {dict(kept)}"

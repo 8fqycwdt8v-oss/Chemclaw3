@@ -52,9 +52,26 @@ def reciprocal_rank_fusion(
             this merge design's reason to exist, reintroduced by the knob meant to tune it.
 
             Dividing the rank instead makes a weight mean what its documentation says: `1.5`
-            promotes a hit by a third of its own rank — graph rank 3 fuses like rank 2 — and no
-            weight can push a source's rank-1 hit below another source's *tail*, because every
-            source's best hit still scores within one rank position of every other's.
+            promotes a hit by a third of its own rank — graph rank 3 fuses like rank 2.
+
+            **It does not make starvation impossible on its own, and this docstring claimed it
+            did.** The sentence here read "no weight can push a source's rank-1 hit below another
+            source's *tail*, because every source's best hit still scores within one rank position
+            of every other's" — both halves false, and computed rather than argued. A source at
+            weight `w` fuses its rank-1 hit at effective rank `1/w`, so at `w = 0.1` its best hit
+            fuses at rank 10, nine positions from rank 1, not one. Measured over six sources of
+            eight hits each with every other weight at 1.0: at `0.5` the weighted leg's best hit
+            is at fused index 6 of 48 and it keeps 4 chunks under the 40-chunk cap; at `0.2`,
+            index 21 and 1 chunk; at **`0.1`, index 40 — behind all five other sources'
+            complete tails — and it keeps 0**. In the other direction a weight of `8.0` puts every
+            *other* source's rank-1 hit behind the weighted source's whole eight-hit list.
+
+            What holds the property is the band `retrieval_source_weights` is now validated
+            against, `[1/W, W]` with `W = 2`: a source's best hit fuses at effective rank at most
+            `W`, another source's rank `r` at effective rank at least `r / W`, so at most `W²`
+            chunks of any other source can precede it. `core/config/retrieval.py` carries the
+            derivation and refuses anything outside it; the fusion cannot, because it does not
+            know the cap.
 
     Returns:
         The chunks, one per source note, ordered by descending fused score. Ties break by

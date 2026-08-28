@@ -19,7 +19,7 @@ from pydantic import BaseModel, Field
 from chemclaw.core.ids import stable_hash
 from chemclaw.kg.note import Note, require_note_slug, split_link, strip_links
 from chemclaw.retrieval.evidence import EvidenceChunk, SourceRetriever
-from chemclaw.retrieval.fanout import sweep_sources
+from chemclaw.retrieval.fanout import record_kept_chunks, sweep_sources
 
 # Each section declares which memory layer it draws on, so the report keeps evidenced history
 # (episodic) and transferred generalization (semantic) structurally apart, not just by prose.
@@ -180,12 +180,20 @@ async def gather_section(
     an incomplete sweep pass as a genuinely empty one — and it is strictly more informative than
     before, because the section is marked incomplete *and* keeps what was retrieved.
     """
-    ranked_lists, failed, skipped = await sweep_sources(
-        [(retriever.name, retriever) for retriever in retrievers],
-        section.query,
-        section.filters,
-    )
+    named = [(retriever.name, retriever) for retriever in retrievers]
+    ranked_lists, failed, skipped = await sweep_sources(named, section.query, section.filters)
     evidence = [chunk for chunks in ranked_lists for chunk in chunks]
+    # Both halves of the source metric pair, not just the one the shared sweep books for itself.
+    # `sweep_sources` increments `chemclaw_evidence_source_chunks_total` per branch — the ratio's
+    # denominator — and this path applies no cap, so every hit it is handed reaches the draft.
+    # Without the numerator a deployment that runs reports pushed `kept / chunks` down for every
+    # source it swept, which is the one shape that ratio exists to alert on
+    # (`D-2026-08-01-a-cap-that-starves-a-source`): a leg being starved and a leg being reported
+    # on read identically.
+    record_kept_chunks(
+        evidence,
+        [(name, hits) for (name, _), hits in zip(named, ranked_lists, strict=True)],
+    )
     # A skip counts as incompleteness here, deliberately: for the conversational sweep a declined
     # source is an answer the model can relay, but a *report* is signed by a chemist, and a
     # section swept without the share leg (an unentitled service actor, a filter the source

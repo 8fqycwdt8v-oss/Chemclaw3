@@ -22,6 +22,7 @@ from typing import Any
 import psycopg
 import pytest
 
+from chemclaw.agent import research_tools
 from chemclaw.agent.research_tools import gather_evidence
 from chemclaw.core import db, embeddings
 from chemclaw.core.config import settings
@@ -59,6 +60,14 @@ def _series(name: str, **labels: str) -> float:
         if head.startswith(f"{name}{{") and all(pair in head for pair in wanted):
             return float(reading)
     raise AssertionError(f"no series {name}{{{', '.join(wanted)}}} in the exposition")
+
+
+def _series_or_absent(name: str, **labels: str) -> float:
+    """One labelled series' value, or 0.0 when the exposition does not carry it yet."""
+    try:
+        return _series(name, **labels)
+    except AssertionError:
+        return 0.0
 
 
 def _rendered(name: str) -> list[str]:
@@ -188,10 +197,59 @@ def test_a_starved_source_reads_as_zero_rather_than_as_absent() -> None:
     kept series at zero is what gives the ratio a denominator at the moment it matters; without it
     the starved source would simply be missing from the metric.
     """
-    record_kept_chunks([_chunk("graph")], asked=["graph", "lexical"])
+    graph_hit = _chunk("graph")
+    record_kept_chunks([graph_hit], handed=[("graph", [graph_hit]), ("lexical", [])])
 
     assert _series("chemclaw_evidence_source_kept_total", source="graph") >= 1.0
     assert _series("chemclaw_evidence_source_kept_total", source="lexical") == 0.0
+
+
+@pytest.mark.anyio
+async def test_a_leg_that_agrees_with_an_earlier_one_is_not_counted_as_starved(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two healthy legs finding the same note, nothing cut — and the alert reads a zero.
+
+    Both merge modes collapse a note found twice: `_interleave_dedup` keeps the first
+    `(note, content)` it meets and RRF keeps "the first one encountered across the lists (stable
+    input order)". So the surviving chunk carries the *earlier* source's `retriever`, and a counter
+    labelled from it credits list order rather than contribution.
+
+    Measured end to end over the shipped 38-note corpus with `graph,vector,lexical` enabled and a
+    real Postgres note index, 10 research queries, nothing truncated on any of them
+    (`truncated_by=None` throughout, and every hit every leg handed over reached the answer):
+
+    | mode | handed | kept, as labelled | queries reading exactly 0 |
+    | --- | --- | --- | --- |
+    | graph  | graph 38, vector 73, lexical 73 | 25 / 38 / 25 | 0 |
+    | hybrid | graph 38, vector 73, lexical 73 | 38 / 42 / **8** | **4 of 10** |
+
+    `chemclaw_evidence_source_kept_total`'s own registry entry says a leg "contributing 30 and
+    surviving 0 ... is exactly the state D-2026-08-01 was written about". On this deployment
+    nothing whatsoever was discarded, and the lexical ratio still read 0.11 — and 0.00 on four
+    queries out of ten. An alert that cannot tell a starved leg from an agreeing one is not the
+    alert that ADR asked for.
+    """
+    shared = EvidenceChunk(content="x", source_note_id="note-shared", retriever="graph")
+    echo = shared.model_copy(update={"retriever": "lexical"})
+    monkeypatch.setattr(
+        research_tools,
+        "_text_retrievers",
+        lambda: [_Retriever("graph", [shared]), _Retriever("lexical", [echo])],
+    )
+
+    # Absent, not zero, until a sweep books it — this series is seeded per sweep, so a run in
+    # which this test goes first has no line to read.
+    before = _series_or_absent("chemclaw_evidence_source_kept_total", source="lexical")
+    sweep = await gather_evidence("anything at all")
+    after = _series_or_absent("chemclaw_evidence_source_kept_total", source="lexical")
+
+    assert len(sweep.chunks) == 1, "sanity: the merge collapsed the two into one chunk"
+    assert sweep.sources == {"graph": 1, "lexical": 1}, "sanity: both legs handed one hit over"
+    assert after > before, (
+        "the lexical leg handed over the note that is in the answer and booked zero kept — the "
+        "starved-source ratio is measuring which list came first"
+    )
 
 
 @pytest.mark.anyio
