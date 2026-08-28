@@ -66,6 +66,36 @@ about a measurement rather than a bare number.
 Both defects fall out of the one rule. The same question asked twice is one record exactly when it
 produced one answer, which is the only case in which one record is honest.
 
+## The determinism this rests on, measured
+
+Hashing the *result* makes the record's identity depend on the result being stable for a repeated
+question. The change was merged with that stated as unverified — "`embed_structure` determinism is
+unobservable from this repo" — and argued correct on the grounds that a different conformer is a
+different measurement and the record says which.
+
+The argument stands and the gap is now closed rather than left open, because the fact lives one
+repository over and that repository is checked out. Measured 2026-08-28 against
+`Chemclaw3-mcp`'s `servers/calc`, calling `embed_structure("CC(=O)Nc1ccccc1")` three times:
+
+    st_b19d49353e298dac
+    st_b19d49353e298dac
+    st_b19d49353e298dac
+
+and `O=C(C)Nc1ccccc1` gives the same id, because the tool canonicalises before embedding.
+`engine/xtb_engine.geometry` takes an explicit seed and `embed_structure` exposes none, so a given
+RDKit build and configured seed produce one geometry.
+
+**So a repeated `compute_thermochemistry` with no `structure_id` re-embeds to the same geometry, the
+payload is stable, and the outbox collapses the repeat** — the case this decision needs to be one
+record is one record. What legitimately mints a second row is what should: a second temperature, a
+changed calculator, a `CALCULATION_EPOCH` bump, or a caller supplying a genuinely different
+`structure_id`.
+
+The dependency is real, though, and it is now a dependency *across a repository boundary*: were
+`embed_structure` ever made stochastic, or its seed made caller-supplied and defaulted to something
+varying, this record's identity would change per call and the results store would grow without
+bound. That is the restart condition for this decision.
+
 ## Consequences
 
 - A sentinel default and the value it stands for now address one row.
