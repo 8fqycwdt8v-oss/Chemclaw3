@@ -27,8 +27,8 @@ Status: `pending` · `running` · `PASS` · `FAIL` · `skipped (reason)`
 | S0 | Baseline, all repos | see below | **PASS** (4/4 repos) | `.live/baseline/*.log` |
 | S1 | Four-repo bring-up | `make live-e2e-full-stack` | **PASS** after F2 | `.live/e2e-*.log` |
 | S1b | Wiring check | `/readyz`, `chemclaw_connectors_unhealthy` | **PASS** | — |
-| S2 | Durable path, no LLM | `make live-jobs` | pending | — |
-| S3 | Template args vs live | `make live-template-args` | pending | — |
+| S2 | Durable path, no LLM | `make live-jobs` | **PASS 5/5** | — |
+| S3 | Template args vs live | `make live-template-args` | **PASS 9/9** (after lane re-run) | — |
 | S4 | Real-model probes | `make live-probes` | **blocked (F1)** | `tasks/live-test/transcripts/` |
 | S5 | Plan gate | `make live-plan-gate` | blocked (F1), mock route TBD | `tasks/live-test/m12-plan-gate/` |
 | S6 | UI full-stack | `npm run test:e2e:full-stack` | **blocked (F1)** | — |
@@ -176,3 +176,41 @@ setting it could not derive from. Two further tests cover that domain.
 
 **Verified**: the backfill now starts — `eln-backfill-epoch: still draining`, the workflow running
 on the broker, which is S8's long pole and expected to take over two hours.
+
+**S2 — the durable path, end to end, with no model involved.** Job
+`compute_reaction_energy`, workflow `calc-compute_reaction_energy-e7812db80ea86202`, launched in
+1.8s against Temporal `localhost:7233` and Postgres `chemclaw@localhost:5432`:
+
+| check | result | observed |
+| --- | --- | --- |
+| workflow reached COMPLETED | PASS | COMPLETED, started 2026-08-28T21:07:24+00:00 |
+| calculation cached in Postgres | PASS | 3 `xtb*` rows in `calculation_results` |
+| job recorded in Postgres | PASS | `calc/compute_reaction_energy` by `admin@localhost` |
+| duplicate launch rejoins the same run | PASS | id matches; cache rows 3 -> 3 |
+| wedged worker yields a pending job | PASS | returned the id after 20s, then COMPLETED once resumed |
+
+That fourth row is D-011 measured rather than asserted: a persisted result is not recomputed. And
+the whole path crosses the repo boundary — the physics answered from `Chemclaw3-mcp`'s `servers/calc`
+on :8860 while the orchestration, the cache and the job record stayed here, which is
+`D-2026-08-16-the-physics-leaves-the-cache-stays` working as designed.
+
+**S3 — every template's tool arguments against the running servers.** `9 step(s) checked`, exit 0,
+covering all four connectors the templates reach: `chem` (5 steps), `safety` (2), `calc` (1),
+`molfp` (1).
+
+The first attempt exited **3** with `0 step(s) checked, 9 unreached` — a *lane* failure, not a
+product one, and the permitted single re-run is what distinguished them. I had invoked it without
+`eval "$(bash infra/live/processes.sh env)"`, so `CHEMCLAW_CONNECTOR_URLS` was unset and four
+connectors "did not come up for this scope" while being perfectly healthy on their ports.
+
+Worth recording that the validator **refused to report green over nothing**: it exited non-zero and
+named all nine unchecked steps rather than passing with a count of zero. That is the same failure
+mode `live_storm.py`'s header calls the most expensive one under load, and here the tool got it
+right on its own.
+
+**S8 progress** — the backfill is draining, measured from Postgres rather than from the log:
+
+```
+reaction_records = 2783    (of ~4251 ingestible; ~1.8s each)
+corpus_reactions = 0
+```
