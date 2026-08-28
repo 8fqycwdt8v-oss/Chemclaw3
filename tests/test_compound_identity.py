@@ -379,12 +379,18 @@ def test_the_tie_break_no_longer_depends_on_which_solvent_it_is() -> None:
     compound: the same solute standardized to itself beside a small solvent and to the *solvent*
     beside a bulky one, so swapping THF for toluene silently changed which substance the record was
     about. Both solvates must now name the same solute.
+
+    **The solute is pyridine (79.1) and the masses are the whole point.** It sits between THF
+    (72.1) and toluene (92.1), so under the old rule the first solvate keeps pyridine and the
+    second keeps *toluene* — the instability this test is named for. A heavier solute cannot show
+    it: cresol (108.1) outweighs both solvents, so `FragmentParent` keeps cresol either way and
+    this test passed with the rule reverted, which is how it was written first.
     """
-    in_thf = standard_smiles("Cc1ccccc1O.C1CCOC1")
-    in_toluene = standard_smiles("Cc1ccccc1O.Cc1ccccc1")
-    solute = standard_smiles("Cc1ccccc1O")
-    assert solute in in_thf.split(".")
-    assert solute in in_toluene.split(".")
+    in_thf = standard_smiles("c1ccncc1.C1CCOC1")
+    in_toluene = standard_smiles("c1ccncc1.Cc1ccccc1")
+    solute = standard_smiles("c1ccncc1")
+    assert solute in in_thf.split("."), f"the solvent won: {in_thf}"
+    assert solute in in_toluene.split("."), f"the solvent won: {in_toluene}"
 
 
 def test_the_solvate_rule_changed_no_shipped_reagent() -> None:
