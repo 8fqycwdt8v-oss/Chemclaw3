@@ -172,15 +172,20 @@ def activity_context(args: Sequence[Any]) -> ActivityContext:
     run was launched for.
     """
     models = list(_models(args))
-    roles: frozenset[str] = frozenset()
-    for model in models:
-        declared = getattr(model, "roles", None)
-        if isinstance(declared, (list, tuple, frozenset, set)) and declared:
-            roles = frozenset(str(role) for role in declared)
-            break
+    # Roles are NOT taken from the payload. A workflow argument is data the broker relays, not a
+    # verified claim: anyone who can enqueue an activity (a plaintext broker, a compromised worker,
+    # a replay) could otherwise put `roles=["Chemclaw.Privileged"]` in the payload and satisfy the
+    # privileged gate, because `authz._has_required_role` reads exactly the contextvar this binds.
+    # The actor is still lifted, for attribution — the audit trail and job records name the person a
+    # run was launched for — but authorization binds an *empty* set, which every gate treats as
+    # fail-closed (`authz.authorize_trigger`, `documents/retriever._entitled`). A durable job that
+    # legitimately needs a user's entitlements was already authorized at the front door before the
+    # workflow started (`connectors/jobs.prepare_job_launch`); propagating role-scoped authority
+    # *into* the durable boundary safely needs a signed payload (a Temporal codec), which is a
+    # separate decision — see the security-review ADR. Until then, fail closed.
     return ActivityContext(
         actor=_first(models, _ACTOR_FIELDS),
-        roles=roles,
+        roles=frozenset(),
         session_id=_first(models, _SESSION_FIELDS),
         correlation_id=_first(models, _CORRELATION_FIELDS),
     )

@@ -195,6 +195,16 @@ def _acting_as(identity: StepIdentity) -> Iterator[None]:
     means moving those tests onto a worker harness, and that is a decision with a security control
     in its blast radius rather than a tidy-up (`docs/planning/BACKLOG.md`).
     """
+    # The template path DOES bind `identity.roles`, unlike the interceptor and the report retriever
+    # which bind empty (security review: roles do not cross the durable boundary from an unsigned
+    # payload). The difference is deliberate and its residual is stated: `authorize_job_step` is the
+    # *first* authorization for a template step — a step launched by another step has no front-door
+    # pre-check to fall back on — so binding empty here would refuse every entitled template job
+    # rather than fail closed on a forgery. Keeping the role bind preserves that shipped
+    # capability; what it relies on is that only trusted code can enqueue a `TemplateWorkflow` —
+    # i.e. broker write access is restricted (Temporal mTLS, enforced under entra_required).
+    # Fully closing it without breaking the feature needs a signed payload (a Temporal codec); until
+    # then this one path trusts `StepIdentity.roles` and the ADR records why.
     identity_token = set_current_identity(identity.actor, frozenset(identity.roles))
     session_token = set_current_session_id(identity.session_id)
     correlation_token = set_current_correlation_id(identity.correlation_id)
