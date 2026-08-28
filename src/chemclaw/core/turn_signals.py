@@ -37,7 +37,7 @@ survived the fold as aliases and were removed in D-149 — three had never had a
 fourth discarded the `kind` this module's whole point is to carry.
 """
 
-from typing import Any
+from typing import Any, Literal
 
 from langgraph.config import get_stream_writer
 from pydantic import BaseModel
@@ -69,6 +69,20 @@ class ProposalSignal(BaseModel):
     reference: str
 
 
+#: The kinds of deliberate refusal a failing tool call can carry.
+#:
+#: **One definition, because three places have to agree and two of them are contracts.**
+#: `agent/audit.refusal_reason` produces it from the exception, `ToolFailureSignal` carries it out
+#: of the tool chain, and `api/events.ToolFailedEvent` puts it on the wire for `Chemclaw3_ui` and
+#: `Chemclaw3_mock` to mirror. Written here rather than beside the event because `core` is the one
+#: layer both the agent and the API may import — the alternative was a `cast` at the boundary,
+#: which is a static-typing device standing in for the agreement this makes structural.
+#:
+#: Adding a gate means adding its reason here, which is what makes `refusal_reason`'s table and the
+#: wire's closed set unable to drift apart.
+RefusalReason = Literal["dry_run", "undeclared_write", "plan_gate", "repeat", "authz"]
+
+
 class ToolFailureSignal(BaseModel):
     """A tool that raised during this turn, so the chemist can see why an answer went thin.
 
@@ -95,6 +109,24 @@ class ToolFailureSignal(BaseModel):
     # two calls to the same tool in a single batch, and suppressing the result of both because one
     # failed loses a real answer.
     call_id: str = ""
+    # **Which gate refused this call, or empty for a genuine fault.** Exactly the vocabulary
+    # `agent/audit.refusal_reason` already classifies — that table is the one place the five gates
+    # are named, and this field is what carries its verdict out of the process.
+    #
+    # It is a field rather than something the consumer re-derives, and that is the correction. The
+    # stream used to recover *one* of the five by testing whether `message` started with
+    # `"PlanNotApprovedError:"`, on the argument that a new field here is "a third repository's
+    # contract for a fact this side can already derive". That argument held while there was one
+    # reason; at five it buys five copies of a class name living in a module that cannot see the
+    # classes, checked against a string `failure_detail` truncates. The exception is in scope where
+    # the signal is recorded (`agent/tool_authz.announce_tool_failures`), so the classification is
+    # taken there, from the exception, by the table that already owns the question.
+    #
+    # `None` rather than a defaulted `str`, and still additive: a signal built without it is
+    # exactly the ordinary fault every failure emitted before this field existed already was —
+    # never "a refusal whose kind we could not work out". Typed as the closed set rather than as
+    # `str` so a gate whose reason the wire cannot express fails here, in the change that added it.
+    reason: RefusalReason | None = None
 
 
 Signal = JobSignal | ProposalSignal | QuestionSignal | ToolFailureSignal
@@ -180,6 +212,13 @@ def record_question(question: str, options: list[str]) -> None:
     _emit(QuestionSignal(question=question, options=options))
 
 
-def record_tool_failure(tool: str, message: str, call_id: str = "") -> None:
-    """Note that `tool` failed, by raising or by answering. A no-op where nothing is streaming."""
-    _emit(ToolFailureSignal(tool=tool, message=message, call_id=call_id))
+def record_tool_failure(
+    tool: str, message: str, call_id: str = "", reason: RefusalReason | None = None
+) -> None:
+    """Note that `tool` failed, by raising or by answering. A no-op where nothing is streaming.
+
+    `reason` is `agent/audit.refusal_reason`'s verdict where the caller had an exception to
+    classify, and `None` otherwise — a tool that *returns* its failure has no exception and so no
+    gate to name: the gates refuse by raising.
+    """
+    _emit(ToolFailureSignal(tool=tool, message=message, call_id=call_id, reason=reason))

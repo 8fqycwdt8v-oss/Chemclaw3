@@ -29,10 +29,10 @@ import logging
 from collections.abc import Mapping
 from typing import Any
 
-from chemclaw.api.events import Event, ToolCallEvent, ToolResultEvent
+from chemclaw.api.events import Event, ResultValue, ToolCallEvent, ToolResultEvent
 from chemclaw.api.tool_results import ResultSink
 from chemclaw.core.config import settings
-from chemclaw.core.quantities import returned_values
+from chemclaw.core.quantities import labelled_values, returned_values
 from chemclaw.kg.note import mentioned_ids
 
 logger = logging.getLogger(__name__)
@@ -239,9 +239,11 @@ class ToolCallTrace:
             preview=text[: settings.agent_audit_max_arg_chars],
             note_ids=mentioned_ids(text),
             numbers=_capped_numbers(tool, text),
+            values=_capped_values(tool, text),
             # Awaited here rather than by the caller so the bytes are durable before the ref
             # naming them leaves the process.
             result_ref=await _stored_ref(self._sink, tool, text),
+            result_inline=_inline(text),
         )
 
     def _take(self, keys: set[str]) -> list[Event]:
@@ -273,6 +275,47 @@ def _capped_numbers(tool: str, text: str) -> list[float]:
         settings.stream_max_result_numbers,
     )
     return values[: settings.stream_max_result_numbers]
+
+
+def _capped_values(tool: str, text: str) -> list[ResultValue]:
+    """The named values a JSON result returned, under the same cap the bare numbers take.
+
+    Same bound and the same reason: this list goes to a browser, so it must be bounded, and the
+    bound is the operator's rather than a literal. Capped independently of `numbers` because they
+    are different lists over the same result — a payload can carry fifty distinct values under
+    forty labels — and sharing one budget between them would make either one's contents depend on
+    the other's.
+
+    Silent on a non-JSON result, which is not a failure: `labelled_values` refuses to guess a name
+    out of prose, and the figures are on the wire regardless.
+    """
+    quantities = labelled_values(text)
+    if len(quantities) > settings.stream_max_result_numbers:
+        logger.warning(
+            "tool %s returned %d labelled values; the trace event carries the first %d",
+            tool,
+            len(quantities),
+            settings.stream_max_result_numbers,
+        )
+        quantities = quantities[: settings.stream_max_result_numbers]
+    return [ResultValue(label=q.label, value=q.value, unit=q.unit) for q in quantities]
+
+
+def _inline(text: str) -> str:
+    """The result itself when it is small enough to ride along, or `""` when it is not.
+
+    Measured in bytes for the same reason `_stored_ref` measures in bytes: the cap is protecting a
+    wire, and a result full of multi-byte characters is up to four times its length in what is
+    actually sent.
+
+    No log line on the empty case, and that is the difference from every other cap in this file.
+    Those are *truncations*, where silence reads as completeness; this is a shortcut declining to
+    apply, and the result stays reachable through its ref exactly as it always was. Nothing is
+    lost, so there is nothing to report.
+    """
+    if settings.stream_inline_result_bytes <= 0:
+        return ""
+    return text if len(text.encode("utf-8")) <= settings.stream_inline_result_bytes else ""
 
 
 async def _stored_ref(sink: ResultSink | None, tool: str, text: str) -> str:
