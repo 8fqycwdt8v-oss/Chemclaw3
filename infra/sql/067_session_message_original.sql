@@ -1,0 +1,56 @@
+-- Keep the pre-conversion payload of every row the M6 pass rewrites
+-- (`docs/decisions/D-2026-08-27-a-conversion-that-cannot-be-rolled-back-is-not-a-pre-upgrade-step.md`).
+--
+-- **This column exists to make 043's own argument true.** That migration's comment says, at length,
+-- that "an unversioned rewrite destroys the evidence" and that "keeping the original readable until
+-- the conversion has been trusted on real data is what makes this step reversible in practice".
+-- The stamp it added cannot do that and never could: `message_shape` says which shape a row holds
+-- *now*. `chemclaw.agent.message_migration` overwrote `message` in the same statement that set the
+-- stamp, so the MAF bytes were gone the instant the row was marked converted, and the promise was
+-- kept by nothing.
+--
+-- Measured against a live database rather than argued: convert a seeded three-row exchange, then
+-- read it back the way the previous release does.
+--
+--   * the strict reader — `to_langchain`, the only one the pre-M6 image had — raises
+--     `UnconvertibleMessage: stored message has unknown role ''` on 3 of 3 converted rows;
+--   * the forgiving read path (`session_store.message_from_row` with no stamp, because the previous
+--     release's SELECT does not name this column) returns a *degraded* render for 3 of 3: the
+--     `ToolMessage` carrying `tool_call_id = 'c1'` comes back as a plain `AIMessage` with no id, and
+--     the assistant row's `tool_calls` list comes back empty. The words survive; the call/result
+--     pairing `agent/message_pairing.py` exists to protect does not;
+--   * `chemclaw.cli.explain` prints the speaker of every one of those rows as `unknown`, where
+--     before the pass it printed `user`, `assistant` and `tool`;
+--   * and `SELECT count(*) … WHERE message ? 'contents'` answers **0 of 3**. The original was not
+--     somewhere else. It was nowhere.
+--
+-- `helm rollback` does not undo a data conversion, and it does not re-run a `pre-upgrade` hook, so
+-- none of the above heals itself. With this column the recovery is one statement an operator can
+-- read:
+--
+--     UPDATE session_messages
+--        SET message = message_original, message_shape = 'maf', message_original = NULL
+--      WHERE message_original IS NOT NULL;
+--
+-- **Written on exactly the rows the conversion rewrites, which is the same set as "rows whose shape
+-- actually changed".** The pass selects only rows still stamped `maf` and every one of those does
+-- change shape, so "write it always" and "write it only on a real change" are the same rule here;
+-- there is no third case to decide between. A refused row is never updated at all and keeps a NULL.
+-- Nothing else writes this column: rows the provider writes are born `langchain` and have no
+-- earlier shape to preserve.
+--
+-- **Disposal, and why this is not the column that grows forever.** It is disposed of with its row,
+-- by `durable/retention.py`'s existing per-session sweep (D-145) — there is no new lifetime and no
+-- new sweep, because this is a column on a table that is already pruned. What bounds it beyond that
+-- is history rather than traffic: nothing has written a MAF row since M6, so the set of rows that
+-- can ever carry a value here was fixed on the day the framework was removed and shrinks from then
+-- on. It cannot become the `session_owners` shape — a population that grows with use and that
+-- nothing retires — because its population cannot grow at all. An operator who has trusted the
+-- conversion on real data may reclaim the bytes early with
+-- `UPDATE session_messages SET message_original = NULL`, which is the deliberate act of giving up
+-- the rollback this column exists to keep, and is why nothing does it on a timer.
+--
+-- No index and no NOT NULL. It is read by `id` during a recovery an operator runs by hand, never by
+-- a query path, and the column is NULL on every row the conversion did not touch.
+ALTER TABLE session_messages
+    ADD COLUMN IF NOT EXISTS message_original JSONB;

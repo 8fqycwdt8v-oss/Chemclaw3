@@ -33,7 +33,11 @@ from chemclaw.agent.message_migration import (
     convert_stored_messages,
     to_langchain,
 )
-from chemclaw.agent.session_store import SessionOwnerStore, message_from_row
+from chemclaw.agent.session_store import (
+    SessionOwnerStore,
+    is_degraded_render,
+    message_from_row,
+)
 from chemclaw.core import db
 from chemclaw.core.config import settings
 from chemclaw.core.migrate import migrate
@@ -263,6 +267,118 @@ def test_a_row_the_converter_refuses_is_left_exactly_as_it_was() -> None:
     assert bad in outcome.refused
     shapes = dict(_run(_shape_of(bad)))
     assert shapes[bad] == MAF_SHAPE, "a refused row was stamped as converted"
+
+
+def test_the_conversion_preserves_the_original_and_the_rollback_is_one_statement() -> None:
+    """The promise `043_session_message_shape.sql`:20 makes, held by the row rather than by prose.
+
+    That comment argues that "an unversioned rewrite destroys the evidence" and that keeping the
+    original readable "is what makes this step reversible in practice". The stamp it added cannot do
+    that — it says which shape a row holds *now* — and the UPDATE overwrote `message` in the same
+    statement that set it. Measured before the fix, on a live database: the previous release's
+    strict reader raised `UnconvertibleMessage: stored message has unknown role ''` on every
+    converted row, the forgiving read path returned a degraded render that had lost `tool_call_id`
+    and every `tool_calls` entry, `chemclaw.cli.explain` printed each speaker as `unknown`, and no
+    row anywhere still held a MAF payload.
+
+    So the assertion is not "a column exists". It is that the previous release, reading
+    `message_original`, gets back exactly the messages it wrote — the `ToolMessage` with its id, the
+    `AIMessage` with its call, neither degraded — and that the documented recovery restores the row
+    byte-for-byte.
+    """
+    session_id = "sess-m6-preserved"
+    _run(_seeded(session_id))
+    # A row the converter refuses, to pin the other half: nothing is written for a row nothing
+    # rewrote, so a NULL here means "never converted" rather than "converted and not preserved".
+    refused_id = _run(
+        _insert_raw(
+            session_id,
+            legacy_message("tool", result_content("c2", "logP 1.5"), result_content("c3", "mp 41")),
+        )
+    )
+    before = {row_id: payload for row_id, payload, _, _ in _run(_full_rows(session_id))}
+
+    outcome = _run(convert_stored_messages())
+    assert refused_id in outcome.refused
+
+    after = _run(_full_rows(session_id))
+    for row_id, message, original, shape in after:
+        if row_id == refused_id:
+            assert (shape, original) == (MAF_SHAPE, None), "a row nothing rewrote grew an original"
+            # And it is still readable in the shape it is stored in, unconverted and unharmed.
+            assert message == before[row_id]
+            continue
+        assert shape == LANGCHAIN_SHAPE
+        assert original == before[row_id], "the preserved original is not what the row held"
+
+    # What the previous release actually gets back. Not "the bytes match" — the messages do, with
+    # the pairing intact and nothing degraded, which is the property the conversion destroyed.
+    restored = [
+        message_from_row(original, MAF_SHAPE)
+        for row_id, _, original, _ in after
+        if original is not None
+    ]
+    assert [type(m).__name__ for m in restored] == [
+        "HumanMessage",
+        "AIMessage",
+        "ToolMessage",
+        "AIMessage",
+    ]
+    assert not any(is_degraded_render(m) for m in restored), "the previous release reads a guess"
+    calls = {c["id"] for m in restored if isinstance(m, AIMessage) for c in m.tool_calls}
+    assert calls == {m.tool_call_id for m in restored if isinstance(m, ToolMessage)} == {"c1"}
+
+    # The recovery, exactly as `067_session_message_original.sql` and the module docstring write it.
+    _run(_roll_back(session_id))
+    rolled = _run(_full_rows(session_id))
+    assert {row_id: message for row_id, message, _, _ in rolled} == before
+    assert {shape for _, _, _, shape in rolled} == {MAF_SHAPE}
+    assert all(original is None for _, _, original, _ in rolled)
+
+
+def test_an_unconverted_row_still_reads_through_the_reader_the_previous_release_had() -> None:
+    """The other side of the split hook: a release may roll out before anything is converted.
+
+    Moving the pass to `post-upgrade` means a failed rollout converts nothing, so both images have
+    to be able to serve a table that is entirely `maf`. `to_langchain` is that reader — the strict
+    one, which is the point: an unconverted row is not merely renderable, it converts cleanly, so
+    nothing about deferring the pass costs a chemist anything.
+    """
+    session_id = "sess-m6-unconverted"
+    _run(_seeded(session_id))
+
+    for payload, shape in _run(_rows_for(session_id)):
+        assert shape == MAF_SHAPE
+        assert not is_degraded_render(message_from_row(payload, shape))
+        to_langchain(payload)
+
+
+async def _full_rows(session_id: str) -> list[tuple[int, Any, Any, str]]:
+    """Every stored row for one session as `(id, message, message_original, shape)`."""
+    async with db.connection(settings.postgres_dsn) as conn, conn.cursor() as cur:
+        await cur.execute(
+            "SELECT id, message, message_original, message_shape FROM session_messages "
+            "WHERE session_id = %s ORDER BY id",
+            (session_id,),
+        )
+        return [(int(r[0]), r[1], r[2], r[3]) for r in await cur.fetchall()]
+
+
+async def _roll_back(session_id: str) -> None:
+    """The recovery statement the SQL comment and the module docstring both publish, run verbatim.
+
+    Written here rather than paraphrased: a documented procedure nobody executes is a procedure
+    that is wrong the first time somebody needs it.
+    """
+    async with db.connection(settings.postgres_dsn) as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "UPDATE session_messages "
+                "   SET message = message_original, message_shape = 'maf', message_original = NULL "
+                " WHERE session_id = %s AND message_original IS NOT NULL",
+                (session_id,),
+            )
+        await conn.commit()
 
 
 async def _rows_for(session_id: str) -> list[tuple[dict[str, Any], str]]:
