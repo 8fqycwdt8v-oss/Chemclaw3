@@ -348,6 +348,15 @@ def test_record_failure_retires_a_claim_that_stopped_holding_in_the_same_submiss
     assert not amended.is_current(date(2026, 6, 1))  # and no longer reads as current fact
     assert "Use 5 mol% Pd" in amended.body  # the original claim is kept, never edited away
     assert failure.id in amended.outgoing_links()  # and points at what ended it
+    # The retirement must OVERWRITE: the refuted note already exists on the base branch, and a file
+    # marked overwrite=False (a `dependencies` entry) is skipped by `_write_and_push` when it exists
+    # on base — so the retirement was silently dropped on the real git path and the refuted claim
+    # stayed served as current. `superseded` marks it overwrite=True. Asserted on the submission
+    # because the FakeSubmitter never runs the skip, which is why this bug survived the old test.
+    retirement_file = next(
+        f for f in fake.submissions[0].files if f.path.endswith("playbook-pd.md")
+    )
+    assert retirement_file.overwrite is True
 
 
 def test_record_failure_refuses_to_reclose_an_already_retired_note(

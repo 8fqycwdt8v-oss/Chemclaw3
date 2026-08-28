@@ -323,6 +323,9 @@ def connector_http_client(connector: str, endpoint: HttpEndpoint) -> httpx.Async
     return httpx.AsyncClient(
         auth=auth_for(endpoint.auth, connector),
         follow_redirects=False,
+        # Never inherit an ambient proxy: a connector endpoint is an in-cluster Service, and an
+        # HTTPS_PROXY on the pod must not silently reroute a tool call (and its bearer) elsewhere.
+        trust_env=False,
         event_hooks={"request": [turn_identity_hook(_endpoint_url(connector, endpoint))]},
         # Without this, httpx applies its own 5 s default to *every* phase, and the manifest's
         # `request_timeout` — which this module's docstring credits with "keeping an unreachable

@@ -47,6 +47,8 @@ _COLUMNS = (
     "tool_refusals",
     "jobs_started",
     "ttft_seconds",
+    "compacted",
+    "context_unreducible",
 )
 
 # `correlation_id` is the conflict target, so it is the one column the update must not re-set.

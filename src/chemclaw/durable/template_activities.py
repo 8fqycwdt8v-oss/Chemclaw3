@@ -34,6 +34,11 @@ from langchain_core.tools import tool as tool_decorator
 from pydantic import BaseModel, ConfigDict, Field
 from temporalio import activity
 
+from chemclaw.agent.context_budget import (
+    begin_context_watch,
+    current_context,
+    end_context_watch,
+)
 from chemclaw.agent.profiles import AgentProfile, get_profile
 from chemclaw.agent.repeat_guard import begin_call_watch, end_call_watch
 from chemclaw.agent.state import answer_text, turn_config, turn_input
@@ -201,6 +206,16 @@ def _acting_as(identity: StepIdentity) -> Iterator[None]:
     means moving those tests onto a worker harness, and that is a decision with a security control
     in its blast radius rather than a tidy-up (`docs/planning/BACKLOG.md`).
     """
+    # The template path DOES bind `identity.roles`, unlike the interceptor and the report retriever
+    # which bind empty (security review: roles do not cross the durable boundary from an unsigned
+    # payload). The difference is deliberate and its residual is stated: `authorize_job_step` is the
+    # *first* authorization for a template step — a step launched by another step has no front-door
+    # pre-check to fall back on — so binding empty here would refuse every entitled template job
+    # rather than fail closed on a forgery. Keeping the role bind preserves that shipped
+    # capability; what it relies on is that only trusted code can enqueue a `TemplateWorkflow` —
+    # i.e. broker write access is restricted (Temporal mTLS, enforced under entra_required).
+    # Fully closing it without breaking the feature needs a signed payload (a Temporal codec); until
+    # then this one path trusts `StepIdentity.roles` and the ADR records why.
     identity_token = set_current_identity(identity.actor, frozenset(identity.roles))
     session_token = set_current_session_id(identity.session_id)
     correlation_token = set_current_correlation_id(identity.correlation_id)
@@ -582,6 +597,11 @@ async def run_agent_step(step: AgentStepInput) -> str:
     meter = _StepMeter()
     answered = False
     calls_token = begin_call_watch()
+    # Started for the same reason as the call watch above it: a step runs a real model turn, so the
+    # context policy's per-turn state has to exist here too or compaction reports one standing
+    # reduction once per model call and the step's cost row cannot say the policy fired
+    # (`agent/context_budget.py`).
+    context_token = begin_context_watch()
     with _acting_as(step.identity):
         try:
             async with AsyncExitStack() as stack:
@@ -636,7 +656,10 @@ async def run_agent_step(step: AgentStepInput) -> str:
             # to read. Every call that completed is booked. So the ledger can under-report by at
             # most one call, never by a whole turn.
             end_call_watch(calls_token)
+            # Booked *before* the context watch is torn down, because the row reads it. The call
+            # watch above has no such reader, which is why the two ends are not adjacent.
             _book_step_spend(step, meter.usage, time.perf_counter() - started, answered)
+            end_context_watch(context_token)
 
 
 def _book_step_spend(
@@ -666,6 +689,7 @@ def _book_step_spend(
         answered: Whether the step produced its answer. Recorded, not filtered — see `TurnCost`.
     """
     labels = {"profile": step.profile or "default"}
+    context = current_context()
     record_turn_cost(
         TurnCost(
             correlation_id=(
@@ -682,6 +706,8 @@ def _book_step_spend(
             cache_write_tokens=usage.cache_write,
             duration_seconds=duration_seconds,
             completed=answered,
+            compacted=context.compacted if context is not None else False,
+            context_unreducible=context.unreducible if context is not None else False,
         )
     )
     if usage.total:

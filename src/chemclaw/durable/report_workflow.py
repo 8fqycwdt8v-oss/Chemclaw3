@@ -78,7 +78,11 @@ async def retrieve_section(request: SectionRequest) -> SynthesizedSection:
     """
     if not request.requested_by:
         return await gather_section(request.section, default_retrievers())
-    token = set_current_identity(request.requested_by, frozenset(request.requested_roles))
+    # Empty roles, never `request.requested_roles`: a workflow payload is relayed data, not a
+    # verified claim, so binding roles from it would let anyone who can enqueue this workflow read
+    # entitlement-gated sources as any role. The actor is bound for attribution; authorization fails
+    # closed on the empty set (security-review: roles do not cross the durable boundary unsigned).
+    token = set_current_identity(request.requested_by, frozenset())
     try:
         return await gather_section(request.section, default_retrievers())
     finally:

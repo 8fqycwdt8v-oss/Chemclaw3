@@ -45,6 +45,25 @@ Three sentences in the tree stated the opposite, and one was wrong by 50×:
 
 The mechanism was stated correctly one paragraph below the headline that contradicted it.
 
+## Re-verified after `D-2026-08-28-a-budget-in-the-wrong-unit-is-not-a-budget`
+
+That ADR landed on `main` while this one was being written, and it changes the *unit* the trigger is
+in: the configured budget is now a **billed**-token budget, converted by a measured ratio and
+clamped by a declared context window (`effective_trigger`, `agent/context_budget.py`). It does not
+touch this arm — `cut = min(max(by_tokens, by_groups), starts[-1])` and `default=12` are unchanged
+by it — and re-measuring through the merged code confirms the finding survives, on the same shape:
+
+```
+281,900 tokens, 2,000 groups, budget 100,000
+  keep=12 (the old default) ->  1,692 tokens, 12 groups   (0.6% of the budget)
+  keep=0  (shipped here)    -> 99,969 tokens, 709 groups
+```
+
+The two changes compose in the same direction rather than overlapping: that one makes the budget
+*mean* what it says, and this one makes it *decide*. A budget converted carefully into the right
+unit and then overridden by a count of turns is the same inert knob with better arithmetic behind
+it.
+
 ## Decision
 
 **`agent_keep_last_conversation_groups` becomes `ge=0` and ships at `0`.** The edit already reads 0

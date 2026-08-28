@@ -179,7 +179,9 @@ async def _probe_endpoints(targets: list[tuple[str, str]]) -> list[ConnectorHeal
     """Probe every HTTP health route concurrently, over one client for the whole sweep."""
     if not targets:
         return []
-    async with httpx.AsyncClient(timeout=settings.connector_health_timeout_seconds) as client:
+    async with httpx.AsyncClient(
+        timeout=settings.connector_health_timeout_seconds, trust_env=False
+    ) as client:
         return list(await asyncio.gather(*(_probe(client, name, url) for name, url in targets)))
 
 

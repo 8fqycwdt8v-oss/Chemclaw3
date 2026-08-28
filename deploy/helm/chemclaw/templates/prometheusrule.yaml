@@ -798,4 +798,34 @@ spec:
               so that metric — and any alert or panel reading it — is now low by an unknown amount.
               A label here is meant to be low-cardinality, so this means something is generating
               values it should not. The pod's log names the metric.
+
+        {{- /* The egress guard: a refusal is a first-party component reaching a host it should
+               not, and a disarmed guard is the control itself being off. Both page rather than
+               warn, because the invariant they defend is "nothing leaves except LLM traffic". */}}
+        - alert: ChemclawEgressRefused
+          expr: increase(chemclaw_egress_refused_total[15m]) > 0
+          for: 0m
+          labels:
+            severity: critical
+          annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawegressrefused
+            summary: A process tried to reach a host outside the egress allowlist
+            description: >-
+              The in-process egress guard refused an outbound connection to a host that is not the
+              LLM gateway, declared infrastructure, or a named exception — a dependency reaching out
+              at runtime, or a misconfiguration. The pod's ERROR log names the host. This should be
+              zero; a non-zero rate is either an attempted exfiltration path or a destination the
+              deployment legitimately needs and must add to `CHEMCLAW_EGRESS_ALLOW`.
+        - alert: ChemclawEgressGuardDisarmed
+          expr: max(chemclaw_egress_guard_armed) < 1
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawegressguarddisarmed
+            summary: The in-process egress guard is not armed
+            description: >-
+              A process is running with `CHEMCLAW_EGRESS_GUARD_ENABLED=false`, so outbound calls are
+              bounded only by the NetworkPolicy, not by this process — the defence-in-depth layer for
+              "only LLM traffic leaves the estate" is off.
 {{- end }}

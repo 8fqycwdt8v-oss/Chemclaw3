@@ -21,16 +21,45 @@ import os
 import time
 from collections.abc import Sequence
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 
-from chemclaw.core.config import settings
+from chemclaw.core.config import PG_LOOPBACK_HOSTS, settings
 from chemclaw.core.logging import log_event, register_secret_env
 from chemclaw.core.metrics_bridge import record_metric
 from chemclaw.publish.driver import SinkRejectedError, SinkUnavailableError
 from chemclaw.publish.record import ResultRecord
 
 logger = logging.getLogger(__name__)
+
+
+def _refuse_plaintext_sink(name: str, url: str, token_env: str) -> None:
+    """Refuse a non-loopback `http://` sink under the enforced posture.
+
+    The published records are confidential chemistry and — when `token_env` is set — every POST
+    carries a bearer credential in its `Authorization` header. Over `http://` both cross the wire in
+    cleartext, so a sink that is not `https://` and not loopback is the same plaintext-transport
+    exposure `require_pg_tls`/the Temporal-mTLS guard refuse for the database and the broker, and it
+    is refused on the same terms: only under `entra_required` (the deployment that believes it is in
+    the enforced posture), with loopback dev exempt.
+    """
+    if not settings.entra_required:
+        return
+    parts = urlsplit(url)
+    if parts.scheme == "https" or (parts.hostname or "").lower() in PG_LOOPBACK_HOSTS:
+        return
+    carried = (
+        "every POST carries a bearer credential and the published records"
+        if token_env
+        else "the published records"
+    )
+    raise ValueError(
+        f"entra_required=true with a non-loopback http sink {name!r} at {url!r}: {carried} "
+        "(confidential chemistry) would cross the wire in cleartext. Use an https:// url, or "
+        "bind a loopback address for local dev."
+    )
+
 
 # Statuses worth trying again: the far end is overloaded, restarting, or behind a proxy that is.
 # Everything else in 4xx is a statement about the content, which a retry cannot change.
@@ -71,6 +100,7 @@ class HttpResultSink:
             raise ValueError(
                 f"result sink {name!r} declares no url; an HTTP sink must name where it publishes"
             )
+        _refuse_plaintext_sink(name, url, token_env)
         self._name = name
         self._tenant_id = tenant_id
         self._url = url
@@ -178,7 +208,9 @@ class HttpResultSink:
             return
         started = time.perf_counter()
         try:
-            async with httpx.AsyncClient(timeout=self._timeout, verify=self._verify) as client:
+            async with httpx.AsyncClient(
+                timeout=self._timeout, verify=self._verify, trust_env=False
+            ) as client:
                 response = await client.post(
                     self._url, json=self._document(records), headers=self._headers()
                 )

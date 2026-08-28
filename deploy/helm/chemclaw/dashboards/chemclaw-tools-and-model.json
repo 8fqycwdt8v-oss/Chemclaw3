@@ -453,6 +453,72 @@
           "expr": "sum by (outcome) (rate(chemclaw_protocol_digests_total[15m]))",
           "legendFormat": "protocol digest {{outcome}}",
           "refId": "G"
+        },
+        {
+          "expr": "sum(rate(chemclaw_context_unreducible_total[15m]))",
+          "legendFormat": "context unreducible",
+          "refId": "H"
+        },
+        {
+          "expr": "sum(rate(chemclaw_tool_results_truncated_total[15m]))",
+          "legendFormat": "tool results truncated",
+          "refId": "I"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "type": "graph",
+      "title": "What a turn costs before the chemist speaks",
+      "description": "The estimator ratio is billed input tokens over this system's own estimate of the same request: 1.0 means not yet calibrated, and anything above it is how much the context budget's chars/4 unit understates what the provider charges. The schema series is the half of the static prefix tests/test_context_floor.py cannot ratchet, because an endpoint tool's schema arrives from a server this repository does not build.",
+      "datasource": "prometheus",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 40
+      },
+      "span": 12,
+      "fill": 0,
+      "stack": false,
+      "linewidth": 2,
+      "nullPointMode": "null",
+      "legend": {
+        "show": true,
+        "current": true,
+        "max": true,
+        "values": true
+      },
+      "tooltip": {
+        "shared": true,
+        "sort": 2,
+        "value_type": "individual"
+      },
+      "yaxes": [
+        {
+          "format": "short",
+          "show": true,
+          "min": 0
+        },
+        {
+          "format": "short",
+          "show": false
+        }
+      ],
+      "xaxis": {
+        "mode": "time",
+        "show": true
+      },
+      "targets": [
+        {
+          "expr": "max(chemclaw_context_estimator_ratio)",
+          "legendFormat": "billed / estimated",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(chemclaw_connector_tool_schema_tokens) by (connector)",
+          "legendFormat": "{{connector}} tool schemas",
+          "refId": "B"
         }
       ]
     }

@@ -532,3 +532,49 @@ def test_concurrent_first_turns_get_one_migrated_saver() -> None:
 
     assert all(ready for ready, _ in taken), "a turn got a checkpointer that was not migrated"
     assert len({saver for _, saver in taken}) == 1, "one process, one checkpointer"
+
+
+def test_strict_serde_blocks_import_by_name_deserialization() -> None:
+    """The checkpoint serializer refuses to run a `module:callable` named in a stored blob.
+
+    `AsyncPostgresSaver` with no `serde=` builds a permissive `JsonPlusSerializer` whose msgpack
+    ext hook runs `getattr(import_module(mod), attr)(*args)` on values taken straight from the
+    stored bytes — arbitrary code execution on the resume of a poisoned `checkpoint_blobs` row,
+    reachable from the app credential's own INSERT+DELETE grant. `_strict_serde` pins the hook to
+    `SAFE_MSGPACK_TYPES`; a poisoned type is blocked (returns a degraded value, never executes)
+    while every legitimate channel still round-trips.
+    """
+    import ormsgpack
+    from langchain_core.messages import AIMessage, HumanMessage
+
+    serde = ckpt._strict_serde()
+    # legitimate turn state round-trips
+    payload: dict[str, Any] = {
+        "messages": [HumanMessage(content="hi"), AIMessage(content="ok")],
+        "model_calls": 3,
+    }
+    restored = serde.loads_typed(serde.dumps_typed(payload))
+    assert len(restored["messages"]) == 2
+    assert restored["model_calls"] == 3
+
+    # an os.system ext payload does not execute under the strict serializer
+    marker = "/tmp/strict-serde-should-not-exist"
+    evil = ormsgpack.packb(
+        ormsgpack.Ext(1, ormsgpack.packb(("os", "system", (f"touch {marker}",))))
+    )
+    serde.loads_typed(("msgpack", evil))  # must not raise, must not execute
+    import os.path
+
+    assert not os.path.exists(marker), "strict serde executed a blocked callable"
+
+
+def test_upstream_default_serde_is_still_permissive() -> None:
+    """Pin the upstream default this workaround exists for, so a fix upstream turns this red.
+
+    If langgraph-checkpoint ever makes the msgpack ext hook strict by default, `_strict_serde`
+    becomes redundant and this assertion fails, prompting its removal — the `test_upstream_surface`
+    pattern for a shape upstream never promised.
+    """
+    from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+
+    assert JsonPlusSerializer()._allowed_msgpack_modules is True

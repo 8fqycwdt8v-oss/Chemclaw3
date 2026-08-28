@@ -42,6 +42,43 @@ pipeline {
   }
 
   stages {
+    // Free-text parameters are interpolated (`${params.X}`) into `sh` blocks and into the release
+    // descriptor's image refs, so a value with a shell metacharacter would run on the agent
+    // (CWE-78) — the single quotes around `'${params.NAMESPACE}'` etc. are added by Groovy *before*
+    // the shell sees them, so a `'` in the value breaks straight out. Choice/boolean parameters are
+    // fixed by Jenkins and safe. Reject anything outside a conservative allowlist here, first.
+    stage('Validate parameters') {
+      steps {
+        script {
+          def digestPattern = ~'^(sha256:[0-9a-f]{64})?$'
+          def checks = [
+            [name: 'NAMESPACE', value: params.NAMESPACE, pattern: ~'^[a-z0-9-]*$'],
+            [name: 'IMAGE_REGISTRY', value: params.IMAGE_REGISTRY, pattern: ~'^[A-Za-z0-9._:/-]*$'],
+            [name: 'CORE_DIGEST', value: params.CORE_DIGEST, pattern: digestPattern],
+            [name: 'UI_DIGEST', value: params.UI_DIGEST, pattern: digestPattern],
+            [name: 'CLUSTER_API', value: params.CLUSTER_API, pattern: ~'^[A-Za-z0-9._:/-]*$'],
+            [name: 'DATABRICKS_HOST', value: params.DATABRICKS_HOST, pattern: ~'^[A-Za-z0-9._:/-]*$'],
+            [name: 'CLUSTER_CREDENTIALS_ID', value: params.CLUSTER_CREDENTIALS_ID,
+             pattern: ~'^[A-Za-z0-9._-]*$'],
+            [name: 'DATABRICKS_CREDENTIALS_ID', value: params.DATABRICKS_CREDENTIALS_ID,
+             pattern: ~'^[A-Za-z0-9._-]*$'],
+          ]
+          for (c in checks) {
+            if (!(c.value ==~ c.pattern)) {
+              error("release parameter ${c.name} contains characters outside its allowlist; it is " +
+                    "interpolated into shell and must not carry shell metacharacters")
+            }
+          }
+          // Each MCP_DIGESTS line becomes `chemclaw-mcp-<name>@<digest>` in an image ref.
+          params.MCP_DIGESTS.readLines().findAll { it.trim() }.each { line ->
+            if (!(line.trim() ==~ ~'^[A-Za-z0-9._-]+=sha256:[0-9a-f]{64}$')) {
+              error("MCP_DIGESTS line is not `server=sha256:<64 hex>`: ${line.trim()}")
+            }
+          }
+        }
+      }
+    }
+
     stage('Compose the descriptor') {
       steps {
         script {

@@ -8,7 +8,7 @@ The Postgres backend reproduces the same ranking in SQL (tested in CI).
 
 import asyncio
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 
 import psycopg
 import pytest
@@ -524,6 +524,9 @@ def test_agent_supplied_threshold_is_clamped() -> None:
             self.thresholds: list[float] = []
 
         async def add(self, record: FingerprintRecord) -> None:
+            raise NotImplementedError
+
+        async def add_many(self, records: Sequence[FingerprintRecord]) -> None:
             raise NotImplementedError
 
         async def all_records(self, limit: int | None = None) -> list[FingerprintRecord]:

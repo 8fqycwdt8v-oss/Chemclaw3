@@ -603,12 +603,29 @@ class PostgresLabelIndex(LabelIndex):
         return grouped
 
     async def _scope_coverage(self, cur: Any, facet: Facet, version: str) -> CorpusCoverage:
-        """Labelled-vs-total over the facet's *scope* — see `_in_scope` for why that is narrower."""
+        """Labelled-vs-total over the facet's *scope* — see `_in_scope` for why that is narrower.
+
+        **Every narrowing `_in_scope` applies has to be restated here**, and that duplication is
+        the hazard this method carries: the two are one condition written twice, so a field added
+        to one and not the other makes the denominator disagree between the backends. It was
+        measured going wrong exactly that way — `reaction_keys` in `_in_scope` and not here
+        reported `total=10` against the in-memory backend's `3`, because the SQL counted every row
+        in the table rather than the neighbour set.
+        """
         params: dict[str, Any] = {"version": version}
-        where = ""
+        clauses: list[str] = []
         if facet.sources:
             params["sources"] = sorted(facet.sources)
-            where = " WHERE source = ANY(%(sources)s::text[])"
+            clauses.append("source = ANY(%(sources)s::text[])")
+        if facet.reaction_keys:
+            pairs = sorted(facet.reaction_keys)
+            params["rk_sources"] = [s for s, _ in pairs]
+            params["rk_ids"] = [i for _, i in pairs]
+            clauses.append(
+                "EXISTS (SELECT 1 FROM unnest(%(rk_sources)s::text[], %(rk_ids)s::text[]) "
+                "AS k(s, i) WHERE k.s = source AND k.i = reaction_id)"
+            )
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
         await cur.execute(self._COVERAGE_COLUMNS + where, params)
         row = await cur.fetchone()
         if row is None:
@@ -637,6 +654,19 @@ def _facet_sql(facet: Facet) -> tuple[str, dict[str, Any]]:
     if facet.sources:
         clauses.append("r.source = ANY(%(sources)s::text[])")
         params["sources"] = sorted(facet.sources)
+    if facet.reaction_keys:
+        # Two parallel arrays zipped by `unnest`, matching the pair against the table's own two
+        # columns — never a `source || ':' || id` string, which would be an expression no index can
+        # serve and a second spelling of a key the schema already has. Not indexed either way: the
+        # set comes from a fingerprint page bounded by `fingerprint_max_top_k`, so this narrows
+        # tens of rows off a version scan the planner is already doing.
+        pairs = sorted(facet.reaction_keys)
+        clauses.append(
+            "EXISTS (SELECT 1 FROM unnest(%(rk_sources)s::text[], %(rk_ids)s::text[]) AS k(s, i) "
+            "WHERE k.s = r.source AND k.i = r.reaction_id)"
+        )
+        params["rk_sources"] = [source for source, _ in pairs]
+        params["rk_ids"] = [reaction_id for _, reaction_id in pairs]
     if facet.named_reaction:
         clauses.append("lower(r.named_reaction) = lower(%(named)s)")
         params["named"] = facet.named_reaction
@@ -678,7 +708,12 @@ def _in_scope(row: ReactionLabel, facet: Facet) -> bool:
     counting it out of the denominator would hide exactly the reactions the coverage sentence
     exists to warn about.
     """
-    return not facet.sources or row.source in facet.sources
+    if facet.sources and row.source not in facet.sources:
+        return False
+    # In scope, unlike `product_smiles` one function down: this narrowing reads the reaction's own
+    # key, which an unlabelled row has. Leaving it out would take the coverage denominator over the
+    # whole corpus while the numerator is a handful of neighbours, and report ~0% labelled.
+    return not facet.reaction_keys or (row.source, row.reaction_id) in facet.reaction_keys
 
 
 def _matches(row: ReactionLabel, facet: Facet) -> bool:
@@ -686,6 +721,8 @@ def _matches(row: ReactionLabel, facet: Facet) -> bool:
     if facet.named_reaction and (row.named_reaction or "").lower() != facet.named_reaction.lower():
         return False
     if facet.rxno_id and row.rxno_id != facet.rxno_id:
+        return False
+    if facet.reaction_keys and (row.source, row.reaction_id) not in facet.reaction_keys:
         return False
     if facet.species_smiles is not None and not any(
         s.smiles == facet.species_smiles

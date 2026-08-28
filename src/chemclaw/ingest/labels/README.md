@@ -17,6 +17,7 @@ here. `chemclaw.ingest.documents` is split on the same line.
 | `merge.py` | the fill-what-is-missing rule: `provides` is never a skip |
 | `enrich.py` | one bounded drain pass, and why a batch failure retries reaction by reaction |
 | `corpus.py` | one keyset page of a bulk reaction corpus into the record phase |
+| `cursor.py` | the keyset watermark an `append_only:` source resumes from, and why it is not `sync_cursors` |
 
 There is deliberately no retriever here. A corpus source's `retrieve:` half is
 `ingest.eln.warehouse.retriever:WarehouseVectorRetriever` — an embedding search over the same

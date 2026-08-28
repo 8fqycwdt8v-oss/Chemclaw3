@@ -122,6 +122,10 @@ skills:
 jobs:
   - name: compute_reaction_energy
     workflow: CalcJobWorkflow
+    # Gated: this is one of the jobs the block header calls "the expensive half", so it
+    # must require a privileged role via authz.expensive_actions — it was omitted, leaving
+    # it launchable by any authenticated user (security review A8-F6).
+    expensive: true
     inline_wait_seconds: 20
     summary: Compute the energy, enthalpy and free energy of a balanced reaction (GFN2-xTB).
     description: >-
@@ -153,6 +157,10 @@ jobs:
 
   - name: compare_solvents
     workflow: CalcJobWorkflow
+    # Gated: this is one of the jobs the block header calls "the expensive half", so it
+    # must require a privileged role via authz.expensive_actions — it was omitted, leaving
+    # it launchable by any authenticated user (security review A8-F6).
+    expensive: true
     inline_wait_seconds: 20
     summary: Rank candidate solvents for one reaction by their computed effect on ΔG.
     description: >-
@@ -171,6 +179,10 @@ jobs:
 
   - name: scan_coordinate
     workflow: CalcJobWorkflow
+    # Gated: this is one of the jobs the block header calls "the expensive half", so it
+    # must require a privileged role via authz.expensive_actions — it was omitted, leaving
+    # it launchable by any authenticated user (security review A8-F6).
+    expensive: true
     inline_wait_seconds: 20
     summary: Relaxed scan along one internal coordinate (bond, angle or dihedral).
     description: >-
@@ -186,6 +198,10 @@ jobs:
 
   - name: profile_rotation
     workflow: CalcJobWorkflow
+    # Gated: this is one of the jobs the block header calls "the expensive half", so it
+    # must require a privileged role via authz.expensive_actions — it was omitted, leaving
+    # it launchable by any authenticated user (security review A8-F6).
+    expensive: true
     inline_wait_seconds: 20
     summary: Rotational profile about one named bond — its rotamers, and the barriers between them.
     description: >-

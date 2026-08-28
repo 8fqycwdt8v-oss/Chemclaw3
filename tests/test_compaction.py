@@ -35,10 +35,13 @@ from langchain_core.messages.utils import count_tokens_approximately
 from chemclaw.agent.chemclaw_agent import _INSTRUCTIONS
 from chemclaw.agent.compaction import (
     TOOL_RESULT_PLACEHOLDER,
+    ClearOlderToolResultsEdit,
     KeepLastConversationGroupsEdit,
     RecordContextCompaction,
     context_compaction_middleware,
+    newest_batch_size,
 )
+from chemclaw.agent.context_budget import MeasureRequestPrefix
 from chemclaw.agent.langgraph_agent import build_langgraph_agent
 from chemclaw.agent.message_pairing import calls_without_adjacent_results
 from chemclaw.core.config import settings
@@ -401,7 +404,7 @@ def test_the_two_edits_do_not_share_one_threshold(monkeypatch: pytest.MonkeyPatc
     """
     monkeypatch.setattr(settings, "agent_tool_result_clear_trigger", 12_345)
     monkeypatch.setattr(settings, "agent_context_token_budget", 99_999)
-    editing = context_compaction_middleware()[0]
+    editing = context_compaction_middleware()[1]
     # Unwrapped, because both edits are wrapped in `GuardedEdit` so a raising edit costs the
     # reduction rather than the turn (`D-2026-08-27-a-refusal-is-not-a-crash`). The wrapper is
     # transparent to this claim, which is about which setting each edit was constructed with.
@@ -467,16 +470,21 @@ def test_the_counter_separates_not_needed_from_not_wired(monkeypatch: pytest.Mon
     assert _run(1) > 0, "compaction did not fire on a thread over its budget"
 
 
-def test_the_policy_is_two_middleware_and_the_observer_is_inside() -> None:
-    """The observer must nest inside the editor, or it reads an unedited request.
+def test_the_policy_is_three_middleware_in_one_order() -> None:
+    """The prefix measurement outermost, the editor, the observer innermost — all three positions.
 
-    Pinned because the ordering is the whole correctness of the measurement and nothing about the
-    list's shape would fail loudly if it were reversed — the counter would simply report zero
-    forever, which is exactly what "not wired" looks like.
+    Pinned because every one of them is silent when wrong and nothing about the list's shape would
+    fail loudly. An observer above the editor reads an *unedited* request and the counter reports
+    zero forever, which is exactly what "not wired" looks like. `MeasureRequestPrefix` below the
+    editor publishes the prefix after the edits have already budgeted without it, so a declared
+    context window would be subtracted from nothing.
     """
     middleware = context_compaction_middleware()
 
-    assert len(middleware) == 2, f"expected the editor and its observer, got {middleware}"
+    assert len(middleware) == 3, f"expected prefix, editor and observer, got {middleware}"
+    assert isinstance(middleware[0], MeasureRequestPrefix), (
+        f"the prefix measurement is not outermost: {[m.__class__.__name__ for m in middleware]}"
+    )
     assert isinstance(middleware[-1], RecordContextCompaction), (
         f"the observer is not innermost: {[m.__class__.__name__ for m in middleware]}"
     )
@@ -596,3 +604,144 @@ def test_only_the_cleared_results_are_reported_to_the_repeat_guard() -> None:
         ("call_0", "tool_0", {"n": 0}),
         ("call_1", "tool_1", {"n": 1}),
     ]
+
+
+def _fanned_out(steps: int, width: int, filler: str) -> list[AnyMessage]:
+    """A thread of `steps` sequential tool calls, then one step that fans out to `width` calls.
+
+    The shape `agent_max_parallel_tool_calls` exists for and `agent_keep_last_tool_groups` was
+    measured to break: `ToolNode` gathers a whole batch and appends every result after the
+    `AIMessage` that asked for them, so the newest results are the trailing `ToolMessage`s — which
+    is exactly what upstream's `keep` counts and would otherwise clear.
+    """
+    messages: list[AnyMessage] = [HumanMessage(content="screen these conditions")]
+    for index in range(steps):
+        call_id = f"earlier-{index}"
+        messages.append(
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "find_notes", "args": {"i": index}, "id": call_id}],
+            )
+        )
+        messages.append(ToolMessage(content=filler, tool_call_id=call_id, name="find_notes"))
+    batch = [{"name": "predict_pka", "args": {"j": j}, "id": f"fan-{j}"} for j in range(width)]
+    messages.append(AIMessage(content="", tool_calls=batch))
+    for call in batch:
+        messages.append(
+            ToolMessage(content=filler, tool_call_id=str(call["id"]), name="predict_pka")
+        )
+    return messages
+
+
+def test_a_fan_out_never_loses_its_own_results(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The newest batch survives a clearing, however much wider than `keep` it is.
+
+    **The defect, measured before the fix.** Upstream's `keep` counts tool *results*, not steps, and
+    the edit runs in `wrap_model_call` — so the list it reduces already holds the results that came
+    back in the step immediately before. At the shipped `agent_keep_last_tool_groups` of 2 against
+    an `agent_max_parallel_tool_calls` of 8, a five-way fan-out past the trigger had **three of its
+    five results replaced by a placeholder before the model's first look at them**, each one reading
+    "Earlier tool result" about a result that was not earlier.
+
+    What reaches the chemist is not a slow turn: the model answers from two of five pKₐ values
+    and never says the other three were computed.
+
+    Asserted over the whole fan-out rather than over a count, because the property is "this batch,
+    entirely" — a fix that happened to keep one more result would satisfy a count and still lose
+    the answer.
+    """
+    monkeypatch.setattr(settings, "agent_keep_last_tool_groups", 2)
+    messages = _fanned_out(steps=5, width=5, filler="x" * 20_000)
+    assert _count(messages) > settings.agent_tool_result_clear_trigger, (
+        "the thread is under the clearing trigger, so this test proves nothing"
+    )
+
+    ClearOlderToolResultsEdit(
+        trigger=settings.agent_tool_result_clear_trigger,
+        keep=settings.agent_keep_last_tool_groups,
+        placeholder=TOOL_RESULT_PLACEHOLDER,
+    ).apply(messages, count_tokens=_count)
+
+    fan = [m for m in messages if isinstance(m, ToolMessage) and m.name == "predict_pka"]
+    cleared = [m.tool_call_id for m in fan if m.content == TOOL_RESULT_PLACEHOLDER]
+    assert not cleared, f"the model never saw these results and they were cleared anyway: {cleared}"
+    earlier = [m for m in messages if isinstance(m, ToolMessage) and m.name == "find_notes"]
+    assert any(m.content == TOOL_RESULT_PLACEHOLDER for m in earlier), (
+        "nothing was cleared at all — this test would pass on an edit that does nothing"
+    )
+
+
+def test_the_batch_floor_is_the_batch_and_not_a_bigger_number() -> None:
+    """`newest_batch_size` counts the newest tool-calling step's results, and nothing else."""
+    assert newest_batch_size(_fanned_out(steps=3, width=4, filler="x")) == 4
+    assert newest_batch_size(_thread(3, with_tool_calls=True)) == 1
+    assert newest_batch_size(_thread(3)) == 0, "a prose conversation has no batch to protect"
+
+
+def test_clearing_stops_at_the_trigger(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Crossing the trigger clears what the overshoot needs, not every result in the thread.
+
+    `clear_at_least` defaults to 0 upstream, which never breaks its loop: measured on a 20-result
+    research turn, one token over the trigger wiped **18 of 20** — an 88% cut where roughly half
+    would have crossed back under. Every one is re-fetchable, which is what makes the edit lossless
+    and also what makes over-clearing expensive: a re-fetch costs a model call, the tool again, and
+    a forgiveness that lets the same result be cleared once more.
+    """
+    monkeypatch.setattr(settings, "agent_keep_last_tool_groups", 2)
+    messages = _thread(20, with_tool_calls=True, filler="x" * 4_000)
+    trigger = int(_count(messages) * 0.9)
+
+    ClearOlderToolResultsEdit(trigger=trigger, keep=2, placeholder=TOOL_RESULT_PLACEHOLDER).apply(
+        messages, count_tokens=_count
+    )
+
+    cleared = sum(
+        1 for m in messages if isinstance(m, ToolMessage) and m.content == TOOL_RESULT_PLACEHOLDER
+    )
+    assert 0 < cleared < 18, f"expected a partial clearing near the overshoot, got {cleared} of 20"
+    assert _count(messages) <= trigger, "clearing stopped before reaching the trigger"
+
+
+def test_an_unreducible_thread_is_counted(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A request the policy cannot shrink says so, which is the reading the two counters could not.
+
+    **Measured through a compiled graph before the fix**: one human message and two 200,000-
+    character tool results — each inside its own tool's ceiling — is 100,081 estimated tokens,
+    ~224,000 billed, over both triggers. `ClearToolUsesEdit` had exactly `keep` candidates so it
+    cleared nothing; the window cannot cut past the newest group so it dropped nothing. Both
+    compaction counters moved by **zero**, and `core/metrics.py` documented a flat zero as "never
+    over budget".
+
+    So the turn about to fail at the provider's context limit was indistinguishable from a quiet
+    one. This asserts the distinction exists, on the same shape that produced it.
+    """
+    monkeypatch.setattr(settings, "agent_context_token_budget", 1_000)
+    monkeypatch.setattr(settings, "agent_keep_last_tool_groups", 2)
+    model = GenericFakeChatModel(messages=iter([AIMessage(content="done")]))
+    monkeypatch.setattr(type(model), "bind_tools", lambda self, tools, **kw: self, raising=False)
+    graph = build_langgraph_agent(model=model)
+    payload = "x" * 40_000
+    messages: list[AnyMessage] = [HumanMessage(content="compare these two")]
+    for index in range(2):
+        call_id = f"big-{index}"
+        messages.append(
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "find_calculations", "args": {}, "id": call_id}],
+            )
+        )
+        messages.append(
+            ToolMessage(content=payload, tool_call_id=call_id, name="find_calculations")
+        )
+
+    before = METRICS.value("chemclaw_context_unreducible_total")
+    compactions = METRICS.value("chemclaw_context_compactions_total")
+    asyncio.run(graph.ainvoke({"messages": messages}))
+
+    assert METRICS.value("chemclaw_context_unreducible_total") > before, (
+        "a request over the budget that the policy could not reduce was not counted"
+    )
+    assert METRICS.value("chemclaw_context_compactions_total") == compactions, (
+        "nothing was reclaimed, so the compaction counter must not have moved — that conflation "
+        "is the defect this series exists to separate"
+    )

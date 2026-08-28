@@ -224,6 +224,23 @@ class FingerprintStore(Protocol):
         """
         ...
 
+    async def add_many(self, records: Sequence[FingerprintRecord]) -> None:
+        """Insert or replace a batch of fingerprints, atomically where the backend can.
+
+        On the interface rather than left to each caller looping over `add`, because the cost that
+        makes it worth having is the backend's and invisible from outside: the Postgres store takes
+        a pooled connection and commits per call. Measured against a live database inside
+        `db.pooling()`, 200 rows, three trials: **3.0 ms/row** one at a time against **1.15 ms/row**
+        batched, a stable 2.6x. `CorpusMolecules.add_many` is the same method for the same reason
+        one table over; this is the half `FingerprintStore` was missing.
+
+        **The commit is the part this removes, and it is not the whole cost** — 1.15 ms/row remains,
+        so the 13M-row corpus `ingest/labels/corpus.py` sizes against is ~4 hours of writes either
+        way rather than ~11. Worth saying, because a reader who took this for the fix to bulk-load
+        throughput would be surprised; what it buys is the 2.6x, not a different order of magnitude.
+        """
+        ...
+
     async def all_records(self, limit: int | None = None) -> list[FingerprintRecord]:
         """Return stored records (used for substructure scans); at most `limit` when set.
 
@@ -289,6 +306,16 @@ class InMemoryFingerprintStore:
         self._records[(record.source, record.id)] = record
         if record.source:
             self._records.pop(("", record.id), None)
+
+    async def add_many(self, records: Sequence[FingerprintRecord]) -> None:
+        """Insert or replace a batch — `add` per record, since there is nothing here to batch.
+
+        Delegating rather than writing the dict again: `add` also supersedes an unsourced twin, and
+        a second copy of that rule here is a second place for the two backends' contents to diverge
+        — which is the property every ordering assertion in this module rests on.
+        """
+        for record in records:
+            await self.add(record)
 
     async def all_records(self, limit: int | None = None) -> list[FingerprintRecord]:
         """Return stored records; at most `limit` (first in id order) when set.
@@ -481,36 +508,49 @@ class PostgresFingerprintStore:
     async def add(self, record: FingerprintRecord) -> None:
         """Insert or replace a fingerprint by this table's key, in one transaction.
 
-        **A sourced write also removes the row's unsourced twin**, and that is what makes
-        migration `063`'s leftover `''` rows a transient state rather than a permanent one. `063`
-        backfills every row a single-claimant `reaction_labels` row can name and leaves the rest
-        — pre-`051` ingests, and ids two sources already claim — under the empty source. Keeping
-        both would put one entry in the index twice with identical bits and one label, so a
-        similarity search would report two precedents where a chemist has one experiment. The
-        delete is a single primary-key lookup, it matches nothing once an index is clean, and it
-        is the write path's statement of the rule `reaction_records._one_of` states on the read
-        path: a stated source supersedes an unstated one.
+        The single-record case of `add_many`, so the upsert and the source refusal below have
+        exactly one definition rather than two that can drift.
+        """
+        await self.add_many([record])
+
+    async def add_many(self, records: Sequence[FingerprintRecord]) -> None:
+        """Insert or replace a batch on one connection, in one transaction.
+
+        One checkout and one commit for the whole batch rather than per record. Measured against a
+        live database inside `db.pooling()`, 200 rows, three trials: 3.0 ms/row one at a time
+        against 1.15 ms/row batched, a stable 2.6x. `CorpusMolecules.add_many` is the same method
+        for the same reason one table over.
 
         A record carrying a source on a store that is not `source_keyed` is refused rather than
         written, because the column it would need does not exist and the value would otherwise
-        be dropped on the floor — the silent half-write this whole key change is about.
+        be dropped on the floor — the silent half-write the key change is about. Checked for every
+        record *before* the connection is taken, so a bad batch costs no partial write: the refusal
+        is about a mis-wired store rather than about one row, and half-applying it would leave the
+        caller unable to say what landed.
+
+        An empty batch takes no connection at all: the drain calls this once per page, and a page
+        that recorded nothing must not pay a checkout to write nothing.
         """
-        if record.source and not self._source_keyed:
-            raise FingerprintError(
-                f"{self._table} is not keyed by source, so a record from {record.source!r} "
-                "cannot be stored in it without losing which corpus it came from"
-            )
+        if not records:
+            return
+        for record in records:
+            if record.source and not self._source_keyed:
+                raise FingerprintError(
+                    f"{self._table} is not keyed by source, so a record from {record.source!r} "
+                    "cannot be stored in it without losing which corpus it came from"
+                )
         async with self._connection() as conn:
-            await conn.execute(
-                self._upsert,
-                {
-                    "id": record.id,
-                    "label": record.label,
-                    "bits": record.bits,
-                    "definition": record.definition,
-                    **({"source": record.source} if self._source_keyed else {}),
-                },
-            )
+            for record in records:
+                await conn.execute(
+                    self._upsert,
+                    {
+                        "id": record.id,
+                        "label": record.label,
+                        "bits": record.bits,
+                        "definition": record.definition,
+                        **({"source": record.source} if self._source_keyed else {}),
+                    },
+                )
             await conn.commit()
 
     async def all_records(self, limit: int | None = None) -> list[FingerprintRecord]:

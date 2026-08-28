@@ -482,11 +482,15 @@ async def record_failure(
             "or correct the existing date first"
         )
     # Both files ride in one submission, so the reviewer signs off on the refutation and the
-    # retirement as the single decision they are (STO-7's `dependencies`, used here for a note that
-    # is amended rather than newly minted).
+    # retirement as the single decision they are. `superseded`, NOT `dependencies`: a dependency is
+    # written only where the base branch has no copy (`NoteFile.overwrite=False`), and the refuted
+    # note always exists on base — `_require_note` just found it in the merged graph — so passing
+    # the retirement as a dependency silently dropped it every time, leaving the refuted claim with
+    # its validity window intact and still served as current evidence. `superseded` overwrites the
+    # note in place, which is what retiring it means.
     retirement = (
         [close_refuted_note(refuted, note.id, held_until)] if held_until is not None else []
     )
-    reference = await propose_note(note, default_submitter(), dependencies=retirement)
+    reference = await propose_note(note, default_submitter(), superseded=retirement)
     record_proposal(note.id, reference)
     return reference
