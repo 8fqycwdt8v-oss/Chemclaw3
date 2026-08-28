@@ -175,7 +175,7 @@ def _refuse_public_llm_exposure() -> None:
             f"({settings.service_host!r}) with llm_provider='anthropic' and no "
             "CHEMCLAW_LLM_BASE_URL "
             "— every prompt and completion (confidential chemistry) would go to the public "
-            "the public Anthropic API rather than the internal gateway. Set "
+            "Anthropic API rather than the internal gateway. Set "
             "CHEMCLAW_LLM_PROVIDER=openai_compatible with CHEMCLAW_LLM_BASE_URL pointing at the "
             "internal endpoint (what the shipped chart does), or set CHEMCLAW_LLM_BASE_URL to an "
             "anthropic-compatible gateway you host. The bare anthropic provider is the "

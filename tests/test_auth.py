@@ -421,5 +421,5 @@ def test_exposed_anthropic_default_refuses_to_boot(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(settings, "service_host", "0.0.0.0")
     monkeypatch.setattr(settings, "llm_provider", "anthropic")
     monkeypatch.setattr(settings, "llm_base_url", "")
-    with pytest.raises(RuntimeError, match="api.anthropic.com"):
+    with pytest.raises(RuntimeError, match="public Anthropic API"):
         create_app()
