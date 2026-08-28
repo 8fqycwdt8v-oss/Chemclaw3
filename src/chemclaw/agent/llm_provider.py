@@ -517,4 +517,10 @@ def _tls_http_client() -> Any | None:
     # deprecated. Use `verify=ssl.create_default_context(cafile=...)`"), and building the context
     # here is also the only form that says what the bundle *is* — a CA file to verify the peer
     # against, rather than a path httpx has to guess the meaning of.
-    return httpx.AsyncClient(verify=ssl.create_default_context(cafile=settings.llm_tls_ca_bundle))
+    return httpx.AsyncClient(
+        verify=ssl.create_default_context(cafile=settings.llm_tls_ca_bundle),
+        # Never inherit an ambient proxy: HTTPS_PROXY/ALL_PROXY set on the pod would otherwise
+        # redirect every prompt, completion and the Authorization bearer to a host of the env
+        # setter's choosing, past the private-CA pinning above (the proxy re-terminates TLS).
+        trust_env=False,
+    )

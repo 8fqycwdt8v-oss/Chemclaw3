@@ -476,3 +476,25 @@ def test_a_reagent_the_hazard_rules_were_widened_for_can_be_named(
     resolved = resolve_compound_name(spelling)
     assert resolved is not None, f"{spelling!r} resolves to nothing"
     assert resolved.name == expected
+
+
+def test_oversized_smiles_is_refused_not_crashed() -> None:
+    """A molecule past the atom/length cap raises instead of segfaulting the process.
+
+    RDKit's canonical-SMILES writer and the tautomer canonicalizer are unbounded-recursive and
+    SIGSEGV on a large linear molecule (measured between ~16k and ~20k atoms) — an uncatchable
+    crash that takes the whole worker and every concurrent session with it, reachable by a ~20 KB
+    SMILES that clears the 1 MB body cap and as an ELN poison pill. `require_molecule` is the one
+    gate every SMILES caller shares, so the bound lives there; the lenient helpers passthrough.
+    """
+    from chemclaw.core.chem import canonical_smiles, require_molecule, standard_smiles
+
+    huge = "C" * 20000
+    with pytest.raises(InvalidSmilesError):
+        require_molecule(huge)
+    # lenient helpers must not crash — they return the input unchanged, exactly like an unparseable
+    # string, rather than handing an oversized molecule to the writer.
+    assert canonical_smiles(huge) == huge
+    assert standard_smiles(huge) == huge
+    # a real reagent well under the cap still parses
+    assert require_molecule("CC(=O)Oc1ccccc1C(=O)O").GetNumAtoms() == 13

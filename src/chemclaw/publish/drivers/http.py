@@ -178,7 +178,9 @@ class HttpResultSink:
             return
         started = time.perf_counter()
         try:
-            async with httpx.AsyncClient(timeout=self._timeout, verify=self._verify) as client:
+            async with httpx.AsyncClient(
+                timeout=self._timeout, verify=self._verify, trust_env=False
+            ) as client:
                 response = await client.post(
                     self._url, json=self._document(records), headers=self._headers()
                 )

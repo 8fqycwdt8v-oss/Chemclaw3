@@ -106,6 +106,7 @@ from langgraph.checkpoint.base import (
 )
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from psycopg import AsyncConnection
 from psycopg.rows import DictRow
 from psycopg_pool import AsyncConnectionPool
@@ -137,6 +138,27 @@ _pool: AsyncConnectionPool[AsyncConnection[DictRow]] | None = None
 # their loop later or never. `close_checkpointer` drops it with the pool so the next loop gets its
 # own.
 _init_lock: asyncio.Lock | None = None
+
+
+def _strict_serde() -> JsonPlusSerializer:
+    """The checkpoint serializer, pinned to reject import-by-name deserialization.
+
+    `AsyncPostgresSaver` with no `serde=` builds `JsonPlusSerializer()`, whose msgpack ext hook
+    defaults to **permissive** (`allowed_msgpack_modules=True` in `langgraph-checkpoint`): a stored
+    blob may name *any* importable `module:callable`, and the hook runs
+    `getattr(import_module(mod), attr)(*args)` on it — arbitrary code execution in the turn-serving
+    pod on the resume of a poisoned `checkpoint_blobs` row. The app credential holds INSERT+DELETE
+    on those tables (a delete+insert is an update), so this is reachable from the one privilege the
+    least-privilege split (D-2026-08-05) grants the runtime role, not only from a DBA compromise.
+
+    `allowed_msgpack_modules=None` restricts the hook to `SAFE_MSGPACK_TYPES`; a poisoned type is
+    blocked (measured: the `os.system` payload returns a degraded value rather than executing) while
+    every legitimate channel — LangChain messages, the todo list, `model_calls` — still round-trips,
+    because those travel the typed/JSON path, not the import-by-name one. `pickle_fallback` stays
+    upstream's `False`. `tests/test_upstream_surface.py` pins the permissive default so an upstream
+    change to it turns red here rather than silently widening this surface.
+    """
+    return JsonPlusSerializer(allowed_msgpack_modules=None)
 
 
 def _initialization_lock() -> asyncio.Lock:
@@ -385,7 +407,7 @@ async def checkpointer() -> AsyncPostgresSaver:
     pool = await _checkpoint_pool()
     async with _initialization_lock():
         if _saver is None:
-            saver = SchemaStampedSaver(pool)
+            saver = SchemaStampedSaver(pool, serde=_strict_serde())
             await saver.setup()
             _saver = saver
             logger.info("checkpointer ready")

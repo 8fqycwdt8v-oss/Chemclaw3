@@ -110,7 +110,9 @@ async def probe_connectors() -> list[ConnectorHealth]:
             unprobed.append(ConnectorHealth(name=manifest.name, state="unprobed"))
     probed: list[ConnectorHealth] = []
     if targets:
-        async with httpx.AsyncClient(timeout=settings.connector_health_timeout_seconds) as client:
+        async with httpx.AsyncClient(
+            timeout=settings.connector_health_timeout_seconds, trust_env=False
+        ) as client:
             probed = list(
                 await asyncio.gather(*(_probe(client, name, url) for name, url in targets))
             )
