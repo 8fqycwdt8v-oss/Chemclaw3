@@ -97,8 +97,8 @@ soak is checkpointed per round rather than held in a process.
 ## The parallel audit pass
 
 Twelve agents, one per area, each in an isolated worktree, each required to produce a test that
-**fails against current code** before fixing anything and to report what it could not prove. Three
-have landed. Their branches are merged into this one and their worktrees reclaimed.
+**fails against current code** before fixing anything and to report what it could not prove. **All
+twelve landed**; every branch is merged and every worktree reclaimed.
 
 | Area | What it found |
 | --- | --- |
@@ -119,3 +119,113 @@ Twelve concurrent agents put a 4-core box at load 35–48. Under that:
 So the rule this campaign now runs on: **mass auditing and live measurement alternate, they do not overlap.** Scaling coverage is free; scaling load on shared hardware only manufactures contention artifacts, and five of this campaign's false signals came from exactly that.
 
 Corollary, learned the same way: **verify each agent's gate yourself.** One reported all-green and four tests failed on merge. Its work was sound; its box was not mine.
+
+### The rest of the pass
+
+| Area | What it found |
+| --- | --- |
+| front door / SSE | A tool call could end with **neither a result nor a failure**: `_from_update` dropped a `Command`-wrapped `ToolMessage(status="error")` down the same branch as an already-signalled one, so the one case its comment existed for was the one case it deleted. Also three route-level error events naming no turn and a fourth minting a correlation id present in no log line, no audit row and no access log; and `arguments` was the only field in the whole event contract that went through `json.dumps`, so a CJK question reached the wire as literal `\u5496` and spent 200 audit characters on 75 source glyphs |
+| config / metrics | `chemclaw_repeated_tool_calls_total{tool}` booked **the model's own string** — 141 characters of model-authored text on the unauthenticated `/metrics`, under a declaration claiming the label was "bounded by the registered tool surface". Two derived lists reported clean *with the enumerations that prove it*: 394 settings, 0 without a consumer; 113 metrics, 0 without a producer |
+| middleware | The same two labels, found independently — three audits converging on one defect class is decent evidence it was real rather than a reading |
+| security | The live lane's credential file was **world-readable**: `( umask 077; … ) > file` applies the redirection in the child *before* the body, so the file is created under the inherited umask — measured `-rw-r--r--`, 12 credential lines, three lines below a comment saying "0600". The same block's trailing `&&` list returned 1 on an unset last variable and silently killed `processes.sh up` under `set -e`. Plus two unbounded model strings reaching the SSE stream, measured at 50,112 and 50,000 characters |
+| durable | A **completed** job killed by the ceiling written to outlast it: `wrapper_execution_timeout` sized its headroom from a setting that bounds none of its four post-child steps. Driven against a real broker — the fixture job completed, its record was written, and the wrapper was killed mid-publish; `TIMED_OUT`, and an execution timeout is not delivered to workflow code, so no push-back ever ran. Also settled two open campaign questions: a FAILED workflow **does** write a `job_records` row, and the SIGKILL check could never fail because its precondition was the *wrapper* reporting RUNNING — true from launch, on core's queue, before any bundle worker holds anything |
+| retrieval / KG | A **validator-accepted** fusion weight empties a leg: at 0.1 a source's rank-1 hit lands at fused index 40 of 48, behind five other sources' complete tails, keeping 0 chunks. And the starvation counter measured *list order* rather than contribution — lexical read 8/73 with **nothing truncated on any of 20 sweeps**; counted correctly it is 73/73 |
+| deploy | A migration that cannot replay (`ADD CONSTRAINT` with no `DROP`, and the re-runnability test matches only `CREATE`), an egress-port map read by nine hardcoded key names, a `deps-audit` clean-control that asserted an audit of **zero packages** was a pass, and two more lane primitives that verified nothing. `git fetch --unshallow` took the migration-immutability guard from **3 skipped to 173 passed** — the first time it was actually asked its question |
+| fleet (`Chemclaw3-mcp`) | The egress guard's three *documented* escapes had no test; all three verified to genuinely escape (`ctypes` `libc.connect` rc=0, a subprocess printing `CONNECTED`, `_socket.socket` connected) and now pinned, with the reason the largest hole exists pinned too. And `rxnlabel`'s three hand-written pattern tables were **12 of 60** covered, measured by mutating each literal in turn — now 59/59. Two ligand patterns matched nothing their own comments named: the NHC pattern demanded a formal −1 carbon (IMe, IMes, IPr, SIMes all missed) and the "phosphoramidite" pattern demanded three oxygens, which a phosphoramidite cannot have |
+
+## The repaired storm, and what it found
+
+The `audit-storm` pass asked every check in `live_storm` a single question: **what would a run that
+did nothing score?** Of 68 checks in the full matrix, **19 scored PASS having observed nothing and
+one could not fail at all** (`accepted + failed == turns`, with `failed` *defined* as
+`turns - accepted` — an identity). Family B counted an unbounded `count(*)` over the audit trail, so
+it was answered by residue: 366 audited calls reported for a run that contributed 3.
+`_require_mock_lane` pinged the mock's stats endpoint and concluded no real model would be driven —
+a mock left running by an earlier lane answers that ping while the base URL points anywhere else.
+And the reconciliation the mock counter's own docstring calls its purpose **did not exist**: family D
+restarts `mock-llm`, which zeroes the counter, so the previously published "516 mock requests served"
+was the count from the middle of the run.
+
+Re-run at volume on a quiet box with the repaired instrument: **818 turns driven, 607 mock requests
+served, 58 of 69 checks passed.** The failures are informative rather than noise, which is the point.
+
+### The biggest product finding of the campaign
+
+Every tool of every in-tree connector bundle returned **nothing**: `t-calc-properties` scored
+`announced=5/5 returned=0`, and the same for `molfp`, `rxnfp` and `bo` — 25 tools, a whole
+capability gone — while `/readyz` reported `connectors_unhealthy: 0` and the chemist was told
+*"similar_molecules is not a valid tool"*. This is measured from `announced` vs `returned` on the
+stream, **not** from the truncated error string that produced this campaign's one retracted claim.
+
+Three linked causes, each measured on the running lane:
+
+1. `connectors_dev --export-env` mints a **fresh** credential set on every call, and `restart` is
+   `up`. Family A restarts the front door once per admission cap, so the storm re-minted every
+   bundle token mid-run and started core presenting secrets the running connectors process had
+   never seen. Measured: the connectors process started 21:03 held token hashes differing from the
+   contract rewritten at 21:28.
+2. The contract was **narrowing**: an inherited fleet token was written only when the invoking shell
+   happened to have one, so a second shell that sourced `env` and restarted dropped them all.
+3. Writing the contract was not enough — `up` starts processes from its own environment, so a
+   carried-forward value reached the *file* and not the front door, the workers or the connectors
+   process.
+
+Fixed as one rule — **a credential's lifetime is the lane, not the invocation that minted it** — and
+verified end to end: the nine behaviours that scored `returned=0` now score **6 of 9 fully green**,
+with the mint file unchanged across restarts of the front door, a worker and the connectors process.
+Keying reuse on "the connectors process is running" was tried first and is one scope too narrow:
+`restart connectors` then re-minted and orphaned the front door.
+
+**The health surface is the other half and is not fixed.** `calc` is a *backend*, so `/readyz` never
+reaches it, and no probe authenticates — a stack can report ready while every calculation 401s.
+Filed rather than patched.
+
+### A refusal the wire could not name
+
+Of the three residual failures, one was a second product defect. `compute_atomic_descriptors` told
+the chemist **"an internal error occurred"**. What the calc backend had actually said:
+
+> atomic polarisabilities, dispersion coefficients and atomic multipoles require the `'xtb'` binary,
+> which is not installed in this deployment. Nothing here approximates them … The partial charges,
+> bond orders and Fukui indices from `compute_electronic_properties` and `predict_site_reactivity`
+> do not need it.
+
+A deployment fact, the reason there is no fallback, and the two tools to use instead — discarded at
+the last hop, because `McpRequestRefused` is a plain `Exception` and the sanitiser's pass-through
+family admits only `ValueError`. A refusal that crossed a process boundary has **already** passed
+the far side's sanitiser, so sanitising it again keeps nothing back.
+
+Two links in that chain were found only by measuring: the refusal arrives inside a nested `anyio`
+`ExceptionGroup`, and **the group's leaf is not the refusal** — it is the exception the `async with`
+raised while unwinding, with the refusal on its `__cause__`. The first version of the fix passed its
+unit test and left the live lane unchanged. That is now a lesson in `tasks/lessons.md`.
+
+The third residual is a real output-schema defect (`campaign_progress` advertises 16 properties with
+`additionalProperties: false` and returns 18, because `model_json_schema()` defaults to *validation*
+mode and computed fields exist only in the serialisation schema) and is being fixed separately.
+
+### Two lane defects an offline suite cannot produce
+
+- **A pid is not an identity.** Both lane scripts carried their own `running()`, each reading
+  `kill -0 $(cat name.pid)` — which answers whether *a* process with that number exists. Measured:
+  `props` recorded as pid 3422 at 17:56 and killed at 18:07; a bring-up at 20:53 logged
+  `props already running (pid 3422)`, skipped the start, and died at `props did not become ready`.
+  `soak.sh` reads the same file with `ps -o rss=` to build the front door's memory-drift series, so
+  a recycled number does not only skip a start — it puts a stranger's resident set into a published
+  measurement. Now the process's `/proc/<pid>/stat` start time is recorded beside the pid.
+- **`server_tools_module` treated a bundle package's absence as a broken import.** The lane mounts
+  `Chemclaw3-mcp/manifests` on `CHEMCLAW_CONNECTORS_DIR`, so `discovered()` legitimately yields
+  names with no `chemclaw.connectors.<name>` package at all — one level above the two cases the
+  guard knew. The mock model refused to start with `ModuleNotFoundError: No module named
+  'chemclaw.connectors.props'` while every offline suite stayed green, because a suite that mounts
+  only this repository's own directory can never produce the case.
+
+### A gate parametrized over the tree is a whole-tree gate
+
+Six audit branches each ran `tests/test_docstring_paths.py` and each reported it green. The **merge
+of the six was red in that same file**, three failures. Nothing regressed: the test is parametrized
+*per referring file*, so a branch that adds a dangling pointer to `tests/test_service.py` fails only
+that one case, and a sibling running its own subset never collects it. Every agent's "green" was
+true and none of them was evidence about the branch. The correction is not "run the whole suite" —
+that cost every agent hours and produced only BoFire wall-clock timeouts — it is to re-run the
+*unparametrized* gates whole after a merge. They cost seconds; this took 8 s to clear.
