@@ -74,3 +74,22 @@ the campaign's worst possible output.
 2. **Coverage run vs planned.** The storm declares `FAMILIES` and names the difference itself; the
    NOT RUN table above is the rest.
 3. **What drifted.** `.live/soak.jsonl` and `make live-soak-report`.
+
+## Drift, over the first 8 recorded soak rounds
+
+Readable only after finding #8 — before that fix the record was empty while every round reported
+success. Full fit in `soak-report-r8.md`; `rounds with a non-zero exit: none`.
+
+| Series | Round 1 | Round 8 | Fit |
+| --- | ---: | ---: | --- |
+| api RSS (KB) | 588,732 | 607,032 | **grows and slowing** — +5,414 then +1,202 KB/round (± 560). Decelerating is the caches-filling signature, not a leak; 8 rounds is a baseline, not a verdict |
+| `chemclaw_pg_pool_size` / `_available` | 13 | 16 | grows and steady, max 48, `requests_waiting` flat at 0 |
+| `calculation_results` rows | 15 | 15 | **flat across 279 turns** — D-011's "a persisted result is never recomputed", visible as a number |
+| `session_turns` rows | 8 | 8 | flat, while `session_messages` grows +144/round — turn rows reclaimed, messages retained |
+| `audit_events` rows | 2,937 | 3,539 | +86/round, steady |
+| `turn_costs` rows | 1,435 | 1,659 | +32/round — one per turn started, as expected |
+| turns started / failed / empty | 55 / 20 / 18 | 279 / 90 / 81 | +32 / +10 / +9 per round; the ~31% failure rate is families F and H doing their job |
+| disk free | 20 GB | 20 GB | flat |
+
+The container was reclaimed at round 8 and **the record survived** — which is the whole reason the
+soak is checkpointed per round rather than held in a process.
