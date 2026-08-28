@@ -30,6 +30,7 @@ from chemclaw.durable.retention import (
     _EXPIRED_THREADS,
     _NOT_PRUNED,
     _PRUNABLE,
+    _SESSION_SCOPED_ROWS,
     RetentionOutcome,
     _window_days,
     prune_expired_rows,
@@ -64,6 +65,13 @@ def test_only_spent_operational_rows_are_prunable() -> None:
     predicate is what keeps that true — a `pending` or `failed` row is the only record that
     something has **not** been published, and sweeping it on a clock would turn a results-store
     outage into a silent gap.
+
+    `session_owners` is the sixth and the only member whose disposal is not about the row's own age
+    at all: it is the row that makes a session reopenable, so it is pruned behind everything it
+    keys and only when nothing holds a row for the session
+    (`D-2026-08-27-a-session-nobody-can-reopen-is-disposable`). It is in this set because it does
+    have a window — the floor under "how long may an empty session live" — and not in `_NOT_PRUNED`
+    because something now bounds it.
     """
     assert set(_PRUNABLE) == {
         "session_events",
@@ -71,7 +79,54 @@ def test_only_spent_operational_rows_are_prunable() -> None:
         "tool_result_blobs",
         "result_publications",
         "checkpoints",
+        "session_owners",
     }
+
+
+def test_the_ownership_row_is_the_last_table_the_sweep_touches() -> None:
+    """Order in `_PRUNABLE` is load-bearing, so it is asserted rather than commented.
+
+    Every session-scoped sweep in this system starts from `session_owners` — `leaver.erase_actor`
+    selects session ids out of it and `session_store.delete_session` deletes one session by it — so
+    an ownership row disposed of *before* the tables it keys puts their rows beyond both. The sweep
+    iterates `_PRUNABLE` in insertion order, which makes the position of this entry the whole
+    protection: moving it up would strand rows silently, and a comment cannot fail.
+    """
+    assert list(_PRUNABLE)[-1] == "session_owners"
+
+
+def test_the_reachability_guard_names_every_session_scoped_erasure_table() -> None:
+    """What must be gone before an ownership row may go is derived from erasure, not transcribed.
+
+    `_SESSION_SCOPED_ROWS` is the set of tables whose rows are reachable *only* through the
+    ownership row. The authoritative answer to "which tables hold one session's rows" already
+    exists — `session_store._session_delete_statements()`, itself derived from `leaver._ERASE` — so
+    this asserts the two agree instead of letting a table added to the erasure sweep be silently
+    outlived by the row that finds it.
+
+    Two entries differ by name for a stated reason, and both are checked here rather than trusted:
+    the guard reads `tool_result_links` where the erasure deletes `tool_result_blobs` (the link is
+    the session-scoped row; a blob is content-addressed and may belong to another session too), and
+    `session_turns` is not a guard at all — it is swept *with* the ownership row, so it appears in
+    the delete rather than in the anti-joins.
+    """
+    from chemclaw.agent.session_store import _session_delete_statements
+
+    erasable = {table for table, _statement in _session_delete_statements()}
+    # `tool_result_blobs` and `tool_result_links` are the same fact seen from either side: the
+    # erasure deletes the blob and the link cascades behind it, because the app role has no DELETE
+    # on the link table at all (`infra/sql/grants/app_privileges.sql`).
+    seen_from_the_guard = {"tool_result_blobs": "tool_result_links"}
+    expected = {seen_from_the_guard.get(table, table) for table in erasable} - {
+        # Swept *with* the ownership row rather than guarding it — they are what is deleted.
+        "session_turns",
+        "session_owners",
+    }
+    assert set(_SESSION_SCOPED_ROWS) == expected, (
+        "the reachability guard and the erasure sweep disagree about which tables hold one "
+        f"session's rows: guard-only {sorted(set(_SESSION_SCOPED_ROWS) - expected)}, "
+        f"erasure-only {sorted(expected - set(_SESSION_SCOPED_ROWS))}"
+    )
 
 
 def test_the_audit_trail_is_never_pruned() -> None:
@@ -205,6 +260,10 @@ def test_a_stated_window_is_read_per_table(monkeypatch: pytest.MonkeyPatch) -> N
     # record kept for years, while a checkpoint is what a suspended turn resumes from and is dead
     # weight long before that.
     assert _window_days("checkpoints") == 30
+    # The ownership row takes the conversation's window deliberately, as a floor rather than as the
+    # thing that decides disposal: a session may not be forgotten sooner than the conversation in
+    # it would have been, and the guards — not the clock — are what hold a row that still has rows.
+    assert _window_days("session_owners") == 365
 
 
 # --- D-145: an age cutoff alone cannot dispose of a conversation row ---------------------------
@@ -519,10 +578,10 @@ def test_a_failure_part_way_through_keeps_what_the_sweep_already_removed() -> No
 def test_a_failed_table_does_not_starve_the_tables_after_it() -> None:
     """The outer per-table loop's own version of the fix above.
 
-    `_PRUNABLE` iterates `session_events`, `session_messages`, `tool_result_blobs`, `checkpoints` in
-    that order, and a `session_messages` failure used to propagate straight out of
-    `prune_expired_rows` before `tool_result_blobs` was ever reached — so a persistent problem
-    confined to one table stopped every table after it from being pruned at all, on every retry.
+    `_PRUNABLE` iterates `session_events`, `session_messages`, `tool_result_blobs`, `checkpoints`
+    and `session_owners` in that order, and a `session_messages` failure used to propagate straight
+    out of `prune_expired_rows` before `tool_result_blobs` was ever reached — so a persistent
+    problem confined to one table stopped every table after it from being pruned, on every retry.
     Injected the same way as the test above (`droppable_rows` failing on the fourth call), but this
     one asserts on the table that comes *after* the one that fails.
     """
@@ -1338,3 +1397,243 @@ def test_an_uncastable_timestamp_fails_the_pass_rather_than_disposing_of_anythin
 
     with pytest.raises(psycopg.DataError):
         asyncio.run(_run())
+
+
+# --- The ownership row: disposed of behind everything it keys, never in front of it ------------
+# `D-2026-08-27-a-session-nobody-can-reopen-is-disposable`. A `session_owners` row is what makes a
+# session reopenable at all (`api/deps.py::_rehydrate_session` 404s an id this table does not
+# hold), and it is also the row every session-scoped sweep starts from — so these pin both
+# directions: what must be gone before it may go, and that it does go once nothing is left.
+
+
+async def _clear_owner_fixtures() -> None:
+    """Empty the tables the ownership pass reads, so its global cap sees only this test's rows.
+
+    The same argument `_seed_expired_sessions` makes for clearing `session_messages`: the pass
+    selects candidates table-wide under a `LIMIT`, so a row another test left behind lands inside
+    the batch and shifts every count asserted here. The suite isolates one schema per run rather
+    than per test (`tests/pg.py`), and every test below seeds immediately before it prunes.
+    """
+    async with db.connection(settings.postgres_dsn) as conn:
+        async with conn.cursor() as cur:
+            for table in ("session_messages", "session_events", "session_turns", "session_owners"):
+                await cur.execute(f"DELETE FROM {table}")
+        await conn.commit()
+
+
+async def _seed_owner(session_id: str, *, age_days: int) -> None:
+    """One ownership row of the given age — what a client's first keystroke leaves behind."""
+    async with db.connection(settings.postgres_dsn) as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "INSERT INTO session_owners (session_id, owner, created_at) "
+                "VALUES (%s, 'oid-retention-test', now() - make_interval(days => %s))",
+                (session_id, age_days),
+            )
+        await conn.commit()
+
+
+async def _seed_message(session_id: str, *, age_days: int) -> None:
+    """One self-contained conversation row for that session, of the given age."""
+    async with db.connection(settings.postgres_dsn) as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "INSERT INTO session_messages (session_id, message, created_at) "
+                "VALUES (%s, %s, now() - make_interval(days => %s))",
+                (session_id, Jsonb(legacy_text("user", "old")), age_days),
+            )
+        await conn.commit()
+
+
+async def _seed_lease(session_id: str, *, expires_in_seconds: float) -> None:
+    """A turn lease on that session — live when positive, an abandoned crash artifact when not."""
+    async with db.connection(settings.postgres_dsn) as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "INSERT INTO session_turns (session_id, holder, expires_at) "
+                "VALUES (%s, 'worker-1', now() + make_interval(secs => %s)) "
+                "ON CONFLICT (session_id) DO UPDATE SET expires_at = EXCLUDED.expires_at",
+                (session_id, expires_in_seconds),
+            )
+        await conn.commit()
+
+
+async def _rows_left(table: str) -> set[str]:
+    """Which session ids that table still holds."""
+    async with db.connection(settings.postgres_dsn) as conn, conn.cursor() as cur:
+        await cur.execute(f"SELECT session_id FROM {table}")
+        return {str(row[0]) for row in await cur.fetchall()}
+
+
+async def _sweep(**windows: int) -> RetentionOutcome:
+    """One retention pass with exactly these windows stated and every other one off."""
+    monkeypatch = pytest.MonkeyPatch()
+    for name in (
+        "retention_session_events_days",
+        "retention_session_messages_days",
+        "retention_tool_results_days",
+        "retention_result_publications_days",
+        "retention_checkpoints_days",
+    ):
+        monkeypatch.setattr(settings, name, windows.get(name, 0))
+    try:
+        return await prune_expired_rows()
+    finally:
+        monkeypatch.undo()
+
+
+def test_a_session_nobody_can_reopen_is_forgotten_and_one_still_in_use_is_not() -> None:
+    """The policy in one pass: age is necessary, emptiness decides, and the lease rides along.
+
+    Four sessions, all four cases the rule has to separate:
+
+    - `gone` — created past the window, never a message. The abandoned draft the companion UI
+      creates on the first keystroke, which nothing has ever deleted: it is invisible in the
+      session list already (`_OWNER_LIST` drops a session with no messages), so the row is a
+      permanent 124 bytes nobody can reach except by an id they still remember.
+    - `stale-lease` — the same, plus the lease a SIGKILLed worker never released. It goes *with*
+      the ownership row, because a lease naming a session nothing can find is an orphan beyond both
+      `delete_session` and erasure.
+    - `history` — past the window, but its conversation is not, so the row that makes that
+      conversation reachable stays.
+    - `draft` — created minutes ago with nothing in it yet, which is what every session looks like
+      between the first keystroke and the first answer.
+    """
+
+    async def _run() -> tuple[RetentionOutcome, set[str], set[str]]:
+        await migrated_db_or_skip()
+        await _clear_owner_fixtures()
+        for session_id in ("gone", "stale-lease", "history"):
+            await _seed_owner(session_id, age_days=400)
+        await _seed_owner("draft", age_days=0)
+        await _seed_lease("stale-lease", expires_in_seconds=-172800)
+        await _seed_message("history", age_days=10)
+        outcome = await _sweep(retention_session_messages_days=365)
+        return outcome, await _rows_left("session_owners"), await _rows_left("session_turns")
+
+    outcome, owners, leases = asyncio.run(_run())
+    assert owners == {"history", "draft"}, (
+        "a session with a conversation, or one created inside the window, must stay reopenable"
+    )
+    assert leases == set(), "the lease of a forgotten session is an orphan nothing can reach"
+    assert outcome.deleted["session_owners"] == 2
+    assert outcome.deleted["session_turns"] == 1
+    assert outcome.owners_deferred == 0
+
+
+def test_a_live_turn_lease_protects_a_session_that_is_otherwise_disposable() -> None:
+    """A turn writes its transcript at the end, so mid-turn the lease is the only thing saying so.
+
+    A session resumed from an old, empty ownership row genuinely holds no rows anywhere while its
+    turn is running — the transcript is written by `api/runner._record_transcript` after the answer
+    exists — so without this guard the sweep would delete the ownership row of a conversation in
+    progress and leave a transcript nothing can find. The second half is the other direction and is
+    what keeps the rule narrow: once that same lease has expired it is a crash artifact, which
+    every other reader of the table already treats as dead, and it is collected.
+    """
+
+    async def _run() -> tuple[set[str], set[str], set[str]]:
+        await migrated_db_or_skip()
+        await _clear_owner_fixtures()
+        await _seed_owner("mid-turn", age_days=400)
+        await _seed_lease("mid-turn", expires_in_seconds=600)
+        await _sweep(retention_session_messages_days=365)
+        during = await _rows_left("session_owners")
+        await _seed_lease("mid-turn", expires_in_seconds=-1)
+        await _sweep(retention_session_messages_days=365)
+        return during, await _rows_left("session_owners"), await _rows_left("session_turns")
+
+    during, after, leases = asyncio.run(_run())
+    assert during == {"mid-turn"}, "the sweep deleted the ownership row of a running turn"
+    assert after == set(), "an expired lease is a crash artifact and must not hold the row forever"
+    assert leases == set()
+
+
+def test_a_conversation_pruned_this_pass_lets_its_session_be_forgotten_in_the_same_pass() -> None:
+    """The ordering hazard, pinned: `session_owners` is last in `_PRUNABLE` deliberately.
+
+    Retention prunes `session_messages` by age, so a session whose history goes in this pass is
+    empty by the time the ownership pass runs — and is disposed of in the same sweep. That is the
+    intended outcome rather than an accident of ordering: what is left at that point is a shell the
+    session list does not show and a resumed transcript would render blank, and keeping it would be
+    exactly the unbounded growth this policy closes. The direction that would be wrong is the other
+    one — the ownership row going *first*, which would put the conversation beyond erasure.
+    """
+
+    async def _run() -> tuple[RetentionOutcome, set[str], int]:
+        await migrated_db_or_skip()
+        await _clear_owner_fixtures()
+        await _seed_owner("expiring", age_days=400)
+        await _seed_message("expiring", age_days=400)
+        outcome = await _sweep(retention_session_messages_days=365)
+        return outcome, await _rows_left("session_owners"), await _remaining("expiring")
+
+    outcome, owners, messages = asyncio.run(_run())
+    assert messages == 0
+    assert owners == set()
+    assert outcome.deleted["session_messages"] == 1
+    assert outcome.deleted["session_owners"] == 1
+
+
+def test_graph_state_left_behind_keeps_the_ownership_row_that_finds_it() -> None:
+    """The reachability guard against the table that is not in `infra/sql` at all.
+
+    The checkpointer keys a turn's state by `thread_id`, which is the session id, and its window is
+    separate — so a deployment that states a conversation window and no checkpoint window keeps
+    graph state for sessions whose transcripts are gone. Deleting the ownership row there would put
+    that state beyond `leaver.erase_actor`, which reaches it only by selecting session ids out of
+    `session_owners`. With both windows stated the same pass removes the thread first and the
+    ownership row after it, which is the ordering `_PRUNABLE` encodes.
+    """
+
+    async def _run() -> tuple[set[str], set[str]]:
+        await migrated_db_or_skip()
+        await _create_checkpoint_tables()
+        await _clear_checkpoint_tables()
+        await _clear_owner_fixtures()
+        await _seed_owner("thread-left", age_days=400)
+        await _seed_thread("thread-left", age_days=400)
+        try:
+            await _sweep(retention_session_messages_days=365)
+            with_state = await _rows_left("session_owners")
+            await _sweep(retention_session_messages_days=365, retention_checkpoints_days=30)
+            return with_state, await _rows_left("session_owners")
+        finally:
+            await _clear_checkpoint_tables()
+
+    with_state, after = asyncio.run(_run())
+    assert with_state == {"thread-left"}, (
+        "an ownership row was deleted while the checkpointer still held the session's turn state, "
+        "which is the only way erasure can reach it"
+    )
+    assert after == set(), "once the thread is gone the session is a shell and may be forgotten"
+
+
+def test_the_ownership_pass_works_a_bounded_batch_and_reports_the_rest() -> None:
+    """The cap and its probe, for the reason the other two passes carry them.
+
+    A first pass against a deployment that has never pruned faces every abandoned draft it has ever
+    created. Capped, each pass commits a bounded amount; reported, an operator can tell a drained
+    backlog from a pass that stopped at its limit — a cap that is not reported makes a still-growing
+    table look bounded in every result this job returns.
+    """
+
+    async def _run() -> tuple[RetentionOutcome, set[str]]:
+        await migrated_db_or_skip()
+        await _clear_owner_fixtures()
+        for index in range(3):
+            await _seed_owner(f"capped-{index}", age_days=400)
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(settings, "retention_max_sessions_per_pass", 2)
+        try:
+            outcome = await _sweep(retention_session_messages_days=365)
+        finally:
+            monkeypatch.undo()
+        return outcome, await _rows_left("session_owners")
+
+    outcome, owners = asyncio.run(_run())
+    assert outcome.deleted["session_owners"] == 2, "the pass worked more rows than its cap allowed"
+    assert len(owners) == 1
+    assert outcome.owners_deferred == 1, (
+        "the pass stopped at its cap and reported nothing left, which reads as a bounded table"
+    )
