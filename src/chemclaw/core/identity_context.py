@@ -74,8 +74,15 @@ def reset_current_identity(tokens: tuple[object, object]) -> None:
 
 
 def get_current_actor() -> str | None:
-    """The Entra oid of the turn in flight, or None when there is no authenticated user."""
-    return _current_actor.get()
+    """The Entra oid of the turn in flight, or None when there is no authenticated user.
+
+    An empty string is treated as no actor (`... or None`): `agent/authz.require_actor` and
+    `authorize_trigger` gate on `is None` / `is not None`, and nothing constrains the contextvar to
+    be non-empty, so a context bound with `set_current_identity("", ...)` would otherwise return
+    `""` and pass the reject-if-absent rule as an authenticated user. Fail closed here, in the one
+    reader every gate shares, rather than at each of the five producers separately.
+    """
+    return _current_actor.get() or None
 
 
 def get_current_roles() -> frozenset[str]:
