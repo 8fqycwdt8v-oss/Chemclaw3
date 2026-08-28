@@ -208,6 +208,22 @@ topic).
 
 ## 4 — Operating it
 
+- [ ] **A storm behaviour whose deployment cannot run it scores FAIL, where the campaign's own rule
+      says NOT RUN** — [S], `src/chemclaw/cli/live_storm.py` family `T`,
+      `src/chemclaw/cli/storm_behaviours.py::t-calc-xtb-descriptors`. Measured 2026-08-28: this
+      deployment ships no `xtb` binary, so `compute_atomic_descriptors` and
+      `compute_surface_potential` are refused by the calc backend in its own words, and the check
+      scores FAIL. That is a true statement about the deployment and a misleading one about the
+      code — the campaign's verification rule is that anything not exercised is reported as **not
+      run**, never as passed and never as a failure of the thing it did not reach.
+      **Do not close this by reading the refusal's wording and calling it a pass**: a check that
+      turns a failure into a success when a message contains certain words is exactly the vacuous
+      shape `D-2026-08-28`'s storm audit removed nineteen of. The honest form is a *declared*
+      precondition the storm can check mechanically — `servers/calc`'s `/healthz` already lists
+      what it verified as `name@version` (`Chemclaw3-mcp`'s readiness contract), so a behaviour can
+      declare "needs the `xtb` binary" and the family can report NOT RUN against that reading.
+      Two behaviours need it today; the mechanism is what the row is for.
+
 - [ ] **Nothing in this repository has ever observed a connector job surviving a SIGKILLed
       bundle worker** — [M], `src/chemclaw/cli/live_storm.py::_chaos_worker_killed_mid_job`. The
       claim that durability lives in Temporal rather than in layer 1 rests on it, and the thirteen

@@ -474,16 +474,38 @@ BEHAVIOURS: list[Behaviour] = [
                 tool="compute_electronic_properties",
                 arguments={"smiles": "c1ccccc1", "solvent": "acetonitrile"},
             ),
-            # Bromobenzene for both descriptor tools, because a sigma-hole is what they are asked
-            # about and a molecule with no heavy halogen has none to find.
-            ToolCall(tool="compute_atomic_descriptors", arguments={"smiles": "Brc1ccccc1"}),
-            ToolCall(tool="compute_surface_potential", arguments={"smiles": "Brc1ccccc1"}),
             ToolCall(
                 tool="predict_site_reactivity",
                 arguments={"smiles": "Cc1ccccc1", "mode": "electrophilic", "top_n": 3},
             ),
         ],
         text="Frontier orbitals, the potential extrema and the Fukui ranking.",
+        think_seconds=0.2,
+    ),
+    # **Split out of `t-calc-electronic` because these two need a binary the others do not.**
+    # Both answer from `xtb` itself: the calc backend refuses them, in its own words, with
+    # "atomic polarisabilities, dispersion coefficients and atomic multipoles require the 'xtb'
+    # binary, which is not installed in this deployment. Nothing here approximates them: tblite
+    # exposes no atomic multipoles and no polarisability" — and it names
+    # `compute_electronic_properties` and `predict_site_reactivity`, which do not need it, as the
+    # alternatives. Kept in the catalogue rather than deleted, because a deployment that *does*
+    # ship the binary must still exercise them; separated so a run without it reports one honest
+    # capability gap instead of dragging two working tools' behaviour to FAIL alongside it.
+    #
+    # A run against a deployment with no `xtb` scores this FAIL, and that is a true statement about
+    # the deployment rather than about the code. Making the storm say NOT RUN instead needs a
+    # declared precondition it can check against the backend's readiness — a `BACKLOG.md` row, not
+    # a widened check, because a check that reads a refusal's wording and calls it a pass is the
+    # vacuous shape this family was just repaired to remove.
+    Behaviour(
+        name="t-calc-xtb-descriptors",
+        calls=[
+            # Bromobenzene for both descriptor tools, because a sigma-hole is what they are asked
+            # about and a molecule with no heavy halogen has none to find.
+            ToolCall(tool="compute_atomic_descriptors", arguments={"smiles": "Brc1ccccc1"}),
+            ToolCall(tool="compute_surface_potential", arguments={"smiles": "Brc1ccccc1"}),
+        ],
+        text="Sigma-hole descriptors for bromobenzene.",
         think_seconds=0.2,
     ),
     Behaviour(

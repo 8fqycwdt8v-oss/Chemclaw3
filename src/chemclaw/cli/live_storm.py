@@ -1248,6 +1248,7 @@ _T_DIRECT = (
     "t-safety-screen",
     "t-calc-properties",
     "t-calc-electronic",
+    "t-calc-xtb-descriptors",
     "t-calc-geometry",
     "t-calc-ledger",
     "t-calc-record",
