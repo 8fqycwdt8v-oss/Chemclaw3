@@ -6,9 +6,10 @@ working file, and discover which profiles exist. Every session-scoped route reso
 through `chemclaw.api.deps` before doing anything (404 for a non-owner, no existence leak).
 """
 
+import logging
 import uuid
 
-from fastapi import Depends, FastAPI, HTTPException, Request, UploadFile
+from fastapi import Depends, FastAPI, HTTPException, Request, Response, UploadFile
 
 from chemclaw.agent.attachments import STORE as ATTACHMENTS
 from chemclaw.agent.attachments import (
@@ -19,6 +20,7 @@ from chemclaw.agent.attachments import (
 )
 from chemclaw.agent.profiles import get_profile, registered_profile_names
 from chemclaw.agent.session import TurnSession
+from chemclaw.agent.session_store import SessionOwnerStore, encode_session_cursor
 from chemclaw.api import app as front_door
 from chemclaw.api.deps import CurrentSession, CurrentUser, resolve_session
 from chemclaw.api.schemas import (
@@ -28,8 +30,43 @@ from chemclaw.api.schemas import (
     TranscriptMessage,
     _transcript,
 )
-from chemclaw.api.state import SessionOwners, state
+from chemclaw.api.state import (
+    _WORKER_ID,
+    SessionOwners,
+    SessionTurns,
+    _claim_turn_slot,
+    _release_turn_claim,
+    _release_turn_slot,
+    state,
+)
 from chemclaw.core.config import settings
+from chemclaw.core.logging import log_event
+
+logger = logging.getLogger(__name__)
+
+# Where the next page's cursor is returned, because the body cannot carry it. `GET /sessions`
+# answers with a bare JSON array — the companion UI parses it as one — so an envelope
+# (`{"sessions": [...], "next": ...}`) would have broken every deployed client to add a field, and
+# a per-row field would have to be added to `SessionSummary`, which is a shape shared with the
+# transcript surface. A header is additive to both: a client that does not read it sees exactly
+# what it saw before, and one that does can page.
+#
+# A bare cursor rather than RFC 8288's `Link: <url>; rel="next"`, deliberately: this service is
+# reached through the companion UI's BFF, which maps `/api/sessions` onto `/sessions`, so any URL
+# this process built would name a path the browser cannot use. The cursor is the part that is
+# actually ours to state.
+_NEXT_CURSOR = "X-Next-Cursor"
+
+
+def _tombstone_owner() -> str:
+    """An owner string a deleted session's cached handle can be parked under, matching nobody.
+
+    Random per delete rather than one literal, so it cannot collide with a principal's `oid` in any
+    deployment, and truthy so `chemclaw.api.deps._owner_authorizes` compares it rather than falling
+    into the dev-mode "no recorded owner, so anyone" branch — an owner-less entry would make a
+    deleted conversation *more* reachable than an ordinary one.
+    """
+    return f"deleted:{uuid.uuid4().hex}"
 
 
 async def create_session(
@@ -68,8 +105,10 @@ async def create_session(
 async def list_sessions(
     request: Request,
     principal: CurrentUser,
+    response: Response,
+    after: str = "",
 ) -> list[SessionSummary]:
-    """The caller's own sessions, newest first — the conversation list.
+    """One page of the caller's own sessions, newest first — the conversation list.
 
     Without this a client that lost its local state (a new browser, cleared storage, a
     second device) could not find sessions it still owns: ids are minted server-side and
@@ -87,15 +126,45 @@ async def list_sessions(
     dates is not a conversation list — see `SessionSummary`. Sessions that were created and never
     used are not listed at all; the query that establishes the last activity is the same one that
     establishes there was any.
+
+    **`service_max_listed_sessions` is now the page, not the end of the list.** It always bounded
+    the answer, and nothing said so: a chemist with more conversations than the cap simply could
+    not reach the older ones from any client. `after` resumes strictly after the row a cursor
+    names, and `X-Next-Cursor` on a full page says there may be more — absent means there is not.
+    The cursor is a keyset, not an offset, because this list reorders itself while it is read (see
+    `encode_session_cursor`); a page boundary counted in rows would skip the conversations that
+    moved down and repeat the ones that moved up.
     """
     owners: SessionOwners | None = state(request).session_owners
     if owners is None:
         return []
+    # `page_for_owner` lives on the durable store rather than on the `SessionOwners` protocol,
+    # because resuming a listing is a property of a registry that can order and filter one — a
+    # front door handed some other registry through `create_app(owner_store=...)` can answer the
+    # first page and nothing further, and saying so is better than silently answering the first
+    # page again and leaving a client to page forever.
+    if isinstance(owners, SessionOwnerStore):
+        try:
+            rows = await owners.page_for_owner(principal.oid, after=after or None)
+        except ValueError as exc:  # a cursor this service did not mint
+            raise HTTPException(status_code=422, detail="not a session cursor") from exc
+    elif after:
+        raise HTTPException(
+            status_code=422, detail="this deployment's session registry cannot resume a listing"
+        )
+    else:
+        rows = await owners.list_for_owner(principal.oid)
+    if len(rows) == settings.service_max_listed_sessions:
+        # A full page is the only evidence there might be more — asking for one row beyond the
+        # ceiling to know for sure would cost every listing an extra row to answer a question the
+        # next request answers for free by coming back empty.
+        last_id, _, last_activity, _ = rows[-1]
+        response.headers[_NEXT_CURSOR] = encode_session_cursor(last_activity, last_id)
     return [
         SessionSummary(
             session_id=session_id, created_at=created_at, updated_at=updated_at, title=title
         )
-        for session_id, created_at, updated_at, title in await owners.list_for_owner(principal.oid)
+        for session_id, created_at, updated_at, title in rows
     ]
 
 
@@ -131,6 +200,101 @@ async def get_messages(
     """
     stored = await state(request).history.get_messages(session_id, state=live.session.state)
     return _transcript(stored, fetchable=await front_door.fetchable_refs(session_id))
+
+
+async def delete_session(
+    request: Request,
+    session_id: str,
+    principal: CurrentUser,
+) -> Response:
+    """Delete one conversation and everything keyed by it — the owner's own erasure.
+
+    **Authorized exactly as reading it is**, through the same `resolve_session` dependency the
+    transcript route uses — declared as a route dependency rather than as a parameter, the way the
+    attachment route does it, because this handler needs the *gate* and not the handle. That
+    identity is the whole design rather than a convenience: a
+    caller who cannot read a session must not be able to delete it, and the cheapest way to
+    guarantee that is to have one gate rather than two that can drift apart. So a session that does
+    not exist and a session that is somebody else's answer the same **404**, exactly as they do on
+    every other session-scoped route (`chemclaw.api.deps._refuse`): a 403 here would confirm which
+    ids exist, and turn a delete endpoint into an id oracle. The refusal is recorded server-side,
+    which is where that distinction survives.
+
+    This is *not* `make user-erase` (`chemclaw.agent.leaver`) at a smaller scope, and the difference
+    is who is asking. Erasure is an operator answering "someone left", scoped to a person, and it
+    reports the attributable rows it deliberately keeps. This is a chemist closing one conversation,
+    scoped to a session id, and it takes nothing that belongs to the person rather than to the
+    conversation — no memory, no preference, no subscription — nor anything from the retained tier:
+    the audit trail still records what this session's turns did, because a record that its subject
+    can delete is not a record.
+
+    **A turn in flight refuses with 409 rather than racing it.** The session's turn slot is claimed
+    the same way `POST /sessions/{id}/messages` claims it — the in-process lease first, then the
+    durable cross-process one — so a delete cannot land between a running turn's tool call and the
+    row that turn is about to write. Holding the slot for the duration is also what stops a turn
+    from *starting* while the sweep runs. The client's answer is the same 409 a second turn gets;
+    stopping the turn (`POST /sessions/{id}/turn/stop`) and deleting again is the way through.
+
+    The live in-process handle is not left behind: it is replaced by an entry no principal can
+    match, so this pod stops resolving the id at all rather than serving a conversation whose
+    durable half is gone (see `_tombstone_owner`).
+    """
+    front = state(request)
+    # Nothing may sit between this claim and the `try` — the same rule the turn route states: the
+    # reservation it takes has no expiry until `_start_turn_lease` starts one, which nothing here
+    # ever does, so only that `finally` gives it back.
+    slot = _claim_turn_slot(front.active_turns, session_id)
+    if slot is None:
+        raise HTTPException(
+            status_code=409,
+            detail="a turn is running on this session; stop it before deleting the session",
+        )
+    claims: SessionTurns | None = front.turn_claims
+    claimed = False
+    try:
+        lease = settings.service_turn_claim_lease_seconds
+        if claims is not None:
+            claimed = await claims.claim(session_id, _WORKER_ID, lease)
+            if not claimed:
+                raise HTTPException(
+                    status_code=409,
+                    detail="a turn is running on this session; stop it before deleting the session",
+                )
+        owners = front.session_owners
+        removed = (
+            await owners.delete_session(session_id) if isinstance(owners, SessionOwnerStore) else {}
+        )
+        # The durable rows are gone; the live handle in this process is not, and it is what
+        # `_resolve_session` consults *first*. Overwriting it with an owner no principal can equal
+        # is how the id stops resolving here — the cache has no invalidation channel and the LRU
+        # would otherwise keep serving a conversation whose transcript no longer exists, and let a
+        # new turn write messages under an id nothing can find again (every session-scoped sweep in
+        # this system starts from `session_owners`). Sibling pods learn the same way they learn
+        # about an erasure: on their next durable lookup.
+        front.live_sessions.add(session_id, TurnSession(session_id=session_id), _tombstone_owner())
+        log_event(
+            logger,
+            "session.deleted",
+            "deleted session %s for %s: %d durable row(s)",
+            session_id,
+            principal.oid or "-",
+            sum(removed.values()),
+            actor=principal.oid,
+            session=session_id,
+            rows=sum(removed.values()),
+        )
+    finally:
+        if claimed and claims is not None:
+            # Ordinarily a no-op: the sweep deleted this session's claim row inside its own
+            # transaction. It is here for the path where the sweep raised, so a failed delete does
+            # not leave the session refusing its owner's turns for a whole lease. Through the
+            # shielded release for the reason D-130 gives — this `finally` also runs when the
+            # caller is cancelled, and a bare `await` in a cancelled task raises at its first
+            # suspension point, so the release would start on every abandoned delete and finish on
+            # none.
+            await _release_turn_claim(claims, session_id)
+        _release_turn_slot(front.active_turns, session_id, slot)
+    return Response(status_code=204)
 
 
 async def upload_attachment(
@@ -225,6 +389,9 @@ def register(app: FastAPI) -> None:
     app.post("/sessions")(create_session)
     app.get("/sessions")(list_sessions)
     app.get("/sessions/{session_id}/messages")(get_messages)
+    app.delete("/sessions/{session_id}", status_code=204, dependencies=[Depends(resolve_session)])(
+        delete_session
+    )
     app.post("/sessions/{session_id}/attachments", dependencies=[Depends(resolve_session)])(
         upload_attachment
     )
