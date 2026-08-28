@@ -1,11 +1,11 @@
 # Live durable-job smoke
 
-Job `compute_reaction_energy` · workflow `calc-compute_reaction_energy-22c1d328a9716af6` · launched in 1.3s
+Job `compute_reaction_energy` · workflow `calc-compute_reaction_energy-54271e3b9664310b` · launched in 1.2s
 · Temporal `localhost:7233` · Postgres `user=chemclaw dbname=chemclaw host=localhost port=5432`
 
 | check | result | observed |
 | --- | --- | --- |
-| workflow reached COMPLETED | PASS | COMPLETED, started 2026-08-28T21:27:59+00:00 |
+| workflow reached COMPLETED | PASS | COMPLETED, started 2026-08-28T21:46:06+00:00 |
 | calculation cached in Postgres | PASS | 6 xtb* row(s) in calculation_results |
 | job recorded in Postgres | PASS | calc/compute_reaction_energy by admin@localhost |
 | duplicate launch rejoins the same run | PASS | id matches; cache rows 6 → 6 |
