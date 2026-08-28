@@ -81,6 +81,15 @@ topic).
   not spell the exact registered name would fail to authorize its own tool, making `plan_only`
   unusable — the worst outcome the gate's own docstring names). Until the declaration exists, the
   gate binds plan *content* only. Deliberately left as a feature rather than shipped as a heuristic.
+  **Re-measured against HEAD on 2026-08-28** and still true as written, which is what this file asks
+  of a row before it is worked. The amplification is now pinned rather than described:
+  `tests/test_plan_gate.py::test_an_approved_read_only_plan_authorizes_a_knowledge_graph_write` runs
+  the sequence, and its sibling measures the blast radius — every one of the 46 members of
+  `authz.side_effecting_tools()` this deployment enables executes under one approval of "look up the
+  melting point of aspirin", with **none** refused. Both assert the *insecure* behaviour on purpose,
+  the shape `tests/test_upstream_surface.py` uses for an accepted residual: whoever ships the
+  per-step declaration deletes them and writes their opposites, and the change that closes this row
+  is the change that turns them red.
 
 - [ ] **The unauthenticated `X-Chemclaw-Actor` header becomes durable attribution** — [M], and
       **narrower than this row used to claim**. It does not reach `job_records` or the audit trail:

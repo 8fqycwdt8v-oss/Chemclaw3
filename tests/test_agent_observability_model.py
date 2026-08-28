@@ -33,6 +33,7 @@ from chemclaw.agent.model_calls import (
     invalid_tool_calls,
     model_call_middleware,
 )
+from chemclaw.agent.tool_authz import FAILURE_CHARS
 from chemclaw.core.metrics import METRICS
 from chemclaw.core.turn_signals import ToolFailureSignal
 from tests.signals import collect_signals
@@ -396,6 +397,61 @@ def test_a_repaired_call_announces_no_failure() -> None:
 
     _, signals = asyncio.run(collect_signals(_drive))
     assert not [s for s in signals if isinstance(s, ToolFailureSignal)]
+
+
+def test_the_announced_failure_is_bounded_like_every_other_one_on_that_stream() -> None:
+    """The model's own output must not reach the turn's stream unbounded (2026-08-28 review).
+
+    `ToolFailureSignal.message` has one bound and it is 300 characters — `tool_authz.FAILURE_CHARS`,
+    applied by `failure_detail` to a raised failure and by `returned_failure_detail` to a returned
+    one, "short enough that an unexpected exception's text cannot flood the stream". The
+    announcement added here is the third producer of that field and had no bound at all: it sends
+    `call.error or call.arguments`, and while `invalid_tool_calls` deliberately bounds `arguments`
+    with `bounded_repr`, it leaves `error` as `str(...)` because until this change `error` only ever
+    reached a log line.
+
+    That is not a safe assumption about `error`. For the `openai_compatible` provider the shipped
+    chart uses, `langchain_core.output_parsers.openai_tools.parse_tool_call` builds the message as
+    "Function <name> arguments: <the argument document> are not valid JSON" — it **embeds the raw
+    argument document verbatim**, so the field the announcement prefers is exactly the one
+    carrying unbounded model output. A prompt injection that makes the model emit a large malformed
+    call therefore writes its whole payload onto the SSE stream every viewer of that turn reads,
+    past a bound the module beside it states as a rule.
+
+    The size below is a plausible malformed argument document, not a stress figure: it is what one
+    long tool call looks like when the model runs out of budget mid-JSON.
+    """
+    payload = "A" * 50_000
+    broken = AIMessage(
+        content="",
+        invalid_tool_calls=[
+            {
+                "name": "predict_pka",
+                "args": '{"smiles": "CC',
+                "id": "call-1",
+                "error": f"Function predict_pka arguments:\n\n{payload}\n\nare not valid JSON.",
+                "type": "invalid_tool_call",
+            }
+        ],
+    )
+
+    async def _handler(request: ModelRequest[Any]) -> Any:
+        return ModelResponse(result=[broken])
+
+    async def _drive() -> Any:
+        return await RepairInvalidToolCalls().awrap_model_call(
+            _request([HumanMessage("what is the pKa")], [_NamedTool("predict_pka")]), _handler
+        )
+
+    _, signals = asyncio.run(collect_signals(_drive))
+    failures = [s for s in signals if isinstance(s, ToolFailureSignal)]
+    assert failures, "nothing was announced; the case this bound applies to did not happen"
+    longest = max(len(f.message) for f in failures)
+    assert longest <= FAILURE_CHARS + 200, (
+        f"{longest} characters reached the turn's stream: the model's own output is announced "
+        f"unbounded, while every other producer of this field is clamped at {FAILURE_CHARS}"
+    )
+    assert payload not in failures[0].message
 
 
 def test_a_clean_reply_costs_no_extra_model_call() -> None:

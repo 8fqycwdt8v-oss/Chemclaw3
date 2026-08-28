@@ -94,8 +94,9 @@ from typing import Any, cast
 from langchain.agents.middleware import AgentMiddleware, ModelRequest
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 
-from chemclaw.agent.audit import UNKNOWN_TOOL, bounded_repr
+from chemclaw.agent.audit import UNKNOWN_TOOL, bounded_name, bounded_repr
 from chemclaw.agent.llm_provider import classify_model_failure
+from chemclaw.agent.tool_authz import FAILURE_CHARS
 from chemclaw.core.config import settings
 from chemclaw.core.logging import log_event
 from chemclaw.core.metrics import Metrics
@@ -254,20 +255,6 @@ def _messages_of(response: Any) -> Sequence[BaseMessage]:
     return cast(Sequence[BaseMessage], result)
 
 
-def _bounded_name(value: object) -> str:
-    """The tool name the model emitted, bounded by the audit budget and deliberately not repr'd.
-
-    Bounded because nothing upstream limits what a model may call a tool and this string reaches a
-    log field and a sentence sent back to the model. **Not** repr'd, unlike the argument document
-    beside it: `_metric_label` compares this against the names the request actually bound, and a
-    quoted name matches none of them — which would clamp every label to `UNKNOWN_TOOL` and lose the
-    distinction the clamp exists to keep.
-    """
-    limit = settings.agent_audit_max_arg_chars
-    text = str(value)
-    return text if len(text) <= limit else text[:limit] + "…"
-
-
 @dataclass(frozen=True, slots=True)
 class BrokenCall:
     """One tool call the model emitted whose arguments could not be parsed.
@@ -301,7 +288,7 @@ def invalid_tool_calls(response: Any) -> list[BrokenCall]:
     """
     return [
         BrokenCall(
-            name=_bounded_name(call.get("name") or UNKNOWN_TOOL),
+            name=bounded_name(call.get("name") or UNKNOWN_TOOL),
             error=str(call.get("error") or ""),
             arguments=bounded_repr(call.get("args")),
         )
@@ -319,7 +306,7 @@ def valid_tool_calls(response: Any) -> list[str]:
     the name beside it is a reasonable length.
     """
     return [
-        _bounded_name(call.get("name") or UNKNOWN_TOOL)
+        bounded_name(call.get("name") or UNKNOWN_TOOL)
         for message in _messages_of(response)
         if isinstance(message, AIMessage)
         for call in (message.tool_calls or [])
@@ -557,7 +544,12 @@ def _report_repair(request: ModelRequest[Any], repaired: Any) -> None:
     # refuses by *raising*. Nothing refused this call. It is a fault in the model's output, and
     # calling it a refusal would put a gate's name on a turn no gate touched.
     for call in failures:
-        detail = call.error or call.arguments
+        # Bounded by the same `FAILURE_CHARS` every other producer of this field uses, and the
+        # bound is on `detail` rather than on the whole sentence so the sentence always survives.
+        # `error` is preferred and is the *unbounded* half: `invalid_tool_calls` clamps `arguments`
+        # with `bounded_repr` and leaves `error` as the provider gave it, which for an
+        # OpenAI-compatible endpoint quotes the entire malformed argument document back.
+        detail = (call.error or call.arguments)[:FAILURE_CHARS]
         record_tool_failure(
             call.name,
             f"the model's arguments for this call did not parse, twice: {detail}",

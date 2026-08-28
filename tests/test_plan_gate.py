@@ -719,3 +719,90 @@ def test_a_teardown_spend_lands_without_awaiting(
         "an abandoned turn's approval stayed live; 'drop the connection after the tools ran' "
         "re-authorizes a second turn under one human decision"
     )
+
+
+# --- the open hole: an approval binds the plan's *identity*, never the plan's *tools* -------------
+#
+# `docs/planning/BACKLOG.md` §1 carries this as the top-priority row, and the file's own rule is
+# that a row is a claim about the code which goes stale. The two tests below are that claim,
+# re-measured against HEAD instead of re-read: they were written by the 2026-08-28 adversarial
+# review, run against `enforce_plan_approval` as it stands, and they pass — so the row is still
+# true and still workable as written.
+#
+# They deliberately pin the **insecure** behaviour, which is the only shape a demonstration of an
+# accepted risk can take. `tests/test_message_pairing.py` and `tests/test_upstream_surface.py`
+# already use it for the same purpose: an absence asserted so that closing the hole turns the test
+# red in the change that closes it, rather than leaving a claim nobody re-derives. Whoever ships
+# the per-step tool declaration the row describes deletes these two and writes their opposites.
+
+
+_READ_ONLY_PLAN = ["look up the melting point of aspirin"]
+
+
+def test_an_approved_read_only_plan_authorizes_a_knowledge_graph_write(
+    approvals: InMemoryPlanApprovalStore,
+) -> None:
+    """OPEN HOLE (BACKLOG §1): the approval binds the plan's hash, never the tool being called.
+
+    The amplification in one sequence. A chemist is shown a one-line plan whose only step is a
+    lookup, approves it, and `propose_knowledge_note` — a branch pushed to the knowledge repo —
+    then executes inside the same turn on the strength of that approval. Nothing in
+    `enforce_plan_approval` compares `request.tool_call["name"]` to the plan it authorizes: the
+    whole decision is `approval_stands(session_id, plan_identity(lines))`, and `plan_identity` is a
+    hash of the todo *contents*.
+
+    Why it is worth a test rather than a paragraph: the gate's own docstring, the module docstring
+    and D-167 all describe it as gating "the act rather than the session", and it does — the act is
+    just not the act the person approved. Combined with the unframed injection surfaces the
+    security review names (connector output, `find_past_jobs` rationales, ELN notes), untrusted text
+    that lands in an approved turn reaches the full write surface while the chemist believes they
+    approved a lookup.
+
+    **Not fixed here, deliberately.** The row explains why: the plan is prose todos with no per-step
+    tool declaration, so binding an approval to "its tools" is a `write_todos` schema change plus a
+    column on `plan_approvals`, and the cheap heuristic (scanning todo prose for tool names) was
+    rejected in both directions. This test fails the day that lands, which is the point of it.
+    """
+
+    async def _run() -> bool:
+        session = _Session("amplification")
+        await _set_plan(session, _READ_ONLY_PLAN)
+        await _approve(approvals, session)
+        return await _call("propose_knowledge_note", session)
+
+    assert asyncio.run(_run()), (
+        "the plan gate now binds an approval to the tools its plan names — BACKLOG.md §1 is "
+        "closed, so delete this test and its sibling and assert the refusal instead"
+    )
+
+
+def test_one_read_only_approval_opens_every_side_effecting_tool_in_the_deployment(
+    approvals: InMemoryPlanApprovalStore,
+) -> None:
+    """OPEN HOLE (BACKLOG §1): the blast radius is the whole write surface, measured not argued.
+
+    The test above shows one tool. This one asks how many, because "an approval authorizes any
+    state-changing tool" is a claim about a *set* and the set is derived at runtime from whatever
+    connectors and templates a deployment has enabled (`authz.side_effecting_tools`). Every member
+    of it executes under the same one-line read-only approval — the in-process knowledge writes, the
+    memory writes, and every durable job a bundle declares.
+
+    The count is printed into the failure message rather than pinned as a number: it moves with the
+    enabled manifests, and a number written here would be the stale-count failure
+    `D-2026-08-01-the-count-lives-in-the-test-not-in-the-prose` names. What is pinned is that the
+    refused set is **empty**.
+    """
+
+    async def _run() -> tuple[list[str], int]:
+        session = _Session("amplification-surface")
+        await _set_plan(session, _READ_ONLY_PLAN)
+        await _approve(approvals, session)
+        gated = sorted(side_effecting_tools())
+        refused = [tool for tool in gated if not await _try_call(tool, session)]
+        return refused, len(gated)
+
+    refused, total = asyncio.run(_run())
+    assert not refused, (
+        f"{len(refused)} of {total} side-effecting tools are now refused under an approval for a "
+        "read-only plan; BACKLOG.md §1 is closed and this test should assert that instead"
+    )

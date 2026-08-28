@@ -40,6 +40,7 @@ repository rather than of a function, and that no type checker can see:
 | `test_metric_declarations.py` | every metric name a call site uses is declared |
 | `test_docstring_paths.py` | every module path a docstring or comment points at is a file that exists |
 | `test_prose_contract.py` | the agent's prose names only capability the agent actually has |
+| `test_live_lane_secret_file.py` | the live lane's credential file is created owner-only, driven out of `infra/live/processes.sh` itself |
 
 ## A structural test must be shown failing
 
