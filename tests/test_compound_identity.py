@@ -357,6 +357,87 @@ def test_an_organic_salt_still_loses_its_counterion() -> None:
     assert compound_id("[Na+].[O-]C(=O)c1ccccc1") == compound_id("OC(=O)c1ccccc1")
 
 
+def test_a_solvate_is_not_its_solvent() -> None:
+    """The defect `D-2026-08-27-a-solvate-is-not-its-solvent` closes, stated as it was reported.
+
+    An ethylamine/THF solvate has no counterion to discard, so the old gate let `FragmentParent`
+    break the tie by molecular weight and the solvate became *THF*: one `compound_id`, one note and
+    one fingerprint row shared with the neat solvent. Both fragments are asserted to survive,
+    because "the ids differ" alone would also pass if the pipeline had started deleting the
+    solvent instead of the solute.
+    """
+    solvate = standard_smiles("CCN.C1CCOC1")
+    assert compound_id("CCN.C1CCOC1") != compound_id("C1CCOC1")
+    assert compound_id("CCN.C1CCOC1") != compound_id("CCN")
+    assert set(solvate.split(".")) == {standard_smiles("C1CCOC1"), standard_smiles("CCN")}
+
+
+def test_the_tie_break_no_longer_depends_on_which_solvent_it_is() -> None:
+    """Why "keep the larger fragment" is not merely wrong here but *unstable*.
+
+    Under the old rule the surviving compound was a property of the pair rather than of the
+    compound: the same solute standardized to itself beside a small solvent and to the *solvent*
+    beside a bulky one, so swapping THF for toluene silently changed which substance the record was
+    about. Both solvates must now name the same solute.
+    """
+    in_thf = standard_smiles("Cc1ccccc1O.C1CCOC1")
+    in_toluene = standard_smiles("Cc1ccccc1O.Cc1ccccc1")
+    solute = standard_smiles("Cc1ccccc1O")
+    assert solute in in_thf.split(".")
+    assert solute in in_toluene.split(".")
+
+
+def test_the_solvate_rule_changed_no_shipped_reagent() -> None:
+    """An absence test: exactly three shipped reagents lose a fragment, and they are the salts.
+
+    The solvate rule is a *narrowing* of D-2026-08-01's counterion rule and must not re-litigate
+    it, so the claim to pin is which entries of the shipped table the pipeline shrinks at all.
+    Measured over `core/reagents.py`'s 68 distinct structures, before and after: three, all of them
+    the salts that rule deliberately collapses (LDA onto diisopropylamide, HATU and TBTU onto their
+    uronium cations). A fourth name appearing here means a solvate or a co-crystal is being deleted
+    again; one of these three disappearing means the counterion rule has been broken from the other
+    side, which is the direction nobody watches.
+    """
+    shipped = {r.smiles: r.name for r in map(resolve_compound_name, known_names()) if r}
+    assert len(shipped) == 68, "the shipped table changed; re-measure before editing the set below"
+    shrunk = {
+        name
+        for smiles, name in shipped.items()
+        if Chem.MolFromSmiles(standard_smiles(smiles)).GetNumAtoms()
+        < Chem.MolFromSmiles(smiles).GetNumAtoms()
+    }
+    assert shrunk == {"lithium diisopropylamide", "HATU", "TBTU"}
+
+
+def test_an_organic_salt_keeps_one_identity_however_its_proton_was_drawn() -> None:
+    """Keeping a species whole must not make its identity depend on how it was spelled.
+
+    `Uncharger` used to run only on the path that also stripped, which was harmless while a
+    kept-whole species was always a metal salt nobody writes two ways. A solvate rule puts organic
+    ion pairs on that path, and nicotine bitartrate is written both as an ion pair and as a neutral
+    co-crystal — so leaving the two coupled would have split one substance into two notes, trading
+    this defect for the one D-2026-07-31 exists to prevent.
+    """
+    assert compound_id("C[NH+]1CCC[C@H]1c1cccnc1.[O-]C(=O)[C@H](O)[C@@H](O)C(=O)O") == compound_id(
+        "CN1CCC[C@H]1c1cccnc1.OC(=O)[C@H](O)[C@@H](O)C(=O)O"
+    )
+
+
+def test_a_bare_inorganic_anion_is_not_neutralized_into_another_reagent() -> None:
+    """The guard on the neutralization, and it is not hypothetical — this was built and reverted.
+
+    `rxnfp._standardize_species` standardizes a reaction one `.`-separated token at a time, so
+    `standardize` meets `[OH-]` and `[BH4-]` *alone*, without the counterion that explains their
+    charge. Letting `Uncharger` run on them returns water and **borane** — D-2026-08-01's NaOH and
+    NaBH4 defect reappearing one ion at a time, on the live fingerprint path rather than in the
+    reagent table where that ADR's own tests watch for it. Measured: it moved a pinned DRFP
+    similarity in `tests/test_rxnfp.py` from 0.7937 to 0.7969, which is how it was caught.
+    """
+    assert standard_smiles("[OH-]") == "[OH-]"
+    assert standard_smiles("[BH4-]") == "[BH4-]"
+    assert standard_smiles("[O-]C([O-])=O") != standard_smiles("OC(O)=O")
+
+
 def test_standardization_is_recorded_in_the_fingerprint_definition() -> None:
     """Rows indexed under an older notion of sameness must fall out, not be ranked against new ones.
 
