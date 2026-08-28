@@ -199,6 +199,22 @@ topic).
 
 ## 4 — Operating it
 
+- [ ] **Nothing in this repository has ever observed a connector job surviving a SIGKILLed
+      bundle worker** — [M], `src/chemclaw/cli/live_storm.py::_chaos_worker_killed_mid_job`. The
+      claim that durability lives in Temporal rather than in layer 1 rests on it, and the thirteen
+      Temporal test modules all run against a server where no worker is ever killed. E2's
+      precondition now waits for the worker the broker says is *executing* the job
+      (`running_activity_worker`, D-2026-08-28-a-ceiling-that-does-not-cover-its-own-tail), so the
+      check can no longer pass having interrupted nothing — but it has still never *passed*, and
+      what remains unmeasured is the recovery itself: after the SIGKILL, does the activity's
+      heartbeat timeout expire, does a restarted worker take attempt 2, and does the job reach
+      COMPLETED. That needs a bundle worker in its own process to kill, which is `make live-storm`'s
+      lane. The offline suite holds the precondition
+      (`tests/test_durable_observability.py::test_a_wrapper_that_is_running_is_not_a_worker_that_is_working`)
+      and the ending a dead worker produces when nobody comes back
+      (`..::test_a_job_whose_bundle_worker_never_answers_still_leaves_a_row`), which is the half a
+      test server can see.
+
 - [ ] **`mock_llm._validate` green-lights behaviours the running agent then rejects as unknown
       tools** — [M], measured 2026-08-28 by the storm's new `T` family on its first live run.
       `available_tool_names()` reports 99 and `advertised_tool_names(None)` reports 91, and

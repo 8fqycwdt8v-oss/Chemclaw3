@@ -270,14 +270,65 @@ def queue_wait_timeout() -> timedelta:
     return timedelta(seconds=settings.activity_queue_wait_seconds)
 
 
-async def publish_note(activity: Any, args: list[Any]) -> str:
-    """Run a note-publish activity with the shared queue/timeout/retry discipline."""
+def best_effort_close_timeout(start_to_close_seconds: float) -> timedelta:
+    """The whole-call bound a best-effort step gets, as `schedule_to_close_timeout`.
+
+    **The one rule, written once, because it had two implementations and two omissions.** A step
+    whose failure is swallowed must still be *bounded*, or "never fail the job" becomes "hold the
+    finished job open until somebody notices": `queue_wait_timeout()` alone starts counting when a
+    worker picks the task up, so an unserved background queue — a fleet scaled to zero, a rolling
+    update, a queue named in config and served by no pod — is a wait nothing ends. `notify.py`
+    measured that at 75 s against a 30 s start-to-close, and `connector_job.py::_record_run`
+    measured it again at 150 s; both fixed it the same way and both wrote the doubling out by hand,
+    which is why the two steps *between* them still had no bound at all.
+
+    Doubled rather than given a knob of its own, which is the choice both call sites already made:
+    the wait is the step's own work plus whatever queue delay a healthy fleet has, and a knob of
+    its own would be one more pair to keep in step, per step.
+
+    The cost is stated rather than discovered, and it is the same one `_record_run`'s docstring
+    accepts: a whole-call bound caps every attempt *together*, so a step configured for more
+    attempts than fit in the window reaches fewer of them. That is the right trade only where
+    nothing downstream reads the step's output synchronously — which is what "best effort" means
+    here — and it is why `publish_note`'s must-deliver caller (`report_workflow`) passes no bound
+    and keeps its full `note_write_max_attempts`.
+
+    Args:
+        start_to_close_seconds: The step's own per-attempt budget.
+
+    Returns:
+        The `schedule_to_close_timeout` to pass beside it.
+    """
+    return timedelta(seconds=start_to_close_seconds * 2)
+
+
+def note_publish_bound() -> timedelta:
+    """The whole-call bound on a best-effort note publish — see `best_effort_close_timeout`."""
+    return best_effort_close_timeout(settings.note_write_timeout_seconds)
+
+
+def result_publish_bound() -> timedelta:
+    """The whole-call bound on a best-effort result publish — see `best_effort_close_timeout`."""
+    return best_effort_close_timeout(settings.result_publish_timeout_seconds)
+
+
+async def publish_note(
+    activity: Any, args: list[Any], close_timeout: timedelta | None = None
+) -> str:
+    """Run a note-publish activity with the shared queue/timeout/retry discipline.
+
+    `close_timeout` is the best-effort caller's whole-call bound (`note_publish_bound`). `None` —
+    the must-deliver caller, `report_workflow` — keeps the full hour of `queue_wait_timeout()`
+    deliberately: its note *is* the workflow's result, so waiting out a rolling update is better
+    than dropping it.
+    """
     result: str = await workflow.execute_activity(
         activity,
         args=args,
         task_queue=settings.background_task_queue,
         start_to_close_timeout=timedelta(seconds=settings.note_write_timeout_seconds),
         schedule_to_start_timeout=queue_wait_timeout(),
+        schedule_to_close_timeout=close_timeout,
         retry_policy=note_publish_retry(),
     )
     return result
@@ -297,7 +348,7 @@ async def publish_note_best_effort(activity: Any, args: list[Any], label: str) -
     history would otherwise re-count every failure the workflow has ever seen.
     """
     try:
-        await publish_note(activity, args)
+        await publish_note(activity, args, note_publish_bound())
     except ActivityError:
         workflow.logger.warning("knowledge-note publish failed for %s", label)
         if not workflow.unsafe.is_replaying():
@@ -326,7 +377,13 @@ async def publish_result_best_effort(activity: Any, args: list[Any], label: str)
             args=args,
             task_queue=settings.background_task_queue,
             start_to_close_timeout=timedelta(seconds=settings.result_publish_timeout_seconds),
+            # Both, and the smaller wins — which at the shipped numbers is the whole-call bound, an
+            # hour of queue wait being unable to elapse inside four minutes. The general one stays
+            # because it is the one that becomes live again for a deployment that raises
+            # `result_publish_timeout_seconds` past `activity_queue_wait_seconds`, and a bound that
+            # is only redundant at today's defaults is not a bound to delete.
             schedule_to_start_timeout=queue_wait_timeout(),
+            schedule_to_close_timeout=result_publish_bound(),
             retry_policy=BAD_DATA_RETRY,
         )
     except ActivityError:

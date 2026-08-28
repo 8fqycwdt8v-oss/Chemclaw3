@@ -74,8 +74,9 @@ class JobRecord(BaseModel):
     # connector's domain payload and this is a fact about the run.
     calc_refs: list[str] = Field(default_factory=list)
     # Wall-clock seconds the run took, measured by the wrapper across the child workflow. The row
-    # said what ran and why and nothing about what it cost, so a two-second xTB call and a six-hour
-    # DFT run were one row shape and one increment of `chemclaw_jobs_started_total` — on the most
+    # said what ran and why and nothing about what it cost, so a two-second xTB call and a
+    # four-hour CREST search were one row shape and one increment of `chemclaw_jobs_started_total`
+    # — on the most
     # expensive thing this system does, "how many" was the only number anyone had. Not node-hours:
     # parallelism belongs to the launcher and none reports it back yet. Runtime is the factor
     # node-hours multiplies, and it is measurable today.

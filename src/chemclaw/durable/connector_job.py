@@ -55,15 +55,18 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.core.metrics_bridge import degraded
     from chemclaw.durable.job_record import JobRecord, note_with_run_provenance, record_job
     from chemclaw.durable.memory_jobs import publish_memory_note_activity
-    from chemclaw.durable.notify import notify_session_best_effort
+    from chemclaw.durable.notify import notify_session_best_effort, pushback_bound
     from chemclaw.durable.publish_results import JobPublishInput, publish_job_result
     from chemclaw.kg.note import Note
     from chemclaw.memory.jobs import SynthesisUnit
 
 from chemclaw.durable.publish import (
     BAD_DATA_RETRY,
+    best_effort_close_timeout,
+    note_publish_bound,
     publish_note_best_effort,
     publish_result_best_effort,
+    result_publish_bound,
 )
 from chemclaw.durable.registry import durable_workflow
 
@@ -290,7 +293,28 @@ def child_workflow_id(suffix: str) -> str:
     needs, and neither of them available from anything else the workflow can see.
     """
     info = workflow.info()
-    return f"{info.workflow_id}-{info.run_id}-{suffix}"
+    return child_workflow_id_for(info.workflow_id, info.run_id, suffix)
+
+
+def child_workflow_id_for(workflow_id: str, run_id: str, suffix: str) -> str:
+    """The same id, spelled for a caller *outside* the workflow that owns it.
+
+    `child_workflow_id` above can only run inside a workflow, because that is where
+    `workflow.info()` is. An observer — the chaos check in `cli/live_storm.py`, which has to look
+    at the *child* to know whether a bundle's worker is actually executing anything — has the
+    parent's id and run id from the broker and no way to reach that function. Restating the format
+    at the observer would be a second spelling of an id core owns, which is the failure
+    `connectors/queues.py` exists one level up to prevent.
+
+    Args:
+        workflow_id: The parent execution's workflow id.
+        run_id: The parent execution's run id — what makes a re-execution's child a new id.
+        suffix: What this child is to its parent (`"run"` for the wrapper's own child).
+
+    Returns:
+        The child's workflow id.
+    """
+    return f"{workflow_id}-{run_id}-{suffix}"
 
 
 def job_record_for(
@@ -372,11 +396,40 @@ def failed_job_record(
 # On the light queue: this wrapper does no work itself — it starts a child on the
 # connector's own queue and waits — so it belongs with the many light workers, not the few
 # heavy ones. The *capability* is heavy; this is not (D-006).
-# The four things the wrapper still does *after* its child returns, each one activity's worth of
-# wall clock: write the durable record (D-157), offer the composite to the results store, PR-gate
-# the note, push back to the launching session. They are why the wrapper is not a pass-through, and
-# why anyone giving it an execution timeout must leave room for them.
-_FINISH_STEPS = 4
+
+
+def record_run_bound() -> timedelta:
+    """The whole-call bound on the durable record write — see `publish.best_effort_close_timeout`.
+
+    Named rather than inlined for the reason `notify.pushback_bound` is: `wrapper_execution_timeout`
+    has to be able to *read* what its four post-child steps may take, and a bound only the call site
+    knows is one the sum cannot see.
+    """
+    return best_effort_close_timeout(settings.job_record_timeout_seconds)
+
+
+def finish_tail_budget() -> timedelta:
+    """The wall clock the four things the wrapper does after its child returns may take, summed.
+
+    They are: write the durable record (D-157), offer the composite to the results store, PR-gate
+    the note, push back to the launching session. Each is one activity on the background queue, each
+    is best-effort, and each therefore carries a `schedule_to_close_timeout` of its own — so this is
+    a sum of four real bounds rather than a count multiplied by a number.
+
+    **It used to be `4 * activity_timeout_seconds`, and `activity_timeout_seconds` bounds none of
+    the four.** Two of them carried their own whole-call bound already; the other two carried only
+    `queue_wait_timeout()` — an hour by default, at the front of *every* attempt — so the wrapper's
+    headroom was two orders of magnitude short of what its own tail could legitimately spend.
+    Measured on 2026-08-28 against a live broker with the background queue unserved and the
+    settings scaled down (child ceiling 10 s, every step 1 s, queue wait 8 s): the fixture job
+    completed, its record was written, and the wrapper was killed by its own ceiling at **14.1 s**
+    — exactly `10 + 4 * 1` — while the result publish was still waiting for a worker. The run ended
+    `TIMED_OUT` with no `job_completed` push-back, which is precisely what `wrapper_execution_
+    timeout` below exists to prevent, arrived at through the arithmetic instead of through a caller.
+
+    Summed rather than maxed because the four run in sequence.
+    """
+    return record_run_bound() + result_publish_bound() + note_publish_bound() + pushback_bound()
 
 
 def wrapper_execution_timeout() -> timedelta:
@@ -394,6 +447,9 @@ def wrapper_execution_timeout() -> timedelta:
     right to — the child is already bounded. This exists for the template path, which wants a
     ceiling on the step and must not make it the child's own.
 
+    The headroom is `finish_tail_budget()` — the four post-child steps' own bounds, summed — rather
+    than a count times an unrelated setting. See that function for what the old arithmetic cost.
+
     **It stays the deployment's global number even for a job that lowered its own ceiling, and
     that is deliberate.** The relation this function owes is one-directional — strictly above
     whatever the child gets — and since a declared ceiling can only *lower* the child's
@@ -404,10 +460,7 @@ def wrapper_execution_timeout() -> timedelta:
     still bounded by the fleet-wide number — but the child, which is where the work is, fails
     first and the wrapper's own failure path then runs, which is the outcome that matters.
     """
-    return timedelta(
-        seconds=settings.connector_job_timeout_seconds
-        + settings.activity_timeout_seconds * _FINISH_STEPS
-    )
+    return timedelta(seconds=settings.connector_job_timeout_seconds) + finish_tail_budget()
 
 
 def child_execution_timeout(declared: float | None) -> timedelta:
@@ -591,9 +644,12 @@ class ConnectorJobWorkflow:
             # through its own activity surfaces as `ActivityFailure` — a name deliberately absent
             # from `_BAD_DATA_TYPES`, since that list names the errors themselves. Measured: the
             # identical `ValueError` costs 1 attempt at an activity boundary and **5 child
-            # executions** here, 15.4 s of backoff, six executions under one parent id. On a
-            # that is five DFT submissions for one unparameterised basis set, and the D-011 cache
-            # cannot help because a failed run stores nothing.
+            # executions** here, 15.4 s of backoff, six executions under one parent id. On a CREST
+            # search that is five conformer searches for one unparameterised solvent, and the D-011
+            # cache cannot help because a failed run stores nothing. (The sentence naming a DFT
+            # submission here lost its subject when the tier it named was deleted —
+            # `D-2026-08-26-semiempirical-is-the-whole-tier`; the measurement is unchanged and the
+            # example is now the longest job this system actually runs.)
             #
             # Nothing is lost by dropping it: the child's own activities already carry
             # `BAD_DATA_RETRY`, so genuine transients are retried where they can be classified, and
@@ -767,9 +823,7 @@ class ConnectorJobWorkflow:
                 # nothing downstream reads synchronously. Passing the general
                 # `schedule_to_start_timeout` here as well would be dead: an hour of queue wait
                 # cannot elapse inside a minute of schedule-to-close.
-                schedule_to_close_timeout=timedelta(
-                    seconds=settings.job_record_timeout_seconds * 2
-                ),
+                schedule_to_close_timeout=record_run_bound(),
                 retry_policy=BAD_DATA_RETRY,
             )
         except ActivityError:

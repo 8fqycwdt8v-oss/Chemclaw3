@@ -36,6 +36,7 @@ from chemclaw.cli.live_storm import (
     TurnResult,
     _bad_call_was_reported,
     _completed_without_dying,
+    _freed_without_the_lease,
     _knee,
     noise,
     percentiles,
@@ -420,3 +421,30 @@ def test_every_declared_behaviour_is_reached_by_some_check() -> None:
         "Wire a check that asserts something about them, or delete them — a catalogue entry that "
         "no run reaches is coverage the report cannot claim and a reader will assume."
     )
+
+
+# ------------------------------------------------------- the disconnect verdict (E1)
+
+
+def test_a_disconnected_session_is_judged_against_the_lease_not_a_guessed_second() -> None:
+    """The wait a detached turn costs is not a failure; the wait a lapsed lease costs is.
+
+    `D-2026-08-27-a-disconnect-is-a-detach-not-a-stop` made a client disconnect detach the *view*
+    of a turn instead of stopping it, so the session goes on refusing until the turn it is already
+    running actually ends. E1's bar was five seconds, written when the stream's `finally` ended the
+    turn, and the `[[f-slow]]` behaviour it drives thinks for eight — so the check asserted a design
+    this system no longer has. The 2026-08-28 campaign measured 0.2 s, 10.4 s and 25.3 s against a
+    60 s lease and reported two of the three as regressions.
+    """
+    lease = 60.0
+    # A turn that outlives the old bar and frees the session well inside the lease: the shipped
+    # behaviour, and the case that used to be reported as a failure.
+    assert _freed_without_the_lease([409, 409, 409, 200], 10.4, lease)
+    # A release that never happened, so the session only freed itself when the claim expired.
+    assert not _freed_without_the_lease([409, 200], 61.0, lease)
+    # Never refused at all: the probe arrived after the detached turn was over, so this run says
+    # nothing about the guard and must not be counted as evidence that it works.
+    assert not _freed_without_the_lease([200], 0.2, lease)
+    # Still refusing when the probe budget ran out.
+    assert not _freed_without_the_lease([409, 409], 59.0, lease)
+    assert not _freed_without_the_lease([], 0.0, lease)

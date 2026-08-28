@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+from temporalio.api.enums.v1 import PendingActivityState
 from temporalio.client import WorkflowExecutionStatus
 
 from chemclaw.connectors.jobs import build_job_tool, job_workflow_id
@@ -45,6 +46,7 @@ from chemclaw.core.db import _redact
 from chemclaw.core.db import connection as db_connection
 from chemclaw.core.logging import configure_logging
 from chemclaw.core.temporal_client import connect as temporal_connect
+from chemclaw.durable.connector_job import child_workflow_id_for
 
 logger = logging.getLogger(__name__)
 
@@ -701,14 +703,100 @@ async def _workflow_status(workflow_id: str) -> WorkflowExecutionStatus | None:
     return description.status
 
 
+async def running_activity_worker(job_id: str) -> str | None:
+    """The identity of the worker *currently executing* an activity of this job, or None.
+
+    **"Is the job mid-flight" is not "is the workflow RUNNING", and reading the second for the
+    first is why the kill check below has never proved anything.** A `ConnectorJobWorkflow` is
+    RUNNING from the instant it is started — on *core's* queue, before the bundle's worker has been
+    handed anything at all — so a check that kills the bundle worker as soon as the wrapper reports
+    RUNNING can interrupt nothing and still record its precondition as met. One storm run reported
+    `at kill: FAILED`, which is the same read failing in the other direction: the poll broke on the
+    first status of any kind, terminal included.
+
+    The broker knows the difference and will say so. A pending activity in `STARTED` with a
+    heartbeat behind it is being executed *now*, by the worker whose identity it carries — measured
+    on 2026-08-28 against a local server: `state=PENDING_ACTIVITY_STATE_STARTED`, `attempt=1`,
+    `last_heartbeat_time` set, `last_worker_identity="11336@vm"`. Returning the identity rather
+    than a bool is what lets the check say *which* worker it then killed, so "the killed process
+    was the one holding the work" is recorded rather than assumed.
+
+    The activity lives in the **child**, not in the wrapper, so this resolves the child's id from
+    the parent's execution through core's own `child_workflow_id_for` rather than restating the
+    format here.
+
+    Args:
+        job_id: The wrapper's workflow id, as `job_workflow_id` derives it.
+
+    Returns:
+        The worker identity, or None when nothing of this job is executing on a worker right now
+        (it has not started, it is between activities, or it is over).
+    """
+    client = await temporal_connect()
+    parent = await client.get_workflow_handle(job_id).describe()
+    if parent.status is not WorkflowExecutionStatus.RUNNING:
+        return None
+    child = await client.get_workflow_handle(
+        child_workflow_id_for(job_id, parent.run_id or "", "run")
+    ).describe()
+    for pending in child.raw_description.pending_activities:
+        started = pending.state == PendingActivityState.PENDING_ACTIVITY_STATE_STARTED
+        if started and pending.HasField("last_heartbeat_time"):
+            return str(pending.last_worker_identity)
+    return None
+
+
+def _freed_without_the_lease(codes: Sequence[int], waited: float, lease: float) -> bool:
+    """Whether a disconnected session freed itself by *ending its turn* rather than by lapsing.
+
+    Three conditions, and the third is the one this harness keeps having to add. The session must
+    end up answering (`200`); the wait must not reach the lease, which is the observable difference
+    between an explicit release and an expiry; and a `409` must have been seen at all, or the probe
+    arrived after the detached turn was already over and measured nothing about the guard.
+
+    **The bar is the lease and not a flat five seconds, because the design changed under this
+    check.** `D-2026-08-27-a-disconnect-is-a-detach-not-a-stop` made a disconnect detach the view
+    rather than stop the turn, so the session is *expected* to refuse for as long as the turn it is
+    already running takes. Measured across the 2026-08-28 campaign against the old five-second bar:
+    0.2 s, 10.4 s and 25.3 s on three runs, all with a 60 s lease, two of them reported as failures
+    for behaving exactly as designed.
+
+    Pure, like every other predicate whose output this harness quotes as a finding, so the rule can
+    be checked on a diff instead of only on a lane.
+
+    Args:
+        codes: The status codes the re-POST probe collected, in order.
+        waited: Seconds from the disconnect to the first non-409 answer.
+        lease: `service_turn_claim_lease_seconds`, the expiry this must beat.
+
+    Returns:
+        Whether the session freed itself the way the current design says it does.
+    """
+    return bool(codes) and codes[-1] == 200 and waited < lease and 409 in codes
+
+
 async def _chaos_client_disconnect() -> Finding:
-    """E1 · a client that walks away mid-turn must free the session at once, not after the lease.
+    """E1 · a disconnected session must free itself when its turn ends, not when a lease expires.
 
     The CHAOS-1 regression, made permanent. The 2026-07 load test measured 63 seconds before a
-    disconnected session accepted a new turn — the full `service_turn_claim_lease_seconds` — because
-    nothing released the claim when the generator was closed. `api/routes/turns.py` now releases
-    both the in-process slot and the durable claim in the stream's `finally`, which runs on client
-    disconnect; that is the claim, and this is the measurement of it.
+    disconnected session accepted a new turn — the full `service_turn_claim_lease_seconds` —
+    because nothing released the claim when the generator was closed.
+
+    **What the release now waits for is the turn, and this check used to assert otherwise.** Its
+    threshold was five seconds, on the stated ground that the stream's `finally` releases both
+    guards "on client disconnect". `D-2026-08-27-a-disconnect-is-a-detach-not-a-stop` retired that:
+    a disconnect *detaches the view*, the turn runs on a pump of its own to its real end, its
+    answer lands in the transcript, and both guards release there. So a session is expected to
+    answer 409 for as long as the turn it is already running takes — the `[[f-slow]]` behaviour
+    below thinks for eight seconds, which is more than the old threshold allowed. Measured across
+    the 2026-08-28 campaign: accepted after 0.2 s, 10.4 s and 25.3 s on three runs, all with a
+    60 s lease. Against the five-second bar the last two read as regressions in a system behaving
+    exactly as designed, and the first passed for the wrong reason — it never saw a 409 at all,
+    because the turn was over before the probe arrived.
+
+    So the bar is the **lease**, which is what the release must not be waiting for, and a 409 has
+    to have been observed at all — a run that never saw one measured nothing, and the harness's own
+    rule is that a check which cannot detect its own vacuous pass is the thing to fix.
 
     Measured as time-to-accept rather than as an inspection of the lock, because a lock that is
     released and a session that answers are different statements and only the second one is what a
@@ -746,16 +834,21 @@ async def _chaos_client_disconnect() -> Finding:
         waited = time.monotonic() - started
 
     lease = settings.service_turn_claim_lease_seconds
+    guarded = 409 in codes
     return Finding(
         family="E",
         name="a disconnected session accepts a new turn without waiting out the lease",
-        # Five seconds, not "half the lease": the claim is that the release is *explicit*, and an
-        # explicit release is an order of magnitude away from a lease expiry, not a factor of two.
-        # A threshold at lease/2 would have passed a release that never happened on a lane whose
-        # lease was configured short.
-        ok=codes[-1] == 200 and waited < 5.0,
-        observed=f"accepted after {waited:.1f}s (lease is {lease}s); status codes {codes[:4]}",
-        detail="CHAOS-1 regression: this was 63 s before the claim was released on disconnect",
+        ok=_freed_without_the_lease(codes, waited, lease),
+        observed=(
+            f"accepted after {waited:.1f}s (lease is {lease}s, the detached turn thinks for ~8s); "
+            f"status codes {codes[:4]}"
+        ),
+        detail=(
+            "CHAOS-1 regression: this was 63 s, the whole lease, before the release was explicit"
+            if guarded
+            else "the session never answered 409 — the turn was over before the probe, so this "
+            "measured nothing about the guard"
+        ),
     )
 
 
@@ -768,9 +861,13 @@ async def _chaos_worker_killed_mid_job() -> Finding:
     with SIGSTOP and resumes it, which tests a *stall*; this kills the process outright and starts
     a new one, which is what a pod eviction does.
 
-    The workflow's state at the moment of the kill is reported, not assumed. A job that had already
-    completed would make this check pass having interrupted nothing — the same vacuous shape as an
-    audit chain that verifies over zero rows.
+    **What was true at the moment of the kill is reported, not assumed, and the thing reported had
+    to change.** It was the *wrapper's* status, which is RUNNING from the instant the job is
+    launched — on core's queue, before `worker-calc` holds anything — so the precondition was met
+    by a kill that interrupted nothing, the same vacuous shape as an audit chain that verifies over
+    zero rows. It is now the identity of the worker the broker says is *executing* an activity of
+    this job (`running_activity_worker`), so the check knows it killed the process holding the
+    work, and says which one.
 
     **The recovery latency is the deliverable, not the pass.** A SIGKILLed worker leaves its
     activity in `Started` against a worker identity that no longer exists, and Temporal has no
@@ -789,19 +886,28 @@ async def _chaos_worker_killed_mid_job() -> Finding:
     launch = asyncio.create_task(
         tool(params_type(**_CHAOS_PAYLOAD), "storm chaos: SIGKILL the connector worker mid-job")
     )
-    # Poll for RUNNING and kill the instant it is, rather than sleeping a guessed interval. A fixed
-    # sleep has to be long enough for the workflow to start and short enough that the job has not
-    # finished, and nothing guarantees those windows overlap — on this job at `quick` level they
-    # did not. Polling removes the guess from the front half; `standard` level removes it from the
-    # back half; and `at_kill` below still records what was actually true, because a check that
-    # cannot detect its own vacuous pass is the thing this harness keeps having to fix.
-    at_kill: WorkflowExecutionStatus | None = None
-    for _ in range(100):
+    # Poll until the bundle's worker is *executing* something for this job, and kill the instant
+    # it is. A fixed sleep has to be long enough for the workflow to start and short enough that
+    # the job has not finished, and nothing guarantees those windows overlap — on this job at
+    # `quick` level they did not.
+    #
+    # **What is polled for is the whole point, and it used to be the wrong thing.** This waited for
+    # the *wrapper* to report RUNNING, which it does from the instant it is started, on core's
+    # queue, before `worker-calc` has been handed anything — so the kill could land before there
+    # was any work to interrupt while the check recorded its precondition as met. The loop also
+    # broke on the first status of *any* kind, so a job that had already died reported
+    # `at kill: FAILED` and the check reported that it had proved nothing, correctly, for the
+    # second reason rather than the first. `running_activity_worker` asks the broker the question
+    # this check's title claims to have arranged: which worker is executing an activity of this
+    # job right now.
+    held_by: str | None = None
+    for _ in range(300):
         with contextlib.suppress(Exception):  # not started yet reads as "not found"
-            at_kill = await _workflow_status(workflow_id)
-        if at_kill is not None:
+            held_by = await running_activity_worker(workflow_id)
+        if held_by is not None:
             break
         await asyncio.sleep(0.2)
+    at_kill = await _workflow_status(workflow_id)
 
     await asyncio.to_thread(_lane, "processes.sh", "restart", "worker-calc")
     with contextlib.suppress(Exception):
@@ -820,13 +926,14 @@ async def _chaos_worker_killed_mid_job() -> Finding:
     recovered = time.monotonic() - killed_at
     recorded = await _scalar("select count(*) from job_records where job_id = %s", (workflow_id,))
 
-    interrupted = at_kill == WorkflowExecutionStatus.RUNNING
+    interrupted = held_by is not None and at_kill == WorkflowExecutionStatus.RUNNING
     return Finding(
         family="E",
         name="a job survives its connector worker being SIGKILLed mid-flight",
         ok=interrupted and final == WorkflowExecutionStatus.COMPLETED and bool(recorded),
         observed=(
-            f"at kill: {at_kill.name if at_kill else 'not found'}; "
+            f"at kill: {at_kill.name if at_kill else 'not found'}, "
+            f"activity held by {held_by or 'nobody'}; "
             f"after restart: {final.name if final else 'never terminal'} "
             f"{recovered:.0f}s later (heartbeat timeout is "
             f"{settings.xtb_job_heartbeat_timeout_seconds}s); job_records rows: {recorded}"
@@ -834,7 +941,7 @@ async def _chaos_worker_killed_mid_job() -> Finding:
         detail=(
             "the dead worker is detected by the heartbeat timeout and nothing sooner"
             if interrupted
-            else "the job was not still running when the worker died — this proved nothing"
+            else "no worker was executing this job when the kill landed — this proved nothing"
         ),
     )
 
