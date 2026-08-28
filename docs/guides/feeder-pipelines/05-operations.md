@@ -133,12 +133,16 @@ deliberately not per-source, because two corpora containing the same molecule ar
 *labeller* is the bottleneck — a different fault, in a different pod, from a corpus that is not
 landing at all.
 
-**Metrics: know what is not there.** `chemclaw_ingest_records_total{source,outcome}` is emitted by the
-ELN sync, the document sync and the labelling pass (which reports itself as `source="labels"`, its own
-stage). **The corpus drain emits no metric of its own** — its counters live in `CorpusReport` (`read`,
-`recorded`, `skipped`) in the activity's logs and in Temporal's history. So the corpus half of a
-feeder is watched through `/schedules`, the row counts above and the job's own `verify` stage, and a
-dashboard built only on `chemclaw_ingest_*` will show a flat line for a healthy corpus feed.
+**Metrics.** `chemclaw_ingest_records_total{source,outcome}` is emitted by the ELN sync, the
+document sync, the labelling pass (which reports itself as `source="labels"`, its own stage) and the
+corpus drain, under the **data source's** name. Two outcomes, and they partition the rows a page read:
+`ingested` is a row whose record phase was written, `rejected` is one dropped for want of a usable
+SMILES, key or citation. The drain has nothing answering to the `skipped` the other passes emit, so
+it emits no third series rather than a permanently flat zero.
+
+`rejected` climbing is the number that says a feeder regressed — it is `CorpusReport.skipped`, and
+before it had a series the only place to see it was the activity's log line and Temporal's history.
+Watch it beside `/schedules`, the row counts above and the job's own `verify` stage.
 
 ### 2.4 Is the embedding the right one? — the probe nothing else does
 

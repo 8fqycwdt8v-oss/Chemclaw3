@@ -1284,11 +1284,13 @@ def test_every_declared_tool_composite_is_published_by_a_real_tool_call(
 
 
 def test_asking_the_same_composite_twice_is_one_record(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A tool composite has no cache key, so its identity is the request that produced it.
+    """A tool composite has no cache key, so its identity is the result it measured.
 
-    The job hook answers this with the workflow id, which is itself derived from the job and its
-    arguments; without a workflow the same derivation is the route plus a hash of the validated
-    arguments. Two identical questions must therefore collapse to one row on the outbox's
+    The job hook answers this with the workflow id, which is derived from the job and its
+    arguments; without a workflow the derivation is the route plus a hash of what the tool
+    returned, because a request is not a measurement
+    (`D-2026-08-28-a-composite-is-identified-by-what-it-measured`). Two identical questions that
+    computed the same answer must therefore collapse to one row on the outbox's
     `ON CONFLICT DO NOTHING`, while a second temperature must not — it is a second measurement.
     """
     calc_tools = _calc_stack(monkeypatch)
@@ -1372,4 +1374,115 @@ def test_every_projector_is_claimed_by_exactly_one_hook() -> None:
         "only through the tool hook. Undeclared: "
         f"{sorted(derived - set(TOOL_COMPOSITES))}; stale: "
         f"{sorted(set(TOOL_COMPOSITES) - derived)}"
+    )
+
+
+# --- what a tool composite's identity actually is ------------------------------------------------
+#
+# The two tests below are the pair `D-2026-08-28-a-composite-is-identified-by-what-it-measured.md`
+# was written from. Both drive the real tool surface, for this file's stated reason: a ref derived
+# by a helper the test calls itself proves nothing about the ref a tool call produces.
+
+
+def test_a_sentinel_default_and_the_value_it_stands_for_are_one_measurement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two spellings of one question must not mint two records of one measurement.
+
+    `_composite_ref` used to hash the request. That is exact for a *literal* default — pydantic
+    fills an omitted argument in, so omitting it and passing it hash alike — and wrong for a
+    **sentinel** default, which both tool composites use: `predict_logd(ph=None)` means 7.4 and
+    `compute_thermochemistry(temperature_k=0.0)` means 298.15, so the argument that reaches the
+    hook is a placeholder for the value rather than the value. Measured on the old derivation:
+    ph `None` -> `#1677c5556d3891f4` against ph `7.4` -> `#a357791989b0e1fe`, and temperature
+    `0.0` -> `#44005f1f6014fab5` against `298.15` -> `#f93f5448d1dfed3b` — four refs for two
+    measurements, each pair a duplicate row in every results store this deployment writes to.
+    """
+    calc_tools = _calc_stack(monkeypatch)
+    queued = _publishing(monkeypatch)
+
+    async def _thermo_twice() -> None:
+        manager = calc_tools.server._tool_manager
+        await manager.call_tool("compute_thermochemistry", {"smiles": "CCO"})
+        await manager.call_tool(
+            "compute_thermochemistry", {"smiles": "CCO", "temperature_k": 298.15}
+        )
+
+    asyncio.run(_thermo_twice())
+    refs = [r.calc_ref for r in queued if r.payload_kind == "ThermochemistryResult"]
+    assert len(refs) == 2
+    assert refs[0] == refs[1], (
+        "the tool resolves `temperature_k=0.0` to 298.15 before it computes anything, so the "
+        "sentinel and the value it stands for are one measurement and must address one record"
+    )
+
+    async def _logd_twice() -> None:
+        manager = calc_tools.server._tool_manager
+        await manager.call_tool("predict_logd", {"smiles": "CC(=O)Nc1ccc(O)cc1"})
+        await manager.call_tool("predict_logd", {"smiles": "CC(=O)Nc1ccc(O)cc1", "ph": 7.4})
+
+    queued.clear()
+    asyncio.run(_logd_twice())
+    logd = [record.calc_ref for record in queued if record.payload_kind == "LogdResult"]
+    assert len(logd) == 2 and logd[0] == logd[1], (
+        "`ph=None` is the tool's own spelling of pH 7.4; the two must address one record"
+    )
+
+
+def test_a_composite_recomputed_by_a_changed_calculator_is_not_dropped_as_a_duplicate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other direction, and the one that loses science rather than duplicating it.
+
+    The outbox's identity is `(sink, calc_ref, schema_version)` with `ON CONFLICT DO NOTHING`, and
+    a tool composite carries neither a `calc_version` nor a `params_hash` into it. So a ref derived
+    from the request alone is the same string after a calculator change, an epoch bump or a
+    re-embedded starting geometry — and the *different* answer the re-run produced is dropped on
+    the way in, silently, leaving the store pinned to the first computation forever. Driven with
+    the calculation server answering differently the second time, which is what all three of those
+    look like from this side.
+    """
+    from tests.calc_server_fake import FAKE_VERSION, install
+    from tests.calc_server_fake import FakeCalcServer as Fake
+
+    server = Fake()
+    install(monkeypatch, server)
+
+    def _shifted(arguments: dict[str, Any]) -> dict[str, Any]:
+        """The same molecule, a different pKa — one calculator revision, from the caller's side."""
+        return {
+            "calc_version": FAKE_VERSION,
+            "smiles": arguments["smiles"],
+            "method": "GFN2-xTB/alpb-water",
+            "pka": 9.9,
+            "deprotonation_energy_kcal": 320.0,
+            "uncertainty": 1.6,
+            "site": "acid",
+        }
+
+    import chemclaw.connectors.calc.server.app  # noqa: F401  installs the hook, as a pod does
+    import chemclaw.connectors.calc.server.tools as calc_tools
+    from chemclaw.science.calc.store import InMemoryStore
+
+    monkeypatch.setattr(calc_tools, "default_store", lambda: InMemoryStore())
+    queued = _publishing(monkeypatch)
+
+    async def _before_and_after() -> None:
+        manager = calc_tools.server._tool_manager
+        await manager.call_tool("predict_logd", {"smiles": "CC(=O)Nc1ccc(O)cc1"})
+        server.overrides["predict_pka"] = _shifted
+        # A fresh cache, or the changed calculator would never be reached at all.
+        monkeypatch.setattr(calc_tools, "default_store", lambda: InMemoryStore())
+        await manager.call_tool("predict_logd", {"smiles": "CC(=O)Nc1ccc(O)cc1"})
+
+    asyncio.run(_before_and_after())
+
+    records = [record for record in queued if record.payload_kind == "LogdResult"]
+    assert len(records) == 2, "both calls must reach the queue"
+    assert records[0].payload["log_d"] != records[1].payload["log_d"], (
+        "the fixture is not expressing a changed calculator; the assertion below would be vacuous"
+    )
+    assert records[0].calc_ref != records[1].calc_ref, (
+        "two different measurements sharing one ref means the second is dropped by the outbox's "
+        "ON CONFLICT DO NOTHING and the results store keeps the superseded number"
     )

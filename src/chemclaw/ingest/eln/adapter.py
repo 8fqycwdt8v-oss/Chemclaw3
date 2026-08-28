@@ -7,6 +7,7 @@ identical no matter which ELN is wired. There is no universal ELN abstraction �
 per source (docs/planning/DEFERRED.md: generalize only from a third source).
 """
 
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from logging import Logger
 from pathlib import Path
@@ -157,6 +158,68 @@ class BoundedFetch(Protocol):
         ...
 
 
+@runtime_checkable
+class RefusingFetch(Protocol):
+    """An adapter that refused something before the sync could ever see it, and can say what."""
+
+    def fetch_refusals(self) -> dict[str, str]:
+        """Entry id -> why the last `fetch_new_entries` refused it — entries it never returned."""
+        ...
+
+
+def _wrapper_chain(adapter: object) -> Iterator[object]:
+    """`adapter` and everything it wraps, outermost first — where a capability is looked for.
+
+    **The chain, not the object handed over**, and that distinction is the whole reason this
+    exists. The registry always returns `DatedIngest(...)` and the durable sync wraps that again in
+    `_BoundedIngest`; a `runtime_checkable` Protocol is structural, so a wrapper that does not
+    redeclare a method simply does not have it. Asking the outermost object alone answered `False`
+    for every source in every deployment — see `fetch_was_truncated`, which is the case that found
+    it, and `D-2026-08-28-a-refusal-is-recorded-by-the-pass-not-by-the-fetch`, which found the same
+    gap one wrapper further out. A wrapper exposes what it wraps through the public `inner` and
+    satisfies this by doing nothing.
+
+    The visited set is not defensiveness about a cycle anyone would write: it is what keeps a
+    mistaken `inner` returning `self` from hanging a sync run rather than failing it.
+
+    One walk rather than one per capability: there are two now, and the subtle half — the chain and
+    the cycle guard — is identical in both. What differs is only which Protocol the caller tests
+    for, which it does with an ordinary `isinstance` over what this yields.
+    """
+    seen: set[int] = set()
+    candidate: object | None = adapter
+    while candidate is not None and id(candidate) not in seen:
+        seen.add(id(candidate))
+        yield candidate
+        candidate = getattr(candidate, "inner", None)
+
+
+def fetch_refusals(adapter: object) -> dict[str, str]:
+    """What `adapter`'s last fetch refused outright; empty if it refuses nothing or cannot say.
+
+    **Only the fetch knows these**, which is what makes them different from every other refusal in
+    a sync run. A file that would not parse, or one that arrived after the cursor carrying an older
+    timestamp, is turned away *inside* `fetch_new_entries`: it becomes no `RawEntry`, so the sync's
+    own reject-and-continue can never see it and the rejection ledger would have no row for a
+    record somebody will ask about.
+
+    Everything the sync *can* see it records itself, from the one `except` that knows how to word a
+    refusal — which is why this is deliberately narrow rather than "the adapter's rejections".
+    An adapter that answered here with entries it also returned would file each refusal twice, and
+    an adapter that mapped its whole fetch to find them would pay for entries the chunk is about to
+    truncate away (`D-2026-08-28-a-refusal-is-recorded-by-the-pass-not-by-the-fetch`: measured at
+    0.30-0.32 s per fetch over 5,000 entries, re-paid by every chunk of a backfill).
+
+    Optional rather than a method on `ElnAdapter` for `fetch_was_truncated`'s reason: a warehouse
+    adapter's `WHERE` clause turns nothing away by name, so `{}` is the true answer for it and a
+    method every adapter had to implement would only be a way to get it wrong.
+    """
+    for candidate in _wrapper_chain(adapter):
+        if isinstance(candidate, RefusingFetch):
+            return candidate.fetch_refusals()
+    return {}
+
+
 def fetch_was_truncated(adapter: object) -> bool:
     """Whether `adapter`'s last fetch was cut short by its own page limit; `False` if it cannot say.
 
@@ -176,20 +239,11 @@ def fetch_was_truncated(adapter: object) -> bool:
     returns `DatedIngest(...)`, and a `runtime_checkable` Protocol is structural: a wrapper that
     does not redeclare a method simply does not have it. So this read `False` for every source in
     every deployment, including the warehouse adapter that implements `fetch_truncated` precisely
-    so the workflow would come back for the truncated remainder. The capability belongs to the
-    adapter, so the question has to reach it — the walk below is that rule, and a wrapper that
-    exposes what it wraps through the public `inner` satisfies it by doing nothing.
-
-    The visited set is not defensiveness about a cycle anyone would write: it is what keeps a
-    mistaken `inner` returning `self` from hanging a sync run rather than failing it.
+    so the workflow would come back for the truncated remainder. `_wrapper_chain` is that rule.
     """
-    seen: set[int] = set()
-    candidate: object | None = adapter
-    while candidate is not None and id(candidate) not in seen:
-        seen.add(id(candidate))
+    for candidate in _wrapper_chain(adapter):
         if isinstance(candidate, BoundedFetch):
             return candidate.fetch_truncated()
-        candidate = getattr(candidate, "inner", None)
     return False
 
 

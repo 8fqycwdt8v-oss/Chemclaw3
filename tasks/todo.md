@@ -1,122 +1,80 @@
-# Consolidate the memory landscape, then close what the audit found
+# Audit: the two data seams (ingest in, publish out)
 
-**Session:** 2026-08-28 · branch `claude/kemplaw-memory-investigation-lj1fzg`
+Branch `audit-ingest`, worktree only. Four already-measured BACKLOG rows, each re-measured
+against HEAD before it was worked.
 
-A deep investigation of every memory in this system (model context, turn state, transcript,
-scratchpad, durable memories, preferences, observations, knowledge) produced four measured
-defects and one consolidation. Four parallel audits verified each against HEAD and against a live
-Postgres; every claim below was re-checked by hand before being queued.
+## 1. The ORD pre-flight maps the whole fetch, once per drain chunk — CONFIRMED
 
-## A — the context policy: the budget is a trigger, not a control
+Re-measured on this HEAD, 5,000 synthetic ORD exports built from the shipped
+`data/eln-exports/ord/ord-2026-001.json`, three runs:
 
-- [x] A1 `agent_keep_last_conversation_groups` -> `ge=0`, default `0` (no group floor).
-      Measured at the shipped defaults, 2,000 prose groups: retained goes 1,944 -> 99,954 tokens
-      against a 100,000 budget. The regression the `max()` arm exists to prevent stays closed:
-      20 x 60kB groups still cut to 90,366, not 180,180.
-- [x] A2 Correct the four measurably false sentences (compaction heading, `trigger` field,
-      `apply` docstring, and `core/config/agent.py`'s "raising N no longer raises what a request
-      can cost" — off by 50x).
-- [x] A3 `.env.example` mirrors the new default.
-- [x] A4 Test: the budget binds at the shipped defaults; a floor still bites when a deployment
-      sets one.
+    run 0: total 0.969s  _unmappable 0.317s (32.7%)  63 us/entry
+    run 1: total 1.712s  _unmappable 0.304s (17.8%)  61 us/entry
+    run 2: total 0.851s  _unmappable 0.320s (37.6%)  64 us/entry
 
-## B — erasure returns a false green
+The row's 0.374 s / 75 us / ~26% stands (this sandbox is a little faster). `_unmappable`
+maps every entry the fetch returns; `_BoundedIngest` truncates to `eln_sync_batch_size`
+*after* the adapter returns, so a 100k backfill re-maps 100k entries per chunk.
 
-- [x] B1 A digest mailbox row is keyed `digest-<owner>` and has no `session_owners` row, so
-      `_ERASE`'s session_events arm cannot match it: a departing person's unread digests survive
-      while the report prints `session_events: 0`. Erase them, both actor spellings.
-- [x] B2 The completeness test's actor vocabulary is a hardcoded six names; `audit_anchors.reseal_by`
-      is a seventh and escapes it. Teach the vocabulary the name and classify the table.
+- [x] Root cause: the refusal *recording* lives in the adapter, which knows neither which
+      entries the chunk will keep nor its own registry source name (row 3, same cause).
+- [x] Move it to `sync_entries`, which maps each entry exactly once, already builds the
+      reason string, and takes `source`. The adapter *reports* its fetch-level refusals
+      through an optional protocol, exactly as `BoundedFetch`/`fetch_was_truncated` already do.
+- [x] `record_refusals` upserts with `executemany` instead of a Python loop.
 
-## C — one rule per table, in one place
+## 2. A tool composite publishes twice and pins to its first computation — CONFIRMED, both halves
 
-- [x] C1 `_RETAINED` implies "refused": three of the seven retained tables say *nothing bounds it,
-      no decision on record* while the same argument governs all seven. Fix the reasons and derive
-      the test from `_RETAINED` instead of hardcoding four names.
-- [x] C2 `store_vectors`' disposal reason states a deployment fact, not a decision; `scratchpad.py`
-      logs two tables where `setup()` made one.
-- [x] C3 `STORE_TABLES` has no upstream-derived backstop (the checkpointer's does). A LangGraph
-      minor adding a store table would escape both registers with every test green.
-- [x] C4 `session_owners` disposal silently requires `retention_tool_results_days`: with only a
-      messages window set, no session that ever called a tool is disposable. Make it visible.
+- [x] Half A measured: `predict_logd` ph=None -> `#1677c5556d3891f4`, ph=7.4 ->
+      `#a357791989b0e1fe`; `compute_thermochemistry` 0.0 -> `#44005f1f6014fab5`,
+      298.15 -> `#f93f5448d1dfed3b`. Same measurement, two refs.
+- [x] Half B measured against Postgres: same ref, changed document, second enqueue writes 0 rows.
+- [x] Fix: a composite's identity is **what it measured**, not what was asked.
 
-## D — the landscape itself
+## 3. `LEDGER_SOURCE` is a constant where the schema documents a registry source name — CONFIRMED
+- [x] Closed by 1: the sync passes the registry name; the constant is deleted.
 
-- [x] D1 `infra/sql/README.md`: `bo_campaigns` reads "nothing bounds it" where the code refuses it
-      and a test pins the refusal; the Disposal legend delegates to a BACKLOG row that no longer
-      exists.
-- [x] D2 The chart's retention example omits one of the five windows.
-- [x] D3 Planning files: a row with its own trigger filed in BACKLOG; two pairs of rows describing
-      one subject from two files; four stale anchors (one names a class that does not exist, and a
-      docstring in `src/` repeats it).
-- [x] D4 ADR + ledger row.
+## 4. The corpus drain is the one ingest pass with no metric — CONFIRMED
+- [x] `chemclaw_ingest_records_total` emitted from `drain_corpus`, `source` naming the data source.
 
-## Verification plan
+## 5. Found while fixing 1 — a wrapper that hides the capability it wraps
 
-`make lint type test` green with Postgres up (baseline captured before any edit), plus the
-compaction measurement re-run against the new default and the erasure test proving the digest row
-goes.
+`_BoundedIngest` had no public `inner`, so `fetch_refusals(adapter)` walked one step and stopped:
+an unreadable ORD export left **no** ledger row on the durable path, silently. That is the same
+defect the `fetch_was_truncated` docstring already records for `fetch_truncated` — reintroduced by
+this change on the other capability, one wrapper further out. Failing test written first
+(`test_an_unreadable_export_reaches_the_ledger_through_the_durable_wrapper`), `inner` exposed as
+`DatedIngest` already does.
 
 ## Review
 
-**All fourteen items are done.** Nothing was descoped; two things were deliberately *not* built and
-each says so below rather than being dropped quietly.
+Two ADRs written (`D-2026-08-28-a-refusal-is-recorded-by-the-pass-not-by-the-fetch`,
+`D-2026-08-28-a-composite-is-identified-by-what-it-measured`) and the ledger row added for each.
+All four BACKLOG rows deleted in the same commit. Five tests written and seen failing first:
 
-**What changed behaviourally.** Three of these are user-visible and the rest are the registers and
-the prose that describe them:
+| test | proved failing on |
+| --- | --- |
+| `test_a_sentinel_default_and_the_value_it_stands_for_are_one_measurement` | two refs for one measurement |
+| `test_a_composite_recomputed_by_a_changed_calculator_is_not_dropped_as_a_duplicate` | one ref for -1.850 and +1.349 |
+| `test_a_corpus_drain_pass_is_counted_like_every_other_ingest_pass` | `0.0 > 0.0` — no metric at all |
+| `test_a_second_ord_source_files_its_refusals_under_its_own_name` | both sources under `"eln-ord"` |
+| `test_a_bounded_chunk_records_only_the_refusals_that_chunk_saw` | `6 == 2` |
+| `test_an_unreadable_export_reaches_the_ledger_through_the_durable_wrapper` | my own change's gap |
 
-1. A long conversation now sends the model up to the token budget instead of twelve turns. Measured
-   at the shipped defaults, 2,000 prose groups: 1,944 -> 99,954 tokens retained. The arm that
-   *bounds* the thread is untouched — 20 groups of 60 kB still cut to 90,366 against a 100,000
-   budget, not to the 180,180 the count-only version left.
-2. A departing person's unread digests, and their id inside a publication payload, no longer
-   survive an erasure that reports success.
-3. Erasing one person no longer deletes a tool result another person's session still links.
+## 6. A latent cross-test coupling this change introduces — measured, left open
 
-**How the erasure fixes were proven.** The three new tests were run against the *pre-fix*
-statements (restored at runtime, no file reverted) and all three fail; against the fix, all three
-pass. A test that passes both ways proves nothing, and this file's own history says so.
+`sync_entries` now writes `ingest_rejections` for every source, so the ELN sync tests leave rows
+behind inside a pytest session: measured, `tests/test_eln.py` writes **9** rows under `test-eln`.
+`gather_evidence` reads that table (`refusals_matching`), so a later test whose query shares a
+qualifying word with one of those reasons would see a `refused_on_ingest` entry it did not have
+before. Latent today rather than hypothetical-only: running `test_eln.py` first and then the five
+files most likely to trip on it (`test_gather_evidence_outage`, `test_evidence_fanout`,
+`test_framing`, `test_datasource_seam`, `test_dialogue`) in one deterministic invocation is
+**171 passed**. Recorded rather than papered over with an autouse truncate, which would open a
+connection per test for a hazard nothing currently trips.
 
-**Two things deliberately not built.**
-
-- *An orphaned `tool_result_links` row is beyond erasure permanently.* It names a session id no
-  ownership row resolves, so what it keeps alive is unattributable rather than somebody's, and the
-  age sweep collects the link with its blob. Recorded in the ADR as an accepted consequence rather
-  than filed as work.
-- *`delete_session` and the retention prune take their two rows in opposite orders.* The BACKLOG row
-  asked for them to be ordered consistently; examined, that is not available — each order is
-  required by its own invariant, and reversing either trades a one-statement deadlock window for a
-  correctness bug. The row now records that the obvious fix was tried and rejected, which is the
-  contribution the row was worth.
-
-**One audit finding was wrong and the baseline is what showed it.** A subagent reported
-`tests/test_deploy_chart.py::test_the_fleet_ceiling_...` as failing on a clean tree. The baseline
-run taken before any edit was **5,444 passed, 11 skipped, exit 0**. Prose about a test is evidence
-about what its author believed; the run is the evidence.
-
-
----
-
-## Follow-up: the review of this change (2026-08-28)
-
-Four adversarial passes over the merged diff. **Three defects in my own change, all now closed**,
-two false claims in its ADRs retracted in a new one, and one gap filed with its measurement.
-
-- [x] `jsonb_array_elements` on a non-array aborted the whole erasure — guarded, parametrized over
-      the five shapes Postgres refuses.
-- [x] The leaver's own orphaned link spared the leaver's own blob, under a report reading `0` —
-      the anti-join goes through `session_owners` now, paired with the test proving another
-      *person* still spares it.
-- [x] A `BACKLOG.md` section heading was deleted with a moved row, silently re-filing three rows.
-- [x] A test fixture that outlived its own test and was measured by the next one.
-- [x] `unwindowed_ownership_dependencies` claimed to be derived and was not — a test now joins the
-      two maps; and its `session_events` entry named a window that cannot unblock it.
-- [x] Corrected: the "three tables said no decision is on record" quotation (two did), the 90,366
-      figure (90,090 on the fixture the suite builds), the ordering row's overgeneralisation from
-      erasure to `delete_session`, and the counts in the unbounded-tables row.
-- [x] Hardened: the register assertion tested an English substring; the shipped compaction default
-      was pinned only by fixtures it could outgrow; a declared column nothing read now has to exist.
-- [ ] **Filed, not fixed**: no deployment declares `llm_context_window_tokens`, so the ~30k prefix
-      is uncharged and a request now measures ~135,700 against a configured 100,000 — and
-      `_record_overrun` cannot see it. Three candidate fixes, one of which changes what
-      `agent_context_token_budget` means. That is a decision with an owner.
+**Unproven, reported as such**: nothing in the four rows was left unmeasured. What this change
+does *not* settle is whether the calculation server's `embed_structure` is deterministic — if it is
+not, `compute_thermochemistry` with no `structure_id` now publishes one record per call. That is
+argued as correct (each is a different conformer, and the result says which) rather than measured,
+because the determinism lives in `Chemclaw3-mcp` and is not observable from here.

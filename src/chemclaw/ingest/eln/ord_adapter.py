@@ -27,7 +27,6 @@ from pydantic import ValidationError
 from rdkit import Chem
 
 from chemclaw.core.config import settings
-from chemclaw.core.errors import ChemclawError
 from chemclaw.core.reagents import resolve_compound_name
 from chemclaw.ingest.eln.adapter import (
     ElnMappingError,
@@ -38,18 +37,8 @@ from chemclaw.ingest.eln.adapter import (
     warn_late_arrivals,
 )
 from chemclaw.ingest.eln.ord import Component, OrdReaction, ReactionStep, Role, StepKind
-from chemclaw.ingest.rejections import record_refusals
 
 logger = logging.getLogger(__name__)
-
-# The source name a refusal by this adapter is filed under in the rejection ledger. It is the
-# registry source name, not a label invented here, because the ledger's `source` is what tells a
-# reader whose data quality a row is a statement about — the same rule
-# `registry._build_retrieve_half` states for a retrieve half's name. The ingest half is built with
-# the manifest's `config` only and is never told its own name, so this constant is the one place
-# the two can disagree, and `tests/test_ingest_rejections.py` reads every manifest that names this
-# adapter and fails if they do.
-LEDGER_SOURCE = "eln-ord"
 
 # ORD reaction-role -> our Role subset. Roles outside the subset (WORKUP,
 # INTERNAL_STANDARD, AUTHENTIC_STANDARD) collapse to REAGENT: they are auxiliary species,
@@ -91,6 +80,11 @@ class OrdJsonAdapter:
     def __init__(self, export_dir: str | None = None) -> None:
         """Read from the given directory, or the configured `ord_export_dir`."""
         self._dir = Path(export_dir if export_dir is not None else settings.ord_export_dir)
+        # What the last fetch turned away outright — entry id -> reason. Held rather than written,
+        # because filing a refusal needs the registry source name and this adapter is built from
+        # `manifest.config` alone and is never told which source it is. `fetch_refusals` is how the
+        # sync asks; see that function for why the whole capability is optional.
+        self._refused: dict[str, str] = {}
 
     async def fetch_new_entries(self, since: datetime) -> list[RawEntry]:
         """Return ORD messages created at or after `since`, oldest first.
@@ -105,20 +99,21 @@ class OrdJsonAdapter:
         arrival: it is filtered out here and on every later run, so it is reported in one
         aggregated WARNING (`warn_late_arrivals`) instead of vanishing silently.
 
-        **Every refusal this run makes is also recorded in the rejection ledger**, so a chemist
-        asking about a record that never arrived gets the reason instead of "I have no such
-        record" (`D-2026-08-27-a-refused-record-is-a-question-somebody-will-ask`). All three kinds
-        are refusals of the same sort — a file this adapter could not read, a file that arrived too
-        late to ever be fetched, and a message that cannot be mapped — and the third is why the
-        recording happens *here* rather than in `map_to_ord`: the ledger write is `await`ed, and
-        `map_to_ord` is synchronous by the `ElnAdapter` contract. So the entries this fetch is
-        about to hand over are mapped once here to find the ones that cannot be, which costs one
-        pure-function call per entry — **measured at 65 µs** over the shipped
-        `data/eln-exports/ord/ord-2026-001.json`, so ~6.5 ms on a full 100-entry
-        `eln_sync_batch_size` chunk —
-        and changes nothing about what is returned: the sync maps them again, refuses the same
-        ones, and stays the sole author of the run summary. `sync.py::_replay_record_ids` already
-        pays the same cost for the same structural reason.
+        **The two refusals only this fetch can see are held for the sync to file**
+        (`fetch_refusals`), so a chemist asking about a record that never arrived gets the reason
+        instead of "I have no such record"
+        (`D-2026-08-27-a-refused-record-is-a-question-somebody-will-ask`). They are the two kinds
+        that never become a `RawEntry` at all — a file this adapter could not read, and a file that
+        arrived too late to ever be fetched — so the sync's own reject-and-continue cannot see them.
+
+        **A message that cannot be *mapped* is not one of them, and used to be**
+        (`D-2026-08-28-a-refusal-is-recorded-by-the-pass-not-by-the-fetch`). Finding those meant
+        mapping every entry this fetch returns, which the sync then maps again — measured at
+        0.30-0.32 s over 5,000 entries, 61-64 us each, 18-38% of the whole call — and the bound the
+        drain applies (`eln_sync_batch_size`) is applied by `_BoundedIngest` *after* this returns,
+        so a 100k-entry backfill re-mapped all 100k in each of its ~1,000 chunks. The sync sees
+        every one of those refusals anyway, one map per entry, in the `except` that already words
+        them.
         """
         entries: list[RawEntry] = []
         late: list[str] = []
@@ -166,29 +161,17 @@ class OrdJsonAdapter:
                 )
         warn_late_arrivals(logger, "ORD export", late)
         entries.sort(key=lambda e: e.created_at)
-        refused.update(self._unmappable(entries))
-        await record_refusals(LEDGER_SOURCE, refused)
+        self._refused = refused
         return entries
 
-    def _unmappable(self, entries: list[RawEntry]) -> dict[str, str]:
-        """Which of these entries cannot be mapped, and what the refusal says.
+    def fetch_refusals(self) -> dict[str, str]:
+        """What the last fetch turned away, for the sync to file under its own source name.
 
-        The pre-flight `fetch_new_entries` describes: the refusal is found here so it can be
-        recorded from an `async` caller, and the entry is still returned so the sync refuses it
-        itself and reports it in the summary exactly as before.
-
-        The two caught types are the pair `sync.py`'s own reject-and-continue catches, which is the
-        definition of "deterministic bad data in one entry" this repository already uses. Anything
-        else is a bug rather than a bad record and is left to propagate, as it would from the
-        sync's loop one step later.
+        Only the files that never became an entry — see `ingest/eln/adapter.py::fetch_refusals`
+        for why this capability is deliberately narrow, and why it is optional rather than a
+        method every adapter must implement.
         """
-        refused: dict[str, str] = {}
-        for raw in entries:
-            try:
-                self.map_to_ord(raw)
-            except (ChemclawError, ValidationError) as exc:
-                refused[raw.entry_id] = str(exc)
-        return refused
+        return dict(self._refused)
 
     def map_to_ord(self, raw: RawEntry) -> OrdReaction:
         """Map one ORD message to the canonical `OrdReaction` (structured, step-linked).

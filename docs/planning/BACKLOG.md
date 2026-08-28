@@ -266,26 +266,6 @@ topic).
       connector endpoint, so the fix is probably an explicit `timeoutSeconds` plus a bound on the
       sweep, not reverting the probe.
 
-- [ ] **The ORD pre-flight maps the whole fetch, once per drain chunk** — [M]. `_unmappable` maps
-      every entry `fetch_new_entries` returns, and `eln_sync_batch_size` is applied by
-      `_BoundedIngest` *after* the adapter returns. The docstring prices this as "~6.5 ms on a full
-      100-entry chunk"; the per-entry figure is right and the unit is not. Measured: **0.374 s over
-      5,000 entries** (75 µs each), ~26% of the whole fetch. A 100k-entry backfill drains in ~1,000
-      activity attempts each re-mapping all 100k — roughly two hours of pure re-mapping added to
-      the drain. `record_refusals` is likewise handed the whole directory's refusals every chunk and
-      issues one upsert round trip per row in a Python loop.
-
-- [ ] **A tool composite publishes twice and pins to its first computation** — [S].
-      `publish/hooks.py::_composite_ref` hashes the raw validated kwargs, and its docstring claims a
-      default omitted and a default passed explicitly derive one ref. True for literal defaults,
-      false for the sentinel defaults both tool composites use: measured, `predict_logd` with
-      `ph=None` and `ph=7.4` produce different refs for the same measurement, as do
-      `compute_thermochemistry` at `temperature_k=0.0` and `298.15`. Conversely `publish_tool_result`
-      passes no `calc_version` or `params_hash`, while the outbox's identity is
-      `(sink, calc_ref, schema_version)` — so after a calculator or epoch change the re-run's
-      *different* result is silently dropped as a duplicate. Both older hooks supply a
-      version-bearing ref.
-
 - [ ] **The session list advertises a cursor it then refuses** — [S]. `list_sessions` emits
       `X-Next-Cursor` on a full page outside the branch that checks the registry can resume, so a
       deployment with a custom non-durable registry gets a `200` with a cursor and a `422` when it
@@ -316,29 +296,6 @@ topic).
       correctness bug, and the deadlock is one statement wide, self-healing on the retention side
       (a Temporal activity retries) and has not been reproduced. **Keep both orders; the row stays
       open only as the record that the obvious fix was tried and rejected.**
-
-- [ ] **`LEDGER_SOURCE` is a constant where the schema documents a registry source name** — [S].
-      `ord_adapter.LEDGER_SOURCE = "eln-ord"` is hardcoded while `ingest_rejections.source` is
-      documented as the registry source name and the eviction cap is per-source, so two ORD data
-      sources would share one bucket and mis-attribute each other's refusals. The guarding test
-      reads this repository's manifests, so a site adding a second ORD source fails the test rather
-      than the code taking the name as an argument.
-
-- [ ] **The corpus drain is the one ingest pass with no metric** — [S].
-      `chemclaw_ingest_records_total{source,outcome}` is emitted by the ELN sync
-      (`ingest/eln/sync.py:319`), the document sync (`ingest/documents/sync.py:312`) and the
-      labelling pass (`ingest/labels/enrich.py:195`, under `source="labels"`). `ReactionCorpusWorkflow`
-      emits none: `CorpusReport`'s `read`/`recorded`/`skipped` reach the activity's log line and
-      Temporal's history, and nothing else. So a dashboard built on `chemclaw_ingest_*` shows a flat
-      line for a healthy corpus feed, and `skipped` — the count of rows dropped for no usable SMILES
-      or no citation, which is the number that says a feeder regressed — has no series at all.
-      Found while writing `docs/guides/feeder-pipelines/`, whose §2.3 has to tell an operator this in
-      prose because the metric they would otherwise reach for does not exist.
-      **The fix is the wrapper the ELN sync already uses**, one call site, with `source` naming the
-      data source rather than the pass — the three outcomes partition the rows the pass saw, exactly
-      as `ingest/documents/sync.py:332` documents for its own. Do it when a deployment actually runs
-      a corpus feeder; until then the gap costs nobody anything, which is why it is [S] and here
-      rather than done.
 
 - [ ] **Settle `pytest-xdist` on a real runner** — [S].
       The `check` job is 87% one step: `make lint type cov` was **12m06s of a 13m56s job** on
@@ -836,20 +793,6 @@ and (b) a separate lower-tier record type that retrieval can cite but similarity
 Both change what a `Component` is, so this wants its own ADR and its own measurement of what a
 partially-structured reaction does to retrieval — not a patch to `_smiles`. Measured and declared
 by `make live-data`; see `D-2026-08-18-a-corpus-is-not-reachable-because-it-is-on-disk`.
-
-## Carry the rejection ledger to the site that covers every source
-
-`ingest_rejections` ships (`D-2026-08-27-a-refused-record-is-a-question-somebody-will-ask`): the
-119.43% well now lands in the ledger with its reason, `gather_evidence` answers the question that
-used to return "I have no such record", and the shape is unmistakably a rejection rather than a
-result. Three refusal sites in `ingest/eln/ord_adapter.py` write to it.
-
-What is not covered is every *other* source. `ingest/eln/json_adapter.py::map_to_ord` — the adapter
-the live 119.43% record actually arrives through — plus `sync.py`'s future-timestamp refusal and
-`ingest.py`'s `IngestError` still refuse into a log line only. The one site that would cover every
-adapter and every source at once is `durable/eln_sync.py`, which already holds `IngestSummary.rejected`
-(id, reason, timestamp) in an async activity needing no pre-flight: one call, and the per-adapter
-writers become redundant rather than multiplied.
 
 ## The PR-gate costs 1.81 s per proposed note, and a backfill is one note per record
 

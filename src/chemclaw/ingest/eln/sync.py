@@ -20,10 +20,11 @@ from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.core.logging import log_event
 from chemclaw.core.metrics_bridge import record_metric
-from chemclaw.ingest.eln.adapter import ElnAdapter, RawEntry, entry_window
+from chemclaw.ingest.eln.adapter import ElnAdapter, RawEntry, entry_window, fetch_refusals
 from chemclaw.ingest.eln.ingest import ingest_reaction
 from chemclaw.ingest.eln.record import record_from_ord_reaction
 from chemclaw.ingest.eln.records import ReactionRecordStore
+from chemclaw.ingest.rejections import record_refusals
 from chemclaw.science.fingerprints.store import FingerprintStore
 from chemclaw.science.labels.store import LabelIndex
 
@@ -127,6 +128,14 @@ async def sync_entries(
     canonical record, so its record phase is the row already stored. An *amended* body falls
     through and re-records, which is what re-derives the labels — `labeller_version` is left
     untouched by the record upsert only when the record smiles is unchanged.
+
+    **This pass is what writes the rejection ledger**, for every ingest source rather than for the
+    one adapter that used to
+    (`D-2026-08-28-a-refusal-is-recorded-by-the-pass-not-by-the-fetch`). It is the layer that has
+    all three things a ledger row needs and that no adapter has: the entry mapped exactly once,
+    every refusal this system makes about an entry rather than only the ones a fetch can see, and
+    `source` — the registry source name the ledger's key and its per-source eviction cap are both
+    defined in terms of.
     """
     started = time.perf_counter()
     floor = _fetch_floor(since) if apply_overlap else since
@@ -224,6 +233,26 @@ async def sync_entries(
             )
             continue
         ingested.append(raw.entry_id)
+    # **The rejection ledger is written by the pass, not by the fetch**
+    # (`D-2026-08-28-a-refusal-is-recorded-by-the-pass-not-by-the-fetch`). Every refusal this run
+    # made, in one write: what the adapter turned away before it could become an entry, plus what
+    # this loop refused. Here rather than in an adapter for three reasons, each of which was a
+    # defect while it lived there — the entry is mapped exactly *once*, by the loop above, instead
+    # of a pre-flight re-mapping the whole fetch that the drain's `eln_sync_batch_size` then
+    # truncates; the refusals filed are the ones this bounded chunk actually saw; and `source` is
+    # the registry source name, an argument of this function, rather than a constant an adapter
+    # built from `manifest.config` alone had to guess.
+    #
+    # It also covers refusals no adapter could have: a future-stamped entry, a record that would
+    # not build, a reaction that would not index. Those were refused records with no ledger row at
+    # all, which is the ledger's own stated purpose gone missing on three of its cases.
+    #
+    # Never raises — `record_refusals` logs and returns — so a ledger that cannot be written
+    # cannot cost the corpus the entries that ingested cleanly.
+    await record_refusals(
+        source,
+        {**fetch_refusals(adapter), **{entry.entry_id: entry.reason for entry in rejected}},
+    )
     # The summary is a return value the scheduler stores; also log the outcome so an admin
     # running this under a Temporal Schedule sees it without opening the workflow result, and
     # gets a WARNING trail of exactly which entries were rejected and why.

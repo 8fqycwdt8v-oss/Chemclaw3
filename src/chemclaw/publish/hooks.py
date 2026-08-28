@@ -80,23 +80,37 @@ logger = logging.getLogger(__name__)
 TOOL_COMPOSITES: frozenset[str] = frozenset({"ThermochemistryResult", "LogdResult"})
 
 
-def _composite_ref(connector: str, tool: str, arguments: dict[str, Any]) -> str:
-    """The identity of one tool composite: the request that produced it.
+def _composite_ref(connector: str, tool: str, payload: dict[str, Any]) -> str:
+    """The identity of one tool composite: **what it measured**, not what was asked for it.
 
-    A composite has no cache key — that is the definition of one here — so it has no
-    content-addressed identity to borrow. The job hook answers the same question the same way and
-    says so: `calc_ref` is the workflow id, "because a composite has no cache key: its identity is
-    the run. That is also what makes it idempotent, since the workflow id is itself derived
-    deterministically from the job and its arguments." This is that sentence without a workflow.
+    A composite has no cache key — that is the definition of one here — so it has no key to borrow.
+    What it does have is a result that states its own conditions: `LogdResult` carries the pH it
+    was evaluated at, `ThermochemistryResult` the temperature, the medium, the symmetry number and
+    the geometry it ran on. That statement is content-addressable, and the route above it is what
+    says where it came from, so the pair is a complete identity with nothing inferred.
 
-    So the same question asked twice is one record — the outbox's `ON CONFLICT DO NOTHING` on
-    `(sink, calc_ref, schema_version)` collapses the repeat — while the same molecule asked at a
-    second temperature is a second record, which is right: it is a second measurement.
+    **The request is not that identity, and hashing it was wrong in both directions**
+    (`D-2026-08-28-a-composite-is-identified-by-what-it-measured`):
 
-    The arguments are the *validated* keyword arguments the tool body ran on, so a default the
-    caller omitted and a default the caller passed explicitly derive one ref rather than two.
+    - Two spellings of one question minted two records. Hashing the validated kwargs is exact for a
+      *literal* default — pydantic fills an omitted argument in — and wrong for a **sentinel**
+      default, which is what both composites use: `predict_logd(ph=None)` means 7.4 and
+      `compute_thermochemistry(temperature_k=0.0)` means 298.15. Measured on the old derivation,
+      ph `None` and ph `7.4` hashed to `#1677c555…` and `#a357…`, and the two temperatures to
+      `#4400…` and `#f934…` — four refs for two measurements.
+    - A re-run that computed something *different* was dropped. A tool composite carries no
+      `calc_version` and no `params_hash`, and the outbox's identity is
+      `(sink, calc_ref, schema_version)` with `ON CONFLICT DO NOTHING` — so after a calculator
+      revision, a `CALCULATION_EPOCH` bump or a re-embedded starting geometry, the request hashed
+      the same and the new answer never landed. Measured against Postgres: paracetamol's logD
+      recomputed from -1.850 to +1.349 wrote **0** rows on the second enqueue, leaving the store
+      pinned to the superseded number.
+
+    Both fall out of the one rule. The same question twice is one record exactly when it produced
+    one answer, which is the only case where one record is honest; a second temperature, a changed
+    calculator and a different conformer are each a second measurement and each get a row.
     """
-    return f"{connector}.{tool}#{stable_hash(arguments)}"
+    return f"{connector}.{tool}#{stable_hash(payload)}"
 
 
 async def publish_tool_result(
@@ -115,8 +129,11 @@ async def publish_tool_result(
             the shape is carried separately as `payload_kind`
             (`D-2026-08-26-a-route-is-not-a-shape`).
         tool: The tool's own name — the second half of that route.
-        arguments: The validated keyword arguments the tool ran on. Hashed into the record's
-            identity; never stored verbatim, because they are a request rather than a result.
+        arguments: The validated keyword arguments the tool ran on, recorded as `input_hash` and
+            never stored verbatim, because they are a request rather than a result. **Not** the
+            record's identity — see `_composite_ref` for the two defects that made it one — so a
+            sentinel default and the value it stands for record different `input_hash`es on what
+            is deliberately one row: the first call to land is the one whose spelling is kept.
         result: Whatever the tool returned. Anything that is not a pydantic model, or whose model
             is not named in `TOOL_COMPOSITES`, is left alone.
     """
@@ -126,12 +143,13 @@ async def publish_tool_result(
     if kind not in TOOL_COMPOSITES:
         return 0
     try:
+        payload = result.model_dump(mode="json")
         return await enqueue_payload(
-            calc_ref=_composite_ref(connector, tool, arguments),
+            calc_ref=_composite_ref(connector, tool, payload),
             # A route, exactly as the job hook builds one. It identifies where this came from; the
             # `payload_kind` beside it is what identifies the shape.
             calc_type=f"{connector}.{tool}",
-            payload=result.model_dump(mode="json"),
+            payload=payload,
             payload_kind=kind,
             input_hash=stable_hash(arguments),
         )

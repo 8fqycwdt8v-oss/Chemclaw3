@@ -38,6 +38,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from chemclaw.core.chem import InvalidSmilesError, standard_smiles
+from chemclaw.core.metrics_bridge import record_metric
 from chemclaw.ingest.eln.warehouse import sql
 from chemclaw.ingest.eln.warehouse.binding import CorpusBinding, FieldBinding
 from chemclaw.ingest.eln.warehouse.driver import Warehouse
@@ -197,6 +198,8 @@ async def drain_corpus(
             report.recorded,
         )
     report.advanced = bool(report.cursor) and report.cursor != after
+    _count_records(source, "ingested", report.recorded)
+    _count_records(source, "rejected", report.skipped)
     if report.skipped:
         logger.warning(
             "%s: %d of %d corpus row(s) carried no usable reaction SMILES, key or citation and "
@@ -206,6 +209,27 @@ async def drain_corpus(
             report.read,
         )
     return report
+
+
+def _count_records(source: str, outcome: str, count: int) -> None:
+    """Add `count` to this source's tally of one outcome (a named function; see `eln/sync.py`'s).
+
+    **The two outcomes partition what the page read**, and there is no third: `ingested` is a row
+    whose record phase was written, `rejected` is one dropped for want of a usable SMILES, key or
+    citation. A corpus drain has nothing answering to the `skipped` the other two passes emit —
+    neither an overlap replay nor a file it deliberately did not open — so no third series is
+    emitted rather than a permanently flat zero, which is a reading that claims a population exists.
+
+    `source` names the data source, not the pass, so a corpus feeder joins the same
+    `chemclaw_ingest_records_total{source}` an operator already reads the ELN and the share on.
+    Before this the drain emitted nothing at all, and a healthy corpus feed and an unconfigured one
+    rendered identically — as a flat line.
+    """
+    record_metric(
+        lambda m: m.increment(
+            "chemclaw_ingest_records_total", count, {"source": source, "outcome": outcome}
+        )
+    )
 
 
 def _collect_fingerprint(
