@@ -212,6 +212,33 @@ def test_session_owner_lists_an_unnamed_session_rather_than_dropping_it() -> Non
     asyncio.run(_run())
 
 
+def test_session_owner_listing_carries_the_profile_each_session_runs_under() -> None:
+    """The listing returns `profile`, which is what `GET /plans/pending` filters on.
+
+    Not cosmetic and not for the sidebar: it is the one column that says whether a session can be
+    holding a plan waiting on a decision, and the alternative to reading it here is one serialized
+    checkpointer statement per conversation to discover the same thing. `None` is a real value and
+    means the default profile — `agent.profiles.get_profile(None)` resolves exactly that — so it
+    must come back rather than being normalised into a name the row does not hold.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        store = SessionOwnerStore()
+        await store.record("sess-profiled", "owner-profile-list-test", "property-lookup")
+        await store.record("sess-unprofiled", "owner-profile-list-test")
+        await _spoke_in("sess-profiled")
+        await _spoke_in("sess-unprofiled")
+
+        listed = await store.list_for_owner("owner-profile-list-test")
+        assert {row[0]: row[4] for row in listed} == {
+            "sess-profiled": "property-lookup",
+            "sess-unprofiled": None,
+        }
+
+    asyncio.run(_run())
+
+
 def test_session_owner_lists_the_null_owner_sessions() -> None:
     """A NULL owner matches itself when listing — `owner = NULL` would silently return nothing.
 
