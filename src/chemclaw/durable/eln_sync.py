@@ -249,7 +249,14 @@ async def store_sync_cursor(source: str, cursor: datetime) -> None:
 
 
 @durable_workflow("background")
-@workflow.defn
+# Declared, where its near-twin `DocumentShareSyncWorkflow` is not, and the difference is not
+# the shape of the drain — it is that this one has a starter that waits. `cli.live_data.
+# backfill` starts it with an explicit `since`, **no `execution_timeout`**, and then awaits
+# `handle.result()`: a plain exception parks a run nothing will ever end while the bring-up
+# blocks on it. Failing costs at most the chunk in flight, because every chunk persists its
+# cursor through `store_sync_cursor` — which is the same reason `schedule_run_timeout_seconds`
+# is safe to state at all. D-2026-08-27.
+@workflow.defn(failure_exception_types=[Exception])
 class ElnSyncWorkflow:
     """Run one ELN sync durably, returning what was ingested across every active ingest source.
 

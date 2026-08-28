@@ -6,19 +6,30 @@ never runs, and nothing fails until someone submits one and it waits in the queu
 forever.
 """
 
+import asyncio
+import contextlib
 import json
 import subprocess
 import sys
 import textwrap
+import uuid
+from typing import Any
 
 import pytest
+from temporalio import workflow
 
-from chemclaw.durable.registry import (
-    describe,
-    durable_workflow,
-    registered_activities,
-    registered_workflows,
-)
+# This module *defines* two workflows (the stance probes at the foot of the file), so Temporal's
+# sandbox re-imports it — and everything it imports — when it validates them. Passing the
+# first-party import through keeps that re-import from walking the whole package inside the
+# sandbox's restricted environment, the same guard `tests/test_orchestrator.py` needed for the
+# same reason.
+with workflow.unsafe.imports_passed_through():
+    from chemclaw.durable.registry import (
+        describe,
+        durable_workflow,
+        registered_activities,
+        registered_workflows,
+    )
 
 
 def test_every_declared_capability_reaches_its_worker() -> None:
@@ -171,9 +182,10 @@ def test_every_workflow_on_the_job_path_can_actually_fail() -> None:
     carries an `execution_timeout` of its own, so nothing ends either one.
 
     Scoped to the job path rather than to every registered workflow, deliberately: these are the
-    runs a person is waiting on, and widening the same declaration to the sixteen periodic
-    workflows would change how a redeploy bug behaves for jobs nobody is watching — a separate
-    decision, recorded in `docs/planning/BACKLOG.md` rather than smuggled in here.
+    runs a person is waiting on. The periodic workflows were decided one at a time instead
+    (`D-2026-08-27-a-periodic-job-decides-for-itself-whether-a-bug-should-park-it`), and
+    `test_every_background_workflow_holds_the_stance_argued_for_it` below is where those decisions
+    live — including the six that deliberately keep parking.
 
     The check is over the *registry* rather than a list of names, so a bundle added later is
     covered without editing this file — which is the property the seam claims and the reason the
@@ -200,4 +212,220 @@ def test_every_workflow_on_the_job_path_can_actually_fail() -> None:
         f"{undeclared} raise plain exceptions into an unbounded workflow-task-failure loop instead "
         "of failing: add `@workflow.defn(failure_exception_types=[Exception])`. A job that hangs "
         "while the chemist is told it is running is the failure this prevents."
+    )
+
+
+# The stance argued for each workflow on core's `background` queue, from
+# `D-2026-08-27-a-periodic-job-decides-for-itself-whether-a-bug-should-park-it`. That ADR carries
+# the reason for every name here and each workflow carries its own beside its decorator; this is
+# the table a test can read.
+#
+# **The rule the split follows**, so a new workflow can be placed rather than guessed at: a plain
+# exception in workflow code parks the run in the SDK's unbounded workflow-task-failure loop.
+# Declare `failure_exception_types` where that park has **no ceiling, or a ceiling somebody is
+# waiting through** — a workflow a tool, a CLI or a webhook starts (none of those sites passes an
+# `execution_timeout`), or a fan-out child whose hour of `fan_out_child_timeout_seconds` is charged
+# to a parent that a chemist is polling. Leave it parking where the only starter is a Temporal
+# Schedule: that action carries `schedule_run_timeout_seconds`, nothing reads the result, and every
+# such job is cursored or idempotent, so the fires it skips cost a delay and not a record.
+# `EvalDriftWorkflow` is the argued exception on the schedule side — see its decorator.
+_MUST_FAIL = frozenset(
+    {
+        # The job path. Named here as well as derived above, so this table is a complete account of
+        # the queue rather than a partial one that reads as complete.
+        "ConnectorJobWorkflow",
+        "TemplateWorkflow",
+        # Started by an agent tool for a named chemist, with no `execution_timeout`, and polled
+        # through `get_durable_job_status` — the job path in everything but its queue.
+        "CampaignSynthesisWorkflow",
+        "PlaybookDistillationWorkflow",
+        "OptimizationCampaignWorkflow",
+        "ObservationPromotionWorkflow",
+        "DevelopmentReportWorkflow",
+        # Fan-out children of those. A parked child is dropped only when its execution timeout
+        # expires, and that hour is spent by the parent the chemist is polling.
+        "PublishNoteWorkflow",
+        "ReportSectionWorkflow",
+        # An uncapped second starter beside the Schedule: a merge webhook
+        # (`request_note_reindex`) and the live lane's backfill, which awaits `handle.result()`.
+        "NoteReindexWorkflow",
+        "ElnSyncWorkflow",
+        # Schedule-only, and declared anyway: its output is a claim about a moment, so a resumed
+        # park delivers a day-old verdict as current.
+        "EvalDriftWorkflow",
+        # Schedule-only drains, declared by their own merged argument before this table existed
+        # (`corpus_sync.py`, `label_sync.py`). D-2026-08-27 records that the rule above would not
+        # have required either, and that reversing a merged declaration on a tie is not worth the
+        # churn — the entry is here so removing one is a decision someone takes, not a tidy-up.
+        "ReactionCorpusWorkflow",
+        "ReactionLabelWorkflow",
+    }
+)
+
+# Deliberate non-changes. Each is reached only from a Temporal Schedule, so the park is bounded by
+# `schedule_run_timeout_seconds`; nothing reads the run; and the work is idempotent or cursored, so
+# a skipped fire costs a delay. Declaring these would buy a failure state no surface reports —
+# `ScheduleHealth` carries no run outcome — and cost the run its chance to finish once a same-day
+# redeploy fixes the bug.
+_MAY_PARK = frozenset(
+    {
+        "ArtifactEvictionWorkflow",
+        "DigestWorkflow",
+        "DocumentShareSyncWorkflow",
+        "ObservationSynthesisWorkflow",
+        "PublishResultsWorkflow",
+        "RetentionWorkflow",
+    }
+)
+
+
+def _real_background_workflows() -> dict[str, type]:
+    """The `@workflow.defn` classes on core's queue, by name.
+
+    Filtered to classes Temporal actually has a definition for, because two tests above register
+    bare `type()` probes on `background` to exercise the collision guard. Keying on the presence of
+    `__temporal_workflow_definition` is the same fact the stance check reads, so a probe cannot
+    make this table look incomplete and a real workflow cannot hide behind the filter.
+    """
+    return {
+        cls.__name__: cls
+        for cls in registered_workflows("background")
+        if getattr(cls, "__temporal_workflow_definition", None) is not None
+    }
+
+
+def _declares_failure(cls: type) -> bool:
+    """Whether `cls` turns a plain `Exception` in workflow code into a workflow *failure*.
+
+    Read off the definition Temporal itself consults (`workflow_is_failure_exception`), and
+    checking that `Exception` is actually covered rather than that the tuple is merely non-empty —
+    `failure_exception_types=[ValueError]` is a different decision from this one.
+    """
+    definition = getattr(cls, "__temporal_workflow_definition", None)
+    declared = getattr(definition, "failure_exception_types", ()) or ()
+    return any(issubclass(Exception, declared_type) for declared_type in declared)
+
+
+def test_every_background_workflow_holds_the_stance_argued_for_it() -> None:
+    """Each periodic workflow either fails or parks *because someone argued it should*.
+
+    The backlog row this closes asked for a decision per workflow and said in as many words that
+    widening the job-path assertion across all of them was the wrong answer. So this asserts both
+    directions: a workflow in `_MUST_FAIL` that stops declaring goes red, **and a workflow in
+    `_MAY_PARK` that starts declaring goes red too**. The second half is what makes this a record
+    of decisions rather than a snapshot of the tree — flipping a stance means revisiting the
+    argument in D-2026-08-27 and moving the name, which is a diff a reviewer can see.
+
+    What the two stances actually *do* is measured rather than assumed, by
+    `test_the_two_stances_behave_as_the_table_assumes` below — because this table would be a table
+    of decorator spellings otherwise.
+    """
+    from chemclaw.durable import background_worker  # noqa: F401 — registration
+
+    workflows = _real_background_workflows()
+    registered = set(workflows)
+    assert not (_MUST_FAIL & _MAY_PARK), "a workflow cannot hold two stances at once"
+
+    undecided = sorted(registered - _MUST_FAIL - _MAY_PARK)
+    assert not undecided, (
+        f"{undecided} is on the background queue with no stance recorded. Decide whether a plain "
+        "exception should fail it or park it — the rule and the worked cases are in "
+        "D-2026-08-27-a-periodic-job-decides-for-itself-whether-a-bug-should-park-it — then add "
+        "the name to _MUST_FAIL or _MAY_PARK and say why beside its decorator."
+    )
+    departed = sorted((_MUST_FAIL | _MAY_PARK) - registered)
+    assert not departed, f"{departed} no longer exists; drop the stale row from this table"
+
+    should_fail = sorted(
+        name for name in _MUST_FAIL & registered if not _declares_failure(workflows[name])
+    )
+    assert not should_fail, (
+        f"{should_fail} was argued to fail rather than park and no longer declares "
+        "`failure_exception_types=[Exception]`. Restore it, or move the name to _MAY_PARK with the "
+        "argument for the change in a new ADR."
+    )
+    should_park = sorted(
+        name for name in _MAY_PARK & registered if _declares_failure(workflows[name])
+    )
+    assert not should_park, (
+        f"{should_park} was argued to keep parking — nothing reads it, its only starter is a "
+        "Schedule that already bounds the run, and its work is idempotent — and now declares "
+        "`failure_exception_types`. That is a stance change: argue it in a new ADR and move the "
+        "name, rather than sweeping the queue."
+    )
+
+
+# Two probes for the measurement below. Module-level because Temporal's workflow sandbox re-imports
+# the defining module, and deliberately **not** registered with `durable_workflow` — they are not
+# capabilities, they are the two spellings under test.
+@workflow.defn
+class _ParksOnAPlainException:
+    """A workflow with no declaration: the SDK default the periodic jobs mostly keep."""
+
+    @workflow.run
+    async def run(self) -> str:
+        """Raise the shape of a redeploy bug — a plain exception in workflow code."""
+        raise ValueError("a redeploy bug, raised in workflow code")
+
+
+@workflow.defn(failure_exception_types=[Exception])
+class _FailsOnAPlainException:
+    """The same workflow with the declaration `_MUST_FAIL` names."""
+
+    @workflow.run
+    async def run(self) -> str:
+        """Raise the same exception, so the stance is the only difference between the two."""
+        raise ValueError("a redeploy bug, raised in workflow code")
+
+
+def test_the_two_stances_behave_as_the_table_assumes() -> None:
+    """One plain exception, two decorators, against a real broker: one fails, one hangs.
+
+    The whole decision table above rests on a claim about the SDK — that an exception raised in
+    workflow *code* parks the run rather than failing it, unless the definition says otherwise —
+    and a table resting on documentation is a table of spellings. So the claim is run.
+
+    Measured here on the time-skipping server: the declared workflow reached `FAILED` with an
+    `ApplicationError` on its first attempt, and the undeclared one was still `RUNNING` five
+    seconds later, the worker re-failing and re-polling the same poisoned task. Nothing ends the
+    second one — neither start carries an `execution_timeout`, which is exactly the shape of the
+    tool- and webhook-started workflows in `_MUST_FAIL`.
+    """
+    from temporalio.client import WorkflowFailureError
+    from temporalio.types import MethodAsyncNoParam
+    from temporalio.worker import Worker
+
+    from tests.temporal_env import start_env_or_skip
+
+    # Typed as the no-argument workflow method Temporal's own `start_workflow` overload takes, for
+    # the reason `agent/durable_tools.py` gives beside its own such mapping: a bare list of two
+    # unrelated workflow classes degrades to `type[object]` and `.run` stops type-checking.
+    starts: dict[str, MethodAsyncNoParam[Any, str]] = {
+        "_FailsOnAPlainException": _FailsOnAPlainException.run,
+        "_ParksOnAPlainException": _ParksOnAPlainException.run,
+    }
+
+    async def measure() -> dict[str, str]:
+        outcomes: dict[str, str] = {}
+        async with await start_env_or_skip() as env:
+            probes = [_FailsOnAPlainException, _ParksOnAPlainException]
+            async with Worker(env.client, task_queue="stance-probe", workflows=probes):
+                for name, start in starts.items():
+                    handle = await env.client.start_workflow(
+                        start, id=f"{name}-{uuid.uuid4()}", task_queue="stance-probe"
+                    )
+                    # Both terminal states are legitimate answers here; the assertion is on the
+                    # status the server ends up reporting, not on how the wait ended.
+                    with contextlib.suppress(WorkflowFailureError, TimeoutError):
+                        await asyncio.wait_for(handle.result(), timeout=5)
+                    status = (await handle.describe()).status
+                    outcomes[name] = status.name if status is not None else "UNREPORTED"
+        return outcomes
+
+    outcomes = asyncio.run(measure())
+    assert outcomes["_FailsOnAPlainException"] == "FAILED"
+    assert outcomes["_ParksOnAPlainException"] == "RUNNING", (
+        "the undeclared workflow completed or failed on its own — if the SDK has changed this "
+        "default, the trade D-2026-08-27 decided per workflow no longer exists and the table above "
+        "should be retired rather than maintained"
     )

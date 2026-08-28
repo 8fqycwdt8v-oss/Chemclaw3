@@ -287,6 +287,12 @@ class JobSpec(BaseModel):
     consulted only `entra_expensive_actions`; `tests/test_authz.py` now cross-checks every declared
     job against the effective set. `publish_to_graph` lets core PR-gate a `Note` the job's result
     carries — the write still goes through `chemclaw.kg.pr_gate`, never through the connector.
+
+    **A bundle may lower its own runtime ceiling and may not raise it** (`timeout_seconds`). The
+    deployment keeps the maximum — the effective ceiling is the *lower* of the declared number and
+    `connector_job_timeout_seconds` — so a manifest that asks for more than the operator funds is
+    clamped rather than obeyed, and a manifest that declares nothing is bounded exactly as it was
+    before this field existed.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -345,6 +351,32 @@ class JobSpec(BaseModel):
     # Keep it comfortably under the front door's `service_turn_timeout_seconds`: this budget is
     # spent inside a turn, and a job that outlives the turn is the failure it exists to prevent.
     inline_wait_seconds: float | None = Field(default=None, gt=0)
+    # A ceiling on this job's whole durable run, in seconds — **a lowering of the deployment's
+    # ceiling, never a raise.** The effective ceiling is
+    # `min(this, connector_job_timeout_seconds)`, computed in one place
+    # (`durable/connector_job.py::child_execution_timeout`), so a manifest in this repository can
+    # ask for *less* runtime than the deployment funds and never for more. That asymmetry is the
+    # whole reason this field can exist at all: `connector_job_timeout_seconds` is one global
+    # number precisely because a bundle must not be able to grant itself unlimited runtime, and a
+    # bound that can only move downward takes nothing away from the operator.
+    #
+    # Unset (the default) means exactly the deployment's ceiling — what every manifest written
+    # before this field existed got, and still gets.
+    #
+    # It exists because one global ceiling bounds a twenty-second job and a four-hour job
+    # identically. With a bundle's worker down, a job that would have answered in seconds sits
+    # `running` for the whole global ceiling with nothing said, because the only thing that ends it
+    # is a number sized for the *longest* job in the fleet. The bundle knows what its own job
+    # costs; the deployment knows the maximum it will fund. Declaring the first here keeps both.
+    #
+    # **Declare what this job actually costs, and never less than the longest activity its own
+    # workflow runs.** Core cannot check that half and does not pretend to: it can see neither the
+    # bundle's workflow nor its activity budgets, so a ceiling below the child's own activity
+    # budget re-creates — for this one job — the defect
+    # `Settings._the_job_ceiling_covers_the_activity_it_bounds` refuses globally: a single attempt
+    # exhausts the whole ceiling, the activity's retry policy becomes unreachable, and the run dies
+    # as a bare `WorkflowExecutionTimedOut` naming no setting at all.
+    timeout_seconds: float | None = Field(default=None, gt=0)
 
     @model_validator(mode="after")
     def _one_way_to_declare_params(self) -> Self:

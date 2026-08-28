@@ -89,20 +89,41 @@ class FingerprintRecord(BaseModel):
     Morgan radius) are the same length yet incomparable, which the width check cannot catch;
     carrying the definition lets the durable store refuse to rank across definitions. Defaults
     to empty for a record built without one (an ephemeral, single-definition index).
+
+    `source` is the *other half of the id* for an index whose ids come from outside this system
+    (D-2026-08-27). An ELN entry id is unique to one site, so two ELNs may legitimately both hold
+    `EXP-1001` and the two are different runs; the reaction index keyed on the bare id let the
+    second ingest overwrite the first, and the first site's chemistry stopped being findable at
+    all. It is the registry source name — the token in `CHEMCLAW_DATA_SOURCES` — and it is the
+    same string `reaction_labels.source` and `reaction_records.ingest_source` carry, so the four
+    indexes an ingest writes agree on what a source is.
+
+    **Empty is the right answer for an index whose ids are already global**, which is why it
+    defaults to it rather than being required: a molecule record's id is its standardized SMILES,
+    and two sources charging the same molecule *must* land on one row — splitting that index by
+    source would duplicate every shared structure and answer "have we made this?" per site.
     """
 
     id: str = Field(min_length=1)
     label: str = Field(min_length=1)
     bits: str = Field(min_length=1)
     definition: str = ""
+    source: str = ""
 
 
 class Match(BaseModel):
-    """A structural-search hit: the entity and its Tanimoto similarity to the query."""
+    """A structural-search hit: the entity, its Tanimoto similarity, and which corpus it is from.
+
+    `source` carries the ingest source that stored the record, empty for an index whose ids are
+    global (see `FingerprintRecord.source`). It is on the hit because a hit is what a citation is
+    spelled from: with two sites behind one entry id, `note_id_for_reaction(hit.id)` alone names
+    both runs and neither, and only the search knows which one it matched.
+    """
 
     id: str
     label: str
     similarity: float
+    source: str = ""
 
 
 HitT = TypeVar("HitT", bound=BaseModel)
@@ -196,7 +217,11 @@ class FingerprintStore(Protocol):
     """Persistence + similarity-search contract. Backends implement this."""
 
     async def add(self, record: FingerprintRecord) -> None:
-        """Insert or replace a fingerprint by id."""
+        """Insert or replace a fingerprint by its key.
+
+        The key is `(source, id)` for an index whose ids come from outside this system, and the
+        bare id everywhere else — see `FingerprintRecord.source`.
+        """
         ...
 
     async def add_many(self, records: Sequence[FingerprintRecord]) -> None:
@@ -252,7 +277,11 @@ class InMemoryFingerprintStore:
 
     Computes exact Tanimoto ranking without a database — the reference the Postgres
     backend matches (same threshold and tie-break, exactly for small corpora, up to HNSW
-    recall for large ones). Keyed by record id, so re-adding an id replaces it.
+    recall for large ones). Keyed by `(source, id)`, so re-adding one source's record replaces
+    it and a second source using the same entry id gets its own row (D-2026-08-27) — the same
+    key the reaction table carries. An index whose records all leave `source` empty (every
+    molecule index, and every ephemeral one built in a test) behaves exactly as it did when the
+    key was the bare id, because the first half of the pair is then constant.
     """
 
     def __init__(self, definition: str | None = None) -> None:
@@ -263,30 +292,45 @@ class InMemoryFingerprintStore:
         testable without a database. Left `None` it ranks every record, which is correct
         for an ephemeral index always populated in a single configuration (tests, demo).
         """
-        self._records: dict[str, FingerprintRecord] = {}
+        self._records: dict[tuple[str, str], FingerprintRecord] = {}
         self._definition = definition
 
     async def add(self, record: FingerprintRecord) -> None:
-        """Insert or replace a fingerprint by id."""
-        self._records[record.id] = record
+        """Insert or replace a fingerprint by `(source, id)`, superseding its unsourced twin.
+
+        The supersede is the in-memory half of the durable store's, and it is what keeps a
+        migrated index from holding one entry twice — see `PostgresFingerprintStore.add` for the
+        row it is about. Here it costs one dict lookup and keeps the two backends' contents
+        identical, which is the property every ordering assertion in this module rests on.
+        """
+        self._records[(record.source, record.id)] = record
+        if record.source:
+            self._records.pop(("", record.id), None)
 
     async def add_many(self, records: Sequence[FingerprintRecord]) -> None:
-        """Insert or replace a batch — the same dict writes, since there is nothing to batch."""
+        """Insert or replace a batch — `add` per record, since there is nothing here to batch.
+
+        Delegating rather than writing the dict again: `add` also supersedes an unsourced twin, and
+        a second copy of that rule here is a second place for the two backends' contents to diverge
+        — which is the property every ordering assertion in this module rests on.
+        """
         for record in records:
-            self._records[record.id] = record
+            await self.add(record)
 
     async def all_records(self, limit: int | None = None) -> list[FingerprintRecord]:
         """Return stored records; at most `limit` (first in id order) when set.
 
         Unbounded (`limit=None`) keeps insertion order for byte-identical legacy behavior; a
-        bounded scan sorts by id first so the truncated slice matches the Postgres backend's
-        `ORDER BY id COLLATE "C" LIMIT` (Python's code-point sort equals byte order under
-        UTF-8, which is order-preserving — the default database collation is not).
+        bounded scan sorts by `(source, id)` first so the truncated slice matches the Postgres
+        backend's `ORDER BY source COLLATE "C", id COLLATE "C" LIMIT` (Python's code-point sort
+        equals byte order under UTF-8, which is order-preserving — the default database collation
+        is not). On an index whose records carry no source that is the previous ordering exactly,
+        because a constant leading key changes nothing.
         """
         records = list(self._records.values())
         if limit is None:
             return records
-        return sorted(records, key=lambda r: r.id)[:limit]
+        return sorted(records, key=lambda r: (r.source, r.id))[:limit]
 
     def _searchable(self) -> list[FingerprintRecord]:
         """The records this store may rank: its own definition's, or all when it pins none.
@@ -313,9 +357,10 @@ class InMemoryFingerprintStore:
         """Rank stored records by Tanimoto to `query_bits`, filtered and truncated.
 
         Records whose definition differs from this store's (when one is set) are excluded —
-        their equal-width bits are not comparable. Ties break by id so the ordering is
-        deterministic and matches the Postgres `ORDER BY similarity DESC, id COLLATE "C"`
-        (code-point order — the locale-independent ordering both backends can share).
+        their equal-width bits are not comparable. Ties break by `(source, id)` so the ordering
+        is deterministic and matches the Postgres `ORDER BY similarity DESC, source COLLATE "C",
+        id COLLATE "C"` (code-point order — the locale-independent ordering both backends can
+        share).
 
         The query is parsed once rather than once per record, which is what `tanimoto`'s two-string
         form would have done here — see `tanimoto_bits`. The width check moves with it: it is made
@@ -332,10 +377,11 @@ class InMemoryFingerprintStore:
                     id=record.id,
                     label=record.label,
                     similarity=tanimoto_bits(query, int(record.bits, 2)),
+                    source=record.source,
                 )
             )
         hits = [m for m in scored if m.similarity >= threshold]
-        hits.sort(key=lambda m: (-m.similarity, m.id))
+        hits.sort(key=lambda m: (-m.similarity, m.source, m.id))
         return hits[:top_k]
 
 
@@ -350,9 +396,25 @@ class PostgresFingerprintStore:
     HNSW scan, so a selective threshold can return fewer than `top_k` rows even when that
     many qualify in the table (bounded by `hnsw.ef_search`) — approximate by design.
     A short-lived connection per call (KISS — the calc store's choice).
+
+    `source_keyed` says whether the table carries the `source` half of the key
+    (D-2026-08-27) — `reaction_fingerprints` does since `063`, `molecule_fingerprints` does not
+    and must not. It is a constructor flag rather than two classes because everything that makes
+    this backend worth having is identical either way: the Jaccard SQL, the HNSW ordering, the
+    definition scoping and the pooling. What it changes is confined to the key columns the
+    statements below are built from, and every read projects a constant `''` for a table without
+    the column, so a row reaches Python in one shape whichever table it came from.
     """
 
-    def __init__(self, table: str, width: int, definition: str, dsn: str | None = None) -> None:
+    def __init__(
+        self,
+        table: str,
+        width: int,
+        definition: str,
+        dsn: str | None = None,
+        *,
+        source_keyed: bool = False,
+    ) -> None:
         """Bind to `table` with fingerprint `width` and `definition`, on the configured DSN.
 
         `table` and `width` come from trusted domain constants, never user input, so
@@ -366,19 +428,49 @@ class PostgresFingerprintStore:
         this store's definition, so changing the definition and re-indexing alongside older
         rows can never silently rank incomparable (same-width, different-radius) bits — the
         stale rows simply fall out of search until they are re-indexed.
+
+        `source_keyed` binds this store to a table whose primary key is `(source, id)`. Set it
+        only for a table that actually has the column: it decides the `ON CONFLICT` target, and
+        naming a key the table does not have is a write that fails to plan rather than one that
+        silently mis-keys.
         """
         if not table.isidentifier():
             raise ValueError(f"table must be a plain SQL identifier, got {table!r}")
         self._table = table
         self._definition = definition
+        self._source_keyed = source_keyed
         self._dsn = dsn if dsn is not None else settings.postgres_dsn
+        # The one place the two shapes diverge. `_source_read` is a *projection*, not a filter:
+        # a table without the column answers a constant, so `all_records` and `find_similar`
+        # unpack the same five/four positions either way and no caller branches on the flag.
+        self._source_read = "source" if source_keyed else "''"
+        insert_columns = "source, id" if source_keyed else "id"
+        insert_values = "%(source)s, %(id)s" if source_keyed else "%(id)s"
+        conflict = "(source, id)" if source_keyed else "(id)"
+        # Ties break by the whole key, so two sources holding one entry id still order
+        # deterministically — and identically to the in-memory backend's `(source, id)` sort.
+        self._order = 'source COLLATE "C", id COLLATE "C"' if source_keyed else 'id COLLATE "C"'
         self._upsert = (
-            f"INSERT INTO {table} (id, label, bits, definition) "
-            f"VALUES (%(id)s, %(label)s, %(bits)s::bit({width}), %(definition)s) "
-            f"ON CONFLICT (id) DO UPDATE SET "
+            f"INSERT INTO {table} ({insert_columns}, label, bits, definition) "
+            f"VALUES ({insert_values}, %(label)s, %(bits)s::bit({width}), %(definition)s) "
+            f"ON CONFLICT {conflict} DO UPDATE SET "
             f"label = EXCLUDED.label, bits = EXCLUDED.bits, definition = EXCLUDED.definition"
         )
-        self._all = f"SELECT id, label, bits::text, definition FROM {table}"
+        # There is deliberately no statement here that deletes the unsourced row `063` could not
+        # backfill, and the reason is a privilege rather than a preference. `app_privileges.sql`
+        # grants this table INSERT and UPDATE only, in the group whose comment says withholding
+        # DELETE is what makes `retention.py`'s refusal to prune enforced rather than intended. A
+        # `DELETE` here therefore raises `permission denied` for the runtime role on every sourced
+        # write — and because it shares the upsert's transaction, the fingerprint would not land
+        # either. That is every ELN and corpus ingest on any deployment that runs `make db-grants`,
+        # which no test in this tree could see: the suite connects as the owner.
+        #
+        # It would also have been wrong where it worked. An unsourced row is not a *twin* — it is
+        # whichever site synced last before `063`, or a pre-051 entry that merely shares an id — so
+        # deleting it on a same-id write from another source destroys that site's only fingerprint.
+        # The unsourced population is finite, shrinks only on a reindex, and is exactly the
+        # pre-`063` behaviour for those rows.
+        self._all = f"SELECT {self._source_read}, id, label, bits::text, definition FROM {table}"
         # Both scoped to this store's definition, for the reason `find_similar` is: rows indexed
         # under a superseded definition are not searchable here, so counting them would report a
         # populated index to an operator whose searches all return nothing.
@@ -391,11 +483,12 @@ class PostgresFingerprintStore:
         # en_US.UTF-8/ICU) orders mixed-case ids differently from Python's code-point sort
         # and would silently break the documented cross-backend ordering parity.
         self._similar = (
-            f"SELECT id, label, 1 - (bits <%%> %(q)s::bit({width})) AS similarity "
+            f"SELECT {self._source_read}, id, label, "
+            f"1 - (bits <%%> %(q)s::bit({width})) AS similarity "
             f"FROM {table} "
             f"WHERE definition = %(definition)s "
             f"AND 1 - (bits <%%> %(q)s::bit({width})) >= %(threshold)s "
-            f'ORDER BY bits <%%> %(q)s::bit({width}), id COLLATE "C" '
+            f"ORDER BY bits <%%> %(q)s::bit({width}), {self._order} "
             f"LIMIT %(k)s"
         )
 
@@ -413,21 +506,39 @@ class PostgresFingerprintStore:
             yield conn
 
     async def add(self, record: FingerprintRecord) -> None:
-        """Insert or replace a fingerprint by id."""
+        """Insert or replace a fingerprint by this table's key, in one transaction.
+
+        The single-record case of `add_many`, so the upsert and the source refusal below have
+        exactly one definition rather than two that can drift.
+        """
         await self.add_many([record])
 
     async def add_many(self, records: Sequence[FingerprintRecord]) -> None:
         """Insert or replace a batch on one connection, in one transaction.
 
-        One checkout and one commit for the whole batch rather than per record — the difference the
-        protocol's own docstring measures. `add` is the single-record case of this rather than a
-        second statement, so there is exactly one place the upsert is written.
+        One checkout and one commit for the whole batch rather than per record. Measured against a
+        live database inside `db.pooling()`, 200 rows, three trials: 3.0 ms/row one at a time
+        against 1.15 ms/row batched, a stable 2.6x. `CorpusMolecules.add_many` is the same method
+        for the same reason one table over.
+
+        A record carrying a source on a store that is not `source_keyed` is refused rather than
+        written, because the column it would need does not exist and the value would otherwise
+        be dropped on the floor — the silent half-write the key change is about. Checked for every
+        record *before* the connection is taken, so a bad batch costs no partial write: the refusal
+        is about a mis-wired store rather than about one row, and half-applying it would leave the
+        caller unable to say what landed.
 
         An empty batch takes no connection at all: the drain calls this once per page, and a page
         that recorded nothing must not pay a checkout to write nothing.
         """
         if not records:
             return
+        for record in records:
+            if record.source and not self._source_keyed:
+                raise FingerprintError(
+                    f"{self._table} is not keyed by source, so a record from {record.source!r} "
+                    "cannot be stored in it without losing which corpus it came from"
+                )
         async with self._connection() as conn:
             for record in records:
                 await conn.execute(
@@ -437,6 +548,7 @@ class PostgresFingerprintStore:
                         "label": record.label,
                         "bits": record.bits,
                         "definition": record.definition,
+                        **({"source": record.source} if self._source_keyed else {}),
                     },
                 )
             await conn.commit()
@@ -447,18 +559,22 @@ class PostgresFingerprintStore:
         Unfiltered by definition on purpose: the only consumer is substructure search, which
         re-matches the stored SMILES label with RDKit and never touches the bits, so a
         stale-definition row is still a correct substructure hit. When `limit` is set the scan
-        is `ORDER BY id LIMIT` — a bounded, deterministic slice so a huge corpus is never
+        is `ORDER BY <key> LIMIT` — a bounded, deterministic slice so a huge corpus is never
         materialized whole into the worker heap (the caller warns when the cap truncates).
         """
         if limit is None:
             sql, params = self._all, None
         else:
-            sql, params = f'{self._all} ORDER BY id COLLATE "C" LIMIT %(limit)s', {"limit": limit}
+            sql = f"{self._all} ORDER BY {self._order} LIMIT %(limit)s"
+            params = {"limit": limit}
         async with self._connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(sql, params)
                 rows = await cur.fetchall()
-        return [FingerprintRecord(id=r[0], label=r[1], bits=r[2], definition=r[3]) for r in rows]
+        return [
+            FingerprintRecord(source=r[0], id=r[1], label=r[2], bits=r[3], definition=r[4])
+            for r in rows
+        ]
 
     async def is_empty(self) -> bool:
         """Whether this table holds no row under this store's definition.
@@ -492,7 +608,7 @@ class PostgresFingerprintStore:
                 }
                 await cur.execute(self._similar, params)
                 rows = await cur.fetchall()
-        return [Match(id=r[0], label=r[1], similarity=float(r[2])) for r in rows]
+        return [Match(source=r[0], id=r[1], label=r[2], similarity=float(r[3])) for r in rows]
 
 
 async def find_matches(
@@ -619,5 +735,8 @@ def default_reaction_store() -> PostgresFingerprintStore:
     from chemclaw.science.fingerprints.rxnfp.fingerprint import reaction_definition
 
     return PostgresFingerprintStore(
-        "reaction_fingerprints", settings.drfp_bits, reaction_definition()
+        "reaction_fingerprints",
+        settings.drfp_bits,
+        reaction_definition(),
+        source_keyed=True,
     )

@@ -7,8 +7,12 @@ config error rather than a silent drop. The properties that are *new* are the ma
 a bundle must contribute something reachable, a job must declare its arguments exactly one way,
 and a name may not be claimed twice.
 
-Pure validation — no subprocess, no network, no filesystem.
+Pure validation — no subprocess and no network. One test at the end reaches the loader, and
+says why: a number a bundle author got wrong is only actionable if the failure names the file it
+is in, and that framing belongs to `registry._load_manifest` rather than to the model.
 """
+
+from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
@@ -281,3 +285,48 @@ def test_an_endpoint_that_declares_no_tools_refuses_to_load() -> None:
         )
         with pytest.raises(ValidationError, match="declares no tools"):
             endpoint.model_validate(payload)
+
+
+def test_a_job_may_declare_its_own_ceiling_and_a_bad_number_is_refused() -> None:
+    """The new key's shape: absent by default, a positive number, and nothing else.
+
+    Absent is the state of every manifest written before the field existed, and it must stay
+    distinguishable from any declared number — `None` is what `child_execution_timeout` reads as
+    "the deployment's ceiling, unchanged", so a zero or a negative silently coerced into it would
+    turn a typo into a behaviour change nobody asked for. `gt=0` refuses both where a bundle author
+    meets them, at load, rather than at the moment a child workflow is started with a ceiling of
+    zero seconds.
+    """
+    assert JobSpec.model_validate(_JOB).timeout_seconds is None
+    assert JobSpec.model_validate({**_JOB, "timeout_seconds": 900}).timeout_seconds == 900.0
+    for bad in (0, -1, "soon"):
+        with pytest.raises(ValidationError):
+            JobSpec.model_validate({**_JOB, "timeout_seconds": bad})
+
+
+def test_a_bad_ceiling_in_a_real_manifest_names_the_file_it_is_in(tmp_path: Path) -> None:
+    """The one test here that reaches the loader, because the file name is the whole message.
+
+    `JobSpec` raising a `ValidationError` is not by itself useful to whoever wrote the number: a
+    bundle is discovered by existing on `connectors_dir`, so the report has to name *which*
+    `connector.yaml` among however many are on that path. `registry._load_manifest` wraps every
+    validation failure with the file it read, which is what makes a manifest problem a
+    fail-closed startup error somebody can act on — asserted here on the field this module added,
+    since a rule that is only checked in the abstract is a rule nobody can locate.
+    """
+    from chemclaw.connectors.registry import ConnectorError, _load_manifest
+
+    bundle = tmp_path / "thing"
+    bundle.mkdir()
+    (bundle / "connector.yaml").write_text(
+        "name: thing\n"
+        "description: does a thing\n"
+        "jobs:\n"
+        "  - name: run_thing\n"
+        "    workflow: ThingWorkflow\n"
+        "    summary: Run the thing.\n"
+        "    timeout_seconds: 0\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConnectorError, match=r"connector\.yaml: invalid manifest"):
+        _load_manifest(bundle)

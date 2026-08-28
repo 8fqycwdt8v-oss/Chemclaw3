@@ -1,16 +1,18 @@
 """The corpus's reactions as DRFP bits — the half `molecules.py` does for structures.
 
-`corpus_reactions` carries the same five columns `reaction_fingerprints` does, so similarity needs
-no code at all: `PostgresFingerprintStore` is already table-parameterised and `corpus_reactions()`
-just points it at the other table. Unlike `CorpusMolecules` there is no extra column and no second
-search shape, so there is no class here either — two functions and a constant is the whole module.
+`corpus_reactions` carries the same columns `reaction_fingerprints` does, so similarity needs no
+code at all: `PostgresFingerprintStore` is already table-parameterised and `corpus_reactions()` just
+points it at the other table. Unlike `CorpusMolecules` there is no extra column and no second search
+shape, so there is no class here either — one constant and two functions is the whole module.
 
-**Why a second table rather than more rows in `reaction_fingerprints`.** The same argument
-`molecules.py` makes, and stronger: that table is keyed on the *bare* reaction id, which
-`ingest_reaction`'s own docstring records as unable to tell two sources apart. A feed of millions of
-rows would collide with this organisation's own ELN runs under any shared entry id, and would swamp
-`similar_reactions` with hits whose `reaction-<id>` citation resolves to a different record. The ELN
-table answers "have we run this?" and cites a transcription; this answers "is there precedent?".
+**Why a second table rather than more rows in `reaction_fingerprints`.** Not the key: `063` gave
+that table a `source` column and an `(source, id)` primary key
+(`D-2026-08-27-a-fingerprint-is-keyed-by-its-source`), so it tells two sources apart and a shared
+entry id collides with nothing. What is left is the argument `molecules.py` makes, untouched by that
+fix: the two answer different questions and cite different things. `reaction_fingerprints` is "have
+we run this?" and its hits resolve to a `reaction-<id>` transcription; this is "is there literature
+precedent?". Merging them would swamp `similar_reactions` by four orders of magnitude with hits
+whose note id resolves to nothing.
 """
 
 from chemclaw.core.config import settings
@@ -21,20 +23,18 @@ CORPUS_REACTIONS_TABLE = "corpus_reactions"
 
 
 def corpus_reactions() -> PostgresFingerprintStore:
-    """Tanimoto search and writes over the corpus's reactions, on the class the ELN corpus uses."""
-    return PostgresFingerprintStore(
-        CORPUS_REACTIONS_TABLE, settings.drfp_bits, reaction_definition()
-    )
+    """Tanimoto search and writes over the corpus's reactions, on the class the ELN corpus uses.
 
-
-def corpus_reaction_id(source: str, reaction_id: str) -> str:
-    """The row id for one corpus reaction: `<source>:<reaction_id>`.
-
-    The pair, never the bare id, so a hit joins to `reaction_labels (source, reaction_id)` by
-    construction — the collision `051` and `D-2026-08-26-a-transcription-is-keyed-by-its-source`
-    both exist to prevent, and the one `reaction_fingerprints` still has.
+    `source_keyed`, like `default_reaction_store()`: a corpus row is identified by the registry
+    source *and* the source's own reaction id, which is what lets a hit join to
+    `reaction_labels (source, reaction_id)` without composing or decomposing a string.
     """
-    return f"{source}:{reaction_id}"
+    return PostgresFingerprintStore(
+        CORPUS_REACTIONS_TABLE,
+        settings.drfp_bits,
+        reaction_definition(),
+        source_keyed=True,
+    )
 
 
 def transformation_of(record_smiles: str) -> str:

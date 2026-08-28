@@ -61,18 +61,22 @@ async def ingest_reaction(
     in hand (`ingest/labels/record.py` says why), so a default of `None` would let a caller quietly
     stop writing the half of the row that cannot be reconstructed afterwards.
 
-    `source` is the registry source name, and it is the other half of the key of *both* rows this
-    writes — two ELNs may legitimately use one entry id, and a facet count must not merge two
-    sites' runs any more than one site's transcription may overwrite the other's. The transcription
-    tier keyed on the bare id until
-    `D-2026-08-26-a-transcription-is-keyed-by-its-source`, carrying the rendered provenance in a
-    `source` column beside it — which recorded which site won rather than keeping both.
+    `source` is the registry source name, and it is the other half of the key of *every* row this
+    writes about the reaction — two ELNs may legitimately use one entry id, and a facet count must
+    not merge two sites' runs any more than one site's transcription may overwrite the other's.
+    Each tier reached that key on its own date and the last one closed the gap this docstring used
+    to name: `reaction_labels` since `051`, the transcription tier since
+    `D-2026-08-26-a-transcription-is-keyed-by-its-source` (it carried the rendered provenance in a
+    `source` column beside a bare-id key, which recorded which site won rather than keeping both),
+    and `reaction_fingerprints` since `D-2026-08-27-a-fingerprint-is-keyed-by-its-source`. Measured
+    before that last one, ingesting `EXP-1001` from two sources left **one** fingerprint row, and
+    searching the index for the losing site's own reaction returned no hits under the verdict "this
+    is a genuine negative result".
 
-    **The fingerprint tables are still keyed on the bare id**, so two sites sharing one id still
-    collapse to one structural row. That is a narrower harm — a hit resolves to a run that exists,
-    and `ReactionRecordStore.read` now refuses rather than substituting when the citation is
-    ambiguous — but it is not fixed here, and saying so is the point: this function writes four
-    indexes and only three of them can tell the two sites apart.
+    **The molecule index is deliberately not keyed by source**, and that is not the same gap: a
+    molecule record's id is its standardized SMILES, so two sites charging the same reagent are one
+    structure and must share one row. What has a source is a record whose id came from outside this
+    system.
     """
     problems = validate_ord(reaction)
     if problems:
@@ -80,9 +84,13 @@ async def ingest_reaction(
 
     # `transformation_smiles`, never `reaction_smiles`: the row is a fingerprint, and the agent
     # slot only changes the bits by being *left out* (DRFP folds it back onto the reactants).
-    await reaction_store.add(
-        record_for_reaction(reaction.reaction_id, reaction.transformation_smiles())
-    )
+    #
+    # The source is set on the record rather than passed to `record_for_reaction`, because that
+    # builder is the DRFP half — id, label, bits, definition — and the source is who supplied the
+    # id, which the fingerprint knows nothing about. Keeping it out of the builder also keeps the
+    # molecule builder beside it honest: a structure has no source to carry.
+    fingerprint = record_for_reaction(reaction.reaction_id, reaction.transformation_smiles())
+    await reaction_store.add(fingerprint.model_copy(update={"source": source}))
     for smiles in {standard_smiles(c.smiles) for c in reaction.compounds()}:
         await molecule_store.add(record_for(smiles, smiles))
     await _index_impurities(reaction, molecule_store)

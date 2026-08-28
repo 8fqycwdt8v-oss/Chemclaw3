@@ -1,0 +1,468 @@
+# Live-test probe corpus — the multi-step calculation surface: species sets, conformer ensembles,
+# and the named protocols that sequence them.
+#
+# **Every probe here covers a tool that had no probe at all**, and they are the same seventeen
+# names `tests/test_probe_coverage.py` used to grandfather: the GFN multi-step merge added them in
+# one change, the coverage gate landed on a branch that was already behind it, and the gate
+# recorded the debt rather than pretending the corpus was complete. This file is that debt paid —
+# and because it is paid in full, the grandfathering machinery was deleted rather than left holding
+# an empty set, so there is no longer a live debt to compute. The gate is now simply that every
+# advertised tool has a probe.
+#
+# The surface these ask about has a shape worth stating, because it decides what a right answer is
+# and it is the commonest thing to get wrong:
+#
+#   **The enumeration and the calculation are different tools, and the order is not optional.**
+#   `enumerate_tautomers`, `enumerate_protonation_states`, `enumerate_stereoisomers`,
+#   `enumerate_bond_cleavages` and `enumerate_degradants` are free graph operations that build a
+#   *species set*. `rank_species` and `survey_bond_strengths` are durable jobs that compute over a
+#   set they are handed and **will not enumerate one**. A ranking over a set the model wrote out
+#   itself is confident about the wrong universe, and it reads exactly like a correct answer — so
+#   several probes here are graded on which universe was ranked as much as on the ranking.
+#
+#   **A named protocol (`run_*`) is a fixed sequence, not a better calculator.** It exists because
+#   getting the order wrong is silent. Where one fits, reaching for it and reaching for the parts in
+#   the right order are both good answers, which is why those probes name both — `expects_tools` is
+#   ANY-OF and grading routing taste is not what it is for.
+#
+# bucket: A = the surface covers this | B = partial cover, the honest answer states the limit
+#         C = the surface cannot do this at all; the only good answer says so
+#
+# `expects_job: true` marks the probes whose answer requires durable work to have actually run, so
+# the runner resolves the launched workflow ids against Temporal instead of believing the turn.
+
+probes:
+  # ---------------------------------------------------------------------------
+  # The species set — free, structural, and the universe every ranking is over
+  # ---------------------------------------------------------------------------
+
+  - id: ms-01
+    section: 6
+    persona: lab_technician
+    bucket: A
+    question: >-
+      Our filing draws the intermediate as the hydroxypyridine, Oc1ccccn1, but the crystal
+      structure paper draws the pyridone. Before anyone argues about which is right — what forms
+      can this thing actually exist as? I want the list, not a verdict yet.
+    expects_tools: [enumerate_tautomers]
+    forbids_claims:
+      - "a population, ratio or dominant form, which needs a calculation this question did not ask for"
+      - "a tautomer that the enumeration did not return"
+      - "that the enumeration settles which form the crystal contains"
+    direction: >-
+      The ask is explicitly the enumeration and explicitly not the ranking, which is the whole
+      distinction this part of the surface is built on. A good answer builds the species set with
+      the structural enumerator, reports each form as a SMILES a chemist can read back, and stops
+      there — then names what would settle it (a free-energy ranking over this set) as the next
+      step rather than performing it in prose. Saying that the enumeration is a graph operation
+      with no chemistry in it, so it says which forms are possible and nothing about which is
+      present, is the sentence that makes the answer useful. Asserting "it is mostly the pyridone"
+      from memory is the failure here even though it is the textbook answer: nothing was computed,
+      and the same reflex on a compound with no textbook entry produces a number out of nowhere.
+
+  - id: ms-02
+    section: 6
+    persona: lab_technician
+    bucket: A
+    question: >-
+      Nicotinic acid, OC(=O)c1cccnc1. It has an acid and a basic nitrogen, so I do not think a
+      single pKa tells me anything. What ionised forms are even on the table here?
+    expects_tools: [enumerate_protonation_states]
+    forbids_claims:
+      - "a pKa value for either site"
+      - "a percentage or distribution across the microstates"
+      - "a microstate that combines two ionisations, which the single-toggle enumeration does not produce"
+    direction: >-
+      The asker has already identified the amphoteric case correctly, so the useful answer is the
+      microstate set rather than a lecture. Each ionisable site is toggled singly — the neutral
+      parent, the carboxylate, the pyridinium — and a good answer says that plainly, including that
+      the doubly-ionised zwitterion is not in the set and is reachable by enumerating again on a
+      member. It should agree with the asker that a single predicted pKa does not describe this
+      molecule and name what does: a ranking over these microstates at a stated pH. Quoting a pKa
+      here is not wrong chemistry, it is the wrong tool, and an answer that leads with one has gone
+      back to the single-site question the asker just ruled out.
+
+  - id: ms-03
+    section: 6
+    persona: lab_technician
+    bucket: A
+    question: >-
+      The reduction gave us CC(O)C(C)c1ccccc1 and I have not assigned either centre yet. How many
+      distinct compounds could that actually be, and which of them are separable?
+    expects_tools: [enumerate_stereoisomers]
+    forbids_claims:
+      - "a relative energy or a favoured isomer, which needs a calculation"
+      - "an isomer ratio observed in the reaction"
+      - "that enantiomers can be told apart by any calculation available here"
+    direction: >-
+      Two unassigned centres, so the expansion is four structures — two diastereomer pairs, each
+      pair enantiomers. The separability half is where the answer earns its keep: diastereomers
+      differ in energy and in every physical property, so they are separable and rankable; the
+      enantiomers within a pair are isoenergetic and nothing in this system distinguishes them, and
+      saying so is a correct answer rather than a limitation to apologise for. It should also note
+      that only *unassigned* centres expand — a drawn structure is a claim, so a fully specified
+      SMILES comes back as itself. Reporting how many isomers there are without the enantiomer
+      caveat invites the asker to ask for a ranking that cannot mean what they want.
+
+  - id: ms-04
+    section: 8
+    persona: lab_leader
+    bucket: A
+    question: >-
+      Before I sign off on the compute for a bond survey of ibuprofen, CC(C)Cc1ccc(cc1)C(C)C(=O)O
+      — how many bonds is that actually going to be, and which ones? I want to see the bill before
+      I approve it.
+    expects_tools: [enumerate_bond_cleavages]
+    forbids_claims:
+      - "a bond dissociation energy or a ranking, none of which has been computed"
+      - "a runtime, a core-hour figure or a cost in money"
+      - "that ring bonds are included in the survey"
+    direction: >-
+      A cost question answered with the free half of the workflow, which is exactly what the
+      enumeration is for. A good answer lists the distinct breakable bonds with the fragment pair
+      each would give, and gives the count as the thing that sets the cost — one balanced reaction
+      per entry. Three facts about the set are what make the count trustworthy: acyclic single
+      bonds only, because breaking one ring bond gives an open-chain biradical rather than two
+      fragments; symmetry-equivalent bonds collapse to one entry, so a methyl is one C-H and not
+      three; and the fragments carry explicit radical electrons, which is what makes the open shell
+      computable without a declared spin state. It must not quote a wall-clock or a price — nothing
+      here knows either — and it must not slip into ranking the bonds it has just listed.
+
+  - id: ms-05
+    section: 8
+    persona: lab_technician
+    bucket: A
+    question: >-
+      Stability study on COc1ccc2[nH]c(S(=O)Cc3ncc(C)c(OC)c3C)nc2c1 threw two peaks we cannot
+      assign. What could this have turned into? Give me structures I can go look for.
+    expects_tools: [enumerate_degradants]
+    forbids_claims:
+      - "a degradant ranked, weighted or given a likelihood"
+      - "a retention time, a mass or a UV maximum for any candidate"
+      - "that the list is comprehensive, or that a structure absent from it cannot form"
+    direction: >-
+      This is peak assignment, and the honest product is a short list of structural hypotheses to
+      check against the data — never a prediction of what the peaks are. A good answer proposes
+      candidates with the transform that produced each one, because the transform is the half a
+      chemist can argue with: sulfoxide to sulfone is worth chasing on this molecule, an
+      N-oxidation on a hindered nitrogen can be dismissed on sight, and a bare SMILES offers
+      neither. It should group them by the stress condition they belong to and say plainly that a
+      match means a transform fits the graph, not that the chemistry happens. The two limits both
+      belong in the answer: the transform set is deliberately short and named, so an absent
+      structure says something about the transform set rather than about the compound; and nothing
+      here computes a rate, so this cannot be ordered by likelihood.
+
+  - id: ms-06
+    section: 6
+    persona: lab_technician
+    bucket: A
+    question: >-
+      Is a conformer search worth running on CC(C)CC(NC(=O)OC(C)(C)C)C(=O)NCc1ccccc1, or is this
+      thing rigid enough that I would be paying for nothing? Also, does it have a tautomer problem
+      I should settle first?
+    expects_tools: [describe_topology]
+    forbids_claims:
+      - "a conformer population or a number of conformers found, which needs a search"
+      - "a computed energy of any kind"
+      - "a recommendation presented as though the counts decided it"
+    direction: >-
+      The question is literally what the free structural summary answers, and reaching for it
+      before spending anything is the behaviour worth measuring — the commonest waste on this
+      surface is buying a conformer search to discover the molecule was rigid. A good answer gives
+      the counts and then reads them: rotatable bonds well above zero means a search will find real
+      alternatives and this molecule has plenty; a tautomer count of one means there is no form to
+      settle first and a count above one means settle it before computing anything else, because
+      every downstream number describes whichever form was assumed. The counts are stable and what
+      to do about them is judgement, so an answer that presents its recommendation as the counts'
+      own conclusion has overstated a free graph read. Running the search here rather than
+      answering the question is the other failure.
+
+  # ---------------------------------------------------------------------------
+  # The calculation over the set — the durable half, given a set it did not build
+  # ---------------------------------------------------------------------------
+
+  - id: ms-07
+    section: 6
+    persona: lab_leader
+    bucket: A
+    question: >-
+      I already know the two forms of my methylpyrazole: Cc1cc[nH]n1 and Cc1ccn[nH]1. I do not
+      need them enumerated, I need to know which one I actually have in DMSO at room temperature
+      and by how much.
+    expects_tools: [rank_species]
+    expects_job: true
+    forbids_claims:
+      - "a population or free-energy gap the job did not return"
+      - "a form that was not in the two the asker supplied"
+      - "a rate, a barrier or an interconversion time"
+    direction: >-
+      The species set arrives with the question, which is precisely the case the ranking job exists
+      for, and the answer should take the asker at their word rather than re-enumerating. Grade
+      three things. That a ranking actually ran, rather than the well-known answer being recited.
+      That the numbers reported are the job's. And the reading: the two forms are ranked by free
+      energy in the requested medium, a gap above roughly 3 kcal/mol settles it and everything
+      downstream should use that form, while a small gap is also an answer and a more important one
+      — both are populated, and any property that differs between them is not a single number.
+      Naming the ranking level and what it bought is a plus; presenting a population to two decimal
+      places is a miss, because a population is approximate twice over, once through the sampling
+      and once through several kcal/mol of method error.
+
+  - id: ms-08
+    section: 8
+    persona: lab_leader
+    bucket: A
+    question: >-
+      Redo the ibuprofen bond survey properly. The quick pass was electronic energies and I want
+      free energies, and run it at 313 K rather than 298 K because that is where our stress study
+      sits.
+    expects_tools: [survey_bond_strengths]
+    expects_job: true
+    forbids_claims:
+      - "a dissociation energy the job did not return"
+      - "that the temperature or the level was applied when the launch did not carry it"
+      - "a quotable bond dissociation energy in kcal/mol presented as a measured BDE"
+    direction: >-
+      A follow-up that asks for two specific controls, and the point of the probe is whether they
+      reach the calculation. The standard level buys a Hessian per fragment per bond, which is what
+      turns an electronic-energy ordering into a free-energy one, and the temperature must be the
+      asker's rather than the default — an answer that runs the default and reports it as what was
+      asked for is the failure here, and it is invisible in the prose. The set of bonds still has
+      to come from an enumeration rather than from the model's own reading of the structure. On
+      reporting: the ordering is the answer and the magnitudes are not, so the weakest bonds should
+      be named and interpreted — a benzylic C-H is an autoxidation and hydrogen-abstraction
+      liability — while every number stays explicitly non-quotable as a BDE. Ring bonds were not
+      surveyed, and their absence must not read as strength.
+
+  - id: ms-09
+    section: 6
+    persona: lab_leader
+    bucket: A
+    question: >-
+      Those conformer populations you gave me are Boltzmann weights over electronic energies, which
+      assumes every conformer has the same entropy. That is exactly wrong for a folded structure.
+      Re-weight them by free energy — the lowest ten members is plenty.
+    expects_tools: [refine_ensemble]
+    expects_job: true
+    forbids_claims:
+      - "a refined population or entropy the job did not return"
+      - "that the refined members cover the whole ensemble when the result says otherwise"
+      - "that free-energy weighting is more accurate rather than a different treatment"
+    direction: >-
+      The asker has stated the defect correctly — a compact hydrogen-bonded fold has both a low
+      electronic energy and a stiff set of low modes, so it is over-populated by electronic energy
+      alone — and the right response is to run the refinement they asked for with the member count
+      they set, since that count is the cost knob and each member is an optimization and a Hessian.
+      The qualifier is the graded part: the result reports what share of the ensemble population
+      the refined members carry, and below roughly 90% that share belongs in the sentence reporting
+      the populations rather than in a footnote. "Free energies over 5 of 47 conformers" is a
+      different claim from "the ensemble", and the free-energy version is the one that looks more
+      careful. Presenting the refinement as a strict improvement rather than as a different and
+      more expensive treatment is the misframing to catch.
+
+  - id: ms-10
+    section: 6
+    persona: lab_leader
+    bucket: A
+    question: >-
+      You quoted me a dipole moment for CC(C)CC(NC(=O)OC(C)(C)C)C(=O)NCc1ccccc1 and I do not
+      believe it. That molecule does not have one shape. Is that number real for the compound, or
+      just for whichever geometry you happened to embed?
+    expects_tools: [compute_ensemble_property]
+    expects_job: true
+    forbids_claims:
+      - "an averaged dipole or a spread the job did not return"
+      - "that a single-conformer value was an ensemble value"
+      - "a comparison of this dipole against another molecule's"
+    direction: >-
+      The asker has caught the caveat that sits under every single-geometry number here, and the
+      correct answer agrees with them and then does the work: the property is computed at each
+      populated conformer's own geometry and weighted by population. What is graded hardest is the
+      spread rather than the mean. The result carries a minimum and a maximum, and when the values
+      scatter across the ensemble by more than the difference the number is being used to argue,
+      the honest report is that the molecule does not have one dipole at this temperature —
+      reporting only the mean turns that into a false precision indistinguishable from a
+      measurement. Conceding that the earlier figure described one embedded conformer is the right
+      thing to do plainly; defending it is the failure.
+
+  # ---------------------------------------------------------------------------
+  # The named protocols — a fixed sequence, because getting the order wrong is silent
+  # ---------------------------------------------------------------------------
+
+  - id: ms-11
+    section: 6
+    persona: lab_technician
+    bucket: A
+    question: >-
+      Settle this for me: for CC(=O)CC(C)=O in water, which form am I actually working with and
+      how much of the other one is there? I need it before we compute anything else about this
+      compound.
+    expects_tools: [run_tautomer_resolution, rank_species]
+    expects_job: true
+    forbids_claims:
+      - "a mixture composition the calculation did not return"
+      - "a tautomer that was never enumerated"
+      - "a keto/enol ratio recalled from the literature and presented as this system's result"
+    direction: >-
+      A 1,3-dicarbonyl, so the tautomer question is real and the asker is right that it comes
+      first: a pKa, a Fukui ranking, a dipole and a reaction free energy all describe whichever
+      form was drawn. Either route is a good answer — the named protocol, or the enumeration
+      followed by a ranking over it — and what is graded is that the ranking was over an enumerated
+      set rather than over forms the model wrote out. The level matters here more than anywhere
+      else on this surface and a good answer says which it used: ranked from one embedding per
+      tautomer this case comes out overwhelmingly keto against roughly 80% enol in the gas phase,
+      because the enol's stabilising intramolecular hydrogen bond exists in one planar conformer
+      and in none of the others, so a ranking that never searches conformers inverts the answer
+      while looking entirely reasonable. Report the mixture rather than picking the lower form.
+
+  - id: ms-12
+    section: 6
+    persona: lab_technician
+    bucket: A
+    question: >-
+      What is the dominant charge state of OC(=O)c1cccnc1 at pH 7.4? It is amphoteric so I do not
+      trust a single pKa here, and I need to know what is actually in solution before I argue about
+      solubility.
+    expects_tools: [run_microspecies_profile, rank_species]
+    expects_job: true
+    forbids_claims:
+      - "a microstate population the calculation did not return"
+      - "a predicted pKa presented as the answer to which species dominates"
+      - "a solubility value, which was not asked for and not computed"
+    direction: >-
+      The amphoteric case is exactly where the single-site predictor refuses and where the
+      microstate profile earns its cost, and the asker has said so. A good answer enumerates the
+      microstates and ranks them in water at the stated pH, by either route, and reports the
+      dominant form as a structure rather than as a word. The zwitterion question should be
+      addressed explicitly, since single-site toggling does not produce the doubly-ionised form and
+      a reader will assume it was considered. It is a correct and useful answer to add that a
+      single predicted pKa would not have covered this and why. Reaching for the fast pKa predictor
+      and presenting its number as the speciation answer is the failure this probe exists to catch.
+
+  - id: ms-13
+    section: 6
+    persona: lab_leader
+    bucket: A
+    question: >-
+      The route can give either diastereomer of CC(O)C(C)c1ccccc1. Which one is thermodynamically
+      favoured, and by enough to matter?
+    expects_tools: [run_stereoisomer_ranking, rank_species]
+    expects_job: true
+    forbids_claims:
+      - "a diastereomer ratio the calculation did not return"
+      - "a claim about which isomer the reaction produces"
+      - "a distinction drawn between enantiomers"
+    direction: >-
+      Expand the unassigned centres, rank the isomers by free energy, report which is favoured and
+      by how much — and then draw the line the question walks up to. This answers the
+      thermodynamic question and not the kinetic one: there are no transition states here, so what
+      a kinetically controlled reduction actually delivers is outside what was computed, and an
+      answer that slides from "favoured at equilibrium" to "what the route gives you" has answered
+      a different question than the one asked. The "by enough to matter" half should be answered
+      against the method's own error: a gap inside several kcal/mol of semiempirical uncertainty
+      does not separate two diastereomers, and saying so is better than reporting the gap alone.
+      Enantiomers are isoenergetic and must not appear as distinguished.
+
+  - id: ms-14
+    section: 8
+    persona: lab_leader
+    bucket: A
+    question: >-
+      We need a forced-degradation protocol for CC(C)Cc1ccc(cc1)C(C)C(=O)O and I would rather not
+      guess at the conditions. Which bond gives way first, and what does that tell us to stress?
+    expects_tools: [run_bond_strength_survey, survey_bond_strengths]
+    expects_job: true
+    forbids_claims:
+      - "a dissociation energy the calculation did not return"
+      - "a quotable BDE in kcal/mol for any bond"
+      - "a stress condition presented as a prediction of what the study will find"
+      - "that ring bonds were surveyed"
+    direction: >-
+      The question starts from a SMILES and ends at a study, which is the whole sequence: enumerate
+      the breakable bonds as radical pairs, compute one balanced reaction per bond, rank them
+      weakest first. Either the named protocol or the parts in that order is a good answer; a
+      ranking over bonds the model picked out by eye is not, and it is indistinguishable from the
+      right answer in prose. The interpretation is what a chemist is paying for — a weak benzylic
+      or alpha-to-heteroatom C-H is an autoxidation and hydrogen-abstraction liability, a weak C-N
+      or C-O is a thermal or hydrolytic one. Two caveats must survive into the answer: the ordering
+      is the finding and the magnitudes are not quotable as bond dissociation energies, and ring
+      bonds were excluded so their absence is not evidence of strength. Close on conditions to run,
+      framed as a study rather than as its result.
+
+  - id: ms-15
+    section: 6
+    persona: lab_leader
+    bucket: A
+    question: >-
+      How much of CC(C)CC(NC(=O)OC(C)(C)C)C(=O)NCc1ccccc1 is actually in the folded, internally
+      hydrogen-bonded form at room temperature? The population is the number I need, not a picture
+      of the best geometry.
+    expects_tools: [run_ensemble_free_energy, refine_ensemble]
+    expects_job: true
+    forbids_claims:
+      - "a population or conformational entropy the calculation did not return"
+      - "a population presented without the share of the ensemble it was computed over"
+      - "a folded fraction recalled rather than computed"
+    direction: >-
+      The asker has drawn the distinction the surface is built on: a population is the answer here,
+      not a geometry, and that is what makes the free-energy refinement worth its cost rather than
+      the far cheaper search that would have handed back a lowest structure. A good answer searches
+      the conformers, re-weights them by free energy, and reports the folded population with the
+      conformational entropy beside it. Two qualifiers must travel in the same sentence as the
+      number: what share of the ensemble the refined members cover, and that a population is
+      approximate twice over — the search is metadynamics rather than enumeration, and the energies
+      ranking it carry several kcal/mol of error, so 60/40 and 55/45 are the same answer. A crisp
+      percentage with no coverage figure is the failure, because it is the version that gets copied
+      into a report.
+
+  - id: ms-16
+    section: 6
+    persona: lab_technician
+    bucket: A
+    question: >-
+      Where does an electrophile go on CC(C)CC(NC(=O)OC(C)(C)C)C(=O)NCc1ccccc1? The single-geometry
+      ranking you gave last week disagreed with what we saw at the bench, and I think the answer
+      moves with the shape.
+    expects_tools: [run_regioselectivity_in_conformer, compute_ensemble_property]
+    expects_job: true
+    forbids_claims:
+      - "a site ranking or Fukui index the calculation did not return"
+      - "a ranking compared against another molecule's indices"
+      - "a prediction of the reaction outcome as though sterics and the reagent were in the model"
+    direction: >-
+      The asker has diagnosed it themselves, and they are describing exactly the case this exists
+      for: a flexible substrate whose single-conformer ranking disagreed with the bench. The right
+      move is a ranking averaged over the populated conformers, and the spread is what turns it
+      into an answer — a ranking that survives the spread is robust to shape, and one that does not
+      is an artefact of whichever geometry was embedded, which is the finding the asker actually
+      needs. Two reading rules must appear: the indices rank sites within this molecule only and
+      never between molecules, and they describe electronic susceptibility alone, so sterics, the
+      reagent and the solvent are outside the model. Reporting a winning site with no spread, or
+      quietly presenting the electronic ranking as a prediction of the reaction, are the two ways
+      this goes wrong.
+
+  - id: ms-17
+    section: 8
+    persona: lab_technician
+    bucket: A
+    question: >-
+      Design me a forced-degradation study for COc1ccc2[nH]c(S(=O)Cc3ncc(C)c(OC)c3C)nc2c1 — what
+      should I be looking for, and is there anything about handling the parent I should know before
+      I start stressing it?
+    expects_tools: [run_degradant_triage, enumerate_degradants, screen_hazards]
+    expects_job: true
+    forbids_claims:
+      - "a degradant ranked or given a likelihood"
+      - "a hazard classification that no screen returned"
+      - "a yield, a rate or an extent of degradation under any condition"
+    direction: >-
+      Two halves, and both are asked for. The candidate degradants come from the structural
+      transforms, grouped by the stress condition each belongs to, and reported as a short list to
+      look for rather than as a prediction — a transform matching the graph is not the chemistry
+      happening. The handling half is a real question about the parent and should be screened
+      rather than recalled. The refusal to rank is the graded part and it is chemistry rather than
+      a gap: degradants are the products of different irreversible reactions with different
+      stoichiometry, so an equilibrium distribution across a sulfoxide and a hydrolysis fragment is
+      a number with no referent, and what would order them is a rate nothing here computes. An
+      answer that ranks them anyway has invented the one thing the workflow deliberately withholds.
+      Pointing at a bond-strength survey as the way to ask which linkage gives way first is the
+      right next step to offer.

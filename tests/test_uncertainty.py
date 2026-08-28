@@ -15,7 +15,9 @@ The tests below hold three claims that are easy to state and easy to get subtly 
   different things, so `method` has to reach the rendering rather than stopping at the model.
 """
 
+import ast
 import asyncio
+from pathlib import Path
 
 import pytest
 
@@ -179,3 +181,72 @@ def test_a_missing_uncertainty_renders_no_plus_minus_at_all() -> None:
     rendered = Estimate(value=-154.75, unit="Hartree", in_domain=True).render(fmt=".2f")
     assert "±" not in rendered
     assert "-154.75 Hartree" in rendered
+
+
+def _identifiers_used_in(path: Path) -> set[str]:
+    """Every name a module actually *uses* — imports, reads, attribute accesses.
+
+    Parsed rather than grepped, for the reason `Chemclaw3-mcp`'s egress scan is: a comment naming
+    a deleted function reads as a reference to text and as nothing at all to a parser. Measured —
+    the first draft of the guard below matched `core/config/calculators.py`'s own prose about the
+    deletion and reported the re-added function as wired.
+    """
+    tree = ast.parse(path.read_text("utf-8"))
+    used: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name):
+            used.add(node.id)
+        elif isinstance(node, ast.Attribute):
+            used.add(node.attr)
+        elif isinstance(node, ast.alias):
+            used.add(node.asname or node.name.rsplit(".", 1)[-1])
+    return used
+
+
+def test_no_conformal_interval_is_re_added_without_a_reader() -> None:
+    """A split-conformal interval may come back — wired. Unwired, it fails here.
+
+    `conformal_uncertainty` and the two `calibration_conformal_*` settings were deleted for having
+    no caller and no reader, and `D-2026-08-27-an-interval-is-only-honest-where-it-was-calibrated`
+    declines the wiring on three measurements: the ledger holds zero reconciled residuals and its
+    only producer is a chemist typing one measurement in at a time; at the 20 samples that were
+    argued for the estimate is the 19th of 20 absolute residuals, >25% off the truth in 23.8% of
+    runs; and a 90% half-width is not the 1-sigma `predicted_uncertainty` means, so at matching
+    semantics it converges on the `Calibration.rmse` `calculator_trust` already reports.
+
+    So this does **not** forbid the re-add — the ADR names the trigger that would justify one. It
+    forbids the *half* re-add that keeps happening: a function nothing calls, or an operator-facing
+    knob nothing reads, either of which is a claim that a control exists. Same shape as
+    `test_no_structural_domain_check_is_reimplemented_here` above and as
+    `D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution`.
+    """
+    import chemclaw.science.calc.uncertainty as module
+    from chemclaw.core.config import settings
+
+    source_root = Path(module.__file__).resolve().parents[3]
+    sources = [p for p in source_root.rglob("*.py") if p.name != "uncertainty.py"]
+
+    if hasattr(module, "conformal_uncertainty"):
+        callers = [p for p in sources if "conformal_uncertainty" in _identifiers_used_in(p)]
+        assert callers, (
+            "`conformal_uncertainty` is back in `science/calc/uncertainty.py` with no caller in "
+            "`src/`. It was deleted for exactly that once already. Wire it to a predictor, or "
+            "leave it out — and see "
+            "D-2026-08-27-an-interval-is-only-honest-where-it-was-calibrated for the sample count "
+            "that would justify one."
+        )
+
+    for knob in type(settings).model_fields:
+        if not knob.startswith("calibration_conformal"):
+            continue
+        # A config module declaring the setting is not a reader of it; that was the whole defect.
+        readers = [
+            p
+            for p in sources
+            if "core/config/" not in p.as_posix() and knob in _identifiers_used_in(p)
+        ]
+        assert readers, (
+            f"`{knob}` is a shipped setting with no reader outside `core/config/`, so an operator "
+            "can set it and see nothing change — configuration in appearance only. It was deleted "
+            "for that once already."
+        )

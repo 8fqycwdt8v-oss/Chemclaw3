@@ -79,6 +79,7 @@ def _one_of(reaction_id: str, found: Sequence[tuple[str, "ReactionRecord"]]) -> 
     return candidates[0][1]
 
 
+# The columns an ingest writes, which is also everything a read selects.
 _COLUMNS = "reaction_id, body, compound_smiles, project, performed_at, conditions, source"
 
 _UPSERT = f"""
@@ -144,11 +145,15 @@ class ReactionRecord(BaseModel):
     def is_current(self, as_of: date) -> bool:
         """Whether this is servable as *current* evidence on `as_of`.
 
-        The `Note.is_current` rule with the half a record cannot have removed: a run has no
-        `valid_to` — a result does not expire on its own, it is superseded, which is a separate
-        claim a human makes in a note. So only the not-yet-valid case remains, and it is reachable:
-        `eln_sync_future_tolerance_seconds` deliberately admits an entry stamped slightly ahead of
-        the wall clock rather than rejecting a real experiment over a clock skew.
+        One way to fail: **not yet valid**. That is the `Note.is_current` lower bound, and it is
+        reachable — `eln_sync_future_tolerance_seconds` deliberately admits an entry stamped
+        slightly ahead of the wall clock rather than rejecting a real experiment over a clock skew.
+
+        There is no upper bound and no tombstone. A *result* does not expire on its own, it is
+        superseded, which is a claim a human makes in a note. A source **withdrawing** an entry is
+        a different fact and would deserve its own bound — one was built here and removed, because
+        nothing could set it and three of the four readers of this tier ignored it; see
+        `D-2026-08-27-a-withdrawn-entry-is-a-fact-the-sync-must-carry` for what a working one costs.
         """
         return self.performed_at is None or as_of >= self.performed_at
 

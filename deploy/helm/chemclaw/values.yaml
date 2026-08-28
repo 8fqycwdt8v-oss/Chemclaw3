@@ -76,9 +76,21 @@ service:
 # below, each sized for its own work on its own queue (D-118).
 workers:
   background:
-    # Keep at 1. Light work (sync / re-index / reports), but this worker also submits PR-gate
-    # notes, and that checkout lock is host-local (D-069) — a second replica can corrupt a
-    # concurrent submitter's checkout. Raising this needs the distributed lock in docs/planning/BACKLOG.md first.
+    # Keep at 1 — but no longer for the checkout lock. That reason is closed: submissions to one
+    # remote are serialized across pods by a Postgres advisory lock
+    # (`kg/git_submitter.py::_cluster_lock`), and the host-local `flock` now only guards this pod's
+    # own worktree sweep.
+    #
+    # The reason that is still live is `NoteReindexWorkflow`
+    # (`D-2026-08-27-what-a-second-background-worker-would-race-on`): the reindex retires
+    # `note_index` rows for every note missing from *this pod's* knowledge checkout, and that
+    # checkout is an emptyDir refreshed by the pod's own sidecar every
+    # `knowledge.sync.intervalSeconds`. Two pods are two views of the corpus, so a freshly merged
+    # note is indexed by one and retired by the other, alternating, while each run logs that it
+    # retired a note that exists. Nothing else on this queue needs the pin: the periodic jobs are
+    # Temporal Schedules under `SKIP` (server-enforced, so worker count is irrelevant to them), the
+    # ELN cursor has exactly one writer, retention re-checks every predicate inside its own DELETE,
+    # and the result outbox claims rows with `FOR UPDATE SKIP LOCKED`.
     replicas: 1
 
 # A classical SMB/CIFS file share, mounted read-only on the background worker so its documents can
@@ -366,6 +378,20 @@ migrateJob:
   # migration run plus its retries on a database of the size this chart is written for; raise it
   # before a release that adds an index to a large table.
   activeDeadlineSeconds: 900
+
+# The stored-message conversion Job (`post-upgrade`, the second document in `migrate-job.yaml`).
+# Its own block rather than `migrateJob`'s, because the two bound different work: that deadline
+# covers DDL and the locks it waits on, this one covers a *row count*
+# (D-2026-08-27-a-conversion-that-cannot-be-rolled-back-is-not-a-pre-upgrade-step).
+convertJob:
+  # The pass is resumable — it selects only rows still stamped `maf` — so a retry continues rather
+  # than repeating, which is exactly the shape retrying helps.
+  backoffLimit: 3
+  # 30 minutes. Only one release in a deployment's life pays this: the upgrade that carries it
+  # across the M6 conversion. Every later release finds nothing stamped `maf` and exits in seconds.
+  # Raise it before that upgrade if the table is large; a Job that hits the deadline fails the
+  # release without touching the pods, and the rows it did convert stay readable.
+  activeDeadlineSeconds: 1800
 
 resources:
   service:
@@ -738,6 +764,13 @@ serviceAccount:
   name: "chemclaw"
   annotations:
     azure.workload.identity/client-id: "00000000-0000-0000-0000-000000000000"
+  # No component calls the Kubernetes API (there is no in-cluster client anywhere in `src/`), so the
+  # projected API token every pod would otherwise mount is pure attack surface: a compromised pod
+  # could present it to the API server with whatever this SA is granted. Off by default; a release
+  # that genuinely needs the token (a future in-cluster reader) sets this true deliberately. Entra
+  # workload identity uses a *federated* token from the annotation above, not this mount, so turning
+  # it off does not touch identity.
+  automountServiceAccountToken: false
 
 # NetworkPolicy egress **port** allow-list (F6-T2). It bounds the ports, never the destinations —
 # `egressDestinations` below is what bounds those, and the chart refuses to render until a release

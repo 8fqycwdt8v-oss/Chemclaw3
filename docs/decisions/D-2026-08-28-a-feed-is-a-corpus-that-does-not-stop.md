@@ -27,19 +27,25 @@ says nothing about bits.
 
 ### Decision: a second table, `corpus_reactions`, not more rows in `reaction_fingerprints`
 
-The same case `054_corpus_molecules.sql` makes for the molecule half, and stronger here.
-`reaction_fingerprints.id` is the **bare** reaction id. `ingest_reaction`'s own docstring already
-records the consequence — "this function writes four indexes and only three of them can tell the two
-sites apart" — and `D-2026-08-26-a-transcription-is-keyed-by-its-source` fixed the same defect one
-table over. Pouring a feed of millions of rows into it would:
+**Half of the case this ADR was drafted with is gone, and it is worth recording which half.** The
+draft argued from the key: `reaction_fingerprints.id` was the bare reaction id, so a feed of
+millions of rows would collide with this organisation's own ELN runs on any shared entry id,
+silently. While this branch was open, `D-2026-08-27-a-fingerprint-is-keyed-by-its-source` landed on
+`main` and fixed exactly that — migration `063` adds a `source` column and an `(source, id)` primary
+key. The collision argument is now an argument for nothing.
 
-* collide with this organisation's own ELN runs on any shared entry id, silently, and
-* swamp `similar_reactions` with hits whose `reaction-<id>` citation resolves to a different record —
-  the four-orders-of-magnitude argument `molecules.py` already makes, on the index where the citation
-  is *load-bearing* rather than decorative.
+What survives is the one `054_corpus_molecules.sql` rests on, which that fix does not touch: the two
+tables answer different questions and cite different things. `reaction_fingerprints` is "have we run
+this?" and its hits resolve to a `reaction-<id>` transcription; this is "is there literature
+precedent?" and its hits cite whatever the source gave. Merging them would swamp `similar_reactions`
+by four orders of magnitude with hits whose note id resolves to nothing — the same reason the
+molecule halves are two tables, on the index where the citation is *load-bearing* rather than
+decorative.
 
-`corpus_reactions.id` is `<source>:<reaction_id>`, the pair rather than the bare id, so a hit can be
-narrowed back to its `reaction_labels` row.
+`corpus_reactions` is therefore keyed `(source, id)` exactly as `reaction_fingerprints` now is, with
+`id` the source's own reaction id. The draft composed a `<source>:<reaction_id>` string instead,
+because no `source` column existed when it was written; that is now a second spelling of a key the
+schema has, so it is gone along with the function that minted it.
 
 The table carries the same five columns as `003`, so `PostgresFingerprintStore` **ranks** over it
 with no new SQL — the property `corpus_molecules` was built for. `tests/test_reaction_corpus.py`
@@ -63,12 +69,15 @@ cannot answer: a Buchwald and a Suzuki that make the same biaryl are neighbours 
 not the same reaction.
 
 **The join is what makes that work, and it had to be built rather than asserted.**
-`Facet.reaction_keys` narrows on `(r.source || ':' || r.reaction_id)` — composed in SQL so the
-spelling matched is `corpus_reaction_id`'s own and the two cannot drift. It also belongs in
-`_in_scope`, the coverage *denominator*, because unlike `product_smiles` it reads the reaction's own
-key and an unlabelled row has one; leaving it out reported `total=10` against the in-memory
-backend's `3`. That duplication — `_in_scope` and `_scope_coverage` being one condition written
-twice — is now named in `_scope_coverage`'s docstring with the measurement that exposed it.
+`Facet.reaction_keys` is a set of `(source, reaction_id)` pairs, matched against the table's own two
+columns through `unnest(sources, ids)` — never a `source || ':' || id` string, which would be an
+expression no index can serve and a second spelling of a key the schema already has. A `Match` has
+carried both halves since the `063` change, so nothing composes or splits anything.
+
+It also belongs in `_in_scope`, the coverage *denominator*, because unlike `product_smiles` it reads
+the reaction's own key and an unlabelled row has one; leaving it out reported `total=10` against the
+in-memory backend's `3`. That duplication — `_in_scope` and `_scope_coverage` being one condition
+written twice — is now named in `_scope_coverage`'s docstring with the measurement that exposed it.
 
 ### The bits are taken over `reactants>>products`, agents dropped
 
@@ -203,7 +212,7 @@ a live target, which is the row above both of them.
 
 ## Migration and rollback
 
-`062_corpus_reactions.sql` and `063_corpus_cursors.sql` are `CREATE TABLE IF NOT EXISTS` and add no
+`069_corpus_reactions.sql` and `070_corpus_cursors.sql` are `CREATE TABLE IF NOT EXISTS` and add no
 column to an existing table, so the previous image runs unchanged against the migrated database —
 `tests/test_migrations_are_additive.py` covers the shape. Rolling back leaves two unused tables and a
 `corpus_reactions` index nothing writes; nothing reads them either, so there is no half-state.

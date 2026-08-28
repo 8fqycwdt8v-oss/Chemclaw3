@@ -224,6 +224,18 @@ CREATE TABLE IF NOT EXISTS calculation (
     -- Which ChemClaw3 wrote the row, and which contract version it was built against. Without
     -- these, "why is in_domain null for everything before March" is unanswerable, and a consumer
     -- cannot tell an absent measurement from an absent column.
+    --
+    -- **contract_version 1 published a wrong `max_gradient`, and 2 is the correction.** The
+    -- projector reported the value as `hartree/bohr` while it is Hartree/Angstrom, so the number
+    -- passed through the unit conversion untouched: every `max_gradient` fact written at version 1
+    -- is 1.890x too large, under a unit string that looks right and therefore lands silently
+    -- inside or outside any range filter. No other field is affected.
+    --
+    -- Two ways to separate them, and neither needs this table changed: filter on
+    -- `contract_version >= 2`, or read `property_value.reported_unit`, which records what the
+    -- calculator actually said — `hartree/bohr` on a `max_gradient` row is the old population and
+    -- `hartree/angstrom` the corrected one. Re-publishing a corrected document works from version
+    -- 2 onward; at version 1 the writer's own outbox treated it as a duplicate and dropped it.
     writer_version   VARCHAR(64)  NOT NULL DEFAULT '',
     contract_version INTEGER      NOT NULL DEFAULT 0,
     ingested_at      TIMESTAMP WITH TIME ZONE NOT NULL

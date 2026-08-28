@@ -25,7 +25,7 @@ from chemclaw.science.fingerprints.store import (
     PostgresFingerprintStore,
 )
 from chemclaw.science.labels.molecules import CORPUS_MOLECULES_TABLE, CorpusMolecules
-from chemclaw.science.labels.reactions import corpus_reaction_id, transformation_of
+from chemclaw.science.labels.reactions import transformation_of
 from chemclaw.science.labels.records import ReactionLabel, SpeciesLabel
 from chemclaw.science.labels.search import (
     agent_frequency,
@@ -518,9 +518,8 @@ async def _reaction_fingerprints(tag: str) -> InMemoryFingerprintStore:
         _suzuki(tag),
     ):
         await store.add(
-            record_for_reaction(
-                corpus_reaction_id(row.source, row.reaction_id),
-                transformation_of(row.record_smiles),
+            record_for_reaction(row.reaction_id, transformation_of(row.record_smiles)).model_copy(
+                update={"source": row.source}
             )
         )
     return store

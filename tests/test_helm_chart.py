@@ -230,7 +230,12 @@ def test_chart_config_values_load_as_settings(monkeypatch: pytest.MonkeyPatch) -
     mount = _VALUES["secrets"]["temporalTls"]["mountPath"]
     for env_key, filename in zip(sorted(_TLS_ENV), ["ca.crt", "tls.crt", "tls.key"], strict=True):
         overrides[_field_for(env_key)] = f"{mount}/{filename}"
-    overrides["postgres_dsn"] = "postgresql://chemclaw:chemclaw@postgres:5432/chemclaw"
+    overrides["postgres_dsn"] = (
+        # sslmode=verify-full because the chart enforces identity (entra_required=true), under which
+        # a non-loopback DSN must state TLS — the security-review guard rejects a plaintext-capable
+        # DSN in that posture. A production secret must carry the same (documented in the runbook).
+        "postgresql://chemclaw:chemclaw@postgres:5432/chemclaw?sslmode=verify-full"
+    )
     # The two keys the ConfigMap derives rather than copies, passed as *environment* — which is
     # how the pod receives them and, for `connector_urls`, the only way the value works at all:
     # pydantic-settings JSON-decodes a complex field from an env var and does not from an init
@@ -408,22 +413,77 @@ def test_the_document_share_is_read_only_and_only_on_the_worker_that_crawls_it()
             )
 
 
-def test_the_hook_job_migrates_then_converts_then_reconciles_grants() -> None:
-    """Three steps whose order is not optional, in one container so the shell enforces it.
+def _hook_documents() -> dict[str, str]:
+    """`migrate-job.yaml`'s two Job documents, keyed by the component label each carries.
 
-    The grants name tables the migrations create; the stored-message conversion writes a column a
-    migration adds. One container rather than three hook Jobs, so the ordering is the shell's `&&`
-    rather than three weights in three files — and so a failed step is never followed by the next.
-
-    The conversion is its own command rather than a step inside `core.migrate` because the kernel
-    imports no other subpackage and the converter is layer 1's; `tests/test_layering.py` caught that
-    when it was first wired the other way.
+    Split on the YAML document separator rather than parsed: the file is a Go template, so
+    `yaml.safe_load_all` cannot read it — the same limitation the module docstring states for
+    everything else here.
     """
-    job = " ".join((_CHART / "templates" / "migrate-job.yaml").read_text().split())
-    assert (
-        "python -m chemclaw.core.migrate && python -m chemclaw.agent.message_migration "
-        "&& python -m chemclaw.core.grants"
-    ) in job
+    text = (_CHART / "templates" / "migrate-job.yaml").read_text()
+    documents = {}
+    for chunk in re.split(r"^---$", text, flags=re.MULTILINE):
+        component = re.search(r"app\.kubernetes\.io/component:\s*(\S+)", chunk)
+        if component:
+            documents[component.group(1)] = chunk
+    return documents
+
+
+def test_the_pre_upgrade_hook_migrates_then_reconciles_grants() -> None:
+    """Two steps whose order is not optional, in one container so the shell enforces it.
+
+    The grants name tables the migrations create. One container rather than two hook Jobs, so the
+    ordering is the shell's `&&` rather than two weights — and so a failed migration is never
+    followed by a grant run at all.
+
+    The stored-message conversion used to be the middle term of this `&&` and is deliberately no
+    longer here; the test below is what says where it went and why.
+    """
+    documents = _hook_documents()
+    migrate = " ".join(documents["migrate"].split())
+    assert "python -m chemclaw.core.migrate && python -m chemclaw.core.grants" in migrate
+    assert "chemclaw.agent.message_migration" not in migrate, (
+        "the data conversion is back in the pre-upgrade hook, where it rewrites rows the previous "
+        "release is still serving"
+    )
+
+
+def test_the_ddl_runs_before_the_rollout_and_the_data_conversion_after_it() -> None:
+    """The whole of D-2026-08-27, asserted on the two hooks it splits.
+
+    An additive migration is safe for the release still running, so the DDL keeps its `pre-upgrade`
+    slot. Rewriting `session_messages` into a shape the previous release's reader raises on is not,
+    so the conversion moved to `post-upgrade`: a release that fails its rollout — the case a
+    pre-deploy hook exists to protect against — now converts nothing at all, because the hook that
+    would have done it never fires.
+
+    The credential split is the second half and is checked per *document*, not per file. Both Jobs
+    live in `migrate-job.yaml`, so the file-level check above this cannot see which of them mounts
+    the schema-owning DSN — and the converter runs as the runtime role, which already holds UPDATE
+    on `session_messages`, so it must not hold it.
+    """
+    documents = _hook_documents()
+    assert set(documents) == {"migrate", "convert"}, documents.keys()
+
+    assert '"helm.sh/hook": pre-install,pre-upgrade' in documents["migrate"]
+    assert '"helm.sh/hook-weight": "-5"' in documents["migrate"]
+
+    convert = documents["convert"]
+    assert '"helm.sh/hook": post-install,post-upgrade' in convert
+    assert '"helm.sh/hook-weight": "5"' in convert
+    assert '"python", "-m", "chemclaw.agent.message_migration"' in convert
+    assert 'include "chemclaw.migrationEnv"' not in convert, (
+        "the conversion Job mounts the credential that owns the schema and can rewrite the audit "
+        "trail; it issues no DDL and does not need it"
+    )
+
+    # A hook Helm waits on with no deadline leaves the release `pending-upgrade` — the argument
+    # `migrateJob.activeDeadlineSeconds` was added for, and it applies to a post hook identically.
+    assert re.search(r"^\s*activeDeadlineSeconds:", convert, flags=re.MULTILINE), convert
+    bounds = _VALUES["convertJob"]
+    assert bounds["activeDeadlineSeconds"] > bounds["backoffLimit"] * 60, (
+        "the deadline leaves no room for the retries the same Job is configured to make"
+    )
 
 
 def _settings_from_chart(monkeypatch: pytest.MonkeyPatch) -> Settings:
@@ -441,7 +501,12 @@ def _settings_from_chart(monkeypatch: pytest.MonkeyPatch) -> Settings:
     mount = _VALUES["secrets"]["temporalTls"]["mountPath"]
     for env_key, filename in zip(sorted(_TLS_ENV), ["ca.crt", "tls.crt", "tls.key"], strict=True):
         overrides[_field_for(env_key)] = f"{mount}/{filename}"
-    overrides["postgres_dsn"] = "postgresql://chemclaw:chemclaw@postgres:5432/chemclaw"
+    overrides["postgres_dsn"] = (
+        # sslmode=verify-full because the chart enforces identity (entra_required=true), under which
+        # a non-loopback DSN must state TLS — the security-review guard rejects a plaintext-capable
+        # DSN in that posture. A production secret must carry the same (documented in the runbook).
+        "postgresql://chemclaw:chemclaw@postgres:5432/chemclaw?sslmode=verify-full"
+    )
     for env_key, value in _rendered_derived_values().items():
         monkeypatch.setenv(env_key, value)
     return Settings(_env_file=None, **overrides)  # type: ignore[call-arg, arg-type]

@@ -57,6 +57,17 @@ class FingerprintSettings(BaseSettings):
     # Real pharmacophore/functional-group SMARTS run tens to a few hundred characters; 500
     # leaves generous headroom while rejecting degenerate input.
     substructure_query_max_length: int = Field(default=500, gt=0)
+    # Bounds on any molecule string reaching `core/chem.require_molecule` — the one gate every
+    # SMILES/SMARTS caller shares. RDKit's canonical-SMILES writer and the tautomer canonicalizer
+    # recurse per atom and overflow the C stack on a large linear molecule: measured, `MolToSmiles`
+    # / the standardizer SIGSEGV (exit 139) between 16,000 and 20,000 atoms, an *uncatchable* crash
+    # that takes the whole worker process — and every concurrent session on it — down. A ~20 KB
+    # SMILES clears the 1 MB body cap, so the bound has to be here. It is also an ingest poison
+    # pill: one such value in an ELN row segfaults the Temporal worker and, because the sync cursor
+    # is deterministic, stops that source permanently. The caps sit far below the cliff and far
+    # above any real reagent (a large natural product is a few hundred atoms).
+    molecule_max_smiles_length: int = Field(default=4000, gt=0)
+    molecule_max_atoms: int = Field(default=1000, gt=0)
     # Wall-clock bound on one substructure scan's matching work (SEC-4, completing the guard
     # above). Length and record caps bound the *inputs*, but a short adversarial recursive
     # SMARTS can still run for minutes, and the scan is invoked from the async front door — so

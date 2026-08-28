@@ -57,6 +57,39 @@ pipeline {
   }
 
   stages {
+    // The free-text parameters below are interpolated (`${params.X}`) into `sh` blocks later in
+    // this pipeline, so a value carrying a shell metacharacter would execute on the agent (CWE-78).
+    // The choice and boolean parameters cannot: Jenkins constrains them to a fixed set. Reject
+    // anything outside a conservative allowlist here, before any `sh` sees it — a legitimate
+    // registry, image ref, cluster URL, namespace or Jenkins credential id contains none of the
+    // rejected characters (no space, `;`, `|`, `&`, `$`, backtick, quotes, parentheses, `<`/`>`).
+    stage('Validate parameters') {
+      steps {
+        script {
+          def checks = [
+            [name: 'IMAGE_REGISTRY', value: params.IMAGE_REGISTRY, pattern: ~'^[A-Za-z0-9._:/-]*$'],
+            [name: 'IMAGE_NAME', value: params.IMAGE_NAME, pattern: ~'^[A-Za-z0-9._/-]*$'],
+            [name: 'BASE_IMAGE', value: params.BASE_IMAGE, pattern: ~'^[A-Za-z0-9._:/@-]*$'],
+            [name: 'NAMESPACE', value: params.NAMESPACE, pattern: ~'^[a-z0-9-]*$'],
+            [name: 'CLUSTER_API', value: params.CLUSTER_API, pattern: ~'^[A-Za-z0-9._:/-]*$'],
+            [name: 'DATABRICKS_HOST', value: params.DATABRICKS_HOST, pattern: ~'^[A-Za-z0-9._:/-]*$'],
+            [name: 'REGISTRY_CREDENTIALS_ID', value: params.REGISTRY_CREDENTIALS_ID,
+             pattern: ~'^[A-Za-z0-9._-]*$'],
+            [name: 'CLUSTER_CREDENTIALS_ID', value: params.CLUSTER_CREDENTIALS_ID,
+             pattern: ~'^[A-Za-z0-9._-]*$'],
+            [name: 'DATABRICKS_CREDENTIALS_ID', value: params.DATABRICKS_CREDENTIALS_ID,
+             pattern: ~'^[A-Za-z0-9._-]*$'],
+          ]
+          for (c in checks) {
+            if (!(c.value ==~ c.pattern)) {
+              error("release parameter ${c.name} contains characters outside its allowlist; it is " +
+                    "interpolated into shell and must not carry shell metacharacters")
+            }
+          }
+        }
+      }
+    }
+
     stage('Preflight') {
       steps {
         script {

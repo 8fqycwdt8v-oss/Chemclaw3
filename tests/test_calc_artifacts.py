@@ -8,15 +8,39 @@ gap sharper by handing the model calculation keys it then had no way to look beh
 What is pinned here is the pair of refusals, because both replace a plausible wrong answer: a
 binary artifact is refused rather than returned as mojibake, and a truncated read says so rather
 than reading as the whole file.
+
+**And, since `D-2026-08-27-a-tool-that-can-only-refuse-is-not-a-capability`, what the pair may
+*say*.** Measured on the real write path, `list_artifacts` returns one `application/x-npy` entry
+and `fetch_artifact` on it raises "is binary" — every time, because `ArrayOffloadingStore` is the
+only artifact writer left and it writes nothing but packed arrays. The text by-products these
+docstrings were written for went with the engines. So the last three tests below hold the surface
+to what the code can do: the refusal is *derived* from the writer rather than transcribed, no
+agent-facing surface names an artifact nothing produces, and the spectrum the docstrings now
+redirect to is one the code actually returns.
+
+The text fixtures here are deliberately hypothetical, and `test_no_agent_facing_surface_names_an_
+artifact_without_a_producer` is what stops that from becoming a claim: they exercise a real code
+path (`fetch_artifact`'s decode, clamp and truncate) that would serve any text artifact a future
+writer produced, and they are not evidence that one exists.
 """
 
+import ast
 import asyncio
+import pathlib
+import re
 
 import pytest
 
 from chemclaw.connectors.calc.server import tools
 from chemclaw.core.config import settings
-from chemclaw.science.calc.artifacts import InMemoryArtifactStore, media_type_for
+from chemclaw.science.calc.artifacts import (
+    _MEDIA_TYPES,
+    HESSIAN_ARRAYS,
+    InMemoryArtifactStore,
+    media_type_for,
+    put_all,
+)
+from chemclaw.science.calc.models import ThermochemistryResult, VibrationalMode
 
 _CALC_KEY = "xtb.thermo@gfn2-v1:0123456789abcdef:fedcba9876543210"
 
@@ -168,3 +192,140 @@ def test_a_reference_without_a_name_is_rejected(monkeypatch: pytest.MonkeyPatch)
             await tools.fetch_artifact(_CALC_KEY)
 
     asyncio.run(_run())
+
+
+# --- what the surface is allowed to say -------------------------------------------------------
+#
+# `ArrayOffloadingStore` is the only artifact writer left in this repository, and `HESSIAN_ARRAYS`
+# is the map it offloads through — so the set of names anything here can ever store is exactly its
+# values. Deriving both the refusal and the dead-name set from that constant, rather than listing
+# them, is what makes these tests fail the day a *text* writer is added: the name drops out of the
+# dead set on its own and the refusal below stops holding, which is the moment the docstrings need
+# revisiting. An invariant, not a transcription.
+
+_PRODUCED: frozenset[str] = frozenset(HESSIAN_ARRAYS.values())
+# Every name the media-type table knows that nothing writes. `vibspectrum`, `xtbopt.xyz` and the
+# two CREST ensembles are here because their producers left with the engines
+# (`D-2026-08-16-the-physics-leaves-the-cache-stays`); `density.restart` and `orbitals.molden`
+# because the tier they were reserved for was retracted outright
+# (`D-2026-08-26-semiempirical-is-the-whole-tier`).
+_WITHOUT_A_PRODUCER: frozenset[str] = frozenset(_MEDIA_TYPES) - _PRODUCED
+
+
+def _docstring(name: str) -> str:
+    """The tool docstring exactly as the model is shown it, read off the source.
+
+    Parsed rather than imported through `__doc__` so this reads the *declared* prose even if a
+    decorator ever rewrapped it — the docstring is the prompt, and the prompt is what is on trial.
+    """
+    source = pathlib.Path(tools.__file__).read_text()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.AsyncFunctionDef | ast.FunctionDef) and node.name == name:
+            return ast.get_docstring(node) or ""
+    raise AssertionError(f"{name} is not defined in {tools.__file__}")
+
+
+def _agent_facing_surfaces() -> dict[str, str]:
+    """Every place this repository tells an agent what these two tools are for."""
+    root = pathlib.Path(tools.__file__).parents[5]
+    return {
+        "list_artifacts docstring": _docstring("list_artifacts"),
+        "fetch_artifact docstring": _docstring("fetch_artifact"),
+        "computation profile": (root / "data/profiles/computation.yaml").read_text(),
+        "evidence profile": (root / "data/profiles/evidence.yaml").read_text(),
+    }
+
+
+def test_every_artifact_this_release_can_write_is_refused_by_fetch_artifact() -> None:
+    """The measurement behind the decision, derived from the writer rather than transcribed.
+
+    `ArrayOffloadingStore` offloads exactly `HESSIAN_ARRAYS`, and every one of those is a packed
+    `.npy` whose magic byte is not valid UTF-8 — so `fetch_artifact` refuses the complete set of
+    what this repository stores. That is what makes "it can only refuse" a fact about the code and
+    not a remark about today's data.
+    """
+
+    async def _run(store: InMemoryArtifactStore) -> None:
+        await put_all(store, _CALC_KEY, dict.fromkeys(_PRODUCED, _NPY))
+        listed = await tools.list_artifacts(_CALC_KEY)
+        assert {entry.name for entry in listed} == _PRODUCED
+        assert {entry.media_type for entry in listed} == {"application/x-npy"}
+        for entry in listed:
+            with pytest.raises(ValueError, match="is binary"):
+                await tools.fetch_artifact(entry.artifact_ref)
+
+    monkey = pytest.MonkeyPatch()
+    try:
+        store = InMemoryArtifactStore()
+        monkey.setattr(tools, "default_artifact_store", lambda: store)
+        asyncio.run(_run(store))
+    finally:
+        monkey.undo()
+
+
+def test_no_agent_facing_surface_names_an_artifact_without_a_producer() -> None:
+    """A docstring is the prompt, so a filename in one is an offer the model will take up.
+
+    `vibspectrum` and `xtbopt.xyz` were named in both places this checks, and neither has had a
+    writer since the engines moved. Naming a file nobody can obtain does not merely waste prompt:
+    it sends the model to `fetch_artifact` for a spectrum, which answers with an error, and the
+    turn that follows reports a gap where there is a band list.
+    """
+    for where, text in _agent_facing_surfaces().items():
+        for name in sorted(_WITHOUT_A_PRODUCER):
+            # Word boundaries that do not treat `.` as one, so `hessian` cannot match inside
+            # `hessian.npy` — the live name must stay sayable while the dead one does not.
+            found = re.search(rf"(?<![\w.]){re.escape(name)}(?![\w])", text)
+            assert found is None, (
+                f"{where} names {name!r}, which nothing in this repository writes "
+                f"(the only artifacts stored are {sorted(_PRODUCED)}). Either give it a producer "
+                "or stop offering it."
+            )
+
+
+def test_the_spectrum_the_docstrings_redirect_to_is_one_the_code_returns() -> None:
+    """The other half of the fix: a removed promise must leave a reachable answer behind.
+
+    Deleting "a `vibspectrum`" from the two docstrings would be a regression on its own if the
+    spectrum then had nowhere to come from — a chemist asking for band positions would get a
+    refusal and no route. It has one, and this drives it rather than reading it: a
+    `ThermochemistryResult` carries every mode as a wavenumber with an IR intensity, and
+    `strongest_bands` is the truncation `compute_thermochemistry`'s `top_bands` applies.
+    """
+    for where in ("list_artifacts docstring", "fetch_artifact docstring"):
+        text = _agent_facing_surfaces()[where]
+        assert "compute_thermochemistry" in text, f"{where} names no route to a spectrum"
+        assert "modes" in text, f"{where} does not name the field the bands arrive in"
+
+    result = ThermochemistryResult(
+        smiles="O",
+        structure_id="st_0123456789abcdef",
+        method="gfn2",
+        solvent=None,
+        temperature_k=298.15,
+        pressure_pa=101325.0,
+        symmetry_number=2,
+        is_minimum=True,
+        imaginary_frequencies_cm=[],
+        modes=[
+            VibrationalMode(wavenumber_cm=1595.0, ir_intensity_km_per_mol=70.0),
+            VibrationalMode(wavenumber_cm=3657.0, ir_intensity_km_per_mol=5.0),
+            VibrationalMode(wavenumber_cm=3756.0, ir_intensity_km_per_mol=45.0),
+        ],
+        mode_count=3,
+        lowest_wavenumbers_cm=[1595.0],
+        electronic_energy_hartree=-5.07,
+        zero_point_energy_kcal=12.9,
+        thermal_enthalpy_correction_kcal=14.7,
+        entropy_cal_per_mol_k=45.1,
+        gibbs_correction_kcal=1.2,
+        enthalpy_hartree=-5.04,
+        gibbs_free_energy_hartree=-5.06,
+        uncertainty_kcal=1.0,
+    )
+    # The band list a chemist would have gone to `fetch_artifact` for — positions *and*
+    # intensities, strongest first, which is what a measured spectrum is compared on.
+    bands = result.strongest_bands(2)
+    assert [band.wavenumber_cm for band in bands] == [1595.0, 3756.0]
+    assert [band.ir_intensity_km_per_mol for band in bands] == [70.0, 45.0]
+    assert result.mode_count == 3  # the truncation says how many there were

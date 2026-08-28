@@ -149,9 +149,16 @@ async def judge_outcome(probe: Probe, outcome: ProbeOutcome) -> Judgement:
             probe_id=probe.id, verdict="unserved", reason="no answer event was produced"
         )
 
+    import httpx
     from anthropic import AsyncAnthropic
 
-    client = AsyncAnthropic()
+    # Honour the deployment's LLM destination rather than defaulting to the public Anthropic API,
+    # and never inherit an ambient proxy (trust_env=False): the judge prompt embeds the probe
+    # answer and its verified tool outputs — real chemistry — so where that goes is a configured
+    # decision, not the SDK's hardcoded api.anthropic.com. base_url falls back to the SDK default
+    # only when no gateway is configured (a developer's own key on the loopback dev lane).
+    base_url = settings.llm_base_url or None
+    client = AsyncAnthropic(base_url=base_url, http_client=httpx.AsyncClient(trust_env=False))
     response = await client.messages.create(
         model=settings.live_probe_judge_model,
         # Generous on purpose. At 1024 the judge ran out of budget mid-JSON on long answers, the

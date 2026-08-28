@@ -184,9 +184,10 @@ async def conditions_for_similar_reactions(
     defined and measurable, and only then are their recorded conditions looked up.
 
     `fingerprints` is the *corpus* reaction index (`science.labels.reactions.corpus_reactions`),
-    never `reaction_fingerprints`. The two are keyed differently on purpose — this one by
-    `<source>:<reaction_id>`, which is what `Facet.reaction_keys` narrows on, while the ELN index
-    is keyed on the bare id and its hits are note ids `similar_reactions` resolves instead.
+    never `reaction_fingerprints`. Both are `(source, id)`-keyed since
+    `D-2026-08-27-a-fingerprint-is-keyed-by-its-source`, so a `Match` carries the pair
+    `Facet.reaction_keys` narrows on directly. What separates them is what a hit *cites*: the ELN
+    index resolves to a `reaction-<id>` transcription, this one to whatever the corpus gave.
     """
     matches, _ = await find_matches(fingerprints, drfp_bitstring(reaction_smiles), limit, threshold)
     asked = f"conditions recorded for reactions similar to {reaction_smiles}"
@@ -194,7 +195,7 @@ async def conditions_for_similar_reactions(
         # An empty neighbour set is not an empty answer — the same distinction the product twin
         # makes, and for the same reason: an open facet would select the whole corpus.
         return PrecedentSearch(question=asked, coverage=await index.coverage(version))
-    facet = Facet(reaction_keys=frozenset(m.id for m in matches))
+    facet = Facet(reaction_keys=frozenset((m.source, m.id) for m in matches))
     return await _search(index, facet, version, asked, limit)
 
 

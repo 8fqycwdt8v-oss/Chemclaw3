@@ -324,12 +324,13 @@ def test_the_cursor_advances_past_a_row_the_drain_skips() -> None:
     asyncio.run(_run())
 
 
-def test_every_recorded_reaction_is_fingerprinted_under_its_source_scoped_id() -> None:
+def test_every_recorded_reaction_is_fingerprinted_under_its_source_and_id() -> None:
     """The half that did not exist: a bulk source becomes searchable by transformation.
 
     `record_for_reaction` had exactly one caller in the tree — the ELN path — so a corpus drained
     into `reaction_species` and `corpus_molecules` could be searched for *a molecule* and never for
-    *a reaction*. The id is the `(source, reaction_id)` pair rather than the bare id, which is what
+    *a reaction*. The key is the `(source, id)` pair, the same shape
+    `D-2026-08-27-a-fingerprint-is-keyed-by-its-source` gave `reaction_fingerprints`: it is what
     lets a hit join to `reaction_labels` and what keeps two sources sharing an entry id from
     collapsing onto one row.
     """
@@ -343,7 +344,11 @@ def test_every_recorded_reaction_is_fingerprinted_under_its_source_scoped_id() -
         )
 
         stored = await reactions.all_records()
-        assert {record.id for record in stored} == {"pistachio:p1", "pistachio:p2", "pistachio:p3"}
+        assert {(r.source, r.id) for r in stored} == {
+            ("pistachio", "p1"),
+            ("pistachio", "p2"),
+            ("pistachio", "p3"),
+        }
         assert report.unfingerprintable == 0
         # p4 resolved no product, so it is not a precedent and never reached the index at all.
         assert report.skipped == 1
@@ -369,12 +374,13 @@ def test_the_indexed_reaction_drops_its_agents_so_a_solvent_swap_cannot_dominate
 
         await drain_corpus(_fake(), _binding(), index, "pistachio", reactions=reactions, limit=10)
 
-        stored = {record.id: record for record in await reactions.all_records()}
+        stored = {r.id: r for r in await reactions.all_records()}
         # p1 was recorded with `CC#N` (acetonitrile) in the agent slot.
         assert ">CC#N>" in _rows()[0]["REACTION_SMILES"]  # type: ignore[operator]
-        assert stored["pistachio:p1"].label == ("Brc1ccccc1.NC1CCCCC1>>c1ccc(NC2CCCCC2)cc1")
-        assert "CC#N" not in stored["pistachio:p1"].label
-        assert stored["pistachio:p1"].definition == reaction_definition()
+        assert stored["p1"].label == "Brc1ccccc1.NC1CCCCC1>>c1ccc(NC2CCCCC2)cc1"
+        assert "CC#N" not in stored["p1"].label
+        assert stored["p1"].definition == reaction_definition()
+        assert stored["p1"].source == "pistachio"
 
     asyncio.run(_run())
 
@@ -404,7 +410,7 @@ def test_a_reaction_with_no_fingerprint_is_counted_rather_than_failing_the_page(
         assert report.unfingerprintable == 1
         assert report.recorded == 3
         # Still recorded, still answerable by facet — only its similarity row is missing.
-        assert {r.id for r in await reactions.all_records()} == {"pistachio:p1", "pistachio:p2"}
+        assert {r.id for r in await reactions.all_records()} == {"p1", "p2"}
         assert await index.count() == 3
 
     asyncio.run(_run())
@@ -476,7 +482,7 @@ def test_an_unparseable_species_is_still_fingerprinted_which_is_why_only_one_err
         )
 
         assert report.unfingerprintable == 0
-        assert "pistachio:p3" in {record.id for record in await reactions.all_records()}
+        assert ("pistachio", "p3") in {(r.source, r.id) for r in await reactions.all_records()}
 
     asyncio.run(_run())
 

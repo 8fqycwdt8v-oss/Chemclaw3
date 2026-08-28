@@ -618,8 +618,13 @@ class PostgresLabelIndex(LabelIndex):
             params["sources"] = sorted(facet.sources)
             clauses.append("source = ANY(%(sources)s::text[])")
         if facet.reaction_keys:
-            params["reaction_keys"] = sorted(facet.reaction_keys)
-            clauses.append("(source || ':' || reaction_id) = ANY(%(reaction_keys)s::text[])")
+            pairs = sorted(facet.reaction_keys)
+            params["rk_sources"] = [s for s, _ in pairs]
+            params["rk_ids"] = [i for _, i in pairs]
+            clauses.append(
+                "EXISTS (SELECT 1 FROM unnest(%(rk_sources)s::text[], %(rk_ids)s::text[]) "
+                "AS k(s, i) WHERE k.s = source AND k.i = reaction_id)"
+            )
         where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
         await cur.execute(self._COVERAGE_COLUMNS + where, params)
         row = await cur.fetchone()
@@ -650,12 +655,18 @@ def _facet_sql(facet: Facet) -> tuple[str, dict[str, Any]]:
         clauses.append("r.source = ANY(%(sources)s::text[])")
         params["sources"] = sorted(facet.sources)
     if facet.reaction_keys:
-        # Composed in SQL rather than unpacked into two arrays, so the spelling matched here is
-        # `corpus_reaction_id`'s own and the two cannot drift apart. Not indexed: the set comes
-        # from a fingerprint page bounded by `fingerprint_max_top_k`, so this narrows tens of rows
-        # off a version scan the planner is already doing.
-        clauses.append("(r.source || ':' || r.reaction_id) = ANY(%(reaction_keys)s::text[])")
-        params["reaction_keys"] = sorted(facet.reaction_keys)
+        # Two parallel arrays zipped by `unnest`, matching the pair against the table's own two
+        # columns — never a `source || ':' || id` string, which would be an expression no index can
+        # serve and a second spelling of a key the schema already has. Not indexed either way: the
+        # set comes from a fingerprint page bounded by `fingerprint_max_top_k`, so this narrows
+        # tens of rows off a version scan the planner is already doing.
+        pairs = sorted(facet.reaction_keys)
+        clauses.append(
+            "EXISTS (SELECT 1 FROM unnest(%(rk_sources)s::text[], %(rk_ids)s::text[]) AS k(s, i) "
+            "WHERE k.s = r.source AND k.i = r.reaction_id)"
+        )
+        params["rk_sources"] = [source for source, _ in pairs]
+        params["rk_ids"] = [reaction_id for _, reaction_id in pairs]
     if facet.named_reaction:
         clauses.append("lower(r.named_reaction) = lower(%(named)s)")
         params["named"] = facet.named_reaction
@@ -702,7 +713,7 @@ def _in_scope(row: ReactionLabel, facet: Facet) -> bool:
     # In scope, unlike `product_smiles` one function down: this narrowing reads the reaction's own
     # key, which an unlabelled row has. Leaving it out would take the coverage denominator over the
     # whole corpus while the numerator is a handful of neighbours, and report ~0% labelled.
-    return not facet.reaction_keys or f"{row.source}:{row.reaction_id}" in facet.reaction_keys
+    return not facet.reaction_keys or (row.source, row.reaction_id) in facet.reaction_keys
 
 
 def _matches(row: ReactionLabel, facet: Facet) -> bool:
@@ -711,7 +722,7 @@ def _matches(row: ReactionLabel, facet: Facet) -> bool:
         return False
     if facet.rxno_id and row.rxno_id != facet.rxno_id:
         return False
-    if facet.reaction_keys and f"{row.source}:{row.reaction_id}" not in facet.reaction_keys:
+    if facet.reaction_keys and (row.source, row.reaction_id) not in facet.reaction_keys:
         return False
     if facet.species_smiles is not None and not any(
         s.smiles == facet.species_smiles

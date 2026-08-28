@@ -43,8 +43,16 @@ name these documents write. Structural fingerprint search is reached over the MC
 servers, and **only** over them: the
 in-process `search_tools` wrapper that shadowed them is gone, along with the "keep the two in
 sync" obligation it had already broken (D-2026-08-05). Every tool call is recorded by the one audit
-middleware (`audit`), and retrieved note content is framed as data before it reaches the
-model (`framing`).
+middleware (`audit`), and retrieved third-party content is framed as data before it reaches the
+model. That framing has two halves and one implementation (`framing`): the in-process channels —
+a note body, an ELN procedure, an uploaded attachment, a job summary, a recalled statement —
+frame their own spans at the tool that produces them, and **everything a connector returns is
+framed by one `wrap_tool_call` middleware** (`tool_framing`), because those tools are not in this
+process and there is no call site here to add a rule to. It keys on the `SERVED_BY` stamp
+`connectors/transport` writes at handshake time — the same fact the audit trail reads for its
+provenance column — so the split is structural: an in-process result carries no stamp and is never
+framed twice, and a connector result cannot escape by being new
+(`docs/decisions/D-2026-08-27-a-tool-result-crosses-a-boundary-and-must-say-so.md`).
 
 **Skill visibility (`skill_access`)** is three narrowings over one discovered set, none of which can
 widen it: what the deployment enabled (`skills_enabled`), what this agent can actually *do*, and who

@@ -95,6 +95,21 @@ _MIGRATOR_ONLY = {"schema_migrations"}
 # to hand a chat turn that privilege for the rest of the deployment's life.
 _ADMIN_ONLY_MODULES = {"cli/rekey_campaigns.py"}
 
+# Modules that build a statement around an **interpolated** table name, mapped to every table they
+# can target. `_joined` renders an interpolation as `?`, and every verb pattern below matches
+# `(\w+)`, so `DELETE FROM {table}` is invisible to the scan — it is not merely unattributed, it
+# does not register as a write at all.
+#
+# That is not hypothetical. A `DELETE FROM {table} WHERE source = ''` was added to the fingerprint
+# store on this branch and the whole suite stayed green, while the runtime role holds INSERT and
+# UPDATE on `reaction_fingerprints` and nothing else — so every ELN and corpus ingest would have
+# failed `permission denied` on any deployment that runs `make db-grants`, and taken the upsert
+# down with it, since both share one transaction. Nothing in this tree connects as the runtime
+# role, so no test could have noticed downstream either.
+_INTERPOLATED_TARGETS: dict[str, set[str]] = {
+    "science/fingerprints/store.py": {"molecule_fingerprints", "reaction_fingerprints"},
+}
+
 
 def _upstream_tables() -> set[str]:
     """Every table LangGraph's `setup()` creates, derived from the installed distributions.
@@ -227,6 +242,36 @@ def verbs_the_grant_allows() -> dict[str, set[str]]:
             if table:
                 allowed.setdefault(table, set()).update(granted)
     return allowed
+
+
+def test_a_write_against_an_interpolated_table_is_declared_for_every_table_it_can_hit() -> None:
+    """The scan cannot read a table out of `DELETE FROM {table}`, so the verb must be declared.
+
+    `_DYNAMIC` is hand-maintained, which makes it exactly as current as whoever last edited the
+    module beside it — and a verb added to an interpolated statement changes no line in it. This
+    closes that by reading the verbs back out of the module and requiring `_DYNAMIC` to allow each
+    one for *every* table the module can target, since the scan cannot tell which it was.
+
+    A module may legitimately issue fewer verbs than it is granted; the direction that matters is
+    a verb the code performs and the grant withholds.
+    """
+    for module, tables in _INTERPOLATED_TARGETS.items():
+        verbs: set[str] = set()
+        for statement in _sql_literals(_SRC / module):
+            for pattern, verb in ((_INSERT, "INSERT"), (_UPDATE, "UPDATE"), (_DELETE, "DELETE")):
+                if pattern.search(statement.replace(" ? ", " x ")):
+                    verbs.add(verb)
+            if _UPSERT.search(statement.replace(" ? ", " x ")):
+                verbs.add("UPDATE")
+        for table in sorted(tables):
+            missing = verbs - _DYNAMIC.get(table, set())
+            assert not missing, (
+                f"{module} performs {sorted(missing)} against an interpolated table name, and "
+                f"`_DYNAMIC[{table!r}]` does not allow it. Either the grant file must grant it on "
+                f"{table} and `_DYNAMIC` record it, or the statement must go. Note the scan cannot "
+                "see which table an interpolated statement hit, which is why this is checked "
+                "against every table the module can target."
+            )
 
 
 def test_the_grant_matches_the_writes_the_code_actually_performs() -> None:

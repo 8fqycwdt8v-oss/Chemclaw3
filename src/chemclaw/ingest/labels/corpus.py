@@ -49,7 +49,7 @@ from chemclaw.science.fingerprints.store import (
     FingerprintStore,
 )
 from chemclaw.science.labels.molecules import CorpusMolecules
-from chemclaw.science.labels.reactions import corpus_reaction_id, transformation_of
+from chemclaw.science.labels.reactions import transformation_of
 from chemclaw.science.labels.records import ReactionLabel, SpeciesLabel
 from chemclaw.science.labels.store import LabelIndex
 
@@ -223,6 +223,11 @@ def _collect_fingerprint(
     written by the time this runs, so what a skip costs is a similarity hit, never a wrong answer —
     and `report.unfingerprintable` is what keeps that visible instead of implied.
 
+    The source rides on the record via `model_copy` rather than through the builder, which is the
+    idiom `ingest_reaction` sets and states the reason for: the builder is the DRFP half — id,
+    label, bits, definition — and the source is who supplied the id, which the fingerprint knows
+    nothing about.
+
     **`FingerprintInputError` alone, because it is the only thing this path raises**, and that was
     measured rather than assumed: `standard_smiles` returns a species RDKit cannot parse *unchanged*
     (`"C(((C"` → `"C(((C"`), so `drfp_bitstring` shingles it and produces bits, and the reaction
@@ -236,9 +241,8 @@ def _collect_fingerprint(
     """
     try:
         record = record_for_reaction(
-            corpus_reaction_id(source, label.reaction_id),
-            transformation_of(label.record_smiles),
-        )
+            label.reaction_id, transformation_of(label.record_smiles)
+        ).model_copy(update={"source": source})
     except FingerprintInputError:
         report.unfingerprintable += 1
         return

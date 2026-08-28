@@ -99,12 +99,17 @@ the ELN path. `drain_corpus` writes no reaction fingerprint at all, so a feed in
 searchable by *molecule* similarity and not by *reaction* similarity.
 
 **Decision: a second table, `corpus_reactions`, not more rows in `reaction_fingerprints`.** The
-same argument `054_corpus_molecules.sql:8-13` makes for the molecule half, and it applies harder
-here: `reaction_fingerprints.id` is the **bare** reaction id, which `ingest_reaction`'s own
-docstring already records as unable to tell two sources apart — pouring millions of feed rows into
-it would collide them with the ELN's own runs *and* swamp `similar_reactions` with hits whose
-`reaction-<id>` citation resolves to a different record. `corpus_reactions.id` is
-`<source>:<reaction_id>`, so it joins to `reaction_labels (source, reaction_id)` by construction.
+same argument `054_corpus_molecules.sql:8-13` makes for the molecule half: the two answer different
+questions and cite different things, so merging them would swamp `similar_reactions` by four orders
+of magnitude with hits whose `reaction-<id>` note resolves to nothing.
+
+*Half of this spec's original reasoning died while the branch was open, and that is recorded rather
+than quietly dropped.* It also argued from the key — `reaction_fingerprints.id` was the bare
+reaction id, so a feed would collide with this organisation's own runs on any shared entry id. While
+this branch was open, `D-2026-08-27-a-fingerprint-is-keyed-by-its-source` landed on `main` and fixed
+exactly that (migration `063`). The table is now `(source, id)`-keyed like `reaction_fingerprints`,
+and the `<source>:<reaction_id>` string this spec first proposed is gone: a second spelling of a key
+the schema already has.
 
 Because the table carries the same five columns, `PostgresFingerprintStore` serves similarity over
 it with **no new search code** — the same property `corpus_molecules` was built for.
@@ -180,8 +185,8 @@ run's `unfingerprintable` count before suspecting the query.
 
 ## 4 — Work items for this pass
 
-- [x] `infra/sql/062_corpus_reactions.sql` — the table + its HNSW index.
-- [x] `infra/sql/063_corpus_cursors.sql` — the persisted keyset watermark.
+- [x] `infra/sql/069_corpus_reactions.sql` — the table + its HNSW index.
+- [x] `infra/sql/070_corpus_cursors.sql` — the persisted keyset watermark.
 - [x] `src/chemclaw/science/labels/reactions.py` — `corpus_reactions()`, the id, and the
       transformation form. No class: unlike `CorpusMolecules` there is no extra column and no
       second search shape, so a constant and three functions is the whole module.
@@ -234,6 +239,27 @@ the only moment a stored position is worth consulting, so no `continue_as_new` p
    while `ecfp_bitstring("C(((C")` raises — the two halves fail differently. The extra catch was a
    guard for a case that cannot occur; both it and the claim are gone, and a test pins the
    asymmetry so a later change to `standard_smiles` turns red instead of leaving a dead branch.
+
+## 5c — What merging `main` changed
+
+`main` moved three commits while this branch was open, and one of them
+(`D-2026-08-27-a-fingerprint-is-keyed-by-its-source`, migration `063`) reworked the very thing half
+this ADR argued from: `reaction_fingerprints` gained a `source` column and an `(source, id)` primary
+key. Three consequences, all taken rather than merged around:
+
+1. **The collision argument for a separate table is retired**, and the ADR says so instead of
+   keeping a case that no longer holds. `054`'s citation argument carries the decision alone now.
+2. **The `<source>:<reaction_id>` string is gone**, with the function that minted it.
+   `corpus_reactions` is `(source, id)`-keyed like its sibling, `Facet.reaction_keys` is a set of
+   pairs matched through `unnest(sources, ids)`, and the source rides on the record via
+   `model_copy` — the idiom `ingest_reaction` sets, with the reason it states.
+3. **The migrations renumbered** 062/063 → 069/070, because `main` took 062–068.
+
+One thing found while resolving and deliberately *not* fixed here, because it is `main`'s code and
+outside this change: `PostgresFingerprintStore.add`'s docstring says "a sourced write also removes
+the row's unsourced twin", while the constructor 80 lines above explains at length why there is
+deliberately no such statement (the runtime role has no `DELETE` on that table). The in-memory
+backend *does* supersede, so the two backends now differ on it. Worth a look by whoever owns `063`.
 
 ## 5b — What the review found, and what it changed
 

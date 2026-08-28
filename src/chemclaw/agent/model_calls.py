@@ -229,9 +229,10 @@ class RepairInvalidToolCalls(AgentMiddleware[Any, Any, Any]):
         failures = invalid_tool_calls(response)
         if not failures:
             return response
-        _count_invalid(failures, attempt="first")
+        known = _bound_tool_names(request)
+        _count_invalid(failures, attempt="first", known=known)
         repaired = handler(_retry_request(request, failures))
-        _report_repair(invalid_tool_calls(repaired))
+        _report_repair(invalid_tool_calls(repaired), known=known)
         return repaired
 
     async def awrap_model_call(
@@ -244,9 +245,10 @@ class RepairInvalidToolCalls(AgentMiddleware[Any, Any, Any]):
         failures = invalid_tool_calls(response)
         if not failures:
             return response
-        _count_invalid(failures, attempt="first")
+        known = _bound_tool_names(request)
+        _count_invalid(failures, attempt="first", known=known)
         repaired = await handler(_retry_request(request, failures))
-        _report_repair(invalid_tool_calls(repaired))
+        _report_repair(invalid_tool_calls(repaired), known=known)
         return repaired
 
 
@@ -259,6 +261,17 @@ def _retry_request(
     return request.override(messages=[*request.messages, HumanMessage(content=correction)])
 
 
+def _bound_tool_names(request: ModelRequest[Any]) -> frozenset[str]:
+    """The names of the tools actually bound for this model call — the surface a real call can name.
+
+    Used to clamp the `invalid_tool_calls` metric label: a name outside this set was invented by the
+    model (or by injected content steering it) and must not become a Prometheus series on the
+    unauthenticated `/metrics`.
+    """
+    tools = getattr(request, "tools", None) or ()
+    return frozenset(name for tool in tools if (name := getattr(tool, "name", None)))
+
+
 def _bump_invalid(tool: str, metrics: Metrics) -> None:
     """Increment the unparseable-call counter for one tool.
 
@@ -269,10 +282,21 @@ def _bump_invalid(tool: str, metrics: Metrics) -> None:
     metrics.increment("chemclaw_invalid_tool_calls_total", labels={"tool": tool})
 
 
-def _count_invalid(failures: list[tuple[str, str]], *, attempt: str) -> None:
-    """Count each unparseable call under its tool, and say so once per model call."""
+def _count_invalid(failures: list[tuple[str, str]], *, attempt: str, known: frozenset[str]) -> None:
+    """Count each unparseable call under its tool, and say so once per model call.
+
+    **The metric label is clamped to the served surface; the log line is not.** On an
+    `invalid_tool_call` the `name` is whatever the model emitted — not resolved against the bound
+    tools — so booking it verbatim on `chemclaw_invalid_tool_calls_total{tool=...}` puts a
+    caller/model-controlled string on the unauthenticated, internet-reachable `/metrics`. Since
+    retrieved content (ELN rows, share documents, notes) is a prompt-injection surface, an injected
+    "emit a tool call named <secret>" becomes a data-exfiltration channel, and the per-metric series
+    cap then permanently blinds the counter. A name outside `known` is folded to `<unknown>` — the
+    same rule the MCP fleet's kit applies to its own tool-name label — while the full name still
+    reaches the WARNING below, which is authenticated-operator-only, so no diagnostic value is lost.
+    """
     for name, _error in failures:
-        record_metric(partial(_bump_invalid, name))
+        record_metric(partial(_bump_invalid, name if name in known else "<unknown>"))
     log_event(
         logger,
         "model.invalid_tool_calls",
@@ -289,11 +313,11 @@ def _count_invalid(failures: list[tuple[str, str]], *, attempt: str) -> None:
     )
 
 
-def _report_repair(failures: list[tuple[str, str]]) -> None:
+def _report_repair(failures: list[tuple[str, str]], *, known: frozenset[str]) -> None:
     """Close the repair out: silence when it worked, an ERROR and a count when it did not."""
     if not failures:
         return
-    _count_invalid(failures, attempt="second")
+    _count_invalid(failures, attempt="second", known=known)
     log_event(
         logger,
         "model.invalid_tool_calls_unrepaired",

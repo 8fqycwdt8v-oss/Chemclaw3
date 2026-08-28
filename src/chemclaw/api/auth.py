@@ -253,7 +253,12 @@ async def require_principal(request: Request) -> Principal:
         # because an unauthenticated probe of a public endpoint is ordinary internet traffic; the
         # counter is what makes a *rate* of them alertable.
         _count_auth_failure("missing")
-        logger.info("request to %s carried no bearer token", request.url.path)
+        # Bound the path before it reaches the redaction filter: this runs on the *no-bearer*
+        # path, before authentication, and the filter's opaque-token patterns are superlinear in
+        # input length — an unauthenticated 32 KB request line here stalled a pod with the logging
+        # lock held (the same reason `_RequestObservability` logs a route template, not the raw
+        # path). 256 chars is enough to identify the route while bounding the cost.
+        logger.info("request to %s carried no bearer token", request.url.path[:256])
         raise HTTPException(status_code=401, detail="missing bearer token")
     try:
         principal = await asyncio.to_thread(validate_token, header[len("Bearer ") :])
