@@ -231,10 +231,10 @@ class ReactionCorpusWorkflow:
             state.skipped += page.skipped
             state.unfingerprintable += page.unfingerprintable
             iterations += 1
-            if page.has_more and page.cursor and page.cursor != state.after:
+            if page.has_more and page.advanced:
                 state.after = page.cursor
                 if iterations >= state.max_iterations:
-                    # The carried state is three counters and two strings, so unlike the document
+                    # The carried state is four counters and two strings, so unlike the document
                     # drain there is nothing to compact — the payload cannot grow with the corpus.
                     workflow.continue_as_new(state)
                 continue
@@ -242,6 +242,12 @@ class ReactionCorpusWorkflow:
                 # Unreachable with a well-behaved binding (a truncated page always advances the
                 # cursor), but a mis-declared `order_by` must stop one source with a warning rather
                 # than spin this loop — and Temporal's event history — forever.
+                #
+                # `page.advanced` rather than `page.cursor != state.after`, which is what this read
+                # before append-only sources existed and would now be wrong on their first page:
+                # the activity resolves a *stored* position, so `state.after` is `""` here while
+                # the drain started somewhere else, and the comparison would call a stalled cursor
+                # an advance and re-read the same page every fire.
                 workflow.logger.warning(
                     "reaction corpus %s reported more rows but no cursor advance; stopping. Check "
                     "that its `order_by` column is unique and stable across the release.",

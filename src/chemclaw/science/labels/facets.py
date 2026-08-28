@@ -63,6 +63,16 @@ class Facet(BaseModel):
             "on `reaction_species.functional_groups`, so no SMARTS matching happens at query time."
         ),
     )
+    reaction_keys: frozenset[str] = Field(
+        default_factory=frozenset,
+        description=(
+            "Restrict to these reactions, each spelled `<source>:<reaction_id>` — the id "
+            "`science.labels.reactions.corpus_reaction_id` mints, so a DRFP similarity pre-pass "
+            "over `corpus_reactions` feeds this query the way an ECFP pre-pass feeds "
+            "`product_smiles`. The pair rather than the bare id, because two sources may use one "
+            "entry id and this is the narrowing that would otherwise merge them."
+        ),
+    )
     sources: frozenset[str] = Field(
         default_factory=frozenset,
         description="Restrict to these registry sources. Empty means all.",

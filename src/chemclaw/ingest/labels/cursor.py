@@ -13,8 +13,13 @@ a bigint, a ULID or a padded string.
 **No lag gauge, unlike `ingest/eln/cursor.py`, and the absence is deliberate.** That module can say
 how far behind a cursor is because a datetime subtracts from `now()`. A keyset value is opaque —
 nothing here can tell how many rows sit beyond it — so a gauge would have to invent a number.
-`ReactionCorpusWorkflow` already reports `read`/`recorded` per pass, and a feed that has stopped
-advancing shows up there as a run that records nothing while `has_more` stays false.
+
+**What that leaves is weaker than it first reads, and saying so is the point.** A first draft of
+this docstring claimed `ReactionCorpusWorkflow` covers it by reporting `read`/`recorded` per pass;
+it does not — that workflow returns one report aggregated over every source at the end of the whole
+`continue_as_new` chain. So a *stalled* feed has no first-party signal today: `updated_at` is here
+for an operator reading the table, and nothing reads it. Closing that means a per-source outcome or
+a staleness gauge over `updated_at`, and neither is invented here on the way past.
 """
 
 from chemclaw.core import db

@@ -86,9 +86,13 @@ def test_the_drain_activity_resumes_a_feed_and_re_walks_a_release(
     from chemclaw.durable import corpus_sync
 
     seen: list[str] = []
+    stores: list[object] = []
 
-    async def _fake_drain(*_args: object, after: str = "", **_kwargs: object) -> object:
+    async def _fake_drain(
+        *_args: object, after: str = "", reactions: object = None, **_kwargs: object
+    ) -> object:
         seen.append(after)
+        stores.append(reactions)
         from chemclaw.ingest.labels.corpus import CorpusReport
 
         return CorpusReport(read=0, cursor=after)
@@ -107,7 +111,12 @@ def test_the_drain_activity_resumes_a_feed_and_re_walks_a_release(
     monkeypatch.setattr(corpus_sync, "_warehouse_for", lambda _source: object())
     monkeypatch.setattr(corpus_sync, "_label_index", lambda: object())
     monkeypatch.setattr(corpus_sync, "_corpus_molecules", lambda: None)
-    monkeypatch.setattr(corpus_sync, "_corpus_reactions", lambda: None)
+    # A sentinel rather than `None`, because the assertion below is what keeps the wiring alive:
+    # deleting `reactions=_corpus_reactions()` from the activity left every other test in this
+    # change green, so the corpus reaction index would have stopped being written with nothing
+    # failing. This is the only test that drives the production call site.
+    reaction_store = object()
+    monkeypatch.setattr(corpus_sync, "_corpus_reactions", lambda: reaction_store)
 
     feed = CorpusBinding.model_validate({**_BINDING, "append_only": True})
     release = CorpusBinding.model_validate(_BINDING)
@@ -125,3 +134,6 @@ def test_the_drain_activity_resumes_a_feed_and_re_walks_a_release(
     assert seen == ["A400", ""]
     # And only the feed wrote one back.
     assert stored == [("feed", "A400")]
+    # Both modes fingerprint their reactions: `append_only` decides the cursor and nothing else, so
+    # an existing release corpus becomes searchable by transformation on its next drain.
+    assert stores == [reaction_store, reaction_store]

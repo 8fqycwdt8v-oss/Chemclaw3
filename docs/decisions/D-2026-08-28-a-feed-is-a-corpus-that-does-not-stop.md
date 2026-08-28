@@ -38,14 +38,37 @@ table over. Pouring a feed of millions of rows into it would:
   the four-orders-of-magnitude argument `molecules.py` already makes, on the index where the citation
   is *load-bearing* rather than decorative.
 
-`corpus_reactions.id` is `<source>:<reaction_id>`, so a hit joins to `reaction_labels
-(source, reaction_id)` by construction.
+`corpus_reactions.id` is `<source>:<reaction_id>`, the pair rather than the bare id, so a hit can be
+narrowed back to its `reaction_labels` row.
 
-The table carries the same five columns as `003`, so `PostgresFingerprintStore` serves similarity
-over it with **no new search code at all** — the property `corpus_molecules` was built for, applied
-to the other half. `tests/test_reaction_corpus.py` drives that against the real database rather than
-the in-memory double, because the claim is about a migration and an HNSW index and a doubled store
-cannot exercise either.
+The table carries the same five columns as `003`, so `PostgresFingerprintStore` **ranks** over it
+with no new SQL — the property `corpus_molecules` was built for. `tests/test_reaction_corpus.py`
+drives that against the real database rather than the in-memory double, because the claim is about
+a migration and an HNSW index and a doubled store cannot exercise either.
+
+### But ranking is not a reader, and the first draft of this change shipped without one
+
+Written that way, `corpus_reactions` was **write-only**: the drain filled it and nothing in `src/`
+read it. Every reaction-similarity path binds `default_reaction_store()` → `reaction_fingerprints`,
+and correctly so — this ADR's own decision above is that corpus rows must not go there. So the
+defect the change opens with ("`similar_reactions` could not see a single row of it") would have
+survived it, and what shipped would have been the shape this tree deletes on sight: a store whose
+only evidence of working is that something writes to it.
+
+The reader is `conditions_for_similar_reaction`, and it is a *precedent* question rather than a
+second `similar_reactions` — the same place the molecule half is reached from, for the same reason.
+`conditions_for_similar_products` finds neighbours in ECFP space and then looks up their recorded
+conditions; this finds them in DRFP space and does the same. It is the question product similarity
+cannot answer: a Buchwald and a Suzuki that make the same biaryl are neighbours by product and are
+not the same reaction.
+
+**The join is what makes that work, and it had to be built rather than asserted.**
+`Facet.reaction_keys` narrows on `(r.source || ':' || r.reaction_id)` — composed in SQL so the
+spelling matched is `corpus_reaction_id`'s own and the two cannot drift. It also belongs in
+`_in_scope`, the coverage *denominator*, because unlike `product_smiles` it reads the reaction's own
+key and an unlabelled row has one; leaving it out reported `total=10` against the in-memory
+backend's `3`. That duplication — `_in_scope` and `_scope_coverage` being one condition written
+twice — is now named in `_scope_coverage`'s docstring with the measurement that exposed it.
 
 ### The bits are taken over `reactants>>products`, agents dropped
 
@@ -88,6 +111,25 @@ a similarity hit and never a wrong answer. `CorpusReport.unfingerprintable` is a
 from `skipped` because the outcomes differ — a skipped row is not in the index at all — and
 conflating them would report a corpus as less complete than it is.
 
+### The page is one write, not one write per row
+
+The first draft wrote each fingerprint as it was built and justified it as making an interrupted
+page "resumable at the row rather than at the page". That is false: the cursor only advances when
+`drain_corpus` returns, so a retried activity re-reads the page from its start either way.
+
+Measured against the live database inside `db.pooling()`, 200 rows, three trials: **3.0 ms/row**
+one at a time against **1.15 ms/row** batched — 0.583/0.621/0.673 s versus 0.230/0.233/0.239 s, a
+stable **2.6x**. `FingerprintStore.add_many` is the missing half of that interface
+(`CorpusMolecules.add_many` has been the same method for the same reason one table over), and `add`
+is now its single-record case so the upsert has one definition.
+
+**A larger figure was reported to this branch and is not reproducible here**, which is why the
+numbers above are the ones written down: a review measured 1.07 s against 0.09 s for the same 200
+rows (~12x) and put the saving at ~19 h over a 13M-row corpus. Re-run three times on this database
+the ratio is 2.6x, and the honest consequence is smaller than either figure suggests — batched, 13M
+rows is still ~4 h of writes rather than ~11. The commit is not the whole cost, and a reader who
+took this change for a bulk-load fix would be surprised.
+
 ## 2 — A daily fire re-walked the whole corpus
 
 `corpus_sync.py` carried its keyset position inside one run and stored nothing. Its own docstring
@@ -106,9 +148,16 @@ scale a `corpus:` binding exists for, that is the difference between a delta and
 `CorpusBinding.append_only: bool = False`. It is worded as **a claim the binding author makes about
 the source** — that `order_by` is monotonically increasing for new rows — because this side cannot
 detect it and because the cost of it being wrong is a *silently skipped row*: a record inserted below
-the watermark is never seen again. A release leaves it false and behaves exactly as it did before
-this ADR, which is what makes the change additive in behaviour and not only in DDL.
-`tests/test_corpus_cursor.py` asserts that default, since the whole safety of the change rests on it.
+the watermark is never seen again. A release leaves it false and is walked from the top exactly as it
+was before this ADR. `tests/test_corpus_cursor.py` asserts that default, since the whole safety of
+the change rests on it.
+
+**`append_only` decides the cursor and nothing else** — worth stating, because an earlier draft of
+this section said a release "behaves exactly as it did before", and that is not true of the other
+half: `drain_reaction_corpus` passes the reaction index unconditionally, so an existing release
+corpus starts writing `corpus_reactions` on its next drain. That is the intent — a vendor corpus is
+exactly what one wants searchable by transformation — and with the write batched per page (below)
+its cost is one connection and one commit per page. The test asserts both modes fingerprint.
 
 The position lives in `corpus_cursors (source, after, updated_at)` — **its own table, not a row in
 `sync_cursors`**. That column is `TIMESTAMPTZ` and its contract is a datetime watermark; a keyset

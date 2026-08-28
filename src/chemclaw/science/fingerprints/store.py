@@ -199,6 +199,23 @@ class FingerprintStore(Protocol):
         """Insert or replace a fingerprint by id."""
         ...
 
+    async def add_many(self, records: Sequence[FingerprintRecord]) -> None:
+        """Insert or replace a batch of fingerprints, atomically where the backend can.
+
+        On the interface rather than left to each caller looping over `add`, because the cost that
+        makes it worth having is the backend's and invisible from outside: the Postgres store takes
+        a pooled connection and commits per call. Measured against a live database inside
+        `db.pooling()`, 200 rows, three trials: **3.0 ms/row** one at a time against **1.15 ms/row**
+        batched, a stable 2.6x. `CorpusMolecules.add_many` is the same method for the same reason
+        one table over; this is the half `FingerprintStore` was missing.
+
+        **The commit is the part this removes, and it is not the whole cost** — 1.15 ms/row remains,
+        so the 13M-row corpus `ingest/labels/corpus.py` sizes against is ~4 hours of writes either
+        way rather than ~11. Worth saying, because a reader who took this for the fix to bulk-load
+        throughput would be surprised; what it buys is the 2.6x, not a different order of magnitude.
+        """
+        ...
+
     async def all_records(self, limit: int | None = None) -> list[FingerprintRecord]:
         """Return stored records (used for substructure scans); at most `limit` when set.
 
@@ -252,6 +269,11 @@ class InMemoryFingerprintStore:
     async def add(self, record: FingerprintRecord) -> None:
         """Insert or replace a fingerprint by id."""
         self._records[record.id] = record
+
+    async def add_many(self, records: Sequence[FingerprintRecord]) -> None:
+        """Insert or replace a batch — the same dict writes, since there is nothing to batch."""
+        for record in records:
+            self._records[record.id] = record
 
     async def all_records(self, limit: int | None = None) -> list[FingerprintRecord]:
         """Return stored records; at most `limit` (first in id order) when set.
@@ -392,16 +414,31 @@ class PostgresFingerprintStore:
 
     async def add(self, record: FingerprintRecord) -> None:
         """Insert or replace a fingerprint by id."""
+        await self.add_many([record])
+
+    async def add_many(self, records: Sequence[FingerprintRecord]) -> None:
+        """Insert or replace a batch on one connection, in one transaction.
+
+        One checkout and one commit for the whole batch rather than per record — the difference the
+        protocol's own docstring measures. `add` is the single-record case of this rather than a
+        second statement, so there is exactly one place the upsert is written.
+
+        An empty batch takes no connection at all: the drain calls this once per page, and a page
+        that recorded nothing must not pay a checkout to write nothing.
+        """
+        if not records:
+            return
         async with self._connection() as conn:
-            await conn.execute(
-                self._upsert,
-                {
-                    "id": record.id,
-                    "label": record.label,
-                    "bits": record.bits,
-                    "definition": record.definition,
-                },
-            )
+            for record in records:
+                await conn.execute(
+                    self._upsert,
+                    {
+                        "id": record.id,
+                        "label": record.label,
+                        "bits": record.bits,
+                        "definition": record.definition,
+                    },
+                )
             await conn.commit()
 
     async def all_records(self, limit: int | None = None) -> list[FingerprintRecord]:

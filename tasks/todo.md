@@ -70,7 +70,7 @@ three.
       row (a site's other systems join on it), and a lookup path that survives re-standardization.
 - [ ] **A solvate collapses onto its larger fragment** — [M], already a `BACKLOG.md` row under §2.
       Measured: `compound_id("CCN.C1CCOC1") == compound_id("C1CCOC1")` — ethylamine in THF and THF
-      itself become one identity. `core/chem.py:206` keeps the largest fragment and
+      itself become one identity. `core/chem.py:230` keeps the largest fragment and
       `_identity_survives_stripping` guards only organometallics and reactive metals. **Fix this
       before loading a corpus keyed on `standard_smiles`**, because every row written under the
       collapsed identity has to be re-derived afterwards. The candidate fix and its measurement are
@@ -110,14 +110,14 @@ Because the table carries the same five columns, `PostgresFingerprintStore` serv
 it with **no new search code** — the same property `corpus_molecules` was built for.
 
 **The bits are taken over `reactants>>products`, agents dropped.** `DrfpEncoder` folds the agent
-slot onto the reactants (`rxnfp/fingerprint.py:34`), so passing the three-part form would let a
-solvent swap dominate similarity — the effect `ord.py:330` measured at 0.82 for one coupling in THF
+slot onto the reactants (`rxnfp/fingerprint.py:29-30`), so passing the three-part form would let a
+solvent swap dominate similarity — the effect `ord.py:333` measured at 0.82 for one coupling in THF
 vs 2-MeTHF, 1.00 once excluded. The agents are not lost: they are rows in `reaction_species`, which
 is the index built to answer *which solvent, which ligand, which base*.
 
 ### 3.2 A daily fire re-walks the whole corpus
 
-`corpus_sync.py:13` and `schedules.py:284` both state it: the keyset cursor is intra-run only and
+`corpus_sync.py` and `schedules.py` both stated it before this pass: the keyset cursor is intra-run only and
 there is no `sync_cursors` row, "because a re-drain of an unchanged release is a no-op and a *new*
 release must be walked from the top". That is right for a versioned vendor release and wrong for an
 append-only feed: every daily fire reads the entire corpus to discover the rows added since
@@ -158,7 +158,16 @@ binding:
     citation: {path: root.REACTION_ID}       # what a hit cites; any dotted path is legal
 ```
 
-Then `make datasource-validate --construct`, `make schedules-apply`, and the daily drain exists.
+Then `uv run python -m chemclaw.cli.validate_datasources --construct` (the `make` target takes no
+arguments — `make datasource-validate --construct` fails with `unrecognized option`),
+`make schedules-apply`, and the daily drain exists.
+
+**What the feed is then searchable by**, so the other session can check its own work: every species
+in `reaction_species` with its role, every distinct structure in `corpus_molecules` (ECFP + pattern
+bits, reachable through `conditions_for_similar_product` and `reactions_making_substructure`), and
+every reaction in `corpus_reactions` (DRFP, reachable through `conditions_for_similar_reaction`).
+If the last of those returns nothing on a drained feed, the drain wrote no fingerprints — check the
+run's `unfingerprintable` count before suspecting the query.
 
 **Two things to get right in that session, both of which fail quietly:**
 
@@ -173,11 +182,18 @@ Then `make datasource-validate --construct`, `make schedules-apply`, and the dai
 
 - [x] `infra/sql/062_corpus_reactions.sql` — the table + its HNSW index.
 - [x] `infra/sql/063_corpus_cursors.sql` — the persisted keyset watermark.
-- [x] `src/chemclaw/science/labels/reactions.py` — `CorpusReactions`, and the transformation form.
+- [x] `src/chemclaw/science/labels/reactions.py` — `corpus_reactions()`, the id, and the
+      transformation form. No class: unlike `CorpusMolecules` there is no extra column and no
+      second search shape, so a constant and three functions is the whole module.
 - [x] `CorpusBinding.append_only` in `ingest/eln/warehouse/binding.py`.
 - [x] `drain_corpus` writes the reaction fingerprint; `corpus_sync` loads and stores the cursor.
 - [x] `infra/sql/grants/app_privileges.sql`, `durable/retention.py`, `infra/sql/README.md`.
-- [x] Tests: the fingerprint write, the agent-drop, the resume, the release-mode no-op.
+- [x] The **reader**: `Facet.reaction_keys`, `conditions_for_similar_reactions`, and the
+      `conditions_for_similar_reaction` tool on the `rxnfp` bundle. Not in the first draft —
+      see the review below.
+- [x] `FingerprintStore.add_many`, so a page is one write rather than one per row.
+- [x] Tests: the fingerprint write, the agent-drop, the resume, the release-mode no-op, the
+      transformation precedent search on both backends, and the activity's own wiring.
 - [x] The ADR, and its row in `docs/decisions/README.md`.
 
 ## 5 — Review
@@ -218,6 +234,45 @@ the only moment a stored position is worth consulting, so no `continue_as_new` p
    while `ecfp_bitstring("C(((C")` raises — the two halves fail differently. The extra catch was a
    guard for a case that cannot occur; both it and the claim are gone, and a test pins the
    asymmetry so a later change to `standard_smiles` turns red instead of leaving a dead branch.
+
+## 5b — What the review found, and what it changed
+
+The first draft was reviewed against its own claims before merge, and **three of its findings were
+defects rather than nits.** Recorded here because each is a shape worth recognising again.
+
+1. **`corpus_reactions` was write-only.** The drain filled it; nothing in `src/` read it, because
+   every reaction-similarity path binds `default_reaction_store()` → `reaction_fingerprints` and
+   this ADR's own decision says corpus rows must not go there. So the defect the change opens with
+   would have survived it, and what shipped would have been a store whose only evidence of working
+   is that something writes to it. Fixed by building the reader the claim assumed:
+   `Facet.reaction_keys` (the `source || ':' || reaction_id` narrowing that makes "joins by
+   construction" true rather than notional), `conditions_for_similar_reactions`, and the
+   `conditions_for_similar_reaction` tool. **The lesson: "the table is searchable" and "something
+   searches it" are different claims, and only the second is a reader.**
+2. **The per-row commit was justified by a benefit that does not exist.** "Resumable at the row
+   rather than at the page" — but the cursor only advances when `drain_corpus` returns, so a
+   retried activity re-reads the page from its start either way. Fixed by
+   `FingerprintStore.add_many`, with `add` as its single-record case. **The review's own figure did
+   not survive re-measurement and that is worth more than the fix**: it reported 1.07 s against
+   0.09 s for 200 rows (~12x, ~19 h saved over 13M rows); re-run three times here it is 0.6 s
+   against 0.23 s (**2.6x**), and batched 13M rows is still ~4 h of writes rather than ~11. The
+   numbers in the ADR are the reproducible ones. A borrowed measurement is a claim about somebody
+   else's afternoon.
+3. **The workflow's "no cursor advance" guard was bypassed on an append-only source's first page.**
+   It compared `page.cursor != state.after`, and those stopped being the same two values when the
+   activity began resolving a *stored* position: `state.after` is `""` while the drain started at
+   `A400`, so a stalled cursor read as an advance and the same page would be re-read every fire.
+   Fixed by computing `advanced` in `drain_corpus`, the one place both values are in scope.
+
+Smaller corrections from the same pass: a claim that the corpus and ELN writes produce
+"byte-identical rows" (they cannot — the labels differ by design), a claim that the workflow reports
+`read`/`recorded` *per pass* (it returns one aggregate for all sources at the end of the chain, so a
+stalled feed has no first-party signal — now stated as an open gap rather than an answered one), a
+stale "three counters" comment invalidated by this same diff, a `CorpusReactions` class named here
+that was never written, and `make datasource-validate --construct`, which is not a valid invocation.
+Also fixed while building the reader: `_in_scope` and `_scope_coverage` are one condition written
+twice, and adding a narrowing to only the first reported `total=10` against the in-memory backend's
+`3` — the duplication is now named in `_scope_coverage`'s docstring with that measurement.
 
 **Prose corrected because the code moved under it**, rather than left to go stale:
 `corpus_sync.py`'s module docstring, the `run_timeout` comment in `schedules.py`, the `sync_cursors`

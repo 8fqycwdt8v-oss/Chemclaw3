@@ -35,6 +35,7 @@ endpoint:
     - similar_reactions
     - substrate_precedent
     - conditions_for_similar_product
+    - conditions_for_similar_reaction
     - reagent_frequency
     - reactions_making_substructure
     - workup_precedent
@@ -45,6 +46,7 @@ endpoint:
     - similar_reactions
     - substrate_precedent
     - conditions_for_similar_product
+    - conditions_for_similar_reaction
     - reagent_frequency
     - reactions_making_substructure
     - workup_precedent

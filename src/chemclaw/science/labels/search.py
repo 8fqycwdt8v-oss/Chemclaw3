@@ -1,10 +1,11 @@
-"""The six precedent questions, as five functions over one facet query.
+"""The precedent questions, as thin shapings of one facet query.
 
 Each of these is a thin shaping of `LabelIndex.select` or `agent_counts`, and that is the point:
-five presentations of one query cannot drift the way five queries would. What each function
+several presentations of one query cannot drift the way several queries would. What each function
 contributes is the *pre-pass* that turns a chemist's question into a facet — a similarity search
-over `corpus_molecules` for "products like this", a substructure screen for "products containing
-this", a role for "as starting material".
+over `corpus_molecules` for "products like this", a DRFP search over `corpus_reactions` for
+"transformations like this", a substructure screen for "products containing this", a role for "as
+starting material".
 
 Every answer carries a coverage sentence. On a half-labelled corpus a count is a lower bound, and
 a lower bound presented as a total is the failure this subsystem is most exposed to.
@@ -14,6 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field, computed_field
 
 from chemclaw.core.config import settings
 from chemclaw.science.fingerprints.molfp.fingerprint import ecfp_bitstring
+from chemclaw.science.fingerprints.rxnfp.fingerprint import drfp_bitstring
 from chemclaw.science.fingerprints.store import FingerprintStore, find_matches
 from chemclaw.science.labels.facets import Facet, FrequencyReport
 from chemclaw.science.labels.molecules import CorpusMolecules
@@ -158,6 +160,41 @@ async def conditions_for_similar_products(
         )
     facet = Facet(product_smiles=frozenset(m.id for m in matches))
     asked = f"conditions for products similar to {product_smiles}"
+    return await _search(index, facet, version, asked, limit)
+
+
+async def conditions_for_similar_reactions(
+    index: LabelIndex,
+    fingerprints: FingerprintStore,
+    version: str,
+    reaction_smiles: str,
+    *,
+    threshold: float | None = None,
+    limit: int | None = None,
+) -> PrecedentSearch:
+    """Answers: has this *transformation* been done, and under what conditions?
+
+    The transformation-space twin of `conditions_for_similar_products`, and the reason
+    `corpus_reactions` is written at all: without it a bulk source is searchable by structure and
+    never by what the reaction actually does, so "have I got precedent for this coupling" answers
+    from product similarity alone — which cannot tell a Buchwald from a Suzuki that happens to make
+    the same biaryl.
+
+    Same two passes and the same reason: neighbours are found in DRFP space, where similarity is
+    defined and measurable, and only then are their recorded conditions looked up.
+
+    `fingerprints` is the *corpus* reaction index (`science.labels.reactions.corpus_reactions`),
+    never `reaction_fingerprints`. The two are keyed differently on purpose — this one by
+    `<source>:<reaction_id>`, which is what `Facet.reaction_keys` narrows on, while the ELN index
+    is keyed on the bare id and its hits are note ids `similar_reactions` resolves instead.
+    """
+    matches, _ = await find_matches(fingerprints, drfp_bitstring(reaction_smiles), limit, threshold)
+    asked = f"conditions recorded for reactions similar to {reaction_smiles}"
+    if not matches:
+        # An empty neighbour set is not an empty answer — the same distinction the product twin
+        # makes, and for the same reason: an open facet would select the whole corpus.
+        return PrecedentSearch(question=asked, coverage=await index.coverage(version))
+    facet = Facet(reaction_keys=frozenset(m.id for m in matches))
     return await _search(index, facet, version, asked, limit)
 
 

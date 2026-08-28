@@ -18,16 +18,19 @@ import pytest
 from chemclaw.core import db
 from chemclaw.core.config import settings
 from chemclaw.science.fingerprints.molfp.fingerprint import molecule_definition
+from chemclaw.science.fingerprints.rxnfp.search import record_for_reaction
 from chemclaw.science.fingerprints.store import (
     FingerprintError,
     InMemoryFingerprintStore,
     PostgresFingerprintStore,
 )
 from chemclaw.science.labels.molecules import CORPUS_MOLECULES_TABLE, CorpusMolecules
+from chemclaw.science.labels.reactions import corpus_reaction_id, transformation_of
 from chemclaw.science.labels.records import ReactionLabel, SpeciesLabel
 from chemclaw.science.labels.search import (
     agent_frequency,
     conditions_for_similar_products,
+    conditions_for_similar_reactions,
     reactions_with_product_substructure,
     substrate_precedents,
     workup_precedents,
@@ -499,3 +502,78 @@ def test_an_oversized_substructure_query_is_refused_before_anything_is_scanned()
     oversized = "~".join(["[*]"] * settings.substructure_query_max_length)
     with pytest.raises(FingerprintError, match="CHEMCLAW_SUBSTRUCTURE_QUERY_MAX_LENGTH"):
         asyncio.run(CorpusMolecules().containing(oversized, 5000))
+
+
+async def _reaction_fingerprints(tag: str) -> InMemoryFingerprintStore:
+    """The corpus reaction index for one seeded tag, keyed exactly as the drain keys it.
+
+    Built with `corpus_reaction_id` rather than a hand-written `f"{source}:{id}"`, so a change to
+    that spelling breaks this test instead of silently making `Facet.reaction_keys` match nothing.
+    """
+    store = InMemoryFingerprintStore()
+    for row in (
+        _buchwald(tag, f"{tag}-b1", _XPHOS, yield_percent=88.0, workup=None),
+        _buchwald(tag, f"{tag}-b2", _XPHOS, yield_percent=72.0, workup=None),
+        _buchwald(tag, f"{tag}-b3", _TBU3P, yield_percent=54.0, workup=None),
+        _suzuki(tag),
+    ):
+        await store.add(
+            record_for_reaction(
+                corpus_reaction_id(row.source, row.reaction_id),
+                transformation_of(row.record_smiles),
+            )
+        )
+    return store
+
+
+def test_q7_has_this_transformation_been_run_and_under_what_conditions() -> None:
+    """The question `corpus_reactions` exists to answer, and why product similarity is not enough.
+
+    The Buchwald and the Suzuki in this fixture share the aryl bromide and make *different*
+    products, so a product-similarity pre-pass would separate them for the wrong reason. Asking in
+    transformation space is what makes "this coupling" mean the coupling: querying with the
+    Buchwald transformation returns the three Buchwalds and never the Suzuki.
+
+    Run against both backends, because `Facet.reaction_keys` is a `source || ':' || reaction_id`
+    predicate in SQL and a string comparison in Python — two expressions of one narrowing, which is
+    exactly where this file's other tests have caught a predicate meaning something else.
+    """
+
+    async def body(index: LabelIndex, tag: str) -> None:
+        found = await conditions_for_similar_reactions(
+            index,
+            await _reaction_fingerprints(tag),
+            _VERSION,
+            f"Brc1ccccc1.NC1CCCCC1>>{_ANILINE}",
+            threshold=0.5,
+        )
+        assert {hit.reaction_id for hit in found.hits} == {f"{tag}-b1", f"{tag}-b2", f"{tag}-b3"}
+        assert all(hit.citation for hit in found.hits)
+        # The coverage denominator is the neighbour set, not the whole corpus: `reaction_keys` is
+        # answerable by an unlabelled row, so it belongs to `_in_scope`. Without that the
+        # denominator would be every seeded row and the sentence would understate the labelling.
+        assert found.coverage.total == 3
+
+    _both_backends(body)
+
+
+def test_no_neighbours_is_not_an_empty_answer_over_the_whole_corpus() -> None:
+    """An empty neighbour set must not leave the facet open — the twin of the product-side guard.
+
+    A `Facet()` with nothing set selects the entire index, so returning `_search` on it would
+    answer "conditions for reactions similar to X" with every reaction on file. The result must be
+    empty hits *with* a coverage sentence, which is how a caller tells "no precedent found" from
+    "nothing was searched".
+    """
+
+    async def body(index: LabelIndex, tag: str) -> None:
+        found = await conditions_for_similar_reactions(
+            index,
+            InMemoryFingerprintStore(),
+            _VERSION,
+            f"Brc1ccccc1.NC1CCCCC1>>{_ANILINE}",
+        )
+        assert found.hits == []
+        assert found.coverage is not None
+
+    _both_backends(body)

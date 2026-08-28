@@ -43,7 +43,11 @@ from chemclaw.ingest.eln.warehouse.binding import CorpusBinding, FieldBinding
 from chemclaw.ingest.eln.warehouse.driver import Warehouse
 from chemclaw.ingest.eln.warehouse.expr import apply_transforms, as_text, resolve_path
 from chemclaw.science.fingerprints.rxnfp.search import record_for_reaction
-from chemclaw.science.fingerprints.store import FingerprintInputError, FingerprintStore
+from chemclaw.science.fingerprints.store import (
+    FingerprintInputError,
+    FingerprintRecord,
+    FingerprintStore,
+)
 from chemclaw.science.labels.molecules import CorpusMolecules
 from chemclaw.science.labels.reactions import corpus_reaction_id, transformation_of
 from chemclaw.science.labels.records import ReactionLabel, SpeciesLabel
@@ -88,6 +92,17 @@ class CorpusReport(BaseModel):
     )
     cursor: str = ""
     has_more: bool = False
+    advanced: bool = Field(
+        default=False,
+        description=(
+            "Whether this pass moved the keyset position at all. Computed here rather than by the "
+            "caller comparing `cursor` against the `after` it passed, because those are no longer "
+            "the same two values: for an append-only source the activity resolves a *stored* "
+            "position, so the workflow's own `after` is `''` on the first page while the drain "
+            "started somewhere else — and the comparison would read a bypassed guard as an "
+            "advance. This is the one place both values are in scope."
+        ),
+    )
 
 
 async def drain_corpus(
@@ -115,10 +130,10 @@ async def drain_corpus(
         reactions: Where each recorded reaction is fingerprinted (DRFP), if *reaction* similarity
             over this corpus is wanted. The molecule half above has always been written and this
             one never was, so a bulk source arrived searchable by structure and not by
-            transformation. Written per row rather than batched, deliberately: the write is the
-            same `FingerprintStore.add` the ELN path uses, so the two produce byte-identical rows,
-            and a per-row commit is what makes an interrupted page resumable at the row rather than
-            at the page.
+            transformation. Written once per page through `add_many`, like the molecules two lines
+            below: a per-row commit was measured at 3.0 ms/row against 1.15 ms/row batched (200
+            rows, pooled, three trials, 2.6x) and bought nothing, because the cursor only advances
+            at the end of a page — so a retried page is re-read from its start either way.
         after: Resume strictly after this key; empty starts at the beginning.
         limit: Rows this pass may read; defaults to the binding's `fetch_limit`.
 
@@ -139,6 +154,7 @@ async def drain_corpus(
 
     report = CorpusReport(read=len(rows), cursor=after, has_more=len(rows) == page)
     structures: set[str] = set()
+    fingerprints: list[FingerprintRecord] = []
     for row in rows:
         bundle = {ROOT: row}
         key = _text(row.get(binding.key))
@@ -167,7 +183,9 @@ async def drain_corpus(
         report.recorded += 1
         structures.update(s.smiles for s in label.species)
         if reactions is not None:
-            await _fingerprint_reaction(reactions, source, label, report)
+            _collect_fingerprint(fingerprints, source, label, report)
+    if reactions is not None and fingerprints:
+        await reactions.add_many(fingerprints)
     if molecules is not None and structures:
         await molecules.add_many(sorted(structures))
     if report.unfingerprintable:
@@ -178,6 +196,7 @@ async def drain_corpus(
             report.unfingerprintable,
             report.recorded,
         )
+    report.advanced = bool(report.cursor) and report.cursor != after
     if report.skipped:
         logger.warning(
             "%s: %d of %d corpus row(s) carried no usable reaction SMILES, key or citation and "
@@ -189,10 +208,14 @@ async def drain_corpus(
     return report
 
 
-async def _fingerprint_reaction(
-    reactions: FingerprintStore, source: str, label: ReactionLabel, report: CorpusReport
+def _collect_fingerprint(
+    into: list[FingerprintRecord], source: str, label: ReactionLabel, report: CorpusReport
 ) -> None:
-    """Index one recorded reaction's DRFP, counting rather than raising when it has none.
+    """Add one recorded reaction's DRFP to the page's batch, counting when it has none.
+
+    Synchronous and collecting rather than writing, because the write is one `add_many` per page —
+    see the `reactions` argument for the measurement. What stays here is the *decision* about a
+    single reaction, which is the part with a rule in it.
 
     Skipping rather than raising, and it is the same asymmetry `CorpusMolecules.add_many`
     documents one table over: a patent extract is evidence, and refusing a page because one of its
@@ -219,7 +242,7 @@ async def _fingerprint_reaction(
     except FingerprintInputError:
         report.unfingerprintable += 1
         return
-    await reactions.add(record)
+    into.append(record)
 
 
 def _record(
