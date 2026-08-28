@@ -187,8 +187,17 @@ def planned_schedules() -> list[PlannedSchedule]:
     if corpus_sources():
         corpus_every = timedelta(minutes=settings.corpus_sync_schedule_minutes)
         schedules.append(PlannedSchedule("reaction-corpus", ReactionCorpusWorkflow, corpus_every))
-    # Digests only earn a Schedule where someone has subscribed (gap IDEA-1); otherwise the job
-    # would sweep the corpus daily to deliver nothing.
+    # Digests earn a Schedule where a deployment turns them on (gap IDEA-1, default off); with the
+    # flag clear the job would sweep the corpus daily to deliver nothing.
+    #
+    # **The flag is enough now, and for the whole first life of this job it was not.** The digest
+    # lands in a `session_events` mailbox keyed `digest-<owner>`, and until
+    # `D-2026-08-27-a-digest-nobody-can-read-is-not-delivered` nothing in the tree could read one:
+    # the ack still fired on the insert, so every run moved a subscriber's watermark past matches
+    # no surface could ever show them, and `_is_new` cannot re-qualify a note once it has. Turning
+    # this on lost matches rather than merely failing to deliver them. `api/routes/streams.py`'s
+    # `GET /digests` is the reader that makes the acknowledgement true, which is what leaves this
+    # condition an ordinary opt-in rather than one that has to ask whether a consumer exists.
     if settings.digest_enabled:
         digest_every = timedelta(minutes=settings.digest_schedule_minutes)
         schedules.append(PlannedSchedule("digest", DigestWorkflow, digest_every))
