@@ -76,6 +76,7 @@ from chemclaw.core.identity_context import (
 from chemclaw.core.metrics_bridge import record_metric
 from chemclaw.core.session_context import get_current_session_id
 from chemclaw.core.tracing import SpanHandle, start_span
+from chemclaw.core.turn_signals import RefusalReason
 
 logger = logging.getLogger(__name__)
 
@@ -86,7 +87,7 @@ REFUSED = "refused"
 
 
 @cache
-def _refusal_types() -> tuple[tuple[type[BaseException], str], ...]:
+def _refusal_types() -> tuple[tuple[type[BaseException], RefusalReason], ...]:
     """The governance refusals, most specific first, each paired with the reason it records.
 
     **One table, read from one place.** Four of the five gates moved no metric at all, and the
@@ -118,7 +119,7 @@ def _refusal_types() -> tuple[tuple[type[BaseException], str], ...]:
     )
 
 
-def refusal_reason(exc: BaseException) -> str | None:
+def refusal_reason(exc: BaseException) -> RefusalReason | None:
     """Which gate refused this call, or `None` when the exception is a genuine failure.
 
     The one predicate that separates "the system declined, on purpose, and said so" from "something

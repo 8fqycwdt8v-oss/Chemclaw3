@@ -69,6 +69,12 @@ from chemclaw.durable.job_record import JobRecord, record_job
 from chemclaw.durable.job_record_store import PostgresJobRecordSink, read_job_record
 from chemclaw.durable.publish_results import publish_job_result
 from chemclaw.durable.serve import worker_interceptors
+from chemclaw.durable.template_activities import (
+    AgentStepInput,
+    JobStepInput,
+    StepIdentity,
+    ToolStepInput,
+)
 from chemclaw.science.calc.store import (
     CalculationKey,
     InMemoryStore,
@@ -161,7 +167,7 @@ def test_an_activity_runs_under_the_ids_its_own_argument_carries() -> None:
 
     assert seen == {"actor": "oid-42", "session": "sess-7", "correlation": "turn-9"}
     # And unbound again — a contextvar left set leaks one run's identity into the next task this
-    # worker picks up, which is the failure `template_activities.stamp_identity` carries a
+    # worker picks up, which is the failure `template_activities._acting_as` carries a
     # `finally` for.
     assert get_current_actor() is None
     assert get_current_session_id() is None
@@ -200,6 +206,39 @@ def test_a_nested_identity_is_read_one_level_down() -> None:
     assert context.session_id == "sess-t"
     assert context.correlation_id == "template-run-1"
     assert context.roles == frozenset({"process-chemist"})
+
+
+def test_the_real_template_step_inputs_are_the_shape_the_walk_reads() -> None:
+    """The nested-identity walk is asserted above against a stand-in class; this asserts the models.
+
+    Both matter and neither substitutes for the other. The test above pins the *walk* — that a
+    nested `identity` is read one level down — and it would keep passing if `StepIdentity` renamed
+    `correlation_id` tomorrow, because it declares its own shape. This one pins the *contract*:
+    that the three step inputs a real template run carries actually satisfy that walk.
+
+    It is the assertion that lets `template_activities._acting_as` be described as redundant on a
+    worker rather than merely believed to be, and it is what would go red if the two ever drifted —
+    which is the only way the tree ends up with two producers that disagree instead of two that
+    cannot.
+    """
+    identity = StepIdentity(
+        actor="chemist-1",
+        roles=["process-chemist"],
+        correlation_id="template-run-1",
+        session_id="s-tmpl",
+    )
+    for step in (
+        ToolStepInput(tool="t", arguments={}, identity=identity),
+        AgentStepInput(prompt="p", identity=identity),
+        JobStepInput(job="j", arguments={}, identity=identity),
+    ):
+        context = activity_context([step])
+        assert (context.actor, context.session_id, context.correlation_id) == (
+            "chemist-1",
+            "s-tmpl",
+            "template-run-1",
+        ), type(step).__name__
+        assert context.roles == frozenset({"process-chemist"}), type(step).__name__
 
 
 def test_a_model_authored_payload_cannot_supply_an_identity() -> None:

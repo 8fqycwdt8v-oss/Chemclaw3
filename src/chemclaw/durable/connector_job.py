@@ -699,6 +699,15 @@ class ConnectorJobWorkflow:
                 # `_notify_failure` — so the one message telling the chemist their job died was
                 # behind an unbounded wait. The doubling is `notify.py`'s, and it is what keeps the
                 # documented ordering (record first, then notify) safe rather than merely intended.
+                #
+                # **The stricter bound rather than `queue_wait_timeout()`, and it is the same
+                # exception `publish.py::queue_wait_timeout` already writes down for `notify.py`:**
+                # this write is best-effort by construction — the `except ActivityError` below
+                # swallows it and the job carries on — so it wants the bound that caps every
+                # attempt together, and it pays for that with a shorter retry budget on a row
+                # nothing downstream reads synchronously. Passing the general
+                # `schedule_to_start_timeout` here as well would be dead: an hour of queue wait
+                # cannot elapse inside a minute of schedule-to-close.
                 schedule_to_close_timeout=timedelta(
                     seconds=settings.job_record_timeout_seconds * 2
                 ),

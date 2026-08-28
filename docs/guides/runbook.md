@@ -1063,6 +1063,18 @@ HPA edited in the cluster, or a rollout that left both generations up. Scale bac
 `ChemclawTurnLatencyHigh` first: slow turns hold permits, so latency usually precedes shedding
 rather than following it.
 
+#### ChemclawCalcBackendOverCommitted
+`warning`. More calculation-backend sessions are held across the fleet than
+`CHEMCLAW_CALC_BACKEND_MAX_CONCURRENT_REQUESTS` says that pod will serve. It pins
+`OMP_NUM_THREADS=1` and is CPU-bound, so the surplus arrives as thrashing, then as activity
+heartbeat timeouts, then as retries onto the same pod — which is why this fires before anything
+fails. `sum(chemclaw_calc_requests_in_flight)` by pod says who is dispatching: a scaled `calc`
+worker (`replicas × CHEMCLAW_WORKER_MAX_CONCURRENT_ACTIVITIES`) or interactive tool traffic on that
+bundle's own server pods, which have no per-process cap at all. Either scale back, or raise the
+ceiling to what the server actually admits — `Settings` checks only the durable product, once, at
+startup, so it cannot see the interactive half. Silent until a release declares a ceiling: the
+gauge is 0 by default.
+
 #### ChemclawConnectorsUnhealthy
 `warning`. Turns are being answered without those capabilities and **nothing in the answer says so**.
 `chemclaw_connector_unhealthy{connector}` names which; the data dashboard has it. Then

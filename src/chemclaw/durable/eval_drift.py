@@ -33,7 +33,7 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.evals.harness import load_eval_cases, run_eval
 
 from chemclaw.durable.notify import notify_session
-from chemclaw.durable.publish import BAD_DATA_RETRY
+from chemclaw.durable.publish import BAD_DATA_RETRY, queue_wait_timeout
 
 # The well-known system push-back channel a drift alert lands on (a `session_events` "session" an
 # operator surface tails). A fixed internal id, not a tunable threshold — analogous to the schedule
@@ -99,6 +99,7 @@ class EvalDriftWorkflow:
         alerts = await workflow.execute_activity(
             check_eval_drift,
             start_to_close_timeout=timedelta(seconds=settings.eval_drift_timeout_seconds),
+            schedule_to_start_timeout=queue_wait_timeout(),
             retry_policy=BAD_DATA_RETRY,
         )
         for alert in alerts:

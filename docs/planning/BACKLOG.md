@@ -224,6 +224,18 @@ it happens.
 
 ## 3 — Work that is lost, dropped or invisible
 
+- [ ] **A development report's durable run has no correlation id to stamp** — [S].
+      `ReportRequest` and `SectionRequest` (`retrieval/harness.py:38,68`) carry `requested_by` and
+      `requested_roles` and no correlation id, so `report_workflow.retrieve_section` and
+      `propose_report` stamp an actor and nothing that joins the run to the turn that asked for it —
+      the log lines and the PR-gated draft both book an empty one. `ConnectorJobInput.correlation_id`
+      (`durable/connector_job.py:142`) is the shape to copy, and `request_development_report` runs
+      inside a turn where `get_current_correlation_id()` is bound, so the id exists at the launch.
+      Left out of `D-2026-08-27-a-step-runs-under-the-correlation-id-it-was-launched-with`
+      deliberately: that ADR fixed the sites that already carried an id, and inventing one here
+      would make an unjoined run look joined. `durable/memory_jobs.py:178` is the same shape and is
+      *not* this row — a synthesis job is system-triggered, so there is genuinely no turn.
+
 - [ ] **A Hessian is cached and never published, and neither is the thermochemistry built from
       it** — [M], and the two halves are one question. `xtb.hess` is a `calc_type` the server
       stamps and `_CALC_TYPE_PROJECTORS` has no prefix for it, so vibrational frequencies never
@@ -829,3 +841,27 @@ subset of the connector one (no `ConnectorAuth`, no dry-run flag). The likely sh
 core-level `trace_and_identity_headers()` that `connectors/identity.py` composes rather than owns —
 which is a small change once the question is answered and a layering exception if it is not.
 Found by the 2026-08-27 logging and monitoring review.
+
+## Two producers bind a template step's ambient identity, and only one of them is needed
+
+`durable/interceptor.py` binds the actor, the roles, the session and the correlation id around
+*every* activity on every worker, reading them one level into a nested `identity` field — which is
+exactly the shape `durable/template_activities.py`'s `ToolStepInput`, `AgentStepInput` and
+`JobStepInput` use. Measured against those real models, `activity_context` returns the same four
+values `template_activities._acting_as:161` binds, over a scope that strictly contains the
+bracket's. So on a worker the bracket is redundant in full.
+
+It is still there, and deleting it is not a tidy-up: with the bracket neutered, four tests fail, and
+two of them — `test_an_expensive_job_step_is_refused_for_an_unentitled_requester` and
+`test_an_entitled_requester_passes_the_same_gate` in `tests/test_template_job_step.py` — are the
+proof that a template step cannot run a tool its requester could not run. They invoke
+`authorize_job_step` directly, where no interceptor runs, so collapsing the two producers means
+moving a security control's proof onto a worker harness. That is the whole of the work and the whole
+of the risk; decide it deliberately rather than by deletion. The two cannot drift while both stand,
+because both read `StepIdentity`'s own fields.
+
+The same question does **not** apply to `connectors/calc/activities.py::_acting_for`: the
+interceptor skips plain string arguments by design, so it binds nothing there and that bracket is
+the only producer on the calc job path.
+
+Found resolving the merge of #256's branch with #258.

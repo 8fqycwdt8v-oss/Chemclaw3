@@ -667,6 +667,27 @@ readOnlyRootFilesystem: {{ .Values.securityContext.readOnlyRootFilesystem }}
 
        The migration hook Job is deliberately NOT counted: it uses `connect()`, not the pool, and
        it has finished before any app container starts. */ -}}
+{{- /* How many worker processes in this release may run `calc` activities — the left-hand factor
+       of the calculation backend's admission budget
+       (D-2026-08-27-a-per-worker-cap-is-not-a-backend-ceiling). `0` when the bundle is disabled or
+       runs no worker, because then this release dispatches no durable calculation at all and a
+       floor of 1 would refuse a deployment over work it never does.
+
+       A helper rather than an inline `.Values` path down to `workerReplicas`, for the reason
+       `pooledProcesses` below is one: that key is optional (a bundle may size both halves
+       with `replicas`), and `tests/test_deploy_chart.py::test_every_values_path_exists` refuses a
+       template naming a `.Values` path the shipped values do not have — which is the check that
+       catches a renamed value rendering as empty. Reading it off a `$cfg` variable asks the same
+       question without making the optional key mandatory. */}}
+{{- define "chemclaw.calcWorkerProcesses" -}}
+{{- $cfg := .Values.connectors.calc -}}
+{{- if and $cfg.enabled $cfg.worker -}}
+{{- $cfg.workerReplicas | default $cfg.replicas | int -}}
+{{- else -}}
+0
+{{- end -}}
+{{- end -}}
+
 {{- define "chemclaw.pooledProcesses" -}}
 {{- $total := .Values.service.replicas | int -}}
 {{- if .Values.service.autoscaling.enabled -}}

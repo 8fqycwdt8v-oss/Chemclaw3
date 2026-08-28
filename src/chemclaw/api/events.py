@@ -11,6 +11,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from chemclaw.core.turn_signals import RefusalReason
+
 
 class QueuedEvent(BaseModel):
     """The turn was accepted but is waiting for a free admission permit (D-166).
@@ -281,17 +283,44 @@ class ToolFailedEvent(BaseModel):
     message: str
     agent: str = _AGENT_FIELD
     # Which *kind* of failure this is, where the kind is a decision someone made rather than a
-    # fault. Today there is exactly one: `plan_gate`, the pre-execution approval refusing a
-    # state-changing call (`agent/plan_gate`). That refusal is the control working, and a consumer
-    # that folds it in with a database outage reports a correctly-gated turn as a broken one —
-    # which is what `evals/live.py` did, by matching one phrase of the refusal *sentence*, so a
-    # reword would have flipped the finding with every test still green.
+    # fault. A refusal is the control working, and a consumer that folds it in with a database
+    # outage reports a correctly-gated turn as a broken one — which is what `evals/live.py` did, by
+    # matching one phrase of the refusal *sentence*, so a reword would have flipped the finding
+    # with every test still green.
+    #
+    # **All five gates, not one.** This said `plan_gate` alone while `agent/audit.refusal_reason`
+    # already classified five, so the other four — a dry-run refusal the chemist themselves asked
+    # for, a role denial, a write no narrowed agent was given, a repeat the guard stopped — reached
+    # every surface indistinguishable from an unreachable pod. The set here IS that table's
+    # vocabulary — imported from `core.turn_signals`, not restated, so the two cannot drift.
     #
     # `None` is "an ordinary failure", which is every failure that was ever emitted before this
     # field existed. Additive, defaulted and a closed set, because this shape is a contract two
     # other repositories read (`Chemclaw3_ui`, `Chemclaw3_mock`): a surface that ignores it is
     # unchanged, and one that switches on it can be exhaustive.
-    reason: Literal["plan_gate"] | None = None
+    reason: RefusalReason | None = None
+
+
+class ResultValue(BaseModel):
+    """One number a structured tool result returned, under the name the tool gave it.
+
+    `numbers` beside this is a bare list, and it stays one: it feeds a grounding check that asks
+    "did a tool in this turn return this figure?", where a label is irrelevant and a missed value
+    is a false accusation. This feeds a *surface*, where the opposite is true — the entity rail
+    could only ever say "predict_pka returned 4.76, 1.6", because pairing an unlabelled pair into
+    "pKa 4.76 ± 1.6" would invent a relationship the tool never stated.
+
+    So the label is the payload's own key path and the unit is the payload's own `unit`, or empty.
+    Nothing here is prettified or inferred; `chemclaw.core.quantities.labelled_values` is where
+    that rule is enforced and argued.
+
+    Only for a result that parses as JSON. One that does not carries `numbers` and no `values`,
+    which is the honest report: the figures are known, their names are not.
+    """
+
+    label: str
+    value: float
+    unit: str = ""
 
 
 class ToolResultEvent(BaseModel):
@@ -343,6 +372,19 @@ class ToolResultEvent(BaseModel):
     exists to keep is untouched: a surface pulls the one result it decided to render, once, rather
     than every result being streamed to every consumer.
 
+    `values` is `numbers` with the names the tool filed them under, for the surfaces that *display*
+    a figure rather than check one. See `ResultValue`: the two coexist because a grounding check
+    wants every value and no names, and a value strip wants names and refuses to guess them.
+
+    `result_inline` is the small-result shortcut, and it exists because the split above is a rule
+    about *large* results applied to every result. A 300-byte ICH limit or a two-field pKa costs a
+    second round trip to be rendered as anything but prose, and that round trip buys nothing: the
+    payload is smaller than the preview's own budget several times over. Under
+    `stream_inline_result_bytes` the text rides along and a surface renders immediately; over it,
+    the field is empty and the ref is how the result is reached, exactly as before. The cap is the
+    control — this is not a way to stream a 40-chunk evidence sweep to a browser, and the default
+    is set well below where that becomes possible.
+
     **Empty means "not stored", and it is one meaning with three causes** — the store is off
     (`stream_max_result_bytes` at 0), the result was over that cap, or the write failed. A consumer
     has exactly one thing to check, and none of the three ever costs the turn its answer: storing a
@@ -355,7 +397,9 @@ class ToolResultEvent(BaseModel):
     preview: str = ""
     note_ids: list[str] = Field(default_factory=list)
     numbers: list[float] = Field(default_factory=list)
+    values: list[ResultValue] = Field(default_factory=list)
     result_ref: str = ""
+    result_inline: str = ""
     agent: str = _AGENT_FIELD
 
 

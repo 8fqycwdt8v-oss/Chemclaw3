@@ -36,7 +36,7 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.science.fingerprints.store import default_reaction_store
 
 from chemclaw.durable.orchestrator import fan_out
-from chemclaw.durable.publish import BAD_DATA_RETRY, publish_note
+from chemclaw.durable.publish import BAD_DATA_RETRY, publish_note, queue_wait_timeout
 
 
 def default_retrievers() -> list[SourceRetriever]:
@@ -130,6 +130,7 @@ class ReportSectionWorkflow:
                 retrieve_section,
                 request,
                 start_to_close_timeout=timedelta(seconds=settings.report_section_timeout_seconds),
+                schedule_to_start_timeout=queue_wait_timeout(),
                 retry_policy=BAD_DATA_RETRY,
             )
         except ActivityError:

@@ -27,6 +27,7 @@ from collections.abc import Iterator
 import pytest
 from rdkit import Chem
 from temporalio import activity
+from temporalio.worker import Worker
 
 from chemclaw.connectors.calc import activities
 from chemclaw.connectors.calc.results import XtbJobResult
@@ -41,9 +42,17 @@ from chemclaw.connectors.calc.specs import (
     TorsionSpec,
     XtbJobSpec,
 )
+from chemclaw.connectors.calc.workflows import CalcJobWorkflow
+from chemclaw.connectors.identity import (
+    HEADER_ACTOR,
+    HEADER_CORRELATION,
+    turn_headers,
+)
+from chemclaw.connectors.queues import bundle_queue
 from chemclaw.core.chem import torsion_handle
 from chemclaw.science.calc.store import InMemoryStore
 from tests.calc_server_fake import FakeCalcServer, install
+from tests.temporal_env import pydantic_client, start_env_or_skip
 
 # H2 + Cl2 -> 2 HCl. Every species is a closed-shell diatomic, and the shape that matters: the two
 # homonuclear reactants are D∞h (sigma=2) and the product is C∞v (sigma=1), so sigma does *not*
@@ -286,3 +295,105 @@ def test_a_pka_job_carries_the_branch_into_its_summary(server: FakeCalcServer) -
 
     assert result.pka is not None and result.pka.branch == "base"
     assert "pKaH" in result.summary
+
+
+def test_the_remote_call_names_the_person_the_durable_run_is_for(
+    monkeypatch: pytest.MonkeyPatch, server: FakeCalcServer
+) -> None:
+    """Every request to the calculation server used to be anonymous on the durable path.
+
+    The activity's outbound calls carry `connectors.identity.turn_headers()`, which reads the
+    ambient identity — and nothing on this path bound one, so the heaviest server in the fleet
+    (minutes-to-hours CREST runs) logged `actor=- session=-` for every job while the same tool
+    called inline from a chat turn was fully attributed. Recorded at the boundary the real code
+    calls rather than inside it: the header builder is asked, at the moment of the remote call,
+    exactly what it would put on the wire.
+    """
+    seen: list[dict[str, str]] = []
+    answer = server.call_tool
+
+    async def _record(name: str, arguments: dict[str, object]) -> object:
+        seen.append(turn_headers())
+        return await answer(name, arguments)
+
+    monkeypatch.setattr(server, "call_tool", _record)
+
+    asyncio.run(
+        activities.run_xtb_calculation(
+            EnsembleJobSpec(smiles="CCO"), "chemist-1", "job-correlation-1"
+        )
+    )
+
+    assert seen, "the job made no remote call at all, so this proves nothing"
+    assert all(headers.get(HEADER_ACTOR) == "chemist-1" for headers in seen), seen
+    assert all(headers.get(HEADER_CORRELATION) == "job-correlation-1" for headers in seen), seen
+
+
+def test_the_identity_is_unstamped_when_the_job_ends(
+    monkeypatch: pytest.MonkeyPatch, server: FakeCalcServer
+) -> None:
+    """A worker runs the next job in the same process, so a leaked stamp becomes a false one."""
+    asyncio.run(activities.run_xtb_calculation(EnsembleJobSpec(smiles="CCO"), "chemist-1", "job-1"))
+    assert HEADER_ACTOR not in turn_headers()
+    assert HEADER_CORRELATION not in turn_headers()
+
+
+def test_a_run_with_no_memo_stamps_nothing_rather_than_a_placeholder(
+    monkeypatch: pytest.MonkeyPatch, server: FakeCalcServer
+) -> None:
+    """Absent identity stays absent: an empty header would let a log claim an anonymous caller.
+
+    The defaults also keep a run started before these arguments existed decodable, which is why
+    they are empty strings rather than a required field.
+    """
+    seen: list[dict[str, str]] = []
+    answer = server.call_tool
+
+    async def _record(name: str, arguments: dict[str, object]) -> object:
+        seen.append(turn_headers())
+        return await answer(name, arguments)
+
+    monkeypatch.setattr(server, "call_tool", _record)
+    asyncio.run(activities.run_xtb_calculation(EnsembleJobSpec(smiles="CCO")))
+    assert seen and all(HEADER_ACTOR not in headers for headers in seen), seen
+
+
+def test_the_workflow_hands_the_activity_the_actor_off_the_runs_memo(
+    server: FakeCalcServer,
+) -> None:
+    """The other half of the same route: identity has to reach the activity to be stampable.
+
+    `ConnectorJobWorkflow` puts `requested_by` and `correlation_id` on the child's **memo** —
+    deliberately not in the payload, which is model-authored and is the cache key — and this
+    bundle's workflow never read them, so the activity had nothing to stamp however carefully it
+    stamped it. Driven on the real server against a stand-in activity registered under the
+    production name, because what is under test is the argument the workflow sends rather than the
+    calculation; the stand-in answers with a result the *real* activity produced against the fake
+    server, so the workflow's own `job_envelope` still runs on a shape it would really see.
+    """
+    seen: list[tuple[str, str]] = []
+    answer = _run(EnsembleJobSpec(smiles="CCO"))
+
+    @activity.defn(name="run_xtb_calculation")
+    async def _capture(spec: XtbJobSpec, actor: str = "", correlation_id: str = "") -> XtbJobResult:
+        """Stand in for the real activity and record the identity it was handed."""
+        seen.append((actor, correlation_id))
+        return answer
+
+    async def _run_workflow() -> None:
+        async with await start_env_or_skip() as env:
+            client = pydantic_client(env)
+            queue = bundle_queue("calc")
+            async with Worker(
+                client, task_queue=queue, workflows=[CalcJobWorkflow], activities=[_capture]
+            ):
+                await client.execute_workflow(
+                    CalcJobWorkflow.run,
+                    EnsembleJobSpec(smiles="CCO"),
+                    id="calc-memo-identity",
+                    task_queue=queue,
+                    memo={"requested_by": "chemist-1", "correlation_id": "job-correlation-1"},
+                )
+
+    asyncio.run(_run_workflow())
+    assert seen == [("chemist-1", "job-correlation-1")]

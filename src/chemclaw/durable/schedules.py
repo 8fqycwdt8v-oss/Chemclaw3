@@ -265,6 +265,16 @@ def _build_schedule(job: PlannedSchedule) -> Schedule:
             job.workflow.run,  # type: ignore[attr-defined]
             id=f"{job.schedule_id}-scheduled",
             task_queue=settings.background_task_queue,
+            # A ceiling on one run, because `SKIP` below makes a run that never ends the worst
+            # failure this file can have: every subsequent fire is skipped, indefinitely, and a
+            # skipped fire is not an error in `describe_schedules`, in a log or on a dashboard —
+            # the job simply stops running and nothing says so. Every activity these workflows
+            # schedule is now bounded on both sides (`durable/publish.py::queue_wait_timeout`), so
+            # this is the backstop for what that cannot see: a child that hangs, a timer, a wait.
+            # `schedule_run_timeout_seconds` explains why a day is the right size and why a
+            # terminated run is safe here — each of these jobs is cursored or idempotent, so the
+            # next fire picks up where this one was cut off.
+            execution_timeout=timedelta(seconds=settings.schedule_run_timeout_seconds),
         ),
         spec=ScheduleSpec(
             intervals=[ScheduleIntervalSpec(every=job.interval, offset=_jitter(job))],

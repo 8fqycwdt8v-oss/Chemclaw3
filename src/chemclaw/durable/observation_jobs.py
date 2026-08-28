@@ -40,7 +40,7 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.memory.supersede import retire_note
 
 from chemclaw.durable.memory_jobs import read_corpus
-from chemclaw.durable.publish import BAD_DATA_RETRY, note_publish_retry
+from chemclaw.durable.publish import BAD_DATA_RETRY, note_publish_retry, queue_wait_timeout
 
 logger = logging.getLogger(__name__)
 
@@ -230,7 +230,10 @@ class ObservationSynthesisWorkflow:
         """Refresh the tier against the current corpus, then age out what it no longer supports."""
         budget = timedelta(seconds=settings.memory_job_timeout_seconds)
         report = await workflow.execute_activity(
-            mine_observations_activity, start_to_close_timeout=budget, retry_policy=BAD_DATA_RETRY
+            mine_observations_activity,
+            start_to_close_timeout=budget,
+            schedule_to_start_timeout=queue_wait_timeout(),
+            retry_policy=BAD_DATA_RETRY,
         )
         if report.corpus_reactions == 0 or not report.complete:
             # Retirement ages out what mining did not re-observe — so a pass that saw no corpus
@@ -247,6 +250,7 @@ class ObservationSynthesisWorkflow:
         await workflow.execute_activity(
             retire_stale_observations_activity,
             start_to_close_timeout=budget,
+            schedule_to_start_timeout=queue_wait_timeout(),
             retry_policy=BAD_DATA_RETRY,
         )
 
@@ -268,6 +272,7 @@ class ObservationPromotionWorkflow:
             await workflow.execute_activity(
                 promote_observations_activity,
                 start_to_close_timeout=timedelta(seconds=settings.memory_job_timeout_seconds),
+                schedule_to_start_timeout=queue_wait_timeout(),
                 retry_policy=note_publish_retry(),
             )
         )

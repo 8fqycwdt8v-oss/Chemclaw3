@@ -62,6 +62,14 @@ data:
          counts the pods this chart renders that call `chemclaw.core.db.pooling`. */}}
   CHEMCLAW_PG_FLEET_POOLED_PROCESSES: {{ include "chemclaw.pooledProcesses" . | quote }}
   CHEMCLAW_PG_FLEET_MAX_CONNECTIONS: {{ .Values.postgres.maxConnections | quote }}
+  {{- /* The third budget of the same shape, and the same reason it is derived: the calculation
+         backend is one shared pod, `worker_max_concurrent_activities` bounds one worker *process*,
+         and so what `servers/calc` is offered is that cap times however many `calc` worker pods
+         run. Hand-written it would be a second copy of `connectors.calc.workerReplicas` that goes
+         stale the first time someone scales that worker — which is the silent multiplication
+         `CHEMCLAW_CALC_BACKEND_MAX_CONCURRENT_REQUESTS` exists to catch. `0` when this release
+         runs no calc worker, because then it dispatches no durable calculation at all. */}}
+  CHEMCLAW_CALC_FLEET_WORKER_PROCESSES: {{ include "chemclaw.calcWorkerProcesses" . | quote }}
 ---
 apiVersion: v1
 kind: ServiceAccount

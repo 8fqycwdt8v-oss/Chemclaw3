@@ -1,0 +1,192 @@
+# Weekly mutation test of the seven invariant-bearing modules — the backstop `ci.yml` deliberately
+# does not carry.
+#
+# `[tool.mutmut]` names `agent/authz.py`, `agent/audit_store.py`, `api/budget.py`,
+# `api/runner_trace.py`, `kg/note.py`, `kg/pr_gate.py` and `science/calc/store.py`: the
+# authorization gate, the audit trail, the budget guard, the runner's trace, the note schema, the
+# PR-gate and the calculation cache's key. `make mutants` is excluded from the `ci` target because
+# it costs an order of magnitude more than the gate — and until this file it had **no schedule
+# either**, so the only thing that had ever run it was a person, once
+# (`D-2026-08-08-a-survivor-is-a-hypothesis`). That pass found real holes: `propose_note`'s
+# `actor`/`session_id`/`correlation_id` stamps could each be deleted with the whole suite green,
+# which also makes a proposal its own author is served a 404 for; and the reviewer-facing
+# `with N supporting note(s)` count in the PR body was asserted by nothing. A control with that
+# track record and no schedule is a control that ran once.
+#
+# Weekly on Monday, the cadence `dependabot.yml` and `ci.yml`'s own `deps-audit` schedule already
+# use, at 02:00 so the two long jobs do not start together.
+name: mutants
+
+on:
+  schedule:
+    - cron: "0 2 * * 1"
+  # The run is expensive and its result is a report, so it is never attached to a push. Manual
+  # dispatch is how a branch that changes one of the seven modules gets checked before merge.
+  workflow_dispatch:
+
+# `issues: write` is the notification, and it is here rather than left to GitHub's default because
+# of what the default actually is: a scheduled workflow's failure is emailed to whoever last
+# touched the cron line, and shows up in the Actions tab nobody opens on a Monday. A weekly job
+# whose failure nobody sees is the same defect as an unscheduled one — so the last step below files
+# an issue in the repository, where the backlog is worked.
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  mutants:
+    runs-on: ubuntu-latest
+    # Measured 2026-08-27 on a 4-core sandbox against real Postgres: 825 mutants over the seven
+    # modules in **2m57s** warm, plus one full stats collection on a cold checkout (this job is
+    # always cold). mutmut parallelises over `os.cpu_count()` children and runs only the tests its
+    # stats say touch each mutant, so the cost tracks the seven modules rather than the suite. 60 is
+    # a large multiple of the measurement deliberately: the bound is here to stop a hung mutant
+    # holding a runner, not to police the duration.
+    timeout-minutes: 60
+
+    # **Real Postgres, and this is not copied from `ci.yml` for symmetry.** Six of the eighteen
+    # files in `pytest_add_cli_args_test_selection` gate on `tests/pg.py::migrated_db_or_skip` —
+    # `test_store.py`, `test_postgres_store.py`, `test_audit_store.py`, `test_note_proposals.py`,
+    # `test_concurrency_claims.py`, `test_pr_gate_read_window.py`. Without a database they skip and
+    # still report green, so every mutant in `science/calc/store.py` and `agent/audit_store.py`
+    # would be scored SURVIVED for a reason that has nothing to do with the mutation. That is worse
+    # than not running: it manufactures survivors in exactly the two modules this job exists for.
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: chemclaw
+          POSTGRES_PASSWORD: chemclaw
+          POSTGRES_DB: chemclaw
+        ports:
+          - "5432:5432"
+        options: >-
+          --health-cmd "pg_isready -U chemclaw"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      CHEMCLAW_POSTGRES_DSN: postgresql://chemclaw:chemclaw@localhost:5432/chemclaw
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+        with:
+          python-version: "3.11"
+          enable-cache: true
+
+      - name: Sync dependencies
+        run: uv sync --locked
+
+      - name: Apply database migrations
+        run: make db-migrate
+
+      # `mutmut run` exits 0 whatever it finds — survivors included — so the policy below is this
+      # workflow's, stated explicitly, not something inherited from the tool.
+      - name: Mutate the invariant-bearing modules
+        run: make mutants
+
+      # Both halves of the report, and they run even when the step above failed: a run that died
+      # part-way still has counts worth reading.
+      - name: Collect the counts and the survivor list
+        if: ${{ !cancelled() }}
+        run: |
+          make mutant-stats
+          make mutant-results | tee mutants/survivors.txt
+          {
+            echo '### Mutation results'
+            echo '```json'
+            cat mutants/mutmut-cicd-stats.json
+            echo '```'
+            echo '<details><summary>Non-killed mutants</summary>'
+            echo
+            echo '```'
+            cat mutants/survivors.txt
+            echo '```'
+            echo '</details>'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep the report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: mutation-report
+          path: |
+            mutants/mutmut-cicd-stats.json
+            mutants/survivors.txt
+          retention-days: 90
+
+      # **What this job does with a survivor: publishes it, and does not fail.**
+      #
+      # `D-2026-08-27-a-survivor-is-not-a-failing-build` is the decision and carries the numbers.
+      # The short form: `D-2026-08-08-a-survivor-is-a-hypothesis` measured that a survivor from this
+      # selection is a claim about the *selection* — 29 of that run's 39 survivors were killed by
+      # two test files the selection did not name — so acting on one before re-running it against
+      # the whole suite produces tests for behaviour already pinned. Running this checkout twice on
+      # 2026-08-27 added a second leg: 171 survivors then 155, same commit, same configuration, so a
+      # survivor is not even a stable observation. And the standing state is 34 `no_tests` and 2
+      # timeouts both times, with seventeen of the survivors already adjudicated equivalent or
+      # harmless. A gate on any of those at zero would be red the day it merged, which is how a
+      # weekly job stops being read.
+      #
+      # So the gate is the **kill rate against a recorded floor**. A rate, not a count, because a
+      # count breaks the first time one of these modules legitimately grows: well-tested new code
+      # raises `killed` and `total` together and leaves the rate alone.
+      #
+      # `suspicious` and `segfault` fail at zero, and they are a different kind of thing — not a
+      # result at all, but the harness going wrong, which leaves every number above them unexplained.
+      - name: Gate on the kill rate, and on the harness having worked
+        if: ${{ !cancelled() }}
+        env:
+          # Measured 2026-08-27 on this checkout, twice: 618 and 634 killed of 825 — 74.9% and
+          # 76.8%, a 1.9-point spread on identical code. The floor is roughly one and a half spreads
+          # below the *lower* observation, not just under it: a floor set against the best run is a
+          # job that fails for no reason and gets switched off. Two runs is a small sample, so this
+          # number is provisional on the distribution the weekly artifacts will build; raise it —
+          # with a fresh measurement beside it — once there is one, or once somebody works through
+          # the survivor list.
+          MUTATION_SCORE_FLOOR: "72.0"
+        run: |
+          python - <<'PY'
+          import json, os, pathlib, sys
+
+          stats = json.loads(pathlib.Path("mutants/mutmut-cicd-stats.json").read_text())
+          print(json.dumps(stats, indent=2))
+
+          broken = {k: stats.get(k, 0) for k in ("suspicious", "segfault") if stats.get(k, 0)}
+          if broken:
+              sys.exit(f"the mutation harness itself reported {broken}; the counts above mean nothing")
+
+          total = stats["total"]
+          if not total:
+              sys.exit("the run scored no mutants at all")
+          score = 100.0 * stats["killed"] / total
+          floor = float(os.environ["MUTATION_SCORE_FLOOR"])
+          print(
+              f"kill rate {score:.1f}% ({stats['killed']}/{total}); floor {floor:.1f}%. "
+              f"{stats['survived']} survived, {stats['no_tests']} reached by no selected test, "
+              f"{stats['timeout']} timed out — published, not gated."
+          )
+          if score < floor:
+              sys.exit(f"kill rate {score:.1f}% is below the recorded floor of {floor:.1f}%")
+          PY
+
+      # The half that makes the schedule worth having. Deduplicated on the label, so a failure that
+      # persists for three weeks is one issue with the runs linked, not three issues nobody closes.
+      - name: File an issue when the run reports something
+        if: ${{ failure() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          existing=$(gh issue list --label mutation-testing --state open --limit 1 --json number --jq '.[0].number')
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "Weekly mutation run failed again: $RUN_URL"
+          else
+            gh issue create \
+              --title "Weekly mutation run needs attention" \
+              --label mutation-testing \
+              --body "The scheduled \`mutants\` workflow failed: the kill rate fell below the floor recorded in \`.github/workflows/mutants.yml\`, the harness reported a \`suspicious\` or \`segfault\` mutant, or the run died outright. Counts and the full non-killed list are in the run's summary and its \`mutation-report\` artifact: $RUN_URL — see \`D-2026-08-27-a-survivor-is-not-a-failing-build\` for what each category means. A **survivor** alone does not fail this job: re-apply one to the real source and run the whole suite before treating it as a finding."
+          fi

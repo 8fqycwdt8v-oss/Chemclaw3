@@ -684,6 +684,66 @@ def test_the_connection_ceiling_error_names_both_sides_and_every_factor() -> Non
     assert "pg_fleet_max_connections" in message and "pg_pool_max_size" in message
 
 
+def test_the_calculation_backend_budget_is_undeclared_by_default() -> None:
+    """0 means "no opinion", not "a ceiling of zero" — the same split the other two budgets take.
+
+    Sharper here than for either of them: the number belongs to a pod in *another* release
+    (`Chemclaw3-mcp` `servers/calc`), so a code default other than "undeclared" would be this
+    repository guessing at somebody else's CPU allocation.
+    """
+    settings = Settings(  # type: ignore[call-arg]
+        _env_file=None, calc_fleet_worker_processes=8, worker_max_concurrent_activities=16
+    )
+    assert settings.calc_backend_max_concurrent_requests == 0
+
+
+def test_a_calc_fleet_exactly_at_its_backend_ceiling_is_allowed() -> None:
+    """`>`, not `>=`: a deployment sized exactly to what the backend serves is the correct one."""
+    settings = Settings(  # type: ignore[call-arg]
+        _env_file=None,
+        calc_fleet_worker_processes=2,
+        worker_max_concurrent_activities=8,
+        calc_backend_max_concurrent_requests=16,
+    )
+    assert settings.calc_backend_max_concurrent_requests == 16
+
+
+def test_a_release_with_no_calc_worker_dispatches_nothing_durably() -> None:
+    """0 worker processes is legal, and it must not be floored to 1.
+
+    The chart renders 0 whenever `connectors.calc.worker` is off, and a floor there would refuse a
+    deployment over calculations it never makes.
+    """
+    settings = Settings(  # type: ignore[call-arg]
+        _env_file=None,
+        calc_fleet_worker_processes=0,
+        worker_max_concurrent_activities=64,
+        calc_backend_max_concurrent_requests=1,
+    )
+    assert settings.calc_fleet_worker_processes == 0
+
+
+def test_the_calculation_backend_ceiling_error_names_both_sides_and_every_factor() -> None:
+    """Scaling the calc worker is the lever that trips this, so the message has to name it.
+
+    The per-process cap is the only setting whose name contains `concurrent`, and it is exactly the
+    number that is *not* the whole story: `servers/calc` is one shared pod, so what it is offered is
+    that cap times the worker replica count — the product nobody had computed (BS-07).
+    """
+    with pytest.raises(ValueError) as excinfo:
+        Settings(  # type: ignore[call-arg]
+            _env_file=None,
+            calc_fleet_worker_processes=4,
+            worker_max_concurrent_activities=8,
+            calc_backend_max_concurrent_requests=16,
+        )
+    message = str(excinfo.value)
+    assert "32" in message and "16" in message
+    assert "4 calc worker process" in message and "8 activities each" in message
+    assert "worker_max_concurrent_activities" in message
+    assert "calc_backend_max_concurrent_requests" in message
+
+
 def test_the_embedding_width_check_still_leaves_the_standalone_embedder_alone() -> None:
     """Widening the scope must not make it unconditional.
 

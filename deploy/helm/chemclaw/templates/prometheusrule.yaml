@@ -224,6 +224,34 @@ spec:
               or a rollout that left both generations up. Either scale back or raise
               `CHEMCLAW_SERVICE_FLEET_MAX_CONCURRENT_TURNS` with a number the endpoint can serve.
 
+        {{- /* The calculation backend's version of the alert above, and it needs a *live* left
+               hand where that one uses a configured capacity: two kinds of process dispatch to
+               `servers/calc` and they do not share a cap — a calc worker is bounded by
+               `worker_max_concurrent_activities`, while that bundle's own MCP server pods dispatch
+               straight from a tool call and are bounded by nothing local. Counting the sessions
+               actually held is the only number that covers both. `Settings` refuses a bad
+               *product* at startup and never re-runs, and it cannot see the interactive half at
+               all, so this pair is what catches a real overload. Self-disabling: the ceiling gauge
+               is 0 until a release declares what that pod will serve. */}}
+        - alert: ChemclawCalcBackendOverCommitted
+          expr: >-
+            max(chemclaw_calc_backend_max_concurrent_requests) > 0
+            and sum(chemclaw_calc_requests_in_flight)
+                > max(chemclaw_calc_backend_max_concurrent_requests)
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawcalcbackendovercommitted
+            summary: More concurrent calculations are in flight than the backend declares it serves
+            description: >-
+              The calculation server pins OMP_NUM_THREADS=1 and is CPU-bound, so surplus concurrency
+              arrives as thrashing, then as activity heartbeat timeouts, then as retries onto the
+              same pod. Usual causes are a scaled calc worker, a raised
+              CHEMCLAW_WORKER_MAX_CONCURRENT_ACTIVITIES, or interactive tool traffic on the calc
+              connector's own server pods. Either scale back or raise
+              CHEMCLAW_CALC_BACKEND_MAX_CONCURRENT_REQUESTS to what that server actually admits.
+
         - alert: ChemclawTurnsShed
           expr: sum(rate(chemclaw_turns_shed_total[10m])) > 0
           for: 10m

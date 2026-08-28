@@ -74,7 +74,7 @@ SHELL := bash
 
 .DEFAULT_GOAL := help
 
-.PHONY: help install lint type test cov check ci chat db-migrate db-grants schedules-apply kg-validate proposals-reconcile synthesize eval eval-strict eval-baseline eval-baseline-check eln-validate skill-validate connector-validate datasource-validate sink-validate sink-schema template-validate connectors prose-validate helm-validate explain user-erase reindex reindex-full up down phoenix-up phoenix-down phoenix-publish deps-audit live-infra live-infra-down live-up live-down live-status live-jobs live-probes live-verifier-margin trajectory-census live-data live-plan-gate live-degradation live-storm live-soak live-soak-report leak-probe mutants mutant-results
+.PHONY: help install lint type test cov check ci chat db-migrate db-grants schedules-apply kg-validate proposals-reconcile synthesize eval eval-strict eval-baseline eval-baseline-check eln-validate skill-validate connector-validate datasource-validate sink-validate sink-schema template-validate connectors prose-validate helm-validate explain user-erase reindex reindex-full up down phoenix-up phoenix-down phoenix-publish deps-audit live-infra live-infra-down live-up live-down live-status live-jobs live-probes live-verifier-margin trajectory-census live-data live-plan-gate live-degradation live-storm live-soak live-soak-report leak-probe mutants mutant-results mutant-stats
 
 help:  ## List every target with its one-line description (the default).
 	@# Reads the `## ` comments beside each target, so a new target documents itself the day it is
@@ -107,6 +107,12 @@ mutants:  ## Mutation-test the invariant-bearing modules (see [tool.mutmut]; slo
 
 mutant-results:  ## Show the survivors from the last `make mutants` run.
 	uv run mutmut results
+
+mutant-stats:  ## Write the last run's per-category counts to mutants/mutmut-cicd-stats.json.
+	@# The machine-readable half of `mutant-results`, and the one the weekly workflow gates on.
+	@# `mutmut results` prints one line per non-killed mutant for a human; this writes the counts,
+	@# so `.github/workflows/mutants.yml` can decide on a number rather than by grepping prose.
+	uv run mutmut export-cicd-stats
 
 check: lint type test  ## The fast inner-loop gate: lint + type + test (no coverage floor).
 
