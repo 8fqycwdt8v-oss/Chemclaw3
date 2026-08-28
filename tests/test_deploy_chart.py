@@ -2587,3 +2587,21 @@ def test_a_wedged_knowledge_sync_can_be_seen_from_outside_the_pod() -> None:
     assert "readinessProbe:" not in sidecar, (
         "a stale corpus takes the front door out of its Service, which is worse than the staleness"
     )
+
+
+def test_service_account_does_not_automount_the_api_token() -> None:
+    """The ServiceAccount refuses the projected API token no component uses.
+
+    No code under `src/` calls the Kubernetes API, so the token every pod would otherwise mount is
+    unused attack surface. The cluster default is to mount it, so the guard must be an explicit
+    `false` in values and a rendered field on the ServiceAccount — an omission is the insecure
+    posture. Entra workload identity uses a federated token, not this mount, so this is orthogonal
+    to identity.
+    """
+    assert _values()["serviceAccount"]["automountServiceAccountToken"] is False
+    config = (CHART / "templates" / "config.yaml").read_text()
+    assert "kind: ServiceAccount" in config
+    assert (
+        "automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}"
+        in config
+    )
