@@ -20,6 +20,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from chemclaw.cli.live_data import (
     _DATASETS,
     _PROSE_TEMPERATURE,
@@ -31,6 +33,7 @@ from chemclaw.cli.live_data import (
     _published_key,
     _seeded_yield,
     check_adapter_matches_its_declaration,
+    check_prose_yields_its_numbers,
     check_seeding_is_faithful,
     report,
 )
@@ -194,3 +197,78 @@ def test_a_temperature_is_only_read_from_a_temperature() -> None:
     """The units anchor the match, so a mass or an NMR shift cannot become a temperature."""
     assert _PROSE_TEMPERATURE.search("charged with 1071.0 mg of the carbamate") is None
     assert _PROSE_TIME.search("1H NMR (400 MHz) delta 7.4") is None
+
+
+def _entry_stating_conditions_only_in_prose() -> dict[str, Any]:
+    """An entry whose conditions exist *only* as a sentence — the case the check is about.
+
+    No `temperature_c`, no `time_h`. If the prose is not read into a step the condition is simply
+    gone, and nothing downstream can tell "ran at 82 °C" from "temperature unrecorded".
+    """
+    return {
+        "id": "prose-only-1",
+        "timestamp": "2026-01-01T00:00:00+00:00",
+        "reactants": [{"smiles": "CCO", "role": "reactant"}],
+        "products": [{"smiles": "CCOC", "yield_percent": 71.0}],
+        "procedure": (
+            "1. Charge the vessel and cool to 0 °C. "
+            "2. Stir at 82 °C for 4.0 h under nitrogen. "
+            "3. Quench and extract."
+        ),
+    }
+
+
+def _write_entry(directory: Any, payload: dict[str, Any]) -> None:
+    import json
+
+    (directory / f"{payload['id']}.json").write_text(json.dumps(payload), encoding="utf-8")
+
+
+@pytest.mark.anyio
+async def test_a_prose_condition_reaches_a_step(tmp_path: Any) -> None:
+    """The recovery half: a number stated only in a sentence still lands on the step it scopes to."""
+    _write_entry(tmp_path, _entry_stating_conditions_only_in_prose())
+
+    check = await check_prose_yields_its_numbers(tmp_path)
+
+    assert check.passed, check.observed
+    assert "1/1" in check.observed
+
+
+@pytest.mark.anyio
+async def test_a_setpoint_derived_from_prose_fails_the_check(tmp_path: Any) -> None:
+    """The half that guards the decision, and the one this check was missing.
+
+    `D-2026-08-26-a-transcription-may-not-infer-a-setpoint` removed the headline prose fallback
+    after measuring what it stored: a reaction run at 80 °C for 12 h, recorded as 0 °C for 0.5 h,
+    because a procedure begins by charging a vessel. Reinstating that fallback must turn this red
+    — otherwise the check passes for the wrong reason and the retraction is unguarded offline.
+    """
+    _write_entry(tmp_path, _entry_stating_conditions_only_in_prose())
+
+    import chemclaw.ingest.eln.json_adapter as adapter_module
+
+    original = adapter_module.JsonExportAdapter._build
+
+    def _build_with_the_retracted_fallback(
+        self: Any, raw: Any
+    ) -> Any:  # pragma: no cover - exercised via the check
+        reaction = original(self, raw)
+        first = next((s for s in reaction.steps if s.temperature_c is not None), None)
+        return reaction.model_copy(
+            update={
+                "temperature_c": first.temperature_c if first else None,
+                "time_h": next(
+                    (s.duration_h for s in reaction.steps if s.duration_h is not None), None
+                ),
+            }
+        )
+
+    adapter_module.JsonExportAdapter._build = _build_with_the_retracted_fallback  # type: ignore[method-assign]
+    try:
+        check = await check_prose_yields_its_numbers(tmp_path)
+    finally:
+        adapter_module.JsonExportAdapter._build = original  # type: ignore[method-assign]
+
+    assert not check.passed
+    assert "D-2026-08-26" in check.observed
