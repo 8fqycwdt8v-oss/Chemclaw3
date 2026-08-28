@@ -621,18 +621,31 @@ def test_the_pinned_versions_are_the_ones_these_assertions_were_measured_against
 def test_a_pydantic_tool_return_still_reaches_the_model_as_repr() -> None:
     """`_stringify` prefers JSON and falls back to `str()`, so a `BaseModel` arrives as its repr.
 
-    Every structured tool in this repository returns a pydantic model — `EvidenceSweep`,
-    `NoteView`, `FingerprintSearch` — and none of them reaches the model as JSON, because
-    `json.dumps` cannot take a `BaseModel` and `_stringify` falls through to `str(content)`.
+    **This covers the in-process half of the tool surface and only that half**, which the sentence
+    here used to overstate: it said "every structured tool in this repository" and named
+    `EvidenceSweep`, `NoteView` and `FingerprintSearch`, all three of which are in-process. A
+    *connector* result never meets `_stringify` at all — `langchain_mcp_adapters` builds the
+    message from the server's own content blocks, and FastMCP has already serialized the model to
+    JSON on the far side. Measured through a compiled graph over a live connector, and pinned one
+    test down (`test_an_mcp_tool_result_still_arrives_as_content_blocks_carrying_the_servers_json`)
+    because `agent/tool_framing.py` rewrites those blocks in place.
 
-    **This is asserted because a fix upstream would silently change every tool's payload**, and
-    because one design decision in this tree was already made against the wrong belief about it:
-    `Condensation.rows` carried `Field(exclude=True)` and a measurement taken with
+    **This is asserted because a fix upstream would silently change every in-process tool's
+    payload**, and because one design decision in this tree was already made against the wrong
+    belief about it: `Condensation.rows` carried `Field(exclude=True)` and a measurement taken with
     `model_dump_json()`, neither of which described the wire. `agent/protocol_tools` now renders a
     string at the tool boundary rather than depending on this behaviour — the assertion is here so
     that if upstream starts serializing models properly, whoever reads this knows the repr
     assumption is gone and can drop the workarounds it justified rather than leave them
     unexplained.
+
+    **A blanket move to JSON payloads was measured and declined**
+    (`D-2026-08-27-a-tool-result-crosses-a-boundary-and-must-say-so`), and the number that would be
+    the obvious reason to decline says the opposite: compact JSON of a realistic `EvidenceSweep` is
+    0.4–0.8% *shorter* than its repr, so context cost is not the argument. What decided it is that
+    a `wrap_tool_call` middleware is handed an already-stringified `ToolMessage`, so the change
+    cannot be made in one place — it is an edit to every tool's return, for a payload the model
+    reads equally well either way.
     """
     from langchain_core.tools.base import _stringify
     from pydantic import BaseModel, Field
@@ -651,6 +664,87 @@ def test_a_pydantic_tool_return_still_reaches_the_model_as_repr() -> None:
     assert "hidden=" in rendered, (
         "`exclude=True` now survives tool-result stringification; the comment on "
         "`Condensation.rows` saying it does not is stale"
+    )
+
+
+def test_an_mcp_tool_result_still_arrives_as_content_blocks_carrying_the_servers_json() -> None:
+    """A connector result is a *list* of blocks, not a string, and `agent/tool_framing.py` knows it.
+
+    Two shapes exist on this repository's tool surface and the framing middleware has to rewrite
+    both: an in-process tool's `ToolMessage.content` is a `str` (the pin above), and a connector's
+    is `list[str | dict]` — one `{"type": "text", "text": …}` block per content item the server
+    returned. `_rewritten` frames the `text` and copies every other key, which is what keeps the
+    block list, its ids and the artifact beside it intact; if upstream ever joined the blocks into
+    a string before the message is built, the list arm would go dead and the rewrite would still
+    pass, silently.
+
+    Asserted on the *annotation* rather than by opening a session, because a live connector turn is
+    what `tests/test_tool_framing.py` already does and this file is for the shapes upstream does
+    not promise. `content` is typed as the union; a narrowing to `str` is the change that matters.
+    """
+    from langchain_core.messages import ToolMessage
+
+    hints = get_type_hints(ToolMessage)
+    rendered = str(hints["content"])
+    assert "list" in rendered, (
+        "`ToolMessage.content` is no longer a union with a list arm; "
+        "`chemclaw.agent.tool_framing._rewritten` handles content blocks that can no longer arrive"
+    )
+    assert "str" in rendered, (
+        "`ToolMessage.content` no longer admits a plain string; "
+        "`chemclaw.agent.tool_framing._rewritten` frames an in-process tool's result on that arm"
+    )
+
+
+def test_a_fastmcp_tool_is_still_a_mutable_object_the_manager_will_hand_over() -> None:
+    """`connectors/server.py` reaches into `FastMCP`'s tool manager, and this is that coupling.
+
+    The third upstream-internal read in that file, beside the two `ToolManager.call_tool` patches
+    the identity binder and the error sanitizer install. `_publish_tool_results` walks
+    `server._tool_manager.list_tools()` and reassigns each entry's `fn`, because the publish hook
+    routes on the *model* a tool returns and `Tool.fn` is the last point at which the result still
+    is one — by the time `call_tool` returns, `convert_result` has turned it into content blocks.
+
+    Four things are read and `mcp` promises none of them: the private `_tool_manager`, that
+    `list_tools()` hands back the live `Tool` objects rather than copies, that `fn` is a writable
+    attribute, and that `is_async` (decided at registration, dispatched on by
+    `call_fn_with_arg_validation`) is what says whether an async wrapper is legal. A copy or a
+    frozen model would make the wrapper install cleanly and publish nothing — the
+    `audit_events.agent` shape, a hook that reads as installed and is not.
+    """
+    import inspect
+
+    from mcp.server.fastmcp import FastMCP
+    from mcp.server.fastmcp.tools.base import Tool
+
+    server = FastMCP("upstream-surface-probe")
+
+    @server.tool()
+    async def probe(value: str) -> str:
+        """A tool whose only job is to be found by the manager."""
+        return value
+
+    manager = getattr(server, "_tool_manager", None)
+    assert manager is not None, (
+        "FastMCP no longer exposes `_tool_manager`; chemclaw.connectors.server patches "
+        "`call_tool` on it twice and walks `list_tools()` on it once"
+    )
+    listed = manager.list_tools()
+    assert [tool.name for tool in listed] == ["probe"], listed
+    tool = listed[0]
+    assert tool.is_async, (
+        "`Tool.is_async` no longer reports an async tool as async; "
+        "chemclaw.connectors.server._publish_tool_results skips a tool it reads as synchronous"
+    )
+
+    sentinel = object()
+    tool.fn = sentinel
+    assert manager.list_tools()[0].fn is sentinel, (
+        "`ToolManager.list_tools` no longer hands back the live `Tool` objects, so "
+        "chemclaw.connectors.server._publish_tool_results wraps a copy and publishes nothing"
+    )
+    assert "fn" in inspect.signature(Tool).parameters or "fn" in Tool.model_fields, (
+        "`Tool.fn` is gone; the publish hook has no place left to wrap the tool's own body"
     )
 
 

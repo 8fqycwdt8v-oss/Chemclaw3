@@ -157,6 +157,9 @@ asserts it per document.
   afterwards is recoverable by one `UPDATE` instead of by a database backup.
 - The chart declares two pod specs in `migrate-job.yaml`, which `tests/test_deploy_chart.py`'s
   `_POD_SPECS` inventory pins deliberately; its entry moved from 1 to 2 in the same commit.
+- `make db-migrate` still runs the conversion inline, and deliberately: it is a developer command
+  against a database no previous release is serving, so the hazard this ADR is about cannot arise
+  there. The pre/post distinction is a property of a rolling upgrade, not of the pass.
 - `helm` is still not installed in this sandbox, so both chart assertions read template *source*,
   as `tests/test_helm_chart.py`'s own docstring requires them to admit. The rendered-YAML edge is
   unchanged and still open.

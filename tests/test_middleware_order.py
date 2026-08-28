@@ -70,6 +70,12 @@ _EXPECTED_ORDER = (
     "ReloadingSkillsMiddleware",
     "surface_authorization_denials",
     "surface_domain_errors",
+    # Inside both converters and outside the trail
+    # (`D-2026-08-27-a-tool-result-crosses-a-boundary-and-must-say-so`): a refusal this system
+    # composed must not be wrapped in the envelope the instructions call evidence, and the two
+    # readers that record a failure — the announcer and the audit trail — must read the result the
+    # tool actually returned rather than the one the model is shown.
+    "frame_connector_results",
     "announce_tool_failures",
     "audit_tool_calls",
     "enforce_tool_authz",
