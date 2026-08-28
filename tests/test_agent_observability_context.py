@@ -176,16 +176,18 @@ def test_a_raising_observer_costs_only_the_observation(caplog: pytest.LogCapture
     assert "degraded[compaction]" in caplog.text
 
 
-def test_both_edits_are_guarded_including_the_one_upstream_owns() -> None:
-    """`ClearToolUsesEdit` is called with this repository's placeholder, triggers and `keep`.
+def test_both_edits_are_guarded_including_the_one_that_wraps_upstream() -> None:
+    """Both edits construct upstream code with this repository's arguments, so both are guarded.
 
-    So it is exactly as capable of raising on an unexpected message shape as the first-party one,
-    and guarding only what we wrote would leave the larger of the two edits able to end a turn.
+    `ClearOlderToolResultsEdit` builds a `ClearToolUsesEdit` per apply — with the batch-aware
+    `keep` and the overshoot as `clear_at_least` — so upstream's strategy still runs and is still
+    exactly as capable of raising on an unexpected message shape as the first-party window is.
+    Guarding only what we wrote would leave the larger of the two able to end a turn.
     """
-    editing = context_compaction_middleware()[0]
+    editing = context_compaction_middleware()[1]
     assert [type(edit).__name__ for edit in editing.edits] == ["GuardedEdit", "GuardedEdit"]
     assert [type(edit.edit).__name__ for edit in editing.edits] == [
-        "ClearToolUsesEdit",
+        "ClearOlderToolResultsEdit",
         "KeepLastConversationGroupsEdit",
     ]
 

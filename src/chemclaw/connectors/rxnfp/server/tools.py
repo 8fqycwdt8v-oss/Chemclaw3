@@ -31,10 +31,12 @@ from chemclaw.science.fingerprints.store import (
 )
 from chemclaw.science.labels.facets import FrequencyReport
 from chemclaw.science.labels.molecules import CorpusMolecules, corpus_fingerprints
+from chemclaw.science.labels.reactions import corpus_reactions
 from chemclaw.science.labels.search import (
     PrecedentSearch,
     agent_frequency,
     conditions_for_similar_products,
+    conditions_for_similar_reactions,
     reactions_with_product_substructure,
     substrate_precedents,
     workup_precedents,
@@ -139,6 +141,42 @@ async def conditions_for_similar_product(
         return await _unlabelled(f"conditions for products similar to {product_smiles}")
     return await conditions_for_similar_products(
         _labels, corpus_fingerprints(), version, product_smiles, threshold=threshold, limit=top_k
+    )
+
+
+@server.tool()
+async def conditions_for_similar_reaction(
+    reaction_smiles: str, threshold: float | None = None, top_k: int | None = None
+) -> PrecedentSearch:
+    """Recorded conditions from reactions that ran a structurally similar *transformation*.
+
+    Answers "has this reaction been done, and what worked". Two passes: neighbours are found in DRFP
+    reaction-fingerprint space, then their recorded conditions are looked up, so each hit carries
+    its recipe grouped by role, its temperature, time and yield, and the document to cite.
+
+    **Query with `reactants>>products` — the two core substrates and the product, no reagents.**
+    The index is built with the agent slot *excluded*, because DRFP folds agents onto the reactants
+    and a solvent swap otherwise dominates the score. So naming a ligand, base or solvent in the
+    query adds features the indexed rows do not have and pushes a real precedent *below* the
+    threshold. A three-part `reactants>agents>products` string is accepted and its agents are folded
+    in, which is exactly the case to avoid here. Measured on one Buchwald against itself indexed
+    without agents: naming **one solvent** scores 0.72-0.85 across six common ones (DMF 0.72, THF
+    and toluene 0.76, dioxane 0.80, t-BuOH 0.82, MeCN 0.85), and a **realistic recipe** — ligand,
+    base and solvent — scores **0.61**. So a query written the way a chemist describes a reaction
+    can miss the identical precedent at any sensible threshold.
+
+    **Prefer this over `conditions_for_similar_product` when you have the whole reaction.** Product
+    similarity cannot tell a Buchwald from a Suzuki that happens to make the same biaryl; this can.
+    Prefer `similar_reactions` when you want *our own* runs rather than the literature corpus —
+    the two search different indexes and cite different things.
+
+    **Read `verdict`.** An empty result with no neighbours is not the same as no precedent.
+    """
+    version = await _labels.current_version()
+    if version is None:
+        return await _unlabelled(f"conditions for reactions similar to {reaction_smiles}")
+    return await conditions_for_similar_reactions(
+        _labels, corpus_reactions(), version, reaction_smiles, threshold=threshold, limit=top_k
     )
 
 

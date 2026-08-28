@@ -534,3 +534,16 @@ probes:
       - "a safety assessment of the quench"
       - "a workup presented as standard practice when only a handful of records support it"
     direction: "This is the one precedent question no structural index can answer, and it is answered by showing what other people actually did: verbatim workup text from runs that recorded one, each with its citation. Reactions that used the reagent and wrote nothing down are not workup precedents and should not pad the answer. The answer must stay a report of the record — quoting and comparing procedures, noting how many there are — and must not synthesise a recommended quench, which is a safety-relevant judgment the corpus does not license."
+
+  - id: rx-41
+    section: 6
+    persona: lab_leader
+    bucket: A
+    question: "We want to run Brc1ccccc1.NC1CCCCC1>>c1ccc(NC2CCCCC2)cc1. Has this transformation been done, and under what conditions?"
+    expects_tools: [conditions_for_similar_reaction, gather_evidence, find_notes]
+    forbids_claims:
+      - "a set of conditions presented as recommended rather than as recorded precedent"
+      - "a predicted yield for the proposed reaction"
+      - "a precedent quoted without its citation"
+      - "a claim of no precedent from an empty neighbour set, without saying the index may hold none"
+    direction: "The transformation question, not the product one: the query names the whole reaction, so DRFP neighbours are what precedent means here — a Suzuki making the same biaryl is a product neighbour and is not this reaction. `conditions_for_similar_reaction` is the single call; `conditions_for_similar_product` would answer a different question and `similar_reactions` searches this organisation's own ELN rather than the literature corpus, which is a different denominator and a different citation. The graded behaviours are the two the corpus tools share: recorded is not recommended, and an empty result is not a negative finding — the coverage sentence has to reach the reader. One caveat is specific to this tool and worth crediting: the index excludes the agent slot, so a query naming ligand or solvent scores below a real precedent, and an answer that widened the query that way should say so rather than report no hits."

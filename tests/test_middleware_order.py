@@ -76,11 +76,20 @@ _EXPECTED_ORDER = (
     # readers that record a failure — the announcer and the audit trail — must read the result the
     # tool actually returned rather than the one the model is shown.
     "frame_connector_results",
+    # Inside the framing and outside the trail, for the two reasons the framing itself is: the
+    # envelope must wrap an already-bounded payload rather than lose its closing tag to the cut,
+    # and `audit_events.detail` must keep recording what the tool returned rather than what the
+    # model was shown (`agent/tool_result_size.py`).
+    "bound_tool_results",
     "announce_tool_failures",
     "audit_tool_calls",
     "enforce_tool_authz",
     "refuse_writes_on_dry_run",
     "refuse_repeated_calls",
+    # Outermost of the compaction group: a `ContextEdit` sees a message list and a counter, never
+    # the request, so the prefix it must budget against can only be published by a middleware above
+    # the editor (`agent/context_budget.py`).
+    "MeasureRequestPrefix",
     "ContextEditingMiddleware",
     "RecordContextCompaction",
     # The two model-call observers, innermost of this repository's block and therefore closest to

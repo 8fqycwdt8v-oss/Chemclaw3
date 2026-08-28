@@ -122,6 +122,7 @@ from chemclaw.agent.tool_authz import (
     surface_domain_errors,
 )
 from chemclaw.agent.tool_framing import frame_connector_results
+from chemclaw.agent.tool_result_size import bound_tool_results
 from chemclaw.connectors.registry import skills_dirs
 from chemclaw.core.config import settings
 from chemclaw.core.logging import log_event
@@ -766,5 +767,14 @@ def tool_call_middleware(audit: Any, profile: AgentProfile) -> list[Any]:
         # the untouched result; so does `announce_tool_failures`, which sits below this and reads a
         # returned failure before it is defanged.
         frame_connector_results,
+        # Inside the framing, so the envelope wraps a payload that has already been bounded rather
+        # than this cutting the envelope's closing tag off — and outside the governance chain, so
+        # `audit_events.detail` still records what the tool returned rather than what the model was
+        # shown. The same two-sided position, for the same two reasons, as the framing above it.
+        #
+        # Every tool, not only a connector's: the two results that measured the defect
+        # (`read_document`, `find_calculations`) are in-process, so a cap keyed on the `SERVED_BY`
+        # stamp would have missed exactly the case it exists for (`agent/tool_result_size.py`).
+        bound_tool_results,
         *tool_governance_middleware(audit, profile),
     ]

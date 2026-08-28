@@ -11,6 +11,7 @@ tools:
   - similar_reactions
   - substrate_precedent
   - conditions_for_similar_product
+  - conditions_for_similar_reaction
   - reagent_frequency
   - reactions_making_substructure
   - workup_precedent
@@ -50,6 +51,21 @@ correctly but uses them well (G6).
   - `conditions_for_similar_product(product_smiles)` — *what conditions worked for similar
     products?* Neighbours in fingerprint space, then their recorded recipes, temperatures, times
     and yields, each with a document to cite.
+  - `conditions_for_similar_reaction(reaction_smiles)` — *has this **transformation** been run, and
+    under what conditions?* The same two passes, with neighbours found in DRFP space instead. Prefer
+    it over the product form whenever you have the whole reaction: a Buchwald and a Suzuki that make
+    the same biaryl are neighbours by product and are not the same reaction. Prefer
+    `similar_reactions` when you want *our own* runs — the two search different indexes (the
+    literature corpus versus this organisation's ELN) and cite different things, so a hit here is a
+    patent or document reference rather than a `reaction-<id>` note.
+    **Query it with `reactants>>products` only.** Both reaction indexes are built with the agent
+    slot excluded, so reagents in the query add features the rows do not have. Measured on one
+    Buchwald against itself indexed without agents: one solvent scores 0.72-0.85 depending which
+    (DMF 0.72, THF 0.76, MeCN 0.85), and a realistic ligand + base + solvent recipe scores **0.61** —
+    below any sensible threshold, against the identical reaction. If a query written from a full
+    recipe returns nothing, strip it to the core substrates and product and ask again before
+    reporting no precedent. This is the *inverse* of the corpus caveat below — there the risk is a
+    corpus that encoded the recipe as reactants, here it is a query that does.
   - `reagent_frequency(named_reaction=..., roles=["ligand"])` — *which ligands were used for
     Buchwald couplings?* Leave `roles` out and add `product_functional_group=...` for *which
     workhorse conditions were used when the product carries this group*.

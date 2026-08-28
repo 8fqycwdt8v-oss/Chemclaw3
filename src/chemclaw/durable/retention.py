@@ -292,10 +292,13 @@ _NOT_PRUNED: dict[str, str] = {
     "reaction_species": "derived and rebuildable; a species the source amended away is deleted "
     "with its reaction's record phase",
     "corpus_molecules": "derived and rebuildable by re-draining the corpus",
+    "corpus_reactions": "derived and rebuildable by re-draining the corpus",
     # Bounded by construction — the row count cannot run away, so there is nothing to bound.
     "schema_migrations": "never: the ledger is the record of its own work, and the runtime role "
     "cannot write it at all",
     "sync_cursors": "one row per ingest source, so bounded by the source count",
+    "corpus_cursors": "one row per append-only corpus source, so bounded by the source count; "
+    "deleting a row is the supported way to force a full re-walk",
     "ingest_rejections": "bounded by its own writer (`ingest/rejections.py`): at most "
     "`_MAX_ROWS_PER_SOURCE` rows per source, the least recently refused evicted in the same "
     "transaction as a write (D-2026-08-27-a-refused-record-is-a-question-somebody-will-ask). A "
