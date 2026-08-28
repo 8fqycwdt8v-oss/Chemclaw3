@@ -10,8 +10,9 @@ the task queue.
 
 Two other absences met in the same place, which is why this is one object rather than three:
 
-- **`set_current_correlation_id` had exactly one caller in the repository** — the front door
-  (`api/runner.py`). Every line a worker wrote therefore rendered `correlation_id="-" actor="-"
+- **`set_current_correlation_id` had no caller outside the front door** (`api/middleware.py` and
+  `api/runner.py`, two call sites in one process). Every line a worker wrote therefore rendered
+  `correlation_id="-" actor="-"
   session_id="-"`, while `deploy/README.md` told an operator to join on those fields. The ids were
   never missing: they ride in the activity's own argument (`ConnectorJobInput.correlation_id`,
   `JobRecord.session_id`, `StepIdentity.actor`). Nothing bound them to the ambient context that
@@ -261,37 +262,70 @@ class _ObservedActivity(ActivityInboundInterceptor):
             "workflow_id": info.workflow_id or "",
             "run_id": info.workflow_run_id or "",
         }
-        identity_token: tuple[object, object] | None = (
-            set_current_identity(context.actor, context.roles) if context.actor else None
-        )
-        session_token = set_current_session_id(context.session_id or None)
-        correlation_token = (
-            set_current_correlation_id(context.correlation_id) if context.correlation_id else None
-        )
+        # **Bound and counted *inside* the `try`, because the `finally` is what unbinds them.**
+        # The three `set_current_*` calls, the counter and the start line used to run above it, so
+        # the block whose comment says the contextvars are unbound "unconditionally" did not cover
+        # the statements that bound them: a `log_event` that raised — a formatting fault, a filter,
+        # a full disk — leaked all three tokens and one increment of `_IN_FLIGHT` permanently, and
+        # a leaked identity token is the *next* activity on this worker running under the last
+        # one's actor. The tokens are declared before the `try` so the `finally` can see them
+        # whatever it inherits.
+        identity_token: tuple[object, object] | None = None
+        session_token: object = None
+        correlation_token: object | None = None
         started = time.perf_counter()
         global _IN_FLIGHT
-        _IN_FLIGHT += 1
-        log_event(
-            logger,
-            "activity.started",
-            "%s attempt %d on %s",
-            info.activity_type,
-            info.attempt,
-            info.task_queue,
-            **fields,
-        )
         try:
+            # First inside the `try`, because it is the one statement here that cannot raise and
+            # the `finally` decrements unconditionally — anything before it would let a fault
+            # subtract a count that was never added.
+            #
+            # Of the four things this `try` now covers, only the counter's leak is observable from
+            # a test: `ActivityEnvironment` (and, in production, the task the worker runs an
+            # activity in) gives the call its own `contextvars.Context`, so a token left set does
+            # not escape into the next activity — measured, and `tests/test_durable_observability`
+            # says so where it used to assert otherwise. The tokens are reset here anyway, because
+            # the `finally` is where the reset belongs whatever the blast radius turns out to be.
+            _IN_FLIGHT += 1
+            identity_token = (
+                set_current_identity(context.actor, context.roles) if context.actor else None
+            )
+            session_token = set_current_session_id(context.session_id or None)
+            correlation_token = (
+                set_current_correlation_id(context.correlation_id)
+                if context.correlation_id
+                else None
+            )
+            log_event(
+                logger,
+                "activity.started",
+                "%s attempt %d on %s",
+                info.activity_type,
+                info.attempt,
+                info.task_queue,
+                **fields,
+            )
             result = await self.next.execute_activity(input)
         except BaseException as exc:
             elapsed = time.perf_counter() - started
             # One row **per attempt**, which is the whole point: a counter booked once per
             # activity would report a retry storm as a single failure, and the storm is the part
             # an operator can act on.
-            record_metric(
-                lambda m: m.increment(
-                    "chemclaw_activity_failures_total", labels={"activity": info.activity_type}
+            #
+            # **A cancellation is not a failure and is deliberately not counted here.** This clause
+            # catches `BaseException` so the ambient context is unwound however the activity ends,
+            # and that swept `asyncio.CancelledError` into the failure series: a graceful drain of
+            # eight activities booked eight activity failures, and `cancel_durable_job` booked one.
+            # `deploy/helm/chemclaw/templates/prometheusrule.yaml`'s `ChemclawActivityRetryStorm`
+            # reads this series and asserts "Every attempt of this activity is failing", so an
+            # ordinary rolling update paged on a rollout it had itself caused. A cancellation
+            # already has its own counter one line down, and the drain is where the number belongs.
+            if not isinstance(exc, asyncio.CancelledError):
+                record_metric(
+                    lambda m: m.increment(
+                        "chemclaw_activity_failures_total", labels={"activity": info.activity_type}
+                    )
                 )
-            )
             if _DRAINING and isinstance(exc, asyncio.CancelledError):
                 # The work is not lost — Temporal redelivers it — but it is paid for twice, which
                 # is the cost `durable/serve.py`'s docstring names and which nothing measured. It
@@ -338,10 +372,13 @@ class _ObservedActivity(ActivityInboundInterceptor):
             _IN_FLIGHT -= 1
             # Unbound in the reverse order they were bound, and unconditionally: a contextvar left
             # set leaks one run's identity into whatever this worker picks up next, which is the
-            # failure `template_activities._acting_as` already carries a `finally` for.
+            # failure `template_activities._acting_as` already carries a `finally` for. Each is
+            # reset only if it was actually bound, because the binding itself now happens inside
+            # the `try` and a fault between two of them must not turn into a second fault here.
             if correlation_token is not None:
                 reset_current_correlation_id(correlation_token)
-            reset_current_session_id(session_token)
+            if session_token is not None:
+                reset_current_session_id(session_token)
             if identity_token is not None:
                 reset_current_identity(identity_token)
 

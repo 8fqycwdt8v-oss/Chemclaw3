@@ -14,11 +14,12 @@ turn's state.
 
 import asyncio
 import logging
-from typing import Any
+from typing import Any, cast
 
 import psycopg
 import psycopg_pool
 import pytest
+from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import Checkpoint, CheckpointMetadata
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
@@ -36,8 +37,10 @@ def test_the_measurement_that_makes_the_translation_necessary() -> None:
     """
     assert not issubclass(psycopg_pool.PoolTimeout, ConnectionError)
     assert not issubclass(psycopg_pool.PoolTimeout, TimeoutError)
-    # And it *is* caught by what the saver catches, which is the other half of the pairing.
-    assert issubclass(psycopg_pool.PoolTimeout, psycopg.Error)
+    # And it *is* caught by what the saver catches, which is the other half of the pairing —
+    # `OperationalError`, the same class `core/db.py` catches, and not the two levels above it.
+    assert issubclass(psycopg_pool.PoolTimeout, psycopg.OperationalError)
+    assert issubclass(psycopg_pool.PoolClosed, psycopg.OperationalError)
 
 
 def test_a_failed_checkpoint_write_is_counted_and_retryable(
@@ -111,3 +114,85 @@ def test_a_working_write_still_stamps_the_channels_and_counts_nothing(
 
     assert STATE_CHANNELS_KEY in seen[0]
     assert METRICS.value("chemclaw_degraded_total") == before
+
+
+def test_a_missing_table_is_not_translated_into_retry_forever(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The catch was `psycopg.Error`, which is two levels wider than the failure it exists for.
+
+    `core/db.py` catches `OperationalError` at connect and `(PoolTimeout, PoolClosed)` at checkout,
+    and says why a broader test is wrong: "a broad `OperationalError` test first would collapse all
+    of them". `psycopg.Error` takes in `ProgrammingError`, `DataError` and every `IntegrityError`
+    besides — so a pod started against a database where LangGraph's checkpoint tables were never
+    created raised `UndefinedTable`, which became `ConnectionError`, which the front door
+    classified `("storage_unavailable", retryable=True)`: the chemist was told to retry forever a
+    failure that retrying cannot fix.
+    """
+    assert not issubclass(psycopg.errors.UndefinedTable, psycopg.OperationalError), (
+        "the premise of this case: a missing table is a ProgrammingError, not an outage"
+    )
+
+    async def _no_such_table(*_args: Any, **_kwargs: Any) -> Any:
+        raise psycopg.errors.UndefinedTable('relation "checkpoints" does not exist')
+
+    monkeypatch.setattr(AsyncPostgresSaver, "aput", _no_such_table)
+    saver = SchemaStampedSaver.__new__(SchemaStampedSaver)
+
+    async def _write() -> None:
+        await saver.aput(
+            {"configurable": {"thread_id": "session-42"}},
+            Checkpoint(),  # type: ignore[typeddict-item]
+            CheckpointMetadata(),
+            {},
+        )
+
+    with pytest.raises(psycopg.errors.UndefinedTable) as raised:
+        asyncio.run(_write())
+    # It reaches the front door as what it is: a fault, not a wait.
+    assert _classify(raised.value) == ("internal", False)
+
+
+@pytest.mark.parametrize("statement", ["aget_tuple", "aput_writes", "alist"])
+def test_every_statement_on_this_pool_translates_its_outage_not_only_the_write(
+    statement: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The translation covered `aput` alone, and the other three run on the same pool.
+
+    A `PoolTimeout` on `aget_tuple` is the **load** at the start of a turn, where saturation is at
+    least as likely as at write time, and it reached the front door untranslated: `("internal",
+    False)` — do not retry — about a wait. `aput_writes` and `alist` are the same pool and the same
+    silence.
+
+    Parametrised rather than written three times because the property is "every statement", and a
+    test naming two of three would have been green for the same reason the code was wrong.
+    """
+
+    async def _pool_is_saturated(*_args: Any, **_kwargs: Any) -> Any:
+        raise psycopg_pool.PoolTimeout("couldn't get a connection after 30.0 sec")
+
+    async def _saturated_stream(*_args: Any, **_kwargs: Any) -> Any:
+        raise psycopg_pool.PoolTimeout("couldn't get a connection after 30.0 sec")
+        yield  # pragma: no cover - unreachable; makes this an async generator
+
+    monkeypatch.setattr(
+        AsyncPostgresSaver,
+        statement,
+        _saturated_stream if statement == "alist" else _pool_is_saturated,
+    )
+    saver = SchemaStampedSaver.__new__(SchemaStampedSaver)
+    config = cast(RunnableConfig, {"configurable": {"thread_id": "session-42"}})
+
+    async def _run() -> None:
+        if statement == "aget_tuple":
+            await saver.aget_tuple(config)
+        elif statement == "aput_writes":
+            await saver.aput_writes(config, [("channel", "value")], "task-1")
+        else:
+            async for _stored in saver.alist(config):
+                pass
+
+    with pytest.raises(ConnectionError) as raised:
+        asyncio.run(_run())
+    assert _classify(raised.value) == ("storage_unavailable", True)
+    assert "session-42" in str(raised.value)

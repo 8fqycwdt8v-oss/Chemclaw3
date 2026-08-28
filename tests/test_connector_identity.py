@@ -21,6 +21,7 @@ made MAF's own `header_provider` look usable (see `chemclaw.connectors.identity`
 import asyncio
 import shlex
 from pathlib import Path
+from unittest import mock
 
 import httpx
 import pytest
@@ -35,6 +36,7 @@ from chemclaw.connectors.identity import (
     HEADER_SESSION,
     STAMPED_HEADERS,
     MissingConnectorCredential,
+    _strippable_headers,
     auth_for,
     turn_headers,
     turn_identity_hook,
@@ -49,6 +51,10 @@ from chemclaw.core.identity_context import (
 )
 from chemclaw.core.session_context import reset_current_session_id, set_current_session_id
 from chemclaw.core.tracing import trace_headers
+
+# A syntactically valid W3C `traceparent`, so the assertions are about a real header value
+# rather than a placeholder that a stricter client would reject.
+_TRACEPARENT = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
 
 
 def test_no_ambient_identity_sends_no_identity_headers() -> None:
@@ -96,35 +102,51 @@ def test_the_headers_carry_only_identity_never_call_content() -> None:
     assert set(turn_headers()) == {HEADER_DRY_RUN}
 
 
-def test_stamped_headers_lists_every_header_this_module_writes() -> None:
+def test_the_strip_list_covers_every_header_the_stamp_produces() -> None:
     """The strip list and the stamp list must not drift, or one header outlives the guard.
 
-    `turn_identity_hook` removes exactly `STAMPED_HEADERS` when a request leaves the connector's
-    origin, so a new `X-Chemclaw-*` header that is stamped and not listed would be the single one
-    that still walks a redirect. Standard headers are excluded deliberately: `traceparent` grants
-    nothing, and pruning it would only orphan a span.
+    `STAMPED_HEADERS` names the four `X-Chemclaw-*` headers this module mints, and it used to be
+    what the origin guard walked — while `turn_headers()` ends with
+    `headers.update(trace_headers())`. So with tracing on, six headers were stamped and four were
+    stripped: `traceparent`, `tracestate` and `baggage` were copied through to the redirect's
+    target, carrying this deployment's trace and span ids and whatever `baggage` was carrying.
+    The docstring this replaces argued the standard ones were excluded on purpose, because
+    "pruning it would only orphan a span" — which is true of the connector's own origin and
+    irrelevant on a foreign one, where there is no span of ours to attach to.
+
+    So the assertion is now a *covering* one rather than an equality: whatever the stamp produces,
+    the guard removes.
     """
     identity = set_current_identity("user-1", frozenset({"process-chemist"}))
     session = set_current_session_id("session-abc")
     correlation = set_current_correlation_id("turn-7f3a")
     try:
+        stamped = {name.lower() for name in turn_headers()}
         ours = set(turn_headers()) - set(trace_headers())
     finally:
         reset_current_correlation_id(correlation)
         reset_current_session_id(session)
         reset_current_identity(identity)
     assert ours == set(STAMPED_HEADERS)
+    assert stamped <= _strippable_headers()
+    # And the W3C names are covered whether or not a span is live at the moment of the strip, which
+    # is the case `turn_headers()` alone cannot answer for.
+    with mock.patch("chemclaw.connectors.identity.trace_header_names", lambda: frozenset({"b3"})):
+        assert "b3" in _strippable_headers()
 
 
 def test_the_hook_strips_the_identity_when_a_request_leaves_the_connector_origin() -> None:
     """Defence in depth for Sec-2: the hook is bound to one origin and prunes on any other.
 
-    The client refuses redirects (`registry.connector_http_client`), so this is the second layer —
-    what protects the header set if that flag is ever restored to the MCP SDK's own default. It has
-    to *strip* rather than decline to re-add: httpx builds a redirected request from the previous
-    request's headers and drops only `Authorization`, so a hook that merely skipped a foreign origin
-    would let the originals travel untouched. Asserted on a client that *does* follow redirects,
-    because that is the configuration the guard exists for.
+    The connector registry's client refuses redirects (`registry.connector_http_client`), so for a
+    bundle this is the second layer. It is the **only** layer for the calc backend, whose client is
+    `core.mcp_session.short_connect_client` with `follow_redirects=True` — the hottest and most
+    privileged connection in the system. It has to *strip* rather than decline to re-add: httpx
+    builds a redirected request from the previous request's headers and drops only `Authorization`,
+    so a hook that merely skipped a foreign origin would let the originals travel untouched.
+    Asserted on a client that *does* follow redirects, because that is the configuration the guard
+    exists for — and with a trace context stamped, because four of the six headers were being
+    removed and two were not.
     """
     seen: dict[str, httpx.Headers] = {}
 
@@ -145,17 +167,33 @@ def test_the_hook_strips_the_identity_when_a_request_leaves_the_connector_origin
 
     identity = set_current_identity("user-99", frozenset({"process-chemist"}))
     session = set_current_session_id("session-leak")
+    # A real trace context on the wire, not a live tracer: what matters here is that the guard
+    # removes the names the propagator owns, and stubbing the two producers keeps the test free of
+    # an SDK, an exporter and a global provider it would otherwise have to install.
+    stub = {"traceparent": _TRACEPARENT, "baggage": "tenant=acme"}
     try:
-        asyncio.run(_post())
+        with (
+            mock.patch("chemclaw.connectors.identity.trace_headers", lambda: stub),
+            mock.patch(
+                "chemclaw.connectors.identity.trace_header_names",
+                lambda: frozenset({"traceparent", "tracestate", "baggage"}),
+            ),
+        ):
+            asyncio.run(_post())
     finally:
         reset_current_session_id(session)
         reset_current_identity(identity)
 
     assert seen["connector"][HEADER_ACTOR] == "user-99"
     assert seen["connector"][HEADER_SESSION] == "session-leak"
+    assert seen["connector"]["traceparent"] == _TRACEPARENT
     # Nothing of ours survived the hop, including the flags that are not identity themselves but
-    # would still tell an eavesdropper which of our turns it is looking at.
+    # would still tell an eavesdropper which of our turns it is looking at — and including the
+    # trace context, which is an internal correlation identifier and, in `baggage`, an arbitrary
+    # key/value carrier.
     assert [header for header in STAMPED_HEADERS if header in seen["attacker"]] == []
+    assert "traceparent" not in seen["attacker"]
+    assert "baggage" not in seen["attacker"]
 
 
 def test_no_auth_needs_no_credential() -> None:

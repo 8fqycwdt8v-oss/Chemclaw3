@@ -171,17 +171,33 @@ spec:
 
     - name: chemclaw.availability
       rules:
+        {{- /* **The `clamp_min` here was a division-by-zero guard wearing a traffic floor's
+               clothes.** `rate(failed) / clamp_min(rate(started), 0.001)` on a window holding one
+               failed turn and one started turn is `1`, which is over any threshold anybody would
+               set — so a single error in an idle night fired a `critical` page, and the clamp made
+               it *worse* than an unguarded division by turning an empty window into a large finite
+               number instead of no sample. Measured with `promtool test rules` before and after.
+
+               The floor is the fix and the clamp is then redundant: with `sum(rate(started))`
+               required to exceed `turnsFloorPerSecond`, the denominator cannot be zero, and where
+               the series does not exist at all every arm is an empty vector anyway. */}}
         - alert: ChemclawTurnsFailing
           expr: >-
             sum(rate(chemclaw_turns_failed_total[10m]))
-            / clamp_min(sum(rate(chemclaw_turns_started_total[10m])), 0.001) > 0.1
+            / sum(rate(chemclaw_turns_started_total[10m])) > 0.1
+            and sum(rate(chemclaw_turns_started_total[10m]))
+            > {{ .Values.monitoring.alerts.turnsFloorPerSecond }}
           for: 10m
           labels:
             severity: critical
           annotations:
             runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawturnsfailing
             summary: More than 10% of turns are ending in an error
-            description: Every failure reaches a chemist as an opaque internal-error message.
+            description: >-
+              Every failure reaches a chemist as an opaque internal-error message. The rule is
+              gated on `monitoring.alerts.turnsFloorPerSecond` so that one error in an idle window
+              is not a 100% failure rate; a deployment quieter than that floor is one whose ratio
+              cannot mean anything yet.
 
         {{- /* The other direction from the shed alert below, and the one nothing could see. The
                admission cap is per-process, so the fleet's real demand on the shared LLM endpoint
@@ -413,9 +429,13 @@ spec:
               real traffic. The affected users see a 429, not an explanation.
 
     {{- /* The group nothing in this file used to have, and the one whose absence made every rule
-           above conditional on something no rule stated: **all sixteen alert on an application
-           counter, so a process that is gone emits silence** — and silence is what a healthy
-           quiet system also emits. A CrashLooping, evicted, unschedulable or simply un-scraped pod
+           above conditional on something no rule stated: **every one of them alerts on an
+           application counter, so a process that is gone emits silence** — and silence is what a
+           healthy quiet system also emits. (The sentence here used to say "all sixteen", and by the
+           time it was read the file held thirty-seven rules, of which the two below are the only
+           ones that read anything but a first-party series. `tests/test_deploy_chart.py` derives
+           that split from the rendered rules rather than restating it here, for the reason
+           `D-2026-08-01-the-count-lives-in-the-test-not-in-the-prose` gives.) A CrashLooping, evicted, unschedulable or simply un-scraped pod
            produced no alert of any kind. `up` is the only series that inverts that: it is
            synthesised by Prometheus per target, so it exists precisely when the target does not
            answer.
@@ -434,11 +454,26 @@ spec:
                monitor kinds (the Service name for one, `<namespace>/<name>` for the other) and is
                not something this file should assert without a cluster to check it against.
                `targetJobPattern` is the narrowing for a shared namespace. */}}
+        {{- /* **`for: 5m` fired on an ordinary rollout, and the reason is that `up` says nothing
+               about readiness.** Both discovery mechanisms this chart uses make a pod a target from
+               the moment it exists — a PodMonitor's `role: pod` has no readiness filter, and an
+               Endpoints object carries `notReadyAddresses` — so `up` is 0 for the whole cold start,
+               which is the 300 s every `probes.*.startup` block here deliberately allows for
+               importing RDKit, the agent stack and the connector registry. Five minutes sat inside
+               that, so a slow or throttled node during a deploy paged `critical` for a process that
+               was starting exactly as designed.
+
+               Derived from the largest startup budget in `probes:` rather than stated, so raising a
+               budget cannot leave the alert behind. */}}
+        {{- $coldStart := 0 }}
+        {{- range $component, $probes := .Values.probes }}
+        {{- $coldStart = max $coldStart (mul (int $probes.startup.periodSeconds) (int $probes.startup.failureThreshold)) }}
+        {{- end }}
         - alert: ChemclawTargetDown
           expr: >-
             up{namespace="{{ .Release.Namespace }}",
             job=~"{{ .Values.monitoring.alerts.targetJobPattern }}"} == 0
-          for: 5m
+          for: {{ add $coldStart (int .Values.monitoring.alerts.targetDownMarginSeconds) }}s
           labels:
             severity: critical
           annotations:
@@ -565,17 +600,25 @@ spec:
     - name: chemclaw.durable
       rules:
         {{- /* A ratio, not a count: one connector's jobs are seconds apart and another's are hours
-               apart, so a count would mean six different things across the six bundles. Denominated
+               apart, so a count would mean a different thing in each bundle the chart enables — the
+               set `values.yaml`'s `connectors:` block declares and `tests/test_deploy_chart.py`
+               holds against the manifests on disk, which is seven and was called six here for as
+               long as it was seven. Denominated
                on *started* rather than on finished, because a job that never finishes at all is the
                failure this is most likely to be. The two counters are incremented in different
                processes — the front door launches, the worker finishes — which is fine for a
                fleet-wide `sum()` and is the reason this is not `by (connector)`: a partial scrape
                of one side would otherwise fabricate a per-connector ratio above 1. */}}
+        {{- /* Same floor, same reason as `ChemclawTurnsFailing`, and it bites harder here: durable
+               jobs are rare by nature, so one failed CREST search overnight *is* the whole window.
+               `jobsFloorPerSecond` is stated over the 30-minute window this rule reads. */}}
         - alert: ChemclawDurableJobsFailing
           expr: >-
             sum(rate(chemclaw_jobs_finished_total{outcome="failed"}[30m]))
-            / clamp_min(sum(rate(chemclaw_jobs_started_total[30m])), 0.001)
+            / sum(rate(chemclaw_jobs_started_total[30m]))
             > {{ .Values.monitoring.alerts.jobFailureRatio }}
+            and sum(rate(chemclaw_jobs_started_total[30m]))
+            > {{ .Values.monitoring.alerts.jobsFloorPerSecond }}
           for: 30m
           labels:
             severity: critical
@@ -646,19 +689,32 @@ spec:
                is not failed by a dead sink, which leaves the counter as the only signal. Kept as
                two rules and not one sum, because the remedies are different systems — a delivery
                failure is the sink or the network, a projection failure is this build's own
-               `publish/` mapping against a schema that has moved. */}}
+               `publish/` mapping against a schema that has moved.
+
+               **The severities used to run backwards, and this triple is where it showed.** A
+               delivery attempt that failed is *retried* — `publish/outbox.py` spends an attempt and
+               leaves the row `pending` — while `ChemclawResultsDeadLettered` below is the same
+               publication after its retries are gone, which is the record permanently not being
+               published. The retryable one carried `critical` and the terminal one carried
+               `warning`, so the alert that meant "we are still trying" outranked the alert that
+               meant "we have stopped". They are ordered by outcome now: an attempt that will be
+               retried is a `warning`; the two terminal states — retries exhausted, and a payload
+               this build cannot project at all — are `critical`, which is the severity
+               `ChemclawKnowledgeNotesLost` already carries for exactly the same loss. */}}
         - alert: ChemclawResultPublishFailing
           expr: increase(chemclaw_result_publish_failures_total[15m]) > 0
           for: 0m
           labels:
-            severity: critical
+            severity: warning
           annotations:
             runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawresultpublishfailing
-            summary: Computed results are not reaching the result store
+            summary: Result deliveries are failing and being retried
             description: >-
               A result could not be delivered to a configured sink. The calculation stands in the
-              D-011 cache, but the scientific record this deployment publishes to does not have it.
-              `chemclaw_sink_delivery_seconds` and the sink's own logs name which one.
+              D-011 cache and the publication stays `pending`, so this is the retryable half:
+              `ChemclawResultsDeadLettered` is what fires when the retries run out and the record is
+              lost for good. `chemclaw_sink_delivery_seconds` and the sink's own logs name which
+              sink.
         - alert: ChemclawResultProjectionFailing
           expr: increase(chemclaw_result_projection_failures_total[15m]) > 0
           for: 0m
@@ -679,13 +735,15 @@ spec:
           expr: increase(chemclaw_results_dead_lettered_total[30m]) > 0
           for: 0m
           labels:
-            severity: warning
+            severity: critical
           annotations:
             runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawresultsdeadlettered
             summary: Result publications have been retired to `failed`
             description: >-
               A publication exhausted its retries and was retired. It will not be attempted again by
-              anything; re-queueing it is an operator action.
+              anything; re-queueing it is an operator action. This is the terminal state
+              `ChemclawResultPublishFailing` warns about on the way to — the scientific record this
+              deployment publishes to is now permanently missing a computed result.
 
         {{- /* The stuck-outbox condition, read off the *age* of the oldest undelivered row.
 
@@ -712,6 +770,43 @@ spec:
               `chemclaw_outbox_pending{sink}` beside it for the depth and
               `chemclaw_outbox_dead_lettered{sink}` for what has already been given up on.
 
+        {{- /* The half the rule above cannot see, and the reason is structural rather than a
+               threshold being wrong: all three outbox gauge *families* are written together by
+               `publish/outbox.py::refresh_backlog` and are **empty on a fresh process** until that
+               pass has run. So "the drain is not running at all" arrives as series *absence*, and a
+               rule over `max by (sink) (...)` has nothing to evaluate — it is green, which reads
+               exactly like an empty queue. Seeding the families at startup is worse and was
+               rejected where they are declared: it would publish `pending=0` for a queue that is
+               actually deep.
+
+               One rule for all three families, not three: they have one producer, so a second and a
+               third would be three pages for one fault — the same de-duplication argument as the
+               `evidence_source` exclusion below. It reads `chemclaw_outbox_pending` because that is
+               the family whose *presence* means the pass completed.
+
+               Both durations are `silenceWindowPasses`/`silenceHoldPasses` multiplied by the
+               producer's own cadence, so a deployment that changes the schedule moves the alert
+               with it. The hold is what keeps a *fresh install* from paging: `absent_over_time` is
+               true from t=0 until the first pass, and a `for: 0m` absence rule would fire on every
+               install. */}}
+        - alert: ChemclawOutboxBacklogUnreported
+          expr: >-
+            absent_over_time(chemclaw_outbox_pending[{{ mul (int .Values.config.CHEMCLAW_RESULT_PUBLISH_SCHEDULE_MINUTES) (int .Values.monitoring.alerts.silenceWindowPasses) }}m])
+          for: {{ mul (int .Values.config.CHEMCLAW_RESULT_PUBLISH_SCHEDULE_MINUTES) (int .Values.monitoring.alerts.silenceHoldPasses) }}m
+          labels:
+            severity: warning
+          annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawoutboxbacklogunreported
+            summary: No process has reported a result-outbox backlog for several drain intervals
+            description: >-
+              `chemclaw_outbox_pending`, `chemclaw_outbox_oldest_pending_seconds` and
+              `chemclaw_outbox_dead_lettered` are refreshed together by the drain pass and are
+              absent from a worker's `/metrics` until its first pass completes. Several missed
+              passes of `CHEMCLAW_RESULT_PUBLISH_SCHEDULE_MINUTES` means the drain is not running —
+              the same fault `ChemclawResultOutboxStuck` exists for, arriving as silence, which that
+              rule cannot fire on. Check the Temporal Schedule first; a pod that is gone entirely
+              raises `ChemclawTargetDown` beside this.
+
     {{- /* The counters that exist *because* the system degrades quietly, and which nothing watched.
            `metrics_bridge` and `degraded()` were built so that roughly forty deliberate exception
            swallows become visible — and then no rule read the series they produce, which left the
@@ -721,9 +816,21 @@ spec:
         {{- /* The umbrella. `subsystem` is a string literal at a `degraded()` call site and
                `tests/test_degraded.py` enumerates the whole domain, so one rule names the failing
                subsystem without this file having to list them — and a subsystem added tomorrow is
-               covered on the day it is added. */}}
+               covered on the day it is added.
+
+               **`evidence_source` is excluded because it was a duplicate, not because it is
+               uninteresting.** `retrieval/fanout.py`'s failure arm calls `degraded()` *and*
+               increments `chemclaw_evidence_source_failures_total` on the same exception, so one
+               failed retrieval leg raised two alerts of the same severity over the same window —
+               and the umbrella's was the less useful of the two, naming the subsystem where
+               `ChemclawEvidenceSourceFailing` names the leg. It is the only `degraded()` site whose
+               counter has a rule of its own, and `tests/test_deploy_chart.py` derives that set from
+               the source rather than trusting this comment: a second such site fails there until it
+               is either excluded here or given its own rule. */}}
         - alert: ChemclawSubsystemDegraded
-          expr: sum by (subsystem) (increase(chemclaw_degraded_total[15m])) > 0
+          expr: >-
+            sum by (subsystem)
+            (increase(chemclaw_degraded_total{subsystem!="evidence_source"}[15m])) > 0
           for: 0m
           labels:
             severity: warning
@@ -770,6 +877,27 @@ spec:
               This source is further behind than the configured budget, so the corpus chemists are
               querying is stale by at least that much. `chemclaw_ingest_records_total{source}` says
               whether anything is arriving at all.
+
+        {{- /* The same shape one tier over, and the same reason it needs its own rule: the lag
+               family is populated by `ingest/eln/cursor.py`'s load/store and is empty until a sync
+               runs, so "no sync ran at all" is an absence the rule above cannot evaluate. Derived
+               from `CHEMCLAW_ELN_SYNC_SCHEDULE_MINUTES` on the same two multipliers as the outbox
+               rule, so the two say the same thing in each producer's own units. */}}
+        - alert: ChemclawIngestLagUnreported
+          expr: >-
+            absent_over_time(chemclaw_ingest_cursor_lag_seconds[{{ mul (int .Values.config.CHEMCLAW_ELN_SYNC_SCHEDULE_MINUTES) (int .Values.monitoring.alerts.silenceWindowPasses) }}m])
+          for: {{ mul (int .Values.config.CHEMCLAW_ELN_SYNC_SCHEDULE_MINUTES) (int .Values.monitoring.alerts.silenceHoldPasses) }}m
+          labels:
+            severity: warning
+          annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawingestlagunreported
+            summary: No ingest cursor lag has been reported for several sync intervals
+            description: >-
+              The lag gauge family is populated by `load_cursor`/`store_cursor` and is empty until a
+              sync runs. Several missed passes of `CHEMCLAW_ELN_SYNC_SCHEDULE_MINUTES` means no sync
+              ran, which `ChemclawIngestCursorStalled` cannot see because it needs the series to
+              evaluate. `chemclaw_ingest_records_total{source}` is the other reading; a source that
+              was never configured emits neither and is not this alert.
 
         {{- /* The two metrics about the metrics, which are the only warning that a number on a
                dashboard has quietly stopped being true. */}}

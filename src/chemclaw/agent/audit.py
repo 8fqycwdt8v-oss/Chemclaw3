@@ -41,8 +41,8 @@ raising, so all five landed in the `except Exception` clause as `outcome='error'
 `KeyError` in a parser. The log line was no better: it interpolated the exception *instance*, so
 even the class was lost and the only thing separating "the system declined, on purpose" from
 "something broke" was free-text prose in an unindexed column. The audit **row** kept the class,
-because `_truncate` reprs a non-string — so the database was strictly more diagnostic than the log,
-inverting this module's own rule that the log is the floor and the sink is the durable record.
+because `bounded_repr` reprs a non-string — so the database was strictly more diagnostic than the
+log, inverting this module's own rule that the log is the floor and the sink is the durable record.
 `refused` is the fourth outcome, `refusal_reason` is the classification, and both the class name and
 the reason now reach the log line. The reason is counted from *here* rather than from the five
 gates: four of them moved no metric at all, and a gate that has to remember to count itself is a
@@ -66,7 +66,7 @@ from langchain.agents.middleware import AgentMiddleware, wrap_tool_call
 from langchain_core.messages import ToolMessage
 from pydantic import BaseModel, Field
 
-from chemclaw.agent.plan_link import plan_link_from_todos
+from chemclaw.agent.plan_link import plan_link_for_call
 from chemclaw.connectors.transport import SERVED_BY
 from chemclaw.core.config import settings
 from chemclaw.core.identity_context import (
@@ -134,6 +134,32 @@ def refusal_reason(exc: BaseException) -> RefusalReason | None:
     return None
 
 
+# What an unregistered tool name becomes on a metric label. One bucket, not one series per string.
+UNKNOWN_TOOL = "unknown"
+
+
+def metric_tool_name(request: Any, name: str) -> str:
+    """The tool name safe to use as a metric label — the registered one, or a fixed bucket.
+
+    **`name` is the model's string, and a metric label must not be.** `ToolNode` invokes this chain
+    for a name the graph does not hold — `_served_by` records that it passes `tool=None` there
+    deliberately, so an interceptor can short-circuit an unregistered call — so the raw name
+    reaching `/metrics` mints one time series per string a model invents. Measured on a compiled
+    graph: a single hallucinated call created `chemclaw_tool_calls_total{tool="totally_made_up_…"}`
+    *and* a full fourteen-bucket histogram, and driven directly the label accepted 230 characters of
+    arbitrary text. Model output is attacker-influenceable here — that is the whole reason this tree
+    carries `frame_untrusted` — so an injected document could grow the registry until the pod died.
+
+    The registered tool's **own** name is used rather than the caller's, so the label cannot differ
+    from it by case, whitespace or an invisible character while still resolving.
+
+    The audit *row* keeps the model's raw string (truncated), because what the model actually asked
+    for is the forensic fact; it is only the unbounded *label* that is refused.
+    """
+    registered = getattr(getattr(request, "tool", None), "name", None)
+    return registered if isinstance(registered, str) and registered else UNKNOWN_TOOL
+
+
 def _observe_tool_latency(name: str, elapsed_ms: float) -> None:
     """Record one tool call's duration in the process histogram, under the tool's own name.
 
@@ -145,8 +171,11 @@ def _observe_tool_latency(name: str, elapsed_ms: float) -> None:
     **Labelled by tool, which it was not.** One distribution pooled a minutes-long xTB call through
     the calc connector with a sub-millisecond `read_attachment`, so per-tool p95 — the single most
     useful number for "why is this turn slow", and the question this histogram's own docstring says
-    it exists to answer — could not be read off it. The label space is the registered tool surface,
-    which is bounded by configuration rather than by anything a caller sends.
+    it exists to answer — could not be read off it.
+
+    `name` here is already clamped by `metric_tool_name`; this docstring used to claim the label
+    space "is bounded by configuration rather than by anything a caller sends", which was the
+    assumption rather than the code — see that function for what it actually was.
     """
     record_metric(
         lambda metrics: metrics.observe(
@@ -222,15 +251,16 @@ class AuditEvent(BaseModel):
     # honest about being empty.
     agent: str = ""
     # The plan step this call served — the `content` of the first `in_progress` todo, or empty when
-    # the call was not made from a plan step (`agent/plan_link.plan_link_from_todos`, the same rule
+    # the call was not made from a plan step (`agent/plan_link.plan_link_for_call`, the same rule
     # and the same function a durable job's `job_records.plan_step` is stamped from).
     #
-    # **Read off the request's todo list rather than off the ambient link, because the ambient link
-    # is not bound here.** `stamp_plan_link` sits innermost in the governed chain and resets in a
+    # **Read off the request rather than off the ambient link, because the ambient link is not
+    # bound here.** `stamp_plan_link` sits innermost in the governed chain and resets in a
     # `finally`, while this middleware is outermost — measured, `get_current_plan_link()` reads
-    # `("", "")` at the moment the row is written. Reading the same `request.state["todos"]` the
-    # plan gate enforces against is not a second answer to "what was the plan": it is the same
-    # function over the same list, one middleware further out.
+    # `("", "")` at the moment the row is written. Calling the same function the stamp calls, over
+    # the same request, is not a second answer to "what was the plan": it is the same answer, one
+    # middleware further out. Calling it over `request.state["todos"]` instead — which is what this
+    # did — *was* a second answer, and it was off by one step (see `_plan_step`).
     #
     # It is also the *wider* answer, deliberately. A refused call never reaches `stamp_plan_link`
     # at all (the gate raises above it), so the contextvar could never have named the step a
@@ -327,7 +357,7 @@ def default_audit_sink() -> AuditSink:
     return PostgresAuditSink()
 
 
-def _truncate(value: object) -> str:
+def bounded_repr(value: object) -> str:
     """Render a value as a single-line string bounded by the configured budget.
 
     A tool argument or result can be a large object (a full optimization problem, an
@@ -340,6 +370,14 @@ def _truncate(value: object) -> str:
     through `reprlib` with its per-string budget set to this one; the container counts are raised
     far above `reprlib`'s defaults so an ordinary argument dict still renders whole, because the
     audit row's `arguments` is what a reviewer reads as *what was asked*.
+
+    **Public, because the budget is the tree's one answer for a model-authored string.** Three
+    things now reach a record straight out of the model's own output — a tool call's arguments, an
+    unparseable call's argument document (`agent/model_calls.py`) and a skill path the model asked
+    to read (`agent/skill_backend.py`) — and each is unbounded at the source. One budget, applied
+    by one function, is what keeps a megabyte of model prose out of a row, a log line and a
+    correction alike; a second truncation written beside it would be a second answer to the same
+    question, differing by whichever limit its author happened to pick.
     """
     limit = settings.agent_audit_max_arg_chars
     if isinstance(value, str):
@@ -406,15 +444,24 @@ def _plan_step(request: Any) -> str:
     `_recording` for the same reason: what crosses into the recording is a plain string, never a
     library object, so the trail's contents cannot come to depend on which engine ran.
 
-    `plan_link_from_todos` is the *same* function `agent/plan_link.py` stamps a durable job with and
-    the same list the plan gate enforces against, so a tool call and the job it launched cannot
-    disagree about which step they served. Only the step is taken: the plan *hash* is a job's join
-    to an approval decision, and an audit row already carries the session the plan belongs to.
+    `plan_link_for_call` is the *same* function `agent/plan_link.py` stamps a durable job with, so
+    a tool call and the job it launched cannot disagree about which step they served. Only the step
+    is taken: the plan *hash* is a job's join to an approval decision, and an audit row already
+    carries the session the plan belongs to.
+
+    **It has to be that function and not `request.state["todos"]`, which is what this read was.**
+    `request.state` is the snapshot `ToolNode` took *before* the batch, and the canonical harness
+    batch — "tick step N completed, mark N+1 in_progress, call the tool" — carries the status flip
+    in the same assistant message as the call. Measured on that batch: this row was stamped
+    `'run the conformer search'` (the step that had just **finished**) while `job_records.plan_step`
+    for the job the same call launched said `'compute the pKa'`. So the two records the sentence
+    above promises cannot disagree disagreed on every ordinary step of every plan, and
+    `chemclaw explain` rendered the previous step for each of them.
 
     A request with no todos — a profile without the harness, a subagent, a template step — gives the
     empty string, which reads as "this call was not made from a plan step".
     """
-    return plan_link_from_todos((request.state or {}).get("todos") or [])[0]
+    return plan_link_for_call(request)[0]
 
 
 def make_audit_middleware(
@@ -450,6 +497,7 @@ def make_audit_middleware(
             revision=revision,
             tool_revision=_served_by(request),
             plan_step=_plan_step(request),
+            metric_name=metric_tool_name(request, request.tool_call["name"]),
         ) as recorded:
             result = await handler(request)
             recorded.result = getattr(result, "content", result)
@@ -458,7 +506,7 @@ def make_audit_middleware(
             # line the name/arguments split above draws, and it is what keeps the recording itself
             # framework-free.
             failed = returned_failure(result)
-            recorded.returned_error = None if failed is None else _truncate(failed.content)
+            recorded.returned_error = None if failed is None else bounded_repr(failed.content)
             return result
 
     return audit_tool_calls
@@ -492,6 +540,7 @@ async def _recording(
     revision: str,
     tool_revision: str = "",
     plan_step: str = "",
+    metric_name: str = "",
 ) -> AsyncIterator[_Recorded]:
     """The trail itself, with no framework in it — both engines' middlewares are wrappers.
 
@@ -505,7 +554,7 @@ async def _recording(
     What each engine supplies is only the four things it alone knows: the tool's name, its
     arguments, the plan step the request was carrying, and — inside the block — its result.
     """
-    args = _truncate(arguments)
+    args = bounded_repr(arguments)
     # The real actor is the turn's authenticated Entra user (F4-T5); fall back to the static
     # `actor` bound at build time when there is none (tests, the non-service caller).
     event_actor = get_current_actor() or actor
@@ -562,8 +611,13 @@ async def _recording(
         span.set_attribute("outcome", outcome)
         if outcome in ("error", "cancelled") and detail:
             span.failed(detail)
-        _observe_tool_latency(name, elapsed_ms)
-        _count_outcome(name, outcome, reason)
+        # The clamped name for the two metrics, the model's own for the span and the row: a label
+        # is a cardinality decision and an attribute is not. Passed in rather than derived here,
+        # because deriving it needs `request` and this function's whole point is that no library
+        # object crosses into it — `tool_revision` is passed for the same reason.
+        labelled = metric_name or name
+        _observe_tool_latency(labelled, elapsed_ms)
+        _count_outcome(labelled, outcome, reason)
         return elapsed_ms
 
     recorded = _Recorded()
@@ -605,11 +659,11 @@ async def _recording(
             # event: `refusal_reason` is what separates them, off the exception's *type*.
             reason = refusal_reason(exc)
             outcome = REFUSED if reason is not None else "error"
-            detail = _truncate(exc)
+            detail = bounded_repr(exc)
             elapsed_ms = finished(span, outcome, reason, detail)
             # The class name beside the message, which is the whole fix on the log side: `%s`
             # on the exception instance rendered only its prose, so no log query could tell a
-            # `DryRunRefusal` from a `KeyError`. The row always kept the class (`_truncate`
+            # `DryRunRefusal` from a `KeyError`. The row always kept the class (`bounded_repr`
             # reprs a non-string), which is how the sink came to be more diagnostic than the
             # floor it is supposed to sit on.
             logger.warning(
@@ -643,7 +697,7 @@ async def _recording(
             )
             await _emit(sink, event_for("error", detail, elapsed_ms))
             return
-        detail = _truncate(recorded.result) if recorded.result is not None else ""
+        detail = bounded_repr(recorded.result) if recorded.result is not None else ""
         elapsed_ms = finished(span, "ok", None, "")
         logger.info(
             "tool %s ok in %.0f ms [cid=%s actor=%s] (args=%s)",

@@ -94,6 +94,8 @@ because the stamp lives under its own metadata key
 
 import asyncio
 import logging
+from collections.abc import AsyncIterator, Sequence
+from contextlib import asynccontextmanager
 from typing import Any, cast, get_origin, get_type_hints
 
 import psycopg
@@ -247,16 +249,83 @@ class CheckpointSchemaMismatch(RuntimeError):
     """
 
 
+@asynccontextmanager
+async def _translating(operation: str, config: RunnableConfig | None) -> AsyncIterator[None]:
+    """Run one checkpointer statement, turning a pool or connection outage into `ConnectionError`.
+
+    **This is the same translation `core/db.connection()` makes, and it is here because this pool
+    is the one that does not go through it.** `api/runner._classify` decides what a chemist is told
+    from the exception's *type*, and it tests `ConnectionError` and `TimeoutError` — which
+    `psycopg_pool.PoolTimeout` is neither (measured: its MRO is `PoolTimeout → OperationalError →
+    DatabaseError → Error → Exception`, and `PoolClosed`'s is the same). `core/db.py` translates for
+    exactly that reason at both its connect paths; the checkpointer's autocommit pool bypasses them
+    by design (the module docstring's three reasons), so the one Postgres pool that is not
+    `core/db`'s was the one whose outage told the chemist "internal error, do not retry" — about
+    the most retryable failure this system has.
+
+    **`psycopg.OperationalError` and not `psycopg.Error`, which is what this caught.** `core/db.py`
+    catches `OperationalError` at connect and `(PoolTimeout, PoolClosed)` at checkout, and says why
+    a broader test is wrong: it collapses failures that are not the same failure. `psycopg.Error`
+    is two levels wider and takes in `ProgrammingError`, `DataError` and every `IntegrityError` —
+    so a pod started against a database where LangGraph's checkpoint tables were never created
+    raised `UndefinedTable` (measured: a `ProgrammingError`, *not* an `OperationalError`), which
+    became `ConnectionError`, which the front door classified `("storage_unavailable",
+    retryable=True)`, which told a chemist to retry forever a failure no retry can fix. A schema
+    fault has to reach the front door as what it is.
+
+    **Every statement, not only the write.** This covered `aput` alone, and the other three run on
+    the same bypassing pool: a `PoolTimeout` on `aget_tuple` — the *load* at the start of a turn,
+    where saturation is at least as likely as at write time — reached the front door untranslated
+    and booked `("internal", False)`. One wrapper, four call sites, so the answer cannot depend on
+    which statement met the outage.
+
+    Args:
+        operation: what was being done, for the message the front door logs beside the failure.
+        config: the `configurable` naming the thread, for the same message. Absent on some history
+            reads, which stamp the empty thread id rather than failing a second time.
+
+    Raises:
+        ConnectionError: the statement could not run. Deliberately the same type `core/db.py`
+            raises, so a caller classifying a database outage cannot get a different answer
+            depending on which pool the statement went through.
+    """
+    try:
+        yield
+    except psycopg.OperationalError as exc:
+        thread_id = ((config or {}).get("configurable") or {}).get("thread_id", "")
+        # Counted before it is re-raised, because nothing counted a checkpointer failure at all. On
+        # the write this is silent loss of the turn's state: the graph carries on in memory, and
+        # whatever the turn had accumulated cannot be resumed. `degraded` is the shape every other
+        # swallow in this repository uses — except that this one does not swallow. The statement
+        # did not run, so the caller must still fail; what `degraded` buys is that
+        # `chemclaw_degraded_total{subsystem="checkpointer"}` moves before it does.
+        degraded(
+            logger,
+            "checkpointer",
+            "could not %s turn state for session %s: %s",
+            operation,
+            thread_id,
+            type(exc).__name__,
+        )
+        raise ConnectionError(
+            f"checkpointer {operation} failed for session {thread_id!r}: {exc}"
+        ) from exc
+
+
 class SchemaStampedSaver(AsyncPostgresSaver):
     """`AsyncPostgresSaver` that records the channels it writes and refuses a thread missing one.
 
-    Two overrides, on the write and the resume, because those are the only two points where the
-    state schema is knowable and where it matters. `alist` is deliberately not guarded: history
-    reads render checkpoints, they do not restore them into a running graph, and a state change is
-    not a reason to stop showing what a session did.
+    Two *schema* overrides, on the write and the resume, because those are the only two points
+    where the state schema is knowable and where it matters. `alist` carries no schema guard:
+    history reads render checkpoints, they do not restore them into a running graph, and a state
+    change is not a reason to stop showing what a session did.
 
-    The module docstring holds what is and is not caught, and the argument for refusing rather than
-    resuming empty.
+    **The outage translation is on all four**, which is a different question with a different
+    answer: a saturated pool is a saturated pool whichever statement met it, and `_translating`
+    says what reading only `aput` cost.
+
+    The module docstring holds what is and is not caught by the schema stamp, and the argument for
+    refusing rather than resuming empty.
     """
 
     async def aput(
@@ -268,45 +337,34 @@ class SchemaStampedSaver(AsyncPostgresSaver):
     ) -> RunnableConfig:
         """Write the checkpoint with this build's first-party channel names in its metadata.
 
-        **The `psycopg.Error` translation is the same one `core/db.connection()` makes, and it is
-        here because this pool is the one that does not go through it.** `api/runner._classify`
-        decides what a chemist is told from the exception's *type*, and it tests `ConnectionError`
-        and `TimeoutError` — which `psycopg_pool.PoolTimeout` is neither (measured: its MRO is
-        `PoolTimeout → OperationalError → DatabaseError → Error → Exception`). `core/db.py`
-        translates for exactly that reason at both its connect paths; the checkpointer's autocommit
-        pool bypasses them by design (the module docstring's three reasons), so the one Postgres
-        pool that is not `core/db`'s was the one whose outage told the chemist "internal error, do
-        not retry" — about the most retryable failure this system has.
-
-        **Counted before it is re-raised, because nothing counted a checkpoint write failure at
-        all.** Mid-turn this is silent loss of the turn's state: the graph carries on in memory, and
-        whatever the turn had accumulated cannot be resumed. `degraded` is the shape every other
-        swallow in this repository uses — except that this one does not swallow. The write did not
-        happen, so the caller must still fail; what `degraded` buys is that
-        `chemclaw_degraded_total{subsystem="checkpointer"}` moves before it does.
+        The outage translation is `_translating`'s, shared with the other three statements on this
+        pool; that function holds the measurements and why it is `OperationalError` rather than
+        `psycopg.Error`.
 
         Raises:
-            ConnectionError: The checkpoint could not be written. Deliberately the same type
-                `core/db.py` raises, so a caller classifying a database outage cannot get a
-                different answer depending on which pool the statement went through.
+            ConnectionError: The checkpoint could not be written.
         """
         stamped = cast(
             CheckpointMetadata, {**metadata, STATE_CHANNELS_KEY: list(FIRST_PARTY_CHANNELS)}
         )
-        try:
+        async with _translating("write", config):
             return await super().aput(config, checkpoint, stamped, new_versions)
-        except psycopg.Error as exc:
-            thread_id = (config.get("configurable") or {}).get("thread_id", "")
-            degraded(
-                logger,
-                "checkpointer",
-                "could not write turn state for session %s: %s",
-                thread_id,
-                type(exc).__name__,
-            )
-            raise ConnectionError(
-                f"checkpointer write failed for session {thread_id!r}: {exc}"
-            ) from exc
+
+    async def aput_writes(
+        self,
+        config: RunnableConfig,
+        writes: Sequence[tuple[str, Any]],
+        task_id: str,
+        task_path: str = "",
+    ) -> None:
+        """Write one task's pending channel updates, translating an outage like every other write.
+
+        No schema stamp: this writes into `checkpoint_writes`, which carries channel values for a
+        task rather than a checkpoint's metadata, so there is nothing here to stamp and nothing to
+        refuse on resume. What it shares with `aput` is the pool, and therefore the outage.
+        """
+        async with _translating("write", config):
+            await super().aput_writes(config, writes, task_id, task_path)
 
     async def aget_tuple(self, config: RunnableConfig) -> CheckpointTuple | None:
         """Load the checkpoint, refusing one that predates a channel this build declares.
@@ -325,8 +383,12 @@ class SchemaStampedSaver(AsyncPostgresSaver):
         Raises:
             CheckpointSchemaMismatch: The stored checkpoint never held a channel this build
                 declares, so restoring it can fail inside a node instead of here.
+            ConnectionError: The checkpoint could not be read — see `_translating`. This is the
+                *load* at the start of a turn, and it was the untranslated one: a saturated pool
+                here told the chemist "internal error, do not retry" about a wait.
         """
-        stored = await super().aget_tuple(config)
+        async with _translating("read", config):
+            stored = await super().aget_tuple(config)
         if stored is None:
             return None
         stamp = (stored.metadata or {}).get(STATE_CHANNELS_KEY)
@@ -350,6 +412,40 @@ class SchemaStampedSaver(AsyncPostgresSaver):
             "indexes one of them. Start a new session: this one's transcript and audit trail are "
             "unaffected and its checkpoints stay until retention prunes them."
         )
+
+    def alist(
+        self,
+        config: RunnableConfig | None,
+        *,
+        # `filter` shadows the builtin; it is upstream's parameter name and a caller
+        # passes it by keyword, so renaming it here would break the override.
+        filter: dict[str, Any] | None = None,
+        before: RunnableConfig | None = None,
+        limit: int | None = None,
+    ) -> AsyncIterator[CheckpointTuple]:
+        """Page a thread's history, translating an outage the way every other statement here does.
+
+        Overridden only for that. There is no schema guard on a history read — the class docstring
+        says why — but a saturated pool is the same wait whether a turn is starting or the CLI is
+        rendering what a session did, and this is the fourth statement on the pool `core/db.py`
+        does not translate for.
+
+        Written as a plain method returning the guarded generator rather than as an `async def`
+        generator, because the two differ in *when* the body starts: an async generator's body
+        does not run until the first `__anext__`, so a caller that builds the iterator and awaits
+        something else first would see the failure at a place unrelated to the statement. Neither
+        arrangement changes what is raised; this one keeps `_translating`'s message beside the
+        iteration it describes.
+        """
+
+        async def _guarded() -> AsyncIterator[CheckpointTuple]:
+            async with _translating("read", config):
+                async for stored in super(SchemaStampedSaver, self).alist(
+                    config, filter=filter, before=before, limit=limit
+                ):
+                    yield stored
+
+        return _guarded()
 
 
 async def process_checkpointer() -> Any:

@@ -11,6 +11,7 @@ import logging
 import re
 import time
 import uuid
+from typing import Any
 
 from fastapi import FastAPI
 from fastapi.encoders import jsonable_encoder
@@ -266,11 +267,15 @@ class _RequestObservability:
     just is not in this log line. A CORS preflight is outside it for the same reason.
 
     **The label set is inside the registry's cap, measured rather than assumed.** `core/metrics`
-    refuses a counter past 64 label series (D-152). Across 158 front-door tests this counter grew
-    **35** series and no route produced more than three status classes, so three per route is the
-    worst case: 20 templates plus `<unmatched>` is 63 against 64 — safe, and one route away from
-    not being. `tests/test_api_observability.py` asserts that arithmetic, so the route that would
-    make it start dropping series fails a test instead of silently under-reporting in production.
+    refuses a counter past `_MAX_SERIES_PER_COUNTER` label series (D-152). Across 158 front-door
+    tests this counter grew **35** series and no route produced more than three status classes, so
+    three per route is the worst case: 20 templates plus `<unmatched>` is 63. The cap was 64 when
+    that arithmetic was written and the margin really was one route; it was raised to 128 for
+    exactly this reason, and the number is deliberately not repeated here — the constant is one
+    import away and a copy of it in prose is what goes stale.
+    `tests/test_api_observability.py` asserts the arithmetic against the constant, so the route
+    that would make it start dropping series fails a test instead of silently under-reporting in
+    production.
     """
 
     def __init__(self, app: ASGIApp) -> None:
@@ -295,6 +300,13 @@ class _RequestObservability:
             nonlocal status, response_bytes, answered
             if message["type"] == "http.response.start":
                 status = int(message["status"])
+                # **Before `answered`, and before `MutableHeaders`.** `headers` is optional in the
+                # ASGI spec, and `MutableHeaders(scope=message)` raises `KeyError` without it — a
+                # raise that reached the `except` below with `answered` already true, took the
+                # `if answered: raise` arm, and so sent *nothing at all*: a valid response became a
+                # connection that hangs until the client gives up. Defaulting it first makes the
+                # omission the no-op it is meant to be.
+                message.setdefault("headers", [])
                 answered = True
                 # `setdefault`, so a route that already carries an id of its own keeps it. Every
                 # response gets one: 22 of the 23 routes used to give a client nothing to quote in
@@ -313,7 +325,7 @@ class _RequestObservability:
                 logger.exception(
                     "unhandled error serving %s %s (correlation %s)",
                     scope.get("method", ""),
-                    _route_template(scope),
+                    route_template(scope),
                     correlation,
                     extra={"correlation_id": correlation},
                 )
@@ -343,6 +355,9 @@ _SCOPE_BOUND = "chemclaw.observed"
 # into one would change the shape of every route that depends on it.
 _SCOPE_IDENTITY_TOKEN = "chemclaw.identity_token"
 _SCOPE_SESSION_TOKEN = "chemclaw.session_token"
+# The session for the access-log line, stamped by the ownership gate once it has *resolved* one —
+# never read off `path_params`. See `_record_request` for what that distinction is worth.
+_SCOPE_SESSION = "chemclaw.session_id"
 # The actor for the access-log line, stamped by the authentication gate once it knows one.
 _SCOPE_ACTOR = "chemclaw.actor"
 
@@ -361,10 +376,74 @@ _CORRELATION_ID = re.compile(r"\A[A-Za-z0-9_-]{8,64}\Z")
 # How many pydantic error objects a 422 body may carry. Pydantic materialises one per bad list
 # element, so an unbounded render turns a linear body into a linear response: measured at 683,520
 # errors and ~32 MB from a 2 MB body, on the pod's single uvicorn worker, reachable by any
-# authenticated caller (`docs/archive/lessons-2026-08.md`). Its own webhook body is already bounded
-# in `api/routes/proposals.py` for exactly this reason; this bounds every other route the same way,
-# without changing the shape a client reads (`detail` is still a list of error objects).
+# authenticated caller (`docs/archive/lessons-2026-08.md`).
+#
+# **It bounds the error *count*, and that is not the same bound as the webhook's.** This comment
+# used to claim it bounded "every other route the same way" as `api/routes/proposals.py`, and the
+# two are not comparable: measured, that webhook answers a 2.4 MB body in 112 bytes, while 20
+# pydantic errors still carry 20 copies of whatever the caller sent, because a v2 error object
+# embeds the offending `input` verbatim. Measured before `_render_errors` existed: a 200,025-byte
+# body came back as a 200,119-byte 422, so with `service_max_request_bytes` at 4,000,000 the
+# reflected ceiling was the request itself. The count is bounded here; the *bytes* are bounded
+# in `_render_errors`.
 _MAX_VALIDATION_ERRORS = 20
+
+# How long a caller-controlled string may be where it is echoed into a log record or a 422 body.
+# Long enough for every id, field name and path segment this system mints (a `uuid4().hex` is 32),
+# short enough that a caller cannot spend the logging lock. `SecretRedactingFilter` regex-scans
+# every record it is given, and the cost is linear in the record's length — measured on this
+# machine at 0.13 ms for 100 characters, 4.4 ms for 6 KB and 12.0 ms for 16 KB, with the logging
+# lock held, on the one interpreter that serves every SSE stream. At this cap a record costs the
+# first of those numbers whatever a caller sends.
+_MAX_LOGGED_CHARS = 128
+
+
+def clip_for_log(value: str, limit: int = _MAX_LOGGED_CHARS) -> str:
+    """`value` bounded for a log record or an error body, marked when it was actually cut.
+
+    One definition because three sites need it and each of them was measured unbounded: the access
+    log's session id (6,000 characters, unauthenticated), the authorization refusal's target
+    (8,000), and the 422's echo of what the caller sent (200,119 bytes). A truncation that said
+    nothing would be worse than the raw value in one specific way — an operator reading a clipped
+    id cannot tell it from a short one — so the marker is part of the contract.
+    """
+    return value if len(value) <= limit else f"{value[:limit]}…(+{len(value) - limit})"
+
+
+def _render_errors(errors: list[Any]) -> list[Any]:
+    """Pydantic's error objects with the caller's own bytes bounded — the 422's whole payload.
+
+    **`errors()` takes no `include_input=` here.** FastAPI's `RequestValidationError` is not
+    pydantic's `ValidationError`: it holds an already-materialised `Sequence` and its `errors()`
+    accepts no arguments (`fastapi.exceptions.ValidationException`), so the switch pydantic offers
+    for exactly this cannot be reached and the clipping is done by hand.
+
+    `input` is the caller's own value, `url` is a documentation link that is identical on every
+    error of a kind — one is an amplifier and the other is 60 wasted bytes per error object.
+    `loc` is the *second* amplifier and less obvious than the first: its tail is a caller-chosen
+    string for an `extra_forbidden` error and for a bad key in a `dict[str, …]` field, so clipping
+    only `input` still returned a 5,227-byte body for a 5,000-character key (measured). `type` and
+    `msg` are the handler's own vocabulary and are what tell the client which field to fix.
+    """
+    rendered: list[Any] = []
+    for error in errors:
+        if not isinstance(error, dict):
+            # Not every producer of a `RequestValidationError` is pydantic; anything that is not a
+            # mapping is passed through as it came rather than being guessed at.
+            rendered.append(error)
+            continue
+        trimmed = {key: value for key, value in error.items() if key != "url"}
+        if "input" in trimmed and len(str(trimmed["input"])) > _MAX_LOGGED_CHARS:
+            # Rendered as a clipped *string* only once it is too big to send back as it came, so a
+            # client parsing `input` still sees the number, list or object it sent in every
+            # ordinary case and the wire shape changes only where it had to.
+            trimmed["input"] = clip_for_log(str(trimmed["input"]))
+        if "loc" in trimmed:
+            trimmed["loc"] = [
+                clip_for_log(part) if isinstance(part, str) else part for part in trimmed["loc"]
+            ]
+        rendered.append(trimmed)
+    return rendered
 
 
 def bind_request_actor(request: Request, actor: str, roles: frozenset[str]) -> None:
@@ -394,11 +473,16 @@ def bind_request_session(request: Request, session_id: str) -> None:
     """
     if not request.scope.get(_SCOPE_BOUND):
         return
+    # Stamped for the access log here rather than read off `path_params` there, because *this* is
+    # the frame that establishes the condition the log line needs: the id resolved to a session
+    # this caller owns. See `_record_request`.
+    request.scope[_SCOPE_SESSION] = clip_for_log(session_id)
     request.scope[_SCOPE_SESSION_TOKEN] = set_current_session_id(session_id)
 
 
 def _reset_request_identity(scope: Scope) -> None:
     """Undo whatever the two binders above stamped, in reverse order."""
+    scope.pop(_SCOPE_SESSION, None)
     session_token = scope.pop(_SCOPE_SESSION_TOKEN, None)
     if session_token is not None:
         reset_current_session_id(session_token)
@@ -420,8 +504,14 @@ def _request_correlation_id(headers: Headers) -> str:
     return inbound if _CORRELATION_ID.match(inbound) else uuid.uuid4().hex
 
 
-def _route_template(scope: Scope) -> str:
-    """This request's route template, or `<unmatched>` — never the raw path (see the class)."""
+def route_template(scope: Scope) -> str:
+    """This request's route template, or `<unmatched>` — never the raw path (see the class).
+
+    Public because the authentication gate needs the same answer for the same reason: it logged
+    `request.url.path` on a missing bearer token, *before* any credential was checked, which
+    measured 6,054 characters from an unauthenticated caller. A route template is a source
+    constant; a path is whatever somebody types.
+    """
     path = getattr(scope.get("route"), "path", None)
     return path if isinstance(path, str) and path else _UNMATCHED_ROUTE
 
@@ -464,7 +554,7 @@ def _record_request(
     """
     if not status:
         return
-    route = _route_template(scope)
+    route = route_template(scope)
     labels = {"route": route, "status_class": f"{status // 100}xx"}
     METRICS.increment("chemclaw_http_requests_total", labels=labels)
     METRICS.observe("chemclaw_http_request_duration_seconds", elapsed, labels={"route": route})
@@ -487,7 +577,16 @@ def _record_request(
         # would drop the one field this record exists to be joined on.
         correlation_id=correlation,
         actor=str(scope.get(_SCOPE_ACTOR, "")),
-        session_id=str((scope.get("path_params") or {}).get("session_id", "")),
+        # **The session the ownership gate resolved, never the path parameter.** `path_params` is
+        # filled at route *match*, before any dependency runs, so reading it here put an
+        # unbounded, attacker-chosen, unauthenticated string in this record: measured with
+        # `entra_required=True`, `GET /sessions/<6000 Q's>/messages` answered 401 and booked a
+        # 6,000-character `session_id`, which `SecretRedactingFilter` then regex-scanned holding
+        # the logging lock — 4.4 ms for that record against 0.13 ms for a bounded one. That is
+        # the hazard this class's own docstring cites as the reason `route` is the template and
+        # not the raw path, reintroduced one field along. `bind_request_session` stamps this once
+        # the id has resolved to a session the caller owns, and clips it on the way in.
+        session_id=str(scope.get(_SCOPE_SESSION, "")),
     )
 
 
@@ -498,13 +597,14 @@ async def _validation_failed(request: Request, exc: Exception) -> Response:
     metric, and a response the caller alone ever saw. The counter is what makes it alertable and
     the WARNING is what says which route and how badly.
 
-    The errors are counted rather than rendered into the log, and the body is capped at
-    `_MAX_VALIDATION_ERRORS` — see that constant for the measurement. A handler that logged
-    `exc.errors()` would rebuild the amplification inside the log stack instead of on the wire,
-    which is the worse of the two places for it.
+    The errors are counted rather than rendered into the log, and the body is bounded twice: at
+    `_MAX_VALIDATION_ERRORS` objects and, inside each of them, at `_MAX_LOGGED_CHARS` of the
+    caller's own `input` (`_render_errors`). A handler that logged `exc.errors()` would rebuild the
+    amplification inside the log stack instead of on the wire, which is the worse of the two places
+    for it.
     """
     errors = exc.errors() if isinstance(exc, RequestValidationError) else []
-    route = _route_template(request.scope)
+    route = route_template(request.scope)
     METRICS.increment("chemclaw_request_validation_failures_total", labels={"route": route})
     log_event(
         logger,
@@ -517,12 +617,20 @@ async def _validation_failed(request: Request, exc: Exception) -> Response:
         route=route,
         method=request.method,
         error_count=len(errors),
-        # The *locations* of the first few, which name the offending fields without echoing their
-        # values back into the log.
-        first_locations=[".".join(str(part) for part in e.get("loc", ())) for e in errors[:5]],
+        # The *locations* of the first few. They name the offending fields rather than echoing
+        # their values — with one exception that is why each is clipped: for an `extra_forbidden`
+        # error, and for a bad key in a `dict[str, …]` field, the tail of `loc` **is** a string the
+        # caller chose. No route in this app produces either shape today (no body model forbids
+        # extras and none is a bare mapping), but this handler is registered for every route there
+        # will ever be, and "no caller-controlled bytes in this field" is a property of the handler
+        # or it is a property of nothing.
+        first_locations=[
+            clip_for_log(".".join(str(part) for part in e.get("loc", ()))) for e in errors[:5]
+        ],
     )
     return JSONResponse(
-        status_code=422, content=jsonable_encoder({"detail": errors[:_MAX_VALIDATION_ERRORS]})
+        status_code=422,
+        content=jsonable_encoder({"detail": _render_errors(list(errors[:_MAX_VALIDATION_ERRORS]))}),
     )
 
 

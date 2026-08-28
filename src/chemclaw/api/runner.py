@@ -434,6 +434,10 @@ async def run_turn(
             # `finally` is what turns it into `timed_out` or `abandoned` and it must not depend on
             # the rollback below having run.
             ledger.cancelled = True
+            # Sampled here, beside the flag it qualifies, because this is the only instant at
+            # which the reading is exact — see `_TurnLedger.timed_out`. Everything below this line
+            # takes time, and the deadline does not wait for it.
+            ledger.timed_out = _deadline_passed(ledger.deadline)
             _roll_back_unfinished(session, state_snapshot, ledger)
             # A torn-down turn that already *acted* has used its authorization: durable jobs, note
             # proposals and calibration rows are not rolled back by the teardown, so leaving the
@@ -460,17 +464,24 @@ class _TurnLedger:
     """What one turn accumulates that more than one of its stages has to read.
 
     Extracted from `run_turn`'s locals because the stages below are the readers: the stream
-    collector appends to `answer_parts`, the resume flips `run_complete` twice, the teardown reads
-    `answered` and `usage`, and the two guard events read `correlation_id`. Passing eight locals
-    between them would be the same coupling written out longhand, and a mutable object is what the
-    original already was — a set of names in one frame that every branch could reach.
+    collector appends to `answer_parts` and counts into `note_event`, the resume flips
+    `run_complete` twice, the two guard events read `correlation_id`, and the teardown reads
+    **the whole record** — `answered` and `usage`, and with them `error_code`, `cancelled`,
+    `timed_out`, `loop_capped`, the four counts and `first_token`, because `_book_turn_spend`
+    turns this whole object into one `turn_costs` row. Passing that many locals between them would
+    be the same coupling written out longhand, and a mutable object is what the original already
+    was — a set of names in one frame that every branch could reach.
 
     **`answered` and `run_complete` are two questions, not one, and conflating them was a defect.**
-    `answered` is the cost ledger's question ("did the user get an answer for the money") and
-    becomes true only after the verifier and any mid-turn resume have run. `run_complete` is the
-    rollback's predicate: it says the last model run returned, so there is no unfinished work left
-    to disown, however much of it still lies between there and the `AnswerEvent`. Gating the
-    rollback on `answered` undid finished runs whose teardown merely landed in one of those windows.
+    `answered` is the question `turn_costs.completed` asks ("did the user get an answer for the
+    money"), and it is still asked of this flag directly rather than derived from `outcome` — see
+    the `completed=` argument in `_book_turn_spend`, where deriving it was tried and reverted
+    because a loop-capped turn does deliver its partial answer. It becomes true only after the
+    verifier and any mid-turn resume have run. `run_complete` is the rollback's predicate: it says
+    the last model run returned, so there is no unfinished work left to disown, however much of it
+    still lies between there and the `AnswerEvent`. Gating the rollback on `answered` undid
+    finished runs whose teardown merely landed in one of those windows. *How* the turn ended is a
+    third question again, and `outcome` is the six-valued answer to it.
     """
 
     correlation_id: str
@@ -503,11 +514,28 @@ class _TurnLedger:
     # `loop.time() >= deadline` is true for a timeout and false for a Stop. The caller cannot
     # simply tell us afterwards — its own `except TimeoutError` runs after this ledger is booked.
     deadline: float | None = None
-    # When the chemist first saw prose, as a `perf_counter` reading. **The number a chemist
+    # Whether the clock had already passed `deadline` **at the instant the cancellation arrived**,
+    # recorded there rather than re-derived at teardown.
+    #
+    # `_settle_outcome` used to compare against the clock itself and called that "an exact test
+    # rather than a tolerance". It was exact about the wrong instant: it runs in the `finally`,
+    # *after* `_roll_back_unfinished` and after an approval spend, so a Stop delivered at
+    # `deadline − ε` behind a slow teardown crossed the deadline while being torn down and booked
+    # `timed_out`. Sampling in the `except` clause, one line after `cancelled = True`, is what
+    # makes the claim true: there, the two cancellations really are separated by construction.
+    timed_out: bool = False
+    # When this turn's *answer* first began, as a `perf_counter` reading. **The number a chemist
     # actually experiences**, and nothing measured it: `chemclaw_turn_duration_seconds` is the whole
     # turn, so a turn that spent 40 s on tools and then streamed instantly and one that stalled for
-    # 40 s before its first word were the same sample. `None` means no token was ever produced,
-    # which is a different fact from "0 seconds" and is stored as one.
+    # 40 s before its first word were the same sample. `None` means no token of the answer was ever
+    # produced, which is a different fact from "0 seconds" and is stored as one.
+    #
+    # **A subagent's token is not this turn's first token**, and taking any `TokenEvent` made two
+    # fields of one row contradict each other: `answer_parts` collects only `not event.agent`
+    # (`_stream_into`, where that filter is called load-bearing), so a turn in which only a
+    # subagent ever spoke booked `outcome="empty_answer"` beside a non-null `ttft_seconds` — a
+    # time-to-first-token for an answer that never had a first token. One definition of "a token
+    # of this turn", used by both readers.
     first_token: float | None = None
     tool_calls: int = 0
     tool_failures: int = 0
@@ -535,7 +563,9 @@ class _TurnLedger:
         instead of making a second one.
         """
         if isinstance(event, TokenEvent):
-            if self.first_token is None and event.text:
+            # `not event.agent` — the same filter `_stream_into` applies to `answer_parts`, for
+            # the same reason it gives. See `first_token`.
+            if self.first_token is None and event.text and not event.agent:
                 self.first_token = time.perf_counter()
         elif isinstance(event, ToolCallEvent):
             self.tool_calls += 1
@@ -1041,34 +1071,56 @@ def _settle_outcome(ledger: _TurnLedger) -> str:
     Ranking `answered` first would make `loop_capped` unreachable, which is the same collapse
     `turn_costs.completed` already performed.
 
-    `abandoned` is the floor: the turn reached neither an answer nor any of the named endings, which
-    is what a teardown outside the cancellation clause leaves behind.
+    `empty_answer` is the floor, not `abandoned`: every route to `abandoned` passes through the
+    cancellation flag, so a teardown *outside* that clause — which is what an ordinary silent death
+    is — lands on `empty_answer`. The docstring said the opposite for as long as the two were
+    decided by the prose rather than by the flag.
     """
     if ledger.error_code:
         return "errored"
-    if ledger.cancelled and _deadline_passed(ledger.deadline):
-        # `>=`, against the same event-loop clock `asyncio.timeout` schedules itself on, so this is
-        # an exact test rather than a tolerance: at the moment the timeout delivers its cancellation
-        # the loop clock has reached the deadline by construction, and a Stop or a torn-down pump
-        # arrives at an arbitrary earlier reading.
-        #
-        # `get_running_loop`, not `get_event_loop`, and the `None` arm is not defensive padding: a
-        # ledger settled off the loop is a caller that set no deadline anyway (a test, a synchronous
-        # teardown), and raising `RuntimeError` out of the one function that books what a turn cost
-        # would lose the row to save a comparison.
+    if ledger.cancelled and ledger.timed_out:
+        # **Read off the ledger, not off the clock.** `>=` against the same event-loop clock
+        # `asyncio.timeout` schedules itself on is an exact test — *at the instant the cancellation
+        # is delivered*. This function runs later, in the `finally`, behind the rollback and the
+        # approval spend, so evaluating it here made a Stop at `deadline − ε` with a slow teardown
+        # book `timed_out`. `_deadline_passed` is now called in the `except` clause that sets
+        # `cancelled`, and this reads what it found.
         return "timed_out"
     if ledger.loop_capped:
         return "loop_capped"
-    if not ledger.answer_text.strip():
-        # The same absence, told apart by whether anyone was still reading: a turn cut short with
-        # nothing to show is `abandoned`, while one that ran to its own end and said nothing is the
-        # silent death `empty_answer` names.
-        return "abandoned" if ledger.cancelled else "empty_answer"
-    return "answered"
+    # **`ledger.answered`, not "some prose was emitted", and the difference is a billing fact.**
+    # The flag is set at exactly one place — immediately before `yield answer` — so it means an
+    # `AnswerEvent` was built and delivered. Testing `answer_text` instead is strictly weaker: a
+    # turn Stopped one token into its answer has prose and no `AnswerEvent`, and booked
+    # `outcome="answered"` and therefore `completed=True`, billed as a delivered answer, while the
+    # same teardown logged "torn down before it answered" one line away. `_empty_answer_event`
+    # returns *before* the flag for the same reason, and its comment records the previous time this
+    # exact substitution was made ("the cost ledger booked 'the user got an answer for the money'
+    # for precisely the silent-death turn that branch exists to name").
+    #
+    # The disconnect-after-answer case this ordering was written for still lands on `answered`:
+    # the flag is set before the yield, and the cancellation that reaches a finished turn is
+    # delivered *while suspended in that yield*.
+    if ledger.answered:
+        return "answered"
+    # The same absence, told apart by whether anyone was still reading: a turn cut short before it
+    # could answer is `abandoned`, while one that ran to its own end and said nothing is the silent
+    # death `empty_answer` names.
+    return "abandoned" if ledger.cancelled else "empty_answer"
 
 
 def _deadline_passed(deadline: float | None) -> bool:
-    """Whether the event loop has reached `deadline` — `False` when there is none, or no loop."""
+    """Whether the event loop has reached `deadline` — `False` when there is none, or no loop.
+
+    `>=`, against the same event-loop clock `asyncio.timeout` schedules itself on, so this is an
+    exact test rather than a tolerance *at the instant it is taken* — which is why its one caller
+    is the `except` clause that receives the cancellation and not the teardown that books the row.
+
+    `get_running_loop`, not `get_event_loop`, and the `None` arm is not defensive padding: a turn
+    settled off the loop is a caller that set no deadline anyway (a test, a synchronous teardown),
+    and raising `RuntimeError` on the path that records what a turn cost would lose the row to save
+    a comparison.
+    """
     if deadline is None:
         return False
     try:
@@ -1126,24 +1178,52 @@ def _book_turn_spend(
     same label set and the sum over the family is the deployment's whole spend.
 
     `record_turn_cost` books the same numbers a second time against the identity the metric cannot
-    carry. Not a duplicate: `core/metrics` refuses a counter past 64 label series (D-152) because a
-    label value is attacker-influenced, and an Entra oid is exactly such a key — so per-actor spend
+    carry. Not a duplicate: `core/metrics` caps the label series one counter may hold (D-152,
+    `_MAX_SERIES_PER_COUNTER` — read it there rather than repeating the number here, which is how
+    three copies of this sentence came to say 64 after it was raised to 128) because a label value
+    is attacker-influenced, and an Entra oid is exactly such a key — so per-actor spend
     needs a table, and the fleet-wide rate needs a counter. Booked here rather than on the success
     path so a turn torn down by a disconnect is billed too: that is the runaway this ledger exists
     to find, not an edge case to drop. It does not await — see its own docstring.
 
-    **It is also the one producer of the turn record** (`_settle_outcome`, `_OUTCOMES`): the
+    **It is the one producer of a chat turn's record** (`_settle_outcome`, `_OUTCOMES`): the
     outcome, the classified error code, the resolved model, the tool/job counts and the
     time-to-first-token all land here, in the one function that runs on every path a turn can take.
-    Anywhere else would be a second place that has to remember, and the disconnect path is exactly
-    the one such a place would forget.
+    Anywhere else *inside a turn* would be a second place that has to remember, and the disconnect
+    path is exactly the one such a place would forget. The table itself has a second writer, which
+    is a different thing: `durable/template_activities._book_step_spend` books a template agent
+    step, which is not a turn and never passes through here — it settles its own outcome, in this
+    vocabulary, and says so.
     """
     elapsed = time.perf_counter() - ledger.started
-    outcome = _settle_outcome(ledger)
-    model = _resolved_model()
-    context = current_context()
+    # **The budget first, and everything that can fail after it.** The three derivations below were
+    # computed ahead of this line, so anything raising in any — `_settle_outcome` reading a
+    # ledger, `_resolved_model` reading config, `current_context` reading a contextvar — lost
+    # *both* the budget record and the `turn_costs` row, and replaced the `CancelledError` this
+    # frame usually runs under with its own exception. `budget.record` is a dict write and the
+    # thing a runaway is metered by; it goes first, and the record is then settled where a failure
+    # costs one row's precision instead of the row.
     if budget is not None:
         budget.record(session.session_id, actor, ledger.usage.total)
+    outcome = "unknown"
+    model = ""
+    context = None
+    try:
+        outcome = _settle_outcome(ledger)
+        model = _resolved_model()
+        # Last of the three, and the cheapest to lose: the two fields it feeds already read
+        # `context is not None`, so a failure here books them False rather than losing the row.
+        context = current_context()
+    except Exception:
+        # Assigned progressively above, so a failure in the second derivation keeps the first.
+        # `unknown` is the `turn_costs` column default and means "written before `outcome`
+        # existed"; a row reaching it *through this arm* is the only other way it can be written,
+        # which is why the arm is loud rather than silent.
+        logger.exception(
+            "settling the turn record for session %s failed; booking it as %r",
+            session.session_id,
+            outcome,
+        )
     METRICS.observe("chemclaw_turn_duration_seconds", elapsed)
     METRICS.increment("chemclaw_turns_finished_total", labels={"outcome": outcome})
     spend_labels = {"profile": profile or "default"}
@@ -1158,10 +1238,20 @@ def _book_turn_spend(
             cache_read_tokens=ledger.usage.cache_read,
             cache_write_tokens=ledger.usage.cache_write,
             duration_seconds=elapsed,
-            # **Derived, and kept only for compatibility.** It is `outcome == "answered"` — one
-            # boolean over a six-value enum — and every dashboard and eval that already reads it
-            # keeps reading the same thing. `outcome` is what a new reader should ask.
-            completed=outcome == "answered",
+            # **`ledger.answered`, which is what it has always been, not `outcome == "answered"`.**
+            # The two agree on most rows and disagree on the ones that matter: a loop-capped turn
+            # *does* deliver its partial answer (`events.py` names `loop_cap_reached` as the one
+            # error that shares its turn with one), and a turn that raised after answering has an
+            # answer too. Deriving the boolean from the enum booked both as `completed=False`, so
+            # the field every existing dashboard and eval reads would have quietly changed meaning
+            # under them — while this migration's own header claimed it "stays exactly where it
+            # was". It stays exactly where it was.
+            #
+            # The two fields are not redundant and neither is the other's summary: `completed`
+            # answers "did the chemist get an answer for the money", which is a billing question,
+            # and `outcome` answers "how did the turn end", which is six-valued and is what a new
+            # reader should ask.
+            completed=ledger.answered,
             outcome=outcome,
             error_code=ledger.error_code,
             model=model,

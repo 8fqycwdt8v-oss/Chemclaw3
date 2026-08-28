@@ -188,6 +188,11 @@ async def calc_session(timeout_seconds: float | None = None) -> AsyncIterator[Cl
             # the origin-strip guard that removes them again if a redirect leaves the endpoint's
             # origin. Without it this connection sent `Authorization` alone — so the most expensive
             # work in the system was the one call nobody could trace or correlate.
+            #
+            # "Removes them again" covers all six only since the guard stopped walking a
+            # hand-written list of the four `X-Chemclaw-*` names: `traceparent`, `tracestate` and
+            # `baggage` were copied through to a redirect's target. It matters more here than
+            # anywhere else, because `short_connect_client` follows redirects — see its docstring.
             request_hook=turn_identity_hook(settings.calc_server_url),
         ) as session:
             yield session

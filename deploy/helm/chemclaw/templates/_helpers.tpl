@@ -196,7 +196,17 @@ imagePullSecrets:
 
        `failureThreshold: 6` on liveness against a 20 s period — two minutes of a wedged loop before
        a restart. Generous deliberately: an activity doing real chemistry can hold the loop for a
-       while, and a false restart mid-job is more expensive than a slow true one. */ -}}
+       while, and a false restart mid-job is more expensive than a slow true one.
+
+       **And the `startupProbe` is what makes that generosity safe rather than a guess.** Those two
+       numbers plus `initialDelaySeconds: 10` put the sixth consecutive liveness failure at
+       10 + 5 x 20 = 110 s, and a worker spends that window importing: the same image, the same
+       RDKit/agent/connector-registry tree the front door and the connector servers were given a
+       startup budget for, all of it pulled by `chemclaw.durable.serve` before
+       `chemclaw.core.worker_http` binds a port. So a cold or throttled node SIGKILLed a start that
+       had not failed, and each restart paid the imports again. Liveness and readiness now do not
+       run at all until the process answers once, which is what lets both stay tuned for a
+       *running* worker. `tests/test_deploy_chart.py` pins the budget and the arithmetic. */ -}}
 {{- define "chemclaw.workerProbes" -}}
 ports:
   - name: metrics
@@ -210,6 +220,13 @@ ports:
   - name: temporal-metrics
     containerPort: {{ .Values.monitoring.temporalSdkMetrics.port }}
 {{- end }}
+startupProbe:
+  httpGet:
+    path: /healthz
+    port: metrics
+  periodSeconds: {{ .Values.probes.worker.startup.periodSeconds }}
+  failureThreshold: {{ .Values.probes.worker.startup.failureThreshold }}
+  timeoutSeconds: {{ .Values.probes.worker.startup.timeoutSeconds }}
 readinessProbe:
   httpGet:
     path: /readyz
@@ -242,6 +259,38 @@ livenessProbe:
        nil` is `0`, so an absent key does not fail here — it renders a 30 s grace period against a
        120 s drain, which is the very SIGKILL this helper exists to prevent, wearing a number that
        looks deliberate. A derived value has to refuse when what it derives from is gone. */ -}}
+{{- /* A connector server pod's shutdown ceiling: the longest synchronous tool call it can be
+       holding, plus the endpoint drain in front of it.
+
+       **This replaces a stated 120 s, and the 120 was wrong in the direction that loses work.**
+       The comment beside it argued that the heavy science is not in process — which is true, and is
+       precisely why the bound has to be large: what *is* in process is the HTTP call to
+       `Chemclaw3-mcp`'s `servers/calc`, and this repository's client is allowed
+       `calc_server_timeout_seconds` (900 s) for a composed primitive and
+       `calc_atomic_timeout_seconds` (3600 s) for the two tools pinned to the `xtb` binary. At 120 s
+       the kubelet SIGKILLed a running `optimize_geometry` on every rolling update, node drain and
+       scale-down — and `cached_compute` stores a result only once the call *returns*, so the
+       retry recomputed from zero rather than reading the D-011 cache.
+
+       Derived from the same two ConfigMap keys the pods read, not restated, for the reason
+       `chemclaw.workerGracePeriod` gives: a shutdown budget that has to remember what
+       `CalculatorSettings` chose is one that stops agreeing with it silently.
+
+       `calc_sampling_timeout_seconds` (14400 s) is deliberately outside this maximum. The two CREST
+       searches it bounds are reachable only from `connectors/calc/activities.py` — a Temporal
+       activity on a *worker* pod, which drains under `chemclaw.workerGracePeriod` and is retried by
+       the broker if it does not — never from a connector server's synchronous tool surface.
+
+       A grace period is a ceiling and not a wait: a connector pod with nothing in flight still
+       exits after `connectorDrainSeconds`, so covering the worst case costs a rolling update
+       nothing. `required` for the same reason the other two derived budgets carry one — `int nil`
+       is `0`, and an absent key would render a grace period *shorter* than the default 30 s. */ -}}
+{{- define "chemclaw.connectorGracePeriod" -}}
+{{- $server := int (required "config.CHEMCLAW_CALC_SERVER_TIMEOUT_SECONDS must be set: a connector pod's terminationGracePeriodSeconds is derived from it" .Values.config.CHEMCLAW_CALC_SERVER_TIMEOUT_SECONDS) -}}
+{{- $atomic := int (required "config.CHEMCLAW_CALC_ATOMIC_TIMEOUT_SECONDS must be set: a connector pod's terminationGracePeriodSeconds is derived from it" .Values.config.CHEMCLAW_CALC_ATOMIC_TIMEOUT_SECONDS) -}}
+terminationGracePeriodSeconds: {{ add (max $server $atomic) (int .Values.connectorDrainSeconds) }}
+{{- end -}}
+
 {{- define "chemclaw.workerGracePeriod" -}}
 terminationGracePeriodSeconds: {{ add (int (required "config.CHEMCLAW_WORKER_GRACEFUL_SHUTDOWN_SECONDS must be set: the worker terminationGracePeriodSeconds is derived from it" .Values.config.CHEMCLAW_WORKER_GRACEFUL_SHUTDOWN_SECONDS)) 30 }}
 {{- end -}}

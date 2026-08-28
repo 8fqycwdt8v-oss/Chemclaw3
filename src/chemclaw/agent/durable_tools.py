@@ -429,12 +429,24 @@ async def job_status(job_id: str, *, wait_seconds: float = 0.0) -> DurableJobSta
             ended = _TERMINAL.get(refreshed.status, "running") if refreshed.status else "running"
             return DurableJobStatus(job_id=job_id, status=ended)
         return completed_job_status(job_id, result)
+    if status == "running":
+        # Still going, and this is the branch a `wait_seconds=0` caller falls into — the front
+        # door's `GET /jobs/{id}` passes nothing, so it is the normal path. It used to fall through
+        # to the clause below, where `failed_job_reason` calls `handle.result()`: on a *closed*
+        # execution that is a history read, and on a RUNNING one it is Temporal's unbounded
+        # long-poll. Measured on 2026-08-28 against a live broker, `job_status(wait_seconds=0)`
+        # blocked for over 15 s on a running workflow and would have blocked for the life of the
+        # job. `job_status_wait_seconds` is `ge=0`, so a deployment that set it to 0 hung the agent
+        # tool the same way.
+        return DurableJobStatus(job_id=job_id, status="running")
     if status != "completed":
         # A status word alone was everything the model got for a failed run — measured,
         # `summary=None, result={}`. Both of the other two collectors render the cause, and this is
         # the one the tool's own docstring tells the model to poll, so for a job that outlived its
         # turn with a dropped push-back it is the *only* one. `failed_job_reason` is that same walk,
-        # extracted so there is one answer to "why did it fail" rather than three.
+        # extracted so there is one answer to "why did it fail" rather than three — and it is safe
+        # here precisely because the guard above has already excluded the one status for which its
+        # `handle.result()` is a wait rather than a read.
         return DurableJobStatus(
             job_id=job_id, status=status, summary=await failed_job_reason(handle) or None
         )
@@ -496,10 +508,15 @@ def _framed_free_text(text: str, job_id: str) -> str:
 async def find_past_jobs(text: str = "", connector: str = "") -> list[JobRecordSummary]:
     """Find durable jobs this system has already run, and why each of them was run.
 
-    The retrospective view over every finished campaign, calculation and report job — including
-    ones from other people's conversations and from long before this one. Each hit carries the
-    **reason the run was started**, so "have we optimized this coupling before, and what were we
-    trying to find out?" is answerable without the original chat.
+    The retrospective view over every campaign, calculation and report job that has ended —
+    **runs that failed as well as runs that succeeded**, including ones from other people's
+    conversations and from long before this one. Each hit carries the **reason the run was
+    started**, so "have we optimized this coupling before, and what were we trying to find out?"
+    is answerable without the original chat.
+
+    Read `state` before reading `summary`: a failed run has an empty summary, because a summary is
+    what a run *produced* and a failed one produced nothing. Take its `job_id` to
+    `get_durable_job_status` for the reason it failed.
 
     Use it before launching an expensive job (the answer may already exist: re-running an identical
     job rejoins the stored result, but a *similar* one is a fresh bill), and when a chemist asks
@@ -512,8 +529,8 @@ async def find_past_jobs(text: str = "", connector: str = "") -> list[JobRecordS
         connector: Restrict to one capability bundle (e.g. "bo", "calc"). Empty searches all.
 
     Returns:
-        The matching runs, newest first: what ran, why, what came out in one line, and the note it
-        proposed (if any).
+        The matching runs, newest first: what ran, why, how it ended (`state` is `completed` or
+        `failed`), what came out in one line, and the note it proposed (if any).
     """
     # Two fields are framed and four are not, and both halves of that are deliberate.
     #

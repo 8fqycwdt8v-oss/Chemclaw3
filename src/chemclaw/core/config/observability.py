@@ -6,7 +6,9 @@ cross-section validators; fields, env names and defaults are exactly as they wer
 sections shared a single module (D-072 mixins, split per D-156).
 """
 
-from pydantic import Field
+from typing import Self
+
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings
 
 
@@ -212,3 +214,35 @@ class ObservabilitySettings(BaseSettings):
     # SIGKILLs through the drain and the setting buys nothing; `tests/test_deploy_chart.py` pins
     # that ordering.
     worker_graceful_shutdown_seconds: float = Field(default=120.0, gt=0)
+
+    @model_validator(mode="after")
+    def _the_two_metrics_ports_are_not_the_same_port(self) -> Self:
+        """Two expositions on one port is a worker that reports Temporal as unreachable.
+
+        Both are served by the *same process*: `worker_http` binds `worker_metrics_port` for the
+        `chemclaw_*` registry, and the Temporal SDK's own Rust exporter binds
+        `temporal_metrics_port`. Setting them equal is not a duplicate scrape — the second bind
+        fails. Measured on 2026-08-28 with 127.0.0.1:9111 already held: `Runtime(...)` raised
+        `ValueError: Failed starting Prometheus exporter: Address already in use`, and because that
+        construction happens inside `connect_options()`, `core/temporal_client.py::connect()`
+        replaced it with "the durable execution backend (Temporal) is unreachable … This is an
+        infrastructure outage" — for a broker that was up and answering.
+
+        `telemetry_runtime()` now degrades rather than raising, so this is no longer the difference
+        between a working process and a broken one; it is still a deployment stating a thing it
+        cannot have, and the answer to "why are there no SDK metrics" should be a startup error
+        naming both settings rather than a counter somebody has to think to look at. 0 means
+        "disabled" for both and is therefore not a collision.
+        """
+        if (
+            self.temporal_metrics_port
+            and self.temporal_metrics_port == self.worker_metrics_port
+            and self.temporal_metrics_host == self.worker_metrics_host
+        ):
+            raise ValueError(
+                f"temporal_metrics_port={self.temporal_metrics_port} is also "
+                "worker_metrics_port, on the same host: one process serves both expositions, so "
+                "the second bind fails. Give the SDK's exposition a port of its own, or set "
+                "temporal_metrics_port=0 to switch it off."
+            )
+        return self

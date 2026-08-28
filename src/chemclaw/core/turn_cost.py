@@ -56,9 +56,13 @@ class TurnCost(BaseModel):
     # turn and an abandoned turn were all simply `False`, and a partial answer after the runaway cap
     # was `True` beside a clean one.
     completed: bool = True
-    # How the turn ended (`chemclaw.api.runner._OUTCOMES`, one producer: `_settle_outcome`).
-    # `unknown` is the column default a row written before this field existed carries; nothing
-    # writes it.
+    # How the turn ended (`chemclaw.api.runner._OUTCOMES`). Two producers, because a step is not
+    # a chat turn: `api.runner._settle_outcome` for a chat turn, and
+    # `durable.template_activities._book_step_spend` for a harness step — which cannot import
+    # `api` (`tests/test_layering.py`), so it spells four of the six values as literals.
+    # `unknown` is the column default a row written before this field existed carries, and it is
+    # *also* written live, by `_book_turn_spend`'s caught-exception fallback, which logs when it
+    # does.
     outcome: str = "unknown"
     # The user-facing classification of a failed turn (`chemclaw.api.runner._classify`), empty for
     # every other outcome. It was computed, sent to the chemist and discarded server-side, so a

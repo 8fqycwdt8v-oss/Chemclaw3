@@ -11,9 +11,10 @@ record around the submit. `git_submitter` keeps the mechanics. This module is th
 share.
 """
 
+import re
 from typing import Protocol
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class NoteFile(BaseModel):
@@ -33,6 +34,18 @@ class NoteFile(BaseModel):
     path: str
     content: str
     overwrite: bool = True
+
+
+# A git branch name, as git itself would accept it: `/`-separated components of
+# `A-Za-z0-9._-`, none of them empty or starting with a dot. Deliberately *narrower* than
+# `git check-ref-format` (which also permits e.g. `+` and non-ASCII) — this repository mints
+# `note/<slug>` and has no reason to accept anything a shell, a path or a log line reads
+# specially. What it excludes is the point: whitespace, control characters and newlines.
+_REF_NAME = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9._-]*(?:/[A-Za-z0-9_-][A-Za-z0-9._-]*)*")
+
+# Git's own limit on one path component, applied to the whole ref. A `note/<slug>` is nowhere near
+# it; this bounds what a database row or a direct construction can put into a log record.
+_MAX_BRANCH_LENGTH = 255
 
 
 class NoteSubmission(BaseModel):
@@ -59,6 +72,39 @@ class NoteSubmission(BaseModel):
     files: list[NoteFile] = Field(min_length=1)
     title: str
     body: str
+
+    @field_validator("branch")
+    @classmethod
+    def _branch_is_a_ref(cls, value: str) -> str:
+        """Refuse a branch git would refuse — and one a log record could not survive.
+
+        `pr_gate` builds `note/<id>` from a slug `Note.id` already validates, so on the path this
+        model was written for the constraint is redundant. It is not redundant on the other two:
+        `proposal_store` rebuilds a `NoteSubmission` from a **database row**, and a submission can
+        be constructed directly. Between them, nothing bounded this field's charset or its length
+        before it reached `git_submitter._git`, which interpolates `refs/heads/<branch>` into a log
+        record — so a newline in it forges a log line and an arbitrarily long one stalls every
+        thread behind `SecretRedactingFilter`'s regex scan under the logging lock.
+
+        Checked as *git's* rule rather than as this repository's naming convention, because that is
+        the invariant that actually holds here: `git_submitter` is not told what prefix to expect,
+        and `check-ref-format` is what would reject the value anyway, one subprocess later and with
+        the value already logged. The length bound is git's own 255-byte path component limit
+        applied to the whole ref, which no `note/<slug>` comes near.
+        """
+        if (
+            not value
+            or len(value) > _MAX_BRANCH_LENGTH
+            or ".." in value
+            or value.endswith((".", ".lock"))
+            or not _REF_NAME.fullmatch(value)
+        ):
+            raise ValueError(
+                f"branch {value[:80]!r} is not a usable git ref: it must be a non-empty name of at "
+                f"most {_MAX_BRANCH_LENGTH} characters, built from `A-Za-z0-9._/-` segments, with "
+                "no `..`, no leading/trailing `/` or `.`, and no `.lock` suffix"
+            )
+        return value
 
 
 class SubmissionOutcome(BaseModel):

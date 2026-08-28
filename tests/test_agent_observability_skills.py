@@ -19,6 +19,7 @@ import pytest
 from chemclaw.agent.langgraph_agent import skills_backend
 from chemclaw.agent.profiles import AgentProfile
 from chemclaw.agent.skill_backend import NarrowedSkillsBackend
+from chemclaw.core.config import settings
 from chemclaw.core.metrics import METRICS
 
 
@@ -39,8 +40,10 @@ def test_a_skill_body_the_model_reads_is_named_in_the_log(
 ) -> None:
     """The second half of "was the skill even offered" — did the model actually read it.
 
-    INFO rather than DEBUG because a skill is read at most once per turn, not once per model call,
-    so the volume is bounded by how many procedures a turn consults.
+    INFO because *which procedure the model opened* is the fact the support question turns on and
+    it is reconstructible from nowhere else. The reason this docstring used to give — "a skill is
+    read at most once per turn, not once per model call" — was a bound nothing enforces: `read` is
+    a model-callable tool and a skill directory holds as many documents as its author put in it.
     """
     backend = NarrowedSkillsBackend(str(tree), lambda _name: True)
 
@@ -99,3 +102,31 @@ def test_the_build_records_which_skills_this_profile_offers(
 
     assert "skills.narrowed" in caplog.text
     assert "solvent-selection" in caplog.text
+
+
+def test_a_model_authored_path_is_bounded_before_it_reaches_a_log_line(
+    tree: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """`file_path` is the model's own tool argument, and nothing before this caps its length.
+
+    So a megabyte-long or newline-laden path was written verbatim — at WARNING on the refusal and
+    at INFO on the success — which is a model-authored string with unbounded reach into a log
+    stack. This tree already has one answer for that (`audit.bounded_repr`, over
+    `agent_audit_max_arg_chars`), and it reprs, so an embedded newline can no longer split one
+    refusal record into two lines.
+
+    Driven on the *refusal* branch because that is the one an attacker reaches without a permitted
+    skill: the path need not exist for the gate to log it.
+    """
+    absurd = "/" + "A" * 5000 + "\ninjected-second-line: pretending to be a record\n/SKILL.md"
+    backend = NarrowedSkillsBackend(str(tree), lambda _name: False)
+
+    with caplog.at_level(logging.WARNING):
+        backend.read(absurd)
+
+    line = caplog.text
+    assert absurd not in line, "the model's raw path reached the log unbounded"
+    assert len(line) < 2 * settings.agent_audit_max_arg_chars + 500
+    assert "\ninjected-second-line" not in line, "a newline in the path forged a second log record"
+    # The path is still identifiable — bounding it must not turn the record into nothing.
+    assert "AAAA" in line

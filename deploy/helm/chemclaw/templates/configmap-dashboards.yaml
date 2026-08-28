@@ -1,8 +1,8 @@
 {{- if and .Values.monitoring.enabled .Values.monitoring.dashboards.enabled }}
 {{- /* The consumer the other eighty-eight series never had.
 
-       This chart declares over a hundred metrics; sixteen of them had an alert and the rest had no
-       reader of any kind — `deploy/README.md` said so outright ("there are no dashboards in this
+       This chart declares over a hundred metrics; a minority of them had an alert and the rest had
+       no reader of any kind — `deploy/README.md` said so outright ("there are no dashboards in this
        repo to track anything"). That is the same failure the ServiceMonitor fixed one level down,
        one level up: the number is computed, exposed, collected, retained, and nobody has ever seen
        it. An alert answers "is something wrong now"; these answer the question an operator actually

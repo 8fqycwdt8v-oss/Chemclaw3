@@ -1129,6 +1129,21 @@ def test_the_shipped_connection_ceiling_matches_the_fleet_the_chart_renders() ->
     assert "CHEMCLAW_PG_FLEET_POOLED_PROCESSES" not in values["config"], (
         "the pooled-process count must be derived in templates/_helpers.tpl, not hand-written"
     )
+    # And not restated in prose either, which is how it went wrong: two comments in this values file
+    # said "17 pooled processes" and "seventeen of them" while `chemclaw.pooledProcesses` rendered
+    # 14, so the arithmetic beside `maxConnections` produced a number the chart does not render.
+    # `D-2026-08-01-the-count-lives-in-the-test-not-in-the-prose` is the rule; this is its pin.
+    prose = (CHART / "values.yaml").read_text()
+    restated = re.findall(
+        r"\b(\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|"
+        r"fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty)\b[^.\n]{0,20}pooled process",
+        prose,
+        flags=re.IGNORECASE,
+    )
+    assert not restated, (
+        f"values.yaml writes down a pooled-process count ({restated}); it is rendered by "
+        "chemclaw.pooledProcesses and goes stale here the first time a replica count moves"
+    )
     config_template = (CHART / "templates" / "config.yaml").read_text()
     assert re.search(
         r"^\s*CHEMCLAW_PG_FLEET_POOLED_PROCESSES:.*chemclaw\.pooledProcesses",
@@ -1926,6 +1941,123 @@ def test_every_counter_that_can_fail_silently_has_an_alert() -> None:
     assert not redundant, f"exempted counters that do have an alert: {redundant}"
 
 
+def _degraded_sites_with_their_own_counter() -> dict[str, set[str]]:
+    """Subsystem name -> the counters incremented within a few lines of its `degraded()` call.
+
+    `metrics_bridge.degraded` increments `chemclaw_degraded_total{subsystem=...}` on every call, so
+    a site that *also* increments a counter of its own puts one event on two series. If both series
+    are alerted, one failure raises two alerts — which is the duplication this reads for. Derived
+    from the source in the same spirit as `tests/test_degraded.py`, which reads the subsystem
+    literals out of the tree rather than keeping a list beside them.
+    """
+    sites: dict[str, set[str]] = {}
+    for path in sorted(Path("src").rglob("*.py")):
+        lines = path.read_text().splitlines()
+        for index, line in enumerate(lines):
+            if "def degraded(" in line or not re.search(r"(?<![\w.])degraded\(|\.degraded\(", line):
+                continue
+            window = "\n".join(lines[max(0, index - 12) : index + 14])
+            subsystem = re.search(r'degraded\(\s*\n?\s*[\w.]+,\s*\n?\s*"([a-z_]+)"', window)
+            if subsystem is None:
+                continue
+            counters = set(re.findall(r'increment\(\s*\n?\s*"(chemclaw_[a-z0-9_]+)"', window))
+            sites.setdefault(subsystem.group(1), set()).update(counters)
+    return sites
+
+
+def test_no_two_alerts_fire_on_one_event() -> None:
+    """One failed retrieval leg raised two alerts, and the umbrella's was the less useful one.
+
+    `retrieval/fanout.py`'s failure arm calls `degraded(logger, "evidence_source", ...)` and
+    increments `chemclaw_evidence_source_failures_total` on the same exception. Both series were
+    alerted, both at `warning`, both over a 15-minute window and both at `for: 0m` — so a single
+    broken leg produced `ChemclawSubsystemDegraded{subsystem="evidence_source"}` *and*
+    `ChemclawEvidenceSourceFailing{source=...}`, of which only the second says which leg.
+
+    The fix is an exclusion in the umbrella's selector, and this is what stops that exclusion from
+    becoming a hand-maintained list: the set is derived from the `degraded()` call sites, so a
+    second site that grows its own alerted counter fails here until it is either excluded from the
+    umbrella or left with one rule.
+    """
+    alerted = _series_referenced(_alert_expressions())
+    duplicated = {
+        subsystem
+        for subsystem, counters in _degraded_sites_with_their_own_counter().items()
+        if counters & alerted
+    }
+    umbrella = re.search(r"chemclaw_degraded_total\{([^}]*)\}", _alert_expressions()) or re.search(
+        r"(chemclaw_degraded_total)", _alert_expressions()
+    )
+    assert umbrella is not None, "the degradation umbrella no longer reads chemclaw_degraded_total"
+    excluded = set(re.findall(r'subsystem!="([a-z_]+)"', umbrella.group(0)))
+    assert duplicated == excluded, (
+        f"subsystems whose own counter is alerted: {sorted(duplicated)}; excluded from the "
+        f"umbrella: {sorted(excluded)}. Each side of that difference is a duplicate alert or a "
+        "gap — a subsystem excluded here with no rule of its own is not alerted at all."
+    )
+
+
+def test_severity_is_monotonic_in_how_final_the_loss_is() -> None:
+    """The retryable half outranked the terminal half, which is the wrong way round.
+
+    `publish/outbox.py` spends one attempt and leaves the row `pending`, so
+    `chemclaw_result_publish_failures_total` is "we are still trying" —
+    `chemclaw_results_dead_lettered_total` is that same publication after its retries are gone, and
+    nothing will attempt it again. The first carried `critical` and the second `warning`, so the
+    channel that meant "we have stopped" was the quieter one. A projection failure is terminal by
+    construction (the rule's own description says retrying will not help) and belongs with it.
+
+    Pinned as an ordering between named alerts rather than as three literals, because the claim is
+    the ordering: a later edit that lowers a terminal alert or raises the retryable one fails here.
+    """
+    severity = dict(
+        re.findall(
+            r"- alert: (\w+)(?:.|\n)*?severity: (\w+)",
+            (CHART / "templates" / "prometheusrule.yaml").read_text(),
+        )
+    )
+    rank = {"warning": 1, "critical": 2}
+    retryable = "ChemclawResultPublishFailing"
+    for terminal in ("ChemclawResultsDeadLettered", "ChemclawResultProjectionFailing"):
+        assert rank[severity[terminal]] > rank[severity[retryable]], (
+            f"{terminal} is a permanent loss of a computed result and {retryable} is an attempt "
+            f"that will be retried; {terminal} may not be the quieter of the two "
+            f"({severity[terminal]} against {severity[retryable]})"
+        )
+
+
+def test_every_ratio_alert_has_a_traffic_floor() -> None:
+    """`rate(errors) / rate(total)` is 100% on a single error in an otherwise idle window.
+
+    Both ratio alerts shipped with `clamp_min(denominator, 0.001)`, which is a division-by-zero
+    guard and reads as a floor. It is not one — it makes the empty window *worse*, turning "no
+    sample" into a large finite ratio. Measured with `promtool test rules` on the shipped
+    expressions: one failed turn and one started turn in a ten-minute window evaluated to `1.0`
+    against a 0.1 threshold, and one failed durable job in an idle half hour to `0.56` against
+    0.2. Both now require their own denominator to clear an absolute rate first.
+
+    Derived rather than listed: any expression that divides one `rate()` by another is a ratio, so
+    a third one added tomorrow is covered on the day it is added.
+    """
+    rules = re.split(r"\n\s*- alert: ", (CHART / "templates" / "prometheusrule.yaml").read_text())
+    ratios = []
+    for block in rules[1:]:
+        name = block.splitlines()[0].strip()
+        expr = " ".join(block.split("expr:")[1].split("for:")[0].split())
+        if re.search(r"rate\([^)]*\)\)?\s*/\s*", expr):
+            ratios.append((name, expr))
+    assert ratios, "no ratio alerts found — the extraction is broken, not the rules"
+    for name, expr in ratios:
+        assert "clamp_min" not in expr, (
+            f"{name} still guards its denominator with clamp_min, which converts an idle window "
+            "into a large finite ratio instead of no sample"
+        )
+        assert re.search(r"\band\s+sum\(rate\(", expr), (
+            f"{name} divides two rates with no absolute floor on the denominator, so one event in "
+            "an idle window is a 100% failure rate"
+        )
+
+
 def test_every_declared_metric_has_a_consumer() -> None:
     """A metric with no panel and no rule is a number nobody has ever seen.
 
@@ -1954,6 +2086,51 @@ def test_every_declared_metric_has_a_consumer() -> None:
     assert not unknown, f"dashboard panels query series the app never emits: {unknown}"
 
 
+def test_no_dashboard_panel_queries_a_series_nothing_produces() -> None:
+    """A panel over a series no producer emits is a graph that can never draw.
+
+    Two shipped this way and they failed differently, which is why this reads *every* identifier
+    rather than only the `chemclaw_`-prefixed ones. "Temporal worker task slots" and "Temporal
+    pollers" queried `temporal_worker_task_slots_*` and `temporal_num_pollers` — the Temporal SDK's
+    own exporter, which `monitoring.temporalSdkMetrics` ships **off** and which
+    `durable/serve.py` does not bind at all, so nothing anywhere emits those series. The rule that
+    reads them (`ChemclawWorkerNotPolling`) is rendered only under that flag; the panels were
+    unconditional, which is the whole defect. They are deleted rather than flag-gated, by this
+    repository's own "no 'for later' stubs" rule — the change that adds the bind is the change that
+    adds the panels back, and `values.yaml` says so where the flag lives.
+
+    "Connector reachability" failed the other way: `chemclaw_connector_unhealthy` *is* declared, so
+    the existing declared-vs-queried check passed it, and the gauge family was bound by nothing —
+    caught by `tests/test_service.py::test_the_per_connector_health_gauge_actually_renders_a_series`
+    instead, which reads the exposition.
+
+    `up` and `absent()` are Prometheus's own and stay allowed; nothing else foreign is.
+    """
+    from chemclaw.core.metrics import declared_histogram_names, declared_metric_names
+
+    declared = set(declared_metric_names())
+    queryable = declared | {
+        f"{name}{suffix}"
+        for name in declared_histogram_names()
+        for suffix in ("_bucket", "_sum", "_count")
+    }
+    # Reduced to just the metric references: label selectors, grouping clauses, quoted strings,
+    # durations and function names are all PromQL grammar rather than series, and a check that read
+    # them would report every `by (source)` as a missing metric.
+    expressions = _dashboard_expressions()
+    expressions = re.sub(r"\{[^}]*\}", " ", expressions)
+    grouping = r"\b(?:by|without|on|ignoring|group_left|group_right)\s*\([^)]*\)"
+    expressions = re.sub(grouping, " ", expressions)
+    expressions = re.sub(r"\[[^\]]*\]", " ", expressions)
+    expressions = re.sub(r"\b[a-z_]+\s*\(", " ", expressions)
+    identifiers = set(re.findall(r"\b([a-z][a-z0-9_]*)\b", expressions))
+    foreign = sorted(identifiers - queryable - {"up"})
+    assert not foreign, (
+        f"dashboard panels query series nothing in this system emits: {foreign}. Wire the producer "
+        "or delete the panel; a panel that cannot draw reads as 'nothing happened'."
+    )
+
+
 def test_the_metrics_that_were_designed_to_alert_actually_alert() -> None:
     """Collected-and-un-alerted is the same failure REV-2 fixed one level down.
 
@@ -1978,6 +2155,88 @@ def test_the_metrics_that_were_designed_to_alert_actually_alert() -> None:
         "chemclaw_tokens_total",
     ]:
         assert metric in rule, f"{metric} has no alert"
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
+def test_no_alert_pages_for_a_pod_that_is_merely_still_starting() -> None:
+    """`ChemclawTargetDown` is `critical`, and it fired on an ordinary rollout.
+
+    `up` says a target did not answer; it says nothing about readiness, and neither discovery
+    mechanism this chart uses waits for it — a PodMonitor's `role: pod` has no readiness filter and
+    an Endpoints object carries `notReadyAddresses`. So a pod is a target from the moment it
+    exists, `up` is 0 for the whole cold start, and every `probes.*.startup` block here allows
+    300 s of cold start on purpose (RDKit, the agent stack, the connector registry). A `for: 5m`
+    sat inside that budget.
+
+    Asserted as the relation and not the number, because the number is the derivation: the alert
+    must outlast the *largest* startup budget the chart grants, so raising a budget cannot leave it
+    behind.
+    """
+    budgets = {
+        component: int(probe["startup"]["periodSeconds"])
+        * int(probe["startup"]["failureThreshold"])
+        for component, probe in _values()["probes"].items()
+    }
+    assert budgets, "no startup budgets found — probes moved, not the alert"
+    result = _render()
+    assert result.returncode == 0, result.stderr
+    held = re.search(r"- alert: ChemclawTargetDown(?:.|\n)*?for: (\d+)([ms])", result.stdout)
+    assert held is not None, "ChemclawTargetDown no longer renders a for: clause"
+    seconds = int(held.group(1)) * (60 if held.group(2) == "m" else 1)
+    assert seconds > max(budgets.values()), (
+        f"ChemclawTargetDown pages after {seconds}s while the chart grants "
+        f"{max(budgets.values())}s of cold start ({budgets}); a normal deploy on a slow node is a "
+        "critical page for a process that is starting as designed"
+    )
+
+
+def test_only_the_fleet_group_alerts_on_a_series_this_system_does_not_emit() -> None:
+    """The claim the rule file makes about itself, checked instead of written down.
+
+    Its header argued that every rule reads an application counter — "so a process that is gone
+    emits silence" — which is what makes `up` and `absent()` necessary. The sentence carried a
+    count ("all sixteen") that was thirty-seven by the time anyone read it, and the count was never
+    the interesting half: the *split* is. Two rules read Prometheus's own synthesised `up` and
+    every other rule reads a series this registry declares, and that is what the header now says
+    and this asserts.
+
+    A third rule written against a series nothing here emits would be green forever, which reads
+    exactly like the condition never occurring — the same failure
+    `test_no_dashboard_panel_queries_a_series_nothing_produces` catches one surface over.
+    `temporal_num_pollers` is the sanctioned exception and is rendered only behind its own flag.
+    """
+    from chemclaw.core.metrics import declared_histogram_names, declared_metric_names
+
+    declared = set(declared_metric_names()) | {
+        f"{name}{suffix}"
+        for name in declared_histogram_names()
+        for suffix in ("_bucket", "_sum", "_count")
+    }
+    rule = (CHART / "templates" / "prometheusrule.yaml").read_text()
+    on_up = set()
+    for block in re.split(r"\n\s*- alert: ", rule)[1:]:
+        name = block.splitlines()[0].strip()
+        expr = " ".join(block.split("expr:")[1].split("for:")[0].split())
+        if not re.search(r"\bchemclaw_[a-z0-9_]+\b", expr):
+            on_up.add(name)
+            assert re.search(r"\bup\{|\btemporal_", expr), (
+                f"{name} reads neither a declared series nor `up`, so it can never fire: {expr}"
+            )
+        for series in re.findall(r"\bchemclaw_[a-z0-9_]+\b", expr):
+            assert series in declared, f"{name} reads {series}, which this registry never declares"
+    # `ChemclawWorkerNotPolling` is the sanctioned third, and its difference from the two deleted
+    # dashboard panels is the whole reason it survives: it is rendered only under
+    # `monitoring.temporalSdkMetrics.enabled`, which is the same flag that renders the port the
+    # exporter would bind, so it is absent from every shipped configuration rather than green
+    # forever in one. The panels were unconditional.
+    assert on_up == {
+        "ChemclawTargetDown",
+        "ChemclawNoWorkerIsScraped",
+        "ChemclawWorkerNotPolling",
+    }, (
+        f"the rules that read something other than a first-party series are {sorted(on_up)}; the "
+        "file's header says the fleet group plus the flag-gated SDK rule is the whole of that set"
+    )
 
 
 def test_no_alert_asks_for_to_suppress_what_only_a_threshold_can() -> None:
@@ -2345,12 +2604,59 @@ def test_a_connector_pod_drains_before_it_dies() -> None:
     """
     text = (CHART / "templates" / "deployment-connectors.yaml").read_text()
     assert "preStop:" in text, "a connector pod stops accepting while the front door still dials it"
-    assert "terminationGracePeriodSeconds: {{ $.Values.connectorGracePeriodSeconds }}" in text, (
+    assert 'include "chemclaw.connectorGracePeriod"' in text, (
         "a connector pod keeps the 30 s default, which SIGKILLs through its own drain"
     )
-    values = _values()
-    assert int(values["connectorGracePeriodSeconds"]) > int(values["connectorDrainSeconds"]), (
-        "the grace period does not outlast the drain, so the sleep is what gets SIGKILLed"
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
+def test_a_connector_pod_outlives_the_call_it_may_be_holding() -> None:
+    """The grace period and the calc client's own bounds were two independent numbers.
+
+    `connectorGracePeriodSeconds: 120` shipped beside `calc_server_timeout_seconds: 900` and
+    `calc_atomic_timeout_seconds: 3600`, with a comment arguing that the heavy science "is not in
+    process — it is `Chemclaw3-mcp`'s `servers/calc`, dialled over HTTP". That is the right
+    description of the wait and the wrong conclusion about the number: the HTTP call *is* the
+    in-process wait, so a synchronous `optimize_geometry` or `compute_atomic_descriptors` was
+    SIGKILLed at 120 s into a call this repository is prepared to wait 900 s or 3600 s for. Worse
+    than losing the answer: `cached_compute` stores a result only once the call returns, so the
+    retry recomputed from zero instead of reading the D-011 cache.
+
+    Asserted against `CalculatorSettings`' own defaults rather than against the numbers in
+    `values.yaml`, so raising either bound in code fails here instead of silently outgrowing the
+    pod's ceiling — which is the drift that produced the pair this test exists for.
+
+    `calc_sampling_timeout_seconds` (14400 s) is excluded deliberately and the exclusion is checked:
+    the two CREST searches it bounds are reachable only from `connectors/calc/activities.py`, which
+    runs on a Temporal *worker* pod under the chart's workerGracePeriod helper, with the broker's
+    retry behind it, never from a connector server's synchronous tool surface.
+    """
+    from chemclaw.core.config import settings
+
+    result = _render()
+    assert result.returncode == 0, result.stderr
+    drain = int(_values()["connectorDrainSeconds"])
+    grace = {
+        document["spec"]["template"]["spec"]["terminationGracePeriodSeconds"]
+        for document in yaml.safe_load_all(result.stdout)
+        if document
+        and document.get("kind") == "Deployment"
+        and document["metadata"]["labels"]["app.kubernetes.io/component"].startswith("connector-")
+        and not document["metadata"]["labels"]["app.kubernetes.io/component"].startswith(
+            "connector-worker-"
+        )
+    }
+    assert grace, "no connector server Deployment rendered, so nothing was checked"
+    for bound in (settings.calc_server_timeout_seconds, settings.calc_atomic_timeout_seconds):
+        assert min(grace) >= int(bound) + drain, (
+            f"a connector pod is SIGKILLed {int(bound) + drain - min(grace)} s into a call this "
+            f"repository's own client waits {bound} s for; raise the derived grace period or the "
+            "client bound, but they may not disagree"
+        )
+    tools = (Path("src/chemclaw/connectors/calc/server/tools.py")).read_text()
+    assert "calc_sampling_timeout_seconds" not in tools, (
+        "a synchronous tool now carries the CREST bound; it is outside the pod's ceiling and the "
+        "exclusion in chemclaw.connectorGracePeriod no longer holds"
     )
 
 
@@ -2461,6 +2767,49 @@ def test_the_alertmanager_config_refuses_to_route_to_nothing() -> None:
     )
     assert alertmanager["receivers"] == [], "the chart ships a receiver it invented"
     assert "severity" in text, "the critical split does not read the label the rules carry"
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
+def test_enabling_the_route_without_the_rules_refuses_rather_than_rendering_nothing() -> None:
+    """Every guard in `alertmanagerconfig.yaml` was unreachable through one door.
+
+    The file's own `{{ if }}` required `monitoring.enabled` *and* `monitoring.alerts.enabled`
+    before any of its four `fail`s could run, so a release that turned the routing on while the
+    rules were off got no object, no output and no error — measured, `helm template` exited 0 with
+    no AlertmanagerConfig in the render. That is
+    `D-2026-08-26-a-knob-that-renders-nothing-is-not-a-knob` with the stakes raised: the switch the
+    operator just moved is the one that decides whether an alert reaches a person, and silence
+    reads as success.
+
+    Both directions, because a refusal that also refuses the good case is worse than the no-op: the
+    shipped defaults must still render, and a release with real receivers must still get its route.
+    """
+    silent = _render(
+        "--set", "monitoring.alerts.enabled=false", "--set", "monitoring.alertmanager.enabled=true"
+    )
+    assert silent.returncode != 0, (
+        "enabling the Alertmanager route with the rules off renders nothing and says nothing"
+    )
+    assert "monitoring.alertmanager.enabled" in silent.stderr, silent.stderr
+
+    assert _render().returncode == 0, "the shipped defaults stopped rendering"
+
+    routed = _render(
+        "--set",
+        "monitoring.alertmanager.enabled=true",
+        "--set",
+        "monitoring.alertmanager.receivers[0].name=oncall",
+        "--set",
+        "monitoring.alertmanager.receivers[0].webhookConfigs[0].urlSecret.name=am",
+        "--set",
+        "monitoring.alertmanager.receivers[0].webhookConfigs[0].urlSecret.key=url",
+        "--set",
+        "monitoring.alertmanager.defaultReceiver=oncall",
+    )
+    assert routed.returncode == 0, routed.stderr
+    assert "kind: AlertmanagerConfig" in routed.stdout, (
+        "a release with a declared receiver got no routing object"
+    )
 
 
 def test_the_dashboards_carry_the_label_their_reader_selects_on() -> None:

@@ -21,6 +21,7 @@ things that happen after a result is durable.
 """
 
 import logging
+import time
 from contextlib import AbstractAsyncContextManager
 from datetime import datetime
 from typing import Any
@@ -93,26 +94,72 @@ _MARK_DELIVERED = """
 # row with attempts left are one `UPDATE` — which is why nothing counted dead letters at all, and
 # why the queued-minus-published difference could never be a backlog: a retired row leaves the
 # queue and increments nothing on the published side, forever.
+#
+# **`AND state = 'pending'` is what makes that claim true.** `RETURNING state` returns the *new*
+# value for every matched row, not only for the rows that changed, so without a guard the count was
+# per call rather than per transition: measured, `mark_failed(ids)` on the same three ids twice
+# booked `chemclaw_results_dead_lettered_total` 0 → 3 → 6 and logged "3 retired to dead-letter"
+# both times, for three retirements. The guard is the transition's own precondition — a claimed row
+# is `pending` by construction (`_CLAIM` spends the attempt and leaves the state alone) — so it is
+# narrower than `state <> 'failed'` for free, and a `delivered` row can no longer be walked
+# backwards into `failed` by a mis-partitioned id list either.
 _MARK_FAILED = """
     UPDATE result_publications
     SET last_error = %s,
         state = CASE WHEN attempts >= %s THEN 'failed' ELSE 'pending' END
-    WHERE id = ANY(%s)
+    WHERE id = ANY(%s) AND state = 'pending'
     RETURNING state
 """
 
 # The backlog, per sink, in the two numbers that are actually a backlog. `count(*)` and
 # `min(enqueued_at)` are both served by the partial index `result_publications_pending`
-# (`(sink, enqueued_at) WHERE state = 'pending'`), so this is an index-only scan and the age is one
-# read of its leading edge per sink.
+# (`(sink, enqueued_at) WHERE state = 'pending'`).
+#
+# **What that costs, from `EXPLAIN (ANALYZE, BUFFERS)` rather than from reasoning about it.** On
+# 200k rows with 10k pending across 3 sinks (PostgreSQL 16, everything in shared buffers):
+#
+#   - freshly `VACUUM`ed: `GroupAggregate ← Index Only Scan` — `Heap Fetches: 0`, 70 buffers,
+#     1.8 ms. Still `rows=10000`: it walks **every pending index entry**.
+#   - as the table actually is between vacuums: `HashAggregate ← Bitmap Heap Scan ← Bitmap Index
+#     Scan`, 4,940 heap blocks, 5,076 buffers, 9.4 ms. Pending rows are the churning ones — every
+#     insert and every `_CLAIM` dirties their pages — so their pages are the least likely in the
+#     table to be all-visible, which is exactly when an index-only scan degrades.
+#
+# So the two claims this comment used to make were both wrong: "an index-only scan" is the
+# best-case plan and not the steady-state one, and "the age is one read of its leading edge" is
+# wrong in every plan — `min(enqueued_at)` is a full aggregate over the pending set, because
+# `count(*)` in the same statement has to read all of it anyway. The cost is a function of the
+# backlog, which is the honest way to state it: it is cheap because the backlog is normally small,
+# not because the plan reads one row.
+#
+# `min(enqueued_at)` as an **absolute epoch**, not an age. The age is computed in the gauge
+# callable against the clock at scrape time, so a drain that has stopped shows a backlog that keeps
+# ageing instead of one frozen at its last healthy reading. Computing `now() - min(...)` here put
+# the subtraction at refresh time, which meant the number stood still exactly when the drain did —
+# and a stopped drain is the outage `ChemclawResultOutboxStuck` exists to catch, so the metric was
+# blind to its own headline case. `ingest/eln/cursor.py` had already made this choice and written
+# down why; this is that argument applied to the sibling that got it wrong.
 _PENDING = """
-    SELECT sink, count(*), EXTRACT(EPOCH FROM (now() - min(enqueued_at)))
+    SELECT sink, count(*), EXTRACT(EPOCH FROM min(enqueued_at))
     FROM result_publications WHERE state = 'pending' GROUP BY sink
 """
 
 # Dead letters, per sink. Deliberately a second statement: there is no partial index on `failed`,
 # so folding it into the query above with a `FILTER` would take the pending read off its index too.
-# Read on the drain pass (every `result_publish_schedule_minutes`), never on a scrape.
+#
+# **With no index on `failed` this is a sequential scan of the whole table, and that is the
+# subsystem's most expensive read.** Measured on the same 200k-row population: `Parallel Seq Scan`
+# over 200,000 rows to find 5,136 failed ones, 2,478 buffers, ~20 ms — vacuumed or not, since
+# nothing here is indexable. It does not shrink over time the way the pending read does: retention
+# prunes `delivered` rows only, and a `failed` row is "kept, never deleted" by design, so the scan
+# grows with everything this deployment has ever published *and* with everything it has ever
+# retired.
+#
+# Read once per drain pass — every `result_publish_schedule_minutes`, and once for all sinks rather
+# than once per sink (see `durable/publish_results._drain_result_publications`, which is where the
+# refresh moved to and why). At that cadence 20 ms on 200k rows is not a cost worth an index. It
+# becomes one if the table reaches millions of rows, and the fix then is a partial index on
+# `(sink) WHERE state = 'failed'` in `infra/sql/`, not a change here.
 _DEAD_LETTERED = """
     SELECT sink, count(*) FROM result_publications WHERE state = 'failed' GROUP BY sink
 """
@@ -121,7 +168,7 @@ _DEAD_LETTERED = """
 # read by every scrape — which is the whole point: a gauge that queried per scrape is the objection
 # that argued against having one at all.
 _PENDING_GAUGE: dict[str, float] = {}
-_OLDEST_GAUGE: dict[str, float] = {}
+_OLDEST_ENQUEUED: dict[str, float] = {}
 _DEAD_GAUGE: dict[str, float] = {}
 
 
@@ -274,16 +321,21 @@ async def claim(sink: str, limit: int) -> list[tuple[int, str, dict[str, Any]]]:
     worker that dies mid-delivery leaves its rows `pending` with one attempt spent, and the next
     run picks them up — at-least-once, which is exactly what the content-addressed upserts on the
     far end are built for.
+
+    **This no longer refreshes the backlog gauges, and that is the fix rather than an omission.**
+    It used to, with a comment saying the reading was taken after the claim "so the reading
+    excludes the rows this pass is about to deliver". `_CLAIM` only increments `attempts`; it
+    leaves `state = 'pending'` — the whole point of not holding a transaction across the delivery —
+    so a claimed row is still pending to `_PENDING`. Measured: three rows, one `claim()`, and
+    `chemclaw_outbox_pending{sink="probe"}` read **3.0** with all three still undelivered. The
+    gauge published the *pre*-drain depth and held it for a full pass, which is the one reading it
+    must never give. The refresh now happens once per pass after every row has been marked — see
+    `durable/publish_results._drain_result_publications`.
     """
     async with _connect("outbox_claim") as conn:
         cursor = await conn.execute(_CLAIM, (sink, settings.result_publish_max_attempts, limit))
         rows = await cursor.fetchall()
         await conn.commit()
-    # The drain pass *is* the refresh point, and this is where a pass reaches the outbox — one
-    # extra indexed read per sink per pass, against a `COUNT(*)` on every 15-second scrape. Taken
-    # after the claim rather than before it so the reading excludes the rows this pass is about to
-    # deliver, which is what makes a falling backlog visible from one pass to the next.
-    await refresh_backlog()
     return [(int(row[0]), str(row[1]), row[2]) for row in rows]
 
 
@@ -362,6 +414,22 @@ async def refresh_backlog(dsn: str | None = None) -> None:
     disappearing series and a series reading zero are not the same thing to an alert: a rule on
     "pending > 0 for 30m" silently stops evaluating when the label vanishes.
 
+    **That holds within a process's lifetime and not across a restart, which is a limit rather than
+    a hole.** `_PENDING_GAUGE`, `_OLDEST_ENQUEUED` and `_DEAD_GAUGE` start empty, so between a pod
+    starting and its first drain pass the three families are *absent* from `/metrics` — the exact
+    state the paragraph above argues against, arriving by a route that paragraph does not cover.
+    It cannot be closed by seeding: a fabricated `pending = 0` for every configured sink would be a
+    reading nobody has taken, and reading zero for a queue that is actually deep is strictly worse
+    than reading nothing. `ingest/eln/cursor.py`'s `_OBSERVED` has the identical shape for the same
+    reason, and seeding it with the epoch would page for every source at every restart.
+
+    What closes it is on the alerting side, where absence is expressible:
+    `absent_over_time(chemclaw_outbox_pending[1h])` (and the same over
+    `chemclaw_outbox_dead_lettered` and `chemclaw_ingest_cursor_lag_seconds`) fires when nothing has
+    reported for longer than a drain interval, which is the same fault as a stuck drain and wants
+    the same operator. The window has to exceed `result_publish_schedule_minutes`, or an ordinary
+    restart pages.
+
     Never raises: this is telemetry running inside a drain whose real work is delivery, and a
     backlog read that failed must not fail the pass that would reduce the backlog.
     """
@@ -376,7 +444,12 @@ async def refresh_backlog(dsn: str | None = None) -> None:
         logger.warning("publish: could not read the outbox backlog; gauges keep their last value")
         return
     _replace(_PENDING_GAUGE, {str(row[0]): float(row[1]) for row in pending})
-    _replace(_OLDEST_GAUGE, {str(row[0]): float(row[2] or 0.0) for row in pending})
+    # The enqueue epoch of each sink's oldest pending row; the gauge turns it into an age. A sink
+    # with nothing pending has no oldest row, and `_replace` zeroes it — which reads as "0 seconds
+    # behind", the honest answer for an empty queue.
+    _replace(
+        _OLDEST_ENQUEUED, {str(row[0]): float(row[2]) for row in pending if row[2] is not None}
+    )
     _replace(_DEAD_GAUGE, {str(row[0]): float(row[1]) for row in dead})
 
 
@@ -384,6 +457,24 @@ def _replace(gauge: dict[str, float], reading: dict[str, float]) -> None:
     """Update a gauge family in place, keeping known sinks that have fallen to zero."""
     gauge.update(dict.fromkeys(gauge, 0.0))
     gauge.update(reading)
+
+
+def _oldest_pending_seconds() -> dict[str, float]:
+    """How long each sink's oldest undelivered row has been waiting, as of *now*.
+
+    Read at scrape time against the stored enqueue epoch rather than stored as an age, and the
+    difference is the whole value of the metric: a drain that stops refreshing leaves the count and
+    the dead-letter families frozen — which is honest, they are counts of a state nobody has
+    re-read — but an *age* that stands still is a lie about the passage of time. Frozen at "120 s
+    behind", `ChemclawResultOutboxStuck` would never cross its threshold no matter how long the
+    drain stayed down, so the rule whose own description says "the drain is not keeping up or has
+    stopped" was blind to the second half.
+
+    Clamped at zero: a row enqueued by a pod whose clock runs ahead of this one would otherwise
+    read as a negative age, which is a nonsense an alert cannot interpret.
+    """
+    now = time.time()
+    return {sink: max(0.0, now - enqueued) for sink, enqueued in _OLDEST_ENQUEUED.items()}
 
 
 def bind_backlog_gauges() -> None:
@@ -396,7 +487,7 @@ def bind_backlog_gauges() -> None:
     record_metric(lambda m: m.bind_gauge_family("chemclaw_outbox_pending", lambda: _PENDING_GAUGE))
     record_metric(
         lambda m: m.bind_gauge_family(
-            "chemclaw_outbox_oldest_pending_seconds", lambda: _OLDEST_GAUGE
+            "chemclaw_outbox_oldest_pending_seconds", _oldest_pending_seconds
         )
     )
     record_metric(

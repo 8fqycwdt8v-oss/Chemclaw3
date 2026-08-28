@@ -317,6 +317,26 @@ probes:
       periodSeconds: 10
       failureThreshold: 30
       timeoutSeconds: 5
+  worker:
+    # The same 30 x 10 s budget, and it is the same measurement: core's worker and every bundle's
+    # worker run the *same image* and import the same tree — `chemclaw.durable.serve` pulls the
+    # activities, which pull RDKit, the agent stack and the connector registry — before
+    # `chemclaw.core.worker_http` binds a port. Only the front door and the connector servers were
+    # given a head start for it.
+    #
+    # **What that cost is arithmetic, not a guess.** `chemclaw.workerProbes` states
+    # `initialDelaySeconds: 10`, `periodSeconds: 20` and `failureThreshold: 6`, so the sixth
+    # consecutive liveness failure lands at 10 + 5 x 20 = 110 s and the kubelet SIGKILLs a process
+    # that is still importing. Every restart then pays the same imports again, which is the crash
+    # loop with nothing wrong in it that `probes.connector` was written for — one pod kind later.
+    #
+    # A `startupProbe` is again the right shape rather than a bigger `initialDelaySeconds`:
+    # liveness and readiness do not run at all until the process answers once, so the two numbers
+    # below stay tuned for a *running* worker instead of being stretched to cover a cold start.
+    startup:
+      periodSeconds: 10
+      failureThreshold: 30
+      timeoutSeconds: 5
 
 # How long a connector pod is given to finish what it is holding when it is told to stop, and how
 # long its Service is given to stop routing to it first. The front door has had both since D-121 and
@@ -326,10 +346,28 @@ probes:
 # Kubernetes removes the Endpoint and sends SIGTERM concurrently, so a pod that stopped promptly
 # would refuse calls the front door was still making.
 connectorDrainSeconds: 10
-# Strictly larger than the drain plus the longest request a connector serves *in process*. The heavy
-# science is not in process — it is `Chemclaw3-mcp`'s `servers/calc`, dialled over HTTP under its
-# own `request_timeout` — so this bounds the wait for that call to return, not a CREST search.
-connectorGracePeriodSeconds: 120
+#
+# **The grace period itself is no longer a number here**, because the number that was here was
+# wrong and could not be seen to be. It said 120 s and argued that the heavy science "is not in
+# process — it is `Chemclaw3-mcp`'s `servers/calc`, dialled over HTTP", which is true and is the
+# reason the bound is *large*: the in-process wait is that HTTP call, and this repository's client
+# is allowed `CHEMCLAW_CALC_SERVER_TIMEOUT_SECONDS` (900 s) for a composed primitive and
+# `CHEMCLAW_CALC_ATOMIC_TIMEOUT_SECONDS` (3600 s) for the two tools pinned to the `xtb` binary. A
+# 120 s grace period SIGKILLed a synchronous `optimize_geometry` or `compute_atomic_descriptors`
+# at 120 s into a call the rest of the system was prepared to wait an order of magnitude longer
+# for — and the cache write that would have made the retry free happens *after* the call returns,
+# so the retry recomputed from zero.
+#
+# `chemclaw.connectorGracePeriod` derives it from those two ConfigMap keys plus the drain above, so
+# the pod's ceiling and the client's bound cannot disagree; `tests/test_deploy_chart.py` pins both
+# the derivation and the relation against `Settings`' own defaults. A grace period is a *ceiling*,
+# not a wait — an idle connector pod still exits in `connectorDrainSeconds` — so covering the worst
+# case costs a rolling update nothing and buys the one call that needs it.
+#
+# `CHEMCLAW_CALC_SAMPLING_TIMEOUT_SECONDS` (14400 s) is deliberately **not** in that maximum: the
+# two CREST searches it bounds are reachable only from `connectors/calc/activities.py`, which runs
+# on a Temporal *worker* pod under `chemclaw.workerGracePeriod` and Temporal's own retry, never
+# from a connector server's synchronous tool surface.
 
 # The port every *worker* container serves `/healthz`, `/readyz` and `/metrics` on
 # (`chemclaw.core.worker_http`). A worker has no Service — nothing routes to it — so this is a bare
@@ -348,12 +386,20 @@ postgres:
   # `chemclaw.pooledProcesses`, and until this existed the shipped chart's product was ~272
   # against the `max_connections=100` D-119 measured against.
   #
-  # 136 is exactly what the shipped values produce (17 pooled processes × the 8 below),
-  # deliberately — this ships as a *statement* of the current shape rather than as slack, the same
-  # way CHEMCLAW_SERVICE_FLEET_MAX_CONCURRENT_TURNS does. Anything that exceeds it fails `Settings`
-  # validation at startup, in every pod, naming both sides; the runtime half is
-  # `chemclaw_pg_fleet_max_connections` against `sum(chemclaw_pg_pool_max_size)`, which also
-  # catches a Deployment scaled by hand.
+  # **How many pooled processes that is, is not written here.** The sentence that was said "17
+  # pooled processes × the 8 below", which was 136 exactly — and by the time it was read the
+  # `serverReplicas`/`workerReplicas` split had moved the render to 14, so the arithmetic in the
+  # comment produced a number the chart no longer renders and the equality it claimed was false.
+  # `chemclaw.pooledProcesses` derives the count from the topology and
+  # `CHEMCLAW_PG_FLEET_POOLED_PROCESSES` carries it into every pod, which is where the number lives;
+  # `tests/test_deploy_chart.py::test_the_shipped_connection_ceiling_matches_the_fleet_the_chart_renders`
+  # refuses a chart whose product exceeds this ceiling and prints both sides when it does.
+  #
+  # This is a ceiling with headroom above the shipped topology, not slack nobody meant: enabling one
+  # more connector or raising a replica count must not require re-provisioning the database in the
+  # same change. Anything that *exceeds* it fails `Settings` validation at startup, in every pod,
+  # naming both sides; the runtime half is `chemclaw_pg_fleet_max_connections` against
+  # `sum(chemclaw_pg_pool_max_size)`, which also catches a Deployment scaled by hand.
   #
   # **This is a provisioning requirement, not a preference.** A stock Postgres ships
   # `max_connections=100` and will refuse this release at full scale. Either provision the instance
@@ -449,7 +495,9 @@ config:
   # CHEMCLAW_VERIFIER_CONFIDENCE_THRESHOLD: "0.7"
   CHEMCLAW_SESSION_STORE: "postgres"
   # Stated rather than left to the code default (16), because the code default was chosen for one
-  # process and this chart runs seventeen of them. 8 matches the front door's own admission cap
+  # process and this chart runs a fleet of them — how many is `chemclaw.pooledProcesses`, derived
+  # from the topology rather than counted here, because the count written here said seventeen while
+  # the chart rendered fourteen. 8 matches the front door's own admission cap
   # (CHEMCLAW_SERVICE_MAX_CONCURRENT_TURNS below), which is the process with the most claim on
   # connections — no turn holds one across the model call, so a pool the width of the admission cap
   # already has headroom. `postgres.maxConnections` above is this times the pooled-process count,
@@ -482,6 +530,27 @@ config:
   # `connectors.safety.url` name their siblings: whatever Service the sibling repo's chart gives
   # its `calc` server in this namespace.
   CHEMCLAW_CALC_SERVER_URL: "http://chemclaw3-mcp-calc:8860/mcp"
+  # How long this repository's calc client may wait on that server, stated here rather than left to
+  # the code default for one reason: **the chart derives a connector pod's shutdown ceiling from
+  # them** (`chemclaw.connectorGracePeriod`). A pod grace period shorter than the call it is holding
+  # is a SIGKILL through a running calculation, and that is exactly what a hand-written 120 s did
+  # against these two numbers. Stating them makes the pod and the chart read one value each instead
+  # of a chart number that has to remember what `CalculatorSettings` chose.
+  #
+  # 900 s is the composed-primitive bound (`optimize_geometry`, `compute_thermochemistry`,
+  # `predict_logd`, …); 3600 s is the bound for the two tools pinned to the `xtb` binary
+  # (`compute_atomic_descriptors`, `compute_surface_potential`), matched to that binary's own
+  # `xtb_cli_timeout_seconds` on the serving side so the *server* is what bounds the wait rather
+  # than a shorter client guess that abandons work still being computed.
+  CHEMCLAW_CALC_SERVER_TIMEOUT_SECONDS: "900"
+  CHEMCLAW_CALC_ATOMIC_TIMEOUT_SECONDS: "3600"
+  # The two periodic passes whose *absence* is the only signal that they have stopped, stated here
+  # for the same reason the calc timeouts above are: `prometheusrule.yaml` derives
+  # `ChemclawOutboxBacklogUnreported` and `ChemclawIngestLagUnreported` from them, and an alert
+  # window that has to remember what `Settings` chose is one that stops agreeing with it silently.
+  # Both are the code defaults; a deployment that changes a cadence moves its alert with it.
+  CHEMCLAW_RESULT_PUBLISH_SCHEDULE_MINUTES: "15"
+  CHEMCLAW_ELN_SYNC_SCHEDULE_MINUTES: "60"
   # What that server will serve concurrently — the right-hand side of a bound nothing computed
   # (D-2026-08-27-a-per-worker-cap-is-not-a-backend-ceiling). Every calc worker process may run
   # CHEMCLAW_WORKER_MAX_CONCURRENT_ACTIVITIES activities at once and each holds one session to that
@@ -820,8 +889,26 @@ monitoring:
     turnLatencyP95Seconds: 120
     # The share of durable jobs that may end `failed` before the durable group pages. A ratio and
     # not a count, because one connector's jobs are minutes apart and another's are seconds apart —
-    # a count would mean six different things across the six bundles.
+    # a count would mean a different thing in each bundle the chart enables.
     jobFailureRatio: 0.2
+    # **The traffic floor every ratio alert is gated on, and the reason it exists.**
+    #
+    # A ratio alone fires at 100% on a single event in an otherwise idle window: one failed turn at
+    # 03:00 with no other traffic is `rate(failed) / rate(started) = 1`, which is over any threshold
+    # anybody would set. `clamp_min(denominator, 0.001)` was in both expressions and does not fix
+    # this — it is a division-by-zero guard, and it makes the problem *worse* by turning the empty
+    # window into a large finite ratio rather than no sample. Measured with `promtool test rules`:
+    # one failure and one start in ten minutes evaluated to 1 and the alert fired.
+    #
+    # So each ratio carries an absolute floor on its own denominator, in events per second, and the
+    # window each is read over is what makes them comparable:
+    #   turnsFloorPerSecond 0.01  = 6 turns in the rule's 10-minute window
+    #   jobsFloorPerSecond  0.002 = ~3.6 durable jobs in the rule's 30-minute window
+    # Both are per-second because that is what `rate()` returns; the counts above are what an
+    # operator should tune against, and a deployment quieter than its floor is one whose ratio
+    # cannot mean anything yet.
+    turnsFloorPerSecond: 0.01
+    jobsFloorPerSecond: 0.002
     # How long a result publication may sit undelivered before the outbox counts as stuck, in
     # seconds. Read off `chemclaw_outbox_oldest_pending_seconds`, the age gauge, and NOT off
     # queued-minus-published: dead-lettered rows never leave that difference, and its two counters
@@ -834,6 +921,39 @@ monitoring:
     # genuinely quiet source also does — the lag gauge is the only thing that separates them. 24
     # hours, because the shipped sources are nightly.
     ingestLagSeconds: 86400
+    # **When a periodic producer's series is simply absent.** Four gauge families here
+    # (`chemclaw_outbox_pending`, `chemclaw_outbox_oldest_pending_seconds`,
+    # `chemclaw_outbox_dead_lettered`, `chemclaw_ingest_cursor_lag_seconds`) are written by a
+    # scheduled pass and are empty on a fresh process until that pass runs. So "the drain is not
+    # running at all" presents as *series absence*, and `ChemclawResultOutboxStuck` /
+    # `ChemclawIngestCursorStalled` cannot fire on it — a rule needs the series to evaluate it.
+    # Seeding the families at startup was considered and is worse: it would publish `pending=0` for
+    # a queue that is actually deep.
+    #
+    # Both halves are stated in *passes* and multiplied by the producer's own cadence
+    # (`CHEMCLAW_RESULT_PUBLISH_SCHEDULE_MINUTES`, `CHEMCLAW_ELN_SYNC_SCHEDULE_MINUTES` in `config`
+    # below) rather than written as durations, because a site that raises a schedule to 30 minutes
+    # would otherwise turn a fixed 1 h window into a false-positive generator.
+    #
+    # `silenceHoldPasses` is not decoration: `absent_over_time` is true from the moment a *fresh
+    # install* starts, since the first pass has not run yet, so a `for: 0m` absence rule pages on
+    # every install. Holding for two more cadences puts the page a clear two passes past the point
+    # where a healthy first pass would have cleared it.
+    silenceWindowPasses: 4
+    silenceHoldPasses: 2
+    # How much longer than a cold start `ChemclawTargetDown` waits before paging, in seconds.
+    #
+    # **This exists because that alert could fire on an ordinary rollout.** A PodMonitor's pod
+    # discovery and a ServiceMonitor's endpoint discovery both make a pod a scrape *target* from
+    # the moment it exists, not from the moment it is ready — so `up` is 0 for the whole of a cold
+    # start, and every pod kind here is given `probes.*.startup.periodSeconds x failureThreshold`
+    # to finish importing. `for: 5m` sat *inside* that budget, so a slow node during a deploy paged
+    # `critical` for a process that was starting normally.
+    #
+    # The rule's `for:` is therefore derived from the largest startup budget in `probes:` plus this
+    # margin, rather than stated — raising a startup budget without moving the alert is exactly the
+    # drift that produced the pair.
+    targetDownMarginSeconds: 60
     # Which scrape targets `ChemclawTargetDown` watches, as a PromQL matcher on the `job` label.
     # `.+` means "every target in this release's namespace", which is correct by construction: the
     # rule already pins `namespace`, this chart's ServiceMonitor and PodMonitor are what put those
@@ -885,9 +1005,14 @@ monitoring:
     groupWait: 30s
     groupInterval: 5m
     repeatInterval: 4h
-  # Console/Grafana dashboards for the metrics that have no alert. 104 series are declared and 16
-  # are alerted; the rest had no consumer of any kind, which is the same failure one level up from
-  # the one the ServiceMonitor fixed — collected, and read by nobody.
+  # Console/Grafana dashboards for the metrics that have no alert. How many that is, is not written
+  # here: the sentence that was said "104 series are declared and 16 are alerted" against a registry
+  # of 105 and an alert set that reads 39 of them, so both halves of it were wrong in the direction
+  # that overstates coverage. `len(declared_metric_names())` is the only honest source, and
+  # `tests/test_deploy_chart.py::test_every_declared_metric_has_a_consumer` is what makes the
+  # coverage checkable rather than believed — every declared series must have a panel or a rule.
+  # Before these files most of them had neither, which is the same failure one level up from the one
+  # the ServiceMonitor fixed: collected, and read by nobody.
   dashboards:
     enabled: true
     # **The OpenShift console reads custom dashboards only from `openshift-config-managed`**, so
@@ -912,6 +1037,15 @@ monitoring:
   # permanently-down scrape target — which `ChemclawTargetDown` would then report forever. Flip
   # this to `true` in the same change that adds the `TelemetryConfig(metrics=PrometheusConfig(...))`
   # bind in `durable/serve.py`.
+  #
+  # That change owns the dashboard panels too. `chemclaw-durable.json` shipped a "Temporal worker
+  # task slots" and a "Temporal pollers" panel *unconditionally*, over series nothing in this system
+  # emits — two graphs that could never draw, which on a dashboard is indistinguishable from two
+  # graphs saying nothing is happening. `ChemclawWorkerNotPolling` was already gated on this flag
+  # for exactly that reason; the panels were not. They are deleted rather than gated, because a
+  # panel for a producer that does not exist is a "for later" stub, and
+  # `tests/test_deploy_chart.py::test_no_dashboard_panel_queries_a_series_nothing_produces` refuses
+  # the next one.
   temporalSdkMetrics:
     enabled: false
     # The port that exporter binds. Distinct from `workerMetricsPort`: the SDK's exporter is a Rust

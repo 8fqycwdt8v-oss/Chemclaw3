@@ -217,8 +217,17 @@ async def record_job(record: JobRecord) -> None:
     recorded and one run is counted twice. In a sustained outage all five attempts increment, the
     wrapper swallows the resulting `ActivityError`, and the counter reports five times the compute
     for a run with no durable record at all. Counting after the awaited write makes the number mean
-    "a run was recorded", which is the only claim it can honestly make; the upsert keys on
-    `job_id`, so a retry after a committed-but-timed-out write replaces the row and increments once.
+    "a run was recorded", which is the only claim it can honestly make.
+
+    **It narrows the window rather than closing it, and the residual is worth naming.** An activity
+    whose write commits and whose *result report* is then lost — the worker dies between the commit
+    and the completion, the broker misses the response — is redelivered by Temporal and runs again:
+    the upsert keys on `job_id`, so the row is replaced rather than duplicated, but this counter is
+    incremented a second time for one run. The honest reading of `chemclaw_jobs_finished_total` is
+    therefore "runs recorded, at least once each", which is what a counter booked from an
+    at-least-once activity can be and no more. The alternative — deriving the number from the table
+    — is a `COUNT(*)` per scrape over rows that are never pruned, which is the trade the gauge
+    families decline elsewhere for the same reason.
     """
     await default_job_record_sink().record(record)
     # The counterpart `chemclaw_jobs_started_total` never had. Booked in the activity beside the

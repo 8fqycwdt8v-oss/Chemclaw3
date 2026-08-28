@@ -601,6 +601,46 @@ class Settings(
         return self
 
     @model_validator(mode="after")
+    def _the_heartbeat_fits_inside_the_budget_it_reports_within(self) -> Self:
+        """A heartbeat timeout outside the budget it sits under is a control that does nothing.
+
+        `background_activity_heartbeat_timeout_seconds` is the heartbeat timeout for core's three
+        long background activities — the note reindex, the retention sweep and the result-publish
+        drain — and its own comment asserts as fact that it sits "far below every start-to-close
+        budget it sits under". Nothing checked that, and both directions of getting it wrong are
+        silent:
+
+        - **Above the budget it guards.** `CHEMCLAW_RESULT_PUBLISH_TIMEOUT_SECONDS=30` with one
+          configured sink gives the drain a 30 s start-to-close under a 60 s heartbeat timeout, so
+          the heartbeat can never fire first and the failure detection it exists for is inert.
+        - **Large enough that the beat outlives the budget.** `durable/heartbeat.py::beating`
+          derives its interval as `timeout / 4`, so a 3600 s heartbeat timeout beats every 900 s —
+          longer than the 600 s `retention_timeout_seconds` — and the activity therefore sends *no*
+          beat at all before its start-to-close expires. The sweep fails on a timeout that has
+          nothing to do with the sweep.
+
+        One rule covers both, because both are the same inequality: the heartbeat timeout must be
+        strictly below the shortest budget it sits under. `result_publish_timeout_seconds` is taken
+        alone rather than times the sink count, since one sink is the smallest that budget can be.
+        """
+        shortest, budget = min(
+            (
+                (self.retention_timeout_seconds, "retention_timeout_seconds"),
+                (self.note_reindex_timeout_seconds, "note_reindex_timeout_seconds"),
+                (self.result_publish_timeout_seconds, "result_publish_timeout_seconds"),
+            )
+        )
+        if self.background_activity_heartbeat_timeout_seconds >= shortest:
+            raise ValueError(
+                "background_activity_heartbeat_timeout_seconds="
+                f"{self.background_activity_heartbeat_timeout_seconds} does not fit inside the "
+                f"budget it reports within: the shortest is {shortest}s ({budget}). At or above "
+                "it the heartbeat can never fire first, so the dead-worker detection it exists "
+                f"for is inert. Lower it below {shortest}, or raise {budget}."
+            )
+        return self
+
+    @model_validator(mode="after")
     def _the_activity_budget_covers_the_search_it_awaits(self) -> Self:
         """The same rule one level down: the activity must outlive its longest single client call.
 

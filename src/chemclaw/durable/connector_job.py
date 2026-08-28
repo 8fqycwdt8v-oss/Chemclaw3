@@ -53,7 +53,6 @@ from temporalio.exceptions import ActivityError, ChildWorkflowError
 with workflow.unsafe.imports_passed_through():
     from chemclaw.core.config import settings
     from chemclaw.core.metrics_bridge import degraded
-    from chemclaw.durable.job_metrics import job_ended, job_running
     from chemclaw.durable.job_record import JobRecord, note_with_run_provenance, record_job
     from chemclaw.durable.memory_jobs import publish_memory_note_activity
     from chemclaw.durable.notify import notify_session_best_effort
@@ -65,7 +64,6 @@ from chemclaw.durable.publish import (
     BAD_DATA_RETRY,
     publish_note_best_effort,
     publish_result_best_effort,
-    queue_wait_timeout,
 )
 from chemclaw.durable.registry import durable_workflow
 
@@ -75,6 +73,12 @@ from chemclaw.durable.registry import durable_workflow
 # and no adapter can do that half. One guard covering both keeps the count and the line describing
 # the same event, which is the property `metrics_bridge.degraded` exists to give.
 logger = logging.getLogger(__name__)
+
+
+# How much of a failure's own sentence is kept. The same 500 `publish_results.py` caps its
+# `outcome.reason` at, and for the same reason: this is a sentence for a person, and the first
+# 500 characters of one carry what the remainder cannot add.
+_REASON_MAX_CHARS = 500
 
 
 def failure_reason(exc: BaseException) -> str:
@@ -106,11 +110,20 @@ def failure_reason(exc: BaseException) -> str:
     typed "2-MeTHF" — while the frame directly above was the sentence the product had deliberately
     written for exactly this moment, naming the offending value and the accepted ones. Depth is not
     specificity: the deepest frame belongs to whoever is furthest from the user.
+
+    **Bounded, because nothing downstream of it is.** This string is not a log line: it is written
+    to a TEXT column, carried in the `job_failed` push-back payload, hashed into that event's
+    `_dedupe_key` through `json.dumps`, stored in `session_events`, and read back by
+    `_recorded_status` into a `DurableJobStatus.summary` that lands in a model turn. `str(cause)`
+    over an arbitrary exception has no length at all — a pydantic `ValidationError` over a large
+    payload, or a driver that folds a query into its message, is kilobytes. The cap is the one
+    `publish_results.py` already applies to the analogous field, applied once here so no caller
+    has to remember.
     """
     cause: BaseException = exc
     while isinstance(cause, (ChildWorkflowError, ActivityError)) and cause.__cause__ is not None:
         cause = cause.__cause__
-    return str(cause) or type(cause).__name__
+    return (str(cause) or type(cause).__name__)[:_REASON_MAX_CHARS]
 
 
 class ConnectorJobInput(BaseModel):
@@ -453,6 +466,27 @@ def child_execution_timeout(declared: float | None) -> timedelta:
 class ConnectorJobWorkflow:
     """Run one connector-owned workflow as a child, then publish and notify on its behalf."""
 
+    def __init__(self) -> None:
+        """Start with no durable record written for this execution.
+
+        One field, and it is the flag the failure path reads: `_finish` writes the completed
+        record and then awaits three best-effort steps, so "did this run already record itself"
+        is a question the `except` clause has to be able to ask. Instance state rather than a
+        module global because it is per *execution*, and it is deterministic under replay — the
+        instance is rebuilt and the same sequence of awaits re-runs, so the flag re-reaches the
+        same value at the same point in history. Checked rather than argued: both endings of this
+        workflow were replayed through `temporalio.worker.Replayer` against a live broker on
+        2026-08-28 with no non-determinism. That check is **not** in the suite, and deliberately:
+        a test that runs a workflow and then replays the history it just produced compares code
+        against a history that same code wrote, so the two agree by construction — measured, an
+        extra `await self._record_run(record)` injected into `_finish` replayed clean. Detecting a
+        code-versus-history mismatch needs an *archived* history, which is a CI job rather than a
+        unit test. What the suite holds instead is the effect
+        (`test_a_run_that_fails_after_recording_is_not_recorded_a_second_time`), which does go red
+        when the guard is removed.
+        """
+        self._recorded = False
+
     @workflow.run
     async def run(self, job: ConnectorJobInput) -> ConnectorJobResult:
         """Execute the connector's workflow, PR-gate any note it produced, and wake its session.
@@ -477,10 +511,7 @@ class ConnectorJobWorkflow:
         # `workflow.now()` and not `time.monotonic()`: a workflow's clock must come from the one
         # Temporal records in history, or a replay would measure the replay rather than the run.
         started_at = workflow.now()
-        # This process is now carrying the run. Idempotent under replay by construction — see
-        # `durable/job_metrics.py` — so it needs no `is_replaying` guard, unlike every *counter*
-        # a workflow body touches.
-        job_running(workflow.info().workflow_id)
+        job_id = workflow.info().workflow_id
         try:
             result = await self._run_child(job)
             return await self._finish(job, result, started_at)
@@ -504,18 +535,30 @@ class ConnectorJobWorkflow:
             # message to a session that may no longer be listening. A failed run used to leave
             # neither — it existed only in Temporal's expiring history, so a job whose failure
             # push-back was dropped left literally nothing behind.
-            await self._record_run(
-                failed_job_record(
-                    workflow.info().workflow_id,
-                    job,
-                    failure_reason(exc),
-                    (workflow.now() - started_at).total_seconds(),
+            #
+            # **Only when this run has no completed record standing.** `_finish` writes the
+            # completed row and *then* awaits three best-effort steps, which swallow
+            # `ActivityError` and nothing else — so a `CancelledError` (measured: a cancelled
+            # workflow runs its cleanup after `CancelledError`) or a `ValidationError` out of
+            # `note_with_run_provenance` lands here with the science already recorded. Writing a
+            # failure record for it booked a second `chemclaw_jobs_finished_total` and a second
+            # duration sample for one run: measured, `outcome="completed"` *and* `outcome="failed"`
+            # both at 1, and 2 observations on `chemclaw_job_duration_seconds`. The row itself is
+            # protected one layer down as well (`job_record_store` never lets a failure write erase
+            # a result), because that layer has to hold for the case this flag cannot see — the
+            # record activity committing and then overrunning its own timeout, which leaves a row
+            # behind while this workflow believes there is none.
+            if not self._recorded:
+                await self._record_run(
+                    failed_job_record(
+                        job_id,
+                        job,
+                        failure_reason(exc),
+                        (workflow.now() - started_at).total_seconds(),
+                    )
                 )
-            )
             await self._notify_failure(job, exc)
             raise
-        finally:
-            job_ended(workflow.info().workflow_id)
 
     async def _run_child(self, job: ConnectorJobInput) -> ConnectorJobResult:
         """Start the bundle's own workflow on its queue and wait for its result."""
@@ -636,7 +679,12 @@ class ConnectorJobWorkflow:
         # science is finished, so a database that is down must not fail a completed job and send an
         # expensive campaign round the retry loop — but logged at error level, because unlike a
         # failed note this loses data nothing else holds.
-        await self._record_run(record)
+        #
+        # The return value is what the failure clause reads: everything below this line is
+        # best-effort and may still raise something `publish_note_best_effort` and
+        # `notify_session_best_effort` do not swallow, and a failure record written on top of a
+        # completed one is a second count of one run.
+        self._recorded = await self._record_run(record)
         # The external results store, if a deployment has one. Beside the durable record and before
         # the note, because it is the same kind of obligation the other two are: cross-cutting, and
         # "each connector remembers" is the discipline that fails silently. Best-effort for the
@@ -680,12 +728,16 @@ class ConnectorJobWorkflow:
             )
         return result
 
-    async def _record_run(self, record: JobRecord) -> None:
+    async def _record_run(self, record: JobRecord) -> bool:
         """Persist the run's durable record, logging rather than failing the job if it cannot be.
 
         A method rather than an inline block so the "never fail a finished job" decision has one
         place to be read and one place to change — the same shape, and the same reasoning, as
         `publish_note_best_effort`.
+
+        Returns whether the record was written. The success path reads it to know whether a later
+        failure needs a record of its own; the failure path ignores it, because there is nothing
+        further to decide.
         """
         try:
             await workflow.execute_activity(
@@ -697,7 +749,27 @@ class ConnectorJobWorkflow:
                 # loss, discovered when an id expires months later.
                 task_queue=settings.background_task_queue,
                 start_to_close_timeout=timedelta(seconds=settings.job_record_timeout_seconds),
-                schedule_to_start_timeout=queue_wait_timeout(),
+                # **`start_to_close` alone is not a bound on this call**, for exactly the reason
+                # `durable/notify.py` states and measures: it starts only once a worker has picked
+                # the task up, so an unserved background queue — a fleet scaled to zero, a rolling
+                # update, a queue named in config and served by no pod — simply waits. Measured on
+                # 2026-08-28 against a live broker with that queue unserved: a *failed* connector
+                # job was still RUNNING after 150 s, parked on this activity, having never reached
+                # `_notify_failure` — so the one message telling the chemist their job died was
+                # behind an unbounded wait. The doubling is `notify.py`'s, and it is what keeps the
+                # documented ordering (record first, then notify) safe rather than merely intended.
+                #
+                # **The stricter bound rather than `queue_wait_timeout()`, and it is the same
+                # exception `publish.py::queue_wait_timeout` already writes down for `notify.py`:**
+                # this write is best-effort by construction — the `except ActivityError` below
+                # swallows it and the job carries on — so it wants the bound that caps every
+                # attempt together, and it pays for that with a shorter retry budget on a row
+                # nothing downstream reads synchronously. Passing the general
+                # `schedule_to_start_timeout` here as well would be dead: an hour of queue wait
+                # cannot elapse inside a minute of schedule-to-close.
+                schedule_to_close_timeout=timedelta(
+                    seconds=settings.job_record_timeout_seconds * 2
+                ),
                 retry_policy=BAD_DATA_RETRY,
             )
         except ActivityError:
@@ -714,3 +786,5 @@ class ConnectorJobWorkflow:
                     "job record write failed for %s; this run survives only in Temporal's history",
                     record.job_id,
                 )
+            return False
+        return True

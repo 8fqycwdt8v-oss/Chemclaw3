@@ -22,6 +22,7 @@ from typing import Any
 import psycopg
 import pytest
 
+from chemclaw.agent.research_tools import gather_evidence
 from chemclaw.core import db, embeddings
 from chemclaw.core.config import settings
 from chemclaw.core.metrics import METRICS
@@ -193,6 +194,30 @@ def test_a_starved_source_reads_as_zero_rather_than_as_absent() -> None:
     assert _series("chemclaw_evidence_source_kept_total", source="lexical") == 0.0
 
 
+@pytest.mark.anyio
+async def test_gathering_evidence_records_the_surviving_count_without_being_asked_to() -> None:
+    """Driven through `gather_evidence`, because the unit test above cannot see the defect.
+
+    `record_kept_chunks` shipped with **no caller**: the only invocation in the tree was the test
+    one line up, calling it directly. So the helper was covered, the metric was declared, the ADR
+    said `research_tools` "must call" it, a dashboard panel queried it — and the series had no
+    producer, which is the `audit_events.agent` shape this repository has two ADRs about.
+    `test_every_declared_metric_is_named_somewhere_in_the_source` could not catch it either: the
+    name is a literal inside the helper, and a helper nothing calls still names it.
+
+    A test that drives the real path is the only kind that can fail for the real reason, so this
+    one asks `gather_evidence` for evidence and looks at the registry afterwards.
+    """
+    before = _series("chemclaw_evidence_source_kept_total", source="graph")
+    await gather_evidence("anything at all")
+    after = _series("chemclaw_evidence_source_kept_total", source="graph")
+
+    assert after > before, (
+        "gather_evidence recorded no surviving-chunk count — `record_kept_chunks` has lost its "
+        "only caller again, and the kept/chunks ratio has no numerator"
+    )
+
+
 def test_every_evidence_source_is_timed_including_the_one_that_failed() -> None:
     """A vector store that is timing out and one that is empty both return `[]`.
 
@@ -223,13 +248,15 @@ def test_points_the_catalogue_cannot_resolve_are_counted_and_named(
     matches in and zero hits out, and the fan-out books an honest `chunks=0`.
     """
     before = _counter("chemclaw_vector_unresolved_points_total")
+    # The WARNING is throttled per collection (`tests/test_datapath_review_metrics.py`), so this
+    # names one nothing else uses — the point here is that drift is *said*, not how often.
     with caplog.at_level(logging.WARNING, logger="chemclaw.ingest.documents.external_index"):
-        _report_unresolved(addressed=5, rows=3, hits=2)
+        _report_unresolved(addressed=5, rows=3, hits=2, collection="observability-drifted")
 
     assert _counter("chemclaw_vector_unresolved_points_total") == before + 3
     assert "drifted" in caplog.text
     caplog.clear()
-    _report_unresolved(addressed=4, rows=4, hits=4)
+    _report_unresolved(addressed=4, rows=4, hits=4, collection="observability-healthy")
     assert not caplog.records  # nothing to say when everything resolved
 
 
@@ -268,7 +295,9 @@ def test_a_failing_embedding_provider_names_itself(
             embeddings.embed_texts(["x"], cache=False)
 
     assert "embedding.failed" in _events(caplog)
-    assert _series("chemclaw_embedding_calls_total", outcome="failure") >= 1.0
+    # `error`, the value the metric's own HELP names — see `tests/test_datapath_review_metrics.py`
+    # for why a rule written from the HELP used to select nothing.
+    assert _series("chemclaw_embedding_calls_total", outcome="error") >= 1.0
 
 
 # --- G12: a re-embed pass that made no progress -----------------------------------------------
@@ -337,14 +366,38 @@ def test_git_stderr_reaches_the_log_at_the_raise(
 
 
 def test_an_authentication_failure_is_classified_apart_from_a_partition() -> None:
-    """A 403 from the git host is a fact about the token; no number of retries installs one."""
+    """A dead credential is a fact about the token; no number of retries installs one."""
     assert _is_auth_failure(
         "remote: Invalid username or password.\nfatal: Authentication failed for 'https://host/x'"
     )
+    # A forge's genuine denial names the reason as well as the status, which is what classifies it.
     assert _is_auth_failure(
+        "remote: Permission to owner/repo.git denied to bot.\n"
         "fatal: unable to access 'https://h/': The requested URL returned error: 403"
     )
     assert not _is_auth_failure("fatal: unable to access 'https://h/': Could not resolve host: h")
+
+
+def test_a_bare_403_stays_transient_because_a_forge_throttles_with_one() -> None:
+    """The status line alone must not make a note proposal permanent.
+
+    `GitSubmitError` is in `durable/publish.py`'s `non_retryable_error_types`, so classifying a
+    push failure as auth *drops* the proposal rather than backing off. GitHub answers a bare
+    `The requested URL returned error: 403` for secondary rate limits and abuse detection — both
+    of which clear on their own — so treating the code as a credential fact would let a throttle
+    silently stop the PR-gate while every run reported success.
+
+    A genuine denial is not lost by this: it carries a phrase too (the test above), and the marker
+    list is documented as wrong in the safe direction — a missed phrase retries, a false positive
+    is permanent.
+    """
+    assert not _is_auth_failure(
+        "fatal: unable to access 'https://h/': The requested URL returned error: 403"
+    )
+    assert not _is_auth_failure(
+        "remote: You have exceeded a secondary rate limit.\n"
+        "fatal: unable to access 'https://h/': The requested URL returned error: 403"
+    )
     assert not _is_auth_failure("fatal: 'origin' does not appear to be a git repository")
 
 

@@ -82,11 +82,20 @@ answers neither. A label cannot be added to an already-declared counter from thi
 tool results cleared *and the tools they belonged to*, and the number of conversation groups
 dropped. Counts and names, never content.
 
-**And nothing here may end a turn.** There used to be no `try` in this module at all, so a raising
-edit or a `count_tokens_approximately` that choked on an unfamiliar message shape killed the turn as
-a generic internal error — losing the answer, the tokens already spent and every tool the turn had
-run, in order to save tokens. `GuardedEdit` and `_record_reduction` degrade instead, and the request
-proceeds uncompacted, which is the direction with a chance of being answered.
+**And nothing this module writes may end a turn.** There used to be no `try` here at all, so a
+raising edit or a `count_tokens_approximately` that choked on an unfamiliar message shape killed the
+turn as a generic internal error — losing the answer, the tokens already spent and every tool the
+turn had run, in order to save tokens. `GuardedEdit` and `_record_reduction` degrade instead, and
+the request proceeds uncompacted, which is the direction with a chance of being answered.
+
+**The guard covers the edits and the observer, not the whole path, and the difference is upstream's
+code.** `GuardedEdit` wraps `ContextEdit.apply`; `ContextEditingMiddleware.wrap_model_call` itself
+deep-copies the message list and builds the `count_tokens` closure *before* it calls any `apply`,
+and neither is inside anything this module wrote. A `deepcopy` that chokes on a message a provider
+put in the thread, or a `get_num_tokens_from_messages` that raises under the non-approximate
+counting method, still ends the turn. Both are one `try` further out than anything reachable from
+here, so the honest statement is the narrow one — and stating it narrowly is what keeps the next
+reader from assuming a guard that is not there.
 """
 
 import logging
@@ -425,6 +434,42 @@ def disabled_summarizer(model: Any, backend: Any) -> Any:
     return SummarizationMiddleware(model=model, backend=backend, trigger=None)
 
 
+# What has already been reported loudly, by edit class name (and `"reduction"` for the observer).
+# Process-wide rather than per turn, deliberately: the failure this bounds is a *shape* failure —
+# an upstream change, a message a provider put in the thread — and one of those is one fault
+# however many turns meet it.
+_REPORTED: set[str] = set()
+
+
+def _degrade_once(marker: str, message: str, *args: object) -> None:
+    """Count every degradation; report the first of each kind loudly and the rest at DEBUG.
+
+    **Every guard in this module runs inside `wrap_model_call`, which is per model call.** So the
+    realistic failure — an upstream shape change, not a one-off — was one ERROR *with a traceback*
+    per model call, per turn, per pod: a 30-step turn wrote 30 identical tracebacks, and a fleet
+    wrote them continuously until someone shipped a fix. That is the same volume argument
+    `KeepLastConversationGroupsEdit` demotes its own line to DEBUG for, and `_log_narrowing` makes
+    again in `agent/langgraph_agent.py`; it applies here with more force, because a traceback is
+    the most expensive line a process can write and an ERROR is the level an operator pages on.
+
+    **The count is not latched, only the log line.** `chemclaw_degraded_total{subsystem=...}` is a
+    rate, and a rate that reported one event per process would understate a degradation exactly as
+    the run got worse — which is the failure `metrics_bridge.degraded` exists to correct. So every
+    occurrence increments and the first of each kind carries the traceback that explains all of
+    them.
+    """
+    first = marker not in _REPORTED
+    _REPORTED.add(marker)
+    degraded(
+        logger,
+        "compaction",
+        message,
+        *args,
+        level=logging.ERROR if first else logging.DEBUG,
+        exc_info=first,
+    )
+
+
 @dataclass(slots=True)
 class GuardedEdit(ContextEdit):
     """One context edit, wrapped so that a failure inside it costs the reduction and not the turn.
@@ -464,9 +509,8 @@ class GuardedEdit(ContextEdit):
         try:
             self.edit.apply(messages, count_tokens=count_tokens)
         except Exception:
-            degraded(
-                logger,
-                "compaction",
+            _degrade_once(
+                type(self.edit).__name__,
                 "the %s context edit failed; this model call proceeds uncompacted",
                 type(self.edit).__name__,
             )
@@ -540,9 +584,8 @@ def _record_reduction(request: ModelRequest[Any]) -> None:
     try:
         _publish_reduction(request)
     except Exception:
-        degraded(
-            logger,
-            "compaction",
+        _degrade_once(
+            "reduction",
             "could not measure this model call's context reduction; the call itself is unaffected",
         )
 

@@ -59,7 +59,7 @@ from chemclaw.core.identity_context import (
     get_current_correlation_id,
 )
 from chemclaw.core.session_context import get_current_session_id
-from chemclaw.core.tracing import trace_headers
+from chemclaw.core.tracing import trace_header_names, trace_headers
 
 # The header contract, as constants so the connector-side reader and this writer cannot drift.
 HEADER_ACTOR = "X-Chemclaw-Actor"
@@ -72,10 +72,11 @@ HEADER_SESSION = "X-Chemclaw-Session"
 HEADER_CORRELATION = "X-Chemclaw-Correlation-Id"
 HEADER_DRY_RUN = "X-Chemclaw-Dry-Run"
 
-# Every header `turn_headers` can produce that is ours rather than a standard one, so the origin
-# guard in `turn_identity_hook` can remove all of them in one place. A new `X-Chemclaw-*` header
-# belongs in this tuple the day it is written, or it would be the one that survives a redirect the
-# others do not — `tests/test_connector_identity.py` fails if the two ever drift.
+# The four `X-Chemclaw-*` headers this module mints, named as constants so a connector-side reader
+# and this writer cannot drift. **This is not the list the origin guard strips** — that list is
+# `turn_headers()`'s own keys, because `turn_headers` also emits the W3C trace context and a
+# hand-maintained second list is how four of six got stripped and two did not. See
+# `_strippable_headers`.
 STAMPED_HEADERS = (
     HEADER_ACTOR,
     HEADER_SESSION,
@@ -158,6 +159,30 @@ class _EnvBearerAuth(httpx.Auth):
         yield request
 
 
+def _strippable_headers() -> frozenset[str]:
+    """Every header name `turn_headers()` can produce, for the guard that removes them again.
+
+    **Derived, not restated.** The guard used to walk `STAMPED_HEADERS`, a hand-written tuple of
+    the four `X-Chemclaw-*` names — while `turn_headers()` ends with `headers.update(
+    trace_headers())`, which adds `traceparent`, `tracestate` and `baggage` when tracing is on. So
+    a cross-origin redirect had four of six removed and the trace context copied through to the
+    attacker's origin, carrying this deployment's trace and span ids. A second list that has to be
+    remembered is the defect; asking the producer what it produces cannot drift from it.
+
+    The trace half comes from `trace_header_names()` rather than from `turn_headers()` itself,
+    because the stamp and the strip happen at different moments: `trace_headers()` answers with an
+    empty dict once the span has ended, and a redirect hop whose span closed in between would then
+    carry a `traceparent` nothing removed. The propagator knows its own field names whether or not
+    a span is live.
+
+    Called per stripped request rather than cached, since both halves depend on what this
+    deployment has tracing configured to do. It runs only on the redirect path, which is the path
+    that must not be fast.
+    """
+    names = (*STAMPED_HEADERS, *turn_headers(), *trace_header_names())
+    return frozenset(name.lower() for name in names)
+
+
 def _origin(url: httpx.URL) -> tuple[str, str, int]:
     """The (scheme, host, port) an identity header may travel to, default port filled in."""
     return (url.scheme, url.host, url.port or _DEFAULT_PORTS.get(url.scheme, 0))
@@ -177,9 +202,19 @@ def turn_identity_hook(endpoint_url: str) -> Callable[[httpx.Request], Awaitable
     otherwise have
     harvested the caller's Entra object id and full role set, on every turn, from a header set that
     carries identity and nothing else strips. Declining to *re-add* them on a foreign origin is not
-    enough, because the copied originals arrive anyway; the hook therefore removes them. The client
-    also refuses to follow redirects at all (`registry.connector_http_client`) — this is the second
-    layer, for the day someone restores the flag from the MCP SDK's default.
+    enough, because the copied originals arrive anyway; the hook therefore removes them.
+
+    **And it removes everything `turn_headers()` produced, not a list of four.** That function ends
+    with `headers.update(trace_headers())`, so `traceparent`, `tracestate` and `baggage` ride along
+    with the identity — and the guard walked `STAMPED_HEADERS`, which names only the
+    `X-Chemclaw-*` half. See `_strippable_headers`.
+
+    **On the second layer, which exists for some callers and not for the most privileged one.**
+    `registry.connector_http_client` sets `follow_redirects=False`, so a bundle's own client never
+    reaches this branch. `core.mcp_session.short_connect_client` — the client the calc backend
+    uses, which is the hottest and most privileged connection in the system — sets
+    `follow_redirects=True`, and for it this hook is the *only* layer. That is why the strip has to
+    be complete rather than merely present.
 
     Args:
         endpoint_url: The connector's effective endpoint URL — the one origin its identity headers
@@ -193,7 +228,7 @@ def turn_identity_hook(endpoint_url: str) -> Callable[[httpx.Request], Awaitable
     async def stamp(request: httpx.Request) -> None:
         """Stamp the turn's identity, or remove it if this request left the connector's origin."""
         if _origin(request.url) != allowed:
-            for header in STAMPED_HEADERS:
+            for header in _strippable_headers():
                 request.headers.pop(header, None)
             return
         request.headers.update(turn_headers())

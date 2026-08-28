@@ -90,10 +90,23 @@ class DocumentSyncPlan(BaseModel):
 
 
 class DocumentSyncOutcome(BaseModel):
-    """What one run did: per-share reports, and how many stale vectors it refreshed."""
+    """What one run did, including whether it actually finished what it started.
+
+    `reembedded` alone reads as success at any value, including zero — which is why the third
+    field exists.
+    """
 
     shares: list[SyncReport] = Field(default_factory=list)
     reembedded: int = 0
+    # **The difference between "there was nothing left to do" and "nothing could be done."**
+    # `reembed_stale` returns `has_more=False` in both cases — the batch is deterministic, so
+    # re-handing the caller the identical failing batch forever is worse — and the loop below used
+    # to read that as completion either way. So a total embedding-provider outage produced a run
+    # that reported COMPLETED while every superseded vector was still in the corpus, which is
+    # verbatim what `ReembedReport.stalled` was added to prevent and could not, because nothing
+    # read it. A field with no reader is a claim that a control exists (`audit_events.agent`,
+    # `map_to_hpc_identity`), and this is that shape.
+    reembed_stalled: bool = False
 
 
 class DocumentSyncState(BaseModel):
@@ -114,6 +127,10 @@ class DocumentSyncState(BaseModel):
     # Whether the re-embedding drain finished. Carried, because a corpus large enough to need
     # `continue_as_new` mid-re-embed must not restart that drain from the top on the next run.
     reembed_done: bool = False
+    # Set when a whole re-embed batch failed to embed. Distinct from `reembed_done`, and carried on
+    # the state rather than derived at the end, because the drain stops on it: the corpus still
+    # holds superseded vectors, so the next scheduled run must pick the batch up again.
+    reembed_stalled: bool = False
     reembedded: int = 0
 
 
@@ -256,6 +273,13 @@ class DocumentShareSyncWorkflow:
             )
             state.reembedded += refresh.embedded
             iterations += 1
+            if refresh.stalled:
+                # Stop, but do **not** mark the drain done: every chunk in the batch failed to
+                # embed, so the corpus still holds superseded vectors and the next scheduled run
+                # must try again. Marking it done here is what made an outage indistinguishable
+                # from an up-to-date corpus.
+                state.reembed_stalled = True
+                break
             if not refresh.has_more:
                 state.reembed_done = True
                 break
@@ -309,7 +333,9 @@ class DocumentShareSyncWorkflow:
             state.remaining.pop(0)
             state.after = ""
         return DocumentSyncOutcome(
-            shares=_merge_by_source(state.reports), reembedded=state.reembedded
+            shares=_merge_by_source(state.reports),
+            reembedded=state.reembedded,
+            reembed_stalled=state.reembed_stalled,
         )
 
 

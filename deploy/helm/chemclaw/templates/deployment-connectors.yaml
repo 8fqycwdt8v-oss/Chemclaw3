@@ -59,10 +59,13 @@ spec:
       {{- include "chemclaw.imagePullSecrets" $ | nindent 6 }}
       {{- /* The default 30 s would SIGKILL through the `preStop` sleep below plus whatever request
              is in flight, which is the same mistake `chemclaw.workerGracePeriod` exists to prevent
-             on the other kind of pod. Stated rather than derived: a connector's longest in-process
-             wait is an HTTP call to a sibling server under *its* timeout, not a number this chart
-             holds. */}}
-      terminationGracePeriodSeconds: {{ $.Values.connectorGracePeriodSeconds }}
+             on the other kind of pod. **And it used to be stated rather than derived**, on the
+             argument that "a connector's longest in-process wait is an HTTP call to a sibling
+             server under *its* timeout, not a number this chart holds" — which is the right
+             description of the wait and the wrong conclusion about the number, because this chart
+             is what sets that timeout (`config.CHEMCLAW_CALC_*_TIMEOUT_SECONDS`). The stated 120 s
+             sat against a 900 s and a 3600 s client bound. See `chemclaw.connectorGracePeriod`. */}}
+      {{- include "chemclaw.connectorGracePeriod" $ | nindent 6 }}
       securityContext:
         {{- include "chemclaw.podSecurityContext" $ | nindent 8 }}
       containers:

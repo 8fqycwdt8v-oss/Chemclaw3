@@ -34,9 +34,14 @@ def tool_request(
     `state={}` and `runtime=None` are what LangChain documents for a request built outside a graph.
     `tool` defaults to `None` for the same documented reason and because it is also what `ToolNode`
     passes for a name the graph does not hold — the governance chain reads `request.tool_call` and,
-    in one observational place, `request.tool`. Pass a tool only where its *metadata* is the thing
-    under test (`agent/audit.py::_served_by`); leaving it `None` is the honest default, not a
-    convenience, since a middleware that needed it would be one that fails open without it.
+    in two observational places, `request.tool`. Pass a tool where its *metadata* is the thing under
+    test (`agent/audit.py::_served_by`) or where the *label* is (`agent/audit.py::metric_tool_name`,
+    which reads `.name`); leaving it `None` is the honest default, not a convenience, since a
+    middleware that needed it would be one that fails open without it.
+
+    Both readers fail **closed** on `None` — `_served_by` yields `""` and `metric_tool_name` yields
+    `"unknown"` — which is why `None` is also the right fixture for the case they exist to handle:
+    `ToolNode` passes it for a name the graph does not hold, i.e. a name the model invented.
     """
     return ToolCallRequest(
         tool_call={"name": name, "args": args or {}, "id": call_id, "type": "tool_call"},

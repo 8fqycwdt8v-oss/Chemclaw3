@@ -223,11 +223,22 @@ def _embed_uncached(texts: list[str]) -> list[list[float]]:
     and `gather_evidence` logged a source name, neither of them saying that the *embedder* was what
     failed.
 
-    Instrumented here rather than in `_openai_compatible_embeddings` because this is the one place
-    every provider goes through: a deployment on the `hash` embedder still books calls and
+    Instrumented here rather than in `_openai_compatible_embeddings` because both of *this
+    module's* providers pass through it: a deployment on the `hash` embedder still books calls and
     durations, so the series exist in dev and CI and a test can prove them with no network. The
     unit is one **provider call for a batch**, which is the unit that fails and the unit that is
     retried; `texts` rides on the log line so a slow call can be read against how much was in it.
+
+    **It is not every embedding this deployment performs, and saying so was wrong.** A warehouse
+    binding may declare `vector: {embedding: server}`
+    (`ingest/eln/warehouse/retriever.py`), which hands the raw query text to the warehouse and lets
+    *its* embedding function run inside the SQL — `embed_texts` is never called, so that leg books
+    no call, no failure and no duration here. That is a deliberate design (the vectors in such a
+    warehouse were produced by its own function, and re-embedding locally would compare vectors
+    from two different models), and it is not instrumentable from this module: there is no client
+    call to time, only a SQL expression whose cost is inside the warehouse's own query. What is
+    measurable about it is the leg as a whole, which
+    `chemclaw_evidence_source_seconds{source}` already records.
     """
     started = time.perf_counter()
     try:
@@ -236,8 +247,13 @@ def _embed_uncached(texts: list[str]) -> list[list[float]]:
         else:
             vectors = [_hash_embedding(text) for text in texts]
     except Exception as exc:
+        # `error`, not `failure`: `chemclaw_embedding_calls_total`'s HELP says "by outcome
+        # (ok / error)", and a rule written from the HELP — which is the only description of the
+        # series an operator has — selected an empty vector for the entire lifetime of the metric.
+        # Changed on this side because the label value is a string in one place and the HELP is
+        # documentation two other files quote.
         record_metric(
-            lambda m: m.increment("chemclaw_embedding_calls_total", 1, {"outcome": "failure"})
+            lambda m: m.increment("chemclaw_embedding_calls_total", 1, {"outcome": "error"})
         )
         record_metric(
             lambda m: m.observe(

@@ -14,6 +14,41 @@
 ALTER TABLE audit_events
     ADD COLUMN IF NOT EXISTS plan_step TEXT NOT NULL DEFAULT '';
 
+-- **This index build blocks every audit INSERT while it runs, and this deployment has to plan for
+-- that.** `CREATE INDEX` takes a `SHARE` lock, which conflicts with the `ROW EXCLUSIVE` every
+-- INSERT needs, and `audit_events` is the one table `durable/retention.py` refuses to prune: it
+-- grows by one row per tool call forever, so the build gets slower for the life of the
+-- deployment and never faster. Measured on this repository's own Postgres image, over a table
+-- built with this one's shape: **1.24 s per million rows** (1M rows, 111 MB, warm cache) — so a
+-- fleet with a hundred million audited calls stalls its agent for about two minutes, and a cold
+-- or contended disk is worse.
+--
+-- `CONCURRENTLY` is not available *here*: `core/migrate.py` runs the whole migration set inside
+-- one transaction (it holds a transaction-scoped advisory lock so two migrators cannot interleave
+-- their DDL), and Postgres refuses `CREATE INDEX CONCURRENTLY` inside a transaction block. Naming
+-- that lock function here in prose is deliberately avoided: the runner sends this file whole, and
+-- `tests/test_migrations.py` picks the lock statement out of what was executed by substring — so a
+-- comment mentioning it registers as a second lock. Measured: it did, and the test failed.
+-- Moving the index out of the migration
+-- set instead would mean an index that exists on whichever deployments remembered to run a
+-- script, which is worse than a stall nobody planned: the query it serves would be a sequential
+-- scan on some pods and not others, and nothing would say which.
+--
+-- So the requirement is stated rather than engineered around, and it has an escape hatch that
+-- costs nothing. **On a deployment whose `audit_events` is already large, build the index
+-- concurrently before deploying** —
+--
+--     CREATE INDEX CONCURRENTLY IF NOT EXISTS audit_events_tool_outcome_ts_idx
+--         ON audit_events (tool, outcome, ts);
+--
+-- — outside any transaction, on the live database. The `IF NOT EXISTS` below then finds it and
+-- does nothing, so the migration is a no-op and the deploy needs no window at all. That works
+-- because every `CREATE INDEX` in this directory is `IF NOT EXISTS`
+-- (`tests/test_agent_review_guards.py` holds it, in both directions); a bare `CREATE INDEX` would
+-- turn the pre-build into a duplicate-index error and take the escape hatch away.
+--
+-- Otherwise: apply this in a maintenance window, or accept the stall measured above.
+
 -- "Show me every failing tool this week" was a sequential scan on a table that grows by one row
 -- per tool call forever: the trail's only indexes are `correlation_id` (reconstruct one turn) and
 -- `ts` (a period's activity), and neither helps a predicate on `tool` or `outcome`.

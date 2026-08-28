@@ -389,6 +389,24 @@ def create_app(
         "chemclaw_connectors_unhealthy",
         lambda: float(sum(1 for item in app.state.connector_health if item.unhealthy)),
     )
+    # The same probe result, by connector — the half `chemclaw_connector_unhealthy`'s own
+    # declaration says `open_reachable` "had in hand and discarded", and which nothing had ever
+    # bound. A declared-but-unbound gauge family renders no series at all, so the "Connector
+    # reachability" panel on the data dashboard was a graph that could never draw: empty for a
+    # healthy fleet and empty for a broken one, which is the exact failure the unlabelled gauge
+    # beside it exists to end. The count says *how many* are down and this says *which*, which is
+    # the only one of the two an operator can act on.
+    #
+    # `unprobed` reads 0 rather than being omitted, matching the count above: a connector with no
+    # health route is deliberately not counted as unhealthy (`connectors/health.py`), and dropping
+    # it from the family instead would make "no series" mean both "reachable" and "never asked".
+    METRICS.bind_gauge_family(
+        "chemclaw_connector_unhealthy",
+        lambda: {
+            item.name: 1.0 if item.state == "unreachable" else 0.0
+            for item in app.state.connector_health
+        },
+    )
 
     # The routes, one module per resource (`chemclaw/api/routes/`). Order mirrors the audience:
     # probes first, then the chemist surfaces, then the review/operator surfaces — it changes

@@ -276,16 +276,26 @@ def short_connect_client(
     `follow_redirects=True`, so that is what is restated: an MCP endpoint behind an ingress that
     redirects `/mcp` to `/mcp/` is ordinary, and httpx does not follow by default.
 
+    **That flag is why the request hook's origin guard has to be complete here.** The connector
+    registry's own client sets `follow_redirects=False` and treats the hook as a second layer
+    (`connectors/registry.py`); this one follows, so for the calc backend — the connection that
+    carries the most privileged and most frequent traffic in the system — the hook is the *only*
+    layer. Turning the flag off here would match the registry and is the obvious next narrowing;
+    it is not taken in the same change as the guard's own fix because it is a live-integration
+    change (an ingress or a `CHEMCLAW_CALC_SERVER_URL` written with a trailing slash starts failing
+    instead of redirecting), and it needs a run against a real calc server to settle rather than an
+    argument.
+
     Args:
         read_bound_seconds: The read budget to fall back to when the SDK passes no timeout.
         request_hook: An `httpx` request hook to stamp every outbound request — in practice
             `connectors.identity.turn_identity_hook`, which attaches the turn's actor, session,
-            correlation id and W3C `traceparent`, and strips them again on a foreign origin. It is
-            a *parameter* rather than an import because `chemclaw.core` may not depend on a sibling
-            package (`tests/test_layering.py`), and it is deliberately the same hook the connector
-            registry installs rather than a second one: the origin-strip guard it carries is a
-            security control, and two copies is how one of them stops matching
-            `connectors.identity.STAMPED_HEADERS`.
+            correlation id and W3C `traceparent`, and strips *everything it attached* again on a
+            foreign origin. It is a *parameter* rather than an import because `chemclaw.core` may
+            not depend on a sibling package (`tests/test_layering.py`), and it is deliberately the
+            same hook the connector registry installs rather than a second one: the origin-strip
+            guard it carries is a security control, and two copies is how one of them stops
+            covering everything the other stamps.
     """
 
     def factory(

@@ -1,54 +1,107 @@
-"""How many durable jobs this worker is carrying right now, and who is allowed to say so.
+"""How much durable work is open right now — asked of the broker, never of a workflow body.
 
-`chemclaw_jobs_started_total` counted launches and nothing counted endings, so "durable work in
-flight" was a subtraction that could not be done. The completion counter now exists
-(`chemclaw_jobs_finished_total`, booked in `durable/job_record.py::record_job`), and it is booked
-in a *different process* from the launcher — a job is started by the front door and run by a
-worker — so the subtraction still would not answer for either pod. This is the direct reading
-instead: the set of `ConnectorJobWorkflow` executions whose `run()` this process is currently
-inside.
+**What this replaced, and the three measurements that retired it.** This module used to keep a
+process-local `set` of the `ConnectorJobWorkflow` ids whose `run()` this process was "currently
+inside", added at the top of the workflow body and discarded in its `finally`. Its own docstring
+claimed neither call needed an `is_replaying` guard "because this is a statement about the
+present". Driven against a live broker on 2026-08-28, the set was wrong in three directions and
+raised in the fourth:
 
-**A set of workflow ids rather than a counter, and that is what makes it replay-safe.** A workflow
-body is replayed from history after a worker restart or a cache eviction, so an `increment` at the
-top would count one job many times. Adding an id that is already present is a no-op, and the id is
-the run's own workflow id, so a replay of a job this worker is already carrying changes nothing
-while a replay on a *fresh* worker correctly re-adds it. Neither call needs an `is_replaying`
-guard, because neither is an accumulation — this is a statement about the present, and under replay
-the present is genuinely "this workflow is executing here".
+- **terminate** — `chemclaw_jobs_in_flight` read `1.0` for the life of the process. A termination
+  never resumes workflow code, so the `finally` never ran.
+- **eviction** (`max_cached_workflows=0`) — it read `0.0` while the workflow was still `RUNNING`,
+  which is exactly the reading it must not give for the long idle-between-tasks parent workflows
+  it existed to count.
+- **worker shutdown**, the drain path `durable/serve.py` was written for — the id was still
+  present after `worker.shutdown()` returned, *and* the `finally` raised
+  `_NotInWorkflowEventLoopError: Not in workflow event loop` out of
+  `job_ended(workflow.info().workflow_id)`, because a workflow being torn down is no longer in its
+  own event loop.
 
-Imported inside `connector_job.py`'s `imports_passed_through()` block for the reason
-`core.metrics_bridge` is: the workflow sandbox re-imports a module it is not told to pass through,
-and a sandbox copy of `_IN_FLIGHT` is a set the gauge would never read.
+None of that is a bug in the bracketing; it is the quantity being unmeasurable from inside a
+workflow. A workflow execution is not "in" a process — between tasks it is in the broker, and
+which worker picks up the next task is not this process's business. So the question is put to the
+one component that can answer it: **the broker**, through a visibility count of open
+`ConnectorJobWorkflow` executions.
+
+**A cached reading refreshed on a timer, not a query per scrape** — the shape
+`publish/outbox.py::bind_backlog_gauges` already uses, and for the same two reasons: a gauge source
+is synchronous and a scrape must not make a network call. `serve_worker` drives the refresh, which
+is the one tail every worker's `main()` runs through, so no entrypoint can wire the drain and
+forget the gauge.
+
+**The reading is fleet-wide, not per-pod, and that is a change in what the number means.** Every
+worker publishes the same count, so a dashboard takes `max()` over the series rather than `sum()`.
+That is the honest form: durable work in flight is a property of the deployment, and the per-pod
+number the old set claimed to give never existed.
 """
 
+import asyncio
 import logging
 
+from temporalio.client import Client
+
+from chemclaw.core.config import settings
 from chemclaw.core.metrics import METRICS
+from chemclaw.core.metrics_bridge import degraded
 
 logger = logging.getLogger(__name__)
 
-# The workflow ids of the durable jobs this process is currently running. A `set`, so the same run
-# re-entered by a replay occupies one entry.
-_IN_FLIGHT: set[str] = set()
+# Open executions of the one wrapper every connector job runs inside. The type name is written as
+# a literal rather than imported so this module stays free of the workflow package (and of its
+# sandbox import block); `tests/test_durable_observability.py` pins it against the class.
+_OPEN_JOBS_QUERY = "WorkflowType = 'ConnectorJobWorkflow' AND ExecutionStatus = 'Running'"
+
+# The last count the broker gave, published as the gauge. Starts at zero rather than at "unknown",
+# for the reason `publish/outbox.py` starts its families empty: a pod that has not refreshed yet
+# is a pod carrying nothing anybody has told it about, and the first refresh is one interval away.
+_OPEN_JOBS = 0.0
 
 
-def job_running(job_id: str) -> None:
-    """Note that this process is now carrying durable job `job_id`."""
-    _IN_FLIGHT.add(job_id)
+async def refresh_open_jobs(client: Client) -> None:
+    """Re-read the broker's count of open connector jobs into the gauge's reading.
+
+    Never raises. A visibility query that fails is a fact about the broker, not about the worker
+    serving jobs, and failing the refresh loop would take the drain and the probe surface with it —
+    so the failure is counted (`chemclaw_degraded_total`) and the previous reading stands, which is
+    the same trade `notify_session_best_effort` and the outbox gauges make.
+    """
+    global _OPEN_JOBS
+    try:
+        count = await client.count_workflows(_OPEN_JOBS_QUERY)
+    except Exception:
+        degraded(
+            logger,
+            "jobs_in_flight",
+            "could not count open durable jobs; the gauge still reads %.0f",
+            _OPEN_JOBS,
+        )
+        return
+    _OPEN_JOBS = float(count.count)
 
 
-def job_ended(job_id: str) -> None:
-    """Note that `job_id` has left this process, however it ended."""
-    _IN_FLIGHT.discard(job_id)
+async def poll_open_jobs(client: Client, stop: asyncio.Event) -> None:
+    """Refresh the reading every `jobs_in_flight_refresh_seconds` until `stop` is set.
+
+    A timer rather than a query per scrape, and a timer rather than a refresh at each job's end:
+    a gauge that only moves when a job *finishes* stands still for exactly the deployment that has
+    eight long jobs running and nothing completing — the state it exists to show.
+    """
+    await refresh_open_jobs(client)
+    while not stop.is_set():
+        try:
+            await asyncio.wait_for(stop.wait(), settings.jobs_in_flight_refresh_seconds)
+        except TimeoutError:
+            await refresh_open_jobs(client)
 
 
 def jobs_in_flight() -> float:
-    """How many durable jobs this process is carrying — the gauge's reading."""
-    return float(len(_IN_FLIGHT))
+    """The last count of open durable jobs this worker read from the broker."""
+    return _OPEN_JOBS
 
 
 def bind_job_gauges() -> None:
-    """Publish the in-flight reading on this process's `/metrics`.
+    """Publish the open-jobs reading on this process's `/metrics`.
 
     Called from `durable/serve.py`, which is the tail of every worker's `main()` and therefore the
     one place a third worker cannot wire two of three cross-cutting concerns and look healthy — the
