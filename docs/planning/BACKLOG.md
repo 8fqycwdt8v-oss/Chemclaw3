@@ -98,21 +98,6 @@ topic).
       for the audit trail, where that question can be answered. What stays open is unchanged: the
       string is still the caller's to choose.
 
-- [ ] **The per-round campaign record is unbounded and best-effort** — [S], both halves found by
-      reviewing `D-2026-08-27-a-bound-that-multiplies-…` after it merged. (a) Each round's row
-      snapshots the *cumulative* history, so N rounds store a triangular number of observations:
-      measured at 173 B/observation, a 500-round batch-1 campaign holds **22.19 MB** against the
-      terminal write's 87.4 kB (254x), and 87.45 MB at batch 4. `retention.py` refuses to prune
-      `bo_campaigns` and `bo_suggestions` cascades from it, so nothing reclaims it. The snapshot is
-      what makes an interrupted campaign resumable, so the fix is not "store less per row" but
-      "record every Nth round", trading a bounded number of lost rounds for an N-fold reduction.
-      **Trigger:** the first deployment that runs durable campaigns at all — the capability map
-      records that none ever has, which is why this is [S] and not urgent. (b) The write is
-      best-effort: `record_suggestion` swallows `_TRANSIENT_WRITE_FAILURES` and returns normally,
-      so the activity succeeds on a round that never landed and Temporal never retries it. Making
-      the durable path's guarantee unconditional means letting that caller opt out of the swallow,
-      which is a change to a contract the inline tool depends on.
-
 ## 2 — Answers that are wrong without saying so
 
 - [ ] **The fingerprint index is keyed by source and the citation is not, so two sources collapse
@@ -214,6 +199,35 @@ topic).
 
 ## 4 — Operating it
 
+- [ ] **No deployment declares a context window, and the overrun indicator cannot see the prefix**
+      — [M], found reviewing `D-2026-08-28-the-budget-is-the-control-not-the-trigger` after it
+      merged, and it is that change that made a latent gap live.
+      `context_budget.effective_trigger` subtracts the request's own prefix from the budget **only**
+      `if window:`; `llm_context_window_tokens` defaults to 0, `.env.example` ships 0, and
+      `grep -rn CONTEXT_WINDOW deploy/ infra/ docs/guides/runbook.md` returns nothing. So the ~30k
+      prefix — instructions, the skills listing, every tool schema — is never charged against
+      `agent_context_token_budget`.
+      While the group floor shipped at 12 an ordinary thread sat at ~4k and this could not bite.
+      With the floor off the window fills the budget by design, so a request measures **~135,700
+      estimated tokens** (99,924 thread + 35,773 prefix) against a configured 100,000 — over a
+      128k model window, and at this repository's own measured 2.2x ratio for structured chemistry
+      payloads, well over 200,000 billed.
+      **And the one thing that would say so reads clean.** `compaction._record_overrun` compares
+      the *thread* against the thread's budget, which the window edit has just cut to fit by
+      construction, so `chemclaw_context_unreducible_total` moved by **0** on exactly that request
+      — while its own docstring calls it "the only leading indicator this system has for a
+      context-length failure". `agent_context_calibration_min_calls = 20` also pins the ratio at
+      1.0 for the first twenty model calls of every process, i.e. every pod restart.
+      Three candidate fixes and they are not equivalent, which is why this is a row rather than a
+      patch: declare `llm_context_window_tokens` in `deploy/` (cheapest, and it needs a number
+      nobody here knows); subtract `prefix_tokens()` unconditionally (changes what
+      `agent_context_token_budget` *means* — thread spend becomes request spend — which is
+      `D-2026-08-28-a-budget-in-the-wrong-unit-is-not-a-budget`'s decision to revisit, not a review
+      pass's); or add a window-aware arm to `_record_overrun` so the indicator at least fires where
+      a window is declared. **The first two are a decision with an owner.**
+
+
+
 - [ ] **`/readyz` now waits on Temporal inside a 1-second kubelet probe** — [M], found by the
       correctness review of the branch that added the queue probe. `readyz` calls
       `probe_connectors()` on every poll, and a jobs-only bundle now routes to a
@@ -256,8 +270,25 @@ topic).
       `retention._DELETE_SESSIONS` takes `session_owners` then `session_turns`. The window is narrow
       — the route claims the live lease first and the prune re-checks it inside the DELETE — but a
       retention statement holding the owner row microseconds before the route's claim lands can
-      deadlock, and Postgres aborts one side. Worth ordering the two consistently rather than
-      arguing the window shut.
+      deadlock, and Postgres aborts one side.
+
+      **"Order the two consistently" was examined on 2026-08-28 and is not available**, which is
+      what this row now records instead of an instruction that cannot be followed. Each order is
+      required by its own invariant — but only one of the two paths is *forced*, and a first
+      telling of this correction claimed both were. **Erasure** must remove session-scoped rows
+      before `session_owners`, because its statements re-resolve through a subquery over that table
+      every time (measured by reordering `_ERASE`: `session_turns` keeps a row). **The
+      single-session delete is not forced** — `_SESSION_DELETE`'s predicates are
+      `session_id = %(session_id)s` lookups, and reversing it strands nothing (measured). It shares
+      erasure's order because `_session_delete_statements` *derives* it, which is a coupling worth
+      keeping rather than an invariant of that path.
+      `_DELETE_SESSIONS` must take the ownership row *first*, because the lease deletion reads that
+      DELETE's `RETURNING` — which is what makes "a lease goes only if its ownership row went" true
+      rather than intended; deleting leases first would collect the lease of a live turn whose
+      ownership row the re-check then spares. Reversing either side trades a deadlock window for a
+      correctness bug, and the deadlock is one statement wide, self-healing on the retention side
+      (a Temporal activity retries) and has not been reproduced. **Keep both orders; the row stays
+      open only as the record that the obvious fix was tried and rejected.**
 
 - [ ] **`LEDGER_SOURCE` is a constant where the schema documents a registry source name** — [S].
       `ord_adapter.LEDGER_SOURCE = "eln-ord"` is hardcoded while `ingest_rejections.source` is
@@ -265,12 +296,6 @@ topic).
       sources would share one bucket and mis-attribute each other's refusals. The guarding test
       reads this repository's manifests, so a site adding a second ORD source fails the test rather
       than the code taking the name as an argument.
-
-- [ ] **Unconsumed digests are unbounded** — [S]. `digest-<owner>` has no `session_owners` row and
-      retention prunes `session_events` only where `consumed_at IS NOT NULL`, so a subscriber who
-      never calls `GET /digests` accumulates one row per subscription per cadence forever. Stated in
-      the digest docstring as deliberate, and worth an operator-visible bound now that the feature
-      is reachable at all.
 
 - [ ] **Two suite runs against one database corrupt each other's turn claims** — [S], environmental
       but real. `tests/test_api_sessions.py` uses a fixed session id, and a concurrent run's
@@ -340,7 +365,9 @@ topic).
       `durable/memory_jobs.py:82-86` calls `fetch_new_entries(datetime.min.replace(tzinfo=UTC))` on
       every ingest half inside `read_corpus`, so each of the three memory jobs (`build_campaign_notes_activity`,
       `build_playbook_notes_activity`, `build_optimization_notes_activity`) walks the whole record
-      from the beginning of time, and `all_reactions()` is called once per activity. On the two
+      from the beginning of time, once per activity. (This sentence also named `all_reactions()`,
+      which exists nowhere in `src/` — a reader following the anchor found nothing and had no way to
+      tell whether the row or the tree was wrong.) On the two
       file-drop exports this costs nothing; against a real warehouse ELN it is a full table scan
       per activity per scheduled run. `ElnAdapter` (`ingest/eln/adapter.py:128`) has exactly two
       methods and neither is a fetch-by-id, so there is no cheaper read to reach for — closing this
@@ -391,9 +418,13 @@ topic).
       would close it and they are not equivalent: a per-source outcome (fixes
       `CorpusSyncOutcome`'s own docstring, which claims "per source" and aggregates), or a staleness
       gauge over `corpus_cursors.updated_at` — age since the last *advance*, which is a real number
-      even when the position is opaque. **Trigger:** the first deployment that runs an
-      `append_only:` source, since no shipped binding sets it
-      (`D-2026-08-28-a-feed-is-a-corpus-that-does-not-stop`).
+      even when the position is opaque. **The second is now buildable and was not when this row was
+      written**: the cursor was stored on every page, so `updated_at` re-stamped on every fire and
+      measured when the feed was last *looked at* rather than when it last moved.
+      `D-2026-08-28-a-watermark-that-is-rewritten-has-no-age` gates that write on
+      `report.advanced`; what is left here is a reader.
+      **Trigger:** the first deployment that runs an `append_only:` source, since no shipped
+      binding sets it (`D-2026-08-28-a-feed-is-a-corpus-that-does-not-stop`).
 
 - [ ] **The results store has no live target** — [M]. `D-2026-08-25-a-cache-is-not-a-record` ships
       the whole path — `src/chemclaw/publish/`, the canonical schema in `schema/result-store/`, two
@@ -407,6 +438,36 @@ topic).
       reads: the composite half of the path was inert for a release and no test noticed, because
       every test started at a projector rather than at a hook. A live target is the only thing that
       would have made it obvious.
+
+      **And attaching one opens a data-protection question this repository cannot answer for it**
+      (found 2026-08-28, with the erasure sweep). `schema/result-store/001_core.sql` gives the
+      external store a `calculation_publication` table with its own `actor` and `session_id`
+      columns and an index on `actor`. `agent/leaver.py` reaches a database this system owns; it
+      cannot reach that one, and no ADR says who does. The outbox row on this side is now counted
+      and named in the erasure report as retained (`_RETAINED_IN_PAYLOAD`), so an operator sees
+      that the receipt stays — but the copy downstream is somebody else's sweep, and the first
+      deployment to point at a real store inherits the obligation. Settle it with that
+      deployment, not before: the answer depends on whose database it is.
+- [ ] **Five tables still say "nothing bounds it"** — [M].
+      `durable/retention.py`'s `_NOT_PRUNED` is the register that makes this visible, and it is
+      doing its job: it names every table in the schema and does not invent an answer where none was
+      taken. Eight entries carried that wording — five of them also saying *no decision is on
+      record*, which an earlier version of this row quoted as though it were the same set; the
+      2026-08-28 erasure pass closed three of the eight
+      (`note_proposals`, `plan_approvals`, `turn_costs` — all three are kept through a data-subject
+      erasure, so the decision *was* on record one module over, and a derived test now couples the
+      two registers). The remaining five are `molecule_fingerprints`, `reaction_fingerprints`,
+      `user_preferences`, `predictions` and `measurements` — and `user_preferences` is the weakest
+      of the five, because `leaver._ERASE` already deletes it per actor, so what is open there is a
+      clock rather than a policy. Plus a sixth question of a different
+      kind: `tool_result_blobs` has a window and it ships at 0 "as a deliberate uniformity rather
+      than a considered policy for this table", which `retention.py` itself flags as the
+      highest-volume table in the set.
+      Each needs its own answer rather than one sweep — a fingerprint is derived and rebuildable but
+      expensive to rebuild, a preference is the person's and goes on erasure rather than on a clock,
+      and `predictions`/`measurements` are the calibration ledger nothing has yet filled. What is
+      owed is five decisions, not five `DELETE`s, and the register is where each belongs.
+
 - [ ] **Nothing has measured how many rows a real corpus produces** — [M]. The volume risk named in
       `D-2026-08-25`: `cached_compute` publishes on every miss, and a conformer search projects one
       record with ~47 conformer rows plus their structures. Before publishing is enabled by default

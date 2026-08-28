@@ -1187,3 +1187,49 @@ acceptable, re-run the suspect *with the same seed and load*, or grep the partia
 index a progress percentage into a collection listing. And never let "flake" be the conclusion of a
 chain that starts with a guess about identity; it is the one classification that requires knowing
 exactly which test, since the whole claim is about that test's history.
+
+## 2026-08-28 — a subagent's baseline claim is a claim, and the baseline is cheap
+
+Four parallel audits produced unusually good work on this branch — three of the four defects they
+found were real, verified against a live database, and are now closed with tests that go red
+without the fix. One claim was not: an agent reported a named test as "failing on a clean
+baseline too — pre-existing, unrelated". I had started `make lint type test` on the untouched tree
+before any of them reported, and it came back **5,444 passed, 11 skipped, exit 0**.
+
+Had I not had that run in hand, the cheap move would have been to believe it — it is exactly the
+shape of a true statement, it names a real test, and accepting it costs nothing in the moment. What
+it would have cost later is a whole class of failure classified away in advance: every subsequent
+red in that file would have read as "the known pre-existing one".
+
+The rule is not "distrust subagents" — this session's evidence runs the other way. It is:
+**take the baseline before the first edit, always, and let it be the thing that adjudicates any
+claim about what was already broken.** It costs one backgrounded command started at the moment the
+work begins, and it is the only artifact that can tell "my change broke this" from "this was
+already broken" without argument. Related to the 2026-08-27 lesson about running the gate rather
+than a subset of it: same command, one run earlier.
+
+## 2026-08-28 — the tests I wrote alongside a change cannot find the defects in it
+
+The memory-bounds change merged green: `make lint type test` with Postgres up, 5,532 passed, eight
+new tests, three of them proven red against the pre-fix code. An adversarial review then found
+**three real defects in it**, including one that made erasure impossible for a whole deployment —
+`jsonb_array_elements` raises on a JSON `null`, and one such row in a table the sweep does not even
+erase aborted every actor's erasure, permanently.
+
+Every one of my tests passed with that defect present. Not because they were careless: because I
+wrote them from the same understanding that produced the defect. I tested the payload shape I had
+in mind (`{"publications": [...]}`) and never asked what the other shapes of a `JSONB NOT NULL`
+column with no CHECK would do. Same shape for the blob anti-join: I tested "another person's
+session spares the blob" and never "an orphan session spares it", which is the case that keeps the
+*leaver's own* data alive.
+
+The rule: **when a change adds a predicate, enumerate the inputs that predicate cannot read, and
+parametrize over them.** Not "add an edge case" — enumerate the domain and cover the part outside
+what the happy path constructs. For SQL over a payload, that means every `jsonb_typeof`. For an
+anti-join, it means every reason the join might or might not find a row, including the rows nothing
+owns.
+
+And the second-order rule, which is the one that actually caught these: **review your own merged
+work adversarially, against a live system, with someone else's eyes.** Four parallel passes cost
+one message and found what one careful author plus a green gate did not. The gate proves the change
+did not break what was already tested; it says nothing about what the change itself introduced.

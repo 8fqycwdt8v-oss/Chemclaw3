@@ -236,6 +236,12 @@ def newest_batch_size(messages: Sequence[AnyMessage]) -> int:
 class KeepLastConversationGroupsEdit(ContextEdit):
     """Cut the oldest conversation back to the token budget, on a group boundary.
 
+    **Read `keep` before believing that heading.** The cut is `max(by_tokens, by_groups)` — the
+    *more* aggressive of the two arms — so `keep` is a ceiling on what survives and the budget only
+    tightens it further. With a `keep` low enough to bind, this cuts to `keep` groups and the budget
+    is a trigger rather than a target; that is why `agent_keep_last_conversation_groups` now ships
+    at 0. See its config comment for the measurement.
+
     D-025's second strategy, and the only half of the policy upstream does not ship. It is what
     makes the thread *bounded* rather than merely cheaper: clearing tool results reclaims nothing
     from a conversation that called no tools, so a long enough exchange of prose would grow past any
@@ -250,11 +256,28 @@ class KeepLastConversationGroupsEdit(ContextEdit):
     budget** — the edit ran, logged, dropped eight groups, and left the request 80% over. The budget
     is now `trim_messages` (`strategy="last"`), so what survives is what fits.
 
-    **`keep` survives as a floor rather than the rule.** `agent_keep_last_conversation_groups` is an
-    ENV-visible knob and renaming or dropping it costs every deployment that sets it, for a word;
-    the same argument this module already makes for `agent_keep_last_tool_groups` at
-    `context_compaction_middleware`. So the window always drops everything older than the newest
-    `keep` groups, and the budget may drop more — `max(by_tokens, by_groups)`.
+    **`keep` survives as a floor rather than the rule, and it now ships off.**
+    `agent_keep_last_conversation_groups` is an ENV-visible knob and renaming or dropping it costs
+    every deployment that sets it, for a word; the same argument this module already makes for
+    `agent_keep_last_tool_groups` at `context_compaction_middleware`. So the window always drops
+    everything older than the newest `keep` groups, and the budget may drop more —
+    `max(by_tokens, by_groups)`.
+
+    **What that composition does when both arms are live was never measured until it was, and the
+    answer inverted the paragraph above.** `max` takes the *larger cut*, so the survivors are the
+    *smaller* of "what fits the budget" and "the newest `keep` groups", and the crossover is
+    `trigger / keep` — 8,333 tokens per group at the old defaults, roughly 33 kB of prose in a
+    single turn. Below that the group arm wins outright: measured over 2,000 prose groups, a
+    329,900-token thread was cut to **1,944 tokens against a 100,000 budget**, and sweeping the
+    budget from 10,000 to 300,000 moved that number not at all. The lossless edit ordered before
+    this one makes the common case *more* extreme rather than less, because a cleared group costs
+    about twenty tokens. So the knob a deployment reaches for was inert, and the one that decided
+    the answer was a count of turns — which is the failure this class's own second paragraph
+    describes, arriving through the arm that was kept to fix it.
+
+    `keep` defaults to 0 for that reason. Nothing here changed: the arm is intact, the clamp is
+    intact, and a deployment that wants the model to see fewer *turns* than the budget allows sets
+    it. What changed is which arm is load-bearing when nobody states an opinion.
 
     **A group is a human message and everything that answers it**, which is what keeps this safe.
     A tool call and its result are always emitted between two human messages, so a cut taken at a
@@ -284,17 +307,29 @@ class KeepLastConversationGroupsEdit(ContextEdit):
     """
 
     trigger: int = 100_000
-    """Billed tokens above which the window is applied — and the budget it cuts back to.
+    """Billed tokens above which the window is applied — and the ceiling it cuts back to.
 
     Converted to the estimator's unit by `effective_trigger`, and clamped there by a declared
     context window; it is not compared to `count_tokens` directly.
+
+    A ceiling rather than a target: `keep` may take the cut further, and did so on every ordinary
+    thread while it defaulted to 12.
     """
 
-    keep: int = 12
-    """Floor on the cut: groups older than the newest `keep` always go, whatever the budget says."""
+    keep: int = 0
+    """Floor on the cut: groups older than the newest `keep` always go, whatever the budget says.
+
+    `0` disables the arm, which is what the shipped configuration now asks for — the budget above
+    is then the whole rule. The default here matches `agent_keep_last_conversation_groups` so a
+    directly-constructed edit behaves as the deployment's does; `tests/test_compaction.py` still
+    drives the arm explicitly, because a deployment may re-arm it.
+    """
 
     def apply(self, messages: list[AnyMessage], *, count_tokens: TokenCounter) -> None:
-        """Cut `messages` in place back to the effective budget, when over it.
+        """Cut `messages` in place back to the effective budget or fewer, when over it.
+
+        Fewer whenever `keep` binds — the two arms are combined with `max`, so the survivors are
+        the smaller of the two sets.
 
         In place because that is the `ContextEdit` protocol: `ContextEditingMiddleware` deep-copies
         the request's list once and hands the same list to each edit in turn, so returning a new one
@@ -328,10 +363,14 @@ class KeepLastConversationGroupsEdit(ContextEdit):
         # `kept` is a suffix of `messages` — `strategy="last"` with `allow_partial=False` and no
         # system message to re-insert can only drop a prefix — so its length is the cut index.
         by_tokens = len(messages) - len(kept)
-        # The floor, guarded at both ends because a directly-constructed edit can reach values the
-        # config cannot (`agent_keep_last_conversation_groups` is `ge=1`): `keep == 0` would index
-        # `starts[0]` while meaning the opposite, and `keep` above the group count would raise
-        # `IndexError` inside a middleware, which is a failed turn. Both degrade to "no floor".
+        # The floor, guarded at both ends. `keep == 0` is the **shipped** value rather than
+        # something only a direct construction can reach — this comment said `ge=1` and "a value
+        # the config cannot reach" for a day after `agent_keep_last_conversation_groups` became
+        # `ge=0, default=0`, three lines from the branch it describes. Both guarded values degrade
+        # to "no floor", and for 0 that is now the deployment's intent rather than a rescue: it
+        # takes `starts[0]`, which `trim_messages`' own `end_on` back-off guarantees is `<=
+        # by_tokens`, so `max` returns `by_tokens` and the arm is an exact no-op. `keep` above the
+        # group count would raise `IndexError` inside a middleware, which is a failed turn.
         by_groups = starts[-self.keep] if 0 < self.keep <= len(starts) else starts[0]
         # The newest group is the floor on what can be kept, per the clamp in the class docstring.
         cut = min(max(by_tokens, by_groups), starts[-1])

@@ -41,6 +41,7 @@ from chemclaw.agent.session_store import _session_dsn
 from chemclaw.core import db
 from chemclaw.core.db import existing_tables
 from chemclaw.core.errors import ChemclawError
+from chemclaw.durable.digest import digest_channel
 
 logger = logging.getLogger(__name__)
 
@@ -175,13 +176,59 @@ _ERASE: tuple[tuple[str, str], ...] = (
     # is the boundary quietly moving to make an erasure convenient.
     (
         "tool_result_blobs",
-        "DELETE FROM tool_result_blobs WHERE content_hash IN ("
-        f"SELECT content_hash FROM tool_result_links WHERE session_id IN ({_SESSION_SCOPED}))",
+        # **Only the blobs nobody else can still read.** The first arm finds what this person's
+        # sessions linked; the second refuses to delete one that another session also links. Without
+        # it, erasing one chemist deleted a *different* chemist's stored tool result — measured
+        # against a live database: two sessions link one blob, `erase_actor` on the first removes
+        # the blob, and `ON DELETE CASCADE` takes the second session's link row with it, leaving
+        # that person's own transcript pointing at a result the surface can no longer fetch. The
+        # arm is transcribed from `session_store._SESSION_DELETE`, which has had it since the
+        # single-session delete was written; the two paths delete the same rows for the same
+        # reason and only one of them knew it.
+        #
+        # **What spares a blob is another *person*, not another link**, and the first version of
+        # this arm got that wrong in the direction that costs an erasure. It asked only whether a
+        # link outside the leaver's sessions existed, so an *orphan* link — the row
+        # `delete_session` deliberately leaves when a blob is shared — spared the blob. Measured:
+        # a chemist tidies up one of their own sessions, later asks to be erased, and their
+        # untruncated tool output survives while the report prints `tool_result_blobs: 0`, which
+        # reads as "there were none". The comment here justified that by saying such a link "no
+        # longer resolves to a person"; in that case it resolved to the leaver, and the erasure is
+        # what made it unattributable afterwards.
+        #
+        # So the anti-join goes through `session_owners`: a blob is spared only while some link
+        # belongs to a session that still has an ownership row naming somebody who is not the
+        # leaver. An orphan spares nothing — the session it names cannot be reopened by anyone
+        # (`api/deps._rehydrate_session` answers 404 without that row), so nothing readable is
+        # lost, and the cascade takes the orphan link with the blob. `o.owner IS NULL` still
+        # spares: an unattributed session is somebody, just not somebody this database names.
+        "DELETE FROM tool_result_blobs b WHERE EXISTS ("
+        "  SELECT 1 FROM tool_result_links l"
+        f"   WHERE l.content_hash = b.content_hash AND l.session_id IN ({_SESSION_SCOPED})"
+        ") AND NOT EXISTS ("
+        "  SELECT 1 FROM tool_result_links l"
+        "    JOIN session_owners o ON o.session_id = l.session_id"
+        "   WHERE l.content_hash = b.content_hash"
+        "     AND (o.owner IS NULL OR o.owner <> ALL(%(actors)s)))",
     ),
     ("session_messages", f"DELETE FROM session_messages WHERE session_id IN ({_SESSION_SCOPED})"),
     *_CHECKPOINT_ERASE,
     *_MEMORY_ERASE,
-    ("session_events", f"DELETE FROM session_events WHERE session_id IN ({_SESSION_SCOPED})"),
+    # **Two kinds of session id reach this table, and the join only ever found one of them.**
+    # A digest lands in the synthetic mailbox `digest-<oid>`, which by design has no
+    # `session_owners` row (`durable/digest.digest_channel`) — so the reachability join below could
+    # not match it, and
+    # a departing person's unread digests survived an erasure that reported `session_events: 0`,
+    # i.e. "complete". Their standing queries went in the same run (`subscriptions`), leaving copies
+    # of those queries in a mailbox nothing would ever open. That is the false green this module's
+    # own docstring calls worse than no safety net, and it is why the mailbox is matched by exact
+    # equality against the channel the writer mints, per actor spelling, rather than by a pattern.
+    (
+        "session_events",
+        "DELETE FROM session_events"
+        f" WHERE session_id IN ({_SESSION_SCOPED})"
+        " OR session_id = ANY(%(digest_channels)s)",
+    ),
     # `holder` as well as the session scope: a turn lease names the actor holding it, and releasing
     # a departed person's lease is the point. The session-scoped half alone would leave a lease held
     # on a session whose ownership row had already gone in the same run.
@@ -225,6 +272,68 @@ _RETAINED: tuple[tuple[str, tuple[str, ...], str], ...] = (
     ("job_records", ("requested_by",), "who requested a durable calculation"),
     ("turn_costs", ("actor",), "what a person's turns cost, the record an operator bills against"),
 )
+
+
+# The retained tier again, for the one table whose person is **inside a payload**. Split out rather
+# than folded above because the difference is exactly what hid it: `_RETAINED`'s entries are column
+# names, `tests/test_leaver.py` derives its completeness check from column names, and this actor
+# lives in a `jsonb` column called `document`. So the table was in neither tier, the CLI's two-tier
+# report did not mention it, and the check that exists to catch precisely this could not see it —
+# the `tool_result_links` failure the comment above describes, one indirection further out.
+#
+# **Retained rather than erased, by the same line as everything in `_RETAINED`.** A publication row
+# is the outbox receipt for a result this system computed and handed to a database it does not own
+# (`src/chemclaw/publish/`), and `Publication` records who asked for it and why. That is "who did
+# what to the science", so it stays — and the report now says so with a number instead of by
+# omission. What the number cannot cover is the destination: nothing here can reach a store this
+# system does not own, and `schema/result-store/001_core.sql` gives that store its own `actor`
+# column. An operator erasing a person has a second conversation to have, and the report is where
+# they should find that out.
+# `(table, the column the person is inside, the predicate that finds them, why the row stays)`.
+# The column is not read by the count — the predicate names it — and is here so
+# `tests/test_leaver.py` can assert it exists in the live schema: a payload predicate over a column
+# that has been renamed would silently match nothing, which is this tier's own failure mode.
+_RETAINED_IN_PAYLOAD: tuple[tuple[str, str, str, str], ...] = (
+    (
+        "result_publications",
+        "document",
+        # `jsonb_typeof(...) = 'array'` is not defensive noise, it is what keeps this a *count*.
+        # `jsonb_array_elements` is a partial function: handed a scalar, an object or a JSON `null`
+        # it raises, and this query runs inside the same transaction as every DELETE — so **one**
+        # row of an unreadable shape, in a table this command does not even erase, made erasure
+        # impossible for every actor in the deployment, permanently. Measured: `{"publications":
+        # null}`, `{"publications": {...}}` and `{"publications": "x"}` each turned the whole run
+        # into `ErasureError: cannot extract elements from a scalar`. `document` is `JSONB NOT NULL`
+        # with no CHECK, the table carries a `schema_version` because the shape is expected to
+        # change, and `publish backfill --requeue` walks rows other builds wrote. The guard is
+        # short-circuiting, so an unreadable row counts 0 and the erasure proceeds — which is the
+        # same rule the checkpointer tables are skipped under: erasure must not become the one
+        # operation a deployment cannot perform.
+        "jsonb_typeof(document -> 'publications') = 'array'"
+        " AND EXISTS (SELECT 1 FROM jsonb_array_elements(document -> 'publications') p"
+        " WHERE p ->> 'actor' = ANY(%(actors)s))",
+        "who asked for a result to be published and why — the receipt for a record that now also "
+        "lives in a results store this system does not own, and cannot erase from",
+    ),
+)
+
+# Tables that name a person and that **this command cannot reach at all**, with the reason. Neither
+# tier applies: erasing is impossible and counting is impossible, so claiming either would be the
+# false green again in the other direction.
+#
+# One entry, and it is a real one rather than a placeholder. `audit_anchors.reseal_by` records "who
+# accepted the gap and why" (`infra/sql/032_audit_anchors.sql`); the code that wrote the table went
+# with the audit hash chain in `D-2026-08-14-the-record-is-kept-because-it-is-useful-not-because-a-
+# regulator-asks`, and `infra/sql/grants/app_privileges.sql` deliberately grants the runtime role
+# nothing on it — so a `SELECT count(*)` from here would fail the whole erasure on
+# `InsufficientPrivilege`. The schema is forward-only, so a deployment that ran the pre-removal
+# build may still hold rows naming that operator, and an erasure that silently ignored them would
+# be reporting a completeness it has not got.
+_BEYOND_REACH: dict[str, str] = {
+    "audit_anchors": "the runtime role holds no privilege on it and its writer was removed with "
+    "the audit hash chain, so this deployment's copy is empty; a schema is forward-only, so a "
+    "database that ran the pre-removal build needs an operator with owner rights to check",
+}
 
 
 @dataclass
@@ -293,6 +402,10 @@ async def erase_actor(actor: str, *, apply: bool = False) -> ErasureReport:
         # memory written on the `unverified:` path is under a different namespace from one written
         # on the authenticated path, and both are the same chemist's.
         memory_prefixes = [memory_prefix(form) for form in actors]
+        # The mailbox ids, one per spelling, minted by the function the writer and the reader both
+        # use rather than re-spelled here — a second spelling of this string is a mailbox somebody
+        # writes to and nobody erases, which is the defect this line closes.
+        digest_channels = [digest_channel(form) for form in actors]
         async with db.connection(_session_dsn()) as conn:
             async with conn.cursor() as cur:
                 for table, columns, _ in _RETAINED:
@@ -301,6 +414,16 @@ async def erase_actor(actor: str, *, apply: bool = False) -> ErasureReport:
                     # two, and a campaign whose `opened_by` is their id marked `unverified:` is
                     # still a record that names them.
                     predicate = " OR ".join(f"{column} = ANY(%(actors)s)" for column in columns)
+                    await cur.execute(
+                        f"SELECT count(*) FROM {table} WHERE {predicate}", {"actors": actors}
+                    )
+                    row = await cur.fetchone()
+                    report.retained[table] = int(row[0]) if row else 0
+                # The same tier, counted through a payload predicate rather than a column one —
+                # one loop each because the predicate is the only thing that differs, and folding
+                # them would put a `jsonb` path in the register a schema-derived test reads as
+                # column names.
+                for table, _column, predicate, _ in _RETAINED_IN_PAYLOAD:
                     await cur.execute(
                         f"SELECT count(*) FROM {table} WHERE {predicate}", {"actors": actors}
                     )
@@ -322,7 +445,12 @@ async def erase_actor(actor: str, *, apply: bool = False) -> ErasureReport:
                     # — psycopg ignores a parameter a statement does not name — so the loop stays
                     # one loop rather than branching on which key a table happens to use.
                     await cur.execute(
-                        statement, {"actors": actors, "memory_prefixes": memory_prefixes}
+                        statement,
+                        {
+                            "actors": actors,
+                            "memory_prefixes": memory_prefixes,
+                            "digest_channels": digest_channels,
+                        },
                     )
                     report.erased[table] = cur.rowcount if cur.rowcount > 0 else 0
             if apply:
@@ -361,4 +489,16 @@ def retention_reasons() -> tuple[tuple[str, str], ...]:
     of the answer: an operator asking "why is this row still here?" should read it from the module
     that decided, not from a print statement.
     """
-    return tuple((table, reason) for table, _, reason in _RETAINED)
+    return tuple((table, reason) for table, _, reason in _RETAINED) + tuple(
+        (table, reason) for table, _column, _predicate, reason in _RETAINED_IN_PAYLOAD
+    )
+
+
+def unreachable_tables() -> tuple[tuple[str, str], ...]:
+    """(table, why) for every table this erasure can neither clear nor count.
+
+    Reported rather than omitted, for the reason the retained tier is reported at all: an operator
+    signing off on an erasure needs to know which questions this command did not answer. Omitting
+    them is what turns a partial erasure into one that looks complete.
+    """
+    return tuple(_BEYOND_REACH.items())

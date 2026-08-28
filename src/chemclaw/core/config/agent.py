@@ -77,8 +77,9 @@ class AgentSettings(BaseSettings):
     # `agent_context_token_budget` (measured with a char/4 estimator — no external tokenizer),
     # then reclaims tokens cheapest-first: replace stale tool results with a short placeholder
     # (keeping the newest `agent_keep_last_tool_groups` verbatim), then cut older conversation back
-    # to the same budget on a group boundary. System instructions/skills are always
-    # kept — they are not in the message list at all. No LLM summarizer — deterministic and
+    # to the same budget on a group boundary — with the caveat below, which is the whole of what
+    # `agent_keep_last_conversation_groups` does to that sentence. System instructions/skills are
+    # always kept — they are not in the message list at all. No LLM summarizer — deterministic and
     # credential-free, which is also what keeps a summarizer from becoming an injection surface
     # over retrieved evidence (D-025).
     #
@@ -93,16 +94,36 @@ class AgentSettings(BaseSettings):
     # The name is D-025's and stays, because it is ENV-visible and renaming it would cost every
     # deployment that sets it to buy a more accurate word.
     #
-    # `agent_keep_last_conversation_groups` is a **floor on the cut, not the rule**, for that same
-    # reason. The conversation window cuts to `agent_context_token_budget` — a count of groups
-    # cannot bound anything, because what a group costs is whatever was said in it, and the
-    # count-only version left a 300k-token thread at 180k against this 100k budget. So groups older
-    # than the newest N always go and the budget may drop more; raising N no longer raises what a
-    # request can cost, it only drops more. The one thing that is never dropped is the newest group,
-    # because an empty message list is rejected by the provider (`agent/compaction.py`).
+    # `agent_keep_last_conversation_groups` is an **extra cut a deployment may ask for, and it is
+    # off by default** — which is a reversal of what this paragraph said for as long as the setting
+    # existed, and the reversal was measured rather than argued. The window takes
+    # `max(by_tokens, by_groups)`, i.e. the *more* aggressive of "what fits the budget" and
+    # "everything older than the newest N groups", so N is a ceiling on what survives and the
+    # budget only ever tightens it further. At N=12 that ceiling bound first on every ordinary
+    # thread: the crossover is `budget / N` = 8,333 tokens per group, about 33 kB of text per turn,
+    # and the lossless edit above runs first precisely to push older groups far below it. Measured
+    # over 2,000 prose groups at the shipped defaults, the window cut a 329,900-token thread to
+    # **1,944 tokens — 2% of the 100,000 budget it is documented as cutting to** — and sweeping the
+    # budget from 10k to 300k changed that number not at all. The sentence that used to stand here,
+    # "raising N no longer raises what a request can cost, it only drops more", was wrong in both
+    # halves and by 50x: at a fixed budget, N=12 retains 1,944 tokens and N=600 retains 97,800.
+    #
+    # So the default is now `0`, which the window reads as "no group floor" and which makes
+    # `agent_context_token_budget` the control it is named as. **The regression that put the
+    # `max()` there is untouched**: a count of groups cannot bound anything, because what a group
+    # costs is whatever was said in it, and the count-only version left a 300k-token thread at 180k
+    # against this 100k budget. The token arm still runs and still bounds — measured, 20 groups of
+    # 60 kB cut to 90,090 with the floor off, not to 180,180 (90,366 was quoted here from a
+    # different fixture; the reproducible figure is the one `tests/test_compaction.py`
+    # builds). Setting N above 0 re-arms the extra
+    # cut for a deployment that wants the model to see fewer *turns* than the budget would allow;
+    # the instrument for wanting it to see fewer *tokens* is the budget.
+    #
+    # The one thing that is never dropped is the newest group, because an empty message list is
+    # rejected by the provider (`agent/compaction.py`).
     agent_context_token_budget: int = Field(default=100_000, ge=1)
     agent_keep_last_tool_groups: int = Field(default=2, ge=0)
-    agent_keep_last_conversation_groups: int = Field(default=12, ge=1)
+    agent_keep_last_conversation_groups: int = Field(default=0, ge=0)
     # `agent_tool_result_clear_trigger` is the *lossless* edit's own threshold, and splitting it
     # off is the whole point of this field. `context_compaction_middleware` composes two edits:
     # upstream's `ClearToolUsesEdit`, which replaces a re-fetchable tool result with a placeholder

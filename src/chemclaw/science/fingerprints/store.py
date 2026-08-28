@@ -310,9 +310,12 @@ class InMemoryFingerprintStore:
     async def add_many(self, records: Sequence[FingerprintRecord]) -> None:
         """Insert or replace a batch — `add` per record, since there is nothing here to batch.
 
-        Delegating rather than writing the dict again: `add` also supersedes an unsourced twin, and
-        a second copy of that rule here is a second place for the two backends' contents to diverge
-        — which is the property every ordering assertion in this module rests on.
+        Delegating rather than writing the dict again, so this backend's supersede rule has one
+        definition. **Not a parity argument**, which is what an earlier draft of this docstring
+        claimed: the two backends genuinely differ here. `add` above pops the unsourced twin;
+        `PostgresFingerprintStore` deliberately does not, because the runtime role holds no `DELETE`
+        on that table and an unsourced row is not reliably a twin — the constructor there says so at
+        length. Writing that rule twice *within this class* would still be two places to change.
         """
         for record in records:
             await self.add(record)

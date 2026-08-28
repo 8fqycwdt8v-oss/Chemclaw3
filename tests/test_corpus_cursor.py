@@ -25,6 +25,11 @@ _BINDING: dict[str, object] = {
 }
 
 
+async def _resumes_at_a400(source: str, dsn: str | None = None) -> str:
+    """A stored position, for the two tests that drive the activity's resume branch."""
+    return "A400"
+
+
 def test_a_release_binding_is_not_append_only_and_a_feed_says_so() -> None:
     """The default is the release, so an existing manifest keeps draining from the top.
 
@@ -95,10 +100,9 @@ def test_the_drain_activity_resumes_a_feed_and_re_walks_a_release(
         stores.append(reactions)
         from chemclaw.ingest.labels.corpus import CorpusReport
 
-        return CorpusReport(read=0, cursor=after)
-
-    async def _fake_load(source: str, dsn: str | None = None) -> str:
-        return "A400"
+        # `advanced=True`, because a page that moved the position is the case that stores one —
+        # the stalled page is its own test below.
+        return CorpusReport(read=1, cursor=f"{after}+1", advanced=True)
 
     stored: list[tuple[str, str]] = []
 
@@ -106,7 +110,7 @@ def test_the_drain_activity_resumes_a_feed_and_re_walks_a_release(
         stored.append((source, after))
 
     monkeypatch.setattr(corpus_sync, "drain_corpus", _fake_drain)
-    monkeypatch.setattr(corpus_sync, "load_corpus_cursor", _fake_load)
+    monkeypatch.setattr(corpus_sync, "load_corpus_cursor", _resumes_at_a400)
     monkeypatch.setattr(corpus_sync, "store_corpus_cursor", _fake_store)
     monkeypatch.setattr(corpus_sync, "_warehouse_for", lambda _source: object())
     monkeypatch.setattr(corpus_sync, "_label_index", lambda: object())
@@ -132,8 +136,50 @@ def test_the_drain_activity_resumes_a_feed_and_re_walks_a_release(
 
     # The feed resumed at its stored position; the release began at the top, as it always has.
     assert seen == ["A400", ""]
-    # And only the feed wrote one back.
-    assert stored == [("feed", "A400")]
+    # And only the feed wrote one back — at the position the page advanced to, not the one it
+    # resumed from.
+    assert stored == [("feed", "A400+1")]
     # Both modes fingerprint their reactions: `append_only` decides the cursor and nothing else, so
     # an existing release corpus becomes searchable by transformation on its next drain.
     assert stores == [reaction_store, reaction_store]
+
+
+def test_a_page_that_did_not_advance_writes_no_cursor(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A stalled feed must not refresh `updated_at`, or the column means nothing.
+
+    `store_corpus_cursor` already refuses an *empty* position, but a stalled feed does not return
+    one: it returns the same non-empty key it resumed from, so writing it unconditionally re-stamps
+    `updated_at` on every fire and a source that stopped exporting reads as freshly synced forever.
+    That is the signal `ingest/labels/cursor.py` and `072` both describe over that column, and the
+    first version of this change made it unfirable.
+
+    The gate is `report.advanced`, computed in `drain_corpus` where both the resumed position and
+    the reached one are in scope — the same field the workflow's "no cursor advance" warning reads.
+    """
+    from chemclaw.durable import corpus_sync
+
+    async def _stalled(*_args: object, after: str = "", **_kwargs: object) -> object:
+        from chemclaw.ingest.labels.corpus import CorpusReport
+
+        # What a drain returns when the page it read moved nothing: the position it was given,
+        # non-empty, with `advanced` false.
+        return CorpusReport(read=1, cursor=after, advanced=False)
+
+    stored: list[tuple[str, str]] = []
+
+    async def _fake_store(source: str, after: str, dsn: str | None = None) -> None:
+        stored.append((source, after))
+
+    monkeypatch.setattr(corpus_sync, "drain_corpus", _stalled)
+    monkeypatch.setattr(corpus_sync, "load_corpus_cursor", _resumes_at_a400)
+    monkeypatch.setattr(corpus_sync, "store_corpus_cursor", _fake_store)
+    monkeypatch.setattr(corpus_sync, "_warehouse_for", lambda _source: object())
+    monkeypatch.setattr(corpus_sync, "_label_index", lambda: object())
+    monkeypatch.setattr(corpus_sync, "_corpus_molecules", lambda: None)
+    monkeypatch.setattr(corpus_sync, "_corpus_reactions", lambda: None)
+    feed = CorpusBinding.model_validate({**_BINDING, "append_only": True})
+    monkeypatch.setattr(corpus_sync, "corpus_sources", lambda: {"feed": feed})
+
+    asyncio.run(ActivityEnvironment().run(corpus_sync.drain_reaction_corpus, "feed", ""))
+
+    assert stored == []

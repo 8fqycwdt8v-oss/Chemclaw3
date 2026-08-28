@@ -507,8 +507,8 @@ def test_an_oversized_substructure_query_is_refused_before_anything_is_scanned()
 async def _reaction_fingerprints(tag: str) -> InMemoryFingerprintStore:
     """The corpus reaction index for one seeded tag, keyed exactly as the drain keys it.
 
-    Built with `corpus_reaction_id` rather than a hand-written `f"{source}:{id}"`, so a change to
-    that spelling breaks this test instead of silently making `Facet.reaction_keys` match nothing.
+    The source rides on the record exactly as both ingest paths set it, so a `Match` carries the
+    `(source, id)` pair `Facet.reaction_keys` narrows on and nothing composes or splits a string.
     """
     store = InMemoryFingerprintStore()
     for row in (
@@ -533,9 +533,9 @@ def test_q7_has_this_transformation_been_run_and_under_what_conditions() -> None
     transformation space is what makes "this coupling" mean the coupling: querying with the
     Buchwald transformation returns the three Buchwalds and never the Suzuki.
 
-    Run against both backends, because `Facet.reaction_keys` is a `source || ':' || reaction_id`
-    predicate in SQL and a string comparison in Python — two expressions of one narrowing, which is
-    exactly where this file's other tests have caught a predicate meaning something else.
+    Run against both backends, because `Facet.reaction_keys` is an `unnest(sources, ids)` zip in SQL
+    and a tuple membership test in Python — two expressions of one narrowing, which is exactly where
+    this file's other tests have caught a predicate meaning something else.
     """
 
     async def body(index: LabelIndex, tag: str) -> None:

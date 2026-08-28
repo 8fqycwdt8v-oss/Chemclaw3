@@ -15,8 +15,25 @@ import argparse
 import asyncio
 import sys
 
-from chemclaw.agent.leaver import ErasureReport, erase_actor, retention_reasons
+from chemclaw.agent.leaver import (
+    ErasureReport,
+    erase_actor,
+    retention_reasons,
+    unreachable_tables,
+)
 from chemclaw.core.logging import configure_logging
+
+
+def _wrapped(why: str, *, width: int = 88, indent: str = " " * 11) -> list[str]:
+    """One reason, wrapped to a terminal rather than run out to 150 columns on one line.
+
+    The retained tier's reasons are short enough to sit on one line and the out-of-reach tier's are
+    not, because they have to say what an operator would have to do instead. Wrapping here rather
+    than shortening the prose: the reason is the substantive half of that tier's answer.
+    """
+    import textwrap
+
+    return textwrap.wrap(why, width=width, initial_indent=indent, subsequent_indent=indent)
 
 
 def _render(report: ErasureReport) -> str:
@@ -37,6 +54,22 @@ def _render(report: ErasureReport) -> str:
         if count:
             lines.append(f"           {reasons[table]}")
     lines.append(f"  {report.retained_total:>7}  total")
+
+    # The third tier, and the reason it is printed rather than left out: a table this command can
+    # neither clear nor count is a question it did not answer, and an operator signing off on an
+    # erasure has to see the unanswered ones. A count would be the honest thing to show and is
+    # exactly what is unavailable, so the table is named instead — and the block is skipped only
+    # when the register is empty, which is a real state rather than the "unconditionally" an
+    # earlier version of this comment claimed two lines above the `if`.
+    #
+    # Indented to the same column as a table name in the two tiers above — `"  " + 7 + "  "` is
+    # eleven characters — because a report whose three sections do not line up reads as three
+    # reports.
+    beyond = unreachable_tables()
+    if beyond:
+        lines += ["", "OUT OF REACH (named a person; this command can neither clear nor count):"]
+        for table, why in beyond:
+            lines += [f"{'':>11}{table}", *_wrapped(why)]
 
     if not report.applied:
         lines += ["", "Nothing was written. Re-run with --apply to commit."]
