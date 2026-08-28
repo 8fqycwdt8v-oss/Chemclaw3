@@ -18,16 +18,33 @@ import asyncio
 import contextlib
 import io
 
-from chemclaw.agent.leaver import _ERASE, _RETAINED, erase_actor, retention_reasons
+from psycopg.types.json import Jsonb
+
+from chemclaw.agent.leaver import (
+    _BEYOND_REACH,
+    _ERASE,
+    _RETAINED,
+    _RETAINED_IN_PAYLOAD,
+    erase_actor,
+    retention_reasons,
+)
 from chemclaw.cli.erase_actor import main as erase_actor_main
 from chemclaw.core.config import settings
 from chemclaw.core.db import connect
+from chemclaw.durable.digest import digest_channel
 from tests.pg import migrated_db_or_skip
 
 # The column names this system uses for a person. Not every TEXT column — a derived set needs a
-# vocabulary, and this is it, drawn from the six spellings the schema actually uses.
+# vocabulary, and this is it, drawn from the spellings the schema actually uses.
+#
+# **The vocabulary is itself a hand-written list, which is the defect this test exists to prevent,
+# one level up.** `audit_anchors.reseal_by` names "who accepted the gap and why"
+# (`infra/sql/032_audit_anchors.sql`) and was missing here, so a live person-column sat in neither
+# tier with this test green. It is added rather than argued away; the table it belongs to is
+# unreachable to the sweep for a privilege reason, which `_BEYOND_REACH` now records and which this
+# test accepts as a third answer — a *stated* one, unlike the silence it replaces.
 _ACTOR_COLUMN_NAMES = frozenset(
-    {"actor", "owner", "holder", "requested_by", "decided_by", "opened_by"}
+    {"actor", "owner", "holder", "requested_by", "decided_by", "opened_by", "reseal_by"}
 )
 
 _ANNA = "oid-anna"
@@ -211,6 +228,148 @@ def test_a_blank_actor_is_refused() -> None:
     asyncio.run(_run())
 
 
+async def _seed_shared_blob(hash_: str, sessions: tuple[str, ...]) -> None:
+    """One stored tool result that several sessions link — the shape dedup produces every day."""
+    async with await connect(settings.postgres_dsn) as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "INSERT INTO tool_result_blobs (content_hash, byte_size, data) "
+                "VALUES (%s, %s, %s) ON CONFLICT (content_hash) DO NOTHING",
+                (hash_, 5, b"hello"),
+            )
+            for session_id in sessions:
+                await cur.execute(
+                    "INSERT INTO tool_result_links (session_id, content_hash, tool) "
+                    "VALUES (%s, %s, %s) ON CONFLICT DO NOTHING",
+                    (session_id, hash_, "gather_evidence"),
+                )
+        await conn.commit()
+
+
+def test_erasing_one_person_leaves_a_shared_tool_result_readable_for_the_other() -> None:
+    """A blob two sessions link is not one person's to take away.
+
+    **Measured before the fix**, against a live database: two sessions link one blob, erasing the
+    first owner deleted the blob, and `ON DELETE CASCADE` took the *second* session's link row with
+    it — so a chemist who erased nobody found their own transcript pointing at a result the surface
+    could no longer fetch. `session_store._SESSION_DELETE` has had the "unless another session links
+    it" arm since the single-session delete was written; this is the same rule reaching the same
+    table through the other door.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        shared = "sha-shared-blob"
+        await _seed(_ANNA, "s-anna-shared")
+        await _seed(_BEN, "s-ben-shared")
+        await _seed_shared_blob(shared, ("s-anna-shared", "s-ben-shared"))
+
+        await erase_actor(_ANNA, apply=True)
+
+        async with await connect(settings.postgres_dsn) as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT count(*) FROM tool_result_blobs WHERE content_hash = %s", (shared,)
+                )
+                blobs = (await cur.fetchone() or (0,))[0]
+                await cur.execute(
+                    "SELECT count(*) FROM tool_result_links WHERE content_hash = %s "
+                    "AND session_id = %s",
+                    (shared, "s-ben-shared"),
+                )
+                bens_link = (await cur.fetchone() or (0,))[0]
+
+        assert blobs == 1, "erasing one reader deleted a tool result another session still links"
+        assert bens_link == 1, (
+            "the surviving session's link row was cascaded away with the blob — that session's "
+            "transcript now points at a result nothing can fetch"
+        )
+
+    asyncio.run(_run())
+
+
+def test_an_unread_digest_does_not_survive_its_owners_erasure() -> None:
+    """The mailbox is a session id no ownership row backs, so the reachability join never saw it.
+
+    A digest lands in `digest-<oid>` (`durable/digest.digest_channel`), deliberately without a
+    `session_owners` row. Every other `session_events` row is reached through that table, so before
+    this an erasure removed the person's standing queries and left the digests those queries had
+    already produced — reporting `session_events: 0`, which reads as complete. The row here is
+    unconsumed on purpose: that is the population nothing else in the system ever drains.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        await _seed(_CARLA, "s-carla-digest")
+        async with await connect(settings.postgres_dsn) as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "INSERT INTO session_events (session_id, kind) VALUES (%s, %s)",
+                    (digest_channel(_CARLA), "digest"),
+                )
+            await conn.commit()
+
+        report = await erase_actor(_CARLA, apply=True)
+
+        async with await connect(settings.postgres_dsn) as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT count(*) FROM session_events WHERE session_id = %s",
+                    (digest_channel(_CARLA),),
+                )
+                left = (await cur.fetchone() or (0,))[0]
+
+        assert left == 0, "the departed person's unread digests survived their erasure"
+        assert report.erased["session_events"] >= 2, (
+            "the report did not count the mailbox row it deleted; a count that omits a table's "
+            "rows is the same false completeness by another route"
+        )
+
+    asyncio.run(_run())
+
+
+def test_a_publication_naming_a_person_is_reported_rather_than_silently_kept() -> None:
+    """The one actor this schema holds inside a payload is counted, not omitted.
+
+    `result_publications.document` carries `publications[].actor`, `.session_id` and a free-text
+    `.rationale`. The column is called `document`, so the schema-derived check above could never see
+    it and the two-tier report did not mention the table at all — an erasure that looked complete
+    over a row holding the person's id and their own words. It is retained rather than erased, by
+    the same line as every other record: a publication says who asked for a result and why.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        document = {
+            "publications": [
+                {"actor": _ERIK, "session_id": "s-erik-pub", "rationale": "erik asked for this"}
+            ]
+        }
+        async with await connect(settings.postgres_dsn) as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "INSERT INTO result_publications (sink, calc_ref, document) "
+                    "VALUES (%s, %s, %s)",
+                    ("test-sink", "calc-erik-1", Jsonb(document)),
+                )
+            await conn.commit()
+
+        report = await erase_actor(_ERIK)
+
+        assert report.retained.get("result_publications") == 1, (
+            "a publication naming this person was neither erased nor reported as retained"
+        )
+        assert dict(retention_reasons())["result_publications"], (
+            "the retained tier must say why a row stays; this one had no reason to print"
+        )
+        # The bystander check every count in this file carries: an id that merely *contains*
+        # another must not be counted as it.
+        lookalike = await erase_actor(_ERIK_LOOKALIKE)
+        assert lookalike.retained.get("result_publications") == 0
+
+    asyncio.run(_run())
+
+
 def test_every_actor_bearing_column_in_the_schema_is_accounted_for() -> None:
     """No column may name a person without this module having a position on it.
 
@@ -243,12 +402,19 @@ def test_every_actor_bearing_column_in_the_schema_is_accounted_for() -> None:
         # rather than always naming the actor column directly, so the column-level assertion that
         # fits the retain tier would be wrong here.
         erased_tables = {table for table, _ in _ERASE}
+        # Two further answers, both of which have to be *given* rather than assumed: a table whose
+        # person sits inside a payload (`_RETAINED_IN_PAYLOAD`, where the column is `document` and
+        # the vocabulary above can never match it), and one this command can neither clear nor
+        # count (`_BEYOND_REACH`). Both are accounted-for positions; neither is silence.
+        payload_tables = {table for table, *_ in _RETAINED_IN_PAYLOAD}
+        accounted_tables = erased_tables | payload_tables | set(_BEYOND_REACH)
         unaccounted = sorted(
-            (t, c) for t, c in found if (t, c) not in retained and t not in erased_tables
+            (t, c) for t, c in found if (t, c) not in retained and t not in accounted_tables
         )
         assert not unaccounted, (
-            f"these columns name a person and belong to neither tier: {unaccounted}. "
-            "Add each to `_ERASE` (the conversation) or `_RETAINED` (the record) in "
+            f"these columns name a person and belong to no tier: {unaccounted}. "
+            "Add each to `_ERASE` (the conversation), `_RETAINED` (the record) or "
+            "`_BEYOND_REACH` (out of this command's reach, with the reason) in "
             "chemclaw.agent.leaver — deciding by omission is what this test exists to prevent"
         )
 

@@ -1,159 +1,95 @@
-# Working the curated backlog — 2026-08-27
+# Consolidate the memory landscape, then close what the audit found
 
-Follows the review merged as #255, which deleted six resolved rows and corrected twelve. This is
-the implementation pass over what that review left standing.
+**Session:** 2026-08-28 · branch `claude/kemplaw-memory-investigation-lj1fzg`
 
-## Triage: what can actually be built offline
+A deep investigation of every memory in this system (model context, turn state, transcript,
+scratchpad, durable memories, preferences, observations, knowledge) produced four measured
+defects and one consolidation. Four parallel audits verified each against HEAD and against a live
+Postgres; every claim below was re-checked by hand before being queued.
 
-A row is **buildable** here only if its fix is specified, offline-verifiable, and does not need a
-decision only the owner can take. Everything else keeps its row and its stated trigger.
+## A — the context policy: the budget is a trigger, not a control
 
-### Buildable — worked in this pass
+- [x] A1 `agent_keep_last_conversation_groups` -> `ge=0`, default `0` (no group floor).
+      Measured at the shipped defaults, 2,000 prose groups: retained goes 1,944 -> 99,954 tokens
+      against a 100,000 budget. The regression the `max()` arm exists to prevent stays closed:
+      20 x 60kB groups still cut to 90,366, not 180,180.
+- [x] A2 Correct the four measurably false sentences (compaction heading, `trigger` field,
+      `apply` docstring, and `core/config/agent.py`'s "raising N no longer raises what a request
+      can cost" — off by 50x).
+- [x] A3 `.env.example` mirrors the new default.
+- [x] A4 Test: the budget binds at the shipped defaults; a floor still bites when a deployment
+      sets one.
 
-**Wave 1 — self-contained defects, disjoint files**
-- [x] W1-A A solvate collapses onto whichever fragment is larger (`core/chem.py`)
-- [x] W1-B Surface `invalid_tool_calls` (agent middleware chain)
-- [x] W1-C A timed-out attachment parse still runs to completion — cheap half (`ingest/documents/sync.py`)
-- [x] W1-D `observations_status_idx` does not cover its query (`memory/observations.py` + migration)
-- [x] W1-E A jobs-only bundle has no reachability signal (`connectors/health.py`)
-- [x] W1-F No `framing_envelope_secret` warning on a durable deployment (`core/config`)
-- [x] W1-G No session pagination and no per-session delete (`session_store` + `api/routes/sessions.py`)
-- [x] W1-H `connector_job_timeout_seconds` bounds every bundle identically (`JobSpec.timeout_seconds`)
+## B — erasure returns a false green
 
-**Wave 2 — cross-module, each wants an ADR**
-- [x] W2-A `reaction_fingerprints` keys on a bare reaction id (composite key + migration)
-- [x] W2-B The digest is written to a mailbox with no reader (`GET /digests`)
-- [x] W2-C A retracted ELN entry stays current evidence (tombstone half)
-- [x] W2-D The sixteen periodic workflows can still hang instead of failing
-- [x] W2-E `session_owners` grows without any age-based disposal
-- [x] W2-F Split-conformal uncertainty is unwired
-- [x] W2-G A Hessian is cached and never published
-- [x] W2-H Make an ingest rejection answerable instead of only logged
+- [x] B1 A digest mailbox row is keyed `digest-<owner>` and has no `session_owners` row, so
+      `_ERASE`'s session_events arm cannot match it: a departing person's unread digests survive
+      while the report prints `session_events: 0`. Erase them, both actor spellings.
+- [x] B2 The completeness test's actor vocabulary is a hardcoded six names; `audit_anchors.reseal_by`
+      is a seventh and escapes it. Teach the vocabulary the name and classify the table.
 
-**Wave 3 — the ones that are mostly a decision plus a small diff**
-- [x] W3-A The stored-message conversion is a destructive in-place pre-upgrade rewrite
-- [x] W3-B No connector or MCP tool result is framed
-- [x] W3-C Every structured tool result reaches the model as pydantic repr
-- [x] W3-D `fetch_artifact` is a tool that can only refuse
-- [x] W3-E The background worker is a hard singleton (audit the other activities)
-- [x] W3-F One merge added eighteen tools and 32% to what every turn costs
-- [x] W3-G The live lane and the four-repo lane fight over `chem` and `safety`
-- [x] W3-H A pinned template's arguments go unchecked once its bundle stops being ours
+## C — one rule per table, in one place
 
-### Not buildable here — row and trigger stay
+- [x] C1 `_RETAINED` implies "refused": three of the seven retained tables say *nothing bounds it,
+      no decision on record* while the same argument governs all seven. Fix the reasons and derive
+      the test from `_RETAINED` instead of hardcoding four names.
+- [x] C2 `store_vectors`' disposal reason states a deployment fact, not a decision; `scratchpad.py`
+      logs two tables where `setup()` made one.
+- [x] C3 `STORE_TABLES` has no upstream-derived backstop (the checkpointer's does). A LangGraph
+      minor adding a store table would escape both registers with every test green.
+- [x] C4 `session_owners` disposal silently requires `retention_tool_results_days`: with only a
+      messages window set, no session that ever called a tool is disposable. Make it visible.
 
-Each names the input that is missing, not an effort estimate.
+## D — the landscape itself
 
-- **The unauthenticated `X-Chemclaw-Actor` header becomes durable attribution** — full closure needs
-  an actor assertion bound to the call (OBO or a signed memo). Re-introducing OBO is a new decision
-  (D-2026-08-15 deleted it as a control with no caller); building it against no tenant would rebuild
-  exactly that shape.
-- **The results store has no live target** · **Nothing has measured how many rows a real corpus
-  produces** · **Postgres and Temporal are neither deployed nor owned** · **Two of the four
-  deployables have no chart** — each needs infrastructure this environment does not have. Writing a
-  chart against an imagined Service/Route is inventing somebody's deployment.
-- **No external benchmark has ever been run** — ChemRAG-Bench is an external download and D-089
-  forbids external sources at runtime; vendoring it is a licence review, not a code change.
-- **`deep-research` has no index behind it** — wants `litsearch` built in `Chemclaw3-mcp`, which is
-  its own multi-corpus build, not a change here.
-- **Memory records; it does not change what the next turn does** · **`turn_cost_ratio` scores a
-  fixture** — both blocked on a deployment with real session history. `make trajectory-census`
-  already answers the first the day one exists.
-- **A tool schema is 38% developer rationale** · **Half the probe corpus tests one tool** — both
-  gated on a live-lane run proving every probe still reaches its tool; trimming a prompt without
-  that gate is a regression with a good-looking metric.
-- **`pyexec` is merged in the fleet and unreachable** — needs an ADR on whether
-  `CHEMCLAW_CONNECTORS_ENABLED` stops meaning "empty loads everything", which is a chart-wide
-  behavioural change. Recorded as the decision it is rather than wired quietly.
-- **Turn the image scan back on** / **The image vulnerability scan is not merged as a gate** — the
-  hold is a stated measurement (phantom findings contradicting the build's own filesystem listing)
-  and re-checking it needs a current trivy run against a built image in CI, not a workflow edit.
-- **Settle `pytest-xdist` on a real runner** — the row's own closing condition is a comparison on a
-  GitHub runner; a sandbox number says nothing about CI, which is the row's whole point.
-- **Recover the flow-Suzuki screen** · **The PR-gate costs 1.81 s per proposed note** · **The
-  turn-time comparison cannot diff what the ELN gives structured** · **`read_corpus` re-reads the
-  entire ELN** — each changes what a `Component`/`Protocol`/submission *is*, and each wants its own
-  measurement on a real corpus before the shape is chosen.
-- **This environment's `API-KEY` comes and goes** — operational, no code.
+- [x] D1 `infra/sql/README.md`: `bo_campaigns` reads "nothing bounds it" where the code refuses it
+      and a test pins the refusal; the Disposal legend delegates to a BACKLOG row that no longer
+      exists.
+- [x] D2 The chart's retention example omits one of the five windows.
+- [x] D3 Planning files: a row with its own trigger filed in BACKLOG; two pairs of rows describing
+      one subject from two files; four stale anchors (one names a class that does not exist, and a
+      docstring in `src/` repeats it).
+- [x] D4 ADR + ledger row.
+
+## Verification plan
+
+`make lint type test` green with Postgres up (baseline captured before any edit), plus the
+compaction measurement re-run against the new default and the erasure test proving the digest row
+goes.
 
 ## Review
 
-Twenty-two rows worked across three waves. **Six of them ended as an argued
-decline or a narrowing rather than code**, which is the part worth reading:
+**All fourteen items are done.** Nothing was descoped; two things were deliberately *not* built and
+each says so below rather than being dropped quietly.
 
-- **Split-conformal uncertainty** and **JSON tool payloads** were declined on
-  measurement and moved to `DEFERRED.md`'s declined table, so neither is
-  re-proposed as an oversight. In both cases the number pointed the opposite way
-  to the row's expectation — conformal intervals are noise below n=59, and JSON
-  is *shorter* than the repr, not longer.
-- **`invalid_tool_calls`** was already fixed by a merge that landed while this
-  branch ran; only the missing compiled-graph coverage was added, and no second
-  mechanism was written.
-- **The retraction row's stated foundation was gone** — the ELN sync writes no
-  notes any more, so `Note.valid_to` was not the receiving end. `prune_share`
-  could not port whole either: a crawl enumerates, a delta sync does not, so
-  mark-and-sweep would have retired the whole corpus on run one.
-- **The workflow-failure row's argument was false**: `ScheduleHealth` carries no
-  run outcome, so a scheduled job failing every fire reads *healthier* than a
-  parked one.
-- **The singleton row's two suspects were both safe**, and the real blocker was
-  something no row named.
+**What changed behaviourally.** Three of these are user-visible and the rest are the registers and
+the prose that describe them:
 
-**Four defects were found outside any row**, each by an agent doing adjacent
-work: a dead truncation signal in every deployment (`DatedIngest` swallowed a
-structural Protocol), `/readyz` and `/metrics` holding two definitions of "down",
-published gradients 1.89x too large under a correct-looking unit string, and a
-note-reindex that retires live notes the day anyone scales the worker past one.
+1. A long conversation now sends the model up to the token budget instead of twelve turns. Measured
+   at the shipped defaults, 2,000 prose groups: 1,944 -> 99,954 tokens retained. The arm that
+   *bounds* the thread is untouched — 20 groups of 60 kB still cut to 90,366 against a 100,000
+   budget, not to the 180,180 the count-only version left.
+2. A departing person's unread digests, and their id inside a publication payload, no longer
+   survive an erasure that reports success.
+3. Erasing one person no longer deletes a tool result another person's session still links.
 
-Three prose counts were removed rather than corrected — "seven middlewares",
-"79 call sites", "three probe states" — because incrementing a number in prose
-only moves the date it goes stale.
+**How the erasure fixes were proven.** The three new tests were run against the *pre-fix*
+statements (restored at runtime, no file reverted) and all three fail; against the fix, all three
+pass. A test that passes both ways proves nothing, and this file's own history says so.
 
-## Merge-time tasks (cross-agent couplings)
+**Two things deliberately not built.**
 
-Each is a one-line edit that no single agent could make, because the file
-belonged to a sibling working concurrently.
+- *An orphaned `tool_result_links` row is beyond erasure permanently.* It names a session id no
+  ownership row resolves, so what it keeps alive is unattributable rather than somebody's, and the
+  age sweep collects the link with its blob. Recorded in the ADR as an accepted consequence rather
+  than filed as work.
+- *`delete_session` and the retention prune take their two rows in opposite orders.* The BACKLOG row
+  asked for them to be ordered consistently; examined, that is not available — each order is
+  required by its own invariant, and reversing either trades a one-statement deadlock window for a
+  correctness bug. The row now records that the obvious fix was tried and rejected, which is the
+  contribution the row was worth.
 
-- [x] `ingest_rejections` (migration 065) needs a `_NOT_PRUNED` entry in
-      `durable/retention.py`. `tests/test_retention.py::test_every_table_in_the_schema_has_a_disposal_decision`
-      is red until it lands. The table is self-bounding per its own README row.
-- [x] Delete every `BACKLOG.md` row this branch closes, in the merging commit.
-- [ ] Re-run the whole gate after the last agent lands: the per-agent runs each
-      saw a tree the others were still editing.
-- [x] `tests/test_upstream_surface.py` needs a row for the third upstream-internal
-      read added in `connectors/server.py` (`Tool.fn` / `list_tools`). That file
-      exists to hold exactly this count, so a new coupling that is not listed is
-      the defect it guards against.
-- [x] `tests/test_publish_projection.py`'s docstring measurement ("all 79 `_fact`
-      call sites pass an already-canonical unit; one conversion observed") is
-      stale — two sites convert on a live path now.
-
-## Known-red at HEAD (must be green before PR)
-
-- [x] `tests/test_ingest_rejections.py::test_a_long_refusal_message_is_cut_and_says_so` fails.
-      Cause is mine, not the code's: commit 697f620 used `git add -A` and swept in an agent's
-      half-finished edit to `research_tools.py` and its test. The agent is still working the file.
-      Verify and re-commit when it reports; the final full-suite gate must be green before the PR.
-
-## What CI caught that the local gate could not
-
-The local gate was green — 5422 passed, zero Postgres skips — and CI failed three
-`tests/test_api_sessions.py` delete tests on `relation "checkpoints" does not exist`.
-Neither run was wrong. The isolation DSN is `search_path=<test schema>,public`, and the
-sandbox database *had run the agent*, so `AsyncPostgresSaver.setup()` had put the
-checkpoint tables in `public` and every unqualified read resolved through them. CI's
-container runs `make db-migrate` and never the agent, so `public` has the 36 migrated
-tables and none of the three.
-
-Reproduced against a database in CI's exact shape (fresh database, migrations only) before
-changing anything, and fixed there:
-
-- `tests/pg.py::create_checkpoint_tables` — the helper `test_retention.py` and
-  `test_session_store.py` each held a copy of, now one function (this fix would have been
-  the third copy). The three API delete tests call it, so their count covers the graph
-  state rather than skipping it.
-- `tests/conftest.py::_report_public_schema_shadowing` — a terminal section naming any
-  table in `public` that no migration creates. Reported, not enforced: having run the agent
-  against your own database is not a mistake; reading a green line as evidence about a
-  database that has not is. Same shape as the Postgres- and Temporal-skip sections, for the
-  same misreading.
+**One audit finding was wrong and the baseline is what showed it.** A subagent reported
+`tests/test_deploy_chart.py::test_the_fleet_ceiling_...` as failing on a clean tree. The baseline
+run taken before any edit was **5,444 passed, 11 skipped, exit 0**. Prose about a test is evidence
+about what its author believed; the run is the evidence.

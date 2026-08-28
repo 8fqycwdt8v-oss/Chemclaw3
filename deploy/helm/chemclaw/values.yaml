@@ -947,8 +947,17 @@ retention:
   #     CHEMCLAW_RETENTION_SESSION_MESSAGES_DAYS: "365"
   #     CHEMCLAW_RETENTION_SESSION_EVENTS_DAYS: "30"
   #     CHEMCLAW_RETENTION_TOOL_RESULTS_DAYS: "30"
-  # A table whose key is absent keeps growing — `infra/sql/README.md`'s Disposal column says
-  # which ones exist and what each holds.
+  #     CHEMCLAW_RETENTION_RESULT_PUBLICATIONS_DAYS: "90"
+  # All five, because the example omitted the last one for as long as it existed and an operator
+  # copying it inherits the omission. A table whose key is absent keeps growing —
+  # `durable/retention.py`'s `_PRUNABLE` is the set with a window, and `_NOT_PRUNED` says what
+  # bounds everything else.
+  #
+  # **Two of the five are load-bearing together, which no key here can say on its own.** An
+  # ownership row in `session_owners` is disposable only once nothing session-scoped is left for
+  # that session, and `tool_result_links` empties only behind its blob — so stating
+  # SESSION_MESSAGES and leaving TOOL_RESULTS at 0 forgets no session that ever called a tool. The
+  # sweep now warns with the ENV names when that is the state it is in.
   windows: {}
   # The escape hatch, mirroring `networkPolicy.allowAnyDestination`: a deployment that genuinely
   # wants no disposal says so here, in its own values file, where the next person greps for it.

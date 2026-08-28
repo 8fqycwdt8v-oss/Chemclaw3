@@ -82,17 +82,28 @@ logger = logging.getLogger(__name__)
 _store: AsyncPostgresStore | None = None
 
 # The tables `AsyncPostgresStore.setup()` creates, named here for the reason `CHECKPOINT_TABLES` is
-# named in `agent/checkpointer.py`: nothing can derive the list, because these tables are upstream's
-# and appear in no migration in `infra/sql`. The erasure sweep has to reach a departing person's
+# named in `agent/checkpointer.py`: these tables are upstream's and appear in no migration in
+# `infra/sql`, so no schema scan can find them. The erasure sweep has to reach a departing person's
 # memories, and it spells both names itself (`agent/leaver.py`, one `DELETE` per table, dependent
-# side first). `store_vectors` carries the embeddings and is keyed on `(prefix, key)`.
+# side first).
+#
+# **They are hand-written and they are checked**, which is the half the previous version of this
+# comment got wrong — it said "nothing can derive the list", and upstream's own migration constants
+# derive it exactly. `tests/test_scratchpad.py` reads them, as the checkpointer's twin has done
+# since it was written, so a LangGraph minor adding a store table turns a test red instead of
+# landing a table that escapes both this sweep and the disposal register.
+#
+# `store_vectors` carries the embeddings and is keyed on `(prefix, key)`. It comes from
+# `VECTOR_MIGRATIONS`, which `setup()` runs only for a store built with an `index_config` — none is
+# passed below — so this deployment holds `store` alone. Both names stay because erasure must reach
+# the second wherever a site does set one.
 #
 # **The retention sweep does not touch either table**, and an earlier version of this comment said
-# it "has to prune them by age", which was never true: `durable/retention.py`'s `_PRUNABLE` names
-# `session_events`, `session_messages`, `tool_result_blobs` and `checkpoints`, and no fifth entry.
-# The omission is the design — a memory is written to persist, so disposing of one is a capability
-# decision with its own policy, not something an age cutoff may decide. Turn state is the opposite
-# and is pruned; that is `checkpoints`, not `store`.
+# it "has to prune them by age", which was never true. The omission is the design — a memory is
+# written to persist, so disposing of one is a capability decision with its own policy, not
+# something an age cutoff may decide. Turn state is the opposite and is pruned; that is
+# `checkpoints`, not `store`. (`_PRUNABLE`'s membership is not restated here: this comment used to
+# list it, the list gained two entries, and the sentence went stale in the usual direction.)
 STORE_TABLES: tuple[str, ...] = ("store", "store_vectors")
 
 # The root the memories route is mounted at. A constant because three places spell it — the route
@@ -184,7 +195,13 @@ async def memory_store() -> AsyncPostgresStore:
             store = AsyncPostgresStore(pool)
             await store.setup()
             _store = store
-            logger.info("memory store ready (%d tables)", len(STORE_TABLES))
+            # No count. `STORE_TABLES` names both tables the store *may* create, and this build
+            # creates one of them: `store_vectors` comes from `VECTOR_MIGRATIONS`, which `setup()`
+            # runs only for a store constructed with an `index_config`, and none is passed above.
+            # So the line said "2 tables" over a schema holding one, for as long as it existed. The
+            # constant stays at two names because erasure must reach both wherever a site does set
+            # one; what was wrong is asserting a number about *this* process.
+            logger.info("memory store ready")
     return _store
 
 
