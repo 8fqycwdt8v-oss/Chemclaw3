@@ -430,7 +430,7 @@ def test_every_outcome_is_reachable_and_none_is_invented() -> None:
         # Still on a loop, though `timed_out` no longer reads the clock here: the flag is sampled
         # in `run_turn`'s `except` clause at the instant the cancellation lands, because settling
         # runs after the rollback and a Stop at `deadline − ε` behind a slow teardown used to
-        # cross the deadline while being torn down. `tests/test_api_review_runner.py` is where
+        # cross the deadline while being torn down. `tests/test_api_review_turn_record.py` is where
         # that instant is pinned; this asserts only that the enum is closed in both directions.
         return {
             _settle_outcome(_ledger(answered=True, answer_parts=["ok"])),
@@ -502,7 +502,7 @@ def test_a_wall_clock_kill_is_told_apart_from_a_stop() -> None:
     timeout schedules itself on. **Where that comparison is taken is the whole of it**: it is
     sampled in the `except` clause beside `cancelled = True` and read here, because settling runs
     after the rollback and a Stop delivered just short of the deadline crossed it while being torn
-    down. `tests/test_api_review_runner.py` pins the instant; this pins the pair.
+    down. `tests/test_api_review_turn_record.py` pins the instant; this pins the pair.
     """
 
     async def _run() -> tuple[str, str]:
