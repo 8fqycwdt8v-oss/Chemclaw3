@@ -1,18 +1,102 @@
 """The pre-execution plan gate: read the plan a session proposes, and record the human decision.
 
-These two routes are the HTTP half of the harness's approval line (D-137/D-167): the agent proposes
-a plan, a human approves the exact plan they were shown (hash-bound), and `chemclaw.agent.plan_gate`
+These routes are the HTTP half of the harness's approval line (D-137/D-167): the agent proposes a
+plan, a human approves the exact plan they were shown (hash-bound), and `chemclaw.agent.plan_gate`
 enforces the recorded decision. Deliberately routes and not agent tools — see `decide_plan`.
+
+**Two of them are per session and the third is not, and that asymmetry is the point.** A decision
+belongs to the conversation that raised it, but *finding* the conversation cannot: a chemist who
+closed the tab holds no session id, and every other plan surface is addressed by one.
+`pending_plans` is the cross-session read — see its docstring for the narrower predicate an inbox
+needs and why it is not the one the in-turn card uses.
 """
+
+import logging
+from dataclasses import dataclass
 
 from fastapi import FastAPI, HTTPException, Request
 from starlette.responses import Response
 
-from chemclaw.agent.plan_gate import EMPTY_PLAN_HASH, plan_identity
+from chemclaw.agent.plan_approval_store import ApprovalStore
+from chemclaw.agent.plan_gate import EMPTY_PLAN_HASH, gate_applies, plan_identity
 from chemclaw.agent.plan_state import session_todos
+from chemclaw.agent.profiles import get_profile
 from chemclaw.api.deps import CurrentSession, CurrentUser
-from chemclaw.api.schemas import PlanDecisionIn, PlanStatusOut
+from chemclaw.api.schemas import PendingPlan, PendingPlansOut, PlanDecisionIn, PlanStatusOut
 from chemclaw.api.state import state
+from chemclaw.core.config import settings
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class _PlanRead:
+    """One session's plan as the two stores answer it, before either route interprets it.
+
+    Extracted so `get_plan` and `pending_plans` read a plan the same way. They ask different
+    questions of the answer — one renders it, one filters on it — and a second read path would let
+    the inbox and the session's own page disagree about what this session is proposing, which is
+    the class of defect `agent/plan_state` exists to prevent one layer down.
+
+    `todos` is `None` when the plan could not be read at all, and that is deliberately not folded
+    into `[]`: a session whose checkpoint is unreachable has an *unknown* plan, which the inbox
+    counts as unread rather than reporting as nothing waiting.
+    """
+
+    todos: list[str] | None
+    # The identity a decision is recorded against, or `None` when there is nothing to decide on.
+    approvable: str | None
+    # The latest *effective* `(approved, actor)`; `None` when nobody has decided at all.
+    decision: tuple[bool, str] | None
+
+    @property
+    def plan_hash(self) -> str:
+        """The identity to display: the approvable one, or the global empty-plan constant.
+
+        A client needs *an* identity even for a session proposing nothing — see `get_plan`.
+        """
+        return self.approvable or EMPTY_PLAN_HASH
+
+
+async def _read_plan(session_id: str, approvals: ApprovalStore) -> _PlanRead:
+    """The plan `session_id` proposes and the decision standing against it — one read, both routes.
+
+    The decision is looked up only for an approvable plan, because `plan_identity` returns `None`
+    for an empty one and a row recorded against the empty-plan constant would say "someone approved
+    the empty plan" — an identity every session in every deployment shares.
+    """
+    todos = await session_todos(session_id)
+    approvable = plan_identity(todos or [])
+    decision = await approvals.decision(session_id, approvable) if approvable else None
+    return _PlanRead(todos=todos, approvable=approvable, decision=decision)
+
+
+def _plan_gated(profile_name: str | None) -> bool:
+    """Whether a plan on this profile can be waiting on a person.
+
+    `gate_applies` — the same predicate `chemclaw.api.runner` uses to decide whether to show the
+    decision card at all, so the inbox and the card cover the same sessions. It answers two things
+    at once, and both are needed here: with the harness off there is no todo list to read
+    (`build_langgraph_agent` attaches `TodoListMiddleware` under `harness_enabled_for`), and under
+    `harness_autonomy="execute"` there is a plan but no gate — the agent acts without asking, so
+    nothing about that plan is anyone's decision.
+
+    This is also the filter that keeps `GET /plans/pending` free in the default deployment, where
+    `harness_enabled` is off: a skipped session costs no checkpointer statement, and every
+    checkpointer statement is serialized against every concurrent turn on the pod.
+
+    A profile the registry no longer knows is treated as gated rather than skipped: the deployment
+    dropped a profile out from under an existing session, and guessing *away* from a plan that may
+    be sitting there is the direction that loses a chemist's blocked work. It costs one read.
+    """
+    try:
+        return gate_applies(get_profile(profile_name))
+    except ValueError:
+        logger.info(
+            "session profile %r is no longer registered; its plan is read rather than skipped",
+            profile_name,
+        )
+        return True
 
 
 async def get_plan(
@@ -50,24 +134,80 @@ async def get_plan(
     saying execute after the approval it was granted for had been spent. There is no mode here;
     what a surface renders is one fact seen twice.
     """
-    plan = await session_todos(session_id) or []
-    approvable = plan_identity(plan)
-    plan_hash = approvable or EMPTY_PLAN_HASH
-    decision = (
-        await state(request).plan_approvals.decision(session_id, plan_hash) if approvable else None
-    )
+    read = await _read_plan(session_id, state(request).plan_approvals)
     # One read, one question. Calling `plan_is_approved` here as well would issue a second query
     # whose answer could differ from this one — a route reporting `approved=false` beside the
     # name of whoever approved it is a worse surface than either fact alone.
-    approved = bool(decision and decision[0])
+    approved = bool(read.decision and read.decision[0])
     return PlanStatusOut(
         session_id=session_id,
-        plan_hash=plan_hash,
-        plan=plan,
+        plan_hash=read.plan_hash,
+        plan=read.todos or [],
         mode="execute" if approved else "plan",
         approved=approved,
-        decided_by=decision[1] if decision else None,
+        decided_by=read.decision[1] if read.decision else None,
     )
+
+
+async def pending_plans(request: Request, principal: CurrentUser) -> PendingPlansOut:
+    """Every plan of the caller's that nobody has decided yet — the cross-session inbox.
+
+    The plan gate is answered per session, and until this route existed *finding* the session was
+    the unsolved half: the decision card lives inside a turn, a reload recovers it only for a
+    conversation somebody opens, and a chemist who closed the tab holds no session id. So a plan
+    could sit blocking work with nothing anywhere able to say which conversation it was in.
+
+    **The predicate is narrower than the card's, deliberately.** `runner._pending_plan_approval`
+    prompts whenever a plan holds no *live* approval, which is right inside a turn and wrong for an
+    inbox: an approval is spent at the end of the turn it authorized (D-167), so every finished
+    plan-gated conversation would sit here forever. This lists a plan with **no decision at all** —
+    `plan_approvals` holds no row for this session and this plan hash. A spent approval and a
+    rejection are both answers; asking again is the conversation's job, and the card does it there.
+
+    What that misses, stated rather than left to be found: a plan re-proposed byte-identically after
+    its approval was spent hashes to a row that exists, so it does not list — while the card, on the
+    next turn's end, still shows. The alternative misses nothing and drowns the queue in decided
+    work, which is the failure mode that makes an inbox stop being read.
+
+    **Ownership comes from the same registry `GET /sessions` reads**, so this can never name a
+    session the caller would then be refused — the property `list_sessions` relies on, for the same
+    reason.
+
+    Bounded twice, and the response says so rather than truncating quietly. Sessions that cannot be
+    holding a decision are skipped for free (`_plan_gated`); of what remains, at most
+    `service_max_plan_scans` have their plan read, because each read is a statement on a
+    checkpointer that serializes them against every concurrent turn on the pod. `unread` counts
+    what was left — including a session whose checkpoint could not be read at all, which is an
+    unknown plan rather than an absent one.
+    """
+    owners = state(request).session_owners
+    if owners is None:
+        # No durable registry to enumerate — the same emptiness, and for the same reason, that
+        # `GET /sessions` returns under `session_store="memory"`. `gated=0` tells the surface this
+        # is a property of the deployment rather than of the caller's work.
+        return PendingPlansOut(plans=[], considered=0, gated=0, unread=0)
+    sessions = await owners.list_for_owner(principal.oid)
+    gated = [row for row in sessions if _plan_gated(row[4])]
+    budget = settings.service_max_plan_scans
+    unread = len(gated) - min(len(gated), budget)
+    approvals = state(request).plan_approvals
+    plans: list[PendingPlan] = []
+    for session_id, _created_at, updated_at, title, _profile in gated[:budget]:
+        read = await _read_plan(session_id, approvals)
+        if read.todos is None:
+            unread += 1
+            continue
+        if read.approvable is not None and read.decision is None:
+            plans.append(
+                PendingPlan(
+                    session_id=session_id,
+                    title=title,
+                    updated_at=updated_at,
+                    plan_hash=read.approvable,
+                    plan=read.todos,
+                )
+            )
+    return PendingPlansOut(plans=plans, considered=len(sessions), gated=len(gated), unread=unread)
 
 
 async def decide_plan(
@@ -140,3 +280,6 @@ def register(app: FastAPI) -> None:
     """
     app.get("/sessions/{session_id}/plan")(get_plan)
     app.post("/sessions/{session_id}/plan/decision", status_code=204)(decide_plan)
+    # Not under `/sessions/…`: it is a question about all of them, and a path that named one
+    # session would need an id the caller is asking this route to find.
+    app.get("/plans/pending")(pending_plans)

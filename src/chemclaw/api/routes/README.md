@@ -18,7 +18,7 @@ disables `app.dependency_overrides`.)
 | `turns.py` | `POST /sessions/{id}/messages` — the SSE turn stream, the one route with real concurrency machinery (admission, leases, budget) |
 | `streams.py` | `GET /sessions/{id}/events` — the job push-back stream and its per-user/per-pod caps |
 | `results.py` | `GET /sessions/{id}/tool-results/{ref}` — the full text of what one tool returned, which the 200-character `ToolResultEvent.preview` cannot carry. Session-scoped so it reuses `resolve_session` rather than inventing an auth story for a bare `/tool-results/{ref}` |
-| `plan.py` | `GET/POST /sessions/{id}/plan[...]` — the pre-execution harness-plan gate (D-137/D-167) |
+| `plan.py` | `GET/POST /sessions/{id}/plan[...]` — the pre-execution harness-plan gate (D-137/D-167) — plus `GET /plans/pending`, the cross-session inbox of plans nobody has decided, which is the only one of the three not addressed by a session id because it is what finds the session |
 | `proposals.py` | `GET/POST /proposals[...]`, `POST /events/knowledge-merged` — the PR-gate's review queue and the webhook that closes it |
 | `notes.py` | `GET /notes/{id}` — one knowledge note as the `NoteView` `expand_note` returns, so a citation chip resolves to the note it cites. `CurrentUser`-gated, not owner-scoped: the graph has no owner |
 | `jobs.py` | `GET/DELETE /jobs[...]` — the durable-run surface over `job_records` |

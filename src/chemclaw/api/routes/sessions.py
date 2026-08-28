@@ -95,7 +95,12 @@ async def list_sessions(
         SessionSummary(
             session_id=session_id, created_at=created_at, updated_at=updated_at, title=title
         )
-        for session_id, created_at, updated_at, title in await owners.list_for_owner(principal.oid)
+        # The profile comes back on the same row and is not a session's *summary* — it is what
+        # `GET /plans/pending` filters on. Dropped here rather than added to `SessionSummary`,
+        # which describes a conversation to a person.
+        for session_id, created_at, updated_at, title, _ in await owners.list_for_owner(
+            principal.oid
+        )
     ]
 
 

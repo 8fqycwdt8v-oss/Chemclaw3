@@ -17,6 +17,7 @@ verdict simply expiring — get a test of their own.
 """
 
 import asyncio
+import socket
 import time
 from collections.abc import Iterator
 from contextlib import AsyncExitStack
@@ -184,3 +185,113 @@ def test_a_failed_readiness_sweep_spares_the_next_turn_its_open_timeout(
     spec = _mcp_connection(cast(ConnectorManifest, manifest), manifest.endpoint)
     assert asyncio.run(_open(spec)) == ["dark"]
     assert dials == [], "the turn dialled a connector the readiness sweep had just found down"
+
+
+def test_a_repeated_failing_sweep_does_not_restart_the_breaker_window(
+    monkeypatch: pytest.MonkeyPatch, dials: list[str]
+) -> None:
+    """The window measures the outage, not the gap between observations of it.
+
+    This is the shape the shipped deployment is in: the kubelet runs `/readyz` every ten seconds
+    against a five-second readiness cache, so a front-door pod re-observes every connector three
+    times inside a thirty-second window. If each observation re-dated the verdict, recovery path 2
+    — "independently of any probe a verdict expires" — would be unreachable for every probed
+    connector, and a connector whose `/healthz` disagrees with its MCP surface (a health route
+    slower than `connector_health_timeout_seconds` but well inside `connector_open_timeout_seconds`,
+    or a hand-set URL override that sends `health_url` to the manifest's loopback default) would
+    lose its tools for the life of the process with nothing dialling it to find out.
+
+    So: a sweep, a wait past the window, a second sweep re-observing the same outage, then a turn.
+    The turn must dial — and the turn after it must not, because it is the *dial* that restarts the
+    window, being the observation that costs the open bound.
+    """
+    monkeypatch.setattr(settings, "connector_breaker_window_seconds", 0.5)
+    manifest = SimpleNamespace(
+        name="dark",
+        endpoint=HttpEndpoint(
+            url=f"http://127.0.0.1:{_free_port()}/mcp",
+            health_url=f"http://127.0.0.1:{_free_port()}/healthz",
+            tools=["unreached"],
+            read_only=["unreached"],
+        ),
+    )
+    monkeypatch.setattr(health, "enabled", lambda: [manifest])
+    spec = _mcp_connection(cast(ConnectorManifest, manifest), manifest.endpoint)
+
+    assert [item.state for item in asyncio.run(health.probe_connectors())] == ["unreachable"]
+    time.sleep(0.6)
+    assert [item.state for item in asyncio.run(health.probe_connectors())] == ["unreachable"]
+
+    assert asyncio.run(_open(spec)) == ["dark"]
+    assert len(dials) == 1, (
+        "the sweep re-dated a verdict it did not change, so the window never expired and no turn "
+        "ever dialled — the breaker had become permanent"
+    )
+
+    assert asyncio.run(_open(spec)) == ["dark"]
+    assert len(dials) == 1, "the dial did not restart the window, so every turn now pays the open"
+
+
+@pytest.fixture
+def hanging_port() -> Iterator[int]:
+    """A port that completes the TCP handshake and then never speaks.
+
+    A listening socket nobody accepts from: the kernel completes the connect into the backlog, so
+    `httpx` gets its connection and then waits out the session's *read* timeout on `initialize`.
+    That is the failure `/healthz` cannot see and the only one that reaches
+    `HeldConnectorSession.__aenter__`'s `except TimeoutError` — every other test in this file points
+    at a dark port, whose connect is *refused*, which fails fast inside the holder task and returns
+    through the success path instead.
+    """
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(8)
+    try:
+        yield int(listener.getsockname()[1])
+    finally:
+        listener.close()
+
+
+def test_a_connector_that_accepts_and_never_speaks_is_recorded_too(
+    monkeypatch: pytest.MonkeyPatch, dials: list[str], hanging_port: int
+) -> None:
+    """The open bound expiring is a verdict, and it is the expensive one.
+
+    Every other test here builds its connector on a refused connect, which never enters
+    `__aenter__`'s `except TimeoutError` branch — so the `record_reachability` call in that branch
+    was executed by no test in this repository, and deleting it left all five green. It is also the
+    branch that matters most: a refused connect costs microseconds, while a server that accepts the
+    socket and never finishes its handshake costs `connector_open_timeout_seconds` plus the
+    teardown wait, on every turn of the outage, and is precisely the state `/healthz` returning 200
+    cannot describe.
+
+    So: three turns. The first pays the bound, the second is spared it, and the third — past the
+    window — dials again, which is the only shape that proves the saving is a saving and not a
+    connector permanently dropped.
+    """
+    monkeypatch.setattr(settings, "connector_open_timeout_seconds", 0.2)
+    monkeypatch.setattr(settings, "connector_teardown_timeout_seconds", 0.2)
+    monkeypatch.setattr(settings, "connector_breaker_window_seconds", 0.5)
+    endpoint = HttpEndpoint(
+        url=f"http://127.0.0.1:{hanging_port}/mcp",
+        health_url=f"http://127.0.0.1:{hanging_port}/healthz",
+        tools=["unreached"],
+        read_only=["unreached"],
+    )
+    spec = _mcp_connection(cast(ConnectorManifest, SimpleNamespace(name="mute")), endpoint)
+
+    started = time.monotonic()
+    assert asyncio.run(_open(spec)) == ["mute"]
+    first = time.monotonic() - started
+    assert first >= 0.2, f"the open returned in {first:.3f}s, so it did not reach the open bound"
+    assert len(dials) == 1
+
+    assert asyncio.run(_open(spec)) == ["mute"]
+    assert len(dials) == 1, (
+        "the second turn paid the open bound again against a connector the first turn had just "
+        "timed out on — the timeout branch records no verdict"
+    )
+
+    time.sleep(0.6)
+    assert asyncio.run(_open(spec)) == ["mute"]
+    assert len(dials) == 2, "past the window the connector was never dialled again"

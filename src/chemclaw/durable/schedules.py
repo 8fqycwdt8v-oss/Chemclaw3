@@ -272,9 +272,20 @@ def _build_schedule(job: PlannedSchedule) -> Schedule:
             # schedule is now bounded on both sides (`durable/publish.py::queue_wait_timeout`), so
             # this is the backstop for what that cannot see: a child that hangs, a timer, a wait.
             # `schedule_run_timeout_seconds` explains why a day is the right size and why a
-            # terminated run is safe here — each of these jobs is cursored or idempotent, so the
-            # next fire picks up where this one was cut off.
-            execution_timeout=timedelta(seconds=settings.schedule_run_timeout_seconds),
+            # terminated run is safe here.
+            #
+            # **`run_timeout`, not `execution_timeout`, and the difference is the whole point.**
+            # `execution_timeout` is Temporal's WorkflowExecutionTimeout: it bounds the entire
+            # `continue_as_new` chain, and a continued run cannot extend it — the continue-as-new
+            # command carries a run timeout and a task timeout and no execution timeout. Four of
+            # the jobs scheduled here drain by continuing as new (`corpus_sync`, `document_sync`,
+            # `label_sync`, `eln_sync`), so a chain-wide ceiling would not bound "one run" at all:
+            # it would kill a first load of a multi-million-row corpus a day into the drain, and
+            # `corpus_sync` keeps no `sync_cursors` row, so the next fire would start again from
+            # its first page and never finish. Measured against a live broker on a chain of ten
+            # one-second runs under a five-second ceiling: `execution_timeout` failed it at 5.64 s,
+            # `run_timeout` completed it in 12.38 s.
+            run_timeout=timedelta(seconds=settings.schedule_run_timeout_seconds),
         ),
         spec=ScheduleSpec(
             intervals=[ScheduleIntervalSpec(every=job.interval, offset=_jitter(job))],

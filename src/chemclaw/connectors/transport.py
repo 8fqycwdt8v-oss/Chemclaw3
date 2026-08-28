@@ -225,7 +225,7 @@ class HeldConnectorSession:
                 await self._opened.wait()
         except TimeoutError as exc:
             await self._shut_down()
-            record_reachability(self._spec.name, reachable=False)
+            record_reachability(self._spec.name, reachable=False, dialled=True)
             absorb_connect_failure(self._spec.name, exc)
             return []
         except BaseException:
@@ -236,7 +236,7 @@ class HeldConnectorSession:
             raise
         # Both outcomes are recorded, and the healthy one is not an optimisation: it is what lets a
         # connector that recovered be readmitted in a process whose readiness route never runs.
-        record_reachability(self._spec.name, reachable=self._failure is None)
+        record_reachability(self._spec.name, reachable=self._failure is None, dialled=True)
         if self._failure is not None:
             absorb_connect_failure(self._spec.name, self._failure)
         return self._tools
