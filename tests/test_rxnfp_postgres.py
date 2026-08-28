@@ -143,11 +143,13 @@ def test_two_sources_sharing_an_entry_id_keep_two_rows_in_postgres() -> None:
     asyncio.run(_run())
 
 
-def test_a_postgres_hit_cites_the_source_it_matched() -> None:
-    """Each site's reaction finds its own row, and the two spell two citations.
+def test_a_postgres_hit_carries_the_source_it_matched() -> None:
+    """Each site's reaction finds its own row, and the hit says which site that was.
 
-    The half that could not be answered before: a hit is what a citation is built from, and with
-    one row behind two runs the search had no source to hand `note_id_for_reaction`.
+    The half that could not be answered before the key change: one row behind two runs, and a
+    search with no source to report. The source-qualified *citation* this used to spell is gone —
+    no reader resolved it (D-2026-08-27, review section 3) — and the fact it was spelled from is
+    what is asserted here instead.
     """
 
     async def _run() -> None:
@@ -155,17 +157,13 @@ def test_a_postgres_hit_cites_the_source_it_matched() -> None:
         await store.add(_sited("pg-cite-1001", "pg-eln-a", _ESTER_ETHYL))
         await store.add(_sited("pg-cite-1001", "pg-eln-b", _HALOGENATION))
 
-        cited = {}
         for smiles, expected in ((_ESTER_ETHYL, "pg-eln-a"), (_HALOGENATION, "pg-eln-b")):
             hits = [
                 h
                 for h in (await find_similar_reactions(store, smiles, threshold=0.99)).hits
                 if h.id == "pg-cite-1001"
             ]
-            assert [h.source for h in hits] == [expected], f"{smiles} cited the wrong site"
-            cited[expected] = note_id_for_reaction(hits[0].id, hits[0].source)
-
-        assert len(set(cited.values())) == 2, f"two runs, one citation: {cited}"
+            assert [h.source for h in hits] == [expected], f"{smiles} matched the wrong site"
 
     asyncio.run(_run())
 

@@ -369,11 +369,15 @@ def test_two_sources_sharing_an_entry_id_keep_two_fingerprints() -> None:
     asyncio.run(_run())
 
 
-def test_a_hit_carries_the_source_its_citation_needs() -> None:
-    """A search knows which site it matched; a bare `reaction-<id>` citation cannot say it.
+def test_a_hit_carries_the_source_a_citation_would_need() -> None:
+    """A search knows which site it matched, which a bare `reaction-<id>` citation cannot say.
 
-    `note_id_for_reaction` is the one definition of that spelling, so the assertion is that the
-    two hits spell two different citations — not that either equals a literal.
+    The *spelling* that consumed this is gone: `note_id_for_reaction` had an optional `source`
+    argument no caller in `src/` ever passed, and none of the six readers that would have to
+    resolve `reaction-<source>.<id>` accept it, so the qualified id it built resolved to nothing
+    (D-2026-08-27, review section 3). What the hit carries is not gone and is not dead — it is what
+    such a citation would be built *from* on the day those readers accept one, and it is what
+    `ingest.eln.records._one_of` refuses to guess at.
     """
 
     async def _run() -> None:
@@ -381,13 +385,13 @@ def test_a_hit_carries_the_source_its_citation_needs() -> None:
         await store.add(_sited("EXP-1001", "eln-a", _ESTER_ETHYL))
         await store.add(_sited("EXP-1001", "eln-b", _HALOGENATION))
 
-        cited = {
-            note_id_for_reaction(hit.id, hit.source)
+        matched = {
+            (hit.id, hit.source)
             for smiles in (_ESTER_ETHYL, _HALOGENATION)
             for hit in (await find_similar_reactions(store, smiles, threshold=0.99)).hits
         }
-        assert len(cited) == 2, f"two runs, one citation: {cited}"
-        assert all(citation.startswith("reaction-") for citation in cited)
+        assert matched == {("EXP-1001", "eln-a"), ("EXP-1001", "eln-b")}
+        assert note_id_for_reaction("EXP-1001") == "reaction-EXP-1001"
 
     asyncio.run(_run())
 
@@ -430,15 +434,3 @@ def test_a_sourced_write_supersedes_the_row_migration_063_could_not_name() -> No
         assert [(h.id, h.source) for h in hits] == [("EXP-1001", "eln-a")]
 
     asyncio.run(_run())
-
-
-def test_a_source_name_that_cannot_be_split_back_out_is_refused() -> None:
-    """The citation separator is the one character a source name may not contain.
-
-    A source called `eln.a` would spell `reaction-eln.a.EXP-1001`, which splits on its first
-    separator into a source that is not the one it came from — an id that resolves, to the wrong
-    run. Refused where the citation is built, so the failure names the source rather than
-    surfacing as a missing record much later.
-    """
-    with pytest.raises(ValueError, match="separates"):
-        note_id_for_reaction("EXP-1001", "eln.a")

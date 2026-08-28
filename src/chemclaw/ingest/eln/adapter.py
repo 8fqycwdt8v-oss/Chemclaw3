@@ -7,7 +7,6 @@ identical no matter which ELN is wired. There is no universal ELN abstraction �
 per source (docs/planning/DEFERRED.md: generalize only from a third source).
 """
 
-from collections.abc import Iterator
 from datetime import UTC, datetime
 from logging import Logger
 from pathlib import Path
@@ -174,101 +173,24 @@ def fetch_was_truncated(adapter: object) -> bool:
     method they would all have to implement would only be a way to get it wrong.
 
     **Asked through the seam's wrappers, not only of the object handed over.** The registry always
-    returns `DatedIngest(...)`, which declares neither optional capability — so this read answered
-    `False` for every source in every deployment, including the warehouse adapter that implements
-    `fetch_truncated` precisely so the workflow would come back for the truncated remainder. The
-    capability belongs to the adapter, so the question has to reach it; `_capable` is that rule,
-    written once because the next optional capability would have been swallowed the same way.
-    """
-    for candidate in _adapter_chain(adapter):
-        if isinstance(candidate, BoundedFetch):
-            return candidate.fetch_truncated()
-    return False
+    returns `DatedIngest(...)`, and a `runtime_checkable` Protocol is structural: a wrapper that
+    does not redeclare a method simply does not have it. So this read `False` for every source in
+    every deployment, including the warehouse adapter that implements `fetch_truncated` precisely
+    so the workflow would come back for the truncated remainder. The capability belongs to the
+    adapter, so the question has to reach it — the walk below is that rule, and a wrapper that
+    exposes what it wraps through the public `inner` satisfies it by doing nothing.
 
-
-class Retraction(BaseModel):
-    """One entry the source says was withdrawn, and when it says that happened."""
-
-    entry_id: str = Field(min_length=1)
-    # The moment the source reported the withdrawal, which is when the run stopped being current
-    # evidence. Carried per entry rather than per report because a report names several
-    # withdrawals and they did not happen at one instant.
-    retracted_at: datetime
-
-
-class RetractionReport(BaseModel):
-    """What a source says about withdrawals in one window — and whether it saw the whole window."""
-
-    retractions: list[Retraction]
-    # **Required, with no default, and that is the safety property.** A report that was cut short —
-    # a page limit, a partly-readable feed, a subset of the sources behind one adapter — is not
-    # evidence about the window it was asked for, and the sweep refuses on it. A default of `True`
-    # would let an adapter that never thought about truncation be believed by omission, which is
-    # the one mistake with an unrecoverable direction here; a default of `False` would make the
-    # sweep silently useless for the same reason. So the adapter has to state it.
-    complete: bool
-
-
-@runtime_checkable
-class RetractionAware(Protocol):
-    """An adapter whose source can *report* that an entry was withdrawn."""
-
-    async def fetch_retractions(self, since: datetime) -> RetractionReport:
-        """Withdrawals the source reports at or after `since`, and whether the report is whole.
-
-        Inclusive at `since` for `fetch_new_entries`' reason, and re-reporting is free: a
-        retraction never advances the sync cursor, so the same withdrawal arrives on every run
-        until the entry stream moves the cursor past it, and `ReactionRecordStore.retract` is
-        idempotent by construction.
-        """
-        ...
-
-
-async def fetch_retractions(adapter: object, since: datetime) -> RetractionReport | None:
-    """What `adapter` reports withdrawn since `since`, or `None` when it **cannot say**.
-
-    **`None` is not an empty report, and conflating the two is the whole defect this guards.** A
-    source that cannot express a withdrawal and a source that reports none look identical from
-    every angle except this one, and only the second is evidence that nothing was withdrawn. The
-    sweep retires nothing on `None`, so an adapter that cannot report can never have its corpus
-    retired — which is `prune_share`'s "an unreachable share and an empty one look identical",
-    moved into the type so a caller cannot forget it.
-
-    Optional rather than a method on `ElnAdapter` for `fetch_was_truncated`'s reason, and more
-    strongly: a file-drop adapter reads a directory and has *no* honest answer at all. Its only
-    evidence would be absence, and absence is exactly what must never be read as a withdrawal —
-    `ingest.eln.sync`'s sweep says why a delta fetch cannot support mark-and-sweep. A required
-    method would force every such adapter to invent an answer, and the cheap invention is the
-    wrong one.
-    """
-    for candidate in _adapter_chain(adapter):
-        if isinstance(candidate, RetractionAware):
-            return await candidate.fetch_retractions(since)
-    return None
-
-
-def _adapter_chain(adapter: object) -> Iterator[object]:
-    """`adapter` and everything it wraps, outermost first — where an optional capability may live.
-
-    A wrapper normalises one aspect of an adapter and delegates the rest, so it must not *narrow*
-    what the adapter can do — but a `runtime_checkable` Protocol is structural, and a wrapper that
-    does not redeclare a method simply does not have it. `DatedIngest` does not, and it swallowed
-    `BoundedFetch` for every source the registry builds: the warehouse adapter implements
-    `fetch_truncated` so the workflow comes back for a truncated remainder, and through the seam
-    the answer was `False` in every deployment.
-
-    Unwrapping through the public `inner` keeps that from being a per-wrapper obligation nobody
-    remembers: a wrapper that exposes what it wraps forwards every optional capability, present and
-    future, by doing nothing. The visited set is not defensiveness about a cycle anyone would write
-    — it is what keeps a mistaken `inner` returning `self` from hanging a sync run rather than
-    failing it.
+    The visited set is not defensiveness about a cycle anyone would write: it is what keeps a
+    mistaken `inner` returning `self` from hanging a sync run rather than failing it.
     """
     seen: set[int] = set()
-    current: object | None = adapter
-    while current is not None and id(current) not in seen:
-        seen.add(id(current))
-        yield current
-        current = getattr(current, "inner", None)
+    candidate: object | None = adapter
+    while candidate is not None and id(candidate) not in seen:
+        seen.add(id(candidate))
+        if isinstance(candidate, BoundedFetch):
+            return candidate.fetch_truncated()
+        candidate = getattr(candidate, "inner", None)
+    return False
 
 
 class DatedIngest:

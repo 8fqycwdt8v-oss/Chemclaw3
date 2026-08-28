@@ -10,19 +10,16 @@ import asyncio
 import json
 import logging
 import os
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
 from chemclaw.core.config import settings
+from chemclaw.ingest.eln import adapter as eln_adapter
 from chemclaw.ingest.eln.adapter import (
     DatedIngest,
-    ElnMappingError,
     RawEntry,
-    Retraction,
-    RetractionReport,
-    fetch_retractions,
     fetch_was_truncated,
     parse_iso_utc,
 )
@@ -50,7 +47,6 @@ from chemclaw.kg.note import cited_ids, cited_links, note_id_for_reaction
 from chemclaw.science.fingerprints.molfp.search import find_similar_molecules
 from chemclaw.science.fingerprints.store import InMemoryFingerprintStore
 from chemclaw.science.labels.store import InMemoryLabelIndex
-from tests.pg import migrated_db_or_skip
 
 _EPOCH = datetime.min.replace(tzinfo=UTC)
 
@@ -2202,243 +2198,13 @@ def test_the_validator_does_not_report_ok_over_a_source_that_yielded_nothing(
     assert "eln-empty" in printed and "no entries" in printed, printed
 
 
-# --- Retractions (D-2026-08-27-a-withdrawn-entry-is-a-fact-the-sync-must-carry) ----------------
+# --- The retraction tier, and the absence it left ----------------------------------------------
 #
-# The property every test below exists to protect: a withdrawal is a fact the **source reports**,
-# and an entry's absence from a delta fetch is never evidence of one.
-
-
-class _RetractingAdapter(_ListAdapter):
-    """A fake adapter whose source *can* report withdrawals — the optional capability."""
-
-    def __init__(
-        self,
-        entries: list[RawEntry],
-        retractions: list[Retraction] | None = None,
-        *,
-        complete: bool = True,
-        fails: Exception | None = None,
-    ) -> None:
-        super().__init__(entries)
-        self._retractions = retractions or []
-        self._complete = complete
-        self._fails = fails
-        self.retraction_fetches: list[datetime] = []
-
-    async def fetch_retractions(self, since: datetime) -> RetractionReport:
-        self.retraction_fetches.append(since)
-        if self._fails is not None:
-            raise self._fails
-        return RetractionReport(retractions=self._retractions, complete=self._complete)
-
-
-async def _sync(
-    adapter: object, store: InMemoryReactionRecordStore, since: datetime
-) -> IngestSummary:
-    """One sync pass against `store`, with throwaway fingerprint indexes."""
-    return await sync_entries(
-        adapter,  # type: ignore[arg-type]  # a structural fake, not an ElnAdapter subclass
-        InMemoryFingerprintStore(),
-        InMemoryFingerprintStore(),
-        store,
-        since,
-        label_index=_labels(),
-        source="test-eln",
-    )
-
-
-def test_a_reported_retraction_retires_the_run_and_is_counted() -> None:
-    """A withdrawal the source reports leaves current evidence, and the pass says how many did."""
-
-    async def _run() -> None:
-        store = InMemoryReactionRecordStore()
-        entry = _good_entry("withdrawn", datetime(2026, 1, 1, tzinfo=UTC))
-        first = await _sync(_RetractingAdapter([entry]), store, _EPOCH)
-        assert first.ingested == ["withdrawn"]
-        assert first.retracted == 0 and first.retraction_refusal == ""
-
-        retracted_at = datetime(2026, 3, 4, 9, 0, tzinfo=UTC)
-        second = await _sync(
-            _RetractingAdapter([], [Retraction(entry_id="withdrawn", retracted_at=retracted_at)]),
-            store,
-            first.next_cursor,
-        )
-        assert second.retracted == 1 and second.retraction_refusal == ""
-        record = await store.read("withdrawn")
-        assert record is not None and record.retracted_at == retracted_at
-
-    asyncio.run(_run())
-
-
-def test_a_retracted_run_stops_being_current_but_stays_readable_as_of_earlier() -> None:
-    """The whole point of a tombstone over a delete: the row answers about the past, not the now.
-
-    `read` still serves it — a `reaction-<id>` citation in a merged playbook must keep resolving,
-    and "what did we think we knew, and when did we stop" is unanswerable once the row is gone —
-    while `eligible`, which every current-evidence sweep resolves through, drops it.
-    """
-
-    async def _run() -> None:
-        store = InMemoryReactionRecordStore()
-        entry = _good_entry("withdrawn", datetime(2026, 1, 1, tzinfo=UTC))
-        first = await _sync(_RetractingAdapter([entry]), store, _EPOCH)
-        assert await store.eligible(["withdrawn"], {}) == {"withdrawn"}
-
-        retracted_at = datetime(2026, 3, 4, tzinfo=UTC)
-        await _sync(
-            _RetractingAdapter([], [Retraction(entry_id="withdrawn", retracted_at=retracted_at)]),
-            store,
-            first.next_cursor,
-        )
-        record = await store.read("withdrawn")
-        assert record is not None, "a retracted run is never deleted"
-        assert record.body, "and it is still readable in full"
-        assert not record.is_current(date(2026, 3, 4)), "not current on the day it was withdrawn"
-        assert not record.is_current(date(2026, 6, 1))
-        assert record.is_current(date(2026, 3, 3)), "still current as of the day before"
-        assert await store.eligible(["withdrawn"], {}) == set()
-
-    asyncio.run(_run())
-
-
-def test_an_adapter_that_cannot_report_retractions_never_retires_anything() -> None:
-    """**The delta trap, pinned.** Absence is not a withdrawal, and no run count makes it one.
-
-    This is the test that stands between this repository and a future session "finishing" the
-    retraction work by porting `prune_share`'s mark-and-sweep wholesale. That sweep is safe on the
-    document share because a crawl is a *full enumeration*; an ELN fetch is a **delta**, so an
-    entry ingested last month is absent from every subsequent fetch by design. Mark-and-sweep here
-    does not merely risk retiring a valid corpus — it retires all of it, on the first pass, and the
-    only visible symptom is that the corpus stopped answering.
-
-    Five passes with an adapter that has no retraction capability at all, its entries vanishing
-    from the export after the first: nothing is retired, ever, and the refusal names the reason.
-    """
-
-    async def _run() -> None:
-        store = InMemoryReactionRecordStore()
-        entries = [
-            _good_entry("alpha", datetime(2026, 1, 1, tzinfo=UTC)),
-            _good_entry("beta", datetime(2026, 1, 2, tzinfo=UTC)),
-        ]
-        summary = await _sync(_ListAdapter(entries), store, _EPOCH)
-        assert sorted(summary.ingested) == ["alpha", "beta"]
-
-        cursor = summary.next_cursor
-        for _ in range(5):
-            # The export is now empty — every entry has "disappeared" from the source's answer,
-            # which is exactly what a cursor-based fetch looks like on any quiet day.
-            summary = await _sync(_ListAdapter([]), store, cursor)
-            cursor = summary.next_cursor
-            assert summary.retracted == 0
-            assert summary.retraction_refusal == "this adapter cannot report retractions"
-
-        assert await store.eligible(["alpha", "beta"], {}) == {"alpha", "beta"}
-        for reaction_id in ("alpha", "beta"):
-            record = await store.read(reaction_id)
-            assert record is not None and record.retracted_at is None
-
-    asyncio.run(_run())
-
-
-def test_a_partial_or_failed_retraction_report_retires_nothing() -> None:
-    """`prune_share`'s other two refusals: half a report is not a report, and neither is an outage.
-
-    Both name a withdrawal that is genuinely in the source. Acting on either would be acting on
-    evidence the pass does not have — the report was cut short, or the source never answered — and
-    the refusal has to be distinguishable from "nothing was withdrawn", which is what
-    `retraction_refusal` beside `retracted=0` is for.
-    """
-
-    async def _run() -> None:
-        real = Retraction(entry_id="alpha", retracted_at=datetime(2026, 3, 4, tzinfo=UTC))
-        for adapter, expected in (
-            (_RetractingAdapter([], [real], complete=False), "partial"),
-            (_RetractingAdapter([], [real], fails=ElnMappingError("feed unreachable")), "asked"),
-        ):
-            store = InMemoryReactionRecordStore()
-            first = await _sync(
-                _ListAdapter([_good_entry("alpha", datetime(2026, 1, 1, tzinfo=UTC))]),
-                store,
-                _EPOCH,
-            )
-            summary = await _sync(adapter, store, first.next_cursor)
-            assert summary.retracted == 0
-            assert expected in summary.retraction_refusal
-            record = await store.read("alpha")
-            assert record is not None and record.retracted_at is None
-
-        # And the honest empty answer is *not* a refusal: a source that reports withdrawals and
-        # had none this window is the one case where `retracted=0` means the corpus is intact.
-        store = InMemoryReactionRecordStore()
-        quiet = await _sync(_RetractingAdapter([]), store, _EPOCH)
-        assert quiet.retracted == 0 and quiet.retraction_refusal == ""
-
-    asyncio.run(_run())
-
-
-def test_a_retraction_is_idempotent_and_does_not_move_the_cursor() -> None:
-    """Re-reporting a withdrawal costs nothing and never creeps its timestamp forward.
-
-    A retraction deliberately does not advance the sync cursor — a future-stamped one would
-    otherwise poison the fetch window the way a future-stamped *entry* does — so the same
-    withdrawal is re-reported on every pass until the entry stream carries the cursor past it. The
-    count must therefore mean "rows this pass retired", not "withdrawals I was told about", or an
-    operator reads a steady trickle of retirements that are not happening.
-    """
-
-    async def _run() -> None:
-        store = InMemoryReactionRecordStore()
-        entry = _good_entry("alpha", datetime(2026, 1, 1, tzinfo=UTC))
-        first = await _sync(_RetractingAdapter([entry]), store, _EPOCH)
-
-        first_report = Retraction(entry_id="alpha", retracted_at=datetime(2026, 3, 4, tzinfo=UTC))
-        later = Retraction(entry_id="alpha", retracted_at=datetime(2026, 5, 5, tzinfo=UTC))
-        one = await _sync(_RetractingAdapter([], [first_report]), store, first.next_cursor)
-        two = await _sync(_RetractingAdapter([], [later]), store, one.next_cursor)
-
-        assert (one.retracted, two.retracted) == (1, 0), "the second pass retired nothing new"
-        assert one.next_cursor == two.next_cursor == first.next_cursor
-        record = await store.read("alpha")
-        assert record is not None and record.retracted_at == first_report.retracted_at
-
-    asyncio.run(_run())
-
-
-def test_re_ingesting_a_soft_deleted_entry_does_not_resurrect_it() -> None:
-    """An ELN that keeps exporting a withdrawn entry must not un-retire it on the next replay.
-
-    This is the failure the upsert's omission of `retracted_at` exists to prevent, and it is not
-    hypothetical: a soft-deleting source keeps the row in its export, so the overlap window
-    re-fetches it every single run. An amended body must still overwrite the transcription — the
-    correction is real — while the tombstone survives it.
-    """
-
-    async def _run() -> None:
-        store = InMemoryReactionRecordStore()
-        entry = _good_entry("alpha", datetime(2026, 1, 1, tzinfo=UTC))
-        first = await _sync(_RetractingAdapter([entry]), store, _EPOCH)
-        retraction = Retraction(entry_id="alpha", retracted_at=datetime(2026, 3, 4, tzinfo=UTC))
-        await _sync(_RetractingAdapter([entry], [retraction]), store, first.next_cursor)
-
-        amended = RawEntry(
-            entry_id="alpha",
-            created_at=entry.created_at,
-            payload={
-                "id": "alpha",
-                "reactants": [{"smiles": "CCO"}, {"smiles": "CC(=O)O"}],
-                "products": [{"smiles": "CCOC(C)=O"}],
-                "procedure": "Yield corrected after assay.",
-            },
-        )
-        await _sync(_RetractingAdapter([amended], [retraction]), store, first.next_cursor)
-
-        record = await store.read("alpha")
-        assert record is not None
-        assert record.retracted_at == retraction.retracted_at, "the tombstone survived the replay"
-        assert "corrected after assay" in record.body.lower(), "and the amendment landed"
-
-    asyncio.run(_run())
+# `D-2026-08-27-a-withdrawn-entry-is-a-fact-the-sync-must-carry` built one and it was removed on
+# review. The defect it named is real and open; what it shipped could not fix it, in three
+# independent places measured below. These two tests are what is left: the wrapper fix the ADR
+# found on the way, which was a live defect of its own, and an absence test naming what a working
+# implementation has to include.
 
 
 def test_the_seam_wrapper_does_not_swallow_an_optional_capability() -> None:
@@ -2447,67 +2213,53 @@ def test_the_seam_wrapper_does_not_swallow_an_optional_capability() -> None:
     The registry hands the durable sync `DatedIngest(...)` for *every* source, and a
     `runtime_checkable` Protocol is structural, so a wrapper that does not redeclare a method
     simply does not have it. `fetch_was_truncated` therefore answered `False` in every deployment,
-    including for the warehouse adapter that implements `fetch_truncated` precisely so the
-    workflow comes back for the truncated remainder. Both optional capabilities are asserted here,
-    because the point is the *rule* (read through `inner`), not either capability.
+    including for the warehouse adapter that implements `fetch_truncated` precisely so the workflow
+    comes back for the truncated remainder — the signal `D-2026-08-27` added, dead through the seam
+    that carries it.
+
+    Read through the public `inner` instead, so a wrapper that exposes what it wraps forwards the
+    capability by doing nothing.
     """
 
-    async def _run() -> None:
-        retraction = Retraction(entry_id="alpha", retracted_at=datetime(2026, 3, 4, tzinfo=UTC))
+    class _Bounded(_ListAdapter):
+        def fetch_truncated(self) -> bool:
+            return True
 
-        class _Bounded(_RetractingAdapter):
-            def fetch_truncated(self) -> bool:
-                return True
-
-        wrapped = DatedIngest(_Bounded([], [retraction]))
-        assert fetch_was_truncated(wrapped) is True
-        report = await fetch_retractions(wrapped, _EPOCH)
-        assert report is not None and report.retractions == [retraction]
-
-        # And a wrapper around an adapter that cannot report still says "cannot say", not "none".
-        assert await fetch_retractions(DatedIngest(_ListAdapter([])), _EPOCH) is None
-        assert fetch_was_truncated(DatedIngest(_ListAdapter([]))) is False
-
-    asyncio.run(_run())
+    assert fetch_was_truncated(DatedIngest(_Bounded([]))) is True
+    assert fetch_was_truncated(DatedIngest(_ListAdapter([]))) is False
+    assert fetch_was_truncated(_ListAdapter([])) is False
 
 
-def test_the_postgres_store_retires_a_run_exactly_as_the_in_memory_one_does() -> None:
-    """The store half proven against a real database, or the sweep's tests prove only the fake.
+def test_no_retraction_tier_claims_to_exist_without_the_readers_that_honour_it() -> None:
+    """A tombstone nothing sets, and that three of its four readers ignore, is not a control.
 
-    Both backends are handed the same two runs and the same report, including an id the corpus
-    does not hold (a source may withdraw an entry this deployment never ingested) and a re-report
-    of one already retracted. The counts, the tombstones and the eligibility narrowing — written
-    twice, once as `ReactionRecord.passes` and once as SQL — must agree.
+    **This test exists to be deleted by whoever implements this properly**, and to make them read
+    `D-2026-08-27` first. What was removed had a `RetractionAware` protocol, a `RetractionReport`,
+    a `retract` on all three stores, a sweep in `sync_entries` and a `retracted_at` column bound —
+    and every one of the following was measured against it:
+
+    - **No producer.** `RetractionAware` had zero implementers in `src/`; the only one was a fake
+      in this file, so `fetch_retractions` answered `None` in every deployment.
+    - **No path to one.** `durable/eln_sync.py::_BoundedIngest` — which `sync_eln_entries` wraps
+      every adapter in — keeps `self._inner` private, and the capability walk follows the public
+      `inner`. So the report was `None` through production even for an adapter that could answer:
+      bare and `DatedIngest`-wrapped returned the report, `_BoundedIngest` returned `None`.
+    - **Three of the four readers ignored the tombstone.** Only the *filtered* leg of
+      `retrieval.retrievers.FingerprintReactionRetriever` consults the record store; the ordinary
+      unfiltered `gather_evidence` sweep still returned `reaction-EXP-1001` for a run whose
+      `is_current` was `False` and whose `eligible(no filters)` was empty. `agent.graph_tools`
+      never reads it, `connectors.rxnfp` never asks the store at all, and
+      `ingest.eln.record.record_from_ord_reaction` renders no withdrawal into the body — so a
+      chemist handed a withdrawn run had no way to see that it was withdrawn.
+
+    So re-adding the storage half alone recreates a control that reads as enabled and is not, which
+    is worse than the gap it closes. Migration `066`'s column is still in the database, unread and
+    deliberately not dropped; a real implementation starts from the readers and reuses it.
     """
-
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        durable = PostgresReactionRecordStore()
-        memory = InMemoryReactionRecordStore()
-        records = [
-            ReactionRecord(reaction_id="rt-alpha", body="alpha", source="eln:test"),
-            ReactionRecord(reaction_id="rt-beta", body="beta", source="eln:test"),
-        ]
-        at = datetime(2026, 3, 4, 9, 0, tzinfo=UTC)
-        results = []
-        for store in (durable, memory):
-            await store.record(records, "rt-eln")
-            first = await store.retract({"rt-alpha": at, "rt-absent": at}, "rt-eln")
-            again = await store.retract({"rt-alpha": datetime(2026, 5, 5, tzinfo=UTC)}, "rt-eln")
-            other_site = await store.retract({"rt-beta": at}, "rt-other-eln")
-            alpha = await store.read("rt-alpha")
-            assert alpha is not None
-            results.append(
-                (
-                    first,
-                    again,
-                    other_site,
-                    alpha.retracted_at,
-                    await store.eligible(["rt-alpha", "rt-beta"], {}),
-                )
-            )
-
-        assert results[0] == results[1], "the two backends must answer alike"
-        assert results[0] == (1, 0, 0, at, {"rt-beta"})
-
-    asyncio.run(_run())
+    assert not hasattr(ReactionRecord(reaction_id="x", body="b", source="s"), "retracted_at")
+    assert not hasattr(InMemoryReactionRecordStore(), "retract")
+    assert not hasattr(PostgresReactionRecordStore(), "retract")
+    absent = ("Retraction", "RetractionReport", "RetractionAware", "fetch_retractions")
+    present = [name for name in absent if hasattr(eln_adapter, name)]
+    assert not present, f"the retraction tier is back without its readers: {present}"
+    assert "retracted" not in IngestSummary.model_fields

@@ -20,12 +20,7 @@ from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.core.logging import log_event
 from chemclaw.core.metrics_bridge import record_metric
-from chemclaw.ingest.eln.adapter import (
-    ElnAdapter,
-    RawEntry,
-    entry_window,
-    fetch_retractions,
-)
+from chemclaw.ingest.eln.adapter import ElnAdapter, RawEntry, entry_window
 from chemclaw.ingest.eln.ingest import ingest_reaction
 from chemclaw.ingest.eln.record import record_from_ord_reaction
 from chemclaw.ingest.eln.records import ReactionRecordStore
@@ -37,12 +32,6 @@ logger = logging.getLogger(__name__)
 # External identifiers/messages cross a trust boundary when they reach the log: a CR/LF in
 # an ELN entry id (or in an error message quoting one) could forge whole log lines.
 _CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
-
-# The one retraction refusal that is a *configuration fact* rather than an incident: the capability
-# is optional, so most adapters simply do not have it and never will. Named here because the level
-# it is logged at depends on being able to tell it from the other two, and a WARNING on every pass
-# of every file-drop source is precisely how the two that *are* incidents get scrolled past.
-_RETRACTIONS_UNSUPPORTED = "this adapter cannot report retractions"
 
 
 def _log_safe(value: str) -> str:
@@ -100,17 +89,6 @@ class IngestSummary(BaseModel):
     skipped_existing: list[str] = Field(default_factory=list)
     rejected: list[RejectedEntry]
     next_cursor: datetime
-    # How many stored runs this pass retired because the source reported them withdrawn. A count
-    # rather than a list of ids, matching `SyncReport.pruned`: the store answers with the rows it
-    # actually changed, and an already-retracted row is not one of them.
-    retracted: int = 0
-    # Why the retraction sweep did not run, empty when it did. **This is what keeps "retired
-    # nothing" and "could not run" from being one number.** `retracted=0` with no refusal is a
-    # source that reports withdrawals and had none; `retracted=0` with a refusal is a source that
-    # said nothing this pass could act on, and the second must never be read as the first — it is
-    # `prune_share`'s "an unreachable share and an empty one look identical", which is a sentence
-    # about evidence rather than about shares.
-    retraction_refusal: str = ""
 
 
 async def sync_entries(
@@ -246,11 +224,6 @@ async def sync_entries(
             )
             continue
         ingested.append(raw.entry_id)
-    # **After the ingest, deliberately.** An ELN that soft-deletes keeps exporting the withdrawn
-    # entry, so the same pass can both re-write its row and be told it is withdrawn; sweeping last
-    # retires it in this run rather than the next. The other order is not wrong, only slower — the
-    # upsert cannot clear a tombstone by construction (`records._UPSERT` says why).
-    retired, refusal = await _sweep_retractions(adapter, record_store, floor, source)
     # The summary is a return value the scheduler stores; also log the outcome so an admin
     # running this under a Temporal Schedule sees it without opening the workflow result, and
     # gets a WARNING trail of exactly which entries were rejected and why.
@@ -270,8 +243,6 @@ async def sync_entries(
         skipped_existing=len(skipped_existing),
         fetched=len(entries),
         next_cursor=cursor,
-        retracted=retired,
-        retraction_refusal=refusal,
         duration_s=time.perf_counter() - started,
     )
     for entry in rejected:
@@ -292,73 +263,7 @@ async def sync_entries(
         skipped_existing=skipped_existing,
         rejected=rejected,
         next_cursor=cursor,
-        retracted=retired,
-        retraction_refusal=refusal,
     )
-
-
-async def _sweep_retractions(
-    adapter: ElnAdapter,
-    record_store: ReactionRecordStore,
-    since: datetime,
-    source: str,
-) -> tuple[int, str]:
-    """Retire the runs `source` reports withdrawn since `since`; return how many, and any refusal.
-
-    **A retraction is carried by the source and is never inferred from absence.** That is the
-    single load-bearing property here, and it is why `ingest/documents/sync.py::prune_share` ports
-    only in its refusals. The share's sweep is safe because a crawl is a *full enumeration*: "this
-    run saw every file and did not see this row" is evidence. An ELN sync is a **delta** —
-    `fetch_new_entries(since)` returns only what changed after the cursor — so "not seen this run"
-    is the normal, permanent state of every entry ever ingested, and mark-and-sweep applied to it
-    would retire the whole corpus on the first pass. Not a risk to be mitigated: an inapplicable
-    mechanism. `tests/test_eln.py` pins it against a future session reintroducing it.
-
-    Three ways a pass fails to be evidence of a withdrawal, all refusals, all `prune_share`'s
-    translated to what this source can actually be asked:
-
-    - **The adapter cannot report retractions** (`fetch_retractions` answers `None`). The share's
-      "it saw no candidate files at all", and the same trap: a source that cannot express a
-      withdrawal and one that reports none are identical from here, and only the second is
-      evidence. Its corpus is never retired by this sweep, which is what makes the capability
-      genuinely optional rather than a default-on behaviour every adapter has to opt out of.
-    - **The report is not whole** (`complete=False`). The share's "the drain did not finish": a
-      page limit, a partly-readable feed, one of several backing sources unavailable. Half a report
-      is not a report. Note this is the *retraction* fetch's completeness, not the entry fetch's —
-      `fetch_was_truncated` is about a different drain, and a delta sweep reads no entries as
-      evidence, so the entry page being cut short says nothing either way.
-    - **The report could not be fetched at all.** The share's failed root. `ChemclawError` and
-      `OSError` are caught rather than every exception, for `sync_entries`' reason: an adapter's
-      own error family and the transport failures under it are what "the source did not answer"
-      looks like, and a `TypeError` in a binding is a defect that must not be filed as an outage.
-
-    A retraction never advances the sync cursor, so this window is re-read on every pass and the
-    same withdrawal is re-reported until the entry stream carries the cursor past it. That is
-    deliberate and free: `retract` skips a row already retracted, so the earliest report wins, the
-    count stays honest, and a future-stamped withdrawal cannot poison a cursor the way a
-    future-stamped entry can.
-    """
-    try:
-        report = await fetch_retractions(adapter, since)
-    except (ChemclawError, OSError) as exc:
-        return 0, f"the source could not be asked: {_log_safe(str(exc))}"
-    if report is None:
-        return 0, _RETRACTIONS_UNSUPPORTED
-    if not report.complete:
-        return 0, "the source's report of withdrawals was partial"
-    if not report.retractions:
-        return 0, ""
-    retired = await record_store.retract(
-        {item.entry_id: item.retracted_at for item in report.retractions}, source
-    )
-    if retired:
-        logger.info(
-            "%s: retired %d run(s) the source reported withdrawn; they stay readable by id and "
-            "leave every current-evidence query",
-            source,
-            retired,
-        )
-    return retired, ""
 
 
 def _record_pass(
@@ -369,8 +274,6 @@ def _record_pass(
     skipped_existing: int,
     fetched: int,
     next_cursor: datetime,
-    retracted: int,
-    retraction_refusal: str,
     duration_s: float,
 ) -> None:
     """Emit the one record a sync pass leaves behind, and tally what it did to the corpus.
@@ -382,49 +285,29 @@ def _record_pass(
 
     The outcomes partition what the fetch returned: `ingested` wrote a record, `rejected` is
     deterministic bad data the cursor advances past, `skipped` is an overlap replay whose stored
-    body is byte-identical, so there was nothing to write. `retracted` is the one outcome that is
-    *not* about the fetched entries at all — it counts runs the source reported withdrawn, which
-    arrive through their own report precisely because an absence from the fetch means nothing.
+    body is byte-identical, so there was nothing to write.
     """
-    if retraction_refusal:
-        # `prune_share`'s wording, because it is the same argument about the same kind of evidence
-        # — but not always its level: an adapter with no such capability is a deployment's shape,
-        # and the summary field says so on every pass whether or not this line does.
-        logger.log(
-            logging.DEBUG if retraction_refusal == _RETRACTIONS_UNSUPPORTED else logging.WARNING,
-            "%s: nothing was retired — %s. A source that cannot report a withdrawal and one with "
-            "none to report look identical from here, and of the two mistakes only re-ingesting "
-            "is recoverable",
-            source,
-            retraction_refusal,
-        )
     for outcome, count in (
         ("ingested", ingested),
         ("rejected", rejected),
         ("skipped", skipped_existing),
-        ("retracted", retracted),
     ):
         _count_records(source, outcome, count)
     log_event(
         logger,
         "ingest.finished",
-        "%s: fetched=%d ingested=%d rejected=%d skipped_existing=%d retracted=%d in %.3fs",
+        "%s: fetched=%d ingested=%d rejected=%d skipped_existing=%d in %.3fs",
         source,
         fetched,
         ingested,
         rejected,
         skipped_existing,
-        retracted,
         duration_s,
         source=source,
         fetched=fetched,
         ingested=ingested,
         rejected=rejected,
         skipped_existing=skipped_existing,
-        retracted=retracted,
-        # Empty when the sweep ran. A field rather than a second event, so one line answers both
-        # "did anything leave the corpus" and "was this pass able to ask".
-        retraction_refusal=retraction_refusal,
         next_cursor=next_cursor.isoformat(),
         duration_s=round(duration_s, 3),
     )

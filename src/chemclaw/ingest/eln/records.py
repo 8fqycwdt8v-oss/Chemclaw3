@@ -28,9 +28,9 @@ structural hits, `agent.graph_tools.expand_note` serves the recipe behind one hi
 """
 
 import logging
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
-from datetime import date, datetime
+from datetime import date
 from typing import Any, Protocol, runtime_checkable
 
 import psycopg
@@ -79,10 +79,8 @@ def _one_of(reaction_id: str, found: Sequence[tuple[str, "ReactionRecord"]]) -> 
     return candidates[0][1]
 
 
-# The columns an ingest writes. `retracted_at` is deliberately **not** among them: see `_UPSERT`.
+# The columns an ingest writes, which is also everything a read selects.
 _COLUMNS = "reaction_id, body, compound_smiles, project, performed_at, conditions, source"
-# What a read selects — the written set plus the tombstone only `retract` sets.
-_READ_COLUMNS = f"{_COLUMNS}, retracted_at"
 
 _UPSERT = f"""
 INSERT INTO reaction_records (ingest_source, {_COLUMNS})
@@ -98,34 +96,14 @@ ON CONFLICT (ingest_source, reaction_id) DO UPDATE SET
     performed_at = EXCLUDED.performed_at,
     conditions = EXCLUDED.conditions,
     source = EXCLUDED.source,
-    -- **`retracted_at` is absent from both halves of this statement, and that is the design.**
-    -- A source that soft-deletes keeps exporting a withdrawn entry, so the overlap window
-    -- re-fetches it every run; refreshing the tombstone from an ingest would clear it on the
-    -- first replay and the run would answer as current again. Nothing here can honestly clear
-    -- one either: a delta fetch cannot distinguish "reinstated" from "still exported, still
-    -- withdrawn". A retraction is set by `retract` and by nothing else.
     last_seen = now()
 """
 
 # Every row that answers to the bare id, with the source that keys it — `_one_of` decides which is
 # the citation's, and refuses when nothing here can.
-_SELECT_ONE = f"SELECT ingest_source, {_READ_COLUMNS} FROM reaction_records WHERE reaction_id = %s"
+_SELECT_ONE = f"SELECT ingest_source, {_COLUMNS} FROM reaction_records WHERE reaction_id = %s"
 
 _SELECT_KNOWN = "SELECT reaction_id FROM reaction_records WHERE reaction_id = ANY(%s)"
-
-# One statement for a whole reported batch, carrying each entry's own retraction time — a report
-# names several withdrawals and they did not happen at one instant. `retracted_at IS NULL` makes it
-# idempotent and makes the *earliest* report win: the sweep re-reads its window every run (a
-# retraction never advances the sync cursor), so the same withdrawal arrives many times and must
-# not creep forward. `rowcount` is therefore the number of rows this sweep actually retired, which
-# is the number it reports — not the number it was told about.
-_RETRACT = """
-UPDATE reaction_records AS r SET retracted_at = v.at
-FROM (
-    SELECT unnest(%(ids)s::text[]) AS id, unnest(%(ats)s::timestamptz[]) AS at
-) AS v
-WHERE r.ingest_source = %(source)s AND r.reaction_id = v.id AND r.retracted_at IS NULL
-"""
 
 _SELECT_BODIES = (
     "SELECT reaction_id, body FROM reaction_records "
@@ -152,19 +130,6 @@ class ReactionRecord(BaseModel):
     # same claim as an empty block.
     conditions: ProcessConditions | None = None
     source: str = Field(min_length=1)
-    # When the *source* reported this entry withdrawn; `None` is not retracted.
-    #
-    # **Not `valid_to`, and the distinction is the whole decision**
-    # (D-2026-08-27-a-withdrawn-entry-is-a-fact-the-sync-must-carry). `is_current` below says why a
-    # record has no validity window: a result does not expire on its own, it is *superseded*, which
-    # is a claim a human makes in a note. A withdrawal is neither — it is the originating system
-    # saying the entry should not have been published, a fact as deterministic as the entry itself
-    # and gated no more than it is.
-    #
-    # Set only from a retraction a source **reports**, never from an entry's absence from an
-    # export: `ingest.eln.sync` is a delta, so "not seen this run" is the permanent normal state of
-    # every entry ever ingested, and sweeping on it would retire the corpus on the first run.
-    retracted_at: datetime | None = None
 
     @field_validator("reaction_id")
     @classmethod
@@ -180,28 +145,16 @@ class ReactionRecord(BaseModel):
     def is_current(self, as_of: date) -> bool:
         """Whether this is servable as *current* evidence on `as_of`.
 
-        Two ways to fail, and they are different facts about the run.
+        One way to fail: **not yet valid**. That is the `Note.is_current` lower bound, and it is
+        reachable — `eln_sync_future_tolerance_seconds` deliberately admits an entry stamped
+        slightly ahead of the wall clock rather than rejecting a real experiment over a clock skew.
 
-        **Not yet valid.** The `Note.is_current` lower bound, and it is reachable:
-        `eln_sync_future_tolerance_seconds` deliberately admits an entry stamped slightly ahead of
-        the wall clock rather than rejecting a real experiment over a clock skew.
-
-        **Retracted.** A run still has no `valid_to` — a result does not expire on its own, it is
-        superseded, which is a separate claim a human makes in a note — but a source *withdrawing*
-        an entry is not that, and this is the bound that carries it. Compared by date because the
-        caller's question is asked as one; a retraction is the moment the record stopped being
-        current, so the day it was withdrawn is already not current (`valid_to`'s bound is
-        inclusive because it names the last day something held, which is the opposite convention
-        for the opposite fact).
-
-        A `retracted_at` in the future reads as "not yet retracted" and needs no guard: unlike a
-        cursor, nothing here is poisoned by it, and it corrects itself when that date arrives.
-
-        The row is never deleted for either reason — `read` keeps serving it, which is what makes a
-        withdrawn run still answerable as of an earlier date.
+        There is no upper bound and no tombstone. A *result* does not expire on its own, it is
+        superseded, which is a claim a human makes in a note. A source **withdrawing** an entry is
+        a different fact and would deserve its own bound — one was built here and removed, because
+        nothing could set it and three of the four readers of this tier ignored it; see
+        `D-2026-08-27-a-withdrawn-entry-is-a-fact-the-sync-must-carry` for what a working one costs.
         """
-        if self.retracted_at is not None and as_of >= self.retracted_at.date():
-            return False
         return self.performed_at is None or as_of >= self.performed_at
 
     def passes(self, filters: dict[str, Any], as_of: date) -> bool:
@@ -215,10 +168,7 @@ class ReactionRecord(BaseModel):
         - **A record with no `performed_at` fails a windowed query** rather than passing it. It
           cannot be *shown* to fall in the window, and a caller asking what happened in a period is
           not asking for runs of unknown date.
-        - **A not-yet-current record is dropped**, matching `Note.is_current` — which since
-          D-2026-08-27 also drops a *retracted* one, so a withdrawn run leaves every
-          current-evidence sweep the moment its source reports it, with no reader learning a
-          new rule.
+        - **A not-yet-current record is dropped**, matching `Note.is_current`.
         """
         if (want_type := filters.get("type")) is not None and want_type != RECORD_TYPE:
             return False
@@ -292,31 +242,6 @@ class ReactionRecordStore(Protocol):
         """Which of `reaction_ids` pass `filters` and are current (`ReactionRecord.passes`)."""
         ...
 
-    async def retract(self, retractions: Mapping[str, datetime], source: str) -> int:
-        """Mark each of `source`'s entries withdrawn at the given moment; return how many changed.
-
-        **The count is rows this call actually retired**, not entries it was told about: a row
-        already retracted is left alone, so the earliest report wins and a re-report is a no-op.
-        That matters because the sweep re-reads its window every run — a retraction never advances
-        the sync cursor — so the same withdrawal arrives many times and the number an operator sees
-        must still mean "this many runs left current evidence today".
-
-        An id the corpus does not hold is silently no rows: a source may withdraw an entry this
-        deployment never ingested (it predates the cursor, or it was rejected as bad data), and
-        that is not an error to report.
-
-        Keyed per entry rather than one timestamp for the batch because a report names several
-        withdrawals that did not happen at one instant, and `retracted_at` is a fact about each.
-
-        Scoped to `source` for the reason `record` and `bodies` are: two ELNs may use one entry id,
-        and one site withdrawing its entry says nothing about the other site's run.
-
-        **Nothing reverses this.** A reinstatement would have to be reported as its own fact, and
-        no delta fetch can imply one — an entry reappearing in an export is indistinguishable from
-        an entry that never left it. Of the two possible mistakes only re-ingesting is recoverable.
-        """
-        ...
-
     async def known(self, reaction_ids: Sequence[str]) -> set[str]:
         """Which of `reaction_ids` the corpus holds at all — the citation-existence check.
 
@@ -374,17 +299,6 @@ class InMemoryReactionRecordStore:
                 if stored_id == reaction_id
             )
         }
-
-    async def retract(self, retractions: Mapping[str, datetime], source: str) -> int:
-        """Mark `source`'s entries withdrawn; return how many rows this call changed."""
-        retired = 0
-        for reaction_id, at in retractions.items():
-            record = self._records.get((source, reaction_id))
-            if record is None or record.retracted_at is not None:
-                continue
-            self._records[(source, reaction_id)] = record.model_copy(update={"retracted_at": at})
-            retired += 1
-        return retired
 
     async def known(self, reaction_ids: Sequence[str]) -> set[str]:
         """Which of `reaction_ids` this store holds at all, under any source."""
@@ -481,10 +395,6 @@ class PostgresReactionRecordStore:
         clauses = [
             "reaction_id = ANY(%(ids)s)",
             "(performed_at IS NULL OR performed_at <= %(today)s)",
-            # `ReactionRecord.is_current`'s retraction bound. The row stays — `read` still serves
-            # it — but a withdrawn run is not current evidence, so it leaves every retrieval sweep
-            # that resolves through here.
-            "(retracted_at IS NULL OR retracted_at > %(today)s)",
         ]
         params: dict[str, Any] = {"ids": list(reaction_ids), "today": date.today()}
         if (want_tag := filters.get("tag")) is not None:
@@ -503,29 +413,6 @@ class PostgresReactionRecordStore:
                 rows = await cur.fetchall()
         return {row[0] for row in rows}
 
-    async def retract(self, retractions: Mapping[str, datetime], source: str) -> int:
-        """Mark `source`'s entries withdrawn in one statement; return how many rows changed.
-
-        One `UPDATE ... FROM unnest(...)` rather than a statement per id, for `record`'s reason —
-        the sweep hands over a whole reported batch — and `rowcount` is then the answer directly,
-        which an `executemany` could not give.
-        """
-        if not retractions:
-            return 0
-        async with self._connection() as conn:
-            async with conn.cursor() as cur:
-                await cur.execute(
-                    _RETRACT,
-                    {
-                        "ids": list(retractions),
-                        "ats": list(retractions.values()),
-                        "source": source,
-                    },
-                )
-                retired = cur.rowcount
-            await conn.commit()
-        return retired
-
     async def known(self, reaction_ids: Sequence[str]) -> set[str]:
         """Which of `reaction_ids` the corpus holds at all."""
         if not reaction_ids:
@@ -538,7 +425,7 @@ class PostgresReactionRecordStore:
 
 
 def _record(row: tuple[Any, ...]) -> ReactionRecord:
-    """Build a `ReactionRecord` from a `_READ_COLUMNS` row, validated through the model."""
+    """Build a `ReactionRecord` from a `_COLUMNS` row, validated through the model."""
     return ReactionRecord(
         reaction_id=row[0],
         body=row[1],
@@ -547,7 +434,6 @@ def _record(row: tuple[Any, ...]) -> ReactionRecord:
         performed_at=row[4],
         conditions=ProcessConditions(**row[5]) if row[5] else None,
         source=row[6],
-        retracted_at=row[7],
     )
 
 
