@@ -233,6 +233,19 @@ readonly MCP_REPO="${CHEMCLAW_MCP_REPO:-$REPO_ROOT/../chemclaw3-mcp}"
 # shape" rule `connector_env` follows: a server that moves port there moves here without an edit.
 fleet_python_bin() { ( cd "$MCP_REPO" && uv sync --quiet && uv run python -c 'import sys; print(sys.executable)' ); }
 
+# Every `CHEMCLAW_<NAME>_TOKEN` this lane's fleet needs, derived from the manifests on disk rather
+# than listed — the same reason `e2e-full-stack/up.sh` derives which servers to start. `calc` is
+# added by hand because it is a backend and its manifest is deliberately not in `manifests/`.
+fleet_token_vars() {
+  local dir name
+  for dir in "$MCP_REPO"/manifests/*/; do
+    [ -f "$dir/connector.yaml" ] || continue
+    name="$(basename "$dir")"
+    printf 'CHEMCLAW_%s_TOKEN\n' "$(printf '%s' "$name" | tr '[:lower:]' '[:upper:]')"
+  done
+  printf 'CHEMCLAW_CALC_TOKEN\n'
+}
+
 fleet_port() {
   "$1" - "$MCP_REPO/manifests/$2/connector.yaml" <<'PY'
 import re, sys
@@ -370,6 +383,25 @@ up() {
     # into a second shell would fail `_llm_provider_config`'s validator rather than fall back.
     local key
     for key in CHEMCLAW_LLM_PROVIDER CHEMCLAW_LLM_BASE_URL CHEMCLAW_LLM_MODEL; do
+      [ -n "${!key:-}" ] && printf 'export %s=%q\n' "$key" "${!key}"
+    done
+    # The fleet's own bearer tokens, for every server whose manifest is mounted, plus the `calc`
+    # backend. `chem` and `safety` are above because this script mints them; these are *inherited*
+    # from whoever started the lane (`e2e-full-stack/up.sh` exports all four), and inherited is the
+    # half that was missing — the contract carried what it minted and dropped what it was given.
+    #
+    # **The cost was a green stack that could not calculate.** `calc` is a backend rather than a
+    # connector, so `/readyz` does not probe it and reports `connectors_unhealthy: 0` either way.
+    # Restart this repo's processes from a second shell without `CHEMCLAW_CALC_TOKEN` and every
+    # durable calculation fails at call time with `HTTP 401 from http://127.0.0.1:8860/mcp`, with
+    # nothing in the health surface to say so. Measured 2026-08-28 by the UI's mock-model tier:
+    # `ConnectorJobError: the 'compute_reaction_energy' job ran and failed: CalcToolError: the
+    # calculation service refused this client's credential`, against a front door reporting ready.
+    #
+    # Note `CHEMCLAW_CALC_MCP_TOKEN` is already written above and is **a different variable** — the
+    # in-tree `calc` *bundle*'s minted MCP credential, not the fleet backend's. Two names one letter
+    # apart, one carried and one not, is why this was invisible.
+    for key in $(fleet_token_vars); do
       [ -n "${!key:-}" ] && printf 'export %s=%q\n' "$key" "${!key}"
     done
   ) > "$RUN_DIR/connector-env.sh"
