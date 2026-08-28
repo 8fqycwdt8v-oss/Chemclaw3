@@ -26,6 +26,12 @@ would only run where the harness already ran.
 from __future__ import annotations
 
 import asyncio
+import os
+import shutil
+import socket
+import subprocess
+import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -307,6 +313,80 @@ def test_the_note_repo_is_provisioned_before_the_docker_branch_takes_over() -> N
         "ensure_note_repo must run before `exec docker compose` hands the process over; "
         "below it, the Docker path silently skips the PR-gate's clone"
     )
+
+
+def test_status_asks_the_broker_the_way_this_lane_starts_it() -> None:
+    """`bootstrap.sh status` said nothing at all about Temporal on the only lane this repo runs.
+
+    The third instance of the shape
+    `D-2026-08-28-a-lane-primitive-must-verify-the-act-it-was-asked-for` is named after, and the
+    one that sweep did not reach. `up`/`down` branch on Docker,
+    `start_temporal`/`stop_temporal` branch on the compose container through `compose_service_id`,
+    and `status` branched on nothing: it shelled straight to `temporal operator cluster health`.
+    That binary exists only where the *native* path built it, so on a compose lane the line
+    resolved to `temporal: command not found`, the `|| true` beside it swallowed the 127, and the
+    verb exited 0 having reported on one of the two services it names.
+
+    Driven rather than read, with both ports pointed at nothing and a `temporal` CLI stubbed to
+    report perfect health: whatever the CLI says, a closed 7233 is a broker that is not there, and
+    the answer has to come from the port. `temporal_port_open` is what `start_temporal`'s compose
+    branch already waits on, so `status` and `start` now agree about what "up" means.
+    """
+    if shutil.which("pg_config") is None:  # the script resolves PGBIN at parse time
+        pytest.skip("pg_config is not installed")
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        closed = probe.getsockname()[1]
+
+    with tempfile.TemporaryDirectory() as stub_dir:
+        stub = Path(stub_dir) / "temporal"
+        stub.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        stub.chmod(0o755)
+        result = subprocess.run(
+            ["bash", str(live_storm._LANE_DIR / "bootstrap.sh"), "status"],
+            capture_output=True,
+            text=True,
+            check=False,
+            env={
+                **os.environ,
+                "PATH": f"{stub_dir}:{os.environ['PATH']}",
+                "CHEMCLAW_LIVE_PGPORT": str(closed),
+                "CHEMCLAW_LIVE_TEMPORAL_PORT": str(closed),
+            },
+        )
+
+    assert "temporal" in result.stdout.lower(), (
+        f"`status` reported nothing about the broker it names:\n{result.stdout}{result.stderr}"
+    )
+    assert "not" in result.stdout.lower().split("temporal", 1)[1][:60], (
+        "`status` called a closed 7233 healthy, so it is reading something other than the port "
+        f"this lane serves on:\n{result.stdout}"
+    )
+
+
+def test_restart_postgres_verifies_that_the_postmaster_restarted() -> None:
+    """The actor's half of the ADR's rule, on the verb the ADR is named after.
+
+    `D-2026-08-28-a-lane-primitive-must-verify-the-act-it-was-asked-for` fixed two things about
+    `restart-postgres`: the missing compose branch, and — from the outside —
+    `_chaos_postgres_bounce` reading `pg_postmaster_start_time()` either side. Its own decision
+    has two halves, though, and the actor's half went to `processes.sh restart` only: this verb
+    still ended by logging "postgres up" without ever asking whether anything had restarted, so a
+    lane where
+    `stop_postgres` finds no `postmaster.pid` (a native server this script did not start) still
+    prints three reassuring lines over a no-op and exits 0.
+
+    Textual because the behavioural form is "bounce a database", which no unit test may do to the
+    lane it is running beside. What is pinned is that the branch reads the one answer a script
+    cannot fake — the server's own start time — and refuses when it has not moved.
+    """
+    script = (live_storm._LANE_DIR / "bootstrap.sh").read_text(encoding="utf-8")
+    branch = script.split("\n  restart-postgres)", 1)[1].split("\n  stop-temporal)", 1)[0]
+    assert "pg_postmaster_start_time" in branch, (
+        "restart-postgres does not read the postmaster's start time, so it cannot tell a bounce "
+        "from a no-op — which is exactly what it reported PASS over on 2026-08-28"
+    )
+    assert "die " in branch, "restart-postgres observes the start time and does not fail on it"
 
 
 # --------------------------------------------------------------------------- the mock's own guard

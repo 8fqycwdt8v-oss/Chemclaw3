@@ -170,6 +170,13 @@ run_sql() {
       -U '$PGUSER_NAME' -d '$database' -tAqc \"$statement\""
 }
 
+# When the server on $PGPORT last started, as the server itself reports it — empty when nothing
+# is there to ask. The one answer a lane script cannot fake: a restart moves it, a no-op leaves it
+# byte-identical, and no amount of reassuring log output distinguishes the two.
+postmaster_start_time() {
+  run_sql postgres "select pg_postmaster_start_time()" 2>/dev/null || true
+}
+
 start_postgres() {
   if compose_service_id postgres >/dev/null; then
     log "starting the compose postgres container"
@@ -342,16 +349,51 @@ case "${1:-up}" in
     stop_postgres
     ;;
   status)
+    # **Both services asked the way this script starts them.** This verb used to shell straight to
+    # `temporal operator cluster health`, which is the third instance of the shape
+    # `D-2026-08-28-a-lane-primitive-must-verify-the-act-it-was-asked-for` is named after and the
+    # one that sweep did not reach: `up`/`down` branch on Docker, `start_temporal`/`stop_temporal`
+    # branch on the compose container through `compose_service_id`, and `status` branched on
+    # nothing. That binary exists only where the native path built it, so on a compose lane — the
+    # one CLAUDE.md tells you to bring up — the line resolved to `temporal: command not found`, the
+    # `|| true` swallowed the 127, and the verb exited 0 having said nothing about half of what it
+    # names. `temporal_port_open` needs no binary and is the same signal `start_temporal`'s compose
+    # branch already waits on, so `status` and `start` now agree about what "up" means.
     pg_isready -h 127.0.0.1 -p "$PGPORT" || true
-    temporal operator cluster health --address "127.0.0.1:$TEMPORAL_PORT" || true
+    if temporal_port_open; then
+      log "temporal accepting connections on $TEMPORAL_PORT"
+    else
+      log "temporal is NOT serving $TEMPORAL_PORT"
+    fi
     ;;
   # The four verbs the chaos family needs. They are subcommands rather than inlined `pg_ctl` and
   # `kill` calls inside the harness for the reason `connector_urls` reads the dev runner instead of
   # rebuilding its port: one place knows how this stack is started, so a chaos test cannot restart
   # it differently from how it was brought up and then measure the difference.
   restart-postgres)
+    # **The actor verifies the act it was asked for** (the first half of
+    # `D-2026-08-28-a-lane-primitive-must-verify-the-act-it-was-asked-for`, on the verb that ADR is
+    # named after). That pass gave this verb its missing compose branch and gave the *observer's*
+    # half to `_chaos_postgres_bounce`; the actor's half went to `processes.sh restart` alone. So
+    # this still ended by logging "postgres up" without asking whether anything had restarted —
+    # and the no-op it reported PASS over is still reachable, on any lane where `stop_postgres`
+    # finds no `postmaster.pid` because something other than this script started the server.
+    #
+    # A reason, however good, is not an outcome: the postmaster's own start time has to move.
+    before="$(postmaster_start_time)"
     stop_postgres
     start_postgres
+    after="$(postmaster_start_time)"
+    # Empty means the *check* could not run — nothing serving $PGPORT, or no `psql`/`postgres`
+    # account to ask with. Either way this invocation has no evidence a bounce happened, and
+    # saying so is the point; an unverifiable restart is not a restart that succeeded.
+    [ -n "$after" ] || die "restart-postgres: could not read pg_postmaster_start_time() on $PGPORT
+after the restart, so this invocation cannot say whether the server was bounced. Check that
+$PGBIN/psql can reach 127.0.0.1:$PGPORT as $PGUSER_NAME."
+    [ "$before" != "$after" ] || die "restart-postgres: the postmaster did not restart.
+pg_postmaster_start_time() is still $after, so this server is the one that was already running and
+nothing was bounced. A check measured against this has proved nothing."
+    log "postgres restarted (postmaster start time ${before:-none} -> $after)"
     ;;
   stop-temporal) stop_temporal ;;
   start-temporal) start_temporal ;;

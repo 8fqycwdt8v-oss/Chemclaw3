@@ -21,12 +21,16 @@ satisfies, and true of one whose surrounding block never renders at all. The sam
 `include "…"` count and every "this key appears only in that file" check.
 
 That is not a gap anyone can close here: `helm` is not a Python dependency and is absent from the
-sandbox this suite runs in. It is closed *in CI*, but only halfway — the `chart` job renders with
-`helm template` and pipes the result to `kubeconform`, which asks whether the YAML is schema-valid
-and never asks whether it says what these tests claim. Asserting on rendered documents needs
-`helm` in the job that runs pytest, which is a CI change rather than a test change; see
-`docs/planning/BACKLOG.md` (LIVE — "assert on rendered chart YAML"). Until then, read a green run
-here as "the template source says so", not "the cluster will see so".
+sandbox this suite runs in. **It is closed in the `chart` job, and only there** — that job installs
+Helm, renders with `helm template` into `kubeconform` (schema-valid or not), and then runs this
+file and `tests/test_deploy_chart.py` under pytest, which is what makes the rendered assertions at
+the bottom of that file execute at all. Before that step existed they were marked
+`skipif(shutil.which("helm") is None)` and the job that ran pytest had no Helm, so all nine skipped
+in CI exactly as they skip here, and a docstring in this position pointed at a `BACKLOG.md` row
+that did not exist.
+
+So read a green run *of this file in this sandbox* as "the template source says so", not "the
+cluster will see so" — the same file in the `chart` job is where the second claim is made.
 """
 
 import json
@@ -849,8 +853,72 @@ def test_the_labelling_server_is_addressable_from_the_chart() -> None:
     assert port, "networkPolicy.egressPorts names no rxnlabel port"
     assert str(port) in url, f"the egress port {port} is not the port the URL dials ({url})"
 
-    policy = (_CHART / "templates" / "networkpolicy.yaml").read_text(encoding="utf-8")
-    assert "egressPorts.rxnlabel" in policy, (
-        "the port is declared in values.yaml but never emitted in the egress rule, so it permits "
-        "nothing"
+
+def _declared_endpoint_ports() -> dict[str, int]:
+    """Every plain-HTTP address this chart hands a pod, as `{where it is declared: port}`.
+
+    Both places a URL can be stated: a `config` key the pods read as a setting, and a connector's
+    `url` for a bundle whose server is hosted outside this release. 443 is excluded because
+    `egressPorts.https` already covers it, and so is `connectorPort`, which the template emits
+    from the value the connector containers listen on rather than from this map.
+    """
+    found: dict[str, int] = {}
+    for key, value in _VALUES["config"].items():
+        match = re.match(r"https?://[^/:]+:(\d+)", str(value))
+        if match and match.group(1) != "443":
+            found[key] = int(match.group(1))
+    for name, bundle in _VALUES["connectors"].items():
+        match = re.match(r"https?://[^/:]+:(\d+)", str(bundle.get("url") or ""))
+        if match and match.group(1) != "443":
+            found[f"connectors.{name}.url"] = int(match.group(1))
+    return found
+
+
+def test_every_address_this_chart_dials_has_an_egress_port() -> None:
+    """The rxnlabel check above, asked of every address instead of the one that was missing.
+
+    A NetworkPolicy egress rule restricts by port *independently* of its `to:` peer list, so an
+    operator who states a host in `egressDestinations` and no port has every packet dropped —
+    silently, since a dropped SYN is a timeout rather than a refusal. `values.yaml` documents that
+    trap in four places and the test that enforced it named one server, which is the shape
+    `D-2026-08-28-a-lane-primitive-must-verify-the-act-it-was-asked-for` calls a lesson written too
+    narrowly: `chem`, `safety`, `calc`, the LLM endpoint and the OTLP collector are the same claim
+    and were nobody's assertion.
+
+    Derived from the addresses the chart actually states, so a sixth endpoint is covered on the day
+    it is added rather than on the day somebody remembers to extend a list.
+    """
+    declared = _declared_endpoint_ports()
+    assert declared, "no addresses were extracted — the reader is broken, not the chart"
+    ports = set(_VALUES["networkPolicy"]["egressPorts"].values())
+    unreachable = {where: port for where, port in declared.items() if port not in ports}
+    assert not unreachable, (
+        f"address(es) this chart dials on a port `networkPolicy.egressPorts` does not name: "
+        f"{unreachable}. Every packet to them is dropped by this release's own egress rule."
     )
+
+
+def test_an_egress_port_an_operator_adds_is_actually_permitted() -> None:
+    """`egressPorts` has to be a knob, not nine keys the template happens to read by name.
+
+    The template names every entry individually (`.Values.networkPolicy.egressPorts.postgres`, and
+    eight more), so a tenth key in an operator's values file renders **nothing** — the same
+    "a knob that renders nothing is not a knob" this chart already took `allowAnyDestination` and
+    `serverReplicas`/`workerReplicas` apart for (D-2026-08-26). It is not hypothetical here: this
+    chart's own `secrets.optionalKeys` ships `llmFallbackApiKey` and `vectorStoreApiKey`, whose
+    endpoints (a failover LLM, Qdrant on 6333) are on ports this map does not name and an operator
+    cannot add — so enabling either from this chart yields a credential, a URL, and a connection
+    the release's own NetworkPolicy drops.
+
+    Asserted on the template source, which is what this module can see: the claim is that the rule
+    is generated *from the map* rather than from a list of its current keys.
+    """
+    policy = (_CHART / "templates" / "networkpolicy.yaml").read_text(encoding="utf-8")
+    named = sorted(set(re.findall(r"\.Values\.networkPolicy\.egressPorts\.(\w+)", policy)))
+    assert not named, (
+        f"the egress rule reads {len(named)} named keys off `egressPorts` ({named}), so a port an "
+        "operator adds to that map is silently not permitted. Range over the map instead."
+    )
+    assert re.search(
+        r"range\s+\$\w+,\s*\$\w+\s*:=\s*\.Values\.networkPolicy\.egressPorts", policy
+    ), "the egress rule does not iterate `egressPorts`, so the map is not what decides the ports"

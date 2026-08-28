@@ -1107,6 +1107,18 @@ retention:
 
 networkPolicy:
   enabled: true
+  # WHICH ports these pods may dial. **Every entry in this map is emitted, so adding one works** —
+  # the rule ranges over it rather than reading a fixed list of key names, which is what an
+  # operator needs the moment this release dials something the chart does not ship a number for.
+  # Two such destinations already have a Secret slot here and no port: `secrets.optionalKeys`'
+  # `llmFallbackApiKey` (a failover LLM endpoint, on whatever port it serves) and
+  # `vectorStoreApiKey` (Qdrant, 6333). Add `llmFallback: <port>` / `vectorStore: 6333` beside the
+  # entries below and the rule follows; before the rule iterated, an added key rendered nothing at
+  # all and every packet to it was dropped with no error anywhere
+  # (D-2026-08-26-a-knob-that-renders-nothing-is-not-a-knob, the same shape one object over).
+  #
+  # The names are documentation — Kubernetes sees only the numbers — so pick one that says which
+  # destination it opens. Duplicated numbers are harmless.
   egressPorts:
     postgres: 5432
     temporal: 7233

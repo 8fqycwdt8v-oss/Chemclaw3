@@ -1552,7 +1552,13 @@ def test_every_downloaded_binary_is_checksummed_before_it_runs() -> None:
 
 
 def _run_deps_audit(
-    tmp_path: Path, stdout: str, exit_code: int, *, ci: str | None, stale_log: str | None = None
+    tmp_path: Path,
+    stdout: str,
+    exit_code: int,
+    *,
+    ci: str | None,
+    stale_log: str | None = None,
+    export: str = "pypdf==6.14.2\npydantic==2.12.4",
 ) -> subprocess.CompletedProcess[str]:
     """Run `make deps-audit` against a stubbed `uvx pip-audit`, with `CI` set or unset.
 
@@ -1570,7 +1576,11 @@ def _run_deps_audit(
     """
     stub_dir = tmp_path / "bin"
     stub_dir.mkdir()
-    (stub_dir / "uv").write_text("#!/bin/sh\necho '# stub export'\n")
+    # The stub export names real packages, and that is not cosmetic: the recipe refuses to call an
+    # audit of nothing clean, so a stub that exported only a comment would make every case below
+    # fail for that reason instead of for the one it is testing. `export` is a parameter so the
+    # empty case can be asked for deliberately.
+    (stub_dir / "uv").write_text(f"#!/bin/sh\ncat <<'EOF'\n{export}\nEOF\n")
     (stub_dir / "uvx").write_text(f"#!/bin/sh\ncat <<'EOF'\n{stdout}\nEOF\nexit {exit_code}\n")
     stubs = ["uv", "uvx"]
     overrides = []
@@ -1689,6 +1699,33 @@ def test_a_clean_audit_passes(tmp_path: Path) -> None:
     result = _run_deps_audit(tmp_path, "No known vulnerabilities found", 0, ci="true")
     assert result.returncode == 0, result.stdout + result.stderr
     assert "SKIPPED" not in result.stdout
+
+
+@pytest.mark.skipif(shutil.which("make") is None, reason="make is not installed")
+def test_an_audit_that_examined_nothing_is_not_a_clean_audit(tmp_path: Path) -> None:
+    """The control above cannot tell "clean" from "read nothing", and it was stubbed as the latter.
+
+    Measured against the real tool: `uvx pip-audit --no-deps -r <a file of comments>` prints
+    `No known vulnerabilities found` and exits **0**. So every branch of the classification is
+    sound and the input to it was never bounded — a `uv export` that succeeded and named no
+    package produced a green supply-chain gate over an audit of zero packages, and the test that
+    exists to be the clean control stubbed `uv` as `echo '# stub export'`, i.e. asserted exactly
+    that state was a pass.
+
+    This is the shape this repository has closed twice elsewhere and not here: `check_corpus_is_
+    assembled` refuses a prose gate that assembled no documents, `test_there_are_migrations_to_
+    check` refuses a scan over an empty glob. A gate that reports success having read nothing is
+    the failure arriving through its own front door.
+
+    The floor is one package, not a number matched to today's closure: a bigger literal would go
+    stale in the direction that quietly stops asking, and the question here is only whether the
+    export named anything at all.
+    """
+    result = _run_deps_audit(
+        tmp_path, "No known vulnerabilities found", 0, ci="true", export="# nothing"
+    )
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert "no packages" in (result.stdout + result.stderr), result.stdout + result.stderr
 
 
 def test_no_calculation_binary_ships_in_this_image() -> None:

@@ -286,3 +286,18 @@ jobs:
 
       - name: Render + validate the Helm chart
         run: make helm-validate
+
+      # **The rendered assertions, in the one job that has `helm`.** Nine tests across
+      # `tests/test_deploy_chart.py` are marked `skipif(shutil.which("helm") is None)` and shell
+      # out to `helm template`; the job that runs pytest is `check`, which installs Postgres and
+      # uv and no Helm. So all nine skipped in CI exactly as they skip on a laptop — a test that
+      # executes in no environment is a claim, not a gate, which is the thing this repository
+      # keeps finding under other names.
+      #
+      # Here rather than in `check` because this is where the chart already is: `make helm-validate`
+      # above asks `kubeconform` whether the render is schema-valid, and these ask whether it says
+      # what the chart's own comments promise — that a missing `config` key stops the render rather
+      # than producing a plausible wrong number, that a connector-less release refuses, that a
+      # connector pod outlives the call it may be holding. `kubeconform` cannot see any of that.
+      - name: Assert on the rendered chart
+        run: uv run pytest tests/test_deploy_chart.py tests/test_helm_chart.py -q
