@@ -30,6 +30,33 @@ merged. All four turned out to be one shape; see
 | 2 | The lane started five of six published fleet manifests; the front door refused to boot on the missing `pyexec` | the start list is derived from the manifests actually mounted |
 | 3 | `processes.sh env`, the documented contract for a second shell, carried the minted credentials and not the resolved fleet checkout — every chaos restart died | the contract carries `CHEMCLAW_MCP_REPO` |
 | 4 | The next restart killed the front door, declined to start it for want of a model posture the contract also omitted, printed "live stack up" and exited 0 | the contract carries the model posture; `restart <name>` asserts `<name>` came back |
+| 5 | The F-family check *"a truncated argument document is reported, not swallowed"* could never pass: LangChain's `parse_partial_json` closes the string, so truncation never reaches the repair path — a fact `agent/model_calls.py` documents | split into `f-malformed-json` (genuinely unparseable, exercises the repair path) and `f-truncated-arguments` (pins that a cut document is completed and *run*). Family F now 9/9 |
+| 6 | An unparseable tool call surviving its repair reached a metric and a log and **nothing on the chemist's stream** — `answered=False, tools_failed=[]`, a blank box with no cause | `_report_repair` publishes a `ToolFailureSignal` per unrepaired call, with `reason=None` (no gate refused it; it is a fault) |
+| 7 | **Every durable calculation returned HTTP 401 behind a `/readyz` reporting `connectors_unhealthy: 0`** — `calc` is a backend, so the health probe structurally cannot see it. The contract carried the four fleet tokens it *minted* and dropped the four it *inherited*; `CHEMCLAW_CALC_MCP_TOKEN` was present and is a different variable one letter away | `fleet_token_vars` derives the set from the mounted manifests; verified with `env -i` + contract only + a real xTB job, 5/5 |
+| 8 | **The soak ran five rounds, reported `24/24 checks passed` each time, and wrote nothing.** The whole Prometheus exposition went through the environment at an exec boundary; past `MAX_ARG_STRLEN` the exec fails and no line is written. The record is the only artefact a soak produces | both scrapes go to `mktemp` files; `json.dumps` still builds the line. Third distinct way this script has lost its own record |
+
+### Check bugs found in the campaign's own instruments
+
+Recorded separately because they are not product defects, and reporting them as such would have been
+the campaign's worst possible output.
+
+| Instrument | What it claimed | What was true |
+| --- | --- | --- |
+| Family `T` dry-run checks (×14) | `refused=0` — the dry-run control did not fire | The control fires. A refusal is *raised*, so it arrives as `tool_failed` and the error `ToolMessage` is suppressed; the check read `result_previews`, which is necessarily empty for a raised refusal. `TurnResult.failure_messages` added |
+| My own reachability probe | "a default-profile turn reaches 17 of 99 tools; 83 unreachable" | The default profile advertises **91 of 99**. I parsed the tool list out of the model's error string, which is truncated at 300 characters without closing its bracket |
+| UI fixture tier | 40 failures | A bare `npm run build` produces a client that refuses `AUTH_MODE=dev`; the failure mode is 40 × 30s `locator.click` timeouts with the cause buried in `[WebServer]` output. Rebuilt with the flag: 6 failed, 65 passed, 57s |
+| Storm families A and E (first run) | noise 26%, lease 10.4s | Measured against a box a subagent was loading. Re-measured idle: still 21% noise — so the A rows are honest, and the campaign's own rule (never share the box with a storm) was violated twice before it stuck |
+
+## Suite results
+
+| Suite | Result |
+| --- | --- |
+| `Chemclaw3` full pytest, Postgres **and** Temporal up | 5,751 passed, 14 skipped (6 helm, 3 truncated git history, 2 no model credit) — the Postgres- and Temporal-gated files ran rather than skipping |
+| `Chemclaw3-mcp` `make check` | 1,521 passed, 7 skipped; mypy clean over 120 source files; no known vulnerabilities |
+| `Chemclaw3-mcp` `make offline-run` | 1,518 passed **with the network namespace removed** — the vendored corpora are provably sufficient |
+| `Chemclaw3_ui` vitest | 772 passed over 75 files |
+| `Chemclaw3_ui` Playwright fixture tier | 65 passed, 6 failed — all one pre-existing `transcript.spec.ts` assertion on `main` |
+| `Chemclaw3_ui` Playwright mock-model tier (new) | 4 passed, 4 failed on first live run; failure 4 was finding #7 above |
 
 ## Runs
 
