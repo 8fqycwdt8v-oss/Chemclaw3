@@ -280,9 +280,12 @@ def _build_schedule(job: PlannedSchedule) -> Schedule:
             # command carries a run timeout and a task timeout and no execution timeout. Four of
             # the jobs scheduled here drain by continuing as new (`corpus_sync`, `document_sync`,
             # `label_sync`, `eln_sync`), so a chain-wide ceiling would not bound "one run" at all:
-            # it would kill a first load of a multi-million-row corpus a day into the drain, and
-            # `corpus_sync` keeps no `sync_cursors` row, so the next fire would start again from
-            # its first page and never finish. Measured against a live broker on a chain of ten
+            # it would kill a first load of a multi-million-row corpus a day into the drain, and a
+            # release-mode `corpus_sync` persists no cursor at all, so the next fire would start
+            # again from its first page and never finish. (A source binding `append_only: true`
+            # keeps its keyset position in `corpus_cursors` and would resume — but the argument
+            # has to hold for the default, which is the release.) Measured against a live
+            # broker on a chain of ten
             # one-second runs under a five-second ceiling: `execution_timeout` failed it at 5.64 s,
             # `run_timeout` completed it in 12.38 s.
             run_timeout=timedelta(seconds=settings.schedule_run_timeout_seconds),

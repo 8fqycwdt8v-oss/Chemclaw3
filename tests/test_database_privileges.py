@@ -43,7 +43,9 @@ _UPSERT = re.compile(r"\bINSERT\s+INTO\s+(\w+).*?\bON CONFLICT\b.*?\bDO UPDATE\b
 #
 # - The fingerprint stores build `INSERT INTO {table} ... ON CONFLICT DO UPDATE` in `__init__`
 #   (`science/fingerprints/store.py`), with the table from `default_molecule_store` /
-#   `default_reaction_store`.
+#   `default_reaction_store` / `science.labels.reactions.corpus_reactions`. `corpus_molecules` is
+#   deliberately *not* here: it has an extra column, so `CorpusMolecules` writes its own literal
+#   statement and the ordinary scan sees it.
 # - The retention sweep builds `DELETE FROM {table}` over the closed `_PRUNABLE` map.
 #
 # - The LangGraph checkpointer and store issue their own SQL from inside the installed package, so
@@ -56,6 +58,7 @@ _UPSERT = re.compile(r"\bINSERT\s+INTO\s+(\w+).*?\bON CONFLICT\b.*?\bDO UPDATE\b
 _DYNAMIC: dict[str, set[str]] = {
     "molecule_fingerprints": {"INSERT", "UPDATE"},
     "reaction_fingerprints": {"INSERT", "UPDATE"},
+    "corpus_reactions": {"INSERT", "UPDATE"},
     # `_PRUNABLE` first, so the fuller upstream matrix below wins for `checkpoints` rather than
     # being flattened back to the retention sweep's single DELETE — which is what a later `**`
     # expansion did, and it read as "the grant allows an INSERT nobody performs".

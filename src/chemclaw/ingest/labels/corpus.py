@@ -42,7 +42,10 @@ from chemclaw.ingest.eln.warehouse import sql
 from chemclaw.ingest.eln.warehouse.binding import CorpusBinding, FieldBinding
 from chemclaw.ingest.eln.warehouse.driver import Warehouse
 from chemclaw.ingest.eln.warehouse.expr import apply_transforms, as_text, resolve_path
+from chemclaw.science.fingerprints.rxnfp.search import record_for_reaction
+from chemclaw.science.fingerprints.store import FingerprintInputError, FingerprintStore
 from chemclaw.science.labels.molecules import CorpusMolecules
+from chemclaw.science.labels.reactions import corpus_reaction_id, transformation_of
 from chemclaw.science.labels.records import ReactionLabel, SpeciesLabel
 from chemclaw.science.labels.store import LabelIndex
 
@@ -69,6 +72,20 @@ class CorpusReport(BaseModel):
         ge=0,
         description="Rows with no usable reaction SMILES or no citation. Counted, never silent.",
     )
+    unfingerprintable: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Recorded reactions whose DRFP could not be built — in practice a degenerate "
+            "transformation whose symmetric difference is empty, which is the one case measured "
+            "to reach it. Notably *not* an unparseable species: `standard_smiles` returns a "
+            "string RDKit cannot read unchanged, so DRFP shingles it and yields bits, where the "
+            "molecule half raises. The reaction row is still written and still answers every "
+            "facet query; what it loses is reaction *similarity*. Counted separately from "
+            "`skipped` because the outcomes differ: a skipped row is not in the index at all, and "
+            "conflating the two would report a corpus as less complete than it is."
+        ),
+    )
     cursor: str = ""
     has_more: bool = False
 
@@ -80,6 +97,7 @@ async def drain_corpus(
     source: str,
     *,
     molecules: CorpusMolecules | None = None,
+    reactions: FingerprintStore | None = None,
     after: str = "",
     limit: int | None = None,
 ) -> CorpusReport:
@@ -94,6 +112,13 @@ async def drain_corpus(
             corpus is wanted. Written *after* the reactions and from what was actually recorded, so
             a structure only enters `corpus_molecules` because some reaction row names it — which
             is what keeps every similarity hit resolvable back to a precedent.
+        reactions: Where each recorded reaction is fingerprinted (DRFP), if *reaction* similarity
+            over this corpus is wanted. The molecule half above has always been written and this
+            one never was, so a bulk source arrived searchable by structure and not by
+            transformation. Written per row rather than batched, deliberately: the write is the
+            same `FingerprintStore.add` the ELN path uses, so the two produce byte-identical rows,
+            and a per-row commit is what makes an interrupted page resumable at the row rather than
+            at the page.
         after: Resume strictly after this key; empty starts at the beginning.
         limit: Rows this pass may read; defaults to the binding's `fetch_limit`.
 
@@ -141,8 +166,18 @@ async def drain_corpus(
         await index.record(label)
         report.recorded += 1
         structures.update(s.smiles for s in label.species)
+        if reactions is not None:
+            await _fingerprint_reaction(reactions, source, label, report)
     if molecules is not None and structures:
         await molecules.add_many(sorted(structures))
+    if report.unfingerprintable:
+        logger.info(
+            "%s: %d of %d recorded reaction(s) yielded no DRFP and are not searchable by "
+            "reaction similarity; they are indexed and answerable by facet",
+            source,
+            report.unfingerprintable,
+            report.recorded,
+        )
     if report.skipped:
         logger.warning(
             "%s: %d of %d corpus row(s) carried no usable reaction SMILES, key or citation and "
@@ -152,6 +187,39 @@ async def drain_corpus(
             report.read,
         )
     return report
+
+
+async def _fingerprint_reaction(
+    reactions: FingerprintStore, source: str, label: ReactionLabel, report: CorpusReport
+) -> None:
+    """Index one recorded reaction's DRFP, counting rather than raising when it has none.
+
+    Skipping rather than raising, and it is the same asymmetry `CorpusMolecules.add_many`
+    documents one table over: a patent extract is evidence, and refusing a page because one of its
+    reactions is degenerate loses every good precedent beside it. The reaction row is already
+    written by the time this runs, so what a skip costs is a similarity hit, never a wrong answer —
+    and `report.unfingerprintable` is what keeps that visible instead of implied.
+
+    **`FingerprintInputError` alone, because it is the only thing this path raises**, and that was
+    measured rather than assumed: `standard_smiles` returns a species RDKit cannot parse *unchanged*
+    (`"C(((C"` → `"C(((C"`), so `drfp_bitstring` shingles it and produces bits, and the reaction
+    tier has no unparseable-structure failure at all. The molecule tier does —
+    `ecfp_bitstring("C(((C")` raises — which is why `add_many` catches `InvalidSmilesError` beside
+    it and this does not. Catching one here would be a guard for a case that cannot occur.
+
+    The bits are taken over the transformation form. `transformation_of` says why, and
+    `reaction_definition()`'s own `agents-excluded` token is what would otherwise be false of these
+    rows.
+    """
+    try:
+        record = record_for_reaction(
+            corpus_reaction_id(source, label.reaction_id),
+            transformation_of(label.record_smiles),
+        )
+    except FingerprintInputError:
+        report.unfingerprintable += 1
+        return
+    await reactions.add(record)
 
 
 def _record(

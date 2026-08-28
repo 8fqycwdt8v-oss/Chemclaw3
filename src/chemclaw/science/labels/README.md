@@ -35,6 +35,8 @@ superseded labeller. Both are found by one indexed scan, so "which entries are m
 * **Fingerprint bits on `reaction_species`.** A 13M-reaction corpus is ~65M species rows over ~4M
   distinct structures; the bits live once per structure in `corpus_molecules` and join by `smiles`,
   which is already `standard_smiles`.
+  A reaction's own bits live once per *reaction* in `corpus_reactions` (`reactions.py`), keyed
+  `<source>:<reaction_id>` so a hit joins back to `reaction_labels`.
 * **A widened `Role`.** See `vocabulary.py` — `Role` decides which side of the fingerprint
   boundary a species lands on and is writable from a tenant's YAML binding, so a sixth member is
   an arithmetic change, not a vocabulary change.

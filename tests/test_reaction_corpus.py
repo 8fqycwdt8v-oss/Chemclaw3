@@ -22,8 +22,14 @@ from chemclaw.ingest.sources.registry import (
     active_retrieve_sources,
     discovered,
 )
+from chemclaw.science.fingerprints.molfp.fingerprint import ecfp_bitstring
+from chemclaw.science.fingerprints.rxnfp.fingerprint import reaction_definition
+from chemclaw.science.fingerprints.rxnfp.search import find_similar_reactions, record_for_reaction
+from chemclaw.science.fingerprints.store import FingerprintInputError, InMemoryFingerprintStore
+from chemclaw.science.labels.reactions import corpus_reactions
 from chemclaw.science.labels.store import InMemoryLabelIndex
 from chemclaw.science.labels.vocabulary import LabelGroup
+from tests.pg import migrated_db_or_skip
 from tests.warehouse_fake import KeysetWarehouse
 
 _RELATION = "V_REACTION"
@@ -316,3 +322,163 @@ def test_the_cursor_advances_past_a_row_the_drain_skips() -> None:
         assert page.cursor == "A100"
 
     asyncio.run(_run())
+
+
+def test_every_recorded_reaction_is_fingerprinted_under_its_source_scoped_id() -> None:
+    """The half that did not exist: a bulk source becomes searchable by transformation.
+
+    `record_for_reaction` had exactly one caller in the tree — the ELN path — so a corpus drained
+    into `reaction_species` and `corpus_molecules` could be searched for *a molecule* and never for
+    *a reaction*. The id is the `(source, reaction_id)` pair rather than the bare id, which is what
+    lets a hit join to `reaction_labels` and what keeps two sources sharing an entry id from
+    collapsing onto one row.
+    """
+
+    async def _run() -> None:
+        index = InMemoryLabelIndex()
+        reactions = InMemoryFingerprintStore()
+
+        report = await drain_corpus(
+            _fake(), _binding(), index, "pistachio", reactions=reactions, limit=10
+        )
+
+        stored = await reactions.all_records()
+        assert {record.id for record in stored} == {"pistachio:p1", "pistachio:p2", "pistachio:p3"}
+        assert report.unfingerprintable == 0
+        # p4 resolved no product, so it is not a precedent and never reached the index at all.
+        assert report.skipped == 1
+
+    asyncio.run(_run())
+
+
+def test_the_indexed_reaction_drops_its_agents_so_a_solvent_swap_cannot_dominate() -> None:
+    """The label the bits are taken over is `reactants>>products`, never the three-part form.
+
+    `DrfpEncoder` folds the agent slot onto the reactants, so keeping it would encode the solvent
+    as part of the transformation — the effect measured on the ELN path at 0.82 for one coupling in
+    THF against the same coupling in 2-MeTHF, and 1.00 once excluded. It is also what makes
+    `reaction_definition()`'s own `agents-excluded` token true of these rows.
+
+    Asserted on the *stored label* rather than on the bits, because that is the string a reader
+    sees and the one a future change would silently widen.
+    """
+
+    async def _run() -> None:
+        index = InMemoryLabelIndex()
+        reactions = InMemoryFingerprintStore()
+
+        await drain_corpus(_fake(), _binding(), index, "pistachio", reactions=reactions, limit=10)
+
+        stored = {record.id: record for record in await reactions.all_records()}
+        # p1 was recorded with `CC#N` (acetonitrile) in the agent slot.
+        assert ">CC#N>" in _rows()[0]["REACTION_SMILES"]  # type: ignore[operator]
+        assert stored["pistachio:p1"].label == ("Brc1ccccc1.NC1CCCCC1>>c1ccc(NC2CCCCC2)cc1")
+        assert "CC#N" not in stored["pistachio:p1"].label
+        assert stored["pistachio:p1"].definition == reaction_definition()
+
+    asyncio.run(_run())
+
+
+def test_a_reaction_with_no_fingerprint_is_counted_rather_than_failing_the_page() -> None:
+    """A degenerate transformation loses similarity, never the page beside it.
+
+    The same asymmetry `CorpusMolecules.add_many` documents for structures: a bulk extract's
+    fiftieth row may be unusable, and refusing the page over it would lose every good precedent
+    with it. The reaction row is written either way and still answers every facet query, so the
+    count is what keeps the loss visible instead of implied.
+    """
+
+    async def _run() -> None:
+        rows = _rows()
+        # Identical on both sides: DRFP's symmetric difference is empty, so there are no features
+        # to fold and `drfp_bitstring` refuses rather than storing meaningless bits.
+        rows[2]["REACTION_SMILES"] = "CCO>>CCO"
+        index = InMemoryLabelIndex()
+        reactions = InMemoryFingerprintStore()
+        warehouse = KeysetWarehouse({_RELATION: rows}, _RELATION, "REACTION_ID")
+
+        report = await drain_corpus(
+            warehouse, _binding(), index, "pistachio", reactions=reactions, limit=10
+        )
+
+        assert report.unfingerprintable == 1
+        assert report.recorded == 3
+        # Still recorded, still answerable by facet — only its similarity row is missing.
+        assert {r.id for r in await reactions.all_records()} == {"pistachio:p1", "pistachio:p2"}
+        assert await index.count() == 3
+
+    asyncio.run(_run())
+
+
+def test_the_drain_without_a_reaction_store_writes_no_fingerprints_and_still_records() -> None:
+    """`reactions=None` is the release-mode default and must stay a complete drain.
+
+    The molecule half has the same shape and the same reason: a caller that wants the label index
+    and not the similarity indexes must not have to pass a store it will never search.
+    """
+
+    async def _run() -> None:
+        index = InMemoryLabelIndex()
+
+        report = await drain_corpus(_fake(), _binding(), index, "pistachio", limit=10)
+
+        assert report.recorded == 3
+        assert report.unfingerprintable == 0
+
+    asyncio.run(_run())
+
+
+@pytest.mark.anyio
+async def test_corpus_reactions_is_searchable_with_no_search_code_of_its_own() -> None:
+    """The payoff for giving the table the same five columns `reaction_fingerprints` has.
+
+    `PostgresFingerprintStore` is table-parameterised, so pointing it at `corpus_reactions` buys
+    Tanimoto ranking over the HNSW index without a line of new SQL — the property `corpus_molecules`
+    was built for, applied to the other half. Driven against the real database rather than the
+    in-memory double, because the thing under test is the migration and the index, and both of
+    those are exactly what a doubled store cannot exercise.
+    """
+    await migrated_db_or_skip()
+    store = corpus_reactions()
+
+    coupling = "Brc1ccccc1.NC1CCCCC1>>c1ccc(NC2CCCCC2)cc1"
+    await store.add(record_for_reaction("pistachio:s1", coupling))
+    await store.add(record_for_reaction("pistachio:s2", "CCO.CC(=O)O>>CCOC(C)=O"))
+
+    hits = await find_similar_reactions(store, coupling, top_k=2)
+
+    assert hits.hits[0].id == "pistachio:s1"
+    assert hits.hits[0].similarity == pytest.approx(1.0)
+
+
+def test_an_unparseable_species_is_still_fingerprinted_which_is_why_only_one_error_is_caught() -> (
+    None
+):
+    """The measurement behind `_fingerprint_reaction` catching `FingerprintInputError` alone.
+
+    The molecule and reaction halves fail differently and the asymmetry is not obvious:
+    `standard_smiles` returns a string RDKit cannot parse *unchanged*, so DRFP shingles it and
+    yields bits, while `ecfp_bitstring` on the same string raises. Pinned here because the drain's
+    exception handling is written to that fact — catching `InvalidSmilesError` beside it would be a
+    guard for a case that cannot occur, and a later change to `standard_smiles` should turn this red
+    rather than leave a silently unreachable branch.
+    """
+
+    async def _run() -> None:
+        rows = _rows()
+        rows[2]["REACTION_SMILES"] = "CCO.C(((C>>CCOC(C)=O"
+        index = InMemoryLabelIndex()
+        reactions = InMemoryFingerprintStore()
+        warehouse = KeysetWarehouse({_RELATION: rows}, _RELATION, "REACTION_ID")
+
+        report = await drain_corpus(
+            warehouse, _binding(), index, "pistachio", reactions=reactions, limit=10
+        )
+
+        assert report.unfingerprintable == 0
+        assert "pistachio:p3" in {record.id for record in await reactions.all_records()}
+
+    asyncio.run(_run())
+
+    with pytest.raises(FingerprintInputError):
+        ecfp_bitstring("C(((C")

@@ -10,10 +10,17 @@ reasoning is in `ingest/labels/corpus.py` and in
 
 Shaped like `document_sync.py`: a planning activity that reads the live values once, a bounded page
 per activity, `continue_as_new` so a multi-million-row corpus drains over many runs without an
-event history that cannot be replayed. The cursor is intra-run only and rides the state, exactly as
-the document crawl's does — there is no `sync_cursors` row, because a re-drain of an unchanged
-release is a no-op (every write is an id-keyed upsert of the record phase) and a *new* release must
-be walked from the top.
+event history that cannot be replayed.
+
+**Whether the cursor outlives the run is the binding's call, not this file's**
+(`D-2026-08-28-a-feed-is-a-corpus-that-does-not-stop`). For a *release* — the default, and what this
+job was written for — it is intra-run only and rides the state, exactly as the document crawl's
+does: a re-drain of an unchanged release is a no-op (every write is an id-keyed upsert of the record
+phase) and a *new* release must be walked from the top, so there is nothing worth storing. For a
+source whose binding declares `append_only: true` it is persisted in `corpus_cursors` and the next
+fire resumes there, because a live feed is the case where re-walking means reading the whole corpus
+daily to find yesterday's rows. Not `sync_cursors`: that column is a datetime and this is a keyset
+key in the source's own domain.
 """
 
 from datetime import timedelta
@@ -30,8 +37,10 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.ingest.eln.warehouse.connect import open_warehouse
     from chemclaw.ingest.eln.warehouse.driver import Warehouse
     from chemclaw.ingest.labels.corpus import CorpusReport, drain_corpus
+    from chemclaw.ingest.labels.cursor import load_corpus_cursor, store_corpus_cursor
     from chemclaw.ingest.sources.registry import active_manifests
     from chemclaw.science.labels.molecules import CorpusMolecules
+    from chemclaw.science.labels.reactions import corpus_reactions
     from chemclaw.science.labels.store import default_label_index
 
 import logging
@@ -44,6 +53,7 @@ logger = logging.getLogger(__name__)
 # Module-level indirections so tests swap the production stores for in-memory ones.
 _label_index = default_label_index
 _corpus_molecules = CorpusMolecules
+_corpus_reactions = corpus_reactions
 
 
 def corpus_sources() -> dict[str, CorpusBinding]:
@@ -122,6 +132,7 @@ class CorpusSyncState(BaseModel):
     read: int = 0
     recorded: int = 0
     skipped: int = 0
+    unfingerprintable: int = 0
 
 
 @durable_activity("background")
@@ -141,24 +152,41 @@ async def plan_corpus_sync() -> CorpusSyncPlan:
 @durable_activity("background")
 @activity.defn
 async def drain_reaction_corpus(source: str, after: str) -> CorpusReport:
-    """Read one page of `source`, resuming after `after`, and record it."""
+    """Read one page of `source`, resuming after `after`, and record it.
+
+    **The persisted cursor is read and written here, not in the workflow**, for the reason every
+    other IO in this file is in an activity: a workflow must replay deterministically, and a
+    database read cannot. An empty `after` means "the start of this source" — the workflow spells
+    it that way both on the first page and after it pops a finished source — so it is the one
+    moment a stored position is worth consulting. For a release-mode binding there is none, and the
+    drain begins at the top exactly as it always has.
+    """
     binding = corpus_sources().get(source)
     if binding is None:  # names come from `plan_corpus_sync`, so this is a wiring bug
         raise ChemclawError(f"data source {source!r} carries no reaction corpus")
+    if binding.append_only and not after:
+        after = await load_corpus_cursor(source)
     activity.heartbeat()
-    return await beating(
+    report = await beating(
         drain_corpus(
             _warehouse_for(source),
             binding,
             _label_index(),
             source,
             molecules=_corpus_molecules(),
+            reactions=_corpus_reactions(),
             after=after,
             limit=settings.corpus_page_size,
         ),
         f"reaction corpus {source}",
         settings.corpus_sync_heartbeat_timeout_seconds,
     )
+    # Every page, not only the last one: a run that is interrupted between pages must resume where
+    # it stopped rather than at the position the previous *run* left, and the write is one indexed
+    # upsert against thousands of rows of work.
+    if binding.append_only:
+        await store_corpus_cursor(source, report.cursor)
+    return report
 
 
 @durable_workflow("background")
@@ -201,6 +229,7 @@ class ReactionCorpusWorkflow:
             state.read += page.read
             state.recorded += page.recorded
             state.skipped += page.skipped
+            state.unfingerprintable += page.unfingerprintable
             iterations += 1
             if page.has_more and page.cursor and page.cursor != state.after:
                 state.after = page.cursor
@@ -221,5 +250,12 @@ class ReactionCorpusWorkflow:
             state.remaining.pop(0)
             state.after = ""
         return CorpusSyncOutcome(
-            reports=[CorpusReport(read=state.read, recorded=state.recorded, skipped=state.skipped)]
+            reports=[
+                CorpusReport(
+                    read=state.read,
+                    recorded=state.recorded,
+                    skipped=state.skipped,
+                    unfingerprintable=state.unfingerprintable,
+                )
+            ]
         )
