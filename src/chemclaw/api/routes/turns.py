@@ -12,7 +12,6 @@ at request time, which is the seam that let this route leave `create_app` unchan
 
 import asyncio
 import logging
-import uuid
 from collections.abc import AsyncIterator
 
 from fastapi import FastAPI, HTTPException, Request
@@ -38,6 +37,7 @@ from chemclaw.api.state import (
     state,
 )
 from chemclaw.core.config import settings
+from chemclaw.core.identity_context import get_current_correlation_id
 from chemclaw.core.metrics import METRICS
 
 logger = logging.getLogger(__name__)
@@ -130,6 +130,20 @@ async def post_message(
     claims: SessionTurns | None = front.turn_claims
     lease = settings.service_turn_claim_lease_seconds
     semaphore = front.turn_semaphore
+    # **The request's id, read once, quoted by every error event below.** `ErrorEvent`'s own
+    # contract makes this the id "the audit trail is keyed on ... quoting it in a bug report is
+    # what lets an operator find the turn", and `run_turn` adopts the same ambient for that
+    # reason. The four failures this route raises *around* `run_turn` did not: the shed, the two
+    # budget refusals and the wall-clock kill sent `""`, and the catch-all minted a fresh
+    # `uuid4().hex` — a hex string that appears in no log line, no `audit_events` row and no access
+    # log, while the `logger.exception` beside it was stamped with the request's. That is the exact
+    # failure `run_turn`'s own comment names, "two ids for one event", and a fabricated id is worse
+    # than none: it sends an operator hunting for a turn that was never recorded under it.
+    # Non-empty on every HTTP path — `_add_request_observability` is installed unconditionally and
+    # mints one when the caller sends nothing usable — so the `or ""` is a type narrowing rather
+    # than a fallback. Where it *did* somehow fire, `""` is what `ErrorEvent` already documents as
+    # "not reported", which is the honest answer and the one thing a minted id can never be.
+    correlation_id = get_current_correlation_id() or ""
     # Nothing may sit between this claim and the `try` below — no `await`, and nothing that can
     # raise — because the reservation it takes does not expire until `_start_turn_lease` starts its
     # clock, and until then only that `try`'s `finally` gives it back.
@@ -178,7 +192,12 @@ async def post_message(
                     METRICS.increment("chemclaw_turns_shed_total")
                     # Retryable and honestly so: shedding says "not now", not "not ever",
                     # and it is the one failure where trying again shortly is exactly right.
-                    shed = ErrorEvent(message=_AT_CAPACITY, code="budget_exhausted", retryable=True)
+                    shed = ErrorEvent(
+                        message=_AT_CAPACITY,
+                        code="budget_exhausted",
+                        retryable=True,
+                        correlation_id=correlation_id,
+                    )
                     yield {"event": shed.type, "data": shed.model_dump_json()}
                     return
             else:
@@ -201,7 +220,12 @@ async def post_message(
                 front.budget.check(session_id, principal.oid)
             except BudgetExceeded as exc:
                 METRICS.increment("chemclaw_turns_refused_budget_total")
-                refused = ErrorEvent(message=str(exc), code="budget_exhausted", retryable=False)
+                refused = ErrorEvent(
+                    message=str(exc),
+                    code="budget_exhausted",
+                    retryable=False,
+                    correlation_id=correlation_id,
+                )
                 yield {"event": refused.type, "data": refused.model_dump_json()}
                 return
             METRICS.increment("chemclaw_turns_started_total")
@@ -265,6 +289,7 @@ async def post_message(
                     # Not retryable unchanged: the same question will take the same time. The
                     # useful next step is a narrower question, not another wait.
                     retryable=False,
+                    correlation_id=correlation_id,
                 )
                 yield {"event": timeout_event.type, "data": timeout_event.model_dump_json()}
         except Exception as exc:
@@ -282,10 +307,12 @@ async def post_message(
             #
             # So the invariant `events.py` states — a stream ends with an answer or an error — is
             # the *stream's*, not only `run_turn`'s. `failure_event` is the same classifier the
-            # runner uses, so a client cannot get two different accounts of one kind of failure.
+            # runner uses, so a client cannot get two different accounts of one kind of failure —
+            # and it is handed the same correlation id, which it was not: this minted its own
+            # `uuid4().hex`, so the two accounts agreed about the *code* and named different turns.
             turn_failed = True
             logger.exception("turn stream failed for session %s", session_id)
-            failed = failure_event(exc, session_id, uuid.uuid4().hex)
+            failed = failure_event(exc, session_id, correlation_id)
             yield {"event": failed.type, "data": failed.model_dump_json()}
         finally:
             if turn_failed:

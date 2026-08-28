@@ -1715,3 +1715,89 @@ def test_readyz_does_not_name_the_connector_fleet_to_an_unauthenticated_caller(
     assert "calc" not in rendered and "molfp" not in rendered, rendered
     assert "connection refused" not in rendered, rendered
     assert body["connectors_unhealthy"] == 1
+
+
+def _stream_with_header(  # type: ignore[no-untyped-def]
+    client, session_id: str, message: str = "hi"
+) -> tuple[str, list[dict[str, Any]]]:
+    """POST a turn; return the response's correlation-id header beside its SSE payloads.
+
+    The header and the events are read from the *same* response on purpose: the whole question
+    these tests ask is whether a chemist quoting the id in an error event names the turn an
+    operator finds under the id the response, the access log and the audit trail all carry.
+    """
+    events: list[dict[str, Any]] = []
+    with client.stream(
+        "POST", f"/sessions/{session_id}/messages", json={"message": message}
+    ) as res:
+        assert res.status_code == 200
+        header = res.headers.get("x-chemclaw-correlation-id", "")
+        for line in res.iter_lines():
+            if line.startswith("data:"):
+                events.append(json.loads(line[len("data:") :].strip()))
+    assert header, "the front door always stamps a correlation id on its responses"
+    return header, events
+
+
+def test_a_shed_turn_names_the_correlation_id_the_request_ran_under(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Every error event this route emits must quote the *request's* id, not none and not a new one.
+
+    `ErrorEvent.correlation_id` exists for exactly one job — "quoting it in a bug report is what
+    lets an operator find the turn" — and `run_turn` already adopts the ambient id for that reason,
+    naming the alternative as "two ids for one event, which is the failure a correlation id exists
+    to prevent". The three error events `routes/turns.py` raises around `run_turn` did not: the
+    shed, the budget refusal and the timeout sent `""`, so the one failure a chemist is most likely
+    to report — a turn that ran out of wall clock — carried nothing to look up.
+    """
+    monkeypatch.setattr(settings, "service_turn_admission_timeout_seconds", 0.05)
+    app = _app()
+    app.state.turn_semaphore = asyncio.Semaphore(0)
+    with TestClient(app) as client:
+        session_id = client.post("/sessions").json()["session_id"]
+        header, events = _stream_with_header(client, session_id)
+    assert [e["type"] for e in events] == ["queued", "error"]
+    assert events[-1]["correlation_id"] == header
+
+
+def test_a_timed_out_turn_names_the_correlation_id_the_request_ran_under(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """The wall-clock kill is the failure a chemist reports; it must be findable."""
+
+    class _HungAgent(_FakeAgent):
+        """A fake standing in for a hung LLM endpoint: one token, then nothing."""
+
+        async def stream(self, message: str) -> AsyncIterator[Piece]:
+            yield "partial"
+            await asyncio.sleep(60)
+            yield "never"
+
+    monkeypatch.setattr(settings, "service_turn_timeout_seconds", 0.2)
+    app = _app(_HungAgent())
+    with TestClient(app) as client:
+        session_id = client.post("/sessions").json()["session_id"]
+        header, events = _stream_with_header(client, session_id)
+    assert events[-1]["code"] == "turn_timeout"
+    assert events[-1]["correlation_id"] == header
+
+
+def test_the_streams_catch_all_quotes_the_requests_id_rather_than_minting_one() -> None:
+    """The one path that *did* send an id sent a fabricated one — worse than sending none.
+
+    `failure_event(exc, session_id, uuid.uuid4().hex)` handed the chemist a hex string that
+    appears in no log line, no `audit_events` row and no access log, while the route's own
+    `logger.exception` one line above was stamped with the request's id. Measured: the response
+    header and the exception's log record both read `537fe7ea…`; the event told the user
+    `8568a58b…`.
+
+    The reachable trigger is the one the route's own comment names — a session whose stored profile
+    the deployment no longer ships, so `connector_factory` raises on every turn.
+    """
+
+    def _retired_profile(_profile: str | None = None) -> Any:
+        raise ValueError("profile 'gone' is not shipped by this deployment")
+
+    app = _app(_FakeAgent(), connector_factory=_retired_profile)
+    with TestClient(app) as client:
+        session_id = client.post("/sessions").json()["session_id"]
+        header, events = _stream_with_header(client, session_id)
+    assert events[-1]["code"] == "internal"
+    assert events[-1]["correlation_id"] == header

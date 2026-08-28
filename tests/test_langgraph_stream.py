@@ -572,3 +572,88 @@ def test_a_tool_result_is_traced_however_upstream_spells_its_class(streamed: boo
         f"a {built.__name__} result produced no tool_result event; the call has no answer"
     )
     assert trace.outputs, "the trace the answer gate scores against was left empty"
+
+
+def test_a_tool_calls_arguments_reach_the_surface_as_characters_not_escapes() -> None:
+    r"""A non-ASCII argument is streamed as itself, so the trace shows what was asked.
+
+    Measured through the UI with the `[[h-unicode]]` marker: the arguments panel rendered
+    `{"text": "\\u5496\\u5561\\u56e0 ..."}` and not the compound name. The escaping is this
+    module's — `json.dumps` defaults to `ensure_ascii=True` — and `ToolCallEvent.arguments` is a
+    *raw* string by contract (`Chemclaw3_ui/shared/events.ts`: "NOT parsed JSON ... never
+    `JSON.parse` this unguarded"), so no consumer un-escapes it and every surface shows the
+    escapes.
+
+    It also costs the preview its budget. `arguments` is cut at
+    `settings.agent_audit_max_arg_chars`, and an escape spends six characters where the glyph
+    spends one — so a CJK argument surfaced roughly a sixth of what a Latin one does, in the field
+    a chemist reads to see what a tool was actually asked. The transcript route disagreed with the
+    stream about the same call, because `api/schemas._truncate_for_transcript` renders with `repr`
+    and Python's `repr` does not escape non-ASCII.
+    """
+    events, _trace, _usage = _drive(
+        [{"name": "ask_clarifying_question", "args": {"question": "咖啡因 in Wasser?"}}, "done"]
+    )
+    call = next(event for event in events if isinstance(event, ToolCallEvent))
+    assert "咖啡因" in call.arguments, call.arguments
+    assert "\\u" not in call.arguments, call.arguments
+
+
+def test_a_failure_returned_inside_a_command_still_reaches_the_chemist() -> None:
+    """A tool call must never end with neither a result nor a failure — whatever shape it failed in.
+
+    `_from_update` suppresses an error `ToolMessage` "on the documented ground that it is already
+    reported as tool_failed", and keeps the status test as a second check because a message "can
+    reach here from a path that raised no signal ... an unreported failure is worse than a redundant
+    check". The code did the opposite of what that sentence promises: it dropped such a message.
+
+    Measured on a real compiled graph with the real governance chain, one tool that reports its
+    failure the way LangChain requires of any tool that must also update graph state —
+    `Command(update={"messages": [ToolMessage(status="error", ...)]})`, which is the shape
+    deepagents' own filesystem tools return: the turn emitted `['tool_call', 'token']`, raised no
+    `ToolFailureSignal`, and left `ToolCallTrace.outputs` empty. The chemist saw a call that never
+    answered, and the trace the answer gate scores against had no record of it at all.
+
+    The upstream half is `agent/audit.returned_failure`, which type-tests `isinstance(result,
+    ToolMessage)` and so cannot see a failure wrapped in a `Command` — no signal, no `outcome=
+    "error"` audit row, and `answered_failure` never clears the provider's retry flag. That is a
+    separate fix in a separate module; what this pins is that the stream's fallback *reports*
+    rather than deletes, which is what makes an unsignalled failure survivable at all.
+    """
+    from typing import Annotated
+
+    from langchain_core.tools import InjectedToolCallId, tool
+    from langgraph.types import Command
+
+    from chemclaw.api.events import ToolFailedEvent
+
+    @tool
+    def probe_instrument(
+        sample: str, tool_call_id: Annotated[str, InjectedToolCallId]
+    ) -> Command[Any]:
+        """Read the instrument for `sample`; reports its failure as a state update."""
+        return Command(
+            update={
+                "messages": [
+                    ToolMessage(
+                        content="Error: the instrument is offline",
+                        status="error",
+                        tool_call_id=tool_call_id,
+                    )
+                ]
+            }
+        )
+
+    events, trace, _usage = _drive(
+        [{"name": "probe_instrument", "args": {"sample": "caffeine"}}, "done"],
+        connectors=[probe_instrument],
+    )
+    assert [event.type for event in events] == ["tool_call", "tool_failed", "token"], [
+        event.type for event in events
+    ]
+    failed = next(event for event in events if isinstance(event, ToolFailedEvent))
+    assert failed.tool == "probe_instrument"
+    assert "instrument is offline" in failed.message
+    # A failure is still not evidence: the error sentence must not join the corpus the answer gate
+    # grades an answer's grounding against.
+    assert trace.outputs == []
