@@ -56,17 +56,13 @@ Read-only; touches nothing.
 """
 
 import argparse
-import importlib
 import inspect
 from collections.abc import Sequence
 from typing import NamedTuple
 
 from chemclaw.agent.profiles import registered_profile_names
-from chemclaw.connectors.registry import discovered as discovered_connectors
 from chemclaw.connectors.registry import enabled as enabled_connectors
-from chemclaw.connectors.registry import server_tools_module
 from chemclaw.core.config import settings
-from chemclaw.core.tool_registry import registered_tools
 from chemclaw.templates.manifest import AgentStep, JobStep, Template, ToolStep
 from chemclaw.templates.registry import TemplateError, discovered, enabled
 
@@ -89,45 +85,18 @@ def _available_jobs() -> set[str]:
 
 
 def _resolvable_signatures() -> dict[str, inspect.Signature]:
-    """Every tool name whose parameters this tree can answer for, mapped to its signature.
+    """The tool signatures this tree can answer for — `chemclaw_agent.tool_signatures`, imported.
 
-    Two sources, both local: the in-process `@tool` registry, and each discovered bundle's own
-    `chemclaw.connectors.<name>.server.tools` module, whose function names *are* the tool names the
-    manifest declares. A bundle with no server module (`results` is jobs-only) and a declared
-    name the
-    module does not define are both skipped — whether a bundle serves what it declares is
-    `make connector-validate`'s question, and answering it twice, differently, here would be worse
-    than not answering it.
-
-    **A bundle that cannot be imported is not "skipped", it is broken.** This used to swallow every
-    `ImportError`, transitive ones included, which is the vacuous pass the paragraph below warns
-    against, arrived at from the other direction: one injected missing dependency in `chem` took
-    the resolved set from 50 signatures to 46 and still printed "template validation passed".
-    `server_tools_module` is now the single definition of that import, shared with
-    `make connector-validate`, and it raises rather than returning `None` for that case.
-
-    **The agent import is load-bearing, not incidental.** `registered_tools()` is populated as an
-    import side effect of `chemclaw.agent.chemclaw_agent`, so without it this returns the connector
-    half only: measured, 30 signatures and 31 advertised tools uncovered, against 50 and 11 with it.
-    It used to be supplied by `_step_problems` happening to call `_available_tools()` two lines
-    earlier — so reordering those lines, or calling this function from anywhere else, would have
-    dropped 20 in-process tools from the argument check **with no failure at all**; the validator
-    would simply have checked less and still printed "template validation passed".
+    A wrapper rather than a second implementation, and it is a wrapper rather than an inlined call
+    because the import must stay *lazy*: this module is a validator entry point, and importing the
+    agent package at module scope would make `make template-validate` pay for it before it has
+    parsed its arguments. The definition moved next to `available_tool_names` when
+    `chemclaw.cli.mock_llm._validate` turned out to be asking the same question and answering it
+    for 22 of 99 names; see there for what the divergence cost.
     """
-    importlib.import_module("chemclaw.agent.chemclaw_agent")
-    signatures = {fn.__name__: inspect.signature(fn) for fn in registered_tools()}
-    for name, (_bundle, manifest) in discovered_connectors().items():
-        endpoint = manifest.endpoint
-        if endpoint is None:
-            continue
-        module = server_tools_module(name)
-        if module is None:
-            continue
-        for tool_name in endpoint.tools:
-            fn = getattr(module, tool_name, None)
-            if callable(fn):
-                signatures[tool_name] = inspect.signature(fn)
-    return signatures
+    from chemclaw.agent.chemclaw_agent import tool_signatures
+
+    return tool_signatures()
 
 
 class ToolArguments(NamedTuple):

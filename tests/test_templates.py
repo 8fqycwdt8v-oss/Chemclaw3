@@ -430,6 +430,14 @@ def test_the_argument_check_covers_the_same_tools_whatever_the_call_order() -> N
     a gate that quietly checks less is the exact failure mode `make template-validate` exists to
     close for templates. Run in a subprocess because the registry cannot be un-populated once this
     test session has imported the agent for something else.
+
+    **The ordering half is now structural rather than arranged**, and this still measures the
+    coverage that made it matter. The definition moved to `chemclaw.agent.chemclaw_agent`
+    (`tool_signatures`) when `chemclaw.cli.mock_llm._validate` turned out to be asking the same
+    question and answering it for 22 of 99 names, so reaching the function at all means having
+    imported the module whose import populates the registry. What a fresh interpreter resolves is
+    the number worth pinning either way: a bundle that stops importing takes its tools out of two
+    guards at once, and the count is what says so.
     """
     probe = (
         "from chemclaw.cli.validate_templates import _available_tools, _resolvable_signatures\n"

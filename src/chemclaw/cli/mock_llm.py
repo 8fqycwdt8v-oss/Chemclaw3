@@ -140,17 +140,35 @@ def _validate(behaviour: Behaviour) -> None:
     """Refuse a behaviour whose tool or arguments the real system would reject (the LOAD-1 guard).
 
     Resolved against the live surface rather than a copy of it: `available_tool_names` is what the
-    agent actually advertises, and the registry holds the callable whose signature the schema is
-    derived from. A behaviour that passes here cannot fail for the reason every measurement in the
-    previous load test failed.
+    agent actually advertises, and `tool_signatures` holds the callable whose signature the schema
+    is derived from. A behaviour that passes here cannot fail for the reason every measurement in
+    the previous load test failed.
+
+    **The argument half used to cover a third of the surface and read as if it covered all of it.**
+    It resolved a name against `registered_tools()` and `continue`d on a miss, commented "an MCP
+    connector tool — its schema lives in the bundle, not in-process". The schema lives in the
+    bundle, and the bundle is *in this tree*: `make template-validate` has resolved exactly those
+    signatures out of `connectors/<name>/server/tools.py` since the capability migration, to ask
+    the identical question about a template step's arguments. Two readers of one question, one of
+    them answering for 22 of the 99 names this function accepts — so a behaviour calling
+    `compute_atomic_descriptors(query=…)` or `calculator_outliers(matchingg=…)` was green-lit here
+    and would die in the parse-error branch before the tool body ran, which is LOAD-1 verbatim, in
+    the guard written to make LOAD-1 impossible. `chemclaw_agent.tool_signatures` is now the one
+    answer; through it the check covers 53.
+
+    What stays unresolvable is stated rather than implied, because a silent skip is how the first
+    gap survived: a bundle served from `Chemclaw3-mcp` (`chem`, `safety`) ships no server module
+    here, a generated launcher takes one `params` object whose fields
+    `tests/test_storm_behaviour_coverage.py` checks against the model `build_job_tool` annotates,
+    and the skills, harness and subagent tools are upstream's. None of those is a name this tree
+    can answer for, and inventing an answer would be worse than not having one.
     """
-    from chemclaw.agent.chemclaw_agent import available_tool_names
-    from chemclaw.core.tool_registry import registered_tools
+    from chemclaw.agent.chemclaw_agent import available_tool_names, tool_signatures
 
     if behaviour.adversarial:
         return
     known = set(available_tool_names())
-    by_name = {fn.__name__: fn for fn in registered_tools()}
+    signatures = tool_signatures()
     for call in behaviour.calls:
         if call.tool not in known:
             raise ValueError(
@@ -162,17 +180,16 @@ def _validate(behaviour: Behaviour) -> None:
                 f"behaviour {behaviour.name!r} sends raw arguments for {call.tool!r}; that can "
                 "only be deliberate, so mark the behaviour adversarial."
             )
-        fn = by_name.get(call.tool)
-        if fn is None:  # an MCP connector tool — its schema lives in the bundle, not in-process
+        signature = signatures.get(call.tool)
+        if signature is None:  # not answerable here — see the docstring for the three cases
             continue
-        annotations = {k: v for k, v in getattr(fn, "__annotations__", {}).items() if k != "return"}
-        unknown = set(call.arguments) - set(annotations)
+        unknown = set(call.arguments) - set(signature.parameters)
         if unknown:
             raise ValueError(
                 f"behaviour {behaviour.name!r} passes {sorted(unknown)} to {call.tool!r}, which "
-                f"takes {sorted(annotations)}. This is exactly LOAD-1: the call would die in the "
-                "parse-error branch before the tool body ran, and the run would report it as a "
-                "tool call that happened."
+                f"takes {sorted(signature.parameters)}. This is exactly LOAD-1: the call would die "
+                "in the parse-error branch before the tool body ran, and the run would report it "
+                "as a tool call that happened."
             )
 
 

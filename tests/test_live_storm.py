@@ -333,6 +333,79 @@ def test_a_wrong_argument_name_is_refused_by_name() -> None:
         )
 
 
+def test_a_connector_tools_wrong_argument_name_is_refused_too() -> None:
+    """LOAD-1's shape on the *other* half of the surface, where the guard used to fall through.
+
+    The check resolved a name against `registered_tools()` and skipped anything it did not find,
+    commented "an MCP connector tool — its schema lives in the bundle, not in-process". The schema
+    does live in the bundle, and the bundle is in this tree: `make template-validate` has resolved
+    exactly these signatures out of `connectors/<name>/server/tools.py` since the capability
+    migration, to ask the identical question about a template step's arguments. So this call was
+    green-lit and would have died in the parse-error branch before `compute_atomic_descriptors`
+    ran — the run reporting it, afterwards, as a tool call that happened.
+    """
+    with pytest.raises(ValueError, match="exactly LOAD-1"):
+        _validate(
+            Behaviour(
+                name="t",
+                calls=[ToolCall(tool="compute_atomic_descriptors", arguments={"query": "CCO"})],
+            )
+        )
+
+
+def test_the_guard_checks_arguments_for_every_connector_tool_this_tree_can_resolve() -> None:
+    """The ratchet: a bundle whose signatures are readable here gets its behaviours checked.
+
+    One wrong-argument call per advertised connector tool, because the one-example test above
+    proves the mechanism and this proves the *coverage* — which is what silently regressed. The
+    number is the point: before `tool_signatures` was one answer, 22 of the 99 names
+    `available_tool_names()` accepts had their arguments checked, and every one of them was
+    in-process. A bundle added to this tree now arrives inside the guard rather than beside it.
+
+    Left out, and each for a reason no assertion here could invent: a bundle served from
+    `Chemclaw3-mcp` ships no `server/tools.py` in this checkout, so its signatures are not readable
+    at any price; a generated launcher takes one `params` object, whose fields
+    `tests/test_storm_behaviour_coverage.py` validates against the model `build_job_tool`
+    annotates; and the skills, harness and subagent tools are upstream's.
+    """
+    from chemclaw.agent.chemclaw_agent import tool_signatures
+    from chemclaw.connectors.registry import enabled as enabled_connectors
+    from chemclaw.connectors.registry import server_tools_module
+
+    signatures = tool_signatures()
+    readable = [
+        (manifest.name, tool)
+        for manifest in enabled_connectors()
+        if manifest.endpoint is not None and server_tools_module(manifest.name) is not None
+        for tool in manifest.endpoint.tools
+    ]
+    assert readable, "no enabled bundle serves an endpoint from this tree — the ratchet is vacuous"
+    for connector, tool in readable:
+        assert tool in signatures, f"{connector}.{tool} has no resolvable signature"
+        with pytest.raises(ValueError, match="exactly LOAD-1"):
+            _validate(
+                Behaviour(
+                    name="t",
+                    calls=[ToolCall(tool=tool, arguments={"not_a_parameter_of_this_tool": 1})],
+                )
+            )
+
+
+def test_the_mock_and_the_template_gate_read_one_answer_about_arguments() -> None:
+    """Two guards against the same failure, resolving names through the same function.
+
+    They diverged once and the divergence was invisible: `make template-validate` checked a
+    template step's arguments against a connector tool's real signature while the mock, asking the
+    identical question about a scripted model's arguments, skipped the same tool entirely. An
+    equality rather than a subset — a second implementation that merely agreed today is what this
+    is here to stop.
+    """
+    from chemclaw.agent.chemclaw_agent import tool_signatures
+    from chemclaw.cli.validate_templates import _resolvable_signatures
+
+    assert set(_resolvable_signatures()) == set(tool_signatures())
+
+
 def test_a_tool_the_agent_does_not_advertise_is_refused() -> None:
     """A typo'd tool name would otherwise be measured as "the system rejected an unknown tool"."""
     with pytest.raises(ValueError, match="does not advertise"):
