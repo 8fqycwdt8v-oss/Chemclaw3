@@ -250,8 +250,9 @@ _PRUNABLE: dict[str, tuple[str, str]] = {
 # job and resolving eight unrelated tables in a retention change is not.
 #
 # **Three of those findings were not findings, and that is worth naming rather than quietly
-# fixing.** `note_proposals`, `plan_approvals` and `turn_costs` each said *no decision is on
-# record* while `agent/leaver.py`'s `_RETAINED` tier had been keeping all three through a
+# fixing.** `note_proposals`, `plan_approvals` and `turn_costs` each read *nothing bounds it* —
+# two of them adding *no decision is on record*, which a first telling of this paragraph attributed
+# to all three — while `agent/leaver.py`'s `_RETAINED` tier had been keeping all three through a
 # data-subject erasure for exactly the reason the four "refused" entries above give — they name who
 # did what to the science. One argument, applied to seven tables in one register and to four of
 # them in the other, which is what two registers describing one set of tables does when nothing
@@ -479,9 +480,20 @@ _SESSION_SCOPED_ROWS: dict[str, str] = {
 # called a tool**, for as long as it runs, and the sweep reports a clean pass every night while
 # doing it. That is a silence rather than a failure, and this map is what turns it into a line an
 # operator can read.
-_OWNERSHIP_DEPENDENCIES: dict[str, tuple[str, str]] = {
+_OWNERSHIP_DEPENDENCIES: dict[str, tuple[str, str] | None] = {
+    # Its own window governs it, but the sweep only reaches `_prune_session_owners` when this
+    # window is already set (`_window_days("session_owners")` *is* this setting), so this entry can
+    # never be the advice. Recorded rather than omitted, so the map stays the same set as
+    # `_SESSION_SCOPED_ROWS` and the test below can say so.
     "session_messages": ("session_messages", "CHEMCLAW_RETENTION_SESSION_MESSAGES_DAYS"),
-    "session_events": ("session_events", "CHEMCLAW_RETENTION_SESSION_EVENTS_DAYS"),
+    # **`None` because no window empties the rows that actually block here.** `_PRUNABLE` prunes
+    # `session_events` only `WHERE consumed_at IS NOT NULL`, and the population that accumulates is
+    # precisely the *unconsumed* one — a CLI launch, a template run, the `digest-<oid>` mailbox
+    # nobody opened. Naming `CHEMCLAW_RETENTION_SESSION_EVENTS_DAYS` here said an operator could
+    # unblock this by setting a number, which is false: an unconsumed row blocks its ownership row
+    # at every window. `docs/planning/DEFERRED.md` carries that as an open row with its own
+    # trigger; what belongs here is the absence of a knob, not a knob that does not work.
+    "session_events": None,
     "tool_result_links": ("tool_result_blobs", "CHEMCLAW_RETENTION_TOOL_RESULTS_DAYS"),
     **dict.fromkeys(CHECKPOINT_TABLES, ("checkpoints", "CHEMCLAW_RETENTION_CHECKPOINTS_DAYS")),
 }
@@ -491,8 +503,18 @@ def unwindowed_ownership_dependencies(present: set[str]) -> list[str]:
     """The settings that must also be set before any session holding such a row can be forgotten.
 
     Public because it answers a deployment question — "why is `session_owners` not shrinking?" —
-    and the answer is a list of ENV names rather than a stack trace. Derived from
-    `_SESSION_SCOPED_ROWS` so it cannot drift from the arms that actually hold the row back.
+    and the answer is a list of ENV names rather than a stack trace.
+
+    **It reads `_OWNERSHIP_DEPENDENCIES`, which is a second hand-written map**, and this docstring
+    claimed to be "derived from `_SESSION_SCOPED_ROWS` so it cannot drift" — the exact defect the
+    ADR beside it says it is repairing, two screens down from the paragraph naming it. Nothing
+    derives one from the other, because the *reason* a table blocks is not derivable from the fact
+    that it blocks. What closes it instead is
+    `test_every_session_scoped_blocker_says_what_would_unblock_it`, which asserts the two maps name
+    the same set — so a new blocker fails a test rather than dropping silently out of the advice.
+
+    A `None` entry means "no window empties this", which is a different answer from "the window is
+    unset" and is why the value is optional rather than a sentinel string.
 
     Args:
         present: Which session-scoped tables exist on this connection's search path; an absent one
@@ -505,6 +527,7 @@ def unwindowed_ownership_dependencies(present: set[str]) -> list[str]:
     for table in present:
         dependency = _OWNERSHIP_DEPENDENCIES.get(table)
         if dependency is None:
+            # Either the table is not a blocker, or nothing unblocks it — neither is advice.
             continue
         windowed_table, env = dependency
         if _window_days(windowed_table) == 0:

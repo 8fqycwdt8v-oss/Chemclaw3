@@ -186,18 +186,30 @@ _ERASE: tuple[tuple[str, str], ...] = (
         # single-session delete was written; the two paths delete the same rows for the same
         # reason and only one of them knew it.
         #
-        # A link whose session has *no* ownership row — the orphan `delete_session` leaves behind
-        # when a blob is shared — reads as "somebody else still links this" and spares the blob.
-        # That is the conservative direction on purpose: such a link names a session id that no
-        # longer resolves to a person, so what it keeps alive is unattributable rather than
-        # somebody's, and `durable/retention.py`'s age sweep collects both together.
+        # **What spares a blob is another *person*, not another link**, and the first version of
+        # this arm got that wrong in the direction that costs an erasure. It asked only whether a
+        # link outside the leaver's sessions existed, so an *orphan* link — the row
+        # `delete_session` deliberately leaves when a blob is shared — spared the blob. Measured:
+        # a chemist tidies up one of their own sessions, later asks to be erased, and their
+        # untruncated tool output survives while the report prints `tool_result_blobs: 0`, which
+        # reads as "there were none". The comment here justified that by saying such a link "no
+        # longer resolves to a person"; in that case it resolved to the leaver, and the erasure is
+        # what made it unattributable afterwards.
+        #
+        # So the anti-join goes through `session_owners`: a blob is spared only while some link
+        # belongs to a session that still has an ownership row naming somebody who is not the
+        # leaver. An orphan spares nothing — the session it names cannot be reopened by anyone
+        # (`api/deps._rehydrate_session` answers 404 without that row), so nothing readable is
+        # lost, and the cascade takes the orphan link with the blob. `o.owner IS NULL` still
+        # spares: an unattributed session is somebody, just not somebody this database names.
         "DELETE FROM tool_result_blobs b WHERE EXISTS ("
         "  SELECT 1 FROM tool_result_links l"
         f"   WHERE l.content_hash = b.content_hash AND l.session_id IN ({_SESSION_SCOPED})"
         ") AND NOT EXISTS ("
         "  SELECT 1 FROM tool_result_links l"
+        "    JOIN session_owners o ON o.session_id = l.session_id"
         "   WHERE l.content_hash = b.content_hash"
-        f"     AND l.session_id NOT IN ({_SESSION_SCOPED}))",
+        "     AND (o.owner IS NULL OR o.owner <> ALL(%(actors)s)))",
     ),
     ("session_messages", f"DELETE FROM session_messages WHERE session_id IN ({_SESSION_SCOPED})"),
     *_CHECKPOINT_ERASE,
@@ -277,11 +289,28 @@ _RETAINED: tuple[tuple[str, tuple[str, ...], str], ...] = (
 # system does not own, and `schema/result-store/001_core.sql` gives that store its own `actor`
 # column. An operator erasing a person has a second conversation to have, and the report is where
 # they should find that out.
+# `(table, the column the person is inside, the predicate that finds them, why the row stays)`.
+# The column is not read by the count — the predicate names it — and is here so
+# `tests/test_leaver.py` can assert it exists in the live schema: a payload predicate over a column
+# that has been renamed would silently match nothing, which is this tier's own failure mode.
 _RETAINED_IN_PAYLOAD: tuple[tuple[str, str, str, str], ...] = (
     (
         "result_publications",
         "document",
-        "EXISTS (SELECT 1 FROM jsonb_array_elements(document -> 'publications') p"
+        # `jsonb_typeof(...) = 'array'` is not defensive noise, it is what keeps this a *count*.
+        # `jsonb_array_elements` is a partial function: handed a scalar, an object or a JSON `null`
+        # it raises, and this query runs inside the same transaction as every DELETE — so **one**
+        # row of an unreadable shape, in a table this command does not even erase, made erasure
+        # impossible for every actor in the deployment, permanently. Measured: `{"publications":
+        # null}`, `{"publications": {...}}` and `{"publications": "x"}` each turned the whole run
+        # into `ErasureError: cannot extract elements from a scalar`. `document` is `JSONB NOT NULL`
+        # with no CHECK, the table carries a `schema_version` because the shape is expected to
+        # change, and `publish backfill --requeue` walks rows other builds wrote. The guard is
+        # short-circuiting, so an unreadable row counts 0 and the erasure proceeds — which is the
+        # same rule the checkpointer tables are skipped under: erasure must not become the one
+        # operation a deployment cannot perform.
+        "jsonb_typeof(document -> 'publications') = 'array'"
+        " AND EXISTS (SELECT 1 FROM jsonb_array_elements(document -> 'publications') p"
         " WHERE p ->> 'actor' = ANY(%(actors)s))",
         "who asked for a result to be published and why — the receipt for a record that now also "
         "lives in a results store this system does not own, and cannot erase from",
@@ -302,7 +331,8 @@ _RETAINED_IN_PAYLOAD: tuple[tuple[str, str, str, str], ...] = (
 # be reporting a completeness it has not got.
 _BEYOND_REACH: dict[str, str] = {
     "audit_anchors": "the runtime role holds no privilege on it and its writer was removed with "
-    "the audit hash chain; rows from an older build need an operator with owner rights",
+    "the audit hash chain, so this deployment's copy is empty; a schema is forward-only, so a "
+    "database that ran the pre-removal build needs an operator with owner rights to check",
 }
 
 

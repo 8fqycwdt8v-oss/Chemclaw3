@@ -354,10 +354,14 @@ class KeepLastConversationGroupsEdit(ContextEdit):
         # `kept` is a suffix of `messages` — `strategy="last"` with `allow_partial=False` and no
         # system message to re-insert can only drop a prefix — so its length is the cut index.
         by_tokens = len(messages) - len(kept)
-        # The floor, guarded at both ends because a directly-constructed edit can reach values the
-        # config cannot (`agent_keep_last_conversation_groups` is `ge=1`): `keep == 0` would index
-        # `starts[0]` while meaning the opposite, and `keep` above the group count would raise
-        # `IndexError` inside a middleware, which is a failed turn. Both degrade to "no floor".
+        # The floor, guarded at both ends. `keep == 0` is the **shipped** value rather than
+        # something only a direct construction can reach — this comment said `ge=1` and "a value
+        # the config cannot reach" for a day after `agent_keep_last_conversation_groups` became
+        # `ge=0, default=0`, three lines from the branch it describes. Both guarded values degrade
+        # to "no floor", and for 0 that is now the deployment's intent rather than a rescue: it
+        # takes `starts[0]`, which `trim_messages`' own `end_on` back-off guarantees is `<=
+        # by_tokens`, so `max` returns `by_tokens` and the arm is an exact no-op. `keep` above the
+        # group count would raise `IndexError` inside a middleware, which is a failed turn.
         by_groups = starts[-self.keep] if 0 < self.keep <= len(starts) else starts[0]
         # The newest group is the floor on what can be kept, per the clamp in the class docstring.
         cut = min(max(by_tokens, by_groups), starts[-1])

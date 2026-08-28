@@ -113,7 +113,9 @@ class AgentSettings(BaseSettings):
     # `max()` there is untouched**: a count of groups cannot bound anything, because what a group
     # costs is whatever was said in it, and the count-only version left a 300k-token thread at 180k
     # against this 100k budget. The token arm still runs and still bounds — measured, 20 groups of
-    # 60 kB cut to 90,366 with the floor off, not to 180,180. Setting N above 0 re-arms the extra
+    # 60 kB cut to 90,090 with the floor off, not to 180,180 (90,366 was quoted here from a
+    # different fixture; the reproducible figure is the one `tests/test_compaction.py`
+    # builds). Setting N above 0 re-arms the extra
     # cut for a deployment that wants the model to see fewer *turns* than the budget would allow;
     # the instrument for wanting it to see fewer *tokens* is the budget.
     #
