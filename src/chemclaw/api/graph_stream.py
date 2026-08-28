@@ -43,6 +43,7 @@ from langchain_core.messages import AIMessageChunk, ToolMessage
 
 from chemclaw.agent.plan_gate import plan_identity
 from chemclaw.agent.state import turn_input
+from chemclaw.agent.tool_authz import returned_failure_detail
 from chemclaw.api.events import (
     Event,
     EvidenceSourceEvent,
@@ -293,17 +294,52 @@ async def _from_update(
                 # exhaustive.
                 #
                 # The turn's own failure signals are the reader that can be right; the status is
-                # kept as a second test only because a `ToolMessage` can reach here from a path that
-                # raised no signal (a middleware short-circuit), and an unreported failure is worse
-                # than a redundant check.
+                # kept as a second test because a `ToolMessage` really does reach here from a path
+                # that raised no signal — measured, see the branch below — and an unreported failure
+                # is worse than a redundant check. What the second test *does* is the thing that was
+                # wrong: it dropped such a message rather than reporting it, so the sentence above
+                # was a promise the code broke on the only case it was written for.
                 call_id = str(getattr(message, "tool_call_id", ""))
-                if call_id in failed_calls or getattr(message, "status", "success") == "error":
+                if call_id in failed_calls:
                     logger.debug("tool call %s failed; already reported as tool_failed", call_id)
+                elif getattr(message, "status", "success") == "error":
+                    # **The fallback reports rather than drops, and it used to drop.** The comment
+                    # above kept the status test on the stated ground that "an unreported failure is
+                    # worse than a redundant check" — and then took the same `continue` as a
+                    # reported one, so the one case it exists for was the one case it deleted.
+                    #
+                    # Measured on a real compiled graph with the real governance chain: a tool that
+                    # reports its failure the way LangChain requires of any tool that must also
+                    # update graph state — `Command(update={"messages": [ToolMessage(status=
+                    # "error", …)]})`, the shape deepagents' own filesystem tools return — emitted
+                    # `['tool_call', 'token']` and nothing else. `agent/audit.returned_failure`
+                    # type-tests `isinstance(result, ToolMessage)`, and a `Command` is not one, so
+                    # no `ToolFailureSignal` was raised; this branch then removed the last trace of
+                    # the call. The chemist watched a call that never answered, and `outputs` — the
+                    # corpus the answer gate grades grounding against — had no record it happened.
+                    #
+                    # `ToolFailedEvent`, not `trace.returned`: the exclusion this branch was written
+                    # for is right — an error sentence must never become evidence — so the failure
+                    # is announced *without* joining `outputs`. Worded by
+                    # `returned_failure_detail`, which is what the signalled path words a returned
+                    # failure with, so the two producers cannot describe one failure differently.
+                    # `reason` stays `None`: a returned failure has no exception, so there is no
+                    # gate to name (`core/turn_signals.record_tool_failure` makes the same point).
+                    logger.warning(
+                        "tool call %s returned status=error with no failure signal; reporting it "
+                        "as tool_failed so the turn does not lose the step",
+                        call_id,
+                    )
+                    yield _attributed(
+                        ToolFailedEvent(
+                            tool=trace.tool_of(call_id),
+                            message=returned_failure_detail(message),
+                        ),
+                        agent,
+                    )
                 else:
                     yield _attributed(
-                        await trace.returned(
-                            str(getattr(message, "tool_call_id", "")), message_text(message)
-                        ),
+                        await trace.returned(call_id, message_text(message)),
                         agent,
                     )
         plan = _todo_titles(update) if emit_plan else None
@@ -333,11 +369,30 @@ def _attributed(event: Event, agent: str) -> Event:
 
 
 def _args(call: Any) -> str:
-    """A tool call's arguments as text, for the preview `ToolCallEvent` carries."""
+    r"""A tool call's arguments as text, for the preview `ToolCallEvent` carries.
+
+    **`ensure_ascii=False`, and that is the whole of the fix it records.** `json.dumps` escapes
+    every non-ASCII character by default, and `ToolCallEvent.arguments` is a *raw* string by
+    contract — `Chemclaw3_ui/shared/events.ts` says "NOT parsed JSON ... never `JSON.parse` this
+    unguarded" — so nothing downstream un-escapes it and every surface renders the escapes.
+    Measured through the UI with the `[[h-unicode]]` marker: the arguments panel showed
+    `{"question": "\u5496\u5561\u56e0 ..."}` where the chemist had asked about 咖啡因.
+
+    It cost the preview its budget as well as its legibility. `ToolCallTrace.issued` cuts this at
+    `agent_audit_max_arg_chars`, and an escape spends six characters where the glyph spends one —
+    measured on a mixed CJK/kana/umlaut argument, the 200-character window showed **75** source
+    glyphs escaped against 200 unescaped, and a pure-CJK argument surfaces a sixth of what a Latin
+    one does. It also disagreed with the transcript about the same call, because
+    `api/schemas._truncate_for_transcript` renders with `repr` and Python's `repr` does not escape.
+
+    Nothing on the wire needs the escaping: an SSE `data:` line is UTF-8, and pydantic's
+    `model_dump_json` does not escape non-ASCII either — so this field was the only one in the
+    contract that did.
+    """
     import json
 
     try:
-        return json.dumps(call.get("args") or {})
+        return json.dumps(call.get("args") or {}, ensure_ascii=False)
     except (TypeError, ValueError):
         return str(call.get("args") or {})
 

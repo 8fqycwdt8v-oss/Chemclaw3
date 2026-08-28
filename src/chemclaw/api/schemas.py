@@ -23,9 +23,16 @@ from chemclaw.api.tool_results import content_address
 from chemclaw.core.config import settings
 from chemclaw.kg.proposal import NoteProposal
 
-# How much of a tool's arguments or result the transcript carries. The same bound the audit trail
-# applies for the same reason: a tool argument can be a whole optimization problem or an evidence
-# sweep, and a reload must not ship one per call.
+# How much of a tool's arguments or result the transcript carries, for the reason the audit trail
+# bounds the same text: a tool argument can be a whole optimization problem or an evidence sweep,
+# and a reload must not ship one per call.
+#
+# **It is not the same *number*, and this comment claimed it was.** The audit trail and the live
+# stream are both cut at `settings.agent_audit_max_arg_chars`, which ships at 200; this is 400, so
+# the reload has always shown twice what the stream did for the same call. Left at 400 rather than
+# reconciled — nothing measured says which budget is right, and halving a chemist's reload view on
+# a docstring's say-so would be the argument-instead-of-measurement this file is otherwise careful
+# about. What is fixed is the claim.
 _TRANSCRIPT_ARG_CHARS = 400
 
 # How much of the opening message becomes the session's name. Sized so a client can truncate to

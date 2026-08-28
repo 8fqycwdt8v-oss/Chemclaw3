@@ -233,7 +233,7 @@ class ToolCallTrace:
             The event a surface renders for this result.
         """
         self.outputs.append(text)
-        tool = self._issued.get(key) or self._names.get(key, key)
+        tool = self.tool_of(key)
         return ToolResultEvent(
             tool=tool,
             preview=text[: settings.agent_audit_max_arg_chars],
@@ -245,6 +245,17 @@ class ToolCallTrace:
             result_ref=await _stored_ref(self._sink, tool, text),
             result_inline=_inline(text),
         )
+
+    def tool_of(self, key: str) -> str:
+        """The tool name one call id was issued under, falling back to the id itself.
+
+        Public because a *failed* call has to be reported under the same name as a successful one:
+        `api/graph_stream` names an unsignalled failure with this, and a second copy of the lookup
+        would let one surface label a call `predict_pka` and the other label it `call_017`. The
+        fallbacks are ordered because both halves can be missing — `_issued` is written when the
+        call is announced and `_names` when a streamed fragment first carries a name.
+        """
+        return self._issued.get(key) or self._names.get(key, key)
 
     def _take(self, keys: set[str]) -> list[Event]:
         events: list[Event] = []
