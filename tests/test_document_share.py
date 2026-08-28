@@ -18,6 +18,8 @@ The two properties worth reading the file for:
 import asyncio
 import logging
 import shutil
+import threading
+import time
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
 from functools import partial
@@ -49,7 +51,11 @@ from chemclaw.ingest.documents.index import (
     InMemoryDocumentIndex,
     PostgresDocumentIndex,
 )
-from chemclaw.ingest.documents.parse import DocumentParseError
+from chemclaw.ingest.documents.parse import (
+    DocumentParseError,
+    ParsedDocument,
+    parse_document,
+)
 from chemclaw.ingest.documents.retriever import ShareDocumentRetriever
 from chemclaw.ingest.documents.sync import (
     SyncReport,
@@ -2178,3 +2184,170 @@ def test_a_systematic_read_failure_costs_log_lines_by_the_pass_not_by_the_corpus
     # The individual paths are not lost, they are moved: DEBUG is where a per-file trail belongs.
     debug = [record for record in caplog.records if record.levelno == logging.DEBUG]
     assert sum("broken-" in record.getMessage() for record in debug) == 40
+
+
+# --- one pathological document must not hold the whole pass -------------------------------------
+#
+# `_parse_changed` hands each file to a worker thread, and until the bound below it waited there
+# with no timeout at all: a document whose parse never returns held the sync activity for as long
+# as it liked, and with it the crawl of every file behind it. These tests use a *real* slow parse —
+# a reader that blocks in the worker thread — rather than a patched clock, because what is being
+# proved is that the pass comes back while the parse is still running.
+
+
+class _BlockingParse:
+    """A parser that never finishes for one named file, and is the real one for every other.
+
+    A `threading.Event` rather than a `sleep`: the point is not that the parse is slow but that it
+    is *still running* when the pass returns, which is precisely what a wall-clock sleep leaves
+    ambiguous. The wait is bounded all the same, so a regression fails the assertions instead of
+    hanging the suite.
+    """
+
+    def __init__(self, blocked_name: str) -> None:
+        """Arm the trap for `blocked_name`; nothing blocks until that file is opened."""
+        self.blocked_name = blocked_name
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def __call__(self, name: str, raw: bytes, declared_type: str | None = None) -> ParsedDocument:
+        """Block in the calling worker thread for the armed file; otherwise parse for real."""
+        if name.endswith(self.blocked_name):
+            self.entered.set()
+            self.release.wait(timeout=30.0)
+        return parse_document(name, raw, declared_type)
+
+
+def _share_with_a_slow_file(tmp_path: Path) -> dict[str, Any]:
+    """Two readable text files on a share, one of which the trap above will hold."""
+    mount = tmp_path / "mount"
+    (mount / "Docs").mkdir(parents=True)
+    (mount / "Docs" / "quick.txt").write_text("the palladium catalyst deactivated above 80 degrees")
+    (mount / "Docs" / "slow.txt").write_text("a document whose parser never comes back")
+    return {
+        "mount": str(mount),
+        "roots": [{"path": "Docs"}],
+        "public": True,
+        "extensions": [".txt"],
+    }
+
+
+def _pass_with_a_blocked_file(
+    binding: Any, index: InMemoryDocumentIndex, trap: _BlockingParse, *, after: str = ""
+) -> tuple[SyncReport, float]:
+    """Run one pass while `trap` holds a file, and report how long the pass itself took.
+
+    The release happens *inside* the loop's lifetime on purpose: `asyncio.run` joins the default
+    executor before it returns, so timing the `asyncio.run` call would time the blocked thread
+    rather than the pass — and the whole claim under test is that those two are no longer the same
+    duration.
+    """
+
+    async def _run() -> tuple[SyncReport, float]:
+        started = time.perf_counter()
+        report = await sync_share(SOURCE, binding, index, after=after, limit=100)
+        elapsed = time.perf_counter() - started
+        trap.release.set()
+        return report, elapsed
+
+    return asyncio.run(_run())
+
+
+def test_a_document_that_never_finishes_parsing_does_not_hold_the_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The bound frees the pass — the rest of the share is indexed while that parse runs on."""
+    share = _share_with_a_slow_file(tmp_path)
+    trap = _BlockingParse("slow.txt")
+    monkeypatch.setattr(sync_module, "parse_document", trap)
+    monkeypatch.setattr(settings, "attachment_parse_timeout_seconds", 0.1)
+    index = InMemoryDocumentIndex()
+
+    report, elapsed = _pass_with_a_blocked_file(load_binding(share), index, trap)
+
+    assert trap.entered.is_set(), "the trap never fired; this test proved nothing about the bound"
+    assert elapsed < 5.0, (
+        f"the pass took {elapsed:.1f}s with a parse that blocks for 30s — it waited for the thread"
+    )
+    assert report.skipped_timeout == 1
+    # The counter is the timeout's own: a bound that fired is not a file that could not be read,
+    # and `TimeoutError` is an `OSError` subclass, so the two are one `except` order apart.
+    assert report.skipped_unreadable == 0
+    # And the honest half of the claim: the *other* file was read, chunked and indexed anyway.
+    assert report.indexed == 1
+    chunking = load_binding(share).chunking_key
+    stored = asyncio.run(index.fingerprints(SOURCE, ["Docs/quick.txt", "Docs/slow.txt"], chunking))
+    assert "Docs/quick.txt" in stored
+    # No row for the timed-out file, the same trade every other refusal makes: storing its
+    # fingerprint would make it look unchanged forever and zero the counter from the next run on.
+    assert "Docs/slow.txt" not in stored
+
+
+def test_a_timed_out_document_is_visible_in_the_run_summary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A skip nobody can see is a corpus silently smaller than the operator believes.
+
+    The count has to survive all three renderings a run is read through: the report the activity
+    returns, the `ingest.finished` record the pass leaves, and the merge the drain folds its
+    chunks into (a field missing from `merge_reports` reads as zero for a whole drain).
+    """
+    share = _share_with_a_slow_file(tmp_path)
+    trap = _BlockingParse("slow.txt")
+    monkeypatch.setattr(sync_module, "parse_document", trap)
+    monkeypatch.setattr(settings, "attachment_parse_timeout_seconds", 0.1)
+
+    with caplog.at_level(logging.DEBUG, logger="chemclaw.ingest.documents"):
+        report, _ = _pass_with_a_blocked_file(load_binding(share), InMemoryDocumentIndex(), trap)
+
+    finished = [r for r in caplog.records if getattr(r, "event", "") == "ingest.finished"]
+    assert len(finished) == 1
+    assert finished[0].__dict__["skipped_timeout"] == 1
+    # One WARNING for the pass, not one per file — `_summarise_skips`'s rule, which a share full of
+    # documents past the bound would otherwise turn into a line per file.
+    warnings = [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno >= logging.WARNING and record.name.startswith("chemclaw.")
+    ]
+    assert len(warnings) == 1 and "TimeoutError" in warnings[0], warnings
+    assert any("slow.txt" in r.getMessage() for r in caplog.records if r.levelno == logging.DEBUG)
+    assert sync_module.merge_reports([report, report], SOURCE).skipped_timeout == 2
+
+
+def test_a_document_that_times_out_keeps_the_row_it_already_had(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A file the bound gave up on is still on the share, so the sweep must leave it alone.
+
+    The same rule as an unreadable file (see `test_a_file_that_changed_and_cannot_be_read...`),
+    and the one that decides whether this bound is safe to add at all: a timed-out file is absent
+    from this pass's *processed* set, and reading that absence as deletion would drop a document
+    the share still holds — every time the parse is slow.
+    """
+    share = _share_with_a_slow_file(tmp_path)
+    binding = load_binding(share)
+    index = InMemoryDocumentIndex()
+    asyncio.run(sync_share(SOURCE, binding, index, limit=100))
+
+    target = tmp_path / "mount" / "Docs" / "slow.txt"
+    target.write_text(target.read_text() + " and now it has changed")  # the fingerprint moves
+    trap = _BlockingParse("slow.txt")
+    monkeypatch.setattr(sync_module, "parse_document", trap)
+    monkeypatch.setattr(settings, "attachment_parse_timeout_seconds", 0.1)
+
+    later = asyncio.run(index.clock())
+    report, _ = _pass_with_a_blocked_file(binding, index, trap)
+
+    assert report.skipped_timeout == 1
+    assert asyncio.run(prune_share(SOURCE, index, later, report)) == 0
+    assert asyncio.run(index.fingerprints(SOURCE, ["Docs/slow.txt"], binding.chunking_key))
+
+
+def test_a_normal_share_is_untouched_by_the_bound(share: dict[str, Any]) -> None:
+    """The bound must cost nothing when no file is near it — the ordinary pass, unchanged."""
+    index = InMemoryDocumentIndex()
+    report = asyncio.run(sync_share(SOURCE, load_binding(share), index))
+
+    assert report.skipped_timeout == 0
+    assert report.indexed == 4 and report.deduplicated == 1  # the fixture share's own numbers

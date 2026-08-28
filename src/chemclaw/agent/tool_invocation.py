@@ -1,8 +1,13 @@
 """Run one tool through the governed chain when no graph is driving (M13 Step 6).
 
-A chat turn's tool call is wrapped by seven `wrap_tool_call` middlewares — two error converters,
-the audit trail, the authorization gate, the dry-run and repeat guards, and the failure announcer
-— and LangChain composes them inside `create_agent`'s tool node. A Temporal activity replaying a
+A chat turn's tool call is wrapped by the `wrap_tool_call` middlewares — two error converters, the
+untrusted-content framer, the audit trail, the authorization gate, the dry-run and repeat guards,
+and the failure announcer — and LangChain composes them inside `create_agent`'s tool node. They are
+named rather than counted here: the number was written as "seven" and went stale the first time one
+was added, which is the shape `D-2026-08-01-the-count-lives-in-the-test-not-in-the-prose` rejects.
+`tests/test_middleware_order.py::_EXPECTED_ORDER` is the one place the sequence is stated.
+
+A Temporal activity replaying a
 template's `tool` step has the same obligation and no tool node: the whole point of
 `durable/template_activities.py` is that a template's calls are governed *identically* to a
 conversation's, because a template naming a role-gated tool must not run it for anyone who can run
@@ -15,10 +20,13 @@ call", and the first time the order changed the two would disagree silently — 
 the defect D-168 fixed, where the template path hand-applied two of the six and reached the
 connector directly for the rest.
 
-**What it does *not* take is the two model-facing converters**, and that is the one deliberate
-difference from a chat turn. They translate an exception into prose a model can act on; a template
-step has no model, and its result is interpolated into later steps. Converting a refusal there made
-a refused `job` step return the refusal as its payload and launch the workflow anyway.
+**What it does *not* take is the two model-facing converters, nor the framing wrapper**, and that
+is the deliberate difference from a chat turn — all three exist to serve a model, and a template
+step has no model. The converters translate an exception into prose a model can act on; a template
+step's result is interpolated into later steps instead, and converting a refusal there made a
+refused `job` step return the refusal as its payload and launch the workflow anyway. Framing is
+withheld for the same reason and one more: the envelope marks retrieved text as data *for a model*,
+so wrapping a template step's result would interpolate a delimiter into a later step's arguments.
 
 **What replaced the MAF version, and what stopped being needed.** This used to build a
 `FunctionInvocationContext` by hand and drive `audit(context, lambda: enforce_tool_authz(...))` —
@@ -153,7 +161,8 @@ async def invoke_governed(
         What this path wants is the opposite of what `handle_tool_error` is for. That callback
         exists to keep a *model* in the loop: it converts a failure into prose the model can
         self-correct against. A template step has no model — the same argument this module makes for
-        withholding the two model-facing converters — so here the failure should simply *raise*, and
+        withholding the two model-facing converters and the framer — so the failure should simply
+        *raise*, and
         `invoke_governed` turns it into `ToolReturnedFailure` below. Disabling it on a copy leaves
         the caller's tool untouched, which matters because the same tool object is the one a chat
         turn uses, and there the handler is exactly right.

@@ -192,7 +192,10 @@ async def readyz(request: Request, response: Response) -> dict[str, str | int]:
         response.status_code = HTTPStatus.SERVICE_UNAVAILABLE
     return {
         "status": "ready" if ready else "database unreachable",
-        "connectors_unhealthy": sum(1 for item in health if item.state == "unreachable"),
+        # `unhealthy` rather than `state == "unreachable"`: a jobs-only bundle whose queue nobody
+        # polls is down in the way that matters, and this body and `/metrics` must not hold two
+        # definitions of it (D-2026-08-27-a-queue-with-no-poller-is-unreachable).
+        "connectors_unhealthy": sum(1 for item in health if item.unhealthy),
     }
 
 

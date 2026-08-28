@@ -12,8 +12,10 @@ things with different answers (D-2026-08-08-a-rollback-that-is-not-a-schema-step
 is refused outright. Leaving the *previous image* unable to write — `SET NOT NULL` on an existing
 column, or a dropped or replaced key — is refused unless the migration is listed in
 `_REVIEWED_ROLLBACK_BREAKS` with the statements read and an ADR saying what an operator does
-instead of "deploy the previous image". Exactly one migration is: `041_document_chunk_identity.sql`,
-whose rollback procedure is in that ADR.
+instead of "deploy the previous image". Four migrations are: `041_document_chunk_identity.sql`, `056_reaction_record_identity.sql`, `058_note_proposal_superseded.sql`, `063_reaction_fingerprint_source.sql`,
+each with its rollback procedure in the ADR `tests/test_migrations_are_additive.py` makes it
+name. (The count and the list are both derived from that set, which is the only place they are
+maintained — this sentence said "exactly one" while the set held four.)
 
 `grants/` is not part of that set and is invisible to the runner's non-recursive glob by
 construction. See the note at the bottom.
@@ -44,25 +46,25 @@ the pair applies in filename order and neither shadows the other.
 | `schema_migrations` | 000 | `core/migrate.py` | never — the ledger is the record of its own work, and the runtime role cannot write it at all |
 | `calculation_results` | 001 (+019 `compute_seconds`, 024 indexes, 048 `structure_id`) | `science/calc/postgres_store.py` | **refused**: evicting a cached result silently converts a hit into a recomputation, potentially an hours-long CREST search (D-011). Bounded by cost policy, not by a clock |
 | `molecule_fingerprints` | 002 (+004, 046 index) | `science/fingerprints/store.py` | — |
-| `reaction_fingerprints` | 003 (+004, 046 index) | `science/fingerprints/store.py` | — |
+| `reaction_fingerprints` | 003 (+004, 046 index, 063 `source` + `(source, id)` key) | `science/fingerprints/store.py` | — |
 | `reaction_labels` | 051 | `science/labels/store.py` | derived and rebuildable: drop it and re-run the corpus drain plus the label backfill |
 | `reaction_species` | 051 | `science/labels/store.py` | derived and rebuildable; a species the source amended away is deleted with its reaction's record phase |
 | `corpus_molecules` | 054 | `ingest/labels/corpus.py` | derived and rebuildable: refilled by re-draining the corpus |
 | `audit_events` | 006 (+010, 011, 026, 044, 045, 059) | `agent/audit_store.py` | **refused**: the trail is the record of who ran what, and disposing of it is a policy decision for whoever owns that record rather than an age cutoff in a cleanup job. `prev_hash`/`row_hash`/`chain_version` are retired columns, unwritten, at their defaults |
 | `sync_cursors` | 007 | `ingest/eln/cursor.py` | — (one row per ingest source; bounded by the source count) |
-| `session_messages` | 008 (+022, 026, 043, 046 `message_shape` check) | `agent/session_store.py` | `durable/retention.py`, per session through the pairing closure (D-145). The in-line compaction on write this row used to name went with the engine that needed it |
+| `session_messages` | 008 (+022, 026, 043, 046 `message_shape` check, 067 `message_original`) | `agent/session_store.py` | `durable/retention.py`, per session through the pairing closure (D-145). The in-line compaction on write this row used to name went with the engine that needed it. `message_original` needs no disposal of its own: it dies with its row, and its population cannot grow — nothing has written a `maf`-shaped row since M6, so the set that can ever carry one was fixed then (D-2026-08-27-a-conversion-that-cannot-be-rolled-back-is-not-a-pre-upgrade-step). An operator who has trusted the conversion may `SET message_original = NULL` to reclaim it, which is the deliberate act of giving up the rollback |
 | `session_events` | 009 (+014, 028) | `agent/session_events.py` | `durable/retention.py`, **consumed rows only** — an undelivered push-back must outlive the window that would have destroyed it |
 | `note_index` | 012 (+035, 039) | `retrieval/vector_index.py` | derived and rebuildable (`make reindex`, which now also heals a model change); rows for deleted notes are not removed |
-| `session_owners` | 013 (+021, 043, 046 index) | `agent/session_store.py` | — (survives its session's pruned history; BACKLOG) |
+| `session_owners` | 013 (+021, 043, 046 index) | `agent/session_store.py` | `durable/retention.py`, **last** and only once nothing is left to reopen: past the conversation window, no session-scoped row anywhere, no live turn lease (`D-2026-08-27-a-session-nobody-can-reopen-is-disposable`). The row is what makes a session reopenable *and* what every session-scoped sweep starts from, so it is disposed of behind everything it keys, never in front of it |
 | `user_preferences` | 015 | `agent/preferences.py` | — |
 | `predictions` | 016 | `science/calc/calibration.py` | — |
 | `subscriptions` | 017 (+029) | `agent/subscriptions.py` | deleted on unsubscribe |
-| `session_turns` | 018 | `agent/session_store.py` | released at turn end; a leased row, so an abandoned claim expires |
+| `session_turns` | 018 | `agent/session_store.py` | released at turn end, and a lease keyed by `session_id` is overwritten in place rather than duplicated, so it does not accumulate. The lease a crashed worker never released is swept with its session's `session_owners` row, in the same transaction; a **live** lease is never touched |
 | `artifact_blobs` | 019 | `science/calc/postgres_artifacts.py` | `durable/artifact_eviction.py`, by idle window and size budget (both off by default) |
 | `calculation_artifacts` | 019 | `science/calc/postgres_artifacts.py` | cascades from `artifact_blobs` |
 | `plan_approvals` | 020 (+034) | `agent/plan_approval_store.py` | — (consumed rows are marked, not removed) |
 | `job_records` | 023 (+033, 049, 055, 057, 061) | `durable/job_record_store.py` | **refused**: the table exists because a durable run's result used to expire with Temporal's history and take a campaign's evaluation record with it (D-157) |
-| `observations` | 025 | `memory/observations.py` | stale rows retired by status, not deleted |
+| `observations` | 025 (+062 index) | `memory/observations.py` | stale rows retired by status, not deleted |
 | `note_proposals` | 027 (+036, +058) | `kg/proposal_store.py` | — |
 | `measurements` | 030 | `science/calc/calibration.py` | — |
 | `bo_campaigns` | 031 | `science/bo/campaign_record_store.py` | — |
@@ -73,8 +75,9 @@ the pair applies in filename order and neither shadows the other.
 | `document_chunks` | 037 (+038, 040, 041) | `ingest/documents/index.py` | cascades in effect from `document_files`: the same sweep deletes any *cutting* — `(doc_id, chunking_key)` — no remaining file row claims, and `upsert` applies the identical predicate to the documents it writes. Derived and rebuildable — dropping both tables and re-running the sync reconstructs them |
 | `tool_result_blobs` | 042 | `api/tool_results.py` | `durable/retention.py`, by `created_at` (`retention_tool_results_days`). 0 by default like every other window, so **an operator who has not stated one lets this grow** — and at up to a row per tool call it grows fastest of the three. It holds no record of anything (the answers are in `calculation_results` and `job_records`), so a plain age cutoff is the whole policy it needs |
 | `tool_result_links` | 042 | `api/tool_results.py` | cascades from `tool_result_blobs` |
-| `reaction_records` | 052 (+053, 056) | `ingest/eln/records.py` | **nothing bounds it, deliberately** — one row per ELN entry (~1 kB), upserted by id, so the corpus tracks the source system and an amendment overwrites rather than appends. A row is the *only* readable form of a run (D-2026-08-25), so pruning one deletes a result; a deployment mirroring a 3M-entry ELN should expect a few GB and no growth beyond what the ELN itself holds |
+| `reaction_records` | 052 (+053, 056, 066 `retracted_at`, 068) | `ingest/eln/records.py` | **nothing bounds it, deliberately** — one row per ELN entry (~1 kB), upserted by id, so the corpus tracks the source system and an amendment overwrites rather than appends. A row is the *only* readable form of a run (D-2026-08-25), so pruning one deletes a result; a deployment mirroring a 3M-entry ELN should expect a few GB and no growth beyond what the ELN itself holds. `retracted_at` (066) is **reserved and unread**: the tier that would have written it was deleted on review, because with a producer wired the withdrawn run still came back from the unfiltered evidence sweep and from `similar_reactions` — see `D-2026-08-27-a-withdrawn-entry-is-a-fact-the-sync-must-carry`, and 068 restates the column's comment to say so |
 | `result_publications` | 050 | `publish/outbox.py` | `durable/retention.py`, by `delivered_at` (`retention_result_publications_days`, 0 by default). **`state = 'delivered'` only**, and the predicate is the policy rather than an optimization: a delivered row is a receipt for a result that now lives both here and in an external store, so pruning it loses nothing — while a `pending` or `failed` row is the only record that something has **not** been published, and sweeping that on a clock would turn a results-store outage into a silent gap |
+| `ingest_rejections` | 065 | `ingest/rejections.py` | **self-bounding, and the only table whose disposal is its own writer's**: at most 1,000 rows per source, the least recently refused evicted in the same transaction as a write (D-2026-08-27-a-refused-record-is-a-question-somebody-will-ask). A corpus with one systematically broken field is exactly the case that would otherwise write a row per record per run, and it is the case where the newest refusals are the informative ones. No retention sweep touches it |
 | `structures` | 047 | `science/calc/postgres_structures.py` | **refused**: a row is the geometry a `structure_id` names, and that address is handed to chemists, written into notes and taken as an argument by the next calculation (D-2026-08-21). Pruning it would break a handle rather than reclaim anything — the same coordinates are inside the `calculation_results` payload one table over, which D-011 already refuses to prune. Rows are a few kB and deduplicated by content |
 
 ## Three things the shape of this table will not tell you

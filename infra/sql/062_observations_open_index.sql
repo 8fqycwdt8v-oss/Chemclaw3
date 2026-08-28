@@ -1,0 +1,48 @@
+-- The index the retrieval bucket actually needs — because 025's does not cover its own query.
+--
+-- `025_observations.sql` creates `observations_status_idx ON observations (status, last_seen DESC)`
+-- under the comment "the retrieval bucket wants open observations newest-first". The retrieval
+-- bucket has never wanted that. `memory/observations.py::_SELECT_OPEN` reads
+--
+--     WHERE status = 'open' ORDER BY cardinality(evidence_note_ids) DESC, last_seen DESC LIMIT %s
+--
+-- so the index covered the `status` equality and nothing else: every read of the bucket fetched
+-- **all** open rows and top-N sorted them in memory on an expression no index knew about.
+--
+-- **The code is authoritative, not the comment.** Support-before-recency is a decision made three
+-- times over and relied on elsewhere: `open_observations`'s docstring ("an observation backed by
+-- six merged notes is worth reading ahead of last night's single-note one"), `with_id`'s account of
+-- an anchor move (the superseded subset is "outranked for as long as it lasts", which is only true
+-- if support leads), and D-2026-08-01, which cites the same ordering. The page is
+-- `observation_max_results` — 10 by default — so the ordering decides what is *seen at all*, and
+-- newest-first would put last night's single-note finding above a six-note one. So the index moves
+-- to the query; the query does not move to the index.
+--
+-- **Measured before adding it** (Postgres 16, this migration set, synthetic rows at 92% open,
+-- `EXPLAIN (ANALYZE, BUFFERS)` on the shipped statement, best of three) —
+-- D-2026-08-27-an-index-must-match-the-sort-it-serves:
+--
+--     open rows │ without this index          │ with it
+--     ──────────┼─────────────────────────────┼──────────────────────────
+--           185 │ 0.125 ms   seq + top-N sort │ 0.038 ms   index scan
+--           924 │ 0.598 ms   seq + top-N sort │ 0.099 ms   index scan
+--         9 243 │ 6.12  ms   seq + top-N sort │ 0.063 ms   index scan
+--        92 433 │ 29.9  ms   parallel, 2 wk   │ 0.118 ms   index scan
+--       924 324 │ 234   ms   parallel, 2 wk   │ 0.076 ms   index scan
+--
+-- Buffers at a million rows go 12 082 → 13. The planner chooses it from ~50 rows upward (at 20 it
+-- prefers the seq scan, correctly), so this is not an index that exists to be believed in.
+--
+-- **It is not free and the cost is stated.** ~39 MB at a million rows, and a mining pass upserting
+-- 5 000 findings into a 100 000-row table goes 155 ms → 185 ms (+6 µs per row). That write is
+-- Temporal's daily job; the read it pays for is inside a conversation turn.
+--
+-- **025's index is kept, and not only because the schema is forward-only.** `_RETIRE_STALE`
+-- (`status = 'open' AND last_seen < now() - N days`) is a genuine `(status, last_seen)` range and
+-- still plans onto it — measured, index scan, 0.65 ms over a million rows. Two indexes, two reads.
+--
+-- 025's comment stays wrong on disk: an applied migration is never edited, because the ledger
+-- checksums it and an edit reads as drift (D-2026-08-04-the-schema-only-goes-forward). This file
+-- is the correction, and the ADR is the record.
+CREATE INDEX IF NOT EXISTS observations_open_rank_idx
+    ON observations (status, cardinality(evidence_note_ids) DESC, last_seen DESC);

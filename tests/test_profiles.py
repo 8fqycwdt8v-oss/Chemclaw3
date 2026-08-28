@@ -76,7 +76,7 @@ def test_profile_can_narrow_connectors() -> None:
 def test_profile_attenuates_but_audit_and_authz_always_attach() -> None:
     """The invariant: narrowing a profile never removes the audit + per-tool authz middleware.
 
-    A narrowing profile carries **one more** than the default agent's seven, not fewer: the
+    A narrowing profile carries **one more** than the default agent's chain, not fewer: the
     undeclared-write refusal is attached exactly when `tool_names is not None`, because that is the
     only case in which a tool can be missing from the graph on purpose rather than by mistake
     (D-2026-08-12-a-template-is-the-plan-so-the-step-is-read-only). Asserted by name rather than by
@@ -95,6 +95,10 @@ def test_profile_attenuates_but_audit_and_authz_always_attach() -> None:
     assert [type(entry).__name__ for entry in middleware] == [
         "surface_authorization_denials",
         "surface_domain_errors",
+        # Inside both converters and outside the trail
+        # (`D-2026-08-27-a-tool-result-crosses-a-boundary-and-must-say-so`): every out-of-process
+        # result is framed as data, and a refusal this system composed is not.
+        "frame_connector_results",
         "announce_tool_failures",
         "object",  # the audit middleware, a stand-in here
         "refuse_undeclared_writes",
@@ -107,7 +111,11 @@ def test_profile_attenuates_but_audit_and_authz_always_attach() -> None:
     assert refuse_repeated_calls in middleware
     assert announce_tool_failures in middleware
     # The default agent keeps the chain it had: the extra entry is the narrowing's, not everyone's.
-    assert len(tool_call_middleware(object(), AgentProfile(name="wide"))) == 7
+    # Expressed as a difference rather than as a literal, because the literal it used to be (7) is
+    # a count of the whole chain and went stale the first time the chain grew.
+    assert len(middleware) - len(tool_call_middleware(object(), AgentProfile(name="wide"))) == 1, (
+        "the narrowing must add exactly one entry, and only for a profile that narrows"
+    )
 
 
 def test_unknown_tool_name_in_profile_fails_loud() -> None:

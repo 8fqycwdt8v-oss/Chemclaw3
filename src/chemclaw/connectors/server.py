@@ -20,9 +20,10 @@ cannot be forgotten per connector:
 """
 
 import asyncio
+import functools
 import logging
 import os
-from collections.abc import AsyncIterator, Callable, Coroutine
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
 from contextlib import asynccontextmanager
 from hmac import compare_digest
 from pathlib import Path
@@ -412,6 +413,65 @@ def _sanitize_tool_errors(server: FastMCP, *, name: str) -> None:
     manager.call_tool = _call_tool  # type: ignore[method-assign,assignment]
 
 
+def _publish_tool_results(server: FastMCP, *, name: str) -> None:
+    """Offer every tool's own result to the external results store, for every bundle at once.
+
+    **The third publish hook** (`D-2026-08-27-a-composite-needs-a-hook-not-a-projector`). Two
+    already exist and neither can see a *tool* composite: the cache hook fires on a cache miss and
+    a composite has no cache row by design (its key would name its own output), and the job hook
+    fires off a Temporal envelope and a tool is not a job. `compute_thermochemistry` and
+    `predict_logd` both had a projector and no caller for as long as the seam has shipped, which is
+    the `audit_events.agent` shape — a record that reads as kept and is not.
+
+    Installed here rather than called by each tool, and that is the whole design: a tool author has
+    nothing to remember, because a tool is registered with `@server.tool()` and is therefore already
+    inside `_tool_manager`. `chemclaw.publish.hooks` decides what is actually published, and the
+    suite derives that set rather than trusting it.
+
+    **Wrapped on the tool's function, not on `call_tool`.** The two patches above intercept
+    `ToolManager.call_tool`, which is right for an error and for an identity because neither needs
+    the result. This one does: by the time a call returns from the manager, `convert_result` has
+    turned the model into content blocks and a structured dict — a tool result is not a model on
+    the wire (`D-2026-08-26-a-tool-result-is-not-a-model-on-the-wire`) — and the hook routes on the
+    model's own name. `Tool.fn` is the last point at which it still is one.
+
+    The wrapper returns the tool's result unchanged and swallows nothing the tool raises: a failed
+    tool publishes nothing, and a failed publish is invisible to the caller. Idempotent, so a
+    process that builds two apps over one server does not wrap twice.
+    """
+    for tool in server._tool_manager.list_tools():
+        if not tool.is_async or getattr(tool.fn, "_chemclaw_publishes", False):
+            # A synchronous tool is left alone rather than wrapped in a coroutine: `Tool.is_async`
+            # was decided at registration and `call_fn_with_arg_validation` dispatches on it, so an
+            # async wrapper over a sync function would be awaited by nobody. No tool in this tree
+            # is synchronous; a future one that is would need `is_async` moved with it.
+            continue
+        tool.fn = _publishing(tool.fn, connector=name, tool_name=tool.name)
+
+
+def _publishing(
+    fn: Callable[..., Awaitable[Any]], *, connector: str, tool_name: str
+) -> Callable[..., Awaitable[Any]]:
+    """One tool's body, with its result offered to the results store after it returns."""
+
+    @functools.wraps(fn)
+    async def _run(**kwargs: Any) -> Any:
+        result = await fn(**kwargs)
+        # Imported here rather than at module scope for the reason `publish_stored_result` gives
+        # for the same import: `connector_app` runs at import time in seven bundle modules, and a
+        # deployment with no sink configured should never load the projection machinery — or
+        # RDKit's canonicalization behind it — at all.
+        from chemclaw.publish.hooks import publish_tool_result
+
+        await publish_tool_result(
+            connector=connector, tool=tool_name, arguments=kwargs, result=result
+        )
+        return result
+
+    _run._chemclaw_publishes = True  # type: ignore[attr-defined]
+    return _run
+
+
 def connector_app(
     server: FastMCP, *, name: str, on_start: Callable[[], Coroutine[Any, Any, None]] | None = None
 ) -> FastAPI:
@@ -440,6 +500,9 @@ def connector_app(
     _sanitize_tool_errors(server, name=name)
     # Outermost, so the identity a tool stamps on a durable row is bound before anything else runs.
     _bind_caller_per_tool_call(server)
+    # Innermost of the three: it runs inside the tool body's own frame, where the result is still
+    # the model it was declared as. See `_publish_tool_results`.
+    _publish_tool_results(server, name=name)
     mcp_app = server.streamable_http_app()
 
     @asynccontextmanager

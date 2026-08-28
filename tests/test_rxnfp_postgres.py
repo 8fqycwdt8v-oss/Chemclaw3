@@ -8,10 +8,17 @@ import asyncio
 
 import pytest
 
+from chemclaw.core import db
 from chemclaw.core.config import settings
+from chemclaw.kg.note import note_id_for_reaction
+from chemclaw.science.fingerprints.molfp.fingerprint import molecule_definition
 from chemclaw.science.fingerprints.rxnfp.fingerprint import reaction_definition
 from chemclaw.science.fingerprints.rxnfp.search import find_similar_reactions, record_for_reaction
-from chemclaw.science.fingerprints.store import PostgresFingerprintStore
+from chemclaw.science.fingerprints.store import (
+    FingerprintError,
+    FingerprintRecord,
+    PostgresFingerprintStore,
+)
 from tests.pg import migrated_db_or_skip
 
 _ESTER_ETHYL = "CCO.CC(=O)O>>CCOC(C)=O"
@@ -20,10 +27,20 @@ _HALOGENATION = "c1ccccc1.BrBr>>Brc1ccccc1"
 
 
 async def _store_or_skip() -> PostgresFingerprintStore:
-    """Return a migrated Postgres reaction store, or skip if no database is reachable."""
+    """Return a migrated Postgres reaction store, or skip if no database is reachable.
+
+    `source_keyed=True` is not decoration: since `063` the table's primary key is `(source, id)`,
+    so a store constructed without it writes `ON CONFLICT (id)` and Postgres refuses the statement
+    outright ("there is no unique or exclusion constraint matching the ON CONFLICT specification").
+    That is the same refusal the ADR's rollback section describes, reached here from the other
+    direction — which is why the flag has to be a constructor argument rather than a default.
+    """
     await migrated_db_or_skip()
     return PostgresFingerprintStore(
-        "reaction_fingerprints", settings.drfp_bits, reaction_definition()
+        "reaction_fingerprints",
+        settings.drfp_bits,
+        reaction_definition(),
+        source_keyed=True,
     )
 
 
@@ -57,7 +74,10 @@ def test_an_unbuilt_reaction_index_says_so_over_postgres() -> None:
     async def _run() -> None:
         await migrated_db_or_skip()
         orphaned = PostgresFingerprintStore(
-            "reaction_fingerprints", settings.drfp_bits, "drfp:never-indexed:b2048"
+            "reaction_fingerprints",
+            settings.drfp_bits,
+            "drfp:never-indexed:b2048",
+            source_keyed=True,
         )
         assert await orphaned.is_empty() is True
         assert await orphaned.count() == 0
@@ -74,5 +94,148 @@ def test_an_unbuilt_reaction_index_says_so_over_postgres() -> None:
         assert (
             await find_similar_reactions(current, _ESTER_PROPYL, threshold=0.1)
         ).index_empty is False
+
+    asyncio.run(_run())
+
+
+# --- one entry id, two ELNs ----------------------------------------------------------------------
+
+
+def _sited(reaction_id: str, source: str, reaction_smiles: str) -> FingerprintRecord:
+    """One site's fingerprint of an entry id both sites happen to use."""
+    return record_for_reaction(reaction_id, reaction_smiles).model_copy(update={"source": source})
+
+
+async def _rows(reaction_id: str) -> list[tuple[str, str]]:
+    """Every `(source, label)` the table holds for one entry id, straight from SQL.
+
+    Asked of the table rather than of the store, because what this migration changes *is* the
+    table's key: a store method that returned one row per id would report success by construction.
+    """
+    async with db.connection(settings.postgres_dsn) as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "SELECT source, label FROM reaction_fingerprints WHERE id = %s ORDER BY source",
+                (reaction_id,),
+            )
+            return [(row[0], row[1]) for row in await cur.fetchall()]
+
+
+def test_two_sources_sharing_an_entry_id_keep_two_rows_in_postgres() -> None:
+    """The primary key and the `ON CONFLICT` target are the deployment's half of the rule.
+
+    Measured before `063`, this scenario left **one** row — site B's bromination — and searching
+    the index for site A's own esterification returned no hits under the verdict "this is a genuine
+    negative result". The transcription tier already kept both rows (D-2026-08-26); the structural
+    index is what made one site's chemistry disappear.
+    """
+
+    async def _run() -> None:
+        store = await _store_or_skip()
+        await store.add(_sited("pg-shared-1001", "pg-eln-a", _ESTER_ETHYL))
+        await store.add(_sited("pg-shared-1001", "pg-eln-b", _HALOGENATION))
+
+        assert await _rows("pg-shared-1001") == [
+            ("pg-eln-a", _ESTER_ETHYL),
+            ("pg-eln-b", _HALOGENATION),
+        ]
+
+    asyncio.run(_run())
+
+
+def test_a_postgres_hit_carries_the_source_it_matched() -> None:
+    """Each site's reaction finds its own row, and the hit says which site that was.
+
+    The half that could not be answered before the key change: one row behind two runs, and a
+    search with no source to report. The source-qualified *citation* this used to spell is gone —
+    no reader resolved it (D-2026-08-27, review section 3) — and the fact it was spelled from is
+    what is asserted here instead.
+    """
+
+    async def _run() -> None:
+        store = await _store_or_skip()
+        await store.add(_sited("pg-cite-1001", "pg-eln-a", _ESTER_ETHYL))
+        await store.add(_sited("pg-cite-1001", "pg-eln-b", _HALOGENATION))
+
+        for smiles, expected in ((_ESTER_ETHYL, "pg-eln-a"), (_HALOGENATION, "pg-eln-b")):
+            hits = [
+                h
+                for h in (await find_similar_reactions(store, smiles, threshold=0.99)).hits
+                if h.id == "pg-cite-1001"
+            ]
+            assert [h.source for h in hits] == [expected], f"{smiles} matched the wrong site"
+
+    asyncio.run(_run())
+
+
+def test_a_single_source_deployment_reads_exactly_as_before() -> None:
+    """One enabled ELN: one row per entry id, amended in place, cited by the bare note id."""
+
+    async def _run() -> None:
+        store = await _store_or_skip()
+        await store.add(_sited("pg-solo-1001", "pg-eln-a", _ESTER_ETHYL))
+        await store.add(_sited("pg-solo-1001", "pg-eln-a", _ESTER_PROPYL))
+
+        assert await _rows("pg-solo-1001") == [("pg-eln-a", _ESTER_PROPYL)]
+        hits = (await find_similar_reactions(store, _ESTER_PROPYL, threshold=0.99)).hits
+        assert "pg-solo-1001" in {h.id for h in hits}
+        assert note_id_for_reaction("pg-solo-1001") == "reaction-pg-solo-1001"
+
+    asyncio.run(_run())
+
+
+def test_a_sourced_write_leaves_the_unsourced_row_063_could_not_resolve() -> None:
+    """The write path must NOT delete the row `063` left under `''` — for two reasons.
+
+    The first is a privilege: `app_privileges.sql` grants this table INSERT and UPDATE only, in
+    the group whose comment says withholding DELETE is what makes `retention.py`'s refusal to
+    prune enforced rather than intended. A `DELETE` here raises `permission denied` for the
+    runtime role, and since it would share the upsert's transaction the fingerprint would not land
+    either — every ELN and corpus ingest, on any deployment that runs `make db-grants`. Nothing in
+    this tree connects as that role, so the suite cannot see it; this test stands in for the half
+    it can see, and `tests/test_database_privileges.py` covers the other half.
+
+    The second is that the row is not a *twin*. An unsourced row is whichever site synced last
+    before `063`, or a pre-051 entry that merely shares an id, so deleting it on a same-id write
+    from another source destroys that site's only fingerprint.
+
+    The cost is real and is accepted: two rows can carry one id until a reindex, so a similarity
+    search can return both. That is the pre-`063` behaviour for exactly these rows.
+    """
+
+    async def _run() -> None:
+        store = await _store_or_skip()
+        await store.add(record_for_reaction("pg-legacy-1001", _ESTER_ETHYL))
+        assert await _rows("pg-legacy-1001") == [("", _ESTER_ETHYL)]
+
+        await store.add(_sited("pg-legacy-1001", "pg-eln-a", _ESTER_ETHYL))
+        assert await _rows("pg-legacy-1001") == [
+            ("", _ESTER_ETHYL),
+            ("pg-eln-a", _ESTER_ETHYL),
+        ], (
+            "the unsourced row must survive a sourced write; deleting it needs a grant "
+            "the runtime role deliberately does not hold"
+        )
+
+    asyncio.run(_run())
+
+
+def test_the_molecule_index_refuses_a_sourced_record() -> None:
+    """A structure's id is global, so `molecule_fingerprints` has no source column — and says so.
+
+    Written against the molecule table rather than asserted about it: without the refusal the
+    source silently never reaches the database, which is the half-write this key change is about.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        molecules = PostgresFingerprintStore(
+            "molecule_fingerprints", settings.ecfp_bits, molecule_definition()
+        )
+        sourced = record_for_reaction("pg-mol-guard", _ESTER_ETHYL).model_copy(
+            update={"source": "pg-eln-a"}
+        )
+        with pytest.raises(FingerprintError, match="not keyed by source"):
+            await molecules.add(sourced)
 
     asyncio.run(_run())

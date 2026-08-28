@@ -81,6 +81,31 @@ to be exhaustive, not asserted to be.
   is the whole of the problem this sweep ever had on a large table. `_EXPIRED_THREADS` and
   `_ANALYZE_THREADS` carry the measurements.
 
+- `session_owners` — one row per session id a client has ever created, and the one row that makes a
+  session reopenable at all: `api/deps.py::_rehydrate_session` 404s an id this table does not hold.
+  It is therefore pruned **behind everything it keys, never in front of it** — a row goes only when
+  the session is past the window, nothing session-scoped holds a row for it any more, and no live
+  turn lease names it (`_prune_session_owners`). The plain cutoff the pair in `_PRUNABLE` describes
+  would be wrong twice over: it would strand rows (every session-scoped sweep in this system starts
+  from this table, so an owner row deleted ahead of a checkpoint or a stored tool result puts that
+  row beyond both `session_store.delete_session` and `leaver.erase_actor`), and it would delete a
+  session a chemist is mid-conversation in, since a transcript is written after the answer exists.
+
+  Measured, the growth is real and small per unit: **124 bytes** per session, index included
+  (200 000 rows, 24 MB total relation size) — but it is per *session id created*, and the companion
+  UI creates one on the first keystroke, before any message is sent. So an abandoned draft costs a
+  permanent row, `_OWNER_LIST` already hides it from the session list (its lateral join drops a
+  session with no messages), and nothing ever deleted it: the only `DELETE` against this table was
+  `agent/leaver.py`'s actor-scoped erasure, which a deployment that no one leaves never runs.
+
+- `session_turns` is **not** in `_PRUNABLE` and is not refused either: it is a turn *lease*, deleted
+  on every clean release, so it does not accumulate under normal operation. What survives is the
+  lease a SIGKILLed worker never released — overwritten in place the next time that session claims
+  a turn, so it is one row per crashed session and not growth. That row is swept with its session's
+  ownership row, in the same transaction, because a lease naming a session nothing can find is
+  exactly the orphan the ordering above exists to prevent. A **live** lease is never touched: it is
+  what says a turn is running right now.
+
 - `audit_events` is **refused**, by design, not by omission. The trail is the record of who ran
   what, and for a tool call that changed nothing durable it is the *only* record — so disposing of
   it is not a cache decision, it is deciding to stop being able to answer a question about the past.
@@ -190,6 +215,13 @@ _PRUNABLE: dict[str, tuple[str, str]] = {
     # after it finally arrived, not deleted on arrival.
     "result_publications": ("delivered_at", "state = 'delivered'"),
     "checkpoints": ("(checkpoint->>'ts')::timestamptz", "TRUE"),
+    # **Last on purpose.** Like `session_messages` and `checkpoints` this is not pruned by the
+    # plain cutoff the pair describes — `_prune_session_owners` handles it, and the pair records
+    # only that the table is in scope and what dates a row. The position is the load-bearing part:
+    # the sweep may dispose of an ownership row only once the tables that hold the session's actual
+    # rows have had their turn in the same pass, because this row is the only way back to any of
+    # them. Iteration order is insertion order, so moving this entry up would silently strand rows.
+    "session_owners": ("created_at", "TRUE"),
 }
 
 # Every other table in this schema, mapped to what bounds its growth instead — or to the fact that
@@ -264,16 +296,19 @@ _NOT_PRUNED: dict[str, str] = {
     "schema_migrations": "never: the ledger is the record of its own work, and the runtime role "
     "cannot write it at all",
     "sync_cursors": "one row per ingest source, so bounded by the source count",
-    "session_turns": "a lease, released at turn end — but see `session_owners` below for the half "
-    "of this that is open",
+    "ingest_rejections": "bounded by its own writer (`ingest/rejections.py`): at most "
+    "`_MAX_ROWS_PER_SOURCE` rows per source, the least recently refused evicted in the same "
+    "transaction as a write (D-2026-08-27-a-refused-record-is-a-question-somebody-will-ask). A "
+    "clock is the wrong bound here — the runaway case is a source refusing every record it holds, "
+    "which fills the table between two sweeps",
+    "session_turns": "a lease, released at turn end; the lease a crashed worker never released is "
+    "swept with its session's ownership row by `_prune_session_owners`, never on a clock of its "
+    "own — a live lease is what says a turn is running",
     "audit_anchors": "retired with the audit hash chain; nothing writes it and the table is empty",
     "store_vectors": "not created in this deployment — the memory store is built without an "
     "`index_config`, so `AsyncPostgresStore.setup()` never makes it",
     # Nothing bounds these, and no decision is on record. Each is a real open question, not a
     # shorthand for "unimportant"; naming them is what this register is for.
-    "session_owners": "**nothing bounds it** — a client creates a row on the first keystroke and "
-    "it outlives its session's pruned history; needs a policy decision (BACKLOG, with "
-    "`session_turns`)",
     "molecule_fingerprints": "**nothing bounds it**, and no decision is on record",
     "reaction_fingerprints": "**nothing bounds it**, and no decision is on record",
     "user_preferences": "**nothing bounds it** — one row per person per key, and a preference has "
@@ -387,6 +422,111 @@ _EXPIRED_IDS = (
 _DELETE_IDS = "DELETE FROM session_messages WHERE session_id = %s AND id = ANY(%s)"
 
 
+# What still refers to a session, and the column that names it.
+#
+# **This is the reachability set, not a convenience list.** Every session-scoped sweep in this
+# system starts from `session_owners`: `agent/leaver.py`'s erasure selects session ids out of it,
+# and `session_store.delete_session` deletes one session by that row. So an ownership row removed
+# while any of these still holds a row for the session does not merely orphan that row — it puts it
+# beyond *erasure*, the one sweep that must never be able to miss something. Hence the rule this map
+# encodes: the ownership row goes last, and only when nothing here is left.
+#
+# It is the session-scoped half of `leaver._ERASE`, and `tests/test_retention.py` asserts that
+# against `session_store._session_delete_statements()` rather than trusting this comment — the next
+# table added to the erasure sweep fails a test here instead of being silently outlived by the row
+# that finds it. `tool_result_links` rather than `tool_result_blobs` because the link is the
+# session-scoped row (a blob is content-addressed and may be shared with another session, which is
+# why `delete_session` deletes it only when no other session links it).
+#
+# The three checkpoint tables are the ones that can genuinely be absent — they are created by
+# `AsyncPostgresSaver.setup()`, not by a migration — and dropping an absent table's arm is exactly
+# right rather than a loosening: a table that does not exist holds no rows for the session. All six
+# are asked about in one `existing_tables` call rather than three, because the migration-created
+# ones answer `present` anyway and a uniform question needs no special case to stay correct.
+_SESSION_SCOPED_ROWS: dict[str, str] = {
+    "session_messages": "session_id",
+    "session_events": "session_id",
+    "tool_result_links": "session_id",
+    **dict.fromkeys(CHECKPOINT_TABLES, "thread_id"),
+}
+
+
+def _untouched_arms(present: set[str]) -> str:
+    """The `NOT EXISTS` chain that makes a session's ownership row disposable.
+
+    One builder for both statements below, because the candidate query and the `DELETE` must ask
+    the *same* question — a `DELETE` re-checking a weaker predicate than the query that chose its
+    rows would delete rows nobody selected.
+
+    The live-lease arm is part of it and is the one arm about *now* rather than about leftovers: a
+    turn writes its transcript only after the answer exists (`api/runner._record_transcript`), so a
+    session resumed from an old, empty ownership row genuinely has no rows anywhere while its turn
+    is running. The lease is what says so. An *expired* lease is not a live turn — it is the crash
+    artifact every other reader already treats as dead (`session_store._TURN_CLAIM` takes an expired
+    row over unconditionally) — so it does not protect the ownership row, and it is swept with it.
+
+    Args:
+        present: Which of `_SESSION_SCOPED_ROWS` exist on this connection's search path.
+
+    Returns:
+        A SQL fragment of `AND NOT EXISTS (...)` arms, against the `o` alias for `session_owners`.
+    """
+    arms = "".join(
+        f" AND NOT EXISTS (SELECT 1 FROM {table} r WHERE r.{column} = o.session_id)"
+        for table, column in _SESSION_SCOPED_ROWS.items()
+        if table in present
+    )
+    return arms + (
+        " AND NOT EXISTS (SELECT 1 FROM session_turns t"
+        " WHERE t.session_id = o.session_id AND t.expires_at > now())"
+    )
+
+
+# The candidate ownership rows. Capped and ordered by the primary key for the reason
+# `_EXPIRED_THREADS` is: `ORDER BY o.session_id` matches `session_owners_pkey`, so the planner
+# streams the index and the `LIMIT` stops it rather than sorting a whole table's anti-joins.
+#
+# **Measured, and the measurement is why no migration accompanies this.** On 200 000 ownership rows
+# (20 000 abandoned drafts, 180 000 with history), cap 501: `Index Scan using session_owners_pkey`
+# under four merge anti-joins, **1.9 ms**, 110 buffers. Adding `session_owners (created_at)` — the
+# obvious index for the cutoff — produced the identical plan at **1.8 ms**, because the ordering is
+# what drives the scan and the cutoff is not selective (in the case that matters nearly every row is
+# older than the window, and the anti-joins are the filter). On a *drained* backlog (180 000 live
+# sessions, nothing disposable) the plan becomes one parallel hash anti-join at **147 ms** — with
+# that index present and unused, so it would not have helped there either. A migration that changes
+# no plan is write amplification on the session-creation path in exchange for nothing.
+_DISPOSABLE_SESSIONS = (
+    "SELECT o.session_id FROM session_owners o "
+    "WHERE o.created_at < now() - make_interval(days => %s){arms} "
+    "ORDER BY o.session_id LIMIT %s"
+)
+# The disposal itself: the ownership row and, behind it, the lease nobody released.
+#
+# **The predicate is repeated here rather than trusted from the candidate query, and that is what
+# closes the race.** Under `READ COMMITTED` every statement takes its own snapshot, so re-asking
+# means a session that claimed a turn lease — or wrote a message, or a checkpoint — between the two
+# statements is no longer disposable *at the moment of deletion*, and a turn always claims its lease
+# before it runs. Without the re-check the sweep could delete the ownership row of a conversation
+# that had just resumed, leaving a transcript nothing can find.
+#
+# One statement rather than two, so a lease and the ownership row it belongs to cannot be committed
+# apart: the second `DELETE` reads the first's `RETURNING`, which is what makes "a lease goes only
+# if its ownership row went" true rather than intended. Both counts come back in the same row.
+_DELETE_SESSIONS = (
+    "WITH disposed AS ("
+    "  DELETE FROM session_owners o"
+    "   WHERE o.session_id = ANY(%s)"
+    "     AND o.created_at < now() - make_interval(days => %s){arms}"
+    "  RETURNING o.session_id"
+    "), leases AS ("
+    "  DELETE FROM session_turns t"
+    "   WHERE t.session_id IN (SELECT session_id FROM disposed)"
+    "  RETURNING t.session_id"
+    ") "
+    "SELECT (SELECT count(*) FROM disposed), (SELECT count(*) FROM leases)"
+)
+
+
 class RetentionOutcome(BaseModel):
     """What one retention pass removed, per table — the job's own audit record.
 
@@ -399,15 +539,17 @@ class RetentionOutcome(BaseModel):
     fields exist to prevent is the opposite misreading: a cap that is not reported at all makes a
     still-growing table look bounded in every result this job returns.
 
-    `sessions_deferred` and `threads_deferred` are separate fields rather than one flag: the two
-    caps bound different units (a conversation, a checkpoint thread) and an operator deciding
-    whether to raise `retention_max_sessions_per_pass` needs to know which one is hitting it.
+    `sessions_deferred`, `threads_deferred` and `owners_deferred` are separate fields rather than
+    one flag: the three caps bound different units (a conversation, a checkpoint thread, a session's
+    ownership row) and an operator deciding whether to raise `retention_max_sessions_per_pass` needs
+    to know which one is hitting it.
     """
 
     deleted: dict[str, int] = {}
     skipped: list[str] = []
     sessions_deferred: int = 0
     threads_deferred: int = 0
+    owners_deferred: int = 0
 
 
 def _window_days(table: str) -> int:
@@ -418,6 +560,16 @@ def _window_days(table: str) -> int:
         "tool_result_blobs": settings.retention_tool_results_days,
         "result_publications": settings.retention_result_publications_days,
         "checkpoints": settings.retention_checkpoints_days,
+        # **The conversation's window, deliberately, rather than a knob of its own.** An ownership
+        # row is disposable only once nothing session-scoped is left (`_prune_session_owners`), so
+        # a window here is a *floor* — "how long after it was created may an empty session be
+        # forgotten" — and not the thing that decides disposal. The one number a deployment already
+        # states about how long a conversation is kept is the honest floor for it: a session may not
+        # be forgotten sooner than the conversation in it would have been. A second setting could
+        # only be set equal to this one (no effect), longer (a delay before an already-empty shell
+        # goes) or shorter (no effect either, because the guards, not the clock, are what hold the
+        # row) — three values, one outcome, and a fourth thing for an operator to keep in step.
+        "session_owners": settings.retention_session_messages_days,
     }[table]
 
 
@@ -498,6 +650,15 @@ async def _prune_expired_rows() -> RetentionOutcome:
                     deleted, deferred = await _prune_session_messages(conn, days)
                     outcome.deleted[table] = deleted
                     outcome.sessions_deferred = deferred
+                    continue
+                if table == "session_owners":
+                    # The ownership row is the only way back to a session's rows, so it is disposed
+                    # of behind them — last in `_PRUNABLE`, and only when nothing holds a row for
+                    # the session (`_prune_session_owners`). It commits itself, as the two branches
+                    # below do, which is why no `commit()` follows this call.
+                    owners, deferred = await _prune_session_owners(conn, days)
+                    outcome.deleted.update(owners)
+                    outcome.owners_deferred = deferred
                     continue
                 if table == "checkpoints":
                     # Three tables, one thread, one transaction — see `_prune_checkpoints`. It
@@ -596,6 +757,69 @@ async def _prune_session_messages(conn: AsyncConnection[TupleRow], days: int) ->
             await cur.execute(_DELETE_IDS, (session_id, sorted(disposable)))
             deleted += max(cur.rowcount, 0)
         await conn.commit()
+    return deleted, deferred
+
+
+async def _prune_session_owners(
+    conn: AsyncConnection[TupleRow], days: int
+) -> tuple[dict[str, int], int]:
+    """Forget the sessions nothing can reopen: the ownership row, and the lease nobody released.
+
+    Returns `({table: rows deleted}, 1 if disposable sessions remain beyond this pass's cap
+    else 0)`.
+
+    **A row here is what makes a session reopenable, so the question is not its age.**
+    `api/deps.py::_rehydrate_session` answers 404 for a session id this table does not hold — that
+    is the whole function of the row — and `_OWNER_LIST` already hides a session with no messages
+    from the listing, so a client can only reach one of these by an id it still remembers. What
+    decides disposal is therefore whether anything is left to reopen *into*: a row goes when the
+    session is past the window, no table in `_SESSION_SCOPED_ROWS` holds a row for it, and no live
+    turn lease names it.
+
+    **That is also the ordering rule, and getting it backwards is the expensive failure.** Every
+    session-scoped sweep in this system starts from this table, so an ownership row deleted ahead of
+    a checkpoint, a stored tool result or an unconsumed push-back event does not just orphan that
+    row — it puts it beyond `session_store.delete_session` *and* beyond `leaver.erase_actor`. So
+    this runs last in `_PRUNABLE`, after the tables it keys have had their turn in the same pass,
+    and it deletes nothing whose rows those tables did not manage to remove first. A session whose
+    conversation was pruned earlier in this very pass is disposable in this one, and that is
+    correct rather than hasty: what is left of it at that point is an empty shell the session list
+    does not show and a resumed transcript would render blank.
+
+    The lease goes with it and only with it (`_DELETE_SESSIONS`). An abandoned lease is a crash
+    artifact — a worker SIGKILLed before `_TURN_RELEASE` — and it is not growth, because
+    `session_turns` is keyed by `session_id` and the next claim on that session overwrites it in
+    place. What it must never be is *collected on a clock of its own*: a lease that has not expired
+    is a turn running right now, and deleting it hands the running turn's next refresh a false
+    takeover (`api/state.py::_hold_turn_claim` counts one and stops beating).
+
+    Capped and reported like the two passes above, for the same reason: the first pass against a
+    deployment that has never pruned faces every abandoned draft the deployment has ever created,
+    and a cap that is not reported reads as a drained backlog.
+    """
+    cap = settings.retention_max_sessions_per_pass
+    async with conn.cursor() as cur:
+        present = await existing_tables(cur, set(_SESSION_SCOPED_ROWS))
+        arms = _untouched_arms(present)
+        await cur.execute(_DISPOSABLE_SESSIONS.format(arms=arms), (days, cap + 1))
+        found = [str(row[0]) for row in await cur.fetchall()]
+        deferred = max(len(found) - cap, 0)
+        sessions = found[:cap]
+        if not sessions:
+            return {"session_owners": 0, "session_turns": 0}, 0
+        await cur.execute(_DELETE_SESSIONS.format(arms=arms), (sessions, days))
+        counted = await cur.fetchone()
+    await conn.commit()
+    deleted = {
+        "session_owners": int(counted[0]) if counted else 0,
+        "session_turns": int(counted[1]) if counted else 0,
+    }
+    logger.info(
+        "forgot %d session(s) nothing can reopen (%d abandoned turn lease(s) with them); %s",
+        deleted["session_owners"],
+        deleted["session_turns"],
+        "more remain for the next pass" if deferred else "the backlog is drained",
+    )
     return deleted, deferred
 
 

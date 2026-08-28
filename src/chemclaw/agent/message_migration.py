@@ -16,13 +16,25 @@ module
 rather than two is deliberate: they are read together, and a converter whose caller lives elsewhere
 invites a second caller that converts differently.
 
-**Why a shape version rather than an in-place rewrite.** A row is stamped with the shape it holds,
-and both shapes read. Two reasons, and the second is the one that matters:
+**Why a shape version, and why the stamp alone was not the promise it was read as.** A row is
+stamped with the shape it holds and both shapes read, which is what makes a non-atomic rollout
+safe: during it some rows are old and some are new, and one reader handles both.
 
-- a rollout is not atomic, so during it some rows are old and some are new;
-- if the conversion turns out to be wrong for some message nobody anticipated, an unversioned
-  in-place rewrite has already destroyed the evidence. Versioned rows keep the original readable
-  until the conversion has been trusted on real data for a while.
+The stamp was also read — here and in `043_session_message_shape.sql` — as keeping "the original
+readable until the conversion has been trusted on real data". It never did. `message_shape` says
+which shape a row holds *now*; the UPDATE below overwrote `message` in the same statement that set
+it, so the MAF bytes were gone the instant a row was marked converted, and the previous release
+could no longer read the row it had written. Measured on a live database, a converted row raises
+`UnconvertibleMessage: stored message has unknown role ''` from the strict reader, comes back from
+the forgiving one as a degraded render that has lost `tool_call_id` and every `tool_calls` entry,
+and prints its speaker as `unknown` in `chemclaw.cli.explain`.
+`067_session_message_original.sql` is that promise made keepable: the pre-conversion payload is
+copied into `message_original` by the same statement that overwrites `message`, and the recovery is
+one statement (`D-2026-08-27-a-conversion-that-cannot-be-rolled-back-is-not-a-pre-upgrade-step`):
+
+    UPDATE session_messages
+       SET message = message_original, message_shape = 'maf', message_original = NULL
+     WHERE message_original IS NOT NULL;
 
 **What is deliberately not converted.** MAF's content types outnumber the five this system stores
 by about four to one (`Content.from_hosted_file`, `from_oauth_consent_request`,
@@ -235,8 +247,21 @@ _SELECT_MAF = (
     "SELECT id, message FROM session_messages "
     f"WHERE message_shape = '{MAF_SHAPE}' ORDER BY id LIMIT %s"
 )
+# The original is copied from the column the same statement overwrites, rather than passed back in
+# as a second parameter. Every SET expression in one UPDATE reads the row as it was before any of
+# them applied, so `message_original` cannot end up holding something other than the exact bytes
+# this row is losing — which a re-serialisation of what the SELECT decoded could not promise.
+# `AND message_shape = 'maf'` is what makes a second pass a no-op rather than a corruption, and it
+# is load-bearing because this pass takes no advisory lock (unlike `core.migrate`) while two things
+# can now start it: `make db-migrate` and the chart's post-upgrade Job. Without the predicate, two
+# overlapping passes both read the row, both convert, and the loser writes the *winner's already
+# converted* payload into `message_original` — so the column that exists to make the conversion
+# reversible holds a LangChain document, and the documented rollback then restores it under
+# `message_shape = 'maf'`, producing a row that lies about its own shape with the original gone.
+# With the predicate the second UPDATE matches nothing, which is the outcome the column promises.
 _MARK_CONVERTED = (
-    f"UPDATE session_messages SET message = %s, message_shape = '{LANGCHAIN_SHAPE}' WHERE id = %s"
+    "UPDATE session_messages SET message_original = message, message = %s, "
+    f"message_shape = '{LANGCHAIN_SHAPE}' WHERE id = %s AND message_shape = '{MAF_SHAPE}'"
 )
 
 
@@ -250,11 +275,14 @@ async def convert_stored_messages(*, batch: int = _BATCH) -> ConversionOutcome:
     provider reads — the single worst thing this module could do. Deferring the import keeps the
     pure half genuinely pure, which is what its own docstring above promises.
 
-    **Resumable by construction, which is what makes an irreversible step survivable.** The pass
-    selects only rows still stamped `maf`, so running it twice converts nothing twice and an
-    interrupted run simply continues where it stopped. Nothing is deleted and nothing is rewritten
-    in place without its stamp changing in the same statement, so there is no window in which a row
-    holds one shape and claims the other.
+    **Resumable by construction, and no longer irreversible.** The pass selects only rows still
+    stamped `maf`, so running it twice converts nothing twice and an interrupted run simply
+    continues where it stopped. Nothing is deleted, and nothing is rewritten in place without its
+    stamp changing *and its original being preserved* in the same statement — so there is no window
+    in which a row holds one shape and claims the other, and no row whose earlier bytes are gone.
+    That is what lets this run as a `post-upgrade` hook: a release that never rolled out converts
+    nothing, and a release that rolled out and is rolled back afterwards is recoverable by the one
+    UPDATE in this module's docstring rather than by a backup.
 
     A row the converter refuses is **left exactly as it was**, stamp included, and reported. The
     alternative — aborting the whole pass on the first refusal — would make one unreadable message
@@ -301,8 +329,12 @@ if __name__ == "__main__":
     # there, and it was right: a schema applier that reaches into layer 1 to convert its data is
     # the dependency direction this tree is arranged to prevent.
     #
-    # Ordered after the schema by whoever runs them (`make db-migrate`, the chart's hook Job), for
-    # the obvious reason: the stamp's column has to exist before anything writes it.
+    # Ordered after the schema by whoever runs them (`make db-migrate`, the chart's hook Jobs), for
+    # the obvious reason: the stamp's column, and now `message_original`, have to exist before
+    # anything writes them. In the chart those are two Jobs rather than one shell `&&`: the DDL is
+    # still `pre-upgrade`, because an additive migration is safe for the release already running,
+    # and this pass is `post-upgrade`, because rewriting rows the previous release is still serving
+    # is not (D-2026-08-27-a-conversion-that-cannot-be-rolled-back-is-not-a-pre-upgrade-step).
     outcome = asyncio.run(convert_stored_messages())
     print(f"converted {outcome.converted} stored message(s)")
     if outcome.refused:

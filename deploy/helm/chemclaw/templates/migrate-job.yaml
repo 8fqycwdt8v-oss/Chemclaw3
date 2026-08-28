@@ -1,5 +1,15 @@
-{{- /* Schema migrations as a pre-deploy Helm hook (F6-T4, D-034): they run to completion before */ -}}
-{{- /* the app rolls out, so no app container ever races the DDL. `make db-migrate` == this command. */ -}}
+{{- /* Schema migrations as a pre-deploy Helm hook (F6-T4, D-034): they run to completion before
+       the app rolls out, so no app container ever races the DDL. `make db-migrate` == this command.
+
+       **Two Jobs, and the split is the point**
+       (D-2026-08-27-a-conversion-that-cannot-be-rolled-back-is-not-a-pre-upgrade-step). This one
+       stays `pre-upgrade` because everything it does is safe for the release that is still running:
+       the schema is forward-only and additive (D-2026-08-04-the-schema-only-goes-forward), so a
+       migration adds what the new image needs and takes nothing the old image is using, and the
+       grants only widen. The *data* conversion below is the opposite — it rewrites rows the
+       previous release is still serving, into a shape its reader raises on — so it runs
+       `post-upgrade`, in its own document, after the new pods are up. They are one file rather than
+       two because their order is the thing worth reading in one place. */ -}}
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -43,10 +53,14 @@ spec:
           securityContext:
             {{- include "chemclaw.containerSecurityContext" . | nindent 12 }}
           {{- /* Migrate, then reconcile the runtime role's privileges — in that order, in this
-                 Job, because the grants name tables the migrations create and a grant applied
+                 container, because the grants name tables the migrations create and a grant applied
                  before its table exists fails. One container rather than a second hook Job so the
-                 ordering is the shell's `&&` rather than a hook weight two files apart, and so a
-                 failed migration cannot be followed by a grant run at all.
+                 ordering is the shell's `&&` rather than a hook weight two documents apart, and so
+                 a failed migration cannot be followed by a grant run at all.
+
+                 The stored-message conversion used to be the middle term of this `&&` and is now
+                 the `post-upgrade` Job below. It is the one step here that is not safe for the
+                 release still serving traffic, and `&&` could only order it, never move it.
 
                  `db-grants` is separate from `db-migrate` in the Makefile and re-run on *every*
                  release, unlike the migrations, which are applied once per file and tracked: a
@@ -55,11 +69,82 @@ spec:
           command:
             - sh
             - -c
-            - python -m chemclaw.core.migrate && python -m chemclaw.agent.message_migration
-              && python -m chemclaw.core.grants
+            - python -m chemclaw.core.migrate && python -m chemclaw.core.grants
           env:
             {{- include "chemclaw.env" . | nindent 12 }}
             {{- include "chemclaw.migrationEnv" . | nindent 12 }}
+          envFrom:
+            {{- include "chemclaw.envFrom" . | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources.connector | nindent 12 }}
+---
+{{- /* The stored-message conversion, as a POST-install/upgrade hook
+       (D-2026-08-27-a-conversion-that-cannot-be-rolled-back-is-not-a-pre-upgrade-step).
+
+       **Why not the `&&` above.** `chemclaw.agent.message_migration` rewrites `session_messages`
+       rows from the removed framework's shape into LangChain's. Run `pre-upgrade`, that happens
+       while the *previous* release is the only thing serving, and measured against a live database
+       its reader raises `UnconvertibleMessage: stored message has unknown role ''` on every row the
+       pass touched, while `chemclaw.cli.explain` renders each of them under the speaker `unknown`.
+       Every release that failed its rollout — the case a `pre-upgrade` hook exists to protect
+       against — therefore left a converted table behind a reader that could not read it, and
+       `helm rollback` neither undoes a data conversion nor re-runs a `pre-upgrade` hook.
+       POST is what makes the conversion happen only for a release that actually rolled out.
+
+       **The new pods do not need it, which is what makes POST correct rather than merely later.**
+       `session_store.message_from_row` reads both shapes, so an unconverted row is a readable row;
+       the pass is a backfill of historical rows, not a step the release depends on.
+
+       **So a failure here must not roll the release back, and does not by default.** Helm fails the
+       release and reports the Job; the pods stay up and keep serving both shapes, and the pass is
+       resumable, so the recovery is to fix the refusal and run the Job again. A deployment using
+       `helm upgrade --atomic` *would* roll back on this — losing a healthy release over a backfill
+       — so do not run this chart with `--atomic`, or the conversion becomes a release gate it was
+       moved out of the pre-upgrade path to stop being.
+
+       Weight 5, alongside the Schedules hook, which it neither needs nor blocks. Its own
+       `convertJob` bounds rather than `migrateJob`'s: this one is bounded by a row count on the
+       single upgrade that carries a deployment across M6, not by how long a `CREATE INDEX` holds a
+       lock, and every later release finds nothing to convert and exits at once. */ -}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "chemclaw.name" . }}-convert
+  labels:
+    {{- include "chemclaw.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: {{ .Values.convertJob.backoffLimit }}
+  activeDeadlineSeconds: {{ .Values.convertJob.activeDeadlineSeconds }}
+  template:
+    metadata:
+      labels:
+        {{- include "chemclaw.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: convert
+        azure.workload.identity/use: "true"
+    spec:
+      serviceAccountName: {{ .Values.serviceAccount.name }}
+      {{- include "chemclaw.imagePullSecrets" . | nindent 6 }}
+      securityContext:
+        {{- include "chemclaw.podSecurityContext" . | nindent 8 }}
+      restartPolicy: Never
+      containers:
+        - name: convert
+          image: "{{ include "chemclaw.image" . }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- include "chemclaw.containerSecurityContext" . | nindent 12 }}
+          command: ["python", "-m", "chemclaw.agent.message_migration"]
+          {{- /* `chemclaw.env` only, deliberately: the converter resolves its DSN through
+                 `session_store._session_dsn`, so it runs as the *runtime* role, which already holds
+                 UPDATE on `session_messages`. `chemclaw.migrationEnv` mounts the credential that
+                 owns the schema and can rewrite the audit trail; a Job that does not issue DDL has
+                 no business holding it, and the Job above is still the only place it appears. */}}
+          env:
+            {{- include "chemclaw.env" . | nindent 12 }}
           envFrom:
             {{- include "chemclaw.envFrom" . | nindent 12 }}
           resources:
