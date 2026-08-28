@@ -794,11 +794,18 @@ _COUNTER_LABELS: dict[str, tuple[str, ...]] = {
     # but tracked for debugging). `durable` is a cross-replica race on the shared turn claim.
     "chemclaw_turns_conflict_total": ("scope",),
     # Bounded by the registered tool surface, which is configuration (the enabled connectors and
-    # profile) rather than anything a caller can name.
+    # profile) rather than anything a caller can name — **because `agent/audit.metric_tool_name`
+    # clamps it**, which is a fact about the code rather than about the tool surface. This comment
+    # asserted the bound while both counters below labelled with `tool_call["name"]`, the model's
+    # own string: `ToolNode` runs the governance chain for a name the graph does not hold, and a
+    # scripted model minted `chemclaw_repeated_tool_calls_total{tool="totally_made_up_xxxx…"}` on a
+    # compiled graph. Every counter labelled by tool derives the label from the registered tool
+    # object, and there is no other way in.
     "chemclaw_repeated_tool_calls_total": ("tool",),
-    # The same bound and for the same reason: a tool name here is one the registry served, never a
-    # string a caller invented (`agent/tool_result_size.py` reads the request's tool name, which is
-    # the one the graph dispatched).
+    # The same bound, by the same clamp. It was reached the same way, with the ceiling lowered —
+    # `agent_max_tool_result_chars` is `ge=0` and ENV-overridable — because `ToolNode` answers an
+    # unregistered name with a 1,061-character "not a valid tool, try one of […]" message, which is
+    # a `ToolMessage` and is bounded like any other.
     "chemclaw_tool_results_truncated_total": ("tool",),
     # A retriever's own `name`, and the bound is the same kind as `connector`: a source is a
     # registry entry a deployment activates, never a string a caller supplies. The shipped set is

@@ -11,14 +11,19 @@ both edits running and reclaiming nothing.
 """
 
 import asyncio
-from typing import Any, cast
+from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from langchain_core.messages import ToolMessage
 
+from chemclaw.agent.audit import NullAuditSink, make_audit_middleware
+from chemclaw.agent.langgraph_agent import tool_call_middleware
+from chemclaw.agent.profiles import get_profile
 from chemclaw.agent.tool_result_size import bound_tool_results, bounded_content
 from chemclaw.core.config import settings
 from chemclaw.core.metrics import METRICS
+from tests.middleware import tool_request
 
 
 def test_a_result_inside_the_ceiling_is_untouched() -> None:
@@ -102,24 +107,83 @@ def test_an_oversized_result_is_bounded_on_its_way_to_the_model(
     stamp would have missed exactly the case it exists for.
     """
     monkeypatch.setattr(settings, "agent_max_tool_result_chars", 5_000)
-    request = _Request("find_calculations")
+    # A registered tool, because that is the shape `ToolNode` builds for a name the graph holds —
+    # and it is what `metric_tool_name` reads the counter's label off.
+    request = tool_request(
+        "find_calculations", tool=SimpleNamespace(name="find_calculations", metadata={})
+    )
 
     async def handler(_: Any) -> ToolMessage:
         return ToolMessage(content="y" * 200_000, tool_call_id="c1", name="find_calculations")
 
     before = METRICS.value("chemclaw_tool_results_truncated_total")
-    # `_Request` carries the one attribute the middleware reads; `ToolCallRequest` is a
-    # dataclass with a graph's worth of fields around it.
-    result = asyncio.run(bound_tool_results.awrap_tool_call(cast(Any, request), handler))
+    result = asyncio.run(bound_tool_results.awrap_tool_call(request, handler))
 
     assert isinstance(result, ToolMessage)
     assert len(result.content) < 200_000
     assert METRICS.value("chemclaw_tool_results_truncated_total") > before
+    assert 'tool="find_calculations"' in METRICS.render()
 
 
-class _Request:
-    """The two attributes `bound_tool_results` reads off a tool-call request."""
+def test_a_name_the_graph_never_held_cannot_become_a_metric_label(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The label is the *registered* tool's name, never the string the model emitted.
 
-    def __init__(self, name: str) -> None:
-        """Name the tool this request is for; nothing else about it is read."""
-        self.tool_call = {"name": name, "args": {}, "id": "c1"}
+    **Measured on a compiled graph before this was pinned.** With the ceiling lowered — it is
+    `ge=0` and ENV-overridable, so every legal value has to hold — a scripted model calling a name
+    the graph does not hold produced
+    `chemclaw_tool_results_truncated_total{tool="made_up_yyyy…"} 1`: `ToolNode` answers an
+    unregistered name with its own 1,061-character "not a valid tool, try one of […]" message,
+    which is a `ToolMessage` like any other and is bounded like any other. One permanent time
+    series per string a model invents, on an endpoint that is unauthenticated by design.
+
+    `core/metrics.py` declared this label as reading "the request's tool name, which is the one the
+    graph dispatched". It read `request.tool_call["name"]` — the *call's* name, which is whatever
+    the model emitted. `metric_tool_name` reads the registered tool object, which is the sentence
+    that was already true of the two counters beside it.
+    """
+    monkeypatch.setattr(settings, "agent_max_tool_result_chars", 50)
+    invented = "made_up_" + "y" * 40
+
+    async def handler(_: Any) -> ToolMessage:
+        return ToolMessage(content="z" * 5_000, tool_call_id="c1", name=invented)
+
+    # `tool=None` is what `ToolNode` passes for a name the graph does not hold, which is the case
+    # under test rather than a convenience of the fixture.
+    asyncio.run(bound_tool_results.awrap_tool_call(tool_request(invented), handler))
+
+    assert invented not in METRICS.render(), (
+        "a tool name the model invented reached /metrics as a label value: one time series per "
+        "string anything that can reach the pod can name"
+    )
+
+
+def test_the_cut_sits_inside_the_framer_and_outside_the_trail() -> None:
+    """The two positional claims this middleware rests on, as relations rather than as a sequence.
+
+    `tests/test_middleware_order.py` pins the compiled list, so any reorder turns it red — but a
+    *deliberate* reorder is exactly the change that list is meant to let a reviewer adjudicate, and
+    what survives it has to be stated somewhere. `tests/test_tool_framing.py` already writes the
+    same three lines for the framer; this is the entry immediately below it, whose own docstring
+    states two invariants that nothing but the sequence held.
+
+    Inside `frame_connector_results`, because the framer wraps the payload in an envelope with a
+    closing tag: cutting from outside it would take the tag off and leave the model a fragment it
+    was told to read as delimited third-party data.
+
+    Outside `audit_tool_calls` and `announce_tool_failures`, because both read the tool's *own*
+    result — `audit_events.detail` is a record of what came back, not of what the model was shown.
+    """
+    audit = make_audit_middleware(correlation_id="c", actor="a", sink=NullAuditSink())
+    names = [
+        getattr(entry, "name", type(entry).__name__)
+        for entry in tool_call_middleware(audit, get_profile(None))
+    ]
+    assert names.index("frame_connector_results") < names.index("bound_tool_results"), (
+        "the cut is outside the envelope, so it can take the closing tag off"
+    )
+    for reader in ("audit_tool_calls", "announce_tool_failures"):
+        assert names.index("bound_tool_results") < names.index(reader), (
+            f"{reader} would read the truncated result as what the tool returned"
+        )

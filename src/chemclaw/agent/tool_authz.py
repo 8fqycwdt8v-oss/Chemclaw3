@@ -271,7 +271,11 @@ def refuse_undeclared_writes(held: frozenset[str]) -> Any:
     request — "validation is deferred to `_execute_tool_async` to allow interceptors to
     short-circuit requests for unregistered tools", in its own words — so a `wrap_tool_call`
     middleware still runs, and raising here means the name is never validated and the body never
-    reached. Nothing in this chain reads `request.tool`.
+    reached. **No gate in this chain decides anything from `request.tool`**, which is the property
+    that matters: one that did would fail *open* on exactly the calls short-circuiting exists for.
+    The observers may and do read it — `audit._served_by` for a connector's revision and
+    `audit.metric_tool_name` for a metric label that must not be the model's own string — and both
+    treat `None` as an answer rather than as a gap.
     """
 
     @wrap_tool_call(name="refuse_undeclared_writes")

@@ -138,23 +138,37 @@ def refusal_reason(exc: BaseException) -> RefusalReason | None:
 UNKNOWN_TOOL = "unknown"
 
 
-def metric_tool_name(request: Any, name: str) -> str:
+def metric_tool_name(request: Any) -> str:
     """The tool name safe to use as a metric label — the registered one, or a fixed bucket.
 
-    **`name` is the model's string, and a metric label must not be.** `ToolNode` invokes this chain
-    for a name the graph does not hold — `_served_by` records that it passes `tool=None` there
-    deliberately, so an interceptor can short-circuit an unregistered call — so the raw name
-    reaching `/metrics` mints one time series per string a model invents. Measured on a compiled
-    graph: a single hallucinated call created `chemclaw_tool_calls_total{tool="totally_made_up_…"}`
-    *and* a full fourteen-bucket histogram, and driven directly the label accepted 230 characters of
-    arbitrary text. Model output is attacker-influenceable here — that is the whole reason this tree
-    carries `frame_untrusted` — so an injected document could grow the registry until the pod died.
+    **The model's string is not a metric label**, which is why this takes the request rather than a
+    name: there is nothing here to choose between. It took the model's name as a second argument
+    from the day it was written and never read it — every call site therefore *showed* the string
+    being clamped while the function ignored it, which reads as a comparison and is not one. The
+    caller that wants that string has it already.
 
-    The registered tool's **own** name is used rather than the caller's, so the label cannot differ
-    from it by case, whitespace or an invisible character while still resolving.
+    `ToolNode` invokes this chain for a name the graph does not hold — `_served_by` records that it
+    passes `tool=None` there deliberately, so an interceptor can short-circuit an unregistered call
+    — so the raw name reaching `/metrics` mints one time series per string a model invents.
+    Measured on a compiled graph: a single hallucinated call created
+    `chemclaw_tool_calls_total{tool="totally_made_up_…"}` *and* a full fourteen-bucket histogram,
+    and driven directly the label accepted 230 characters of arbitrary text. Model output is
+    attacker-influenceable here — that is the whole reason this tree carries `frame_untrusted` — so
+    an injected document could grow the registry until the pod died.
+
+    The registered tool's **own** name is what the label carries, so it cannot differ from the
+    served name by case, whitespace or an invisible character while still resolving.
 
     The audit *row* keeps the model's raw string (truncated), because what the model actually asked
     for is the forensic fact; it is only the unbounded *label* that is refused.
+
+    **Three callers, and the second and third arrived by finding the same hole again.**
+    `agent/repeat_guard.py` and `agent/tool_result_size.py` each labelled a counter with
+    `tool_call["name"]` while `core/metrics.py` documented both labels as bounded by the registered
+    tool surface — measured on a compiled graph, a scripted model minted
+    `chemclaw_repeated_tool_calls_total{tool="totally_made_up_xxxx…"}`. Any counter this tree
+    labels by tool derives the label here; that is what makes the declaration a fact rather than an
+    intention.
     """
     registered = getattr(getattr(request, "tool", None), "name", None)
     return registered if isinstance(registered, str) and registered else UNKNOWN_TOOL
@@ -422,13 +436,20 @@ def _served_by(request: Any) -> str:
     reason the `ToolMessage` test is: what crosses that boundary is a decision — a plain string —
     never a library object, so the trail's contents cannot come to depend on which engine ran.
 
-    **The only place in either governance chain that reads `request.tool`, and it is safe here in a
-    way it is not one middleware over.** `ToolNode` passes `tool=None` for a name the graph does not
-    hold, deliberately, so interceptors can short-circuit an unregistered call — which is why
-    `tool_authz` states that nothing in its chain reads this. A refusal that depended on the field
-    would fail *open* on exactly the calls it exists to stop. This one is observational: `None`
-    means no tool object, which means no connector, which means no server revision, which is the
-    same empty string an in-process tool yields. The degenerate case is already the right answer.
+    **Observational, like every other reader of `request.tool` in this chain, and that is the whole
+    licence to read it.** `ToolNode` passes `tool=None` for a name the graph does not hold,
+    deliberately, so interceptors can short-circuit an unregistered call — so a *refusal* that
+    depended on the field would fail open on exactly the calls it exists to stop, which is why
+    `tool_authz` states that nothing gating in its chain reads it. The readers that do are this
+    one and `metric_tool_name`, and both are safe for the same reason: `None` is not an absence
+    they have to guess about, it is already the right answer. Here it means no tool object, which
+    means no connector, which means no server revision — the same empty string an in-process tool
+    yields; there it means no registered name, which is the `UNKNOWN_TOOL` bucket.
+
+    This paragraph read "the only place in either governance chain that reads `request.tool`" while
+    `metric_tool_name` sat sixty lines above it doing so, and two more middlewares have since had
+    to ask it the same question. What matters is not how many readers there are but that none of
+    them gates.
     """
     metadata = getattr(getattr(request, "tool", None), "metadata", None) or {}
     served = metadata.get(SERVED_BY)
@@ -497,7 +518,7 @@ def make_audit_middleware(
             revision=revision,
             tool_revision=_served_by(request),
             plan_step=_plan_step(request),
-            metric_name=metric_tool_name(request, request.tool_call["name"]),
+            metric_name=metric_tool_name(request),
         ) as recorded:
             result = await handler(request)
             recorded.result = getattr(result, "content", result)

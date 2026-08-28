@@ -76,8 +76,6 @@ def _drive(
     middleware = make_audit_middleware(correlation_id="cid-1", actor="alice@corp", sink=sink)
     # A registered tool, because that is what the graph passes for a name it holds — and
     # `metric_tool_name` reads `.name` off it to decide whether the label is safe to mint.
-    # A registered tool, because that is what the graph passes for a name it holds — and
-    # `metric_tool_name` reads `.name` off it to decide whether the label is safe to mint.
     # `registered=False` is the `ToolNode` shape for a name the model invented.
     tool = SimpleNamespace(name=name, metadata={}) if registered else None
     request = tool_request(name, {"q": "x"}, tool=tool)

@@ -415,7 +415,14 @@ class AgentSettings(BaseSettings):
 
         At the shipped defaults this is `25 * 6 + 8 = 158` against the 132 a 25-iteration harness
         turn actually needs — so the cap fires first, which is the intent. The ceiling should never
-        be what stops a harness turn; it is what stops a turn that has no cap, because the loop cap
-        is attached only when the harness is on.
+        be what stops a turn; it is the backstop under the cap.
+
+        **It used to end "because the loop cap is attached only when the harness is on", and that
+        stopped being true.** `D-2026-08-27-the-cap-is-a-property-of-the-loop-not-of-the-mode` made
+        `enforce_loop_cap` unconditional — measured on the shipped defaults
+        (`harness_enabled=False`), `langgraph_agent._harness_middleware` returns
+        `['enforce_loop_cap']`, and `tests/test_middleware_order.py` pins it on a default build. So
+        there is no longer a turn with no cap for this ceiling to be the only stop for, and the
+        margin above is what it is for: a graph that gains a node before anyone re-measures.
         """
         return self.harness_max_loop_iterations * self.agent_supersteps_per_model_call + 8
