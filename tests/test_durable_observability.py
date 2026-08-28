@@ -395,6 +395,10 @@ def test_no_workflow_body_can_write_the_in_flight_reading() -> None:
     # how the old shape announced itself.
     source = inspect.getsource(ConnectorJobWorkflow.run)
     assert "finally:" not in source
+    # And the reading names the workflow it counts. A rename would leave the visibility query
+    # matching nothing, and a count of zero is the one wrong answer a gauge cannot be caught
+    # giving — it looks exactly like an idle deployment.
+    assert ConnectorJobWorkflow.__name__ in job_metrics._OPEN_JOBS_QUERY
 
 
 def test_a_failed_run_round_trips_through_postgres() -> None:
