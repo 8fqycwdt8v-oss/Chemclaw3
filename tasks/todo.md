@@ -130,7 +130,30 @@ belonged to a sibling working concurrently.
 
 ## Known-red at HEAD (must be green before PR)
 
-- [ ] `tests/test_ingest_rejections.py::test_a_long_refusal_message_is_cut_and_says_so` fails.
+- [x] `tests/test_ingest_rejections.py::test_a_long_refusal_message_is_cut_and_says_so` fails.
       Cause is mine, not the code's: commit 697f620 used `git add -A` and swept in an agent's
       half-finished edit to `research_tools.py` and its test. The agent is still working the file.
       Verify and re-commit when it reports; the final full-suite gate must be green before the PR.
+
+## What CI caught that the local gate could not
+
+The local gate was green — 5422 passed, zero Postgres skips — and CI failed three
+`tests/test_api_sessions.py` delete tests on `relation "checkpoints" does not exist`.
+Neither run was wrong. The isolation DSN is `search_path=<test schema>,public`, and the
+sandbox database *had run the agent*, so `AsyncPostgresSaver.setup()` had put the
+checkpoint tables in `public` and every unqualified read resolved through them. CI's
+container runs `make db-migrate` and never the agent, so `public` has the 36 migrated
+tables and none of the three.
+
+Reproduced against a database in CI's exact shape (fresh database, migrations only) before
+changing anything, and fixed there:
+
+- `tests/pg.py::create_checkpoint_tables` — the helper `test_retention.py` and
+  `test_session_store.py` each held a copy of, now one function (this fix would have been
+  the third copy). The three API delete tests call it, so their count covers the graph
+  state rather than skipping it.
+- `tests/conftest.py::_report_public_schema_shadowing` — a terminal section naming any
+  table in `public` that no migration creates. Reported, not enforced: having run the agent
+  against your own database is not a mistake; reading a green line as evidence about a
+  database that has not is. Same shape as the Postgres- and Temporal-skip sections, for the
+  same misreading.

@@ -36,7 +36,7 @@ from chemclaw.durable.retention import (
     prune_expired_rows,
 )
 from tests.legacy_rows import legacy_call, legacy_result, legacy_text
-from tests.pg import migrated_db_or_skip
+from tests.pg import create_checkpoint_tables, migrated_db_or_skip
 
 # The same reader `tests/test_schema_inventory.py` pins `infra/sql/README.md` with. Imported rather
 # than re-implemented: a second regex over the migrations would be a second answer to "what tables
@@ -669,21 +669,6 @@ def test_one_pass_works_a_bounded_batch_and_reports_the_rest() -> None:
 # --- The LangGraph checkpoint tables: pruned by thread, skipped when absent --------------------
 
 
-async def _create_checkpoint_tables() -> None:
-    """Create the checkpointer's own tables in the test schema.
-
-    Run here rather than through `AsyncPostgresSaver.setup()` because that opens a pool of its own
-    against `settings.postgres_dsn` and would land outside the session fixture's isolation schema.
-    The statements are the saver's own, so the shape under test is the shape production has.
-    """
-    from langgraph.checkpoint.postgres import base
-
-    async with db.connection(settings.postgres_dsn) as conn:
-        for statement in base.MIGRATIONS[1:4]:
-            await conn.execute(statement)
-        await conn.commit()
-
-
 async def _seed_thread(thread_id: str, *, age_days: int) -> None:
     """One thread with a single checkpoint of the given age, plus its blob and write rows."""
     async with db.connection(settings.postgres_dsn) as conn:
@@ -750,7 +735,7 @@ def test_an_expired_thread_leaves_none_of_its_three_tables_behind() -> None:
 
     async def _run() -> tuple[dict[str, int], dict[str, int], RetentionOutcome]:
         await migrated_db_or_skip()
-        await _create_checkpoint_tables()
+        await create_checkpoint_tables()
         monkeypatch = pytest.MonkeyPatch()
         monkeypatch.setattr(settings, "retention_checkpoints_days", 30)
         monkeypatch.setattr(settings, "retention_session_messages_days", 0)
@@ -796,7 +781,7 @@ def test_the_checkpoint_pass_says_that_it_left_threads_behind() -> None:
 
     async def _run() -> tuple[RetentionOutcome, int]:
         await migrated_db_or_skip()
-        await _create_checkpoint_tables()
+        await create_checkpoint_tables()
         monkeypatch = pytest.MonkeyPatch()
         monkeypatch.setattr(settings, "retention_checkpoints_days", 30)
         monkeypatch.setattr(settings, "retention_session_messages_days", 0)
@@ -1048,7 +1033,7 @@ def test_the_thread_query_streams_the_primary_key_in_both_backlog_shapes(
 
     async def _run() -> tuple[dict[str, Any], list[str]]:
         await migrated_db_or_skip()
-        await _create_checkpoint_tables()
+        await create_checkpoint_tables()
         try:
             await _seed_checkpoint_threads(_SCAN_THREADS, _SCAN_CHECKPOINTS_PER_THREAD, live_every)
             async with db.connection(settings.postgres_dsn) as conn:
@@ -1126,7 +1111,7 @@ def test_the_sweep_gives_the_planner_the_statistics_no_migration_can() -> None:
             # turn state with it.
             await conn.execute(f'DROP TABLE IF EXISTS "{schema}".checkpoints')
             await conn.commit()
-        await _create_checkpoint_tables()
+        await create_checkpoint_tables()
         async with db.connection(settings.postgres_dsn) as conn, conn.cursor() as cur:
             await cur.execute("SELECT to_regclass(%s)", (f"{schema}.checkpoints",))
             recreated = await cur.fetchone()
@@ -1220,7 +1205,7 @@ def test_a_thread_whose_oldest_checkpoints_expired_but_is_still_in_use_is_not_de
 
     async def _run() -> tuple[dict[str, int], dict[str, int], RetentionOutcome]:
         await migrated_db_or_skip()
-        await _create_checkpoint_tables()
+        await create_checkpoint_tables()
         await _clear_checkpoint_tables()
         monkeypatch = pytest.MonkeyPatch()
         monkeypatch.setattr(settings, "retention_checkpoints_days", 30)
@@ -1334,7 +1319,7 @@ def test_the_thread_query_is_the_disposal_rule_on_every_shape() -> None:
 
     async def _run() -> tuple[list[str], list[str]]:
         await migrated_db_or_skip()
-        await _create_checkpoint_tables()
+        await create_checkpoint_tables()
         await _clear_checkpoint_tables()
         try:
             empty = await _expired_threads(30, 100)
@@ -1387,7 +1372,7 @@ def test_an_uncastable_timestamp_fails_the_pass_rather_than_disposing_of_anythin
 
     async def _run() -> None:
         await migrated_db_or_skip()
-        await _create_checkpoint_tables()
+        await create_checkpoint_tables()
         await _clear_checkpoint_tables()
         try:
             await _seed_raw_checkpoint("shape-g-bad-ts", {"v": 1, "id": "ckpt-0", "ts": "not-a-ts"})
@@ -1588,7 +1573,7 @@ def test_graph_state_left_behind_keeps_the_ownership_row_that_finds_it() -> None
 
     async def _run() -> tuple[set[str], set[str]]:
         await migrated_db_or_skip()
-        await _create_checkpoint_tables()
+        await create_checkpoint_tables()
         await _clear_checkpoint_tables()
         await _clear_owner_fixtures()
         await _seed_owner("thread-left", age_days=400)

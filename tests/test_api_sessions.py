@@ -27,7 +27,7 @@ from chemclaw.api.auth import Principal, require_principal
 from chemclaw.api.state import TurnLease
 from chemclaw.core import db
 from chemclaw.core.config import settings
-from tests.pg import migrated_db_or_skip
+from tests.pg import create_checkpoint_tables, migrated_db_or_skip
 
 _ALICE = Principal(oid="alice-sessions", upn="alice@corp", roles=frozenset())
 _BOB = Principal(oid="bob-sessions", upn="bob@corp", roles=frozenset())
@@ -64,7 +64,13 @@ async def _conversation(session_id: str, owner: str | None, message: str = "a tu
 
 
 async def _rows_for(session_id: str) -> int:
-    """How many rows of the delete's own table set still name this session."""
+    """How many rows of the delete's own table set still name this session.
+
+    The caller must have run `create_checkpoint_tables()`: this counts the checkpointer's three
+    tables unqualified, and a database that has never run the agent does not have them. Skipping
+    an absent one here instead would make the count *silently* stop covering the graph state — the
+    half of a session delete that has no migration to guarantee it exists.
+    """
     total = 0
     async with db.connection(settings.postgres_dsn) as conn:
         async with conn.cursor() as cur:
@@ -144,6 +150,7 @@ def test_an_owner_deletes_their_own_session_and_it_stops_existing() -> None:
     system could ever find again.
     """
     asyncio.run(migrated_db_or_skip())
+    asyncio.run(create_checkpoint_tables())
     session_id = "sess-api-delete-mine"
     asyncio.run(_conversation(session_id, _ALICE.oid))
 
@@ -166,6 +173,7 @@ def test_a_stranger_cannot_delete_a_session_and_learns_nothing_by_trying() -> No
     would not prove.
     """
     asyncio.run(migrated_db_or_skip())
+    asyncio.run(create_checkpoint_tables())
     session_id = "sess-api-delete-not-yours"
     asyncio.run(_conversation(session_id, _ALICE.oid))
 
@@ -190,6 +198,7 @@ def test_a_session_with_a_turn_in_flight_refuses_the_delete() -> None:
     one.
     """
     asyncio.run(migrated_db_or_skip())
+    asyncio.run(create_checkpoint_tables())
     session_id = "sess-api-delete-busy"
     asyncio.run(_conversation(session_id, _ALICE.oid))
     asyncio.run(SessionTurnClaims().claim(session_id, "another-worker", 60))

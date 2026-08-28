@@ -35,7 +35,7 @@ from chemclaw.core.identity_context import (
     set_current_correlation_id,
 )
 from chemclaw.core.metrics import METRICS
-from tests.pg import migrated_db_or_skip
+from tests.pg import create_checkpoint_tables, migrated_db_or_skip
 
 # The counter that separates "one unreadable legacy row" from "the reader is broken for everyone".
 _DEGRADED = "chemclaw_degraded_total"
@@ -554,21 +554,6 @@ def test_the_session_listing_pages_past_its_ceiling_without_skipping_or_repeatin
     assert len(seen) == len(set(seen)), f"a row was served twice while paging: {seen}"
 
 
-async def _create_checkpoint_tables() -> None:
-    """Create the checkpointer's own tables in the test schema, as `tests/test_retention.py` does.
-
-    Through the saver's own migration statements rather than `AsyncPostgresSaver.setup()`, which
-    opens a pool against `settings.postgres_dsn` and would land outside the isolation schema. They
-    are `CREATE TABLE IF NOT EXISTS`, so this is safe beside any other test that needs them.
-    """
-    from langgraph.checkpoint.postgres import base
-
-    async with db.connection(settings.postgres_dsn) as conn:
-        for statement in base.MIGRATIONS[1:4]:
-            await conn.execute(statement)
-        await conn.commit()
-
-
 async def _rows(table: str, column: str, value: str) -> int:
     """How many rows of `table` carry `value` in `column` — the delete's own evidence."""
     async with db.connection(settings.postgres_dsn) as conn:
@@ -596,7 +581,7 @@ def test_deleting_a_session_clears_every_table_it_reaches_and_no_one_elses() -> 
 
     async def _run() -> tuple[dict[str, int], dict[str, int], int, int]:
         await migrated_db_or_skip()
-        await _create_checkpoint_tables()
+        await create_checkpoint_tables()
         store = SessionOwnerStore()
         doomed, bystander = "sess-delete-mine", "sess-delete-theirs"
         for session_id, owner in ((doomed, "owner-delete-test"), (bystander, "owner-delete-other")):
