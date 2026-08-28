@@ -93,3 +93,29 @@ success. Full fit in `soak-report-r8.md`; `rounds with a non-zero exit: none`.
 
 The container was reclaimed at round 8 and **the record survived** — which is the whole reason the
 soak is checkpointed per round rather than held in a process.
+
+## The parallel audit pass
+
+Twelve agents, one per area, each in an isolated worktree, each required to produce a test that
+**fails against current code** before fixing anything and to report what it could not prove. Three
+have landed. Their branches are merged into this one and their worktrees reclaimed.
+
+| Area | What it found |
+| --- | --- |
+| `Chemclaw3_ui` | The six `transcript.spec.ts` failures were **not** a windowing regression — the spec seeds `chemclaw3.chat.v2`, the persist key from before `chatStorageKey` partitioned storage per account, so under `AUTH_MODE=dev` the seed went to a slot nothing reads. Six pass with no `src/`, `server/` or `MessageList` change. Also: `/readyz` withholds connector names deliberately (it is unauthenticated), so scenario 8 could never pass in **either** live tier, and both closed with a `not.toContain('unreachable')` that is **vacuously true of a body naming no connector**. Plus two fields dropped in transit — `result_ref` (so a reload silently lost a tool result, the exact failure the backend added it to prevent) and `title`/`updated_at` (ten restored conversations rendering as ten identical "Earlier conversation" rows) |
+| tool surface | **Refuted the backlog row this campaign filed.** No `calc` collision; 45 in-process + 31 connector tools bind; executable-but-not-accepted is **0**. The row rested on the truncated-error-string probe that had already been retracted here — the probe was withdrawn, the conclusion drawn from it was not. But the same function held a larger defect: `_validate` skipped argument checking for any name it could not resolve in-process, so the LOAD-1 guard covered **22 of 99** names, and `similar_molecules(query=…)` — LOAD-1's own argument name — was green-lit by the guard written to make LOAD-1 impossible. One `tool_signatures()` now serves both readers; coverage 22 → 53 |
+| ingest / publish | Five backlog rows closed, two of which were one defect: the rejection ledger was written by the *fetch*, which can answer neither question a ledger row needs (measured 0.317/0.304/0.320 s per 5,000-entry fetch, 18–38% of the call, ≈1.7 h added to a 100k backfill). And a data-correctness bug shown against Postgres — a recomputed logD, **−1.8497 → +1.3492**, wrote **0 rows**, because the outbox identity hashed the request rather than the result, so a changed calculator's answer was dropped as a duplicate |
+
+**Open backlog rows: 40 → 35.**
+
+### What the audit pass cost, and the rule it produced
+
+Twelve concurrent agents put a 4-core box at load 35–48. Under that:
+- the live stack could not be brought up (`props` missed its readiness budget) — checked for an OOM kill before concluding it was contention; there was none, 11 GB free;
+- four UI vitest tests failed that pass **10/10** in isolation;
+- two backend tests failed that fail **identically at `HEAD~1`** under the same load;
+- no agent could complete a full `pytest -q`; one measured its own progress at ~2.5%/hour.
+
+So the rule this campaign now runs on: **mass auditing and live measurement alternate, they do not overlap.** Scaling coverage is free; scaling load on shared hardware only manufactures contention artifacts, and five of this campaign's false signals came from exactly that.
+
+Corollary, learned the same way: **verify each agent's gate yourself.** One reported all-green and four tests failed on merge. Its work was sound; its box was not mine.
