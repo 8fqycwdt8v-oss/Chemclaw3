@@ -25,7 +25,7 @@ Status: `pending` · `running` · `PASS` · `FAIL` · `skipped (reason)`
 | # | Stage | Command | Status | Evidence |
 | --- | --- | --- | --- | --- |
 | S0 | Baseline, all repos | see below | **PASS** (4/4 repos) | `.live/baseline/*.log` |
-| S1 | Four-repo bring-up | `make live-e2e-full-stack` | running | `.live/e2e-*.log` |
+| S1 | Four-repo bring-up | `make live-e2e-full-stack` | **FAIL -> fixed (F2)**, re-running | `.live/e2e-*.log` |
 | S1b | Wiring check | `/readyz`, `chemclaw_connectors_unhealthy` | pending | — |
 | S2 | Durable path, no LLM | `make live-jobs` | pending | — |
 | S3 | Template args vs live | `make live-template-args` | pending | — |
@@ -95,3 +95,39 @@ Stated up front so the final report cannot imply otherwise: the live OpenShift c
 `helm`/`kubeconform` render against a real API server, and the browser→Entra tenant hop (MSAL talks
 to `login.microsoftonline.com`; mocking that is mocking a login UI, not a key set). All three stay
 open edges in `docs/planning/BACKLOG.md` and cannot be closed by this lane.
+
+### F2 — the four-repo lane could not start its own front door
+
+**Symptom.** `up.sh up` exits 1 at `api exited before becoming ready`. Every other process comes
+up: mock-eln, mock-vendor, props, rxnpredict, calc, chem, safety, connectors, and all four Temporal
+workers report ready. Only the front door dies, and the lane's own message names a log rather than
+a cause.
+
+**Root cause**, four lines deep in `.live/api.log`:
+
+```
+WARNING chemclaw.connectors.health: connectors unreachable at startup:
+        pyexec (unreachable: ConnectError: All connection attempts failed)
+ERROR   chemclaw.connectors.health.ConnectorsUnavailable: connectors_required is set but
+        these connectors are unreachable: pyexec (unreachable)
+```
+
+`up.sh:268` puts `$MCP_REPO/manifests` on `CHEMCLAW_CONNECTORS_DIR`. That directory holds **five**
+manifests — `chem`, `props`, `pyexec`, `rxnpredict`, `safety` — so `pyexec` is *discovered*, and
+its manifest carries its own loopback default (`http://127.0.0.1:8899/mcp`), so the front door
+health-checks it. But **no lane script starts it**: `up.sh` starts props, rxnpredict, calc, and the
+two mocks; `processes.sh` starts chem and safety. `grep pyexec` over both scripts matched nothing.
+Under `CHEMCLAW_CONNECTORS_REQUIRED=true` an unreachable discovered connector is fatal at startup
+rather than degraded at call time, so the front door refused to boot.
+
+This is a **cross-repo coupling failure**, not a typo: adding `manifests/pyexec/` in Chemclaw3-mcp
+silently broke Chemclaw3's four-repo lane, because the manifest directory is the contract and
+nothing ties "a manifest is on the path" to "something serves it". The lane has no test — it is a
+manual lane by design — so the first thing to notice was a dead front door two hours into a
+campaign.
+
+**Fix** (this repo, `infra/live/e2e-full-stack/`): `start_pyexec()` mirroring `start_props`, called
+beside its peers during bring-up, added to the `restart <name>` set, and a row in the README's
+process table. The alternative — narrowing `CHEMCLAW_CONNECTORS_DIR` to exclude it — was rejected:
+the lane exists to exercise every advertised capability, and a front door advertising fewer tools
+than a real deployment is the wrong thing to measure.
