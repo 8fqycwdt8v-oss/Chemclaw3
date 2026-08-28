@@ -18,6 +18,7 @@ already got wrong once while being written:
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from chemclaw.cli.live_data import (
@@ -27,6 +28,7 @@ from chemclaw.cli.live_data import (
     Check,
     DataRun,
     Dataset,
+    _default_real_data,
     _identifier,
     _published_key,
     _seeded_yield,
@@ -194,3 +196,60 @@ def test_a_temperature_is_only_read_from_a_temperature() -> None:
     """The units anchor the match, so a mass or an NMR shift cannot become a temperature."""
     assert _PROSE_TEMPERATURE.search("charged with 1071.0 mg of the carbamate") is None
     assert _PROSE_TIME.search("1H NMR (400 MHz) delta 7.4") is None
+
+
+def test_the_factor_tables_are_found_from_the_export_dir_the_lane_actually_sets() -> None:
+    """The default `--real-data` path, against the mock layout both lanes really configure.
+
+    This is the check that was missing when the derivation walked up three levels instead of four
+    and produced `<repo>/data/app/eln/real_data`. Nothing failed loudly: `up.sh` logged a warning
+    naming a log file, the bring-up exited 0, and the ORD half of the corpus was simply never
+    reachable — which is the shape of failure this whole lane exists to catch in the *data*, so it
+    is worth catching in the lane itself.
+
+    The literals below are transcribed from `Chemclaw3_mock/start.sh` and
+    `infra/live/e2e-full-stack/up.sh` rather than imported, deliberately and for the reason
+    `Chemclaw3-mcp/tests/test_identity_contract.py` gives about header spellings: importing this
+    module's own constant would let the test agree with the bug.
+    """
+    mock_repo = Path("/checkout/Chemclaw3_mock")
+    ord_export_dir = mock_repo / "data" / "eln" / "exports" / "ord"
+
+    assert _default_real_data(ord_export_dir) == mock_repo / "app" / "eln" / "real_data"
+
+
+def test_the_factor_tables_are_not_looked_for_under_the_export_tree() -> None:
+    """The specific wrong answer, named so a regression cannot pass by being merely plausible.
+
+    An off-by-one here stays inside the mock checkout and still *looks* like a reasonable path,
+    which is why the original survived review — `<repo>/data/app/eln/real_data` reads fine until
+    somebody lists the directory.
+    """
+    ord_export_dir = Path("/checkout/Chemclaw3_mock/data/eln/exports/ord")
+
+    resolved = _default_real_data(ord_export_dir)
+
+    assert "data/app" not in resolved.as_posix()
+    assert resolved.parents[2].name != "data"
+
+
+def test_the_shipped_default_export_dir_derives_no_tables_rather_than_raising() -> None:
+    """The shipped `ord_export_dir` is relative and three parts deep — the common case, not an edge.
+
+    `data/eln-exports/ord` (`core/config/eln.py`) has no fourth parent, and the first version of
+    this fix indexed `parents[3]` unguarded: every invocation outside the four-repo lane died with
+    a bare `IndexError: 3` raised from inside `pathlib`, which names neither the setting that was
+    wrong nor the flag that fixes it.
+
+    This is the input the two tests above could not read. They were written from the lane's layout,
+    which is the same understanding that produced the off-by-one, so they agreed with it about
+    everything except the count — exactly the failure `tasks/lessons.md` records for tests written
+    alongside their own change.
+    """
+    assert _default_real_data(Path("data/eln-exports/ord")) is None
+
+
+def test_a_shallow_absolute_export_dir_also_derives_nothing() -> None:
+    """Absolute but too shallow — the other half of the domain outside the lane's layout."""
+    assert _default_real_data(Path("/exports/ord")) is None
+    assert _default_real_data(Path("/a/b/c/d/exports/ord")) is not None

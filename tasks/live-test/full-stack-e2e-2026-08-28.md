@@ -25,15 +25,15 @@ Status: `pending` · `running` · `PASS` · `FAIL` · `skipped (reason)`
 | # | Stage | Command | Status | Evidence |
 | --- | --- | --- | --- | --- |
 | S0 | Baseline, all repos | see below | **PASS** (4/4 repos) | `.live/baseline/*.log` |
-| S1 | Four-repo bring-up | `make live-e2e-full-stack` | **FAIL -> fixed (F2)**, re-running | `.live/e2e-*.log` |
-| S1b | Wiring check | `/readyz`, `chemclaw_connectors_unhealthy` | pending | — |
+| S1 | Four-repo bring-up | `make live-e2e-full-stack` | **PASS** after F2 | `.live/e2e-*.log` |
+| S1b | Wiring check | `/readyz`, `chemclaw_connectors_unhealthy` | **PASS** | — |
 | S2 | Durable path, no LLM | `make live-jobs` | pending | — |
 | S3 | Template args vs live | `make live-template-args` | pending | — |
 | S4 | Real-model probes | `make live-probes` | **blocked (F1)** | `tasks/live-test/transcripts/` |
 | S5 | Plan gate | `make live-plan-gate` | blocked (F1), mock route TBD | `tasks/live-test/m12-plan-gate/` |
 | S6 | UI full-stack | `npm run test:e2e:full-stack` | **blocked (F1)** | — |
 | S7 | Storm | `make live-storm` | pending | `tasks/live-test/storm.md` |
-| S8 | Corpus convergence | `make live-data`, polled | pending | `.live/e2e-corpus-backfill.log` |
+| S8 | Corpus convergence | `make live-data`, polled | draining after F3 | `.live/e2e-corpus-backfill.log` |
 | S9 | Degradation (Temporal down) | `make live-degradation` | blocked (F1), mock route TBD | `tasks/live-test/m12-degradation/` |
 | S10 | Soak + drift | `make live-soak`, `make live-soak-report` | pending | `.live/soak.jsonl` |
 
@@ -131,3 +131,48 @@ beside its peers during bring-up, added to the `restart <name>` set, and a row i
 process table. The alternative — narrowing `CHEMCLAW_CONNECTORS_DIR` to exclude it — was rejected:
 the lane exists to exercise every advertised capability, and a front door advertising fewer tools
 than a real deployment is the wrong thing to measure.
+
+**S1 re-run, after F2** — `bringup2 exit=0`. `pyexec started` / `pyexec ready` /
+`pyexec credential accepted (HTTP 406)`, then `api ready` and `full stack up`.
+(406 is the expected answer: an MCP endpoint reached without the streaming Accept header, which is
+what `assert_credential_accepted` checks for — it proves the credential was taken, not refused.)
+
+**S1b** — the wiring check the lane README insists on, because absence of an error is not success:
+
+```
+$ curl -s localhost:8000/readyz     -> {"status": "ready", "connectors_unhealthy": 0}
+$ curl -s localhost:8000/metrics    -> chemclaw_connectors_unhealthy 0
+```
+
+### F3 — the corpus backfill could never find its ground truth
+
+**Symptom.** Bring-up ends with `WARNING: corpus backfill failed`, and **exits 0 anyway**. The ORD
+half of the corpus is then permanently invisible, which is precisely the failure `cli/live_data.py`
+was written to detect in the data — its own module docstring says a previous run "reported 638 note
+proposals and called ingestion proven" while 57% of the corpus had never entered the system.
+
+**Root cause.** `live_data.py` derived the published factor tables by walking up from the ORD export
+directory with three `.parent`s. The lane sets `ord_export_dir` to
+`<mock repo>/data/eln/exports/ord` — **four** levels below the repo root — so the derivation landed
+on `<mock repo>/data` and produced `<mock repo>/data/app/eln/real_data`, a path that has never
+existed. The tables are at `<mock repo>/app/eln/real_data`. The lane's own error message named the
+correct path while the code kept computing the wrong one.
+
+It survived because the derivation was an expression inside `main()`: `tests/test_live_data.py`
+existed and had **no** reference to `real_data` at all, because nothing could reach the arithmetic
+without running the whole lane against a seeded checkout.
+
+**Fix** (this repo, `cli/live_data.py`): extracted `_default_real_data()` — the unit that was
+untestable — corrected to `parents[3]`, with two tests proven red against the pre-fix code.
+
+**And the fix's own first version was wrong**, which is worth recording rather than quietly
+amending. `parents[3]` raised a bare `IndexError: 3` on the *shipped* default
+(`ord_export_dir = "data/eln-exports/ord"` — relative, three parts), so every invocation outside
+this lane crashed from inside `pathlib` naming neither the bad setting nor the flag that fixes it.
+My two tests both passed, because I wrote them from the same understanding of the layout that
+produced the off-by-one — the exact pattern `tasks/lessons.md` records for tests written alongside
+their own change. The helper now returns `None` for an underivable path and `main` reports which
+setting it could not derive from. Two further tests cover that domain.
+
+**Verified**: the backfill now starts — `eln-backfill-epoch: still draining`, the workflow running
+on the broker, which is S8's long pole and expected to take over two hours.

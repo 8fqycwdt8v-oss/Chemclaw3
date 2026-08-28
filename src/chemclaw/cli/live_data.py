@@ -241,6 +241,33 @@ class DataRun:
 # --- the published tables -------------------------------------------------------------------
 
 
+def _default_real_data(ord_export_dir: Path) -> Path | None:
+    """Where the mock's published factor tables sit, given its ORD export directory.
+
+    A function rather than an expression inside `main` because the arithmetic is off-by-one-able
+    and was: it walked up **three** levels and derived `<mock repo>/data/app/eln/real_data`, a path
+    that has never existed. Inline, nothing could reach it without running the whole lane, so the
+    bring-up's corpus backfill failed at argparse and the ORD half of the corpus stayed invisible —
+    while `up.sh` reported only a warning pointing at a log.
+
+    The two ends are both facts about `Chemclaw3_mock`'s layout, fixed by its own `start.sh` and by
+    this lane's `up.sh`: exports at `<repo>/data/eln/exports/ord` — four levels down — and the
+    tables at `<repo>/app/eln/real_data`. Hence `parents[3]`.
+
+    `None` when the export directory is too shallow to derive from, which is the *shipped default*
+    (`ord_export_dir = "data/eln-exports/ord"`, relative, three parts) and therefore the common
+    case outside this lane — not an edge. Returning it rather than indexing blindly is what keeps
+    `main` free to print the message that names the flag to pass; the first version of this fix
+    raised a bare `IndexError: 3` from inside `pathlib` instead, which tells a reader nothing about
+    what to do next.
+    """
+    try:
+        root = ord_export_dir.parents[3]
+    except IndexError:
+        return None
+    return root / "app" / "eln" / "real_data"
+
+
 def _published_rows(real_data: Path, dataset: Dataset) -> list[dict[str, str]]:
     """Every row of one published factor table, verbatim."""
     path = real_data / dataset.csv_name
@@ -863,7 +890,13 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     configure_logging()
     export_dir = Path(settings.ord_export_dir)
-    real_data = args.real_data or export_dir.parent.parent.parent / "app" / "eln" / "real_data"
+    real_data = args.real_data or _default_real_data(export_dir)
+    if real_data is None:
+        parser.error(
+            f"cannot derive the factor tables from ord_export_dir={str(export_dir)!r} — it is not "
+            "inside a Chemclaw3_mock checkout. Pass --real-data pointing at "
+            "Chemclaw3_mock/app/eln/real_data (this lane has no ground truth without them)"
+        )
     if not real_data.is_dir():
         parser.error(
             f"no published factor tables at {real_data} — pass --real-data pointing at "
