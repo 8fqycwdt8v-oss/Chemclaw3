@@ -229,3 +229,43 @@ that one case, and a sibling running its own subset never collects it. Every age
 true and none of them was evidence about the branch. The correction is not "run the whole suite" —
 that cost every agent hours and produced only BoFire wall-clock timeouts — it is to re-run the
 *unparametrized* gates whole after a merge. They cost seconds; this took 8 s to clear.
+
+## The final baseline
+
+Four storm runs on the same stack, and the sequence is the campaign in miniature:
+
+| run | score | what changed between it and the previous |
+| --- | --- | --- |
+| `storm-repaired.md` | 58 / 69 | the instrument repaired — 19 checks that had scored PASS on a do-nothing run now measure something |
+| `storm-after-fixes.md` | 65 / 70 | the credential lifetime fixed, so every in-tree connector tool answers again |
+| `storm-baseline.md` | 68 / 70 | the backend-refusal and output-schema fixes; the sweep's noise checks pass on a quiet box |
+| **`storm-final.md`** | **69 / 70** | the broker probe stopped reading a cached client; the zero-live-model floor counted forwards |
+
+**819 turns driven, 595 mock requests served, 10 of 10 families ran, 1,112 s wall clock, zero live
+model calls.**
+
+The single remaining failure is `t-calc-xtb-descriptors`, and it is a true statement about this
+deployment rather than about the code: no `xtb` binary is installed, so the calc backend refuses
+`compute_atomic_descriptors` and `compute_surface_potential` — in its own words, naming the two
+tools that do not need it. A `BACKLOG.md` row carries the honest fix (a declared precondition the
+storm checks against the backend's readiness) and states explicitly that it must **not** be closed
+by reading the refusal's wording and calling it a pass.
+
+For comparison, the run this campaign started from scored **27/31** — on an instrument where 19 of
+68 checks could pass having observed nothing. The two numbers are not comparable, and that is the
+result: the earlier one was not measuring what it reported.
+
+### Four denominators for one floor
+
+The zero-live-model reconciliation took four attempts, and the first three were all the same
+mistake — a bound defined by *subtracting* the ways a turn can fail to reach a model, which asserts
+those ways have been enumerated. Each attempt found one the last had missed: shed statuses that
+omitted 503; any non-200 *response*, which misses the turns that time out with no status at all;
+and turns that opened a stream, which over-counts because a turn can be answered 200, stream, and
+be refused before a model is asked anything (measured, 121 streamed against 116 served).
+
+What held is counted **forwards** from the one event with no exceptions in it: a turn that produced
+an answer certainly asked a model at least once. Deliberately loose, and loose in the safe
+direction. Both lessons are in `tasks/lessons.md`, including the second one — that attempts 2 and 3
+each shipped behind a green unit test, because the test drove counters set by hand and could only
+confirm the arithmetic already assumed.
