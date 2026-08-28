@@ -41,7 +41,7 @@ from typing import Any
 
 from langchain_core.messages import AIMessageChunk, ToolMessage
 
-from chemclaw.agent.plan_gate import plan_gate_failure_reason, plan_identity
+from chemclaw.agent.plan_gate import plan_identity
 from chemclaw.agent.state import turn_input
 from chemclaw.api.events import (
     Event,
@@ -408,13 +408,12 @@ def _signal_event(signal: Signal) -> Event:
     if isinstance(signal, QuestionSignal):
         return QuestionEvent(question=signal.question, options=signal.options)
     if isinstance(signal, ToolFailureSignal):
-        # The one place a `PlanNotApprovedError` becomes an event, so the one place the refusal can
-        # be labelled as such. Downstream — the UI, the eval classifier — then reads a field
-        # instead of grepping the refusal's prose for a phrase, which is a classification that
-        # survives someone rewording the sentence a chemist reads.
-        return ToolFailedEvent(
-            tool=signal.tool,
-            message=signal.message,
-            reason=plan_gate_failure_reason(signal.message),
-        )
+        # The classification rides on the signal, made from the exception by
+        # `agent/audit.refusal_reason` where the exception still existed. This used to re-derive it
+        # here by testing whether `signal.message` started with `"PlanNotApprovedError:"` — which
+        # recovered one of five gates, from a string `failure_detail` truncates, in a module that
+        # cannot see the classes. Downstream reads a field either way; what changed is that the
+        # field is now the same verdict the audit row records, rather than a second opinion.
+        #
+        return ToolFailedEvent(tool=signal.tool, message=signal.message, reason=signal.reason)
     return NoteProposedEvent(note_id=signal.note_id, reference=signal.reference)
