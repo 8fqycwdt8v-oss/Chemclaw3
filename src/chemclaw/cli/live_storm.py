@@ -110,23 +110,19 @@ _TERMINAL = {
 # difference: the mock's counter has to be at least the turns that actually reached a model.
 #
 # **Offered is the wrong denominator and measuring it proved so.** The first version reconciled
-# against every turn `run_turn` was entered for, and a turn the front door sheds with 429 or 409
-# never reaches a model at all — so on the 2026-08-28 run the check read `607 mock request(s)
-# served against 818 turn(s) driven` and failed, on a lane where every model call really had been
-# served by the mock. Family A alone sheds by design: it holds 48 concurrent against caps of 2, 4,
-# 8, 16 and 32, and shed 173 turns doing exactly what it exists to do. A floor that any admission
+# against every turn `run_turn` was entered for, and a turn the front door refuses before the
+# stream opens never reaches a model at all — so on the 2026-08-28 run the check read `607 mock
+# request(s) served against 818 turn(s) driven` and failed, on a lane where every model call really
+# had been served by the mock. Family A alone sheds by design: it holds 48 concurrent against caps
+# of 2, 4, 8, 16 and 32, and shed 173 turns doing exactly what it exists to do. A floor that any
+# admission
 # sweep breaks is not a floor.
 #
 # Deliberately incremented in `run_turn` and nowhere else, so the two families that open their own
 # client (`G`'s stream cap, `E1`'s disconnect) are *not* counted — an undercount can only make the
 # reconciliation easier to satisfy, never falsely fail.
-# The statuses the front door answers when it refuses a turn at admission rather than running it:
-# 429 from the concurrency cap, 409 from a session whose turn claim is still held. Neither reaches
-# a model, so neither belongs in the zero-live-model denominator.
-_SHED_STATUSES = frozenset({409, 429})
-
 _turns_driven = 0
-_turns_shed = 0
+_turns_refused = 0
 
 
 def turns_driven() -> int:
@@ -137,10 +133,14 @@ def turns_driven() -> int:
 def turns_reaching_a_model() -> int:
     """Turns the front door accepted, which is the count that must have produced a model call.
 
-    A shed turn is refused at admission and no model is asked anything, so it belongs in neither
-    side of the reconciliation.
+    **Any non-200 is the condition, not an enumerated list of shed statuses.** `run_turn` returns
+    the moment the status is not 200, before it reads a single SSE line, so no model was asked
+    anything whatever the code was. Enumerating was tried and was wrong: the first version counted
+    429 and 409, while `_turn_outcomes` — the authority in this file on what a shed looks like —
+    buckets 429 **and 503**, so a 503-shedding sweep moved the counter not at all and the check
+    still failed on a lane where every model call had been served by the mock.
     """
-    return _turns_driven - _turns_shed
+    return _turns_driven - _turns_refused
 
 
 @dataclass
@@ -230,9 +230,8 @@ async def run_turn(client: httpx.AsyncClient, message: str, *, dry_run: bool = F
         ) as response:
             result.status = response.status_code
             if response.status_code != 200:
-                if response.status_code in _SHED_STATUSES:
-                    global _turns_shed
-                    _turns_shed += 1
+                global _turns_refused
+                _turns_refused += 1
                 await response.aread()
                 return result
             async for line in response.aiter_lines():
@@ -2049,7 +2048,7 @@ async def run_storm(
     await _require_mock_lane()
     await asyncio.to_thread(_lane, "processes.sh", "restart", "mock-llm")
     _turns_driven = 0
-    _turns_shed = 0
+    _turns_refused = 0
 
     findings: list[Finding] = []
     sweep: list[dict[str, Any]] = []

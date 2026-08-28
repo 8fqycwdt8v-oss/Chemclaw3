@@ -753,7 +753,7 @@ def test_a_shed_turn_is_not_in_the_zero_live_model_denominator() -> None:
     served by the mock. A floor that any admission sweep breaks is not a floor.
     """
     live_storm._turns_driven = 818
-    live_storm._turns_shed = 211
+    live_storm._turns_refused = 211
     try:
         assert live_storm.turns_driven() == 818
         assert live_storm.turns_reaching_a_model() == 607
@@ -764,7 +764,7 @@ def test_a_shed_turn_is_not_in_the_zero_live_model_denominator() -> None:
         assert not live_storm._mock_reconciliation(served=607, turns=live_storm.turns_driven()).ok
     finally:
         live_storm._turns_driven = 0
-        live_storm._turns_shed = 0
+        live_storm._turns_refused = 0
 
 
 def test_a_family_that_raises_does_not_take_the_whole_run_with_it() -> None:
