@@ -429,10 +429,20 @@ class PostgresFingerprintStore:
             f"ON CONFLICT {conflict} DO UPDATE SET "
             f"label = EXCLUDED.label, bits = EXCLUDED.bits, definition = EXCLUDED.definition"
         )
-        # What `063` could not backfill: a row stored before the key had a source half. One
-        # PK-keyed delete per sourced write, which is what keeps a migrated index from holding
-        # one entry twice — see `add`.
-        self._supersede = f"DELETE FROM {table} WHERE source = '' AND id = %(id)s"
+        # There is deliberately no statement here that deletes the unsourced row `063` could not
+        # backfill, and the reason is a privilege rather than a preference. `app_privileges.sql`
+        # grants this table INSERT and UPDATE only, in the group whose comment says withholding
+        # DELETE is what makes `retention.py`'s refusal to prune enforced rather than intended. A
+        # `DELETE` here therefore raises `permission denied` for the runtime role on every sourced
+        # write — and because it shares the upsert's transaction, the fingerprint would not land
+        # either. That is every ELN and corpus ingest on any deployment that runs `make db-grants`,
+        # which no test in this tree could see: the suite connects as the owner.
+        #
+        # It would also have been wrong where it worked. An unsourced row is not a *twin* — it is
+        # whichever site synced last before `063`, or a pre-051 entry that merely shares an id — so
+        # deleting it on a same-id write from another source destroys that site's only fingerprint.
+        # The unsourced population is finite, shrinks only on a reindex, and is exactly the
+        # pre-`063` behaviour for those rows.
         self._all = f"SELECT {self._source_read}, id, label, bits::text, definition FROM {table}"
         # Both scoped to this store's definition, for the reason `find_similar` is: rows indexed
         # under a superseded definition are not searchable here, so counting them would report a
@@ -501,8 +511,6 @@ class PostgresFingerprintStore:
                     **({"source": record.source} if self._source_keyed else {}),
                 },
             )
-            if record.source:
-                await conn.execute(self._supersede, {"id": record.id})
             await conn.commit()
 
     async def all_records(self, limit: int | None = None) -> list[FingerprintRecord]:

@@ -186,12 +186,23 @@ def test_a_single_source_deployment_reads_exactly_as_before() -> None:
     asyncio.run(_run())
 
 
-def test_a_sourced_write_deletes_the_unsourced_row_063_left_behind() -> None:
-    """Migration `063` leaves some rows under `''`; a re-ingest must replace, not duplicate.
+def test_a_sourced_write_leaves_the_unsourced_row_063_could_not_resolve() -> None:
+    """The write path must NOT delete the row `063` left under `''` — for two reasons.
 
-    Two rows with identical bits and one label are two *hits*, so a similarity search would report
-    two precedents where a chemist has one experiment — which is why the write path supersedes
-    rather than leaving the leftovers to a runbook step.
+    The first is a privilege: `app_privileges.sql` grants this table INSERT and UPDATE only, in
+    the group whose comment says withholding DELETE is what makes `retention.py`'s refusal to
+    prune enforced rather than intended. A `DELETE` here raises `permission denied` for the
+    runtime role, and since it would share the upsert's transaction the fingerprint would not land
+    either — every ELN and corpus ingest, on any deployment that runs `make db-grants`. Nothing in
+    this tree connects as that role, so the suite cannot see it; this test stands in for the half
+    it can see, and `tests/test_database_privileges.py` covers the other half.
+
+    The second is that the row is not a *twin*. An unsourced row is whichever site synced last
+    before `063`, or a pre-051 entry that merely shares an id, so deleting it on a same-id write
+    from another source destroys that site's only fingerprint.
+
+    The cost is real and is accepted: two rows can carry one id until a reindex, so a similarity
+    search can return both. That is the pre-`063` behaviour for exactly these rows.
     """
 
     async def _run() -> None:
@@ -200,14 +211,13 @@ def test_a_sourced_write_deletes_the_unsourced_row_063_left_behind() -> None:
         assert await _rows("pg-legacy-1001") == [("", _ESTER_ETHYL)]
 
         await store.add(_sited("pg-legacy-1001", "pg-eln-a", _ESTER_ETHYL))
-        assert await _rows("pg-legacy-1001") == [("pg-eln-a", _ESTER_ETHYL)]
-
-        hits = [
-            h
-            for h in (await find_similar_reactions(store, _ESTER_ETHYL, threshold=0.99)).hits
-            if h.id == "pg-legacy-1001"
-        ]
-        assert len(hits) == 1, f"one experiment indexed twice: {hits}"
+        assert await _rows("pg-legacy-1001") == [
+            ("", _ESTER_ETHYL),
+            ("pg-eln-a", _ESTER_ETHYL),
+        ], (
+            "the unsourced row must survive a sourced write; deleting it needs a grant "
+            "the runtime role deliberately does not hold"
+        )
 
     asyncio.run(_run())
 
