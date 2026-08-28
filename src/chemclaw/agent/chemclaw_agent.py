@@ -24,6 +24,7 @@ by construction rather than by discipline, and `tests/test_subagents.py` proves 
 graphs that compile rather than against the two declarations.
 """
 
+import inspect
 from dataclasses import replace
 from typing import Any
 
@@ -48,9 +49,11 @@ from chemclaw.agent.profiles import AgentProfile, get_profile
 from chemclaw.agent.scratchpad import scratchpad_tools
 from chemclaw.connectors.registry import (
     connector_tool_names,
+    discovered,
     endpoint_tool_names,
     job_tools,
     mcp_connections,
+    server_tools_module,
 )
 from chemclaw.connectors.transport import ConnectorSpec
 from chemclaw.core.config import settings
@@ -452,6 +455,56 @@ def available_tool_names() -> set[str]:
         *harness_tool_names(),
         *subagent_tool_names(),
     }
+
+
+def tool_signatures() -> dict[str, inspect.Signature]:
+    """Every tool name whose *parameters* this tree can answer for, mapped to its signature.
+
+    The argument-side twin of `available_tool_names`, and it lives beside it for the reason that
+    one exists at all: two callers were asking the same question about the same surface and only
+    one of them was getting an answer. `make template-validate` checks the arguments a template
+    step passes; `chemclaw.cli.mock_llm._validate` checks the arguments a scripted model emits.
+    Both are guarding against LOAD-1 — a call that dies in the parse-error branch before the tool
+    body runs, counted afterwards as a call that happened — and the mock's half resolved names off
+    `registered_tools()` alone, so a *connector* tool fell through a `continue` with no check at
+    all. Measured on this tree: 22 of the 99 names `available_tool_names()` accepts had their
+    arguments checked; through here it is 53.
+
+    Two sources, both local: the in-process `@tool` registry, and each discovered bundle's own
+    `chemclaw.connectors.<name>.server.tools` module, whose function names *are* the tool names the
+    manifest declares. A bundle with no server module (`results` is jobs-only; `chem` and `safety`
+    are served from `Chemclaw3-mcp`) and a declared name the module does not define are both
+    skipped — whether a bundle serves what it declares is `make connector-validate`'s question, and
+    answering it twice, differently, here would be worse than not answering it.
+
+    **A bundle that cannot be imported is not "skipped", it is broken.** This used to swallow every
+    `ImportError`, transitive ones included, which is a vacuous pass arrived at from the other
+    direction: one injected missing dependency in `chem` took the resolved set from 50 signatures
+    to 46 and still printed "template validation passed". `server_tools_module` is the single
+    definition of that import, shared with `make connector-validate`, and it raises rather than
+    returning `None` for that case.
+
+    **The in-process half used to depend on the caller having imported this module first.** It read
+    `registered_tools()`, which is populated only as an import side effect of
+    `chemclaw.agent.chemclaw_agent`, from a function that lived in `chemclaw.cli.validate_templates`
+    — so calling it before anything else touched the agent package silently resolved the connector
+    half only (measured: 30 signatures against 50), and the validator printed "template validation
+    passed" over a check that covered twenty fewer tools. Defining it *here* retires that hazard by
+    construction: there is no way to reach this function without having imported the module whose
+    import populates the registry.
+    """
+    signatures = {fn.__name__: inspect.signature(fn) for fn in registered_tools()}
+    for name, (_bundle, manifest) in discovered().items():
+        if manifest.endpoint is None:
+            continue
+        module = server_tools_module(name)
+        if module is None:
+            continue
+        for tool_name in manifest.endpoint.tools:
+            fn = getattr(module, tool_name, None)
+            if callable(fn):
+                signatures[tool_name] = inspect.signature(fn)
+    return signatures
 
 
 def _reject_unknown_tool_names(profile: AgentProfile) -> None:
