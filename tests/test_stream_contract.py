@@ -464,7 +464,9 @@ def test_a_turn_torn_down_in_a_foreign_context_still_unstamps_every_ambient() ->
 
     async def _turn() -> AsyncIterator[str]:
         """Stand in for `run_turn`: stamp the turn's ambients, then park at a yield."""
-        with _turn_ambient("s-foreign", "u-1", frozenset({"chemist"}), False, "cid-1", TurnUsage()):
+        with _turn_ambient(
+            "s-foreign", "u-1", frozenset({"chemist"}), False, "cid-1", TurnUsage(), "hello"
+        ):
             yield "parked"
 
     async def _run() -> None:

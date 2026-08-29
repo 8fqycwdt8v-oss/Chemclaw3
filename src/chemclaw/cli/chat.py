@@ -47,6 +47,7 @@ from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.core.identity_context import reset_current_identity, set_current_identity
 from chemclaw.core.logging import configure_logging
+from chemclaw.core.turn_text import reset_current_user_text, set_current_user_text
 
 _EXIT_WORDS = {"exit", "quit", ":q"}
 
@@ -130,10 +131,19 @@ async def converse(agent: Any, prompt: str, session_id: str = _CLI_SESSION_ID) -
     `agent.run`, so the CLI could not take a single turn under the configuration the shipped Helm
     chart sets (D-152). A thread id is a string in a config dict; there is nothing to be absent.
     """
-    result = await agent.ainvoke(
-        turn_input(prompt),
-        turn_config(session_id),
-    )
+    # The chemist's own words, stamped for the turn. This path invokes the graph directly rather
+    # than through `api.runner`, so it is the second and last place a real user message enters the
+    # system — and `protocols` refuses a `basis="stated"` quote it cannot check against one
+    # (`core.turn_text`). Reset in a `finally` so a failed turn does not leak one prompt into the
+    # next.
+    token = set_current_user_text(prompt)
+    try:
+        result = await agent.ainvoke(
+            turn_input(prompt),
+            turn_config(session_id),
+        )
+    finally:
+        reset_current_user_text(token)
     return answer_text(result)
 
 

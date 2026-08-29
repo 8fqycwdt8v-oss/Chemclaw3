@@ -26,6 +26,7 @@ from chemclaw.core.errors import ChemclawError
 from chemclaw.core.identity_context import get_current_correlation_id
 from chemclaw.core.session_context import get_current_session_id
 from chemclaw.core.tool_registry import tool
+from chemclaw.core.turn_text import get_current_user_text
 from chemclaw.protocols.checks import blockers, run_checks
 from chemclaw.protocols.diff import diff_designs
 from chemclaw.protocols.layout import LayoutError, place, smallest_plate_for
@@ -59,7 +60,7 @@ def _store() -> DesignStore:
     return default_design_store()
 
 
-def require_quotes_are_verbatim(request: ExperimentRequest, source_text: str) -> None:
+def require_quotes_are_verbatim(request: ExperimentRequest, source_text: str | None) -> None:
     """Refuse a `basis="stated"` slot whose quote is not in the chemist's own words.
 
     The whole honesty claim of the structured request rests on this: a slot marked `stated` says
@@ -68,9 +69,41 @@ def require_quotes_are_verbatim(request: ExperimentRequest, source_text: str) ->
     and nothing else is: a paraphrase is exactly what this refuses, because a paraphrase reaching
     the record as a quotation is worse than an unmarked inference.
 
+    **`source_text` is the chemist's message, and it is ambient rather than an argument.** It used
+    to be a parameter of the tool, which is the same as no check at all: a model that wanted
+    `stated` supplied a `source_text` containing its own quotes and got it, and the fabricated
+    attribution landed in `experiment_protocols` indistinguishable from a real one. Measured, the
+    same request was refused against the real user text and accepted against an invented one.
+    `core.turn_text` carries it now, on the argument `session_context` states for the session id.
+
+    `None` means there is no turn — a unit test, an activity, any caller that is not a conversation
+    — and every `stated` slot is refused, because there is no chemist to have said it. That is
+    `require_actor`'s reject-if-absent rule: a check that waived itself when its evidence was
+    missing would be one the caller can switch off by calling from elsewhere.
+
     Raises:
         ChemclawError: naming the slot and its quote.
     """
+    stated = {
+        name: field
+        for name, field in (
+            ("scale", request.scale),
+            ("plate_format", request.plate_format),
+            ("max_runs", request.max_runs),
+            ("deadline", request.deadline),
+        )
+        if field.basis == "stated"
+    }
+    if source_text is None:
+        if stated:
+            raise ChemclawError(
+                "these slots are marked `stated` but there is no chemist message to check them "
+                "against: "
+                + ", ".join(sorted(stated))
+                + ". `stated` means the chemist wrote it; use basis='inferred' for your own "
+                "judgment."
+            )
+        return
     haystack = " ".join(source_text.split()).lower()
     slots = {
         "scale": request.scale,
@@ -93,25 +126,23 @@ def require_quotes_are_verbatim(request: ExperimentRequest, source_text: str) ->
 
 
 @tool
-async def structure_experiment_request(
-    request: ExperimentRequest, source_text: str, salt: str = ""
-) -> str:
+async def structure_experiment_request(request: ExperimentRequest, salt: str = "") -> str:
     """Turn a chemist's free-text ask into the structured request a protocol is drafted from.
 
     Call this **first**, before searching the record: it puts your reading of their sentence in
     front of them while correcting it is still cheap, and it returns the `design_id` every later
     call needs.
 
-    Mark each slot's `basis` honestly — `stated` obliges their verbatim words in `quote` and a
-    paraphrase is refused; `inferred` is your own judgment and is expected; `absent` means the text
-    did not say. Resolve species with `resolve_compound`; never write a SMILES from a name.
-    `skills/protocol-generation` has the rest.
+    Mark each slot's `basis` honestly — `stated` obliges their verbatim words in `quote`, checked
+    against the chemist's actual message and refused if it is not there; `inferred` is your own
+    judgment and is expected; `absent` means the text did not say. Resolve species with
+    `resolve_compound`; never write a SMILES from a name. `skills/protocol-generation` has the rest.
 
     Args:
         request: The structured ask.
-        source_text: The chemist's own words, verbatim — what the quotes are checked against.
-        salt: Only to open a *second* design for the same ask; without it a re-structured request
-            revises the existing one.
+        salt: Only to open a *second* design for the same ask. The id is derived from the title,
+            goal, transformation and mode, so correcting any of those opens a new design rather
+            than revising this one — say so to the chemist when it happens.
 
     Returns:
         JSON: the design id, the revision and the checks. Show the chemist your structured reading
@@ -120,7 +151,7 @@ async def structure_experiment_request(
     Raises:
         ChemclawError: a `stated` slot whose quote is not in `source_text`.
     """
-    require_quotes_are_verbatim(request, source_text)
+    require_quotes_are_verbatim(request, get_current_user_text())
     design_id = design_id_for(request, salt=salt)
     store = _store()
     head = await store.read(design_id)
@@ -140,6 +171,22 @@ async def structure_experiment_request(
         if head is not None
         else ExperimentDesign(request=request)
     )
+    # **An identical document is not a revision, and appending one un-approved designs.** The id is
+    # derived from the ask, so re-stating the same ask reaches the same design and carries its
+    # protocol forward unchanged — and `advanced()` retires an `approved` or `executed` status on
+    # any revision landing, justified by "the document has changed". Measured: a chemist approved a
+    # plate, the ask was restated in a later session, and the header came back `draft` over a head
+    # that compared equal to the approved one. Nothing changed, so nothing is stored.
+    if head is not None and design == head.design:
+        header = await store.summary(design_id)
+        return receipt(
+            design,
+            head.checks,
+            design_id=design_id,
+            revision=head.revision,
+            status=header.status if header else "requested",
+        ).model_dump_json()
+
     checks = run_checks(design, stage="protocol" if design.has_protocol else "request")
     revision = await store.append(
         design_id,

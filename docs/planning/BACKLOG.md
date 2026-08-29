@@ -681,6 +681,22 @@ only holds defects can only ever restore the system to what it already intended 
       `tests/test_context_floor.py::KNOWN_OVERSIZED`, `protocols/models.py`,
       `science/bo/problem.py`.
 
+- [ ] **The module a chemist actually reads has no test file** — [M], found 2026-08-29 by the
+      fresh-context review that took `render.py` apart
+      (`D-2026-08-29-a-check-a-reader-never-sees-is-not-a-check`). No test anywhere imports
+      `render_markdown`, `run_sheet_rows` or `summarise`: the whole assertion surface across the
+      suite is two lines in `tests/test_protocol_design_tools.py` (`startswith("# SM-3 Suzuki")`
+      and `"## Evidence" in readout.markdown`). Coverage over the protocol test files is **76%**,
+      and the uncovered block is `summarise`'s screen/campaign branch — the sentence a chemist reads
+      about a plate is executed by no test.
+
+      That is why every one of that module's defects was found by reading rather than by running:
+      a document that printed the body's conditions over the arm's, a partial setpoint override
+      blanking a row, fifteen dropped leaf fields including `base.waste` and every unit, and
+      `summarise` branching on the ask rather than the design. Each is fixed and each was verified
+      by hand; none has a regression test, because writing thirty of them is its own change with its
+      own argument about what a rendering test should assert. Anchor: `protocols/render.py`.
+
 - [ ] **A tool schema is 38% developer rationale, and it ships on every turn** — [M], and it is
       what `§ 5`'s deferral row turned into once measured. `science/bo/problem.py`'s nested models
       carry design arguments in their class docstrings — *"One `objectives` field rather than a lead

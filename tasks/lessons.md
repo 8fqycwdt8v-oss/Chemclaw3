@@ -1602,3 +1602,42 @@ measuring nothing.
 middleware writes its guard twice — once per hook. The mutation landed on the sync path while the
 test drove the async one, so the guard read as unpinned when it was pinned. The parametrized test
 that came out of that now covers both, which is the coverage the accident found.
+
+
+## 2026-08-29 (fourth entry) — three numbers I published that were not properties
+
+A fourth review cycle, this time over my own fixes rather than over the code they fixed,
+**falsified three measurements I had already written into an ADR.** Every one of them was a real
+number when I took it. Every one was then written down as a fact about the system.
+
+- *"A chemist's abandonment was reverted 20 times out of 20."* Re-run five times: 20, 18, 18, 20,
+  17 — 93 of 100. The race is overwhelmingly likely, not certain. I ran it once, saw a clean sweep,
+  and reported the sweep.
+- *"2.61 s at the 4 MB cap payload, down from 46 s."* That payload cannot be constructed any more —
+  the same commit added the `max_length` ceilings that refuse it. The largest design now legal
+  diffs in 0.060 s, and at its ceiling the quadratic scan costs 22.4 ms against `Counter`'s 0.107
+  ms. **Two fixes shipped together and I gave the credit to the wrong one**, which then went into a
+  code comment as the reason that line exists.
+- *"90.6 ms → 15.7 ms."* Reproduces at 384 arms, not at 24 (4x there). And the method it described
+  was reverted in the same cycle, so the claim outlived its subject.
+
+**The rule: a number going into the record is run more than once, and reported as what varied.**
+One run, in one configuration, immediately after the change it is meant to justify, is the most
+flattering measurement available — and it is the one I reach for, because at that moment I am
+looking for confirmation rather than for the distribution. `CLAUDE.md` says "measure it, don't argue
+it" and says nothing about how many times; for a claim that ends up in an ADR or a code comment, the
+answer is more than once.
+
+**The corollary, which is the part that generalises past measurement.** When two changes ship in one
+commit and the outcome improves, I attribute the improvement to the more interesting one. Here the
+interesting change was an algorithm (O(n²) → `Counter`) and the boring one was a refusal
+(`max_length`), and the boring one did all the work. Before writing "X fixed Y", disable X alone and
+check that Y comes back.
+
+**And the same instrument found four more of the same kind in the UI**, all fixture-shaped: a
+transcript index I "corrected" to a value that gave two messages one key, a plate axis where rows
+and columns used different rules, an error path written for a `detail` shape and blind to the one it
+was written for, and an interface promising a field no read returns. Each was found by reading the
+*producer* — `_transcript`'s `enumerate`, `place()`'s label arithmetic, the route's 409 body,
+`DesignOut`'s `extra="forbid"`. **When a fixture and the code agree, that is not evidence; the
+producer is the evidence.** I now read the producer before writing the fixture, in both repositories.
