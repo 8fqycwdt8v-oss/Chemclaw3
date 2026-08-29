@@ -109,6 +109,23 @@ class RegisteredObjective:
     direction: str
 
 
+#: The objective that is not a function: the numbers come back from a bench, not from a process.
+#:
+#: **This is the name that makes a real screening campaign expressible.** Every entry in the
+#: registry below is `Callable[..., Awaitable[float]]`, which is exactly what a *simulated* campaign
+#: needs and exactly what a chemist's campaign is not — BO's value to a process chemist is proposing
+#: eight conditions, waiting a week for the plates, and proposing eight more. The registry cannot
+#: hold that, because there is no function to register; the durable workflow suspends on a wait
+#: instead (`durable/awaiting.py`), so this name is deliberately absent from `_REGISTRY` and is
+#: recognised by `is_measured` rather than resolved by `get_objective`.
+MEASURED_OBJECTIVE = "measured"
+
+
+def is_measured(name: str) -> bool:
+    """Whether this campaign's values come from people rather than from a registered function."""
+    return name == MEASURED_OBJECTIVE
+
+
 # Name → the objective it stands for. Every factory takes the calculator seam, so the registry has
 # one shape even though the benchmark objective — a surrogate fitted from a bundled dataset — needs
 # no calculator at all. A per-entry signature would push the branch into `get_objective` and make
@@ -127,6 +144,12 @@ def get_objective(name: str, log_s_for: LogSFor) -> Objective:
     `log_s_for` is the calculator a calculator-backed objective evaluates through; see `LogSFor`
     for why it arrives as an argument rather than as an import.
     """
+    if is_measured(name):
+        raise ValueError(
+            f"objective {name!r} is measured rather than computed, so it has no function to "
+            "resolve; a campaign naming it suspends on a durable wait instead of evaluating "
+            "(chemclaw.durable.awaiting)"
+        )
     registered = _REGISTRY.get(name)
     if registered is None:
         raise ValueError(f"unknown objective {name!r}; known: {sorted(_REGISTRY)}")

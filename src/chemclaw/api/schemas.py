@@ -235,6 +235,47 @@ class PlanDecisionIn(BaseModel):
     plan_hash: str
 
 
+class PendingRequestOut(BaseModel):
+    """One held-open question, as an inbox renders it."""
+
+    request_id: str
+    kind: str
+    subject: str
+    rationale: str = ""
+    asked_of: str = ""
+    requested_by: str = ""
+    session_id: str = ""
+    state: str = "waiting"
+    due_at: str = ""
+    reminders: int = 0
+    answered_at: str = ""
+    answered_by: str = ""
+    answer: dict[str, Any] = Field(default_factory=dict)
+    created_at: str = ""
+
+
+class PendingRequestsOut(BaseModel):
+    """Everything waiting on this caller, soonest deadline first.
+
+    `count` is the length of `requests` rather than a total, and the list is bounded by the store.
+    An inbox that said "12" over five rows would be describing a page as a population.
+    """
+
+    requests: list[PendingRequestOut] = Field(default_factory=list)
+    count: int = 0
+
+
+class PendingAnswerIn(BaseModel):
+    """The answer to a held-open question.
+
+    Carries no actor. The answering identity is the authenticated principal and is stamped by the
+    route — a body-supplied name would be a caller writing their own attribution into a record the
+    workflow persists.
+    """
+
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
 class PlanStatusOut(BaseModel):
     """The plan a session is currently proposing, its hash, and who (if anyone) approved it."""
 

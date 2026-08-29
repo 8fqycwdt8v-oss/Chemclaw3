@@ -127,7 +127,15 @@ load_profiles()
 #:
 #: **Lowering this constant is the commit that proves a reduction happened, so it is not lowered by
 #: a commit that only measured one.**
-CEILINGS: dict[str, int] = {"__default__": 29_500}
+#: **Raised to 29,900 on 2026-08-29, and the reason is recorded rather than assumed.** F2 and F3
+#: added three tools to the `default` surface — `review_activity`, `request_external_input` and
+#: `check_pending_requests` — measured at 1,399 tokens between them *after* a trimming pass took
+#: 225 off the first two by moving developer rationale out of the docstrings the schema ships. The
+#: prefix went 28,210 → 29,609. Two of the three are the reason a project leader can be answered at
+#: all (the operational read model and the inbox over the durable wait), so this is capability
+#: rather than drift — but it is exactly the growth the § 5 row is about, and it makes the
+#: `default` allow-list below the next thing worth doing rather than a nice-to-have.
+CEILINGS: dict[str, int] = {"__default__": 29_900}
 
 #: How much of the floor one tool may be. A schema above this is not expensive, it is *badly
 #: shaped* — the fix is pagination, a narrower argument, or splitting a tool that does two things.

@@ -242,6 +242,11 @@ _MUST_FAIL = frozenset(
         "OptimizationCampaignWorkflow",
         "ObservationPromotionWorkflow",
         "DevelopmentReportWorkflow",
+        # The durable wait (D-2026-08-29). Somebody is holding a question open and somebody else is
+        # waiting on the answer, so a bug in it must surface as a failed wait rather than park: a
+        # parked wait is a request that stays in an inbox forever with nothing listening, which is
+        # indistinguishable from one nobody has got to yet — the worst state this primitive has.
+        "AwaitAnswerWorkflow",
         # Fan-out children of those. A parked child is dropped only when its execution timeout
         # expires, and that hour is spent by the parent the chemist is polling.
         "PublishNoteWorkflow",

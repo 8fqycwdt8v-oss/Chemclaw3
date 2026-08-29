@@ -30,43 +30,37 @@ async def review_activity(
 ) -> dict[str, object]:
     """Read what this system itself has done — tool use, durable jobs, proposals, or effort.
 
-    This is the record of the *work*, not of the chemistry: who used which capability, which jobs
-    ran, what this system proposed for the knowledge graph and what people decided about it, and
-    how many turns and tokens each actor spent. Use it for questions like "is anyone actually using
-    this", "how did our hazard flags trend against last quarter", "which jobs dominate the queue"
-    or "how much of what is in the graph did this system propose".
+    The record of the *work*, not of the chemistry: who used which capability, which jobs ran, what
+    this system proposed for the knowledge graph and what people decided, and how many turns and
+    tokens each actor spent. For "is anyone actually using this", "how did our hazard screening
+    trend against last quarter", or "how much of what is in the graph did this system propose".
 
-    Three things it is not, and each matters when you report it:
+    Three limits to carry into any answer built on it:
 
     - **It is not project, programme, capacity or headcount data.** It knows what was asked of
-      *this system*, which is a lower bound on what a team did and no kind of measure of what a
-      team is. Never present a tool-call count as a count of experiments, of people or of hours.
-    - **It is not a share of anybody's authorship.** The `authorship` aspect returns the notes this
-      system proposed and how they were decided. It carries a `boundary` sentence; report that
-      sentence rather than converting the numbers into a percentage of a document.
+      *this system*. Never present a tool-call count as a count of experiments, people or hours.
+    - **It is not a share of anybody's authorship.** The `authorship` aspect returns a `boundary`
+      sentence; report that sentence rather than converting the numbers into a percentage.
     - **An empty result is not automatically "nothing happened".** Every answer carries `coverage`
-      with the window it actually ran over. If it is empty, say over what span it was empty.
+      with the window it ran over; if it is empty, say over what span.
 
-    Every returned figure is a count, a duration, a timestamp or an identifier from a bounded
-    vocabulary. Nothing a caller typed is returned, so there is nothing here to cite as evidence
-    about the science — for the reasons behind a run, use `find_past_jobs`.
+    Every figure is a count, a duration, a timestamp or an identifier from a bounded vocabulary —
+    nothing a caller typed. For the reasons behind a run, use `find_past_jobs`.
 
     Args:
-        aspect: Which reading. `tools` — calls per tool split by outcome (ok, refused, error,
-            cancelled). `jobs` — durable runs per connector job, and how many proposed a note.
-            `authorship` — what this system proposed for the graph, by note type, and how humans
-            decided. `spend` — turns, tokens and wall clock per actor.
-        days: How far back to look, ending now. Clamped to 1..730; the answer's `coverage` states
-            what was actually covered, so quote that rather than this argument.
-        tool_name: With `aspect="tools"`, narrow to one tool name — the "is this being used"
-            question. Ignored by the other aspects.
-        compare_with_previous: Also return the same reading over the immediately preceding window
-            of equal length, as `previous`. This is what a quarter-on-quarter or month-on-month
-            question needs; without it there is one span and no trend to state.
+        aspect: `tools` — calls per tool split by outcome (ok, refused, error, cancelled). `jobs` —
+            durable runs per connector job, and how many proposed a note. `authorship` — what this
+            system proposed for the graph, by note type, and how humans decided. `spend` — turns,
+            tokens and wall clock per actor.
+        days: How far back to look, ending now. Clamped to 1..730; quote `coverage`, not this.
+        tool_name: With `aspect="tools"`, narrow to one tool name. Ignored by the other aspects.
+        compare_with_previous: Also return the same reading over the preceding window of equal
+            length, as `previous`. A quarter-on-quarter question needs this; without it there is
+            one span and no trend to state.
 
     Returns:
-        The reading for the aspect, under `current`, each carrying its own `coverage`; plus
-        `previous` when a comparison was asked for.
+        The reading under `current`, each carrying its own `coverage`; plus `previous` when a
+        comparison was asked for.
     """
     window = Window.trailing(days)
 

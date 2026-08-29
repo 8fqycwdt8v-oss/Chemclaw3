@@ -68,6 +68,11 @@ _EXPECTED_INPROCESS_TOOLS = {
     # another bundle's record — nor, being a projection of the audit trail itself, may the
     # capability that writes that trail be the thing that reads it back.
     "review_activity",
+    # The durable wait (D-2026-08-29). In-process because the wait is core's primitive rather than
+    # any capability's: a BO round, a gate review and an effect approval are the same object, and a
+    # bundle owning it would make four copies of one deadline.
+    "request_external_input",
+    "check_pending_requests",
 }
 
 
