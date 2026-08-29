@@ -32,7 +32,7 @@ Status: `pending` · `running` · `PASS` · `FAIL` · `skipped (reason)`
 | S4 | Real-model probes | `make live-probes` | **blocked (F1)** | `tasks/live-test/transcripts/` |
 | S5 | Plan gate | `make live-plan-gate` | blocked (F1), mock route TBD | `tasks/live-test/m12-plan-gate/` |
 | S6 | UI full-stack | `npm run test:e2e:full-stack` | **blocked (F1)** | — |
-| S7 | Storm | `make live-storm` | pending | `tasks/live-test/storm.md` |
+| S7 | Storm | `make live-storm` | **28/31** (3 open, see F5/F6) | `tasks/live-test/storm.md` |
 | S8 | Corpus convergence | `make live-data`, polled | **PASS 19/19** after F3, F4 | `.live/e2e-corpus-backfill.log` |
 | S9 | Degradation (Temporal down) | `make live-degradation` | blocked (F1), mock route TBD | `tasks/live-test/m12-degradation/` |
 | S10 | Soak + drift | `make live-soak`, `make live-soak-report` | pending | `.live/soak.jsonl` |
@@ -270,3 +270,86 @@ must reach a step, **and** the headline must stay absent unless the entry stated
 field. That is strictly stronger than what it replaced: the old form could not have caught an
 inferred headline at all, because it demanded one. Now `12/12`, with the denominator reported so a
 check that stops matching anything cannot pass quietly. `make live-data` exits 0.
+
+## S7 — the storm: stress, chaos and adversarial, on a mock model
+
+**28/31 checks passed** (`tasks/live-test/storm.md`). The first run read 27/31, and **all four of
+its failures were my own lane misconfiguration rather than defects** — the distinction the
+one-permitted-re-run rule exists to draw, and it changed the verdict on three of them.
+
+What the storm proves when it is pointed at a correctly configured lane:
+
+- **The admission cap is load-bearing and its knee is resolvable.** Goodput rises 0.58 -> 1.15
+  answered/s from cap 2 to cap 32 and stops improving at **cap 16**, against a measured 13%
+  within-cap noise floor. Every offered turn is accounted for at every cap.
+- **Fan-out is honest.** Announcements match results whole (1/1), fragmented (1/1) and in parallel
+  (6/6) — the defect that check was written for is one call announcing ten times against one result.
+- **The durable collision holds.** 12 simultaneous identical launches produce exactly one run, and
+  `calculation_results` moved 51 -> 51: D-011 under contention, not just in sequence.
+- **A Postgres bounce is survivable.** 24/24 in-flight turns survived it and a fresh turn answered
+  2.1s later, with the front door never restarted.
+- **Tool bodies really ran**, asked of the audit trail rather than the stream: 366 `find_notes`,
+  151 `gather_evidence`, 145 `expand_note` audited calls.
+- **Adversarial input does not get through**: an injection string is treated as a search string
+  (`audit_events` 718 -> 719 — a dropped table would read as 0), unicode round-trips through
+  Postgres exactly, an unparseable reaction SMILES does not kill the turn, and arguments that parse
+  but cannot be true are refused rather than answered.
+
+### F5 — the chaos primitive could destroy the lane it was testing
+
+`processes.sh restart <name>` is "kill, then `up`", and `up` dies on a missing Chemclaw3-mcp
+checkout. So a restart invoked without `CHEMCLAW_MCP_REPO` killed the process, failed to restore
+it, and left the lane worse than it found it.
+
+That is the wrong order anywhere and disqualifying here, because this verb is **the primitive the
+storm's chaos family uses**. Measured: family D called `restart mock-llm`, the kill succeeded, `up`
+died, and the rest of the run drove a lane with no model — surfacing as unrelated red checks two
+families later (a durable collision reporting zero job records, a broker outage that never
+recovered). The cause was invisible from every one of those checks.
+
+**Fixed**: every precondition `up` would die on is now checked *before* anything is killed, and the
+refusal says plainly that nothing has been killed. Verified with `CHEMCLAW_MCP_REPO=/nonexistent` —
+`restart` refuses and the target keeps its pid and stays alive.
+
+### F6 — the adversarial probe could not fail-report, and the reachable case was untested (OPEN)
+
+`f-malformed-json` sent `'{"text": "unterminated'` and asserted the bad call must be reported.
+**That check could never pass.** Measured on the two payloads:
+
+```
+'{"text": "unterminated'  ->  repaired to {'text': 'unterminated'}
+'{"text": }'              ->  JSONDecodeError  ->  invalid_tool_calls
+```
+
+LangChain runs a streamed call's fragments through `parse_partial_json`, which closes an
+unterminated string and an unclosed brace. `agent/model_calls.py` already states this, and even
+corrects an earlier draft of its own docstring for the same confusion. So the probe asserted an
+outcome the system is documented and measured never to produce, while the *reachable* case — the
+one `RepairInvalidToolCalls` exists to read — went entirely untested. A permanently red check
+**and** a blind spot over the middleware written for it.
+
+**Corrected** to send JSON-shaped, unclosable arguments, and verified against the live stack that
+this changes what happens: `result[0]` went from `'matches=[] total_matches=0 widened=False'` to
+`None`, so the tool no longer runs and the call really does reach the invalid path.
+
+**It is still red, and now for a reason worth having.** `chemclaw_invalid_tool_calls_total` is
+declared and carries **no samples** after a run that deliberately emits unparseable arguments, and
+no `tool_failed` reaches the stream — so the call is a silent no-op, which is
+`D-2026-08-04-a-failure-that-says-nothing-is-read-as-proceed`.
+
+**Left open deliberately.** Root-causing it means entering LangChain's streaming tool-call assembly,
+this system's most defect-prone seam by its own history (STREAM-1, LOAD-1, the `stream_events` v3
+revert). That is not a change to make unreviewed at the end of a long autonomous run, so it is
+handed over with its measurement and a named next step: find why an `invalid_tool_calls` entry
+reaches neither the counter nor `wrap_model_call`.
+
+### Two more, triaged rather than fixed
+
+- **`a disconnected session accepts a new turn without waiting out the lease`** — PASS in run 1
+  (accepted after 0.2s, codes `[409, 200]`), FAIL in run 2 (11.1s, codes `[409, 409, 409, 409]`).
+  One pass means it is not reproducible, so by the campaign's own rule it is **not** called a
+  defect on this evidence. It is timing-sensitive under load and worth a dedicated look.
+- **`a job survives its connector worker being SIGKILLed mid-flight`** — FAIL in both runs, but
+  with wildly different numbers (`FAILED 597s later` vs `FAILED 13s later`). Reproducible enough to
+  be real, and **not** diagnosed here: run 1 was measuring a lane whose model was already dead, so
+  only run 2's evidence counts and one run is not a root cause.
