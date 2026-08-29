@@ -151,9 +151,15 @@ kwarg — the per-provider translation everyone expects turned out not to exist 
 (`D-2026-08-29-a-tool-schema-nobody-calls-is-still-paid-for`): deferring connector tool schemas.
 Measuring for it found the prefix is **33,310 tokens over 56 bound tools**, re-sent every model
 call and uncached on the shipped `openai_compatible` stack — and that
-`tests/test_context_floor.py`, the ratchet that exists to bound this, counts **7,799 fewer** than
-the model is sent, because `@tool` is identity so it measures raw callables rather than the bound
-objects, and never sees the seven `FilesystemMiddleware`/`SubAgentMiddleware` tools at all.
+`tests/test_context_floor.py`, the ratchet that exists to bound this, counted **7,799 fewer** than
+the model was sent, because `@tool` is identity so it measured raw callables rather than the bound
+objects, and never saw the seven `FilesystemMiddleware`/`SubAgentMiddleware` tools at all.
+**That second half is closed.** `_bound_tools` now reads the surface off the compiled graph's
+`ToolNode` — so any future tool source lands in the count the moment it is bound — and every
+ceiling was re-baselined in one commit: `default` measures **42,458** where the old basis reported
+34,399, six tools turned out to have been over `MAX_SINGLE_TOOL_TOKENS` all along, and **nothing
+was added**. The number grew because the measurement got honest, not because the surface did.
+The deferral itself stands.
 
 M13 removed the dependency itself: `agent-framework-*` is out of `pyproject.toml` and the suite is
 green with it uninstalled, which is how that was verified. Taking it out is also what exposed
