@@ -226,14 +226,14 @@ def test_no_prefix_is_registered_on_one_ladder_and_not_the_other() -> None:
     """Derived from the registry, because a hand-written list is what missed this twice.
 
     Case is what separates molarity from length, and it only works where **both** families register
-    the same rung: a fold claimed by two units is poisoned and the ambiguous spelling refuses. A rung
-    present on one side alone silently resolves to whichever family has it.
+    the same rung: a fold claimed by two units is poisoned and the ambiguous spelling refuses.
+    A rung present on one side alone silently resolves to whichever family has it.
 
-    That defect was found, fixed for `nM`/`µm` — and reintroduced in the same commit, because the fix
-    added `pM` with a comment saying it "has no length twin and is therefore unambiguous". The
-    missing twin is exactly what made it dangerous: `pm`, the unit of a bond length, resolved to
-    picomolar, and `reconcile(154, "pm", "M")` returned 1.54e-10 where `origin/main` had refused it.
-    Both times the test enumerated spellings by hand and stopped one rung short.
+    That defect was found, fixed for `nM`/`µm` — and reintroduced in the same commit. The fix
+    added `pM` with a comment calling it "unambiguous" for having no length twin; the missing twin
+    is exactly what made it dangerous, and `pm` — the unit of a bond length — resolved to picomolar.
+    `reconcile(154, "pm", "M")` returned 1.54e-10 where `origin/main` had refused it outright. Both
+    times the test enumerated spellings by hand and stopped one rung short.
 
     So this asks the registry. `_EXEMPT_FOLDS` is two entries and each states why the other reading
     is not a unit anybody writes — an allowlist that short is readable, which is the condition
@@ -256,6 +256,6 @@ def test_no_prefix_is_registered_on_one_ladder_and_not_the_other() -> None:
 
     unpaired = (folds("concentration") ^ folds("length")) - exempt_folds
     assert unpaired == set(), (
-        f"{sorted(unpaired)} exist on one of the concentration/length ladders and not the other, so "
-        "each resolves silently to whichever family has it instead of refusing as ambiguous"
+        f"{sorted(unpaired)} exist on one of the concentration/length ladders and not the "
+        "other, so each resolves silently to whichever family has it instead of refusing"
     )

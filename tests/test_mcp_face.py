@@ -98,6 +98,47 @@ def test_the_face_is_not_addressable_as_a_connector() -> None:
     assert not [text for text in manifests if "chemclaw-read" in text]
 
 
+#: Exactly what this face serves. **A golden set, because the partition test cannot fail for the
+#: case it exists to catch.** `advertised_tools()` is *derived* as
+#: `(registry ∩ READ_ONLY_TOOLS) − WITHHELD`, so "every read-only tool is advertised or withheld" is
+#: true by construction and stays true when a new read-only tool joins this surface by being
+#: forgotten — which is precisely how four deployment-wide reads were being served. Only an explicit
+#: list makes adding one a decision somebody has to take.
+_ADVERTISED = {
+    "expand_note",
+    "find_experiment_protocols",
+    "find_knowledge_gaps",
+    "find_notes",
+    "gather_evidence",
+    "read_experiment_protocol",
+    "recall_observations",
+    "condense_protocols",
+}
+
+
+def test_the_face_serves_exactly_the_tools_this_list_names() -> None:
+    """A new read-only tool must be classified here or in `WITHHELD` — it cannot arrive by default.
+
+    The failure this replaces: the derived partition assertion passes whether or not a new tool
+    should be on this surface, because the surface *is* the derivation. Dropping a name from
+    `WITHHELD` re-advertises it and every existing assertion stays green.
+
+    When this fails, do not just add the name. Ask the question `WITHHELD` is organised around —
+    does this tool answer something about this deployment's *people* or about its *chemistry* — and
+    put it on whichever side the answer says.
+    """
+    advertised = set(advertised_tools())
+    arrived = advertised - _ADVERTISED
+    vanished = _ADVERTISED - advertised
+    assert not arrived, (
+        f"{sorted(arrived)} joined the read-only MCP face without anyone deciding they should be "
+        "exported. Classify each in WITHHELD or add it here deliberately"
+    )
+    assert not vanished, (
+        f"{sorted(vanished)} no longer reach the face; if that is intended, remove them here"
+    )
+
+
 def test_no_deployment_wide_read_reaches_the_face() -> None:
     """Read-only is not the predicate; "about chemistry rather than about people" is.
 

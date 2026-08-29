@@ -308,3 +308,53 @@ def test_a_settle_without_a_handle_does_not_erase_the_one_already_recorded() -> 
         assert (stored.state, stored.external_ref) == ("compensated", "DEV-7")
 
     asyncio.run(_run())
+
+
+def test_an_applied_effect_can_still_be_compensated() -> None:
+    """The one transition out of `applied` that must survive the overwrite guard.
+
+    `reversal: compensating` means "undone by another declared job", and applied → compensated is
+    the *only* path by which that state is ever reached — so a guard that blocks every write over
+    `applied` leaves the ledger claiming a change is standing after it has been rolled back. That is
+    the same lie the guard exists to prevent, told the other way round.
+
+    The existing compensation test asserts `failed` → `compensated`, which the guard always allowed;
+    it passes whether or not this path works, which is why it could not catch this.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        effect_id = "eff-applied-then-compensated"
+        await _clear(effect_id)
+        await begin_effect(
+            EffectRecord(
+                effect_id=effect_id,
+                connector="qms",
+                job="file_deviation",
+                system="the QMS",
+                reversal="compensating",
+                requested_by="u-1",
+                session_id="s-1",
+                approved_by="u-qa",
+            )
+        )
+        await settle_effect(effect_id, state="applied", external_ref="DEV-55", detail="filed")
+        await settle_effect(
+            effect_id, state="compensated", external_ref="DEV-55R", detail="withdrawn"
+        )
+
+        stored = await get_effect(effect_id)
+        assert stored is not None
+        assert stored.state == "compensated", (
+            "an applied effect could not be compensated, so the ledger still says a change is "
+            "standing after it was rolled back"
+        )
+        assert stored.external_ref == "DEV-55R", "the compensating handle was not recorded"
+
+        # And the guard it must not weaken: `failed` still cannot overwrite `applied`.
+        await settle_effect(effect_id, state="applied", detail="re-applied")
+        await settle_effect(effect_id, state="failed", detail="Cancelled")
+        again = await get_effect(effect_id)
+        assert again is not None and again.state == "applied"
+
+    asyncio.run(_run())

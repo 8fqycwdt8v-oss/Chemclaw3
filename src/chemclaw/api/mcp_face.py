@@ -98,6 +98,11 @@ WITHHELD: dict[str, str] = {
         "the chemistry"
     ),
     "find_past_jobs": "runs from other people's conversations, each with its free-text rationale",
+    "get_durable_job_status": (
+        "the same disclosure as `find_past_jobs` through the other door — it applies no actor "
+        "check, returns the run's summary, result and free-text rationale, and its job ids are a "
+        "pure function of connector, job name and payload, so they are guessable rather than secret"
+    ),
 }
 
 

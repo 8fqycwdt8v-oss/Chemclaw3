@@ -363,7 +363,8 @@ def test_a_measurement_with_no_stated_unit_is_refused_rather_than_stamped() -> N
         asyncio.run(calc_tools.report_measurement("pka", "CCO", 15.9))
 
     # **And the spellings that used to walk around it.** The lookup was exact-match on a
-    # model-supplied string, so one capital letter or a trailing space skipped the refusal and stored
+    # model-supplied string, so one capital letter or a trailing space skipped the refusal
+    # and stored
     # the row with the empty unit the control exists to prevent. (The first version of this test
     # asserted this case with `"pka"`, which *is* calibrated — so it covered the same branch twice
     # and its comment described coverage that did not exist.)

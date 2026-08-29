@@ -207,7 +207,8 @@ _register(Unit("eV", "energy_per_amount", 96.485_332), "electronvolt")
 # limit was refused with "cannot compare length with concentration".
 #
 # So every rung either exists on both sides or on neither — and "or on neither" is not a figure of
-# speech. The first version of this fix registered `pM` with the note that it "has no length twin and
+# speech. The first version of this fix registered `pM` with the note that it "has no length twin
+# and
 # is therefore unambiguous", which had it exactly backwards: the missing twin left the fold `"pm"`
 # unpoisoned, so **picometre — the unit of a bond length — resolved to picomolar**, and
 # `reconcile(154, "pm", "M")` returned 1.54e-10 where `origin/main` had refused it as unknown. A
