@@ -147,7 +147,15 @@ async def graph_events(
                 yield TokenEvent(text=text, agent="subagent" if namespace else "")
         elif mode == "custom":
             if isinstance(signal := (payload or {}).get(_SIGNAL_KEY), ToolFailureSignal):
-                failed_calls.add(signal.call_id)
+                # **Only an attributed id.** `ToolFailureSignal.call_id` documents `""` as "not
+                # attributed", never "the call with no id" — and a failure that never reached the
+                # tool chain has none to give (`agent/model_calls` announces the calls a reply
+                # will never run, and there is no `tool_call` event for them). Adding the empty
+                # string here would put it in the suppression set, so any `ToolMessage` arriving
+                # with an empty `tool_call_id` would have its result silently dropped for a
+                # failure that was not its own.
+                if signal.call_id:
+                    failed_calls.add(signal.call_id)
             event = _custom_event(payload, on_signal)
             if event is not None:
                 yield event

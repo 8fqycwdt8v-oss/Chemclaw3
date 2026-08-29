@@ -25,6 +25,8 @@ from chemclaw.agent.langgraph_agent import build_langgraph_agent
 from chemclaw.api.events import HandoffEvent, ToolCallEvent, ToolResultEvent
 from chemclaw.api.graph_stream import graph_events
 from chemclaw.api.runner_trace import ToolCallTrace
+from chemclaw.core.turn_signals import _KEY as SIGNAL_KEY
+from chemclaw.core.turn_signals import ToolFailureSignal
 from tests.fakes_langgraph import ScriptedChatModel
 
 
@@ -572,3 +574,62 @@ def test_a_tool_result_is_traced_however_upstream_spells_its_class(streamed: boo
         f"a {built.__name__} result produced no tool_result event; the call has no answer"
     )
     assert trace.outputs, "the trace the answer gate scores against was left empty"
+
+
+def test_an_unattributed_failure_does_not_suppress_a_result() -> None:
+    """`call_id=""` means "not attributed", and this module used it as an attribution key.
+
+    `ToolFailureSignal.call_id` documents the empty string as "not attributed, never 'the first
+    call to this tool'", and `failed_calls` is an index *by* call id whose only job is to stop a
+    failed call's `ToolMessage` from also being emitted as a `tool_result`. Adding `""` to it
+    therefore says "the call with no id already failed" about a turn where nothing of the sort
+    happened, and the next result carrying an empty `tool_call_id` is dropped for a failure that
+    was not its own.
+
+    It became worth pinning when a second producer appeared:
+    `agent/model_calls._report_lost_calls` announces the calls a discarded reply will never run,
+    and those have no id to give — there is no `tool_call` event for them to be matched to — so
+    every turn that survives an unparseable emission now writes `""` into that set.
+
+    Driven over a scripted stream rather than a compiled graph, deliberately: a real engine mints
+    an id for every call, so the state under test is one only this module's own bookkeeping can
+    reach, and the assertion is about what the index *means* rather than about what an engine
+    emits.
+    """
+
+    class _Graph:
+        """A stream of exactly the two payloads whose interaction is the subject."""
+
+        async def astream(self, *_args: Any, **_kwargs: Any) -> Any:
+            yield ((), "custom", {SIGNAL_KEY: ToolFailureSignal(tool="find_notes", message="no")})
+            yield (
+                (),
+                "updates",
+                {
+                    "tools": {
+                        "messages": [
+                            ToolMessage(content="matches=[]", tool_call_id="", name="find_notes")
+                        ]
+                    }
+                },
+            )
+
+    trace = ToolCallTrace()
+
+    async def _run() -> list[Any]:
+        return [
+            event
+            async for event in graph_events(
+                _Graph(),
+                "hello",
+                config={},
+                trace=trace,
+                on_signal=lambda _signal: None,
+                usage=_Usage(),
+            )
+        ]
+
+    kinds = [event.type for event in asyncio.run(_run())]
+    assert kinds == ["tool_failed", "tool_result"], (
+        f"the unattributed failure swallowed an unrelated result: {kinds}"
+    )
