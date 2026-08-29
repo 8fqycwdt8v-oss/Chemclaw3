@@ -115,8 +115,13 @@ async def _probe(client: httpx.AsyncClient, name: str, url: str, budget: float) 
     trickling one byte at a time is never late and never done — measured against the shipped 2 s
     budget, a `/healthz` emitting a byte every 1.5 s held this function for **16.6 s** and then
     reported `healthy`. The connect leg has the same shape one level down, because httpcore charges
-    the connect timeout separately to the TCP connect and to the TLS handshake, so a fast SYN
-    followed by a stalled handshake spends it twice. This is the same correction the queue half
+    the connect timeout separately to the TCP connect and to the TLS handshake, so the connect
+    phase alone can be charged more than once — *that* half is unmeasured here and stated as the
+    API's shape rather than as a number: a stalled handshake after an instant loopback connect
+    costs one charge (2.01 s against 2.0 s), and the doubling needs a slow-but-succeeding connect,
+    which is a property of a network rather than of a socket. The wall clock bounds both either
+    way, which is why it is the fix rather than a tighter kwarg. This is the same correction the
+    queue half
     took (`_probe_queues`), for the same reason: `/readyz` is inside a kubelet probe whose
     `timeoutSeconds` is *derived* from this number, and a derivation is only honest if the number
     bounds the whole answer.
