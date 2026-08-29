@@ -1,0 +1,15 @@
+# Deliver each message as JSON to one URL — the shape a chat or ticketing integration takes.
+#
+# **This channel makes an outbound call.** A deployment enabling it owes the chart's
+# `networkPolicy.egressDestinations` an entry for the host, and must set the bearer token under the
+# name `token_env` declares. A host the policy drops fails every delivery with a timeout that reads
+# as the destination being down.
+name: webhook
+description: >-
+  POST each message as JSON to a configured URL with a bearer token from the environment. For a
+  chat room or a ticketing system. Requires an egress rule and a mounted secret.
+driver: chemclaw.deliver.driver:webhook_channel
+config:
+  url: https://example.invalid/hooks/chemclaw
+  token_env: CHEMCLAW_DELIVERY_WEBHOOK_TOKEN
+  timeout_seconds: 10.0

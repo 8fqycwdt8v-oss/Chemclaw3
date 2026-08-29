@@ -74,7 +74,7 @@ SHELL := bash
 
 .DEFAULT_GOAL := help
 
-.PHONY: help install lint type test cov check ci chat db-migrate db-grants schedules-apply kg-validate proposals-reconcile synthesize eval eval-strict eval-baseline eval-baseline-check eln-validate skill-validate connector-validate datasource-validate sink-validate sink-schema template-validate connectors prose-validate helm-validate explain user-erase reindex reindex-full up down phoenix-up phoenix-down phoenix-publish deps-audit live-infra live-infra-down live-up live-down live-status live-jobs live-probes live-template-args live-verifier-margin trajectory-census live-data live-plan-gate live-degradation live-storm live-soak live-soak-report leak-probe mutants mutant-results mutant-stats
+.PHONY: help install lint type test cov check ci chat db-migrate db-grants schedules-apply kg-validate proposals-reconcile synthesize eval eval-strict eval-baseline eval-baseline-check eln-validate skill-validate connector-validate datasource-validate sink-validate channel-validate sink-schema template-validate connectors prose-validate helm-validate explain user-erase reindex reindex-full up down phoenix-up phoenix-down phoenix-publish deps-audit live-infra live-infra-down live-up live-down live-status live-jobs live-probes live-template-args live-verifier-margin trajectory-census live-data live-plan-gate live-degradation live-storm live-soak live-soak-report leak-probe mutants mutant-results mutant-stats
 
 help:  ## List every target with its one-line description (the default).
 	@# Reads the `## ` comments beside each target, so a new target documents itself the day it is
@@ -123,7 +123,7 @@ check: lint type test  ## The fast inner-loop gate: lint + type + test (no cover
 # alone. Last in the list rather than first: a dependency finding is a real failure but not one
 # that should mask a broken test, and it is the one gate whose fix lives in `uv.lock` rather than
 # in the diff under review.
-ci: lint type cov kg-validate eval-strict eval-baseline-check eln-validate skill-validate connector-validate datasource-validate sink-validate template-validate prose-validate helm-validate deps-audit  ## The full pre-push gate: lint + type + coverage + all validators + the dependency audit (what CI runs).
+ci: lint type cov kg-validate eval-strict eval-baseline-check eln-validate skill-validate connector-validate datasource-validate sink-validate channel-validate template-validate prose-validate helm-validate deps-audit  ## The full pre-push gate: lint + type + coverage + all validators + the dependency audit (what CI runs).
 
 chat:  ## Chat with the agent from the terminal (admin/testing mode; needs ANTHROPIC_API_KEY).
 	uv run chemclaw --admin
@@ -186,6 +186,10 @@ datasource-validate:  ## Validate the data-source manifests (halves resolve, con
 
 sink-validate:  ## Validate the result-sink manifests (drivers resolve, config binds, names exist).
 	uv run python -m chemclaw.cli.validate_sinks
+
+channel-validate:  ## Validate every delivery-channel manifest against its driver's signature.
+	uv run python -m chemclaw.cli.validate_channels
+
 
 sink-schema:  ## Print the DDL + registry seed a results database needs (apply it yourself).
 	uv run python -m chemclaw.cli.sink_schema --all

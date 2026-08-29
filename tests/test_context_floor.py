@@ -175,7 +175,28 @@ load_profiles()
 #:
 #: The headroom is ~816 tokens, tighter in proportion than the 29,500 it replaces: less than
 #: `propose_knowledge_note` costs, so it cannot absorb another tool of that size unnoticed.
-CEILINGS: dict[str, int] = {"__default__": 33_000}
+#:
+#: **Raised again on 2026-08-29 by the eight infrastructure findings**, which added five tools to
+#: the `default` surface: `review_activity` 585, `request_external_input` 533, `review_commitments`
+#: 421, `assemble_evidence_pack` 350, `check_pending_requests` 281 — **2,170 between them**, after a
+#: trimming pass took 225 out of the two largest by moving developer rationale out of the docstrings
+#: a schema ships. On that branch alone the prefix went 28,210 → 30,390; **merged with the protocol
+#: surface above it measures 34,379**, which is 32,184 + 2,170 to within 25 tokens — the two
+#: surfaces are additive, as they should be, and neither absorbed the other's headroom.
+#:
+#: Four of the five are the reason a project leader can be answered at all — the operational read
+#: model, the inbox over the durable wait, the commitment mirror and the evidence pack — so this is
+#: capability rather than drift. It is also **exactly the growth § 5's row is about**, and two
+#: independent surfaces raising this ceiling within two days is the argument *for* that row rather
+#: than against it: the `default` allow-list measures **-5,787 tokens (-21%)**, more than twice what
+#: this work added and more than the protocol surface's headroom, and it is a `data/profiles` edit
+#: rather than a tool change. It stays blocked on the live lane for the reason it gives — a cheaper
+#: prompt that stops finding tools is a regression with a good-looking metric.
+#:
+#: The headroom is ~620 tokens against a measured 34,379 — tighter again than the ~816 the protocol
+#: surface left, and now well under what a single tool of `propose_knowledge_note`'s size costs. The
+#: next surface to arrive here should expect to be asked for the allow-list first.
+CEILINGS: dict[str, int] = {"__default__": 35_000}
 
 #: How much of the floor one tool may be. A schema above this is not expensive, it is *badly
 #: shaped* — the fix is pagination, a narrower argument, or splitting a tool that does two things.

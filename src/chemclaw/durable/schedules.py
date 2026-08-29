@@ -43,6 +43,7 @@ from chemclaw.core.config import settings
 from chemclaw.core.ids import stable_hash
 from chemclaw.core.temporal_client import connect
 from chemclaw.durable.artifact_eviction import ArtifactEvictionWorkflow
+from chemclaw.durable.commitment_sync import CommitmentSyncWorkflow
 from chemclaw.durable.corpus_sync import ReactionCorpusWorkflow, corpus_sources
 from chemclaw.durable.digest import DigestWorkflow
 from chemclaw.durable.document_sync import DocumentShareSyncWorkflow, share_sources
@@ -53,7 +54,10 @@ from chemclaw.durable.note_index import NoteReindexWorkflow
 from chemclaw.durable.observation_jobs import ObservationSynthesisWorkflow
 from chemclaw.durable.publish_results import PublishResultsWorkflow
 from chemclaw.durable.retention import RetentionWorkflow
-from chemclaw.ingest.sources.registry import active_ingest_source_names
+from chemclaw.ingest.sources.registry import (
+    active_commitment_sources,
+    active_ingest_source_names,
+)
 from chemclaw.publish.registry import publishing_enabled
 
 logger = logging.getLogger(__name__)
@@ -187,6 +191,14 @@ def planned_schedules() -> list[PlannedSchedule]:
     if corpus_sources():
         corpus_every = timedelta(minutes=settings.corpus_sync_schedule_minutes)
         schedules.append(PlannedSchedule("reaction-corpus", ReactionCorpusWorkflow, corpus_every))
+    # And the commitment mirror earns one only where a source declares a `commitments:` half (F4).
+    # Daily rather than hourly, for the same reason the corpus drain is: a portfolio tool's dates
+    # move on a human cadence, so a tighter loop would spend a vendor's API budget to learn nothing.
+    if active_commitment_sources():
+        commitment_every = timedelta(minutes=settings.commitment_sync_schedule_minutes)
+        schedules.append(
+            PlannedSchedule("commitment-mirror", CommitmentSyncWorkflow, commitment_every)
+        )
     # Digests earn a Schedule where a deployment turns them on (gap IDEA-1, default off); with the
     # flag clear the job would sweep the corpus daily to deliver nothing.
     #

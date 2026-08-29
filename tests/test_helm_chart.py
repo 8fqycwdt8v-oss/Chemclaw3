@@ -325,6 +325,16 @@ def test_chart_declares_only_the_documented_secrets() -> None:
     chart at all. `sessionStoreDsn` falls back to `CHEMCLAW_POSTGRES_DSN`, so splitting the session
     store off had no seam.
 
+    `mcpFaceToken` is the fifteenth, and it is the first whose *absence* is safe in the strong sense
+    rather than the weak one. It is the bearer the read-only MCP face requires on `/mcp`, and the
+    middleware fails **closed** on an unset variable: a face deployed without it answers 401 rather
+    than serving the knowledge graph anonymously
+    (`D-2026-08-29-a-digest-nobody-receives-is-not-delivered`). So "optional" here describes the
+    capability honestly — the surface simply refuses — and the pod is not rendered at all unless
+    `mcpFace.enabled`. It is a Secret slot rather than a `config` entry for the standing reason:
+    `config` renders into a ConfigMap the `view` role can read, and anyone who learns this value can
+    read the whole corpus through that surface.
+
     Both maps are asserted, because "which secrets does this chart name" is one question and
     splitting the answer across two values is exactly how a key comes to be in neither.
     """
@@ -348,6 +358,7 @@ def test_chart_declares_only_the_documented_secrets() -> None:
         "CHEMCLAW_VECTOR_STORE_API_KEY",
         "CHEMCLAW_TEMPORAL_API_KEY",
         "CHEMCLAW_SESSION_STORE_DSN",
+        "CHEMCLAW_MCP_FACE_TOKEN",
     }
 
 

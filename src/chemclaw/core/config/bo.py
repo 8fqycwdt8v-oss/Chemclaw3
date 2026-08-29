@@ -85,3 +85,9 @@ class BoSettings(BaseSettings):
     # than in the summary string because the sentence a chemist reads should not be a magic number
     # in a docstring.
     bo_fit_quality_trustworthy_observations: int = Field(default=20, ge=2)
+    # How long a measured campaign's round stays open before it expires unanswered
+    # (D-2026-08-29-a-decision-that-waits-is-a-workflow). A plate turnaround is the unit here, not
+    # a machine timeout: fourteen days is two working weeks, which is long enough that a batch
+    # genuinely in progress is not abandoned and short enough that a campaign nobody is running
+    # stops asking. Clamped again by `awaiting_max_days`.
+    bo_measurement_deadline_days: float = Field(default=14.0, gt=0)

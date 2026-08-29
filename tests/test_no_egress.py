@@ -109,6 +109,13 @@ def test_the_source_registry_offers_no_external_source() -> None:
         "lexical",
         "eln-json",
         "eln-ord",
+        # A programme's committed work, read from a JSON extract on disk (F4). It is on this list
+        # rather than exempted from it, and it reaches nothing: the commitments half opens a file,
+        # which is the same posture `eln-json` has and the reason both are unremarkable here. What
+        # would need an argument is a commitments half that *called* a portfolio vendor's API —
+        # a new kind of external source, which is exactly what this assertion exists to make
+        # somebody argue for.
+        "commitments-json",
         # Reads a corpus baked into the image at build time (STO-14). Named here rather than
         # exempted: it is the one sanctioned escalation of D-089's scope, and it earns its place
         # by being *local* — the two tests below hold it to that.

@@ -1344,6 +1344,33 @@ two commands against a lane that was going up anyway, and it inverted both halve
 measure that seam *first and cheaply*, not a reason to treat entering it as the cost of the task.
 Four print statements settled it.
 
+## 2026-08-29 — a precedent on disk is not the rule that governs it
+
+Merging `origin/main` into the eight-findings branch put two files on `073`: `main`'s merged
+`073_experiment_protocols.sql` and this branch's unmerged `073_pending_requests.sql`. I checked
+whether that mattered by reading `core/migrate.py` — it keys the ledger on the *full filename* and
+applies in sorted filename order — then noted that `main` already carries `037_*` and `043_*` pairs,
+and told the user it was "not a problem". The full suite disagreed:
+`test_no_two_migrations_claim_one_number` failed.
+
+Both halves of my reasoning were true and the conclusion was still wrong. The runner genuinely does
+not care. The four existing files are **grandfathered by name** in an exemption list whose docstring
+says exactly what it is for: *"the check exists for the next one — caught at review, when a rename is
+still free. Adding a fifth name to it is a visible act in a diff."* Reasoning from the precedent led
+me toward the one move the rule was written to make expensive.
+
+**The rule: when the tree shows a pattern that looks permitted, find the gate that governs it before
+concluding it is.** Two files that look like a merged pair are evidence about history, not about
+policy. Here the policy was one `grep -rn "claim_one_number" tests/` away, and my earlier grep for
+`duplicat|uniq` missed it purely because the test is named in the repository's own prose style rather
+than in the vocabulary I guessed at.
+
+The corollary that would have caught it faster: **grep the test suite for the concept, not for the
+word I would have used.** This repository names its checks as sentences (`test_a_trail_nobody_can_
+read...`, `test_no_two_migrations_claim_one_number`), so a keyword search over identifiers is a
+weaker instrument here than in most trees — search the *subject* (`migration`, `number`) and read the
+handful of hits.
+
 ## 2026-08-29 (second entry) — I shipped, then a review found four defects in what I shipped
 
 PR #282 merged green: `make lint type test`, a live storm family going 7/8 → 8/8, and a live

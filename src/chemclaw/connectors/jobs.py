@@ -392,6 +392,13 @@ def build_job_tool(connector: str, job: JobSpec) -> CapabilityTool:
                     # deployment's maximum is taken in the worker that starts the child
                     # (`durable/connector_job.py::child_execution_timeout`), not here.
                     timeout_seconds=job.timeout_seconds,
+                    # What this job changes outside this deployment, copied from the manifest on
+                    # the same terms as the two fields above — a workflow may not read a manifest
+                    # off disk. Both empty for every job in this repository today, all of whose
+                    # writes are this system's own
+                    # (`D-2026-08-29-an-effect-declares-whether-it-can-be-undone`).
+                    effect_system=job.effect.system if job.effect else "",
+                    effect_reversal=job.effect.reversal if job.effect else "",
                 ),
                 id=workflow_id,
                 task_queue=settings.background_task_queue,

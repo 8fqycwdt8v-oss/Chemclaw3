@@ -192,6 +192,19 @@ class TemporalSettings(BaseSettings):
     # worker per interval.
     jobs_in_flight_refresh_seconds: float = Field(default=30.0, gt=0)
 
+    # The durable wait (D-2026-08-29-a-decision-that-waits-is-a-workflow).
+    #
+    # A ceiling rather than a default, and the two numbers answer different questions. A caller
+    # states its own `deadline_days` — a plate turnaround is days, a gate review is weeks — and this
+    # clamps it, because a wait is a workflow run held open on the broker and an unbounded one is a
+    # resource nobody reclaims. Ninety days is longer than any deliberate ask this system makes and
+    # far short of forever.
+    awaiting_max_days: float = Field(default=90.0, gt=0)
+    # The projection writes and the push-back are small row operations. Separate from
+    # `activity_timeout_seconds` so tightening the general budget cannot silently make a wait's
+    # bookkeeping the thing that fails, on a workflow whose entire purpose is to survive.
+    awaiting_activity_timeout_seconds: float = Field(default=30.0, gt=0)
+
     # **The two halves of the calculation backend's admission budget**
     # (`D-2026-08-27-a-per-worker-cap-is-not-a-backend-ceiling`). Same shape as the fleet turn
     # ceiling and the Postgres connection budget one subject over, and for the same reason: the cap
