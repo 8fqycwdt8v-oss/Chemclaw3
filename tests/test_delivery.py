@@ -371,8 +371,10 @@ def test_a_channel_that_cannot_be_built_is_not_counted_as_a_destination_outage(
     monkeypatch.setattr(settings, "delivery_channels", "broken,good")
 
     def _series(line_prefix: str) -> float:
-        """One labelled series out of the exposition — `value()` sums across labels, and the
-        label is the whole point of this assertion."""
+        """One labelled series out of the exposition.
+
+        `value()` sums across every label set, and the label is the whole point of this assertion.
+        """
         for line in METRICS.render().splitlines():
             if line.startswith(line_prefix):
                 return float(line.rsplit(" ", 1)[1])
