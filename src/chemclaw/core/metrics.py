@@ -537,9 +537,11 @@ _COUNTERS: dict[str, str] = {
     "chemclaw_invalid_tool_calls_total": (
         "Tool calls the model emitted with unparseable arguments, by tool. LangChain puts these on "
         "`AIMessage.invalid_tool_calls` rather than `tool_calls`, and nothing read that field — so "
-        "the call vanished with no `tool_failed`, no `tool_result` and no trace of any kind. Both "
-        "halves are fed from `agent/model_calls`: this counter, and the `tool_failed` the chemist "
-        "sees, which the tool chain's own announcer cannot raise for a call that never reaches it."
+        "the call vanished with no `tool_failed`, no `tool_result` and no trace of any kind. This "
+        "counts malformed *emissions*, once per model call, so a repaired turn books two; the "
+        "`tool_failed` a chemist sees counts unmet *intents*, once per turn, and books none when "
+        "the repair worked. The two are meant to differ — see "
+        "`D-2026-08-29-a-discarded-call-is-not-a-lost-call`."
     ),
     "chemclaw_skill_reads_denied_total": (
         "Skill body reads refused by the role gate. The gate lives on the skills backend because "

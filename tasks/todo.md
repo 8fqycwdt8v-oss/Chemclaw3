@@ -1,155 +1,91 @@
-# Review of the eight-findings change (#280), and the fixes
+# A refusal is not a failure — the third pass over the unparseable-tool-call change
 
-Seven independent reviewers with fresh context read the merged diff. What they found is below,
-in the order it will be fixed. Every item marked **verified** was reproduced by reading the code
-or by executing it, not taken on the reviewer's word.
+Four fresh reviewers over `4a657ad` (#282) + `4859748` (#284), each running the code. The
+announcement rule and the `Counter` arithmetic came back sound; everything below is what they found
+beside it. Every item is verified in this session before it is fixed.
 
-The pattern worth naming before the list: **in almost every case the docstring states the correct
-control and the code does not implement it.** That is the exact failure this repository's culture
-is built to catch, and one change reproduced it about a dozen times.
+## Code
 
-## Critical — a control that is claimed and absent
+- [x] **C1 `_empty_answer_event` calls a gate refusal a failure.** `lost = tool_failures +
+      tool_refusals` rendered as "N tool call(s) failed". Contradicts
+      `D-2026-08-28-a-refusal-the-wire-cannot-name-is-a-fault-to-everyone-downstream` and
+      `_TurnLedger.tool_refusals`' own comment ("the control working, which must not be read as a
+      failure"). Fix: count them separately and give the refusal its own next step.
+- [x] **C2 the log and the message disagree.** The WARNING logs `tool_failures`, the sentence used
+      `failures + refusals` — one turn says `0 failed` and `3 tool call(s) failed`. Fix: one source.
+- [x] **C3 the remedy replaces rather than adds.** One failure among 29 calls deletes the
+      narrower-question advice on the exact du-03 shape the docstring cites. Fix: state the counts
+      always; let the remedy name failures, refusals or neither.
+- [x] **C4 `error` is head-truncated and not repr'd.** The head duplicates `arguments` verbatim
+      (upstream folds the document into the exception text), so bounding head-only drops the
+      `JSONDecodeError` reason — the only part not already printed beside it. Not repr'd means raw
+      newlines reach the WARNING (forgeable log line when `log_json=false`, the default) and the
+      chemist's message. Fix: repr, keep the tail.
+- [x] **C5 nothing caps the *number* of lost calls.** 1000 → an 841 kB corrective `HumanMessage`,
+      appended below `context_compaction_middleware` where nothing can reduce it — the failure
+      `D-2026-08-28-a-budget-in-the-wrong-unit-is-not-a-budget` exists to prevent, in the same
+      function. Fix: a configured ceiling with a "and N more" notice.
+- [x] **C6 a raising repair loses the announcement.** `_count_invalid` runs before the retry and
+      `_announce_unrun` after it, so a 429 on the second call books the counter and tells the
+      chemist nothing. Fix: announce the first reply's losses on the way out.
+- [x] **C7 the dangling parenthetical and the no-op f-string** in the new remedy.
 
-- [x] **C1** `api/mcp_face.py` serves **zero** tools in production. The registry is populated only as
-      an import side effect of `agent/chemclaw_agent.py`, which the face never imports; the five
-      tests pass because `tests/test_mcp_face.py` imports it itself. *(verified: `advertised_tools()`
-      → `[]` on the production path, 14 with the seeder)*
-- [x] **C2** Irreversible-effect approval is **self-approvable**: `_approve_effect` builds its
-      `AwaitRequest` without `asked_of`, so it defaults to `""`, and `_may_answer` returns `True` for
-      any authenticated caller including the requester. *(verified)*
-- [x] **C3** `assemble_evidence_pack(session_id=…)` reads **any** session with no ownership check,
-      while its docstring claims the check exists. `check_pending_requests` supplies the ids.
-      *(verified)*
-- [x] **C4** The `mcp-face` pod has no Service, no Route and is selected by no ingress
-      NetworkPolicy — unrestricted ingress under Kubernetes semantics.
+## Prose
 
-## High — corruption, wedges, wrong numbers
+- [x] **P1 the `RepairInvalidToolCalls` class docstring is the pre-#284 rule**, present tense,
+      naming `_report_lost_calls` (deleted) and asserting a `tool_failed` on a repair that works —
+      which the test added in the same commit asserts does not happen.
+- [x] **P2 `tests/test_langgraph_stream.py`'s docstring** carries the same dead name, "no id to
+      give", and "every turn that survives an unparseable emission now writes `\"\"`".
+- [x] **P3 ADR2's "published to Phoenix as a 1.0" is false.** `evals/phoenix.py` guards that yield
+      on `error_code or transport_error`; the measured turn answered, so no annotation is published.
+- [x] **P4 the boundedness claim is misattributed** — it is `invalid_tool_calls`' docstring, not
+      `BrokenCall.error`'s. In ADR2 and in `lessons.md`.
+- [x] **P5 `core/metrics.py` HELP** still reads as though the counter and the stream count the same
+      thing; they answer different questions by design.
+- [x] **P6 `_empty_answer_event`'s docstring says "the two `tool_failed` events"** — after #284 the
+      unrepaired case emits one.
+- [x] **P7 `lessons.md` says "three defects introduced"** where one was.
 
-- [x] **H5** `effect_ledger._SETTLE` has no state guard where `_BEGIN` has one, and `_finish()` sits
-      inside the `try` after the `applied` settle — so any raise in `_finish` rewrites an applied
-      irreversible effect to `failed`. *(verified)*
-- [x] **H6** A re-asked expired question is invisible and permanently unanswerable: `ALLOW_DUPLICATE`
-      against an upsert guarded `WHERE state='waiting'` that never resets `state`. *(verified, and
-      independently on a live Postgres)*
-- [x] **H7** `external_ref` has **no producer** — `SettleEffectInput` has no such field, so every
-      settle writes `""` — while three readers call it the operator's only handle. This is the
-      `D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution` shape. *(verified)*
-- [x] **H8** The unit registry is wrong one prefix past the tests: `nM` → nanometre, `µm`/`um` →
-      micromolar, `pM` unknown. `area%` and `% w/w` are bare aliases of `%`, so `basis` is empty and
-      they compare **equal**. *(verified by execution)*
-- [x] **H9** Delivery failure is silent (no logger, no metric in `deliver/`) and the activity is
-      ordered **before** `acknowledge_digest`, so a non-retryable channel error wedges the watermark
-      — contradicting the comment directly above it. *(verified)*
-- [x] **H10** `settings` is read inside workflow bodies (`awaiting.py`, `digest.py`), deciding how
-      many commands are emitted — the replay hazard `commitment_sync.py` states the rule against in
-      the same commit. *(verified)*
+## Tests (each of these is a claim no test can see)
 
-## Medium
-
-- [x] Evidence pack: silent 200-row truncation with `refusals` counted over the truncated list;
-      `state`/`failure_reason` unselected so a failed job reads as a successful one; `is_empty`
-      ignores `approvals`; no index on `effects(session_id)`.
-- [x] Operations: `authorship` silently drops `superseded`; `job_activity` counts failures as runs;
-      `audit_events.tool` is the model's raw string and reaches a reader undefanged; `distinct_actors`
-      is a lower bound described as a count.
-- [x] Deliver/commitments: `Message.kind` is unvalidated and used as a path component;
-      `correlation_id` is sent to the webhook host; redaction misses connector bearer tokens;
-      one malformed file aborts the whole mirror pass; the commitment cursor shares a row with the
-      ELN sync; `commitments-json` hardcodes a CWD-relative path.
-- [x] Pending: `answered_at` is stamped on expiry and cancellation; the losing concurrent answerer
-      gets 204; a request routed to an entitlement appears in nobody's inbox.
-- [x] `report_measurement` stamps the ledger's unit on a value the caller never gave one for —
-      worse than the empty string it replaced, because the bad rows are no longer identifiable.
-
-## Prose that is false
-
-- [x] `window.py` justifies the 730-day clamp because those tables "are pruned by
-      `durable/retention.py`". Both are in `_NOT_PRUNED`, **"refused"**. *(verified)*
-- [x] "Five tables recorded this system's own work and none had a reader" is false for **four of
-      five** — only `turn_costs` had none. Repeated in the ADR, three docstrings, the README and the
-      merged PR body. *(verified)*
-- [x] `grants/app_privileges.sql` lists `reaction_records` twice.
+- [x] **T1 `_empty_answer_event` has no test at all** — `grep "reason to start from" tests/` is
+      empty. Both branches, the refusal case, the count.
+- [x] **T2 the `Counter` multiplicity rule** `_announce_unrun`'s docstring argues for in a
+      paragraph: two calls to one tool, one re-issued. A set difference passes every current test.
+- [x] **T3 the parse error reaching the chemist** — deleting `{error}` from the sentence survives.
+- [x] **T4 a repaired reply breaking a *different* tool** than the first.
+- [x] **T5 the sync path's announcement** — only the async path is ever driven.
+- [x] **T6 end to end**: the middleware behind `graph_events`, signal → real `ToolFailedEvent`.
+- [x] **T7 the bound on what is actually sent** — `ToolFailedEvent.message` and the corrective
+      `HumanMessage`, not only `BrokenCall`.
 
 ## Verification
 
-`make lint type test` green with Docker/Postgres/Temporal up, and the full suite reported with what
-it skipped.
+- [x] `make lint type test` green, with Postgres and Temporal up, skips named.
+- [x] Live lane: storm C+F **11/11**, and the F6 turn hand-driven — one `tool_failed`, and
+      `"0 tool call(s) ran, 1 failed … The failure(s) reported above are the place to start"`.
+- [x] ADR + ledger row + `lessons.md`.
 
 ## Review
 
-All of it landed, in five commits. Two migrations (`079_pending_request_run.sql`,
-`078_effects_session_index.sql`), one new setting (`effect_approval_role`), one new module
-(`agent/tool_modules.py`), and one behaviour change a deployment must know about: **a job declaring
-an irreversible effect refuses to run until `CHEMCLAW_EFFECT_APPROVAL_ROLE` names an approver.**
-Nothing in this repository declares such a job, so nothing breaks today — the refusal is the point,
-because the alternative is the self-approval the seam shipped with.
+All seventeen items done. The two that changed the shape of the work:
 
-Three fixes were verified by reverting them and watching the new test go red, rather than by
-reading: the empty tool registry, the applied-effect overwrite, and the re-asked question. The unit
-ladders were verified by execution, in both directions, at every rung.
+**`_empty_answer_event` was the whole of the third pass's user-visible harm** and had no test of any
+kind, so both its defects — a refusal counted as a failure, and the advice replaced rather than
+added — were invisible to a green gate. The tests written for it caught a *third* defect while
+being written: the remedy strings ended in a period before `(session …)`, the exact dangling
+parenthetical a reviewer had reported, which I had "fixed" without reading the rendered output.
 
-**What the audit found beyond the individual defects** is recorded in
-`D-2026-08-29-a-review-with-fresh-context-is-a-different-instrument` and in `tasks/lessons.md`:
-almost every finding was a docstring stating the correct control beside code that did not implement
-it, and the tests that should have caught them were written by the same author and inherited the
-same belief — importing the seeder the production path lacked, seeding a marker into columns the
-read never selects, checking the two prefixes that happened to work.
+**I marked the live-lane row done before running it**, in the plan for a review whose subject is
+claims nobody checked. Caught on the way past, run, and the row now carries its result — which is
+the only form of that row worth having.
 
-**Two claims of my own are retracted** rather than quietly edited: "five tables had writers and no
-readers" (false for four of five — each had a point lookup; the *aggregate* was missing) and
-`MAX_WINDOW_DAYS`'s justification (it cited a retention that `_NOT_PRUNED` explicitly refuses). The
-merged ADRs are untouched, per the rule on merged ADRs; the correction lives in the new one and in
-the module docstrings.
+**A mutation-proof loop nearly cost the session's work.** `git checkout -- src/` as the restore step
+discarded every uncommitted source fix, and the only symptom was a red baseline I could have read as
+a regression. Everything was reapplied and the loop redone against a commit. Recorded in
+`lessons.md`; the derived rule is that a revert-to-prove loop restores from a committed baseline,
+one file at a time, and checks the baseline is green before believing any mutation result.
 
-**One thing was audited hardest and found sound**: the tool-schema cache, added late under CI
-pressure and the change most likely to be wrong. Its stale performance figures are corrected and its
-documented-but-unchecked cache bound is now a test.
-
----
-
-# Second review (fresh context) — the fixes themselves
-
-Six reviewers read the *fix* branch. What they found matters more than the individual defects:
-
-**Two of them mutation-tested the fixes — reverted each and re-ran the suites.** 4 of 5 operations
-changes and 6 of 7 deliver/commitments changes survived with the suite green. Most of what this
-branch fixed is not pinned by anything. `tests/test_delivery.py` and `tests/test_commitments.py` are
-byte-identical to `origin/main`.
-
-**Three regressions were introduced by the fixes themselves**, all in `core/units.py`: `pm`
-(picometre) resolved to picomolar because `pM` was added without its twin — turning a safe refusal
-into a silent wrong dimension, the *same* defect one rung down, made while fixing the rung above;
-`Area%` lost its basis because the basis map was case-sensitive while `parse_unit` is not; and
-`% w/v` was registered as a fraction, hard-coding rho = 1.0 g/mL.
-
-**Three of the prose corrections are themselves false.**
-
-## Fixed in this pass
-
-- [x] `pm`/picometre registered; the ladder test now derives from the registry
-- [x] `_BASIS_SPELLINGS` looked up case-insensitively
-- [x] `% w/v` moved to `mass_concentration` (10 mg/mL, exact by definition)
-- [x] `report_measurement` normalises `property_name` — `"PKA"` walked around the new refusal
-- [x] the re-ask no longer overwrites an **answered** row's attribution, and refreshes
-      `requested_by` — the stale value let a *different* person pass the separation-of-duties gate
-- [x] migration renumbered 077 → 079 (main landed its own 077)
-
-## Still open
-
-- [ ] `get_durable_job_status` is advertised on the face and discloses what `find_past_jobs` was
-      withheld for; job ids are a pure function of connector+job+payload
-- [ ] the `WITHHELD` partition test is tautological — it cannot fail for the case it names
-- [ ] the ownership gate (`_may_read`) has no test at all
-- [ ] `applied` → `compensated` is now unreachable; the shipped test asserts `failed` → `compensated`
-      and passes either way
-- [ ] the deadline clamp reached two of three launch sites; the BO path is unclamped and two
-      comments claim otherwise
-- [ ] `_SAFE_TOOL_NAME` allows `.` and `-`, which no served tool uses and which carry readable
-      injection text; the cardinality claim beside it is false (bucketing runs after the GROUP BY)
-- [ ] the `failed` split counts argument-sets, not runs (`job_records` upserts on `job_id`)
-- [ ] the redaction-failure path logs without a counter, unlike the sibling it was extracted from
-- [ ] the plaintext-channel refusal can only raise on the delivery path, where it is swallowed
-- [ ] a wrong `CHEMCLAW_COMMITMENT_EXPORT_DIR` is still silent
-- [ ] false prose: "point lookup", "unindexed-range aggregate", "five tables", `Coverage`'s
-      retention sentence, `bearer_token_env_names`' return contract
-- [ ] tests for every fix that survived mutation
+The `Counter` arithmetic and the announcement rule from #284 survived the review unchanged, which is
+worth recording as the one thing that did not need fixing.

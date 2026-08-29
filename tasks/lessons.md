@@ -1536,7 +1536,9 @@ reason to accept a loss. So:
 
 PR #282 merged green: `make lint type test`, a live storm family going 7/8 → 8/8, and a live
 measurement of the exact behaviour. Four adversarial reviewers over the merged commit then found
-four real defects, three of them *introduced by the change* and one it made reachable.
+four real problems: one defect introduced by the change, one pre-existing field it made
+reachable, one process failure, and one false claim in its own ADR. "Three introduced" is what I
+first wrote, and it is not what the four bullets below say.
 
 What the green gate could not see, and why:
 
@@ -1552,8 +1554,10 @@ What the green gate could not see, and why:
   repaired step from a broken tool. `reason` names five gates and both cases carry `None` — one
   grep would have shown it. That is the same class as the handover measurement I had corrected in
   this very session, committed by me, in the document recording the correction.
-- **A field documented as bounded was not.** `BrokenCall.error`'s own docstring said every field
-  was bounded on the way out; I read the docstring instead of the constructor three lines below it.
+- **A field documented as bounded was not.** `invalid_tool_calls`' docstring said every field was
+  bounded on the way out; I read the docstring instead of the constructor three lines below it.
+  (An earlier version of this line attributed that claim to `BrokenCall.error`'s own docstring,
+  which says no such thing — a correction about misreading prose, itself misreading prose.)
 
 **The rule: when a change adds a second producer of an existing event, record, or metric, list
 every consumer of it and say what each now sees.** Not "does my new case work" — "what does the
@@ -1564,3 +1568,37 @@ and the sibling repos, then one sentence per hit.
 success path.** For any change that fires on a condition, write the test where the condition is
 absent first. `test_a_repair_that_works_announces_nothing_because_nothing_was_lost` is the test
 that should have existed before the feature did.
+
+
+## 2026-08-29 (third entry) — the third pass, and a self-inflicted wound in the middle of it
+
+A fresh four-way review of the two merged commits found seven more things. The pattern across all
+three passes is one thing, stated three ways:
+
+- **#282**: I tested the failure path and not the success path, so a new event firing on turns that
+  succeeded was invisible.
+- **#284**: I fixed the announcement and shipped `_empty_answer_event` with **no test at all** —
+  `grep "reason to start from" tests/` returned only the source line — and its one behaviour I did
+  think about (failures) folded in the one I did not (refusals), contradicting a merged ADR.
+- Both: prose asserting the rule the same commit had just reverted, 200 lines below the paragraph I
+  corrected.
+
+**The rule, and it is the same rule each time: the thing I did not think about is the thing with no
+test.** Before committing, list every input the new code branches on and name the test for each
+branch. `tool_refusals` was a term in an expression I wrote and never once considered.
+
+**And a mistake made while proving the fix.** My mutation script restored with
+`git checkout -- src/` between runs. `src/` held all of the session's uncommitted work, so the first
+"restore" discarded every source fix I had just made — silently, because the tests live in `tests/`
+and only the *baseline* went red. I noticed because the baseline read `8 failed` when it should have
+read all-pass, and I nearly read that as a real regression.
+
+**The rule: commit before you mutate.** A revert-to-prove loop must restore from a committed
+baseline (`git checkout HEAD -- <one file>`), never from the index of a dirty tree, and never with a
+directory-wide path. Check the baseline is green *first*: a mutation run whose baseline is red is
+measuring nothing.
+
+**One more, from the same loop:** `str.replace(old, new, 1)` hits the first occurrence, and this
+middleware writes its guard twice — once per hook. The mutation landed on the sync path while the
+test drove the async one, so the guard read as unpinned when it was pinned. The parametrized test
+that came out of that now covers both, which is the coverage the accident found.

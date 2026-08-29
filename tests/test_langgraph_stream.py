@@ -587,9 +587,10 @@ def test_an_unattributed_failure_does_not_suppress_a_result() -> None:
     was not its own.
 
     It became worth pinning when a second producer appeared:
-    `agent/model_calls._report_lost_calls` announces the calls a discarded reply will never run,
-    and those have no id to give — there is no `tool_call` event for them to be matched to — so
-    every turn that survives an unparseable emission now writes `""` into that set.
+    `agent/model_calls._announce_unrun` announces the calls a turn will not run, and those carry
+    no id *here* — the upstream entries do have one, `BrokenCall` drops it, because no `tool_call`
+    event is ever emitted for them to be matched to. So an unrepaired emission writes `""` into
+    that set.
 
     Driven over a scripted stream rather than a compiled graph, deliberately: a real engine mints
     an id for every call, so the state under test is one only this module's own bookkeeping can
@@ -632,4 +633,91 @@ def test_an_unattributed_failure_does_not_suppress_a_result() -> None:
     kinds = [event.type for event in asyncio.run(_run())]
     assert kinds == ["tool_failed", "tool_result"], (
         f"the unattributed failure swallowed an unrelated result: {kinds}"
+    )
+
+
+def test_an_unparseable_tool_call_reaches_the_stream_as_a_real_tool_failed_event() -> None:
+    """The sentence both ADRs are titled after, asserted end to end for the first time.
+
+    `agent/model_calls` publishes a `ToolFailureSignal`; this module turns it into a
+    `ToolFailedEvent`; the front door writes that to the chemist's SSE stream. Every test covered
+    one hop: the middleware's tests drive a compiled graph and read the *signal* off the custom
+    channel, and `test_an_unattributed_failure_does_not_suppress_a_result` drives a hand-built
+    stream. Nothing put the middleware behind `graph_events` and looked at the event — so "an
+    unparseable call is announced to the chemist", the claim the whole change exists to make, was
+    proven by no test at all.
+
+    Driven with `RepairInvalidToolCalls` spliced into a real `create_agent` graph rather than
+    through `build_langgraph_agent`, because the middleware chain's *order* is asserted elsewhere
+    (`tests/test_middleware_order.py`) and what is unproven here is the signal-to-event hop.
+    """
+    from langchain.agents import create_agent
+    from langchain_core.language_models import GenericFakeChatModel
+    from langchain_core.messages import AIMessageChunk
+    from langchain_core.outputs import ChatGenerationChunk
+    from langchain_core.tools import tool
+
+    from chemclaw.agent.model_calls import RepairInvalidToolCalls
+
+    @tool
+    def find_notes(text: str) -> str:
+        """Find notes."""
+        return "matches=[]"
+
+    class _Model(GenericFakeChatModel):
+        """Two replies, both carrying the same unparseable argument document."""
+
+        def __init__(self, **kwargs: Any) -> None:
+            super().__init__(messages=iter([]), **kwargs)
+            object.__setattr__(self, "_step", 0)
+
+        def bind_tools(self, tools: Any, **kwargs: Any) -> Any:
+            return self
+
+        def _stream(self, messages: Any, stop: Any = None, run_manager: Any = None, **kw: Any):  # type: ignore[no-untyped-def]
+            step = object.__getattribute__(self, "_step")
+            object.__setattr__(self, "_step", step + 1)
+            yield ChatGenerationChunk(message=AIMessageChunk(content=""))
+            yield ChatGenerationChunk(
+                message=AIMessageChunk(
+                    content="",
+                    tool_call_chunks=[
+                        {
+                            "name": "find_notes",
+                            "args": '{"text": }',
+                            "id": f"call-{step}",
+                            "index": 0,
+                            "type": "tool_call_chunk",
+                        }
+                    ],
+                )
+            )
+
+    graph = create_agent(model=_Model(), tools=[find_notes], middleware=[RepairInvalidToolCalls()])
+    trace = ToolCallTrace()
+
+    async def _run() -> list[Any]:
+        return [
+            event
+            async for event in graph_events(
+                graph,
+                "find me the buchwald notes",
+                config={"configurable": {"thread_id": "t-1"}},
+                trace=trace,
+                on_signal=lambda _signal: None,
+                usage=_Usage(),
+            )
+        ]
+
+    events = asyncio.run(_run())
+    failed = [event for event in events if event.type == "tool_failed"]
+    assert [event.tool for event in failed] == ["find_notes"], (
+        f"expected one tool_failed on the wire, got {[e.type for e in events]}"
+    )
+    assert "not valid JSON" in failed[0].message
+    # `reason` separates a gate refusal from a fault, and this is a fault: `Chemclaw3_ui` renders
+    # `None` in the failure red, which is what a call that could not run should look like.
+    assert failed[0].reason is None
+    assert not [event for event in events if event.type == "tool_result"], (
+        "a call that never ran must not also produce a result"
     )

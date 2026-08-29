@@ -676,3 +676,77 @@ def test_the_answer_phase_runs_inside_the_turn_span(monkeypatch: pytest.MonkeyPa
     assert turn.attributes["correlation.id"]
     assert "actor" in turn.attributes
     assert otel_trace is not None  # the import is what proves the SDK is present, not a stub
+
+
+# --------------------------------------------------------------------------------------------
+# The empty-answer sentence: a refusal is not a failure.
+# --------------------------------------------------------------------------------------------
+
+
+def _silent_turn(**fields: Any) -> str:
+    """The message a turn that wrote nothing produces, in one of the states a real turn leaves."""
+    from chemclaw.agent.session import TurnSession
+    from chemclaw.api.runner import _empty_answer_event
+    from chemclaw.api.runner_trace import ToolCallTrace
+
+    trace = ToolCallTrace()
+    for index, name in enumerate(fields.pop("called", [])):
+        trace.issued(f"call-{index}", name, "{}")
+    event = _empty_answer_event(
+        TurnSession(session_id="s1"), trace, _ledger(answer_parts=[], **fields)
+    )
+    assert event is not None
+    return event.message
+
+
+def test_a_gate_refusal_is_not_reported_to_the_chemist_as_a_failure() -> None:
+    """A refusal is the control working, and the first version of this sentence called it a fault.
+
+    `D-2026-08-28-a-refusal-the-wire-cannot-name-is-a-fault-to-everyone-downstream` exists to stop
+    exactly this, and `_TurnLedger.tool_refusals`' own comment says a refusal is "the control
+    working, which must not be read as a failure". The first version of this sentence added the two
+    together and printed the sum as "N tool call(s) failed", so a dry run the chemist themselves
+    switched on reported three failures — while `Chemclaw3_ui`'s trace header three lines above
+    read `0 failures / 3 held`, from the same events.
+
+    The remedy differs too, and that is the point of separating them: a fault is something to read,
+    a refusal is something to approve.
+    """
+    message = _silent_turn(called=["find_notes"] * 3, tool_refusals=3)
+    assert "3 refused by a gate" in message
+    assert "3 failed" not in message, "a refusal was counted into the failure total"
+    assert "approving the plan" in message
+
+
+def test_a_failure_and_a_refusal_in_one_turn_are_counted_apart() -> None:
+    """Both happened, so both are named; the fault takes the remedy because it is the fault."""
+    message = _silent_turn(called=["find_notes"] * 4, tool_failures=1, tool_refusals=2)
+    assert "4 tool call(s) ran, 1 failed, 2 refused by a gate" in message
+    assert "The failure(s) reported above are the place to start" in message
+
+
+def test_a_turn_where_nothing_failed_still_gets_the_narrower_question_advice() -> None:
+    """The du-03 shape the docstring is about: many calls, no answer, nothing broken.
+
+    The first version replaced this advice whenever *any* failure was booked, so one failure among
+    twenty-nine calls deleted the only useful next step on the very shape the guard exists for.
+    """
+    message = _silent_turn(called=["find_notes"] * 29)
+    assert "29 tool call(s) ran." in message
+    assert "A narrower or more specific question is the useful next step" in message
+
+
+def test_the_sentence_does_not_read_as_two_sentences_with_a_stray_bracket() -> None:
+    """The session id closes the sentence rather than trailing it after a full stop.
+
+    Cosmetic and user-facing: the first version ended the remedy with a period and then appended
+    `(session …)`, so every empty-answer message a chemist saw finished `… to start from. (session
+    abc).` — which reads as a fragment.
+    """
+    for message in (
+        _silent_turn(called=["find_notes"], tool_failures=1),
+        _silent_turn(called=["find_notes"]),
+        _silent_turn(called=[], tool_refusals=1),
+    ):
+        assert message.endswith("(session s1).")
+        assert ". (session" not in message
