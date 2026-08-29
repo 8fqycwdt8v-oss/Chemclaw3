@@ -255,8 +255,9 @@ topic).
 
 - [ ] **The corpus drain is the one ingest pass with no metric** — [S].
       `chemclaw_ingest_records_total{source,outcome}` is emitted by the ELN sync
-      (`ingest/eln/sync.py:319`), the document sync (`ingest/documents/sync.py:312`) and the
-      labelling pass (`ingest/labels/enrich.py:195`, under `source="labels"`). `ReactionCorpusWorkflow`
+      (`ingest/eln/sync.py::_count_records`), the document sync
+      (`ingest/documents/sync.py::_count_records`) and the labelling pass
+      (`ingest/labels/enrich.py::_count_records`, under `source="labels"`). `ReactionCorpusWorkflow`
       emits none: `CorpusReport`'s `read`/`recorded`/`skipped` reach the activity's log line and
       Temporal's history, and nothing else. So a dashboard built on `chemclaw_ingest_*` shows a flat
       line for a healthy corpus feed, and `skipped` — the count of rows dropped for no usable SMILES
@@ -265,7 +266,7 @@ topic).
       prose because the metric they would otherwise reach for does not exist.
       **The fix is the wrapper the ELN sync already uses**, one call site, with `source` naming the
       data source rather than the pass — the three outcomes partition the rows the pass saw, exactly
-      as `ingest/documents/sync.py:332` documents for its own. Do it when a deployment actually runs
+      as `ingest/documents/sync.py::_record_pass` documents for its own. Do it when a deployment actually runs
       a corpus feeder; until then the gap costs nobody anything, which is why it is [S] and here
       rather than done.
 
@@ -358,12 +359,12 @@ topic).
 
 - [ ] **A stalled append-only feed has no first-party signal** — [S]. `corpus_cursors`
       (`infra/sql/063`) records where each feed's drain stopped, and nothing reads `updated_at`:
-      `ingest/labels/cursor.py:23` selects `after` only. The module declines a lag gauge for a
+      `ingest/labels/cursor.py::load_corpus_cursor` selects `after` only. The module declines a lag gauge for a
       stated reason — a keyset position is opaque, so "how far behind" would have to be invented,
       unlike `sync_cursors`' datetime twin which exports `chemclaw_ingest_cursor_lag_seconds`. What
-      was offered instead does not hold, and `cursor.py:17-22` now says so: `ReactionCorpusWorkflow`
+      was offered instead does not hold, and `cursor.py`'s module docstring now says so: `ReactionCorpusWorkflow`
       returns **one** report aggregated over every source at the end of the whole `continue_as_new`
-      chain (`durable/corpus_sync.py:252`), not one per pass, and builds it without `has_more` — so
+      chain (`durable/corpus_sync.py::ReactionCorpusWorkflow`), not one per pass, and builds it without `has_more` — so
       a feed whose source stopped exporting looks exactly like a feed with nothing new. Two shapes
       would close it and they are not equivalent: a per-source outcome (fixes
       `CorpusSyncOutcome`'s own docstring, which claims "per source" and aggregates), or a staleness
