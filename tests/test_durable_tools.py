@@ -355,6 +355,71 @@ def test_every_memory_job_kind_can_actually_be_started(
     assert {queue for _, _, queue in client.started} == {settings.background_task_queue}
 
 
+class _RequestRecordingClient:
+    """A client that keeps the workflow *input* `start_workflow` was handed, not just its id."""
+
+    def __init__(self) -> None:
+        """Start with nothing recorded."""
+        self.requests: list[Any] = []
+
+    async def start_workflow(self, run: Any, request: Any, **kwargs: Any) -> _StartedHandle:
+        """Record the request and hand back a handle carrying the requested id."""
+        self.requests.append(request)
+        return _StartedHandle(str(kwargs["id"]))
+
+
+def test_the_report_launcher_carries_the_turn_s_correlation_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The one line that sources a correlation id for a durable report had no test at all.
+
+    `request_development_report` builds `ReportRequest(..., correlation_id=
+    get_current_correlation_id() or "")`, and that call site is the *only* place a report run gets
+    the turn it was launched from (`D-2026-08-27-a-step-runs-under-the-correlation-id-it-was-
+    launched-with`). Every existing test around this constructs a `ReportRequest` or a
+    `SectionRequest` by hand with a correlation id supplied as a literal — which exercises the
+    field, the interceptor and the workflow, and never the launcher. Deleting the line, or the
+    `or ""` half of it, left the whole suite green while every report run in a deployment became
+    unjoinable to the conversation that asked for it.
+
+    So this drives the launcher itself, through the same monkeypatched `connect` the memory-job
+    tests use, and asserts against the object handed to Temporal rather than against a returned id:
+    an id proves only that this tool ran.
+
+    Both directions, because the line has two halves. Bound: the turn's id travels. Unbound: the
+    empty string travels, deliberately — a launch outside a turn is unjoined and says so, and
+    minting an id there would make an unjoined run look joined. Dropping `or ""` makes the second
+    case a `None` a `str` field refuses; dropping the line makes the first case `""`.
+    """
+    from chemclaw.core.identity_context import (
+        reset_current_correlation_id,
+        set_current_correlation_id,
+    )
+    from chemclaw.retrieval.harness import ReportSection
+
+    client = _RequestRecordingClient()
+
+    async def _connect() -> _RequestRecordingClient:
+        return client
+
+    monkeypatch.setattr(durable_tools, "connect", _connect)
+    sections = [ReportSection(heading="Route", query="what is known", memory_layer="evidence")]
+
+    token = set_current_correlation_id("corr-launcher-1")
+    try:
+        asyncio.run(durable_tools.request_development_report("Nitration route", sections))
+    finally:
+        reset_current_correlation_id(token)
+
+    asyncio.run(durable_tools.request_development_report("Nitration route", sections))
+
+    assert [request.correlation_id for request in client.requests] == ["corr-launcher-1", ""], (
+        "the report launcher did not carry the ambient correlation id onto the request it hands "
+        "Temporal, so the run's log lines and its PR-gated draft cannot be joined back to the "
+        "conversation that asked for it"
+    )
+
+
 def test_asking_twice_in_a_day_rejoins_rather_than_re_scanning(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
