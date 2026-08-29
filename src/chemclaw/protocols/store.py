@@ -30,7 +30,8 @@ citing it, through the gate that has always been there.
 from __future__ import annotations
 
 import logging
-from collections.abc import AsyncIterator, Sequence
+import re
+from collections.abc import AsyncIterator, Iterator, Sequence
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any, Protocol, runtime_checkable
@@ -89,7 +90,20 @@ VALUES
      %(change_note)s, %(document)s, %(checks)s, now())
 """
 
-_SELECT_HEAD = "SELECT head_revision, status FROM experiment_protocols WHERE design_id = %s"
+# **`FOR UPDATE`, and it is the difference between holding a chemist's decision and losing it.**
+# `append` reads the status here, recomputes it through `advanced()` and writes it back through
+# `_UPSERT_DESIGN`. `core/db.py` is READ COMMITTED, so without the row lock a `set_status` that
+# commits between the two is overwritten by this transaction's stale value. Measured before the
+# lock: a chemist abandoning a design while an agent appended a revision lost the abandonment
+# **20 times out of 20**, leaving a header reading `draft` — against `advanced()`'s own promise
+# that `abandoned` is held because "a design somebody decided not to run does not come back
+# because an agent wrote to it".
+#
+# The lock is taken on the design's own header row, which every writer of that design already
+# contends for, so it serialises exactly the writers that must not interleave and nothing else.
+_SELECT_HEAD = (
+    "SELECT head_revision, status FROM experiment_protocols WHERE design_id = %s FOR UPDATE"
+)
 
 # `RETURNING head_revision` rather than a second SELECT: the revision the event is stamped with has
 # to be the one the status was set against, and reading it separately leaves a window in which an
@@ -127,6 +141,22 @@ class RevisionConflict(ChemclawError):
 
 class UnknownDesign(ChemclawError):
     """A design id nothing in the store answers to."""
+
+
+class UnstorableDocument(ChemclawError):
+    """A design carrying bytes no text column can hold — a NUL, or a C0 control character.
+
+    Postgres `text` and `jsonb` reject `\u0000` outright, and psycopg raises it as an untyped
+    `DataError`/`UntranslatableCharacter` from inside the driver. Measured before this existed: a
+    NUL anywhere in a browser-supplied design — the notes field, the title, the change note — was a
+    **500** with a correlation id and nothing a caller could act on, while the in-memory backend
+    accepted it, so the two backends disagreed about whether the write was possible.
+
+    Refused here rather than sanitised, because a chemist did not type a NUL: silently stripping it
+    would store a document that is not the one that was sent. `ingest.eln.sync` strips control
+    characters on the *ingest* path for the opposite reason — there the bytes come from somebody
+    else's database and there is no author to refuse.
+    """
 
 
 @runtime_checkable
@@ -214,6 +244,7 @@ class InMemoryDesignStore:
         status: DesignStatus = "draft",
     ) -> DesignRevision:
         """Store the next revision, refusing when `parent_revision` is not the head."""
+        require_storable(design, change_note)
         existing = self._revisions.get(design_id, [])
         head = existing[-1].revision if existing else 0
         _require_head(design_id, head, parent_revision)
@@ -384,6 +415,7 @@ class PostgresDesignStore:
         — the revision you built on is not the head any more — and a caller that had to tell them
         apart would be a caller with two ways to do one thing.
         """
+        require_storable(design, change_note)
         async with self._connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(_SELECT_HEAD, (design_id,))
@@ -585,6 +617,51 @@ def advanced(current: DesignStatus, kind: str) -> DesignStatus:
     if current == "requested" and kind == "protocol":
         return "draft"
     return "draft" if current in _RETIRED_BY_A_REVISION else current
+
+
+#: The characters no Postgres `text` or `jsonb` column can hold. NUL is the one that actually
+#: arrives (it is what a truncated UTF-16 read or a fuzzing client produces); the rest of the C0
+#: range is refused with it because none of them belongs in a laboratory procedure and a document
+#: carrying one is not a document somebody typed.
+_UNSTORABLE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+
+def require_storable(design: ExperimentDesign, change_note: str) -> None:
+    """Refuse a document Postgres cannot hold, in this process, naming what is wrong.
+
+    Both backends call it, which is the point: without it the in-memory store accepted a NUL and
+    Postgres answered **500**, so whether a write was possible depended on which backend a
+    deployment had configured — the divergence `InMemoryDesignStore`'s own docstring forbids.
+
+    Raises:
+        UnstorableDocument: the design or its change note carries a NUL or a C0 control character.
+    """
+    # The **values**, not the JSON encoding of them: `model_dump_json` escapes a NUL as the six
+    # characters `\u0000`, so a regex over the serialised form finds nothing and the guard passes
+    # exactly the input it exists to refuse. Measured — the first version of this function did.
+    for label, text in _strings(design.model_dump(), "the document"):
+        if _UNSTORABLE.search(text):
+            raise UnstorableDocument(
+                f"{label} contains a control character no text column can store (NUL or C0). "
+                "Remove it and send the document again."
+            )
+    if _UNSTORABLE.search(change_note):
+        raise UnstorableDocument(
+            "change_note contains a control character no text column can store (NUL or C0). "
+            "Remove it and send the document again."
+        )
+
+
+def _strings(value: Any, path: str) -> Iterator[tuple[str, str]]:
+    """Every string in a dumped model, with the path that reaches it."""
+    if isinstance(value, str):
+        yield path, value
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            yield from _strings(item, f"{path}.{key}")
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            yield from _strings(item, f"{path}[{index}]")
 
 
 def _require_head(design_id: str, head: int, parent_revision: int) -> None:

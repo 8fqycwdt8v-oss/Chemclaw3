@@ -16,6 +16,7 @@ which is why `_open` runs before every `_draft` below.
 """
 
 import asyncio
+import inspect
 import json
 from collections.abc import Iterator
 
@@ -23,6 +24,7 @@ import pytest
 
 import chemclaw.agent.protocol_design_tools as tools
 from chemclaw.core.errors import ChemclawError
+from chemclaw.core.turn_text import reset_current_user_text, set_current_user_text
 from chemclaw.protocols.models import (
     ChargeLine,
     EvidenceRef,
@@ -43,6 +45,21 @@ _SOURCE = (
     "We need to get the Suzuki on the deactivated chloride working. "
     "24 wells, no DMF, by Friday please."
 )
+
+
+@pytest.fixture(autouse=True)
+def chemist_said() -> Iterator[None]:
+    """The chemist's message for the turn, stamped the way `api.runner` stamps it.
+
+    Autouse because every test in this file is a turn, and off a turn there is no chemist: the tool
+    no longer takes the text as an argument (a haystack the model supplies is one the model can
+    invent), so a test that stamped nothing would be testing the refusal path by accident.
+    """
+    token = set_current_user_text(_SOURCE)
+    try:
+        yield
+    finally:
+        reset_current_user_text(token)
 
 
 @pytest.fixture
@@ -97,7 +114,7 @@ def _protocol(*, request: ExperimentRequest | None = None, arms: int = 1) -> Exp
 async def _open(request: ExperimentRequest | None = None) -> ProtocolReceipt:
     """Structure an ask, because a draft has nowhere to land without one."""
     return ProtocolReceipt.model_validate_json(
-        await tools.structure_experiment_request(request or _request(), _SOURCE)
+        await tools.structure_experiment_request(request or _request())
     )
 
 
@@ -182,7 +199,7 @@ def test_structuring_a_request_stores_revision_one_as_a_request(
 ) -> None:
     async def _body() -> None:
         request = _request(project="prj-a")
-        payload = await tools.structure_experiment_request(request, _SOURCE)
+        payload = await tools.structure_experiment_request(request)
 
         receipt = ProtocolReceipt.model_validate_json(payload)
         assert receipt.design_id == design_id_for(request)
@@ -206,7 +223,7 @@ def test_a_structured_request_returns_json_the_front_end_can_parse(
     """A `JSON.parse` failure in `ResultBlock` renders nothing at all, not an error."""
 
     async def _body() -> None:
-        payload = await tools.structure_experiment_request(_request(), _SOURCE)
+        payload = await tools.structure_experiment_request(_request())
         parsed = json.loads(payload)
         assert parsed["design_id"].startswith("design-")
         assert ProtocolReceipt.model_validate(parsed).model_dump_json() == payload
@@ -234,7 +251,7 @@ def test_a_salt_is_how_a_second_design_for_one_ask_is_opened(
     async def _body() -> None:
         first = await _open()
         forked = ProtocolReceipt.model_validate_json(
-            await tools.structure_experiment_request(_request(), _SOURCE, salt="second")
+            await tools.structure_experiment_request(_request(), salt="second")
         )
         assert forked.design_id != first.design_id
         assert forked.revision == 1
@@ -250,7 +267,7 @@ def test_structuring_refuses_before_it_stores_anything(
     async def _body() -> None:
         request = _request(scale=RequestField(value="5 g", basis="stated", quote="five grams"))
         with pytest.raises(ChemclawError, match="not in the text"):
-            await tools.structure_experiment_request(request, _SOURCE)
+            await tools.structure_experiment_request(request)
         assert await store.read(design_id_for(request)) is None
 
     asyncio.run(_body())
@@ -551,7 +568,7 @@ def test_restructuring_the_ask_keeps_the_protocol_it_was_drafted_into(
             notes="they meant 100 mg, not the 5 g I first read",
         )
         again = ProtocolReceipt.model_validate_json(
-            await tools.structure_experiment_request(corrected, _SOURCE)
+            await tools.structure_experiment_request(corrected)
         )
         assert again.design_id == opened.design_id
         assert again.revision == 3
@@ -596,7 +613,7 @@ def test_restructuring_grades_the_checks_at_the_stage_the_design_is_at(
 
         await _draft(first.design_id, first.revision, arms=2)
         again = ProtocolReceipt.model_validate_json(
-            await tools.structure_experiment_request(_request(notes="corrected"), _SOURCE)
+            await tools.structure_experiment_request(_request(notes="corrected"))
         )
 
         graded = {check.check_id: check for check in again.checks}
@@ -859,5 +876,50 @@ def test_an_empty_listing_is_valid_json_rather_than_nothing(
     async def _body() -> None:
         payload = await tools.find_experiment_protocols()
         assert json.loads(payload) == {"designs": []}
+
+    asyncio.run(_body())
+
+
+def test_the_tool_does_not_let_its_caller_supply_the_words_it_grades_against() -> None:
+    """The parameter's absence is the control, so its absence is what a test has to pin.
+
+    `source_text` used to be an argument. A model that wanted `basis="stated"` supplied one
+    containing its own quotes and got it — measured: the same request refused against the real user
+    text and accepted against an invented one. The fix is not a better comparison, it is that the
+    caller cannot reach the haystack at all.
+    """
+    parameters = set(inspect.signature(tools.structure_experiment_request).parameters)
+    assert parameters == {"request", "salt"}
+    assert "source_text" not in parameters
+
+
+def test_a_stated_slot_is_refused_when_no_chemist_spoke(store: InMemoryDesignStore) -> None:
+    """`require_actor`'s reject-if-absent rule, applied to the words instead of the person.
+
+    Off a turn there is nobody to have said it, so `stated` is refused rather than waived — a check
+    that passed when its evidence was missing would be one a caller can switch off by calling from
+    somewhere else.
+    """
+
+    async def _body() -> None:
+        set_current_user_text(None)  # the autouse fixture resets it after the test
+        stated = _request(scale=RequestField(value="2 g", basis="stated", quote="24 wells, no DMF"))
+        with pytest.raises(ChemclawError, match="no chemist message"):
+            await tools.structure_experiment_request(stated)
+        assert await store.listing() == []
+
+    asyncio.run(_body())
+
+
+def test_an_inferred_ask_needs_no_chemist_message(store: InMemoryDesignStore) -> None:
+    """The other direction, which is what stops the refusal above from being a blanket one."""
+
+    async def _body() -> None:
+        set_current_user_text(None)  # the autouse fixture resets it after the test
+        inferred = _request(scale=RequestField(value="2 g", basis="inferred"))
+        payload = ProtocolReceipt.model_validate_json(
+            await tools.structure_experiment_request(inferred)
+        )
+        assert payload.revision == 1
 
     asyncio.run(_body())

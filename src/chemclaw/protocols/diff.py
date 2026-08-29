@@ -14,6 +14,7 @@ neither without being flattened first.
 
 from __future__ import annotations
 
+from collections import Counter
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -95,20 +96,27 @@ def flatten(document: dict[str, Any], prefix: str = "") -> dict[str, Any]:
 
 
 def _labelled(items: list[Any], identifier: str | None) -> list[tuple[str, Any]]:
-    """Each member with the key it is flattened under, falling back to its index on a repeat.
+    """Each member with the key it is flattened under, disambiguating a repeated key.
 
-    **The fallback is the whole of this function, and it is a data-loss fix rather than a tidy-up.**
-    Keying by a member's own identifier is what makes a reordered plate diff as no change, but
-    nothing guarantees the identifier is unique: `base.charge` is keyed by `component`, and a
-    solvent charged in two portions — an addition and a rinse — is entirely ordinary. Measured, the
-    second line silently overwrote the first, so a chemist editing the *first* toluene charge from
-    5 mL to 9 mL was recorded as the *second* moving 2 mL to 9 mL: not a lost row but a
+    **The disambiguation is the whole of this function, and it is a data-loss fix rather than a
+    tidy-up.** Keying by a member's own identifier is what makes a reordered plate diff as no
+    change, but nothing guarantees the identifier is unique: `base.charge` is keyed by `component`,
+    and a solvent charged in two portions — an addition and a rinse — is entirely ordinary.
+    Measured, the second line silently overwrote the first, so a chemist editing the *first* toluene
+    charge from 5 mL to 9 mL was recorded as the *second* moving 2 mL to 9 mL: not a lost row but a
     misattributed edit, in the one table this system keeps precisely to learn from those edits.
 
-    A repeated key falls back to `<label>#<index>` for **every** member sharing it, not only the
-    later ones, so the two lines are `toluene#0` and `toluene#1` rather than `toluene` and
-    `toluene#1` — a reorder of an unambiguous list still diffs as nothing, and an ambiguous one
-    diffs by position, which is the only identity it has.
+    **The ordinal counts within the key, not within the list, and that is the correction to the
+    first fix.** `<label>#<position>` replaced the overwrite with a different misattribution:
+    positions shift, so deleting an *unrelated* line renumbered both toluenes and the diff reported
+    "toluene volume 5.0 → 2.0", an edit nobody made — 33 paths for a one-line deletion. Counting
+    within the key makes the two lines `toluene#0` and `toluene#1` whatever else is added or
+    removed around them, so an unrelated edit is not attributed to them at all.
+
+    A key that is still not unique after that — a component literally named `toluene#1` beside two
+    called `toluene` — makes the whole list positional. That loses reorder-freeness for that one
+    list and is the only answer that cannot silently merge two members, which is the property worth
+    keeping.
     """
     if identifier is None:
         return [(str(index), item) for index, item in enumerate(items)]
@@ -116,11 +124,22 @@ def _labelled(items: list[Any], identifier: str | None) -> list[tuple[str, Any]]
         str(item.get(identifier, index)) if isinstance(item, dict) else str(index)
         for index, item in enumerate(items)
     ]
-    repeated = {label for label in labels if labels.count(label) > 1}
-    return [
-        (f"{label}#{index}" if label in repeated else label, item)
-        for index, (label, item) in enumerate(zip(labels, items, strict=True))
-    ]
+    # `Counter`, not `labels.count(label)` in a comprehension: that is O(n²) over a list whose
+    # length a browser chooses through `POST /protocols/{id}/revisions`, and it measured **46 s of
+    # blocked event loop** for one authenticated request inside every declared bound — the 4 MB
+    # body cap and the per-principal rate limit both bound size and count, neither bounds cost.
+    repeated = {label for label, n in Counter(labels).items() if n > 1}
+    seen: Counter[str] = Counter()
+    resolved: list[str] = []
+    for label in labels:
+        if label in repeated:
+            resolved.append(f"{label}#{seen[label]}")
+            seen[label] += 1
+        else:
+            resolved.append(label)
+    if len(set(resolved)) != len(resolved):
+        return [(str(index), item) for index, item in enumerate(items)]
+    return list(zip(resolved, items, strict=True))
 
 
 def diff_designs(

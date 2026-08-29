@@ -40,7 +40,12 @@ from chemclaw.protocols.models import (
     ProtocolCheck,
     StatusEvent,
 )
-from chemclaw.protocols.store import RevisionConflict, UnknownDesign, default_design_store
+from chemclaw.protocols.store import (
+    RevisionConflict,
+    UnknownDesign,
+    UnstorableDocument,
+    default_design_store,
+)
 
 
 class RevisionSummary(BaseModel):
@@ -247,6 +252,11 @@ async def post_revision(
             parent_revision=body.parent_revision,
             change_note=body.change_note,
         )
+    except UnstorableDocument as exc:
+        # 422, because it is the document that is wrong and the caller can fix it — not a 500,
+        # which is what a NUL byte anywhere in a browser-supplied design used to produce, out of
+        # psycopg, with a correlation id and nothing actionable in it.
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except RevisionConflict as exc:
         # 409 with a machine-readable code, because the caller's next move is to re-read and
         # re-apply rather than to retry. Deliberately *not* the shape `POST

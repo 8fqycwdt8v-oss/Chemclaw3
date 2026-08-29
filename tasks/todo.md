@@ -358,3 +358,29 @@ a new `ChemclawError` subclass must be classified retryable or not (`test_publis
 session-scoped route must be in the ownership inventory (`test_service`). None of these is
 reachable by running the tests for the thing you changed, which is the argument for running the
 whole suite before believing any of it.
+## 8 — Third review cycle (2026-08-29): six fresh-context reviewers, ~50 defects
+
+Six independent reviewers, none of which wrote the code, each required to prove a finding by
+reproduction. They found more than both earlier cycles combined, including defects those cycles
+introduced. Phases below; each ships with its own tests and mutations.
+
+- [ ] **P1 `source_text` is self-graded** — `basis="stated"` means "the chemist wrote this" and the
+      haystack is a tool argument the model fills. Ambient, on `session_context`'s stated
+      precedent ("not something the model should pass as a tool argument … the model must not be
+      able to spoof it"). Fail closed when absent.
+- [ ] **P2 Tier 1 correctness** — the abandonment race (20/20), `forbidden_absent` blind to
+      `setpoints.solvent`, the bench document printing the body's conditions over an arm's,
+      `setpoints_for` whole-object fallback, one arm in two wells.
+- [ ] **P3 Availability + integrity** — the O(n²) `_labelled` (46 s of event loop from one
+      request), NaN/Infinity (500 on pg, 200 in memory, stored ≠ served), NUL bytes.
+- [ ] **P4 Checks that cannot fail** — `factor_levels_declared`'s "no factors" exit, the 0-mmol
+      short-circuit, the four `_ok`-on-a-finding sites, `reaction_smiles` unread by the structure
+      checks, `replicate_of` self-reference, `arms_are_distinct` prescribing a refused remedy.
+- [ ] **P5 diff/render fidelity** — position-anchored `#index`, `None`-as-leaf inverting
+      added/removed, fifteen dropped leaf fields (units among them), `summarise` on `mode`.
+- [ ] **P6 Persistence** — byte-identical revisions demoting, the two backend divergences,
+      `history()` reading every document, the unindexed default listing.
+- [ ] **P7 Prose** — every false claim the audit found, including two in my own cycle-2 commits.
+- [ ] **P8 `Chemclaw3_ui`** — the diff query params, 0-based plate columns, dropped 422 detail,
+      orphaned arms on a level rename, request-stage "14 checks passed", swallowed errors, and
+      fixtures the service would reject.

@@ -24,6 +24,7 @@ band a unit mistake leaves.
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Callable, Iterable
 
 from chemclaw.core.chem import InvalidSmilesError, element_counts
@@ -67,8 +68,17 @@ def _all_charge_lines(design: ExperimentDesign) -> list[ChargeLine]:
 
 
 def _structures(design: ExperimentDesign) -> list[tuple[str, str]]:
-    """Every `(where, smiles)` the design names, so one pass can check them all."""
+    """Every `(where, smiles)` the design names, so one pass can check them all.
+
+    **The reaction SMILES is in here, and its absence was a hole in two blockers.** It is the one
+    structure a design always has, and neither `components_resolve` (whose docstring says "every
+    structure the design names parses whole") nor `forbidden_absent` could see it: a request naming
+    `'CCO junk>>QQQ notreal'` cleared the parse blocker with a passing detail reading
+    `0 structures parse`.
+    """
     found: list[tuple[str, str]] = []
+    for side, species in _reaction_species(design.request.reaction_smiles):
+        found.append((f"reaction {side}", species))
     for component in design.request.components:
         if component.smiles:
             found.append((f"request component {component.name_as_written!r}", component.smiles))
@@ -250,6 +260,22 @@ def _split_species(side: str) -> list[str]:
     return [part for part in side.split(".") if part]
 
 
+def _reaction_species(reaction: str) -> list[tuple[str, str]]:
+    """Every `(side, smiles)` in a reaction SMILES, or nothing when it is not one.
+
+    Both forms, as `atom_balance` reads them: `a>>c` and the record form `a>b>c` that
+    `ingest.eln.ord.reaction_smiles()` emits.
+    """
+    parts = reaction.strip().split(">")
+    if len(parts) != 3:
+        return []
+    return [
+        (side, species)
+        for side, block in zip(("reactants", "agents", "products"), parts, strict=True)
+        for species in _split_species(block)
+    ]
+
+
 def factor_levels_declared(design: ExperimentDesign) -> ProtocolCheck:
     """Every arm sets levels its factors declare, and sets all of them."""
     if not design.factors:
@@ -320,7 +346,22 @@ def layout_fits(design: ExperimentDesign) -> ProtocolCheck:
     labels = [w.label for w in layout.wells]
     if len(set(labels)) != len(labels):
         return _fail("layout_fits", "blocker", "two arms are placed in the same well")
-    placed = {w.arm_id for w in layout.wells}
+    # **Counted, not set-compared, because "once" is half of what this blocker claims.** The
+    # docstring says the plate holds every arm *once*; a set could only ever see an arm that is
+    # missing, never one placed twice. Measured: three wells over two arms with A1 in two of them
+    # passed as `3 of 96 wells used`, and `run_sheet_rows` — which keys wells by arm — then dropped
+    # a well, so the chemist's run sheet started at run 2 and put A1 at the wrong position.
+    # `Counter` rather than `list.count` in a comprehension, which is the O(n²) shape that made one
+    # request block the event loop for 46 s (`diff._labelled`).
+    occupants = Counter(w.arm_id for w in layout.wells)
+    twice = sorted(arm for arm, n in occupants.items() if n > 1)
+    if twice:
+        return _fail(
+            "layout_fits",
+            "blocker",
+            "these arms are placed in more than one well: " + ", ".join(twice),
+        )
+    placed = set(occupants)
     arm_ids = {a.arm_id for a in design.arms}
     if placed != arm_ids:
         unplaced = sorted(arm_ids - placed)
@@ -542,10 +583,24 @@ def _identity(value: str) -> str:
 
 
 def _named_species(design: ExperimentDesign) -> list[str]:
-    """Every human-readable species name the design mentions."""
+    """Every human-readable species name the design mentions.
+
+    **The solvent is in here, and its absence made the blocker unable to catch the commonest
+    exclusion there is.** A process chemist's hard exclusion is nearly always a solvent — an ICH
+    class-2 solvent, or one the plant cannot handle — and `Setpoints.solvent` was the one field
+    this function did not read. Measured: a design forbidding DMF and *running in DMF* reported
+    `1 exclusions honoured`, while the rendered protocol printed `- **Solvent:** DMF`. The per-arm
+    override is the same hole one level down.
+
+    A step's `components` are here for the same reason: a procedure reading "charge SM and DMF"
+    names a reagent, whether or not the charge table lists it.
+    """
     names = [c.name_as_written for c in design.request.components]
     names += [line.component for line in _all_charge_lines(design)]
     names += [level.label for factor in design.factors for level in factor.levels]
+    names += [points.solvent for _, points in _all_setpoints(design)]
+    names += [points.atmosphere for _, points in _all_setpoints(design)]
+    names += [component for step in design.base.steps for component in step.components]
     return names
 
 

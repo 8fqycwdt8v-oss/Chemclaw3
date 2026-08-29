@@ -222,9 +222,14 @@ MAX_SINGLE_TOOL_TOKENS = 900
 #: at once and is a measurement to take rather than a change to make.
 KNOWN_OVERSIZED: dict[str, int] = {
     "start_optimization_campaign": 2_020,
-    "propose_knowledge_note": 1_069,
+    "propose_knowledge_note": 1_077,
     "draft_experiment_protocol": 2_419,
-    "structure_experiment_request": 961,
+    # 961 before `source_text` left the signature and the `salt` argument gained the sentence that
+    # makes its docstring true (a correction to the title, goal, transformation or mode opens a new
+    # design rather than revising this one — the promise the old text made backwards). Removing a
+    # `str` parameter and adding two lines of caller-facing prose nets **+7**, which is the whole
+    # shape of this list: the schema is mostly description, and description is what a caller needs.
+    "structure_experiment_request": 968,
 }
 
 

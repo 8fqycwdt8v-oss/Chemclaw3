@@ -114,7 +114,7 @@ class RequestField(BaseModel):
     # this field exists to catch.
     quote: str = ""
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(frozen=True, extra="forbid", allow_inf_nan=False)
 
     @model_validator(mode="after")
     def _stated_is_quoted(self) -> RequestField:
@@ -140,7 +140,7 @@ class RequestedComponent(BaseModel):
     # `resolve_compound`'s answer, or a note saying why there is none.
     resolution: str = ""
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(frozen=True, extra="forbid", allow_inf_nan=False)
 
 
 class ExperimentRequest(BaseModel):
@@ -159,17 +159,17 @@ class ExperimentRequest(BaseModel):
     # `A.B>>C` when the ask is a transformation. Empty for an ask that is not one (a stability
     # study, a solubility screen), which is why this is not required.
     reaction_smiles: str = ""
-    components: list[RequestedComponent] = Field(default_factory=list)
+    components: list[RequestedComponent] = Field(default_factory=list, max_length=200)
     # Named, directional. Reuses the wording `science.bo.problem.Objective` uses so a design that
     # becomes a BO campaign needs no translation.
-    objectives: list[str] = Field(default_factory=list)
+    objectives: list[str] = Field(default_factory=list, max_length=50)
     # The four limits that decide whether a design is runnable at all, each with its basis.
     scale: RequestField = Field(default_factory=RequestField)
     plate_format: RequestField = Field(default_factory=RequestField)
     max_runs: RequestField = Field(default_factory=RequestField)
     deadline: RequestField = Field(default_factory=RequestField)
     # Hard exclusions. A reagent here that appears anywhere in the design is a `blocker`.
-    forbidden: list[str] = Field(default_factory=list)
+    forbidden: list[str] = Field(default_factory=list, max_length=200)
     # What the chemist says has already been tried. Free text on purpose: it is a pointer for the
     # precedent search, not a record, and structuring it would be inventing runs.
     prior_work: str = ""
@@ -177,7 +177,7 @@ class ExperimentRequest(BaseModel):
     # Everything else the text said that no slot above holds, so nothing is lost in structuring.
     notes: str = ""
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(frozen=True, extra="forbid", allow_inf_nan=False)
 
 
 class FactorLevel(BaseModel):
@@ -194,7 +194,7 @@ class FactorLevel(BaseModel):
     # Why this level and not another. The single most useful sentence on a screening plate.
     rationale: str = ""
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(frozen=True, extra="forbid", allow_inf_nan=False)
 
 
 class Factor(BaseModel):
@@ -206,7 +206,7 @@ class Factor(BaseModel):
     levels: list[FactorLevel] = Field(min_length=2)
     unit: str = ""
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(frozen=True, extra="forbid", allow_inf_nan=False)
 
     @model_validator(mode="after")
     def _levels_match_kind(self) -> Factor:
@@ -231,11 +231,6 @@ class Setpoints(BaseModel):
     # yield and impurity, and its docstring says it holds "what a run recorded". A plan's
     # temperature is an instruction; a plan's yield is a prediction. Two models, so a reader can
     # never take one for the other.
-
-    # Deliberately not `kg.note.ProcessConditions`, which is *recorded* — it mixes setpoints with
-    # yield and impurity, and its docstring says it holds "what a run recorded". A plan's
-    # temperature is an instruction; a plan's yield is a prediction. Two models, so a reader can
-    # never take one for the other.
     temperature_c: float | None = None
     time_h: float | None = Field(default=None, gt=0.0)
     pressure_bar: float | None = Field(default=None, gt=0.0)
@@ -244,7 +239,7 @@ class Setpoints(BaseModel):
     solvent: str = ""
     ph: float | None = None
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(frozen=True, extra="forbid", allow_inf_nan=False)
 
 
 class ChargeLine(BaseModel):
@@ -262,7 +257,7 @@ class ChargeLine(BaseModel):
     limiting: bool = False
     note: str = ""
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(frozen=True, extra="forbid", allow_inf_nan=False)
 
 
 class ProtocolStep(BaseModel):
@@ -277,7 +272,7 @@ class ProtocolStep(BaseModel):
     temperature_c: float | None = None
     duration_h: float | None = Field(default=None, ge=0.0)
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(frozen=True, extra="forbid", allow_inf_nan=False)
 
 
 class Analytic(BaseModel):
@@ -292,7 +287,7 @@ class Analytic(BaseModel):
     # commonest way a plate comes back unanswerable, and `checks.objectives_are_measured` says so.
     measures: list[str] = Field(default_factory=list)
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(frozen=True, extra="forbid", allow_inf_nan=False)
 
 
 class ExpectedOutcome(BaseModel):
@@ -309,7 +304,7 @@ class ExpectedOutcome(BaseModel):
     basis: Literal["precedent", "predicted", "assumed"] = "assumed"
     detail: str = ""
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(frozen=True, extra="forbid", allow_inf_nan=False)
 
 
 class EvidenceRef(BaseModel):
@@ -326,25 +321,25 @@ class EvidenceRef(BaseModel):
     # the bottom of the page.
     supports: list[str] = Field(default_factory=list)
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(frozen=True, extra="forbid", allow_inf_nan=False)
 
 
 class ProtocolBody(BaseModel):
     """What every arm of the design shares."""
 
     setpoints: Setpoints = Field(default_factory=Setpoints)
-    charge: list[ChargeLine] = Field(default_factory=list)
-    steps: list[ProtocolStep] = Field(default_factory=list)
-    analytics: list[Analytic] = Field(default_factory=list)
+    charge: list[ChargeLine] = Field(default_factory=list, max_length=500)
+    steps: list[ProtocolStep] = Field(default_factory=list, max_length=500)
+    analytics: list[Analytic] = Field(default_factory=list, max_length=100)
     # In-process controls: what to check *during* the run and what to do about it.
-    in_process_controls: list[str] = Field(default_factory=list)
+    in_process_controls: list[str] = Field(default_factory=list, max_length=100)
     # What `screen_hazards` / `screen_genotoxic_alerts` / `ich_impurity_limit` said, in the
     # chemist's words. This system flags, it never certifies — see `safety`'s own tools.
-    hazards: list[str] = Field(default_factory=list)
+    hazards: list[str] = Field(default_factory=list, max_length=100)
     waste: str = ""
     expected: ExpectedOutcome = Field(default_factory=ExpectedOutcome)
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(frozen=True, extra="forbid", allow_inf_nan=False)
 
 
 class ProtocolArm(BaseModel):
@@ -369,7 +364,7 @@ class ProtocolArm(BaseModel):
     replicate_of: str = ""
     note: str = ""
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(frozen=True, extra="forbid", allow_inf_nan=False)
 
 
 class Well(BaseModel):
@@ -383,7 +378,7 @@ class Well(BaseModel):
     # design is randomised against session drift.
     run_order: int = Field(ge=1)
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(frozen=True, extra="forbid", allow_inf_nan=False)
 
 
 class PlateLayout(BaseModel):
@@ -392,11 +387,11 @@ class PlateLayout(BaseModel):
     plate_format: int = Field(gt=0)
     rows: int = Field(gt=0)
     columns: int = Field(gt=0)
-    wells: list[Well] = Field(default_factory=list)
+    wells: list[Well] = Field(default_factory=list, max_length=1536)
     randomized: bool = False
     seed: int | None = None
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(frozen=True, extra="forbid", allow_inf_nan=False)
 
 
 class ProtocolCheck(BaseModel):
@@ -410,7 +405,7 @@ class ProtocolCheck(BaseModel):
     passed: bool
     detail: str = ""
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(frozen=True, extra="forbid", allow_inf_nan=False)
 
 
 class ExperimentDesign(BaseModel):
@@ -418,12 +413,19 @@ class ExperimentDesign(BaseModel):
 
     request: ExperimentRequest
     base: ProtocolBody = Field(default_factory=ProtocolBody)
-    factors: list[Factor] = Field(default_factory=list)
-    arms: list[ProtocolArm] = Field(default_factory=list)
+    # **Every list here is bounded, and the bound is a refusal rather than a nicety.** Nothing
+    # capped them, and `POST /protocols/{id}/revisions` takes a whole design from a browser — so a
+    # caller chose `n` for a diff that was O(n²), and one authenticated request inside every other
+    # declared bound (the 4 MB body cap, the per-principal rate limit) blocked the front door's
+    # event loop for **46 s**. The quadratic scan is gone, and so is the unbounded input: the
+    # ceilings below are an order of magnitude above the largest real design — 1536 arms is the
+    # largest plate this system knows — so nothing a chemist writes can reach one.
+    factors: list[Factor] = Field(default_factory=list, max_length=50)
+    arms: list[ProtocolArm] = Field(default_factory=list, max_length=1536)
     layout: PlateLayout | None = None
-    evidence: list[EvidenceRef] = Field(default_factory=list)
+    evidence: list[EvidenceRef] = Field(default_factory=list, max_length=500)
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(frozen=True, extra="forbid", allow_inf_nan=False)
 
     @model_validator(mode="after")
     def _names_resolve_and_steps_are_ordered(self) -> ExperimentDesign:
@@ -488,8 +490,26 @@ class ExperimentDesign(BaseModel):
         return next((a for a in self.arms if a.arm_id == arm_id), None)
 
     def setpoints_for(self, arm: ProtocolArm) -> Setpoints:
-        """The arm's own setpoints, falling back to the shared body's."""
-        return arm.setpoints or self.base.setpoints
+        """The arm's own setpoints over the shared body's, **field by field**.
+
+        The docstring always said "falling back to the shared body's"; the code was
+        `arm.setpoints or self.base.setpoints`, which falls back only when the arm states *nothing*.
+        An arm overriding one field therefore lost every other — measured, an arm that set only
+        `temperature_c=60` produced a run-sheet row with no reaction time and no solvent, beside
+        rows that had both, with every blocker passing.
+
+        A field counts as stated when it is not the model's default: `None` for the numbers, `""`
+        for the two strings. That is what `ProtocolArm.setpoints`'s own comment means by "only what
+        differs from `ProtocolBody`" — an arm says the fields it changes, and inherits the rest.
+        """
+        if arm.setpoints is None:
+            return self.base.setpoints
+        stated = {
+            name: value
+            for name, value in arm.setpoints.__dict__.items()
+            if value is not None and value != ""
+        }
+        return self.base.setpoints.model_copy(update=stated)
 
 
 class DesignRevision(BaseModel):
@@ -511,7 +531,7 @@ class DesignRevision(BaseModel):
     checks: list[ProtocolCheck] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(frozen=True, extra="forbid", allow_inf_nan=False)
 
     @property
     def blockers(self) -> list[ProtocolCheck]:
@@ -537,7 +557,7 @@ class StatusEvent(BaseModel):
     reason: str = ""
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(frozen=True, extra="forbid", allow_inf_nan=False)
 
 
 class DesignSummary(BaseModel):
@@ -555,7 +575,7 @@ class DesignSummary(BaseModel):
     created_at: datetime
     updated_at: datetime
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(frozen=True, extra="forbid", allow_inf_nan=False)
 
 
 def design_id_for(request: ExperimentRequest, *, salt: str = "") -> str:
