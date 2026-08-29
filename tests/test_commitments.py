@@ -10,7 +10,9 @@ infers a field the export did not state, and it has no write path back.
 """
 
 import asyncio
+import inspect
 import json
+import logging
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -18,6 +20,7 @@ import pytest
 
 from chemclaw.core.config import settings
 from chemclaw.core.db import connect
+from chemclaw.durable import commitment_sync
 from chemclaw.ingest.commitments.json_export import json_commitment_export
 from chemclaw.ingest.commitments.models import Commitment
 from chemclaw.ingest.commitments.store import mirror_freshness, outstanding, record_commitments
@@ -212,3 +215,63 @@ def test_the_mirror_has_no_write_path_back() -> None:
         "the agent tool reaches the mirror's writer. Reading the mirror is a tool; changing a "
         "programme's plan is not one."
     )
+
+
+def test_one_unreadable_file_costs_that_file_and_not_the_pass(tmp_path: Path) -> None:
+    """Reject-and-continue was written for a *row* and the file was left to raise.
+
+    A truncated export — a partial write, a failed extract — aborted `fetch_commitments` before
+    every file sorting after it was read, the activity failed, the cursor never advanced, and the
+    mirror froze on last week's snapshot while `review_commitments` kept answering from it. One bad
+    file must cost that file.
+    """
+    (tmp_path / "a-good.json").write_text(
+        json.dumps([{"external_id": "M-1", "title": "one", "kind": "milestone"}]), encoding="utf-8"
+    )
+    (tmp_path / "b-truncated.json").write_text('[{"external_id": "M-2",', encoding="utf-8")
+    (tmp_path / "c-null.json").write_text("null", encoding="utf-8")
+    (tmp_path / "d-good.json").write_text(
+        json.dumps([{"external_id": "M-3", "title": "three", "kind": "milestone"}]),
+        encoding="utf-8",
+    )
+
+    export = json_commitment_export(name="probe", path=str(tmp_path))
+    found = asyncio.run(export.fetch_commitments(None))
+    assert sorted(row.external_id for row in found) == ["M-1", "M-3"], (
+        "a malformed file cost the files sorting after it, which freezes the whole mirror"
+    )
+
+
+def test_a_missing_export_directory_is_reported_rather_than_read_as_an_empty_portfolio(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A wrong path and a genuinely empty portfolio were byte-identical, and one is a defect.
+
+    The adapter found no files, the sync reported success with nothing mirrored, `mirror_freshness`
+    stayed NULL, and `review_commitments` reads NULL as "nothing was ever mirrored" — so a mistyped
+    `CHEMCLAW_COMMITMENT_EXPORT_DIR` reached a project leader as a truthful empty portfolio.
+    Shipping a `data/commitments/` directory only fixes the default, and the knob exists precisely
+    so a deployment can point elsewhere.
+    """
+    missing = tmp_path / "not-mounted"
+    export = json_commitment_export(name="probe", path=str(missing))
+    with caplog.at_level(logging.WARNING):
+        assert asyncio.run(export.fetch_commitments(None)) == []
+    assert any("export_dir_missing" in record.message for record in caplog.records), (
+        "a wrong export directory is still indistinguishable from an empty one"
+    )
+
+
+def test_the_commitment_cursor_does_not_share_a_row_with_the_eln_sync() -> None:
+    """`sync_cursors` is keyed on the source name alone, and nothing forbids both halves.
+
+    A manifest may declare `ingest:` and `commitments:` — the model requires *at least* one — and
+    the mirror stores wall-clock now. The next ELN sync would load that and fetch only entries newer
+    than it, silently skipping every unread entry: the exact failure `ingest/eln/cursor.py` argues
+    cannot happen, under an assumption of one writer per source.
+    """
+    source = inspect.getsource(commitment_sync)
+    assert 'f"{source}:commitments"' in source, (
+        "the commitment mirror writes the bare source name again, so it shares the ELN sync's row"
+    )
+    assert "load_cursor(source)" not in source and "store_cursor(source," not in source

@@ -15,6 +15,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from chemclaw.core.logging import redact_secrets
+from chemclaw.core.metrics_bridge import degraded
 
 logger = logging.getLogger(__name__)
 
@@ -37,9 +38,16 @@ def _connector_secret_envs() -> tuple[str, ...]:
 
         return bearer_token_env_names()
     except Exception:
-        logger.error(
-            "deliver.redaction_degraded: connector bearer-token names could not be resolved; "
-            "connector credentials will NOT be scrubbed from outbound messages"
+        # `degraded()` rather than a bare `logger.error`, matching the sibling this was extracted
+        # from: it increments `chemclaw_degraded_total{subsystem}`, which is alerted and
+        # dashboarded. A bare log line here would have made this the *only* security degradation in
+        # the tree with no counter — on the half that leaves the cluster, which this module's own
+        # docstring calls the more consequential of the two.
+        degraded(
+            logger,
+            "deliver_redaction",
+            "connector bearer-token names could not be resolved; connector credentials will NOT "
+            "be scrubbed from outbound messages",
         )
         return ()
 

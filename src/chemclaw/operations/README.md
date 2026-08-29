@@ -10,10 +10,11 @@ the turns and tokens went.
 ## Why it exists
 
 The tables it reads have all been written since the system was built and none of them could be read
-*across*. (First written here as "none of them had a reader", which is false for four of the five —
-`cli/explain.py`, `publish/backfill.py`, `durable/job_record_store.py`, `kg/proposal_store.py` and
-`agent/plan_approval_store.py` all read one. Every one is a point lookup; only `turn_costs` had no
-reader at all. The aggregate was the missing thing, not the read.)
+*across*. (First written here as "none of them had a reader", which is false — `cli/explain.py`,
+`publish/backfill.py`, `durable/job_record_store.py`, `kg/proposal_store.py` and
+`agent/plan_approval_store.py` all read one, and only `turn_costs` had none. The second attempt
+called them all point lookups, which is false too: two are searches and one is a full sweep. What
+none of them does is **aggregate**, and that is the whole of it.)
 `chemclaw.agent.audit_store.PostgresAuditStore` exposes `record` and `flush`; the grant matrix hands
 the runtime principal `SELECT` on every table and no code used it on this one. So the trail proved
 *that* something happened and could not answer a question *about* it — and a set of questions a

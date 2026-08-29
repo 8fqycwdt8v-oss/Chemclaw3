@@ -170,3 +170,88 @@ def test_nothing_reads_from_a_channel() -> None:
             f"{verb!r} appears in the delivery driver. A channel is outbound only; a reader here "
             "is an ingest source that declared its way in through the wrong seam."
         )
+
+
+def test_a_connector_bearer_token_is_scrubbed_from_an_outbound_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The claim this module made in prose and did not implement.
+
+    `Message.redacted()`'s docstring said "the same filter runs here" about `core/logging`'s scrub.
+    It did not: `redact_secrets` reaches a connector's bearer token only through its `extra_secrets`
+    argument, and nothing passed one — so a tool error quoting its own `Authorization` header was
+    scrubbed from the log line and shipped verbatim to the webhook host. Both sides now resolve the
+    names through `connectors.registry.bearer_token_env_names`, so they cannot cover different sets.
+
+    Reverting the `extra_secrets=` argument leaves every suite green, which is why this exists.
+    """
+    from chemclaw.deliver.message import Message
+
+    secret = "sk-connector-token-abc123"
+    monkeypatch.setenv("CHEMCLAW_CALC_MCP_TOKEN", secret)
+    # **Bare, deliberately.** An "Authorization: Bearer …" spelling is caught by the structural
+    # patterns whatever \ holds, so a test written that way passes with the fix
+    # reverted and proves nothing — which is exactly what the first version of this test did. Only a
+    # value recognisable *as a configured credential* exercises the argument that was missing.
+    body = f"the server refused; the token it rejected was {secret}"
+    scrubbed = Message(recipient="u-1", subject="digest", body=body).redacted()
+    assert secret not in scrubbed.body, "a connector bearer token reached an outbound message"
+    assert "***" in scrubbed.body
+
+
+def test_the_webhook_sends_the_recipients_view_and_not_the_join_key() -> None:
+    """`correlation_id` is the key that joins a delivery to this system's audit trail.
+
+    Its own field docstring says "never rendered to the recipient". The file driver honoured that;
+    the webhook driver serialised the whole model with `model_dump()` and posted it to a third-party
+    chat or ticketing host. The projection is an allow-list rather than a deny-list, so a field
+    added later is omitted rather than leaked.
+    """
+    from chemclaw.deliver.message import Message
+
+    message = Message(
+        recipient="u-1", subject="s", body="b", kind="digest", correlation_id="corr-secret"
+    )
+    payload = message.model_dump(include={"recipient", "subject", "body", "kind"})
+    assert "correlation_id" not in payload
+    assert set(payload) == {"recipient", "subject", "body", "kind"}
+
+
+def test_a_plaintext_channel_is_refused_under_the_enforced_posture(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The floor the sibling outbound seam already had and this one shipped without.
+
+    `publish/drivers/http` refuses a non-loopback `http://` sink under `entra_required` because
+    confidential chemistry would cross the wire in cleartext. A delivery carries *more*
+    human-readable content than a sink record does — a chemist's standing query, note ids, an
+    escalation body — and, when `token_env` is set, a bearer credential in every request.
+    """
+    from chemclaw.deliver.driver import WebhookDeliveryDriver
+
+    monkeypatch.setattr(settings, "entra_required", True)
+    with pytest.raises(ValueError, match="cleartext"):
+        WebhookDeliveryDriver(name="ops", url="http://hooks.example.com/x")
+    # Loopback stays available for local development, as it does for the sink.
+    WebhookDeliveryDriver(name="ops", url="http://127.0.0.1:9000/x")
+    WebhookDeliveryDriver(name="ops", url="https://hooks.example.com/x")
+
+    monkeypatch.setattr(settings, "entra_required", False)
+    WebhookDeliveryDriver(name="ops", url="http://hooks.example.com/x")
+
+
+def test_a_message_kind_cannot_escape_the_outbox() -> None:
+    """`kind` is a path component in the file driver, and was documented-but-unbounded.
+
+    The docstring called it "a bounded vocabulary" and the type was `str`, while
+    `FileDeliveryDriver` builds `directory / f"{kind}-{identity}{suffix}"` — so an absolute or
+    `../`-bearing value escapes the outbox, with `mkdir(parents=True)` creating whatever it
+    traverses to. The `Literal` is the bound; the prose was not.
+    """
+    from pydantic import ValidationError
+
+    from chemclaw.deliver.message import Message
+
+    for hostile in ("/etc/cron.d/x", "../../../etc/x", "digest/../.."):
+        with pytest.raises(ValidationError):
+            Message(recipient="u-1", subject="s", kind=hostile)  # type: ignore[arg-type]

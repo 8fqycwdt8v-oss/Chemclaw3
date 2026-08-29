@@ -44,6 +44,19 @@ class JsonCommitmentExport:
         would drop rows whose state moved without their file being rewritten. The upsert is keyed on
         `(source, external_id)`, so re-reading the whole snapshot converges rather than duplicating.
         """
+        if not self.path.exists():
+            # **Said out loud, because the alternative is a truthful-looking empty portfolio.** A
+            # mistyped `CHEMCLAW_COMMITMENT_EXPORT_DIR` or a mount that failed returns no files, the
+            # sync reports success with nothing mirrored, `mirror_freshness` stays NULL, and
+            # `review_commitments` presents that to a project leader as "nothing was ever mirrored".
+            # Creating the shipped default directory does not help a deployment that points the knob
+            # somewhere else, which is the only reason the knob exists.
+            logger.warning(
+                "commitments.export_dir_missing: %s reads %s, which does not exist",
+                self.name,
+                self.path,
+            )
+            return []
         files = sorted(self.path.glob("*.json")) if self.path.is_dir() else [self.path]
         found: list[Commitment] = []
         rejected = 0
@@ -62,7 +75,14 @@ class JsonCommitmentExport:
                 rows = payload if isinstance(payload, list) else payload.get("commitments", [])
                 if not isinstance(rows, list):
                     raise TypeError(f"expected a list of commitments, got {type(rows).__name__}")
-            except (OSError, ValueError, TypeError, AttributeError) as exc:
+            except (
+                OSError,
+                ValueError,
+                TypeError,
+                AttributeError,
+                RecursionError,
+                MemoryError,
+            ) as exc:
                 logger.warning(
                     "commitments.file_unreadable: %s in %s: %s", self.name, file.name, exc
                 )

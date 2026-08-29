@@ -167,7 +167,13 @@ def bearer_token_env_names() -> tuple[str, ...]:
     site-issued connector token matches none of them.
 
     Returns:
-        The variable names, or `()` when discovery fails — the caller decides how loudly to say so.
+        The variable names.
+
+    Raises:
+        Whatever `enabled()` raises on a malformed manifest — this function has no handler and does
+        not swallow. Both callers catch, and each decides how loudly to say so: `core.logging` at
+        ERROR with a counter, `deliver.message` on the path that leaves the cluster. An earlier
+        version of this docstring promised `()` on failure, which no code here delivers.
     """
     from chemclaw.connectors.manifest import BearerAuth, HttpEndpoint
 
