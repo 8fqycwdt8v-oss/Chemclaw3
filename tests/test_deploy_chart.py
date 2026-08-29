@@ -2270,6 +2270,46 @@ def test_no_alert_asks_for_to_suppress_what_only_a_threshold_can() -> None:
         )
 
 
+def test_the_corpus_alert_can_fire_for_the_case_it_calls_the_sharper_one() -> None:
+    """A sentinel below every legal threshold is a case a `>` comparison can never reach.
+
+    `chemclaw_knowledge_sync_age_seconds` reports `kg/graph.py::NO_NOTES` (-1) for a tree holding no
+    note at all — negative on purpose, so an unpopulated volume could never be misread as a corpus
+    that had just refreshed. `ChemclawKnowledgeCorpusStale` was `age > {{ threshold }}` and rendered
+    only when the threshold is positive, so -1 could not satisfy it under any configuration: the
+    alert's own description named that case as the sharper failure while being structurally unable
+    to fire for it. The dashboard panel showed it to whoever was looking; nothing paged.
+
+    The opt-in is asserted in the same test because it is the constraint the fix had to respect. An
+    empty tree needs no site-specific budget to interpret, which is a real argument for alerting on
+    it unconditionally — but the gauge is bound in every process that imports `kg.graph`, and a
+    deployment not using the knowledge graph has an empty tree by design. Both arms stay behind the
+    one threshold, so opting out is still one number.
+    """
+    rule = (CHART / "templates" / "prometheusrule.yaml").read_text()
+    block = re.split(r"\n\s*- alert: ", rule)[1:]
+    stale = [item for item in block if item.startswith("ChemclawKnowledgeCorpusStale")]
+    assert len(stale) == 1, "the alert this test is about is not in the chart under that name"
+    expr = " ".join(stale[0].split("expr:")[1].split("for:")[0].split()).removeprefix(">- ")
+
+    assert "max by (pod) (chemclaw_knowledge_sync_age_seconds) < 0" in expr, (
+        "the rule cannot reach the no-notes sentinel: -1 is not greater than a positive threshold, "
+        f"so an unpopulated knowledge volume never alerts. Expression is {expr!r}"
+    )
+    assert "> {{ .Values.monitoring.alerts.knowledgeCorpusStaleSeconds }}" in expr, (
+        "the staleness arm is gone — the sentinel arm is an addition to it, not a replacement"
+    )
+
+    # And the whole rule is still opt-in: the alert must sit inside the guard, not beside it.
+    guard = "{{- if gt (int .Values.monitoring.alerts.knowledgeCorpusStaleSeconds) 0 }}"
+    assert guard in rule, "the opt-in guard was renamed or removed"
+    guarded = rule.split(guard, 1)[1].split("{{- end }}", 1)[0]
+    assert "ChemclawKnowledgeCorpusStale" in guarded, (
+        "the alert escaped its opt-in guard, so a deployment with an intentionally empty knowledge "
+        "tree is now paged for it and cannot turn it off with `knowledgeCorpusStaleSeconds: 0`"
+    )
+
+
 def test_every_alerted_metric_is_a_metric_the_app_declares() -> None:
     """The other direction: an alert on a metric that does not exist never fires and looks fine.
 

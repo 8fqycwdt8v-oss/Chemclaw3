@@ -163,11 +163,28 @@ spec:
                Rendered only when a deployment states its threshold, because this gauge cannot tell
                a wedged sync from a corpus nobody is adding to — see `values.yaml`. A shipped
                default would be this chart inventing how often somebody else's chemists write
-               notes, and it would page for the quiet weeks. */}}
+               notes, and it would page for the quiet weeks.
+
+               The `< 0` arm is not a second condition, it is the *same* one at its limit. The gauge
+               reports -1 for a tree holding no note at all (`kg/graph.py::NO_NOTES`), chosen
+               negative precisely so an unpopulated volume could never be read as a corpus that had
+               just refreshed — and a negative number is not greater than a positive threshold, so
+               for as long as the rule was the comparison alone it could not fire for the case its
+               own description called the sharper one. The dashboard showed it to a human looking;
+               nothing paged.
+
+               Both arms stay behind the same opt-in. An empty tree needs no site-specific budget to
+               interpret, which is an argument for firing it unconditionally, but the gauge is bound
+               in every process that imports `kg.graph` — workers included — and a deployment that
+               does not use the knowledge graph at all has an empty tree by design. An alert that
+               such a site cannot turn off is one it would silence permanently, which costs the
+               stale arm too. `for: 15m` is what keeps a rollout quiet: a pod whose sync sidecar has
+               not finished its first pull is legitimately at -1. */}}
         - alert: ChemclawKnowledgeCorpusStale
           expr: >-
             max by (pod) (chemclaw_knowledge_sync_age_seconds)
             > {{ .Values.monitoring.alerts.knowledgeCorpusStaleSeconds }}
+            or max by (pod) (chemclaw_knowledge_sync_age_seconds) < 0
           for: 15m
           labels:
             severity: warning
@@ -176,9 +193,10 @@ spec:
             summary: A pod's knowledge corpus has stopped moving
             description: >-
               The newest note on this pod's knowledge tree is older than the deployment's budget, so
-              it is answering from a corpus that has stopped arriving. -1 is the sharper case: the
-              tree holds no note at all, which is a volume that was never populated. Check the
-              sync sidecar's restart count and its log before assuming the corpus is merely quiet.
+              it is answering from a corpus that has stopped arriving. A value of -1 is the sharper
+              case and fires this same alert: the tree holds no note at all, which is a volume that
+              was never populated rather than one that went stale. Check the sync sidecar's restart
+              count and its log before assuming the corpus is merely quiet.
 {{- end }}
 
     - name: chemclaw.correctness
