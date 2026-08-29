@@ -38,6 +38,7 @@ from chemclaw.protocols.models import (
     DesignSummary,
     ExperimentDesign,
     ProtocolCheck,
+    StatusEvent,
 )
 from chemclaw.protocols.store import RevisionConflict, UnknownDesign, default_design_store
 
@@ -78,6 +79,12 @@ class DesignOut(BaseModel):
     design: ExperimentDesign
     checks: list[ProtocolCheck] = Field(default_factory=list)
     history: list[RevisionSummary] = Field(default_factory=list)
+    # Who approved, ran or abandoned this design and at which revision. Beside the document rather
+    # than behind a route of its own, for the reason `history` is: a reader deciding whether to run
+    # a protocol needs "revision 3 was approved by X" at the same instant as the revision they are
+    # looking at, and a design demoted back to `draft` by a later revision has that fact *only*
+    # here.
+    status_history: list[StatusEvent] = Field(default_factory=list)
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -110,6 +117,11 @@ class StatusIn(BaseModel):
     """A lifecycle move."""
 
     status: DesignStatus
+    # **Recorded, which it was not.** `Chemclaw3_ui`'s status panel labels this "recorded with the
+    # move", disables every button until it is filled in, and confirms "the move is recorded
+    # against you with the reason you wrote" — and `set_status` took no `reason` at all, so the one
+    # sentence anybody writes about a design ("abandoned — the SM decomposes above 40 °C") was
+    # accepted from the chemist, validated to 2,000 characters, and dropped on the way to a 204.
     reason: str = Field(default="", max_length=2000)
 
     model_config = ConfigDict(extra="forbid")
@@ -167,6 +179,7 @@ async def get_protocol(
         created_at=stored.created_at,
         design=stored.design,
         checks=stored.checks,
+        status_history=await store.status_history(design_id),
         history=[
             RevisionSummary(
                 revision=item.revision,
@@ -205,7 +218,18 @@ async def post_revision(
         raise HTTPException(
             status_code=404, detail=f"no design {design_id!r} at revision {body.parent_revision}"
         )
-    checks = run_checks(body.document)
+    # **The kind and the stage are derived from the document, not assumed.** This route serves the
+    # ADR's second hole — an artefact the chemist can correct *before* the expensive work — and the
+    # first version hard-coded `kind="protocol"` and graded at the protocol stage, so correcting an
+    # ask recorded a protocol revision, flipped a design with no procedure in it to `draft`, and
+    # reported `is_a_protocol` and `evidence_present` as blockers on it. That is exactly the failure
+    # `_REQUEST_STAGE` was introduced to prevent, reintroduced on the human path: a blocker that
+    # fires on the normal path is a blocker a reader learns to ignore, which is the property the one
+    # real blocker depends on. `has_protocol` is the single definition all three callers now read.
+    kind = "protocol" if body.document.has_protocol else "request"
+    checks = run_checks(
+        body.document, stage="protocol" if body.document.has_protocol else "request"
+    )
     changed = diff_designs(
         previous.design,
         body.document,
@@ -217,7 +241,7 @@ async def post_revision(
             design_id,
             body.document,
             checks,
-            kind="protocol",
+            kind=kind,
             author_kind="human",
             author=principal.oid or "",
             parent_revision=body.parent_revision,
@@ -225,7 +249,10 @@ async def post_revision(
         )
     except RevisionConflict as exc:
         # 409 with a machine-readable code, because the caller's next move is to re-read and
-        # re-apply rather than to retry — the same contract `plan_changed` has.
+        # re-apply rather than to retry. Deliberately *not* the shape `POST
+        # /sessions/{id}/plan/decision` uses — that one answers a 409 with a plain string, and a
+        # caller has to match on prose to tell it from the other 409 the front door serves. This
+        # comment used to claim it mirrored a `plan_changed` code, which exists nowhere in `src/`.
         raise HTTPException(
             status_code=409, detail={"code": "revision_conflict", "message": str(exc)}
         ) from exc
@@ -264,7 +291,9 @@ async def post_status(
 ) -> Response:
     """Move a design's lifecycle status — approve it, mark it run, or abandon it."""
     try:
-        await default_design_store().set_status(design_id, body.status, principal.oid or "")
+        await default_design_store().set_status(
+            design_id, body.status, principal.oid or "", body.reason
+        )
     except UnknownDesign as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ChemclawError as exc:  # pragma: no cover - the store raises only UnknownDesign today

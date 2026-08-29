@@ -28,9 +28,12 @@ from chemclaw.protocols.models import (
     EvidenceRef,
     ExperimentDesign,
     ExperimentRequest,
+    Factor,
+    FactorLevel,
     ProtocolArm,
     ProtocolBody,
     RequestField,
+    Setpoints,
     design_id_for,
 )
 from chemclaw.protocols.render import DesignListing, ProtocolReadout, ProtocolReceipt
@@ -102,22 +105,29 @@ async def _draft(
     design_id: str,
     parent_revision: int,
     *,
-    arms: int = 1,
+    arms: int | list[ProtocolArm] = 1,
     cited: bool = True,
+    evidence: list[EvidenceRef] | None = None,
     change_note: str = "drafted the protocol",
     base: ProtocolBody | None = None,
+    factors: list[Factor] | None = None,
     plate_format: int = 0,
     randomize_run_order: bool = False,
     seed: int | None = None,
 ) -> str:
-    """Draft against an open design, passing the parts the tool assembles into one design."""
+    """Draft against an open design, passing the parts the tool assembles into one design.
+
+    `arms` takes a count for the usual case and a list when the arms have to set factor levels,
+    which is the only shape a screen's `factor_levels_declared` accepts.
+    """
     return await tools.draft_experiment_protocol(
         design_id,
         parent_revision,
         base or ProtocolBody(),
-        _cited() if cited else [],
+        (_cited() if cited else []) if evidence is None else evidence,
         change_note,
-        arms=_arms(arms),
+        factors=factors,
+        arms=_arms(arms) if isinstance(arms, int) else list(arms),
         plate_format=plate_format,
         randomize_run_order=randomize_run_order,
         seed=seed,
@@ -490,6 +500,232 @@ def test_drafting_after_structuring_the_same_ask_stores_the_next_revision(
         assert [item.kind for item in history] == ["request", "protocol"]
         assert [item.parent_revision for item in history] == [0, 1]
         assert history[-1].design.request == request
+
+    asyncio.run(_body())
+
+
+#: One factor and its two levels, so a screen's arms have something to set. `factor_levels_declared`
+#: is a blocker, so an arm that sets nothing a factor declares would refuse the draft before the
+#: property under test could be reached.
+_LIGAND = Factor(
+    name="ligand",
+    kind="categorical",
+    levels=[FactorLevel(label="XPhos"), FactorLevel(label="SPhos")],
+)
+
+
+def _screen_arms() -> list[ProtocolArm]:
+    """One arm per level of `_LIGAND`, each setting it — the least a screen can be."""
+    return [
+        ProtocolArm(arm_id="A1", levels={"ligand": "XPhos"}),
+        ProtocolArm(arm_id="A2", levels={"ligand": "SPhos"}),
+    ]
+
+
+def test_restructuring_the_ask_keeps_the_protocol_it_was_drafted_into(
+    store: InMemoryDesignStore,
+) -> None:
+    """Correcting the ask revises the *ask*; it does not throw the plate away.
+
+    The id is derived from the ask, so re-structuring the same one reaches the same design — and
+    this tool used to append a bare `ExperimentDesign(request=…)` over it. Measured: `arm_count`
+    reset to 0, the factors and the layout vanished, and every default read (the listing, `GET
+    /protocols/{id}`, `read_experiment_protocol`) served the empty ask, because no consumer reads a
+    non-head revision. The correction has to land and the procedure has to survive it.
+    """
+
+    async def _body() -> None:
+        opened = await _open()
+        await _draft(
+            opened.design_id,
+            opened.revision,
+            arms=_screen_arms(),
+            factors=[_LIGAND],
+            plate_format=24,
+        )
+
+        # A *corrected* ask, not a different one: `design_id_for` reads title, goal, reaction and
+        # mode, so correcting any of those would open a second design rather than revise this one.
+        corrected = _request(
+            scale=RequestField(value="100 mg", basis="inferred"),
+            notes="they meant 100 mg, not the 5 g I first read",
+        )
+        again = ProtocolReceipt.model_validate_json(
+            await tools.structure_experiment_request(corrected, _SOURCE)
+        )
+        assert again.design_id == opened.design_id
+        assert again.revision == 3
+
+        head = await store.read(opened.design_id)
+        assert head is not None
+        assert head.kind == "request"
+        # The correction landed…
+        assert head.design.request == corrected
+        # …and the protocol it was drafted into is still there, whole.
+        assert [arm.arm_id for arm in head.design.arms] == ["A1", "A2"]
+        assert [factor.name for factor in head.design.factors] == ["ligand"]
+        assert head.design.layout is not None
+        assert head.design.layout.plate_format == 24
+        assert [well.label for well in head.design.layout.wells] == ["A1", "A2"]
+        assert head.design.evidence == _cited()
+        # The receipt says the same thing, which is what the model reads back.
+        assert again.arm_count == 2
+        assert again.status == "draft"
+
+    asyncio.run(_body())
+
+
+def test_restructuring_grades_the_checks_at_the_stage_the_design_is_at(
+    store: InMemoryDesignStore,
+) -> None:
+    """A design holding a protocol is graded as a protocol, even by the intake tool.
+
+    The request stage reports every protocol-only check as a passing `note` reading "not checked yet
+    — this design holds only the ask". That is right for an intake and wrong the moment the design
+    has a procedure: a protocol that now contradicts a corrected ask is exactly what a chemist needs
+    to see, and grading it at the request stage would report `is_a_protocol` and `evidence_present`
+    as unexamined on a design that has both.
+    """
+
+    async def _body() -> None:
+        first = await _open()
+        intake = {check.check_id: check for check in first.checks}
+        # The intake's own grading, for contrast: this is what the design under test must *not* get.
+        assert intake["is_a_protocol"].severity == "note"
+        assert "not checked yet" in intake["is_a_protocol"].detail
+
+        await _draft(first.design_id, first.revision, arms=2)
+        again = ProtocolReceipt.model_validate_json(
+            await tools.structure_experiment_request(_request(notes="corrected"), _SOURCE)
+        )
+
+        graded = {check.check_id: check for check in again.checks}
+        assert graded["is_a_protocol"].severity == "blocker"
+        assert graded["is_a_protocol"].passed is True
+        assert "2 arm(s)" in graded["is_a_protocol"].detail
+        assert graded["evidence_present"].severity == "blocker"
+        assert graded["evidence_present"].passed is True
+        assert "not checked yet" not in graded["evidence_present"].detail
+        assert again.blocking == []
+
+    asyncio.run(_body())
+
+
+def test_a_revision_that_passes_no_plate_format_carries_the_plate_forward(
+    store: InMemoryDesignStore,
+) -> None:
+    """A revision that only changes a temperature must not delete the plate.
+
+    `plate_format` defaults to 0, and 0 used to mean "no layout" rather than "do not re-lay it out"
+    — so the well assignments and the run order were silently dropped, and `layout_fits` degraded to
+    a *passing* warning reading "no plate layout", which is why nothing said so. A randomised order
+    is not recoverable either: a fresh `place()` with another seed is a different plate, and the one
+    a chemist ran is the one the seed reproduces.
+    """
+
+    async def _body() -> None:
+        opened = await _open()
+        await _draft(
+            opened.design_id,
+            opened.revision,
+            arms=6,
+            plate_format=24,
+            randomize_run_order=True,
+            seed=5,
+        )
+        drafted = await store.read(opened.design_id)
+        assert drafted is not None and drafted.design.layout is not None
+        before = drafted.design.layout
+
+        revised = ProtocolReceipt.model_validate_json(
+            await _draft(
+                opened.design_id,
+                2,
+                arms=6,
+                base=ProtocolBody(setpoints=Setpoints(temperature_c=60.0)),
+                change_note="60 C, the chloride decomposes at 80",
+            )
+        )
+        assert revised.revision == 3
+        assert revised.plate_format == 24
+
+        head = await store.read(opened.design_id)
+        assert head is not None and head.design.layout is not None
+        # Byte-identical: the same wells, the same run order, the same seed.
+        assert head.design.layout.model_dump_json() == before.model_dump_json()
+        assert head.design.layout.randomized is True and head.design.layout.seed == 5
+        assert head.design.base.setpoints.temperature_c == 60.0
+
+        # And the check that used to go quiet about it is still grading a real plate.
+        layout_check = {check.check_id: check for check in head.checks}["layout_fits"]
+        assert "no plate layout" not in layout_check.detail
+
+    asyncio.run(_body())
+
+
+def test_passing_a_plate_format_on_a_revision_lays_the_plate_out_again(
+    store: InMemoryDesignStore,
+) -> None:
+    """Carrying the plate forward is what *omitting* the format asks for; passing one re-lays it.
+
+    The other half of the same rule, and the reason the first is not simply "layouts are immutable":
+    moving a screen onto a bigger plate, or dropping the randomisation, is a `plate_format` away.
+    """
+
+    async def _body() -> None:
+        opened = await _open()
+        await _draft(
+            opened.design_id,
+            opened.revision,
+            arms=6,
+            plate_format=24,
+            randomize_run_order=True,
+            seed=5,
+        )
+
+        revised = ProtocolReceipt.model_validate_json(
+            await _draft(
+                opened.design_id,
+                2,
+                arms=6,
+                plate_format=48,
+                change_note="moved it onto a 48-well plate and dropped the randomisation",
+            )
+        )
+        assert revised.plate_format == 48
+
+        head = await store.read(opened.design_id)
+        assert head is not None and head.design.layout is not None
+        assert head.design.layout.plate_format == 48
+        assert head.design.layout.randomized is False and head.design.layout.seed is None
+        assert [well.run_order for well in head.design.layout.wells] == [1, 2, 3, 4, 5, 6]
+
+    asyncio.run(_body())
+
+
+def test_drafting_refuses_citations_that_name_nothing_to_open(
+    store: InMemoryDesignStore,
+) -> None:
+    """Two sentences about work nobody can check are not two citations.
+
+    `kind="tool"` with no `tool` name and `kind="precedent"` with no `ref` cleared
+    `evidence_present` between them, which made the one blocker in this tier satisfiable by writing
+    prose. Asserted through the tool rather than through `checks` alone, because that is the path a
+    model takes and the path the refusal has to reach it on.
+    """
+
+    async def _body() -> None:
+        opened = await _open()
+        with pytest.raises(ChemclawError, match="evidence_present"):
+            await _draft(
+                opened.design_id,
+                opened.revision,
+                evidence=[
+                    EvidenceRef(kind="precedent", summary="a run like this gave 72%"),
+                    EvidenceRef(kind="tool", summary="the base is strong enough"),
+                ],
+            )
+        assert [item.kind for item in await store.history(opened.design_id)] == ["request"]
 
     asyncio.run(_body())
 

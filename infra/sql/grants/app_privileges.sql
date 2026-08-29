@@ -67,7 +67,6 @@ BEGIN
         'calculation_results, calculation_artifacts, job_records, '
         'bo_campaigns, measurements, predictions, note_proposals, observations, '
         'pending_requests, commitments, effects, '
-        'reaction_records, '
         'reaction_records, experiment_protocols, '
         'plan_approvals, sync_cursors, turn_costs, '
         'molecule_fingerprints, reaction_fingerprints, reaction_labels, corpus_molecules, '
@@ -93,8 +92,14 @@ BEGIN
     -- that could UPDATE one could rewrite the correction it exists to record. The header row
     -- (`experiment_protocols`) is upsertable above because its `head_revision`/`status` genuinely
     -- move; the revisions themselves never do.
+    -- `experiment_protocol_status_events` is the same argument about a sign-off rather than a
+    -- draft: a credential that could UPDATE an approval row could rewrite who approved what, and
+    -- one that could DELETE it could make an approval that happened disappear. The header's
+    -- `status` is the mutable projection; these rows are the record it is projected from.
     EXECUTE format(
-        'GRANT INSERT ON bo_suggestions, structures, experiment_protocol_revisions TO %I', app_role
+        'GRANT INSERT ON bo_suggestions, structures, experiment_protocol_revisions, '
+        'experiment_protocol_status_events TO %I',
+        app_role
     );
 
     -- Insert, delete, and now a narrow update. The row is still written once by its creator

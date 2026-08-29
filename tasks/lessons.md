@@ -1371,3 +1371,151 @@ read...`, `test_no_two_migrations_claim_one_number`), so a keyword search over i
 weaker instrument here than in most trees — search the *subject* (`migration`, `number`) and read the
 handful of hits.
 
+## 2026-08-29 — four of my five worst defects were a check that could not fail
+
+An adversarial review of a tier I had just merged found **fifteen** defects under a green 231-test
+suite. Four of the five worst were the same shape: a **blocker that could not fail**, each sitting
+under a passing test I had written from the same misunderstanding as the code.
+
+- `components_resolve` tested `canonical == smiles and not _parses(smiles)`. I believed
+  `canonical_smiles` returns its input unchanged on a bad input. It does not — RDKit stops at
+  whitespace, so `"CCO junk"` canonicalises *successfully* to `"CCO"`, a smaller molecule. The first
+  clause is false for exactly the class the check exists for, so the second was never reached and the
+  detail read `1 structures parse` about a structure that does not.
+- `forbidden_absent` compared `canonical_smiles("DMF")` — the literal string `"DMF"` — against a set
+  of canonical SMILES. The comment beside it explained at length why looking at the structure
+  matters. It could never match.
+- `charge_is_consistent` put `reference.amount_mmol > 0` inside the comprehension that finds
+  disagreements, so a limiting reagent at `0.0` emptied the list and passed.
+- `layout_fits` never compared `rows`/`columns` to `plate_format`.
+
+**What each has in common is that my test asserted the same wrong model of the world as the code.**
+`test_components_resolve_blocks_a_structure_rdkit_cannot_read` passes `"not-a-smiles"` — which
+RDKit rejects outright, the one case the conjunction handles. I never tried `"CCO junk"`, because
+the code and the test came out of one belief.
+
+The rules I am taking:
+
+1. **For a check, enumerate the input *classes* before writing either the code or the test**, and
+   name the one the check exists for. Here it was "a string RDKit accepts as a different, smaller
+   molecule" — the class `require_molecule`'s own docstring is entirely about, in a function I had
+   read that morning. A both-directions test is not enough when both directions come from one idea.
+2. **A test I write beside my own code is a consistency check, not a search.** The searching has to
+   be done by something that did not write the code. This one cost 15 findings; commissioning it
+   was the highest-value hour of the task and it should not have been the last hour.
+3. **When a comment argues for a behaviour, run the behaviour.** Three of the four announced
+   themselves in their own prose — `forbidden_absent`'s comment describes the DMF/`CN(C)C=O` case as
+   the reason for code that cannot do it. I wrote the comment and the code in one pass and checked
+   neither against the other. The existing rule 14 says the docstring is the best bug detector;
+   the corollary is that it is useless on prose *I* wrote in the same breath as the code.
+
+## 2026-08-29 — I verified `make test` and CI runs `make cov`
+
+I ran `make lint type test` five times across a change, called it green, and CI failed — on a test
+`make test` runs too, but in a job I had never reproduced. The `ci` target is
+`lint type cov kg-validate … deps-audit`, and **`cov` is not `test`**: it is
+`pytest --cov --cov-report=term-missing`, which adds a coverage floor and, more to the point here,
+changes the timing profile of every performance-budget test in the suite. The failure was a
+per-turn graph-compile budget at 408 ms against a 400 ms bound.
+
+Rule 5 already says "run the gate's own command, at the gate's own scope, unpiped", and I read the
+`Makefile`'s `cov` line the day I started. What I did not do was ask **which target CI actually
+invokes** — I inferred it from `CLAUDE.md`'s prose ("the gate: `make lint` · `make type` ·
+`make test`"), which describes the developer loop rather than the CI job. The authority is
+`.github/workflows/`, and it costs one `grep`.
+
+**Before claiming a change is green: `grep -n 'make ' .github/workflows/*.yml` and run exactly
+those.** For this repository that is `make ci`, and the two targets it has that the prose does not
+are `cov` and `deps-audit`.
+
+The finding underneath was worth having, so the cost was not wasted: four new tools raised the
+per-turn compile 30 ms (209 → 239, isolated by deleting their registration import), and profiling
+put **79% of the whole build** in `langchain_core.tools.convert` re-deriving a pydantic model from
+every tool's signature on every build. Build time is proportional to schema size exactly as prompt
+cost is — a second cost of an oversized tool schema that nobody here had measured.
+
+## 2026-08-29 — a fix can be paid for with a record that does not exist
+
+The second adversarial pass over `chemclaw.protocols` found six more defects on top of the first
+pass's fifteen. The one worth a rule is not any of the six; it is the shape the largest one had.
+
+`store.advanced()` demotes an `approved` design back to `draft` when a revision lands on it. That is
+correct, and the docstring arguing for it ends: *"Which revision was approved stays recoverable:
+`set_status` records it."* `set_status` wrote one column on the header row and logged a line that
+did not carry the revision. **I wrote the demotion and the sentence excusing its cost in the same
+commit, one screen apart, and the sentence was an invention.**
+
+Rule 14 and the previous entry's rule 3 both say a docstring is a bug detector and that prose I
+wrote in the same breath as the code is not. This is the sharper case, because the false sentence
+was not describing the code beside it — it was describing *somewhere else*, and describing it as a
+reason to accept a loss. So:
+
+1. **A cost-is-affordable claim names a mechanism; open the mechanism.** "X stays recoverable
+   because Y records it" is a claim about Y, in a comment about X. It reads as reassurance and it
+   is a testable assertion about a different function. Every time I justify removing, demoting or
+   overwriting something by naming what still holds it, the next action is to open that thing.
+2. **A field the API accepts and never reads is a control that lies.** `POST
+   /protocols/{id}/status` validated a `reason` to 2,000 characters and dropped it — while the UI
+   labelled the box "recorded with the move", *disabled every button until it was filled in*, and
+   confirmed "recorded against you with the reason you wrote". That is worse than a dead parameter:
+   it is a promise made to a person, three times, in their own screen. **Trace every request field
+   to a write, and grep the consumer repository for the ones a person types.**
+3. **A fixture that agrees with my type proves nothing about the service.** The UI's
+   `GET /protocols/{id}` type was nested where the service is flat, so `revision.design` was
+   `undefined` and the document page threw on its first field — under 808 green unit tests and 8
+   green browser tests, one of whose docstrings says it exists to prove the page "renders against a
+   real proxied response rather than a stubbed one". Every stub was written from the same belief as
+   the type. **A cross-repository shape is verified by dumping the producer's own schema, not by
+   re-reading the consumer.** One `model_json_schema()` call ended a question three test suites
+   could not.
+4. **Resolve a merge, then grep for the markers.** `docs/decisions/README.md` went to a commit with
+   `<<<<<<< HEAD` in it and eight of `origin/main`'s ADR rows dropped. `make lint` and `make type`
+   were both green, because the file is Markdown. The suite caught it; my own reading did not.
+
+5. **Do not touch the shared database while a full suite is running against it.** I started
+   `make cov`, then ran a mutation that dropped a table and re-migrated it. The suite's own
+   Postgres-backed tests were reading that table at the time, so the run stopped being evidence
+   about anything and had to be thrown away and restarted. The sandbox has one Postgres and
+   `tests/pg.py` points every backend test at it. **While a suite is running, the only safe
+   commands are read-only ones** — a mutation experiment waits, or runs against a database of its
+   own.
+
+6. **The "run exactly what CI runs" rule is per repository, and the UI's gate is seven commands.**
+   I ran `typecheck`, `lint` and `test` in `Chemclaw3_ui`, called it green, and CI failed on
+   `npm run format:check`. The check job is `npm audit --omit=dev --audit-level=high`, `typecheck`,
+   `lint`, `format:check`, `test`, `check:contrast`, `build`; the e2e job adds **both directions**
+   of `check:no-dev-auth` (a default build must not carry the dev provider, an `ALLOW_DEV_AUTH=true`
+   build must) and `test:e2e`. Same `grep -n 'run: ' .github/workflows/*.yml`, different repository.
+
+## 2026-08-29 (second entry) — I shipped, then a review found four defects in what I shipped
+
+PR #282 merged green: `make lint type test`, a live storm family going 7/8 → 8/8, and a live
+measurement of the exact behaviour. Four adversarial reviewers over the merged commit then found
+four real defects, three of them *introduced by the change* and one it made reachable.
+
+What the green gate could not see, and why:
+
+- **The new event fired on turns that succeeded.** Every test I wrote asked "is the lost call
+  announced?" and none asked "is anything announced when nothing was lost?" — so `evals/live`
+  scoring a clean turn `failed_loudly=True`, `turn_costs` booking failures against successful
+  calls, and `Chemclaw3_ui` painting two red rows above a good answer were all invisible to a suite
+  that only tested the failure case.
+- **I never enumerated the consumers.** `ToolFailedEvent` had exactly one producer before this;
+  adding a second changed the meaning of every reader of it, and I read none of them. Two of the
+  three broken readers are named in the event's own docstring.
+- **My ADR asserted a mitigation I had not checked.** I wrote that `reason` distinguished a
+  repaired step from a broken tool. `reason` names five gates and both cases carry `None` — one
+  grep would have shown it. That is the same class as the handover measurement I had corrected in
+  this very session, committed by me, in the document recording the correction.
+- **A field documented as bounded was not.** `BrokenCall.error`'s own docstring said every field
+  was bounded on the way out; I read the docstring instead of the constructor three lines below it.
+
+**The rule: when a change adds a second producer of an existing event, record, or metric, list
+every consumer of it and say what each now sees.** Not "does my new case work" — "what does the
+*old* reader make of my new case". The cheap version is one grep for the type name across `src/`
+and the sibling repos, then one sentence per hit.
+
+**And the corollary: a test suite that only exercises the failure path proves nothing about the
+success path.** For any change that fires on a condition, write the test where the condition is
+absent first. `test_a_repair_that_works_announces_nothing_because_nothing_was_lost` is the test
+that should have existed before the feature did.
