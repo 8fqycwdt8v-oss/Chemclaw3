@@ -311,8 +311,9 @@ topic).
       `main`-only too.
 
 - [ ] **`read_corpus` re-reads the entire ELN from `datetime.min` on every call** — [M].
-      `durable/memory_jobs.py:82-86` calls `fetch_new_entries(datetime.min.replace(tzinfo=UTC))` on
-      every ingest half inside `read_corpus`, so each of the three memory jobs (`build_campaign_notes_activity`,
+      `durable/memory_jobs.py::read_corpus` calls
+      `fetch_new_entries(datetime.min.replace(tzinfo=UTC))` on
+      every ingest half, so each of the three memory jobs (`build_campaign_notes_activity`,
       `build_playbook_notes_activity`, `build_optimization_notes_activity`) walks the whole record
       from the beginning of time, once per activity. (This sentence also named `all_reactions()`,
       which exists nowhere in `src/` — a reader following the anchor found nothing and had no way to
