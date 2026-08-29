@@ -252,13 +252,34 @@ def test_a_missing_export_directory_is_reported_rather_than_read_as_an_empty_por
     `CHEMCLAW_COMMITMENT_EXPORT_DIR` reached a project leader as a truthful empty portfolio.
     Shipping a `data/commitments/` directory only fixes the default, and the knob exists precisely
     so a deployment can point elsewhere.
+
+    **And it is counted, not only logged.** A WARNING with no counter is visible to a person already
+    reading the log of the pod they already suspect, which is nobody: this failure lasts as long as
+    the misconfiguration and its entire symptom is silence. That is the `deliver_redaction` shape
+    one seam over — the sibling this was extracted from — so it goes on
+    `chemclaw_degraded_total{subsystem="commitment_mirror"}`, which is alerted.
     """
+    from chemclaw.core.metrics import METRICS
+
+    series = 'chemclaw_degraded_total{subsystem="commitment_mirror"}'
+
+    def _count() -> float:
+        for line in METRICS.render().splitlines():
+            if line.startswith(series):
+                return float(line.rsplit(" ", 1)[1])
+        return 0.0
+
+    before = _count()
     missing = tmp_path / "not-mounted"
     export = json_commitment_export(name="probe", path=str(missing))
     with caplog.at_level(logging.WARNING):
         assert asyncio.run(export.fetch_commitments(None)) == []
     assert any("export_dir_missing" in record.message for record in caplog.records), (
         "a wrong export directory is still indistinguishable from an empty one"
+    )
+    assert _count() == before + 1, (
+        "the mirror reading nothing left no counter, so a mistyped export directory is invisible "
+        "to everything except a log nobody is reading"
     )
 
 

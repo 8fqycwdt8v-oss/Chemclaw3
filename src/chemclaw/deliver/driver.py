@@ -66,8 +66,8 @@ class FileDeliveryDriver:
         )
 
 
-def _refuse_plaintext_channel(name: str, url: str, token_env: str) -> None:
-    """Refuse a non-loopback `http://` delivery channel under the enforced posture.
+def plaintext_channel_refusal(name: str, url: str, token_env: str = "") -> str:
+    """Why `url` may not be delivered to under the enforced posture, or `""` when it may.
 
     The same floor `publish/drivers/http._refuse_plaintext_sink` applies to a result sink, on the
     same terms and for a stronger reason: a delivery carries *more* human-readable content than a
@@ -77,22 +77,43 @@ def _refuse_plaintext_channel(name: str, url: str, token_env: str) -> None:
 
     Only under `entra_required`, with loopback dev exempt, exactly as the sink and as
     `require_pg_tls` and the Temporal-mTLS guard.
+
+    **The reason is returned rather than raised, because the raise happens in the wrong place to be
+    a refusal.** A driver is constructed inside `registry.deliver`'s per-channel `try`, which
+    swallows so that one broken channel does not cost every other recipient their message — and
+    that swallow is correct. Measured: with `entra_required=true` and an enabled `http://` channel,
+    `enabled()` returns it, `deliver()` returns `[]`, and the only trace is one WARNING per message,
+    which reads exactly like the destination being down. So the control that named itself a refusal
+    was a per-message drop on a deployment that looked healthy. Returning the reason lets
+    `cli/validate_channels.py` ask the same question of a *manifest* — before anything is
+    delivered, which is where "refuse" can mean refuse — from this one definition.
     """
     if not settings.entra_required:
-        return
+        return ""
     parts = urlsplit(url)
     if parts.scheme == "https" or (parts.hostname or "").lower() in PG_LOOPBACK_HOSTS:
-        return
+        return ""
     carried = (
         "every POST carries a bearer credential and the message body"
         if token_env
         else "the message body"
     )
-    raise ValueError(
+    return (
         f"entra_required=true with a non-loopback http delivery channel {name!r} at {url!r}: "
         f"{carried} would cross the wire in cleartext. Use an https:// url, or bind a loopback "
         "address for local dev."
     )
+
+
+def _refuse_plaintext_channel(name: str, url: str, token_env: str) -> None:
+    """Raise `plaintext_channel_refusal`'s reason, when there is one.
+
+    Kept at the construction site as well as in the validator: the validator is a gate an operator
+    runs, and a driver built by a path that skipped it must still not open a cleartext destination.
+    """
+    reason = plaintext_channel_refusal(name, url, token_env)
+    if reason:
+        raise ValueError(reason)
 
 
 class WebhookDeliveryDriver:
