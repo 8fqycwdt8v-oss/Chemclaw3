@@ -95,10 +95,17 @@ def test_effort_is_refused_on_anthropic_where_it_means_extended_thinking() -> No
 def test_the_anthropic_payload_is_why_that_refusal_exists() -> None:
     """Pins the upstream behaviour the refusal is written against, so a change is visible.
 
-    If `langchain-anthropic` ever makes `reasoning_effort` a plain effort level with no injected
-    thinking, this test goes red and the refusal above can be revisited — which is the point of
-    asserting somebody else's behaviour rather than only our reaction to it. The same shape
-    `tests/test_upstream_surface.py` uses for every other coupling to an upstream promise.
+    If `langchain-anthropic` stops injecting thinking for this model, this test goes red and the
+    refusal can be revisited — which is the point of asserting somebody else's behaviour rather
+    than only our reaction to it. The same shape `tests/test_upstream_surface.py` uses for every
+    other coupling to an upstream promise.
+
+    **The injection is model-gated, not universal**, which is why the model name here is pinned
+    rather than incidental: upstream conditions it on the model profile advertising an `xhigh`
+    reasoning level, so `claude-sonnet-4` and `claude-3-5-sonnet` get a bare `output_config` and no
+    thinking at all. That makes this assertion sensitive to a bundled model-table refresh as well
+    as to a code change — which is worth knowing when it goes red, and is why the failure message
+    says so.
     """
     from langchain_anthropic import ChatAnthropic
 
@@ -115,9 +122,14 @@ def test_the_anthropic_payload_is_why_that_refusal_exists() -> None:
     payload = client._get_request_payload([("user", "hi")])
 
     assert payload["output_config"] == {"effort": "high"}
-    assert payload["thinking"]["type"] == "adaptive", (
-        "upstream no longer injects extended thinking for reasoning_effort — "
-        "LlmSettings._effort_is_provider_scoped can be revisited"
+    # `.get` twice, because the interesting failure is `thinking` being **absent** — and
+    # `payload["thinking"]` would die on `KeyError` in exactly that case, so the message explaining
+    # what to do about it would never print. A test whose diagnostic is unreachable in the one
+    # scenario it was written for is a test that reports the wrong thing at the worst moment.
+    assert payload.get("thinking", {}).get("type") == "adaptive", (
+        "upstream no longer injects extended thinking for this model — the injection is gated on "
+        "the model profile's reasoning levels, so this can change from a model-table refresh as "
+        "well as from a behaviour change. `build_chat_model`'s refusal can be revisited."
     )
 
 

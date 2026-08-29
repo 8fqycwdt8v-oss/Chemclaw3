@@ -71,10 +71,14 @@ class AgentProfile(BaseModel):
     # deliberately imports no settings (see the module docstring); the two are pinned against each
     # other by `tests/test_llm_effort.py` instead, the way `harness_autonomy` already is.
     #
-    # **Only meaningful on `llm_provider='openai_compatible'`**, which
-    # `LlmSettings._effort_is_provider_scoped` enforces at startup: on the Anthropic path the same
-    # parameter enables extended thinking rather than setting an effort level (measured), which is
-    # a different decision with its own costs.
+    # **Only meaningful on `llm_provider='openai_compatible'`**, refused elsewhere by
+    # `llm_provider.build_chat_model`: on the Anthropic path the same parameter enables extended
+    # thinking rather than setting an effort level (measured), which is a different decision with
+    # its own costs.
+    #
+    # The refusal is named precisely because this comment first credited
+    # `LlmSettings._effort_is_provider_scoped`, which reads `self.llm_effort` and therefore never
+    # sees this field at all — so the claim was false for exactly the input it was written on.
     effort: Literal["low", "medium", "high"] | None = None
 
 
