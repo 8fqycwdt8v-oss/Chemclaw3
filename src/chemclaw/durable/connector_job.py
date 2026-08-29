@@ -46,13 +46,15 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
-from temporalio import workflow
+from temporalio import activity, workflow
 from temporalio.common import RetryPolicy, WorkflowIDReusePolicy
-from temporalio.exceptions import ActivityError, ChildWorkflowError
+from temporalio.exceptions import ActivityError, ApplicationError, ChildWorkflowError
 
 with workflow.unsafe.imports_passed_through():
     from chemclaw.core.config import settings
     from chemclaw.core.metrics_bridge import degraded
+    from chemclaw.durable.awaiting import AwaitAnswerWorkflow, AwaitOutcome, AwaitRequest
+    from chemclaw.durable.effect_ledger import EffectRecord, begin_effect, settle_effect
     from chemclaw.durable.job_record import JobRecord, note_with_run_provenance, record_job
     from chemclaw.durable.memory_jobs import publish_memory_note_activity
     from chemclaw.durable.notify import notify_session_best_effort
@@ -64,8 +66,9 @@ from chemclaw.durable.publish import (
     BAD_DATA_RETRY,
     publish_note_best_effort,
     publish_result_best_effort,
+    queue_wait_timeout,
 )
-from chemclaw.durable.registry import durable_workflow
+from chemclaw.durable.registry import durable_activity, durable_workflow
 
 # A plain module logger rather than `workflow.logger`, used only inside an `is_replaying` guard.
 # `workflow.logger` exists to suppress duplicate lines on replay, and the one place below that
@@ -186,6 +189,15 @@ class ConnectorJobInput(BaseModel):
     # Additive and defaulted because it crosses the Temporal wire and histories are in flight —
     # the same rule `plan_step` and `ConnectorJobResult.calc_refs` above follow.
     timeout_seconds: float | None = Field(default=None, gt=0)
+    # What this job changes in a system this deployment does not own, copied from the manifest at
+    # the launch site exactly as `publish_to_graph` and `timeout_seconds` are — never derived here,
+    # because the manifest is on disk and a workflow may not read it. `None` means the job's writes
+    # are this system's own, which is every job in this repository today
+    # (`D-2026-08-29-an-effect-declares-whether-it-can-be-undone`).
+    #
+    # Additive and defaulted because it crosses the Temporal wire and histories are in flight.
+    effect_system: str = ""
+    effect_reversal: str = ""
 
 
 class ConnectorJobResult(BaseModel):
@@ -513,9 +525,17 @@ class ConnectorJobWorkflow:
         started_at = workflow.now()
         job_id = workflow.info().workflow_id
         try:
+            approved_by = await self._approve_effect(job, job_id)
+            await self._begin_effect(job, job_id, approved_by)
             result = await self._run_child(job)
+            await self._settle_effect(job, job_id, "applied", result.summary)
             return await self._finish(job, result, started_at)
         except BaseException as exc:
+            # **The ledger is settled first, before anything best-effort.** A failed effect that is
+            # left `attempting` reads as "this system may have changed the far side and cannot
+            # prove either way", which is the honest state for a crash and a false alarm for a run
+            # whose child simply raised.
+            await self._settle_effect(job, job_id, "failed", str(exc)[:500])
             # **Every way this run can end badly, not only a failing child.** The clause used to be
             # `except (ChildWorkflowError, ActivityError)` around the child call alone, which is a
             # correct account of *the child* failing and covers nothing else: the envelope decode,
@@ -559,6 +579,89 @@ class ConnectorJobWorkflow:
                 )
             await self._notify_failure(job, exc)
             raise
+
+    async def _approve_effect(self, job: ConnectorJobInput, job_id: str) -> str:
+        """For an irreversible effect, suspend until a human approves *this call*.
+
+        The second caller of the durable wait, and the reason it was built as one primitive:
+        `D-2026-08-15-the-plan-gate-stays-a-refusal-because-an-interrupt-cannot-ask-the-question`
+        declined `HumanInTheLoopMiddleware` for plan approval and left this open in as many words —
+        *"not declined for per-call approval of an irreversible action, which is a different,
+        still-open question."*
+
+        Per call rather than per plan, because that is what irreversibility means: a plan approved
+        an hour ago authorised a *kind* of work, and filing this deviation with these arguments is
+        a particular act. A refusal or an expiry fails the job rather than proceeding — an
+        unanswered approval is not an approval, and this is the one place where "assume the good
+        outcome" is unrecoverable.
+        """
+        if job.effect_reversal != "irreversible":
+            return ""
+        outcome = AwaitOutcome.model_validate(
+            await workflow.execute_child_workflow(
+                AwaitAnswerWorkflow.run,
+                AwaitRequest(
+                    kind="approval",
+                    subject=f"Approve {job.job!r} against {job.effect_system}",
+                    rationale=job.rationale,
+                    requested_by=job.requested_by,
+                    session_id=job.session_id,
+                    correlation_id=job.correlation_id,
+                    deadline_days=settings.effect_approval_deadline_days,
+                ).model_dump(mode="json"),
+                id=f"{job_id}:approval",
+                task_queue=settings.background_task_queue,
+            )
+        )
+        if outcome.state != "answered" or not outcome.payload.get("approved", False):
+            raise ApplicationError(
+                f"{job.job!r} changes {job.effect_system} irreversibly and was not approved "
+                f"({outcome.state}); nothing was attempted",
+                non_retryable=True,
+            )
+        return outcome.answered_by
+
+    async def _begin_effect(self, job: ConnectorJobInput, job_id: str, approved_by: str) -> None:
+        """Record the intent to change something outside, *before* attempting it."""
+        if not job.effect_system:
+            return
+        await workflow.execute_activity(
+            record_effect_activity,
+            EffectRecord(
+                effect_id=job_id,
+                connector=job.connector,
+                job=job.job,
+                system=job.effect_system,
+                reversal=job.effect_reversal or "idempotent",
+                requested_by=job.requested_by,
+                session_id=job.session_id,
+                correlation_id=job.correlation_id,
+                approved_by=approved_by,
+            ),
+            start_to_close_timeout=timedelta(seconds=settings.activity_timeout_seconds),
+            schedule_to_start_timeout=queue_wait_timeout(),
+            retry_policy=BAD_DATA_RETRY,
+        )
+
+    async def _settle_effect(
+        self, job: ConnectorJobInput, job_id: str, state: str, detail: str
+    ) -> None:
+        """Record how the attempt ended. Never raises: the ledger must not fail the job."""
+        if not job.effect_system:
+            return
+        try:
+            await workflow.execute_activity(
+                settle_effect_activity,
+                SettleEffectInput(effect_id=job_id, state=state, detail=detail),
+                start_to_close_timeout=timedelta(seconds=settings.activity_timeout_seconds),
+                schedule_to_start_timeout=queue_wait_timeout(),
+                retry_policy=BAD_DATA_RETRY,
+            )
+        except Exception:
+            # An unsettled row is the *safe* failure — it says the far side's state is in doubt,
+            # which after a ledger outage it genuinely is. Raising here would fail a job whose real
+            # work already succeeded.
+            workflow.logger.warning("effect ledger not settled for %s", job_id)
 
     async def _run_child(self, job: ConnectorJobInput) -> ConnectorJobResult:
         """Start the bundle's own workflow on its queue and wait for its result."""
@@ -788,3 +891,25 @@ class ConnectorJobWorkflow:
                 )
             return False
         return True
+
+
+class SettleEffectInput(BaseModel):
+    """The typed argument for `settle_effect_activity`."""
+
+    effect_id: str
+    state: str
+    detail: str = ""
+
+
+@durable_activity("background")
+@activity.defn
+async def record_effect_activity(record: EffectRecord) -> None:
+    """Write the intent to change something outside this deployment, before it is attempted."""
+    await begin_effect(record)
+
+
+@durable_activity("background")
+@activity.defn
+async def settle_effect_activity(payload: SettleEffectInput) -> None:
+    """Record how an attempted effect ended."""
+    await settle_effect(payload.effect_id, state=payload.state, detail=payload.detail)

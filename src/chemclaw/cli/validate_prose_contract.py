@@ -407,7 +407,8 @@ def _path_resolves(candidate: str) -> bool:
 def _connector_token_envs() -> set[str]:
     """The credential variable names this deployment declares, lowercased like a Settings field.
 
-    Two sources, and the second is the reason this docstring no longer says "connector manifests".
+    Three sources, and the second and third are why this docstring no longer says
+    "connector manifests".
     A server we do not run is reached either as a *connector* — a bundle manifest with an
     `HttpEndpoint` and a `BearerAuth` — or, for `calc`, as a plain client seam whose address is
     configuration rather than a manifest (`D-2026-08-16-the-physics-leaves-the-cache-stays` says
@@ -445,6 +446,13 @@ def _connector_token_envs() -> set[str]:
     # with no edit here.
     declared.add(settings.calc_server_token_env.removeprefix("CHEMCLAW_").lower())
     declared.add(settings.rxnlabel_server_token_env.removeprefix("CHEMCLAW_").lower())
+    # And core's own read-only MCP face, which is the same shape one step further out: it is a
+    # server this deployment *does* run, its bearer is read from the environment per request by the
+    # transport, and its name is a setting's value rather than a manifest field — deliberately,
+    # because the face must never be addressable as a connector
+    # (`D-2026-08-29-a-digest-nobody-receives-is-not-delivered`). Read off the declaration for the
+    # same reason the two above are: renaming the variable keeps this gate correct with no edit.
+    declared.add(settings.mcp_face_token_env.removeprefix("CHEMCLAW_").lower())
     return declared
 
 

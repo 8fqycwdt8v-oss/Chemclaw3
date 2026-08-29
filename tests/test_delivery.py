@@ -1,0 +1,172 @@
+"""The outbound delivery seam: a message that leaves for a person.
+
+`durable/digest.py` stated the position this replaces in as many words — *"no new delivery
+mechanism, no email integration, no second notification system"* — which was right while the product
+was a chat window and is why a project leader could not be reached on a Monday morning: the only
+place a digest landed was a mailbox inside the app.
+
+Four properties are asserted rather than described, because each is a claim the README makes:
+delivery is off until a deployment names a channel, a message is redacted before any driver sees it,
+one channel's failure is not everyone's, and nothing reads *from* a channel.
+"""
+
+import asyncio
+from pathlib import Path
+
+import pytest
+
+from chemclaw.core.config import settings
+from chemclaw.deliver.driver import FileDeliveryDriver
+from chemclaw.deliver.manifest import DeliveryChannelManifest
+from chemclaw.deliver.message import Message
+from chemclaw.deliver.registry import (
+    DeliveryChannelError,
+    build,
+    deliver,
+    delivery_enabled,
+    discovered,
+    enabled,
+)
+
+SRC = Path(__file__).resolve().parents[1] / "src" / "chemclaw"
+
+
+def test_delivery_is_off_until_a_deployment_names_a_channel() -> None:
+    """Discovery is deliberately not enablement here, unlike the connector registry.
+
+    A discovered connector serves a tool; a discovered channel sends something out of the building.
+    The shipped channels are found — that is what makes them enable-able — and none of them is on.
+    """
+    assert set(discovered()) == {"share", "webhook"}
+    assert settings.delivery_channel_list == []
+    assert delivery_enabled() is False
+    assert enabled() == []
+
+
+def test_a_channel_named_with_no_folder_is_an_error_rather_than_a_skip(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An operator who spelled a channel wrong means to be delivering and is not.
+
+    The one failure a delivery seam has to be loud about: a silent skip looks exactly like a
+    deployment with nothing to send.
+    """
+    monkeypatch.setattr(settings, "delivery_channels", "share,teams")
+    with pytest.raises(DeliveryChannelError, match="teams"):
+        enabled()
+
+
+def test_the_shipped_channels_build_from_their_own_manifests() -> None:
+    """`config:` is bound against the driver's signature, so a wrong key fails here."""
+    manifests = discovered()
+    driver = build(manifests["share"])
+    assert isinstance(driver, FileDeliveryDriver)
+    # And a manifest whose config does not match the driver names both, rather than surfacing a
+    # bare `TypeError` from inside the driver.
+    wrong = DeliveryChannelManifest(
+        name="share",
+        description="x",
+        driver="chemclaw.deliver.driver:file_channel",
+        config={"folder": "/tmp"},
+    )
+    with pytest.raises(DeliveryChannelError, match="signature is the schema"):
+        build(wrong)
+
+
+def test_a_manifest_may_not_set_the_name_the_registry_supplies() -> None:
+    """The same guard the sink and source manifests carry, for the same failure."""
+    with pytest.raises(ValueError, match="supplies it"):
+        DeliveryChannelManifest(
+            name="share",
+            description="x",
+            driver="chemclaw.deliver.driver:file_channel",
+            config={"name": "other", "directory": "/tmp"},
+        )
+
+
+def test_a_message_is_redacted_before_any_driver_sees_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The scrub is in the registry, not in each driver.
+
+    A redaction every driver has to remember is one the next driver forgets, and the one that
+    forgets is the one that sends outside the cluster. Driven end to end through the file channel,
+    with a real registered secret, so the assertion is over what actually lands on disk.
+    """
+    from chemclaw.core.logging import register_secret_env
+
+    monkeypatch.setenv("CHEMCLAW_TEST_DELIVERY_SECRET", "hunter2-not-in-the-outbox")
+    register_secret_env("CHEMCLAW_TEST_DELIVERY_SECRET")
+
+    outbox = tmp_path / "outbox"
+    monkeypatch.setattr(settings, "delivery_channels_dir", str(tmp_path / "channels"))
+    channel = tmp_path / "channels" / "local"
+    channel.mkdir(parents=True)
+    (channel / "channel.yaml").write_text(
+        "name: local\n"
+        "description: a test channel\n"
+        "driver: chemclaw.deliver.driver:file_channel\n"
+        f"config:\n  directory: {outbox}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(settings, "delivery_channels", "local")
+
+    took = asyncio.run(
+        deliver(
+            Message(
+                recipient="u-1",
+                subject="digest",
+                body="the token is hunter2-not-in-the-outbox, do not send it",
+            )
+        )
+    )
+    assert took == ["local"]
+    written = "\n".join(path.read_text(encoding="utf-8") for path in outbox.iterdir())
+    assert "hunter2-not-in-the-outbox" not in written
+    assert "***" in written
+
+
+def test_one_channels_failure_is_not_everyones(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Reject-and-continue, the discipline the ELN sync and the digest already use.
+
+    The return value is the point: "delivered" and "swallowed" are different facts, and
+    `durable/digest.py` is the caller that must not conflate them.
+    """
+    root = tmp_path / "channels"
+    good = root / "good"
+    good.mkdir(parents=True)
+    (good / "channel.yaml").write_text(
+        "name: good\ndescription: works\ndriver: chemclaw.deliver.driver:file_channel\n"
+        f"config:\n  directory: {tmp_path / 'out'}\n",
+        encoding="utf-8",
+    )
+    bad = root / "bad"
+    bad.mkdir()
+    (bad / "channel.yaml").write_text(
+        "name: bad\ndescription: unreachable\n"
+        "driver: chemclaw.deliver.driver:webhook_channel\n"
+        "config:\n  url: http://127.0.0.1:1/never\n  timeout_seconds: 0.05\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(settings, "delivery_channels_dir", str(root))
+    monkeypatch.setattr(settings, "delivery_channels", "bad,good")
+
+    took = asyncio.run(deliver(Message(recipient="u-1", subject="s", body="b")))
+    assert took == ["good"]
+
+
+def test_nothing_reads_from_a_channel() -> None:
+    """An absence pinned: a channel is write-only, and a driver that read would be an ingest source.
+
+    The mirror of the rule `ingest/sources/README.md` states in the other direction — "a source
+    cannot acquire a write path by declaring one". A `fetch`, `read` or `poll` on the driver
+    Protocol would make this seam a second, ungoverned way into the corpus.
+    """
+    protocol = (SRC / "deliver" / "driver.py").read_text(encoding="utf-8")
+    for verb in ("def fetch", "def read", "def poll", "def receive"):
+        assert verb not in protocol, (
+            f"{verb!r} appears in the delivery driver. A channel is outbound only; a reader here "
+            "is an ingest source that declared its way in through the wrong seam."
+        )

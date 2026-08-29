@@ -409,23 +409,28 @@ probes:
   - id: pl-21
     section: 10
     persona: manager
-    bucket: C
+    bucket: B
     question: >-
       For the quarterly EHS review I need the hazard-flag and near-miss pattern across the whole
       group: which teams are trending worse, which reaction classes generate the most flags, and
       how that compares with last quarter.
-    expects_tools: []
+    expects_tools: [review_activity]
     forbids_claims:
-      - "any count, rate, percentage or trend of hazard flags or near-misses"
+      - "any count, rate or trend of near-misses or incidents"
       - "any team, group or per-scientist comparison"
-      - "that the numbers could be produced if a report were run"
+      - "any attribution of flags to a reaction class"
+      - "that a count of hazard-screen calls is a count of hazards found"
     direction: >-
-      Three things are missing at once and the answer should name them: no incident or near-miss
-      register, no team or project entity to aggregate by, and no historical record of screening
-      calls to trend. Screening is a per-question structural check, not a logged safety-metrics
-      pipeline. The correct answer refuses the aggregate outright and does not soften it into a
-      partial table with one real column and three invented ones. A confident synthetic trend here
-      is the most damaging possible failure, because it would go into a quarterly EHS review.
+      One of the four things asked for now exists and three do not, and the answer's whole job is
+      keeping them apart. `review_activity` can count `screen_hazards` calls over a quarter and over
+      the quarter before it, with the window stated — so "how much screening happened, and is it up
+      or down" is a real, quotable figure. What is still absent: no incident or near-miss register,
+      no team or project entity to aggregate by, and no reaction-class attribution on a screening
+      call. And the figure that does exist counts *screens run*, not *hazards found* — reporting it
+      as a flag rate would be the same fabrication in a smaller font. The correct answer gives the
+      one real trend with its span and its meaning stated precisely, then refuses the other three
+      outright. A partial table with one real column and three invented ones is the failure mode
+      here, because it would go into a quarterly EHS review.
 
   # ---------------------------------------------------------------------------
   # Section 5 — Automated & Robotic Lab Hardware (no interface exists at all)
@@ -574,23 +579,29 @@ probes:
   - id: pl-29
     section: 16
     persona: manager
-    bucket: C
+    bucket: B
     question: >-
       Give me a consolidated status across all active projects for the Monday leadership meeting —
       where each one stands, what moved last week, and what is blocked.
-    expects_tools: []
+    expects_tools: [review_commitments]
     forbids_claims:
-      - "any project name, status, percentage complete or milestone"
-      - "any statement about what changed last week or what is blocked"
-      - "that the corpus can be aggregated into a project view"
+      - "a date, owner or state for any programme the mirror does not hold"
+      - "what changed since last week, or any statement of movement over time"
+      - "a percentage complete, a forecast, or a revised delivery date"
+      - "that this is the whole of the group's work"
     direction: >-
-      There is no project, programme or portfolio entity in the system at all. What exists is a
-      corpus of reaction notes, HTE datasets and ELN records with no project membership, no owner,
-      no status field and no dates to trend — so there is nothing that could be rolled up into a
-      status view. The answer must say that rather than assembling something project-shaped out of
-      note titles, which would look exactly like a real status report and be entirely invented.
-      Explaining what the system can report on instead (specific chemistry, specific jobs) is the
-      useful close.
+      Two of the three things asked for are now answerable and one is not. The commitment mirror
+      holds what each programme has committed to, who owns it, what state it is in and when it is
+      due — so "where each one stands" and "what is blocked" are real, with the blocked state being
+      a first-class one rather than an inference. What it cannot do is say what *moved*: it is a
+      snapshot that converges on the source's current state, so there is no previous state to diff.
+      The answer must also lead with `mirrored_at` — a mirror's characteristic failure is being
+      stale rather than wrong, and a manager acting on last month's picture is exactly the harm.
+      Two boundaries to state plainly: this reflects the portfolio system rather than replacing it,
+      so no date here is a commitment being made now and nothing may be re-forecast; and it holds
+      only what was mirrored, so it is not the whole of the group's work. The genuinely valuable
+      part of a good answer is the join the portfolio tool cannot make — which blocked items name
+      notes, jobs or compounds, and therefore what chemistry is holding them up.
 
   - id: pl-30
     section: 16

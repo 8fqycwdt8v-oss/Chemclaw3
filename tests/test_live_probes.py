@@ -447,11 +447,13 @@ def test_every_durable_probe_declares_the_job_expectation_it_is_named_for() -> N
     """
     durable = [p for p in load_probes(str(PROBE_DIR)) if p.id.startswith("du-")]
     assert durable, "no durable probes found — this test would assert nothing"
-    # du-04 is deliberately the exception: it asks about the *record* of past jobs, and starting
-    # one to answer it would be the wrong instinct. Its direction says so; naming the exemption
-    # rather than enumerating the expectant probes is what keeps the exception a named one rather
+    # Two exceptions, both of the same kind: they ask about the *record* of durable work, and
+    # starting a workflow to answer either would be the wrong instinct. du-04 asks what past jobs
+    # ran; du-10 asks what this system is still waiting on, which `check_pending_requests` answers
+    # from the `pending_requests` projection without touching the broker. Naming the exemptions
+    # rather than enumerating the expectant probes is what keeps an exception a named one rather
     # than a habit, while letting the corpus grow without editing a list here.
-    exempt = {"du-04"}
+    exempt = {"du-04", "du-10"}
     silent = sorted(p.id for p in durable if not p.expects_job and p.id not in exempt)
     assert not silent, (
         f"durable probe(s) {silent} do not declare `expects_job` — they would run, pass and prove "

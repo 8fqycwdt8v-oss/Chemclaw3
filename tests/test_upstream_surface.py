@@ -1110,3 +1110,47 @@ def test_the_after_model_call_cap_is_still_the_one_upstream_shape_this_repo_decl
     assert "before_model" in mechanism[0], (
         "CLAUDE.md's runaway-cap sentence no longer names the hook the cap actually counts in"
     )
+
+
+def test_tool_node_still_stores_a_prebuilt_tool_object_instead_of_rebuilding_it() -> None:
+    """`ToolNode` converts a plain callable and passes a `BaseTool` straight through.
+
+    `agent/tool_schema.py` reads this shape. It derives each in-process capability tool's
+    `BaseTool` once per process and hands `build_langgraph_agent`'s tool list the result, because
+    `ToolNode.__init__` otherwise calls `langchain_core.tools.tool` on every plain callable it is
+    given — a pydantic model built from the signature and docstring, on every per-turn compile.
+    Profiled at 108 conversions per build and about four fifths of the compile;
+    `tests/test_langgraph_connectors.py` carries the before/after.
+
+    Two halves, and the second is the one that makes the first worth anything: a callable is
+    converted, and a `BaseTool` is stored **as the same object**. If upstream ever started copying
+    or re-deriving what it is handed, the cache would still be correct and would silently stop
+    being a saving — which is the failure mode this file exists to turn red.
+    """
+    from langchain_core.tools import BaseTool
+    from langchain_core.tools import tool as create_tool
+    from langgraph.prebuilt.tool_node import ToolNode
+
+    def probe_upstream_surface_tool(x: int) -> int:
+        """Double one integer.
+
+        Args:
+            x: The integer to double.
+        """
+        return x * 2
+
+    converted = create_tool(probe_upstream_surface_tool)
+    assert isinstance(converted, BaseTool)
+
+    from_callable = ToolNode([probe_upstream_surface_tool]).tools_by_name
+    from_object = ToolNode([converted]).tools_by_name
+
+    assert list(from_callable) == ["probe_upstream_surface_tool"], (
+        "ToolNode no longer keys a converted callable by the function's name; "
+        "`agent/tool_schema.py` assumes the conversion it performs is the one ToolNode would"
+    )
+    assert from_object["probe_upstream_surface_tool"] is converted, (
+        "ToolNode no longer stores a prebuilt BaseTool as the same object — it copies or "
+        "re-derives it, so `agent/tool_schema.py`'s per-process cache buys nothing and the "
+        "measurement in tests/test_langgraph_connectors.py no longer holds"
+    )

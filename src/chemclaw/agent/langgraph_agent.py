@@ -124,6 +124,7 @@ from chemclaw.agent.tool_authz import (
 )
 from chemclaw.agent.tool_framing import frame_connector_results
 from chemclaw.agent.tool_result_size import bound_tool_results
+from chemclaw.agent.tool_schema import as_structured_tool
 from chemclaw.connectors.registry import skills_dirs
 from chemclaw.core.config import settings
 from chemclaw.core.logging import log_event
@@ -238,7 +239,12 @@ def build_langgraph_agent(
     # `mcp_server_names`, the manifest allow-list bounds each surviving bundle, and
     # `open_connector_specs` returns only what a reachable server actually advertised. An
     # unreachable one contributes nothing here, which is the degradation the turn survives.
-    bound = [*tools, *(connectors or [])]
+    #
+    # The in-process half is converted here rather than left for `ToolNode` to convert, because
+    # that conversion is per-*process* work happening per turn: `agent/tool_schema.py` says why a
+    # first-party tool's schema cannot vary between turns, and what it measured. The connector
+    # tools are already `BaseTool`s belonging to this turn's sessions and pass through untouched.
+    bound = [*(as_structured_tool(fn) for fn in tools), *(connectors or [])]
     shared: dict[str, Any] = {
         "model": chat_model,
         "tools": bound,

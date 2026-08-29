@@ -311,7 +311,7 @@ recovered). The cause was invisible from every one of those checks.
 refusal says plainly that nothing has been killed. Verified with `CHEMCLAW_MCP_REPO=/nonexistent` —
 `restart` refuses and the target keeps its pid and stays alive.
 
-### F6 — the adversarial probe could not fail-report, and the reachable case was untested (OPEN)
+### F6 — the adversarial probe could not fail-report, and the reachable case was untested (CLOSED 2026-08-29)
 
 `f-malformed-json` sent `'{"text": "unterminated'` and asserted the bad call must be reported.
 **That check could never pass.** Measured on the two payloads:
@@ -342,6 +342,15 @@ this system's most defect-prone seam by its own history (STREAM-1, LOAD-1, the `
 revert). That is not a change to make unreviewed at the end of a long autonomous run, so it is
 handed over with its measurement and a named next step: find why an `invalid_tool_calls` entry
 reaches neither the counter nor `wrap_model_call`.
+
+**Closed on 2026-08-29 by
+`D-2026-08-29-a-call-the-tool-chain-never-sees-is-a-call-the-tool-chain-cannot-announce`, and one
+half of the measurement above was wrong.** The counter *does* increment — measured on this same
+lane, `chemclaw_invalid_tool_calls_total{tool="find_notes"} 2`, once per repair attempt — and the
+entry reaches `wrap_model_call` intact, so the streaming assembly named as the place to look is
+sound at every step from the provider up. The silence was one layer away: `tool_failed` is raised
+by `agent/tool_authz.announce_tool_failures`, a `wrap_tool_call` middleware, and a call whose
+arguments never parsed never enters the tool chain at all. Family F is now 8/8 on this lane.
 
 ### Two more, triaged rather than fixed
 

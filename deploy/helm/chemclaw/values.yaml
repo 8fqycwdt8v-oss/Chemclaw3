@@ -74,6 +74,21 @@ service:
 
 # Core's own Temporal worker. Only one: every expensive workflow belongs to a connector bundle
 # below, each sized for its own work on its own queue (D-118).
+# Core's read-only MCP face — this system reachable as a tool by another agent
+# (`CHEMCLAW_COMPONENT=mcp-face`, D-2026-08-29-a-digest-nobody-receives-is-not-delivered).
+#
+# **Off by default**, and that is the posture rather than a convenience: a deployment that does not
+# want to be reachable renders no pod, which is stronger than a pod nobody has a token for. Turning
+# it on means also setting `secrets.optionalKeys.mcpFaceToken`'s variable — the middleware fails
+# closed on an unset one, so a face without it answers 401 rather than serving the knowledge graph
+# anonymously.
+#
+# It serves reads only: the advertised set is derived from `agent.authz.READ_ONLY_TOOLS` minus the
+# turn-scoped ones, so nothing here can launch a job, propose a note or settle a wait.
+mcpFace:
+  enabled: false
+  replicas: 1
+
 workers:
   background:
     # Keep at 1 — but no longer for the checkout lock. That reason is closed: submissions to one
@@ -741,6 +756,16 @@ secrets:
     # should set this; `docs/planning/BACKLOG.md` carries the open question of whether the
     # combination should be refused at startup.
     framingEnvelopeSecret: "CHEMCLAW_FRAMING_ENVELOPE_SECRET"
+    # The bearer token the read-only MCP face requires on `/mcp`
+    # (`CHEMCLAW_COMPONENT=mcp-face`, D-2026-08-29-a-digest-nobody-receives-is-not-delivered).
+    # A Secret slot rather than a `config` entry for the reason above: `config` renders into a
+    # ConfigMap the OpenShift `view` role can read, and anyone who learns this value can read
+    # the whole knowledge graph through that surface.
+    #
+    # Optional because the face is a role a deployment opts into by running it at all — but
+    # note the asymmetry that makes that safe: the middleware fails **closed** on an unset
+    # variable, so a face deployed without this answers 401 rather than serving anonymously.
+    mcpFaceToken: "CHEMCLAW_MCP_FACE_TOKEN"
     # The `chem`, `safety` and `calc` bearer tokens `connectors/identity.py::_EnvBearerAuth` reads
     # per request (`connectors/chem/connector.yaml` and `connectors/safety/connector.yaml`'s
     # `token_env`) and `connectors/calc/remote.py` reads via `settings.calc_server_token_env`. They

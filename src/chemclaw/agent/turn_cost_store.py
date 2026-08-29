@@ -8,12 +8,15 @@ The write is an **upsert on `correlation_id`**, not an append. The row is booked
 outlives its turn, and the one arithmetic error a cost ledger must never make is counting a turn
 twice — so a retry, or a second write under the same correlation id, replaces rather than adds.
 
-**Write-only from this process, and that is the honest state rather than an oversight.** There was
-a `read_spend_by_actor` whose docstring called itself "the whole point of the table"; it had no
+**Write-only from *this* module, and the ledger's one reader lives elsewhere.** There was a
+`read_spend_by_actor` here whose docstring called itself "the whole point of the table"; it had no
 caller in `src/` — no route, no CLI, no ops endpoint — and the only other reader of `turn_costs`,
-`evals/live.session_tokens`, had none either. Both went in the 2026-08-27 sweep. What reads the
-ledger today is an operator with `psql`, and `tests/test_turn_cost.py` pins that absence so a
-reader cannot come back without a surface to reach it through.
+`evals/live.session_tokens`, had none either. Both went in the 2026-08-27 sweep, and what the sweep
+was enforcing was not "no reader" but *a query needs the surface that asks it*. That surface exists
+now: `chemclaw.operations.activity.spend` is the single reader and `review_activity` is what reaches
+it (`D-2026-08-29-a-trail-nobody-can-read-answers-no-question`). `tests/test_turn_cost.py` pins both
+halves — exactly one reading module, and a registered tool over it — so neither a second reader nor
+a reader with no caller can come back quietly.
 """
 
 from contextlib import AbstractAsyncContextManager

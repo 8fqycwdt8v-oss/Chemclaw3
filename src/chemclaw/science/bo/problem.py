@@ -813,7 +813,14 @@ def require_direction_matches_objective(spec: CampaignSpec) -> None:
     Raises:
         ValueError: Naming the objective, both directions, and which one to change.
     """
-    from chemclaw.science.bo.objectives import registered_direction
+    from chemclaw.science.bo.objectives import is_measured, registered_direction
+
+    # A measured objective has no registered direction to disagree with — the numbers come from a
+    # bench, and the only statement of which way is better is the one the requester made. Skipped
+    # rather than defaulted: a comparison against an invented direction would either pass
+    # vacuously or refuse a campaign for disagreeing with nothing.
+    if is_measured(spec.objective_name):
+        return
 
     declared = spec.problem.objective.direction
     registered = registered_direction(spec.objective_name)

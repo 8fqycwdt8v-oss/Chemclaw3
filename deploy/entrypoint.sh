@@ -67,6 +67,14 @@ case "${component}" in
   background-worker)
     exec python -m chemclaw.durable.background_worker
     ;;
+  mcp-face)
+    # Core's own read-only MCP surface (`src/chemclaw/api/mcp_face.py`): this system reachable as a
+    # tool by somebody else's agent. Its own role rather than a flag on `service`, because it
+    # serves a different surface on a different credential and must be scalable and revocable
+    # independently — and because a front door that also spoke MCP would have one bearer token
+    # standing in for two very different authorities.
+    exec python -m chemclaw.api.mcp_face
+    ;;
   connector-worker-*)
     # A connector bundle's own Temporal worker, for a bundle that owns durable work
     # (`src/chemclaw/connectors/<name>/worker.py`). Matched before `connector-*` so the more specific prefix wins.
