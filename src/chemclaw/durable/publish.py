@@ -143,6 +143,7 @@ _BAD_DATA_TYPES = [
     # somebody schedules a drafting job.
     "LayoutError",
     "RevisionConflict",
+    "UnstorableDocument",
     "UnknownDesign",
     "TemplateError",
     "UnresolvedReference",

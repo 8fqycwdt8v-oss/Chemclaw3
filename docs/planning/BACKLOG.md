@@ -191,16 +191,13 @@ topic).
       Nothing here needs new code; it needs a corpus and a run. Until it exists, no claim that
       helpers do or do not pay is evidence about this deployment.
 
-- [ ] **A helper reaches no connector, and the stated reason is not the binding one**
-      — [S] to correct the prose, [L] to change the behaviour, and only the first is recommended.
-      `agent/subagents.py` and `langgraph_agent._subagents` both give the bound as a concurrency
-      measurement: two concurrent turns over one MCP tool object deadlock. That measurement is real
-      (D-110, and `tests/test_langgraph_connectors.py` pins the per-turn shape it forced) but it is
-      about **sharing one session object**, not about concurrency as such — a helper holding
-      sessions *of its own* shares nothing, and `open_connector_specs` already opens a fleet
-      concurrently by design.
-      **The binding constraint is the lifecycle, and it is stronger than the one quoted.**
-      Connectors are opened by the *caller* — the runner, the CLI, the template activity — into an
+- [ ] **A helper reaches no connector, and only the behavioural half of this row is still open**
+      — [L], and it is gated on the row above rather than on an argument. The prose half is
+      **done**: `D-2026-08-29-a-helper-reaches-no-connector-because-of-the-lifecycle-not-the-deadlock`
+      corrected the three places that gave the bound as a concurrency measurement — two concurrent
+      turns over one MCP tool object deadlock — which is real (D-110) but is about **sharing one
+      session object**, so it never reached the question of a helper holding sessions *of its own*.
+      **The constraint that binds is the lifecycle.** Connectors are opened by the *caller* — the runner, the CLI, the template activity — into an
       `AsyncExitStack` **before** the graph is compiled, and `build_langgraph_agent` is synchronous
       and receives them already open. The roster is fixed per compiled graph
       (`SubAgentMiddleware._subagents` is set once, `subagent_names` is a frozen snapshot), so a
@@ -208,10 +205,10 @@ topic).
       second full set **eagerly, on every turn**, whether or not a helper is ever spawned: double
       the sockets, handshakes and server-side session state, against an unmeasured spawn rate, on a
       path whose tail already cost six sequential connect timeouts when a fleet went dark.
-      **So: fix the prose now, and let the row above decide the behaviour.** If delegation is
-      measured to pay *and* the reading helpers do is connector-bound, the cheap form is not a
-      second eager session set but a lazily compiled roster entry — which is a change to a shape
-      upstream owns, and belongs in `tests/test_upstream_surface.py`'s count before it is relied on.
+      **What would reopen it**: the row above showing that delegation pays *and* that the reading
+      helpers do is connector-bound. Even then the cheap form is not a second eager session set but
+      a lazily compiled roster entry — a change to a shape upstream owns, which belongs in
+      `tests/test_upstream_surface.py`'s count before anything relies on it.
 
 - [ ] **An advisor is the one delegation shape every merged decision already permits**
       — [M], and the design is fully determined rather than open.
@@ -224,11 +221,16 @@ topic).
       and replays it every turn. **An advisor as a tool sits on the permitted side of all seven
       rows** — and Anthropic's own advisor arrives as an `advisor_tool_result` block, which is the
       same answer reached independently.
-      It is also already metered: `agent/condense.py` makes an in-tool model call whose usage
-      reaches `agent/spend_cap.py` **because it passes no explicit `config`**, an absence
-      `tests/test_spend_cap.py::test_no_in_tool_model_call_passes_its_own_callbacks` guards by
-      scanning that module. A new advisor module must be added to that scan in the same commit, or
-      its spend leaves the ledger silently.
+      It is also already metered, and the trap that used to sit here is **closed**:
+      `agent/condense.py` makes an in-tool model call whose usage reaches `agent/spend_cap.py`
+      **because it passes no explicit `config`**, an absence
+      `tests/test_spend_cap.py::test_no_in_tool_model_call_passes_its_own_callbacks` guards — and
+      that scan named `condense.py` until
+      `D-2026-08-29-a-guard-that-names-one-file-guards-one-file` made it derive every module that
+      defines a registered tool and builds a model. So an advisor is covered wherever it lands,
+      with no edit to the test, and the natural mistake it would have made silently — copying
+      `verifier.py`'s correct `config=off_stream_metering()` into a tool body — now fails naming
+      the file and the line.
       **`D-2026-08-16-a-second-judge-is-a-second-answer-about-the-same-answer` does not bind it**:
       that ADR declined a *judge* (it cannot reuse `score_answer`, and a failed grading returns the
       ungraded answer). An advisor does not grade and does not gate — it answers a question the
@@ -252,7 +254,13 @@ topic).
       them. Note also what a second name costs on a path that is otherwise free —
       `governed_roster` is the guard, and upstream's `create_sub_agent` builds a declarative
       `SubAgent` from `spec["middleware"]` alone.
-
+      **Revisited 2026-08-29 and confirmed to have no implementable part**, which is recorded here
+      so the next reader does not go looking for one: everything a second name would need already
+      exists (`AgentProfile.model_route` for its model, `helper_profile` for its surface,
+      `governed_roster` for its governance), so what is missing is the reason, and a name added to
+      be ready for one is the capability that ships off and stays off —
+      `D-2026-08-15-a-capability-that-ships-off-is-not-a-capability`, which deleted 1,442 lines of
+      exactly this.
 
 - [ ] **No deployment declares a context window, and the overrun indicator cannot see the prefix**
       — [M], found reviewing `D-2026-08-28-the-budget-is-the-control-not-the-trigger` after it
@@ -672,6 +680,22 @@ only holds defects can only ever restore the system to what it already intended 
       and the *prompt* cost above is unchanged and paid every turn. Anchors:
       `tests/test_context_floor.py::KNOWN_OVERSIZED`, `protocols/models.py`,
       `science/bo/problem.py`.
+
+- [ ] **The module a chemist actually reads has no test file** — [M], found 2026-08-29 by the
+      fresh-context review that took `render.py` apart
+      (`D-2026-08-29-a-check-a-reader-never-sees-is-not-a-check`). No test anywhere imports
+      `render_markdown`, `run_sheet_rows` or `summarise`: the whole assertion surface across the
+      suite is two lines in `tests/test_protocol_design_tools.py` (`startswith("# SM-3 Suzuki")`
+      and `"## Evidence" in readout.markdown`). Coverage over the protocol test files is **76%**,
+      and the uncovered block is `summarise`'s screen/campaign branch — the sentence a chemist reads
+      about a plate is executed by no test.
+
+      That is why every one of that module's defects was found by reading rather than by running:
+      a document that printed the body's conditions over the arm's, a partial setpoint override
+      blanking a row, fifteen dropped leaf fields including `base.waste` and every unit, and
+      `summarise` branching on the ask rather than the design. Each is fixed and each was verified
+      by hand; none has a regression test, because writing thirty of them is its own change with its
+      own argument about what a rendering test should assert. Anchor: `protocols/render.py`.
 
 - [ ] **A tool schema is 38% developer rationale, and it ships on every turn** — [M], and it is
       what `§ 5`'s deferral row turned into once measured. `science/bo/problem.py`'s nested models

@@ -275,8 +275,14 @@ MAX_SINGLE_TOOL_TOKENS = 900
 KNOWN_OVERSIZED: dict[str, int] = {
     "start_optimization_campaign": 2_307,
     "propose_knowledge_note": 1_126,
-    "draft_experiment_protocol": 2_568,
-    "structure_experiment_request": 1_053,
+    # Both +22 against the re-measurement above, and it is the same 22 twice: they share the
+    # `ExperimentDesign` schema, and the `max_length` ceilings
+    # `D-2026-08-29-a-check-a-reader-never-sees-is-not-a-check` put on its six keyed lists render as
+    # `maxItems`. `structure_experiment_request` also lost `source_text` and gained the sentence
+    # that makes its `salt` docstring true, and those two cancel to nothing measurable here — the
+    # ADR's "net +7" was taken on the raw-callable basis this file has since abandoned.
+    "draft_experiment_protocol": 2_590,
+    "structure_experiment_request": 1_075,
     "rank_species": 1_094,
     "rank_species_across_solvents": 1_039,
     "compute_reaction_energy": 1_018,
