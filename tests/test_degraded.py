@@ -85,6 +85,14 @@ _EXPECTED_SUBSYSTEMS = {
     # moving, which reads as "no durable work" rather than as "nobody asked".
     "jobs_in_flight",
     "log_redaction",
+    # `durable/digest.deliver_digest_activity`. Outbound delivery shipped with no signal of any
+    # kind: `deliver()` swallows a per-channel failure so one broken webhook is not everyone's
+    # outage, the caller discarded the return value, and nothing in `chemclaw.deliver.registry` held
+    # a logger
+    # or a metric — so every digest being dropped and every digest being delivered produced
+    # identical observations. Swallowed deliberately (the mailbox is the durable handover and the
+    # watermark turns on it), which is exactly why it has to be counted.
+    "digest_delivery",
     "plan_approval",
     "preferences",
     # `agent.condense`, added with the protocol condenser. Two degradations share it and both

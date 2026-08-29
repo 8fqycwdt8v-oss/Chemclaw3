@@ -78,7 +78,7 @@ def test_two_compiles_hand_the_executor_the_same_tool_objects() -> None:
     )
 
 
-def test_the_cache_holds_one_entry_per_registered_tool_however_many_turns_run() -> None:
+def test_the_cache_does_not_grow_with_the_number_of_turns() -> None:
     """The bound on the cache was documented and not checked, which is this repo's own failure mode.
 
     `functools.cache` is unbounded, and the only thing between it and a leak is the docstring's
@@ -89,17 +89,23 @@ def test_the_cache_holds_one_entry_per_registered_tool_however_many_turns_run() 
     which looks harmless — would grow this cache by one entry per generated tool per build, forever,
     in a long-lived pod. Nothing would turn red.
 
-    Asserted across several builds rather than one, because a single build cannot distinguish a
-    cache from a fresh conversion.
+    **Asserted as "does not grow", not as "equals the registry".** The first version compared
+    `currsize` against `len(_capability_tools())` and failed in a full run at 56 against 54: other
+    files register their own probe tools, so the registry is not the same size at assertion time as
+    it was when those entries were cached. That comparison was never the invariant — the invariant
+    is that a *turn* adds nothing, which is what this measures and what the leak would violate.
     """
     model = _model()
+    for _ in range(2):
+        build_langgraph_agent(model, audit_sink=NullAuditSink())
+    settled = as_structured_tool.cache_info()
+
     for _ in range(3):
         build_langgraph_agent(model, audit_sink=NullAuditSink())
+    after = as_structured_tool.cache_info()
 
-    info = as_structured_tool.cache_info()
-    registered = len(_capability_tools())
-    assert info.currsize <= registered, (
-        f"the schema cache holds {info.currsize} entries for {registered} registered tools; "
-        "something is minting a fresh callable per build and the cache grows without bound"
+    assert after.currsize == settled.currsize, (
+        f"three more builds added {after.currsize - settled.currsize} cache entries; something is "
+        "minting a fresh callable per build and the cache grows without bound"
     )
-    assert info.hits > 0, "nothing is reusing the cache; every build is re-deriving schemas"
+    assert after.hits > settled.hits, "nothing reused the cache; every build re-derives schemas"

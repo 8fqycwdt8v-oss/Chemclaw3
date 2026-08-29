@@ -212,7 +212,10 @@ def test_asking_again_after_a_deadline_lapsed_reopens_the_row() -> None:
         )
         assert not stored.answered_at and stored.answered_by == ""
         assert stored.reminders == 0, "the new cycle inherited the old one's chase count"
-        assert [r.request_id for r in await pending_store.open_requests()] == [request_id]
+        # Membership, not equality: these tables are shared by the whole suite and another file's
+        # open request is not this test's business. Asserting the whole list is what made an
+        # unrelated file fail this one in a full run and pass it alone.
+        assert request_id in [r.request_id for r in await pending_store.open_requests()]
 
     asyncio.run(_run())
 

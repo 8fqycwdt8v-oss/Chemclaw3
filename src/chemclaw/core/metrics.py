@@ -411,7 +411,8 @@ _COUNTERS: dict[str, str] = {
     # A model call that needed no reduction increments neither, so a flat zero means "never over
     # budget" and an absent series means "not wired" — the distinction the previous state of this
     # subsystem could not express.
-    # **Outbound delivery, which shipped with no signal of any kind.** `chemclaw.deliver` held no
+    # **Outbound delivery, which shipped with no signal of any kind.** `chemclaw.deliver.registry`
+    # held no
     # logger and no metric, `deliver()` swallowed every per-channel failure with a comment saying
     # the caller would log it, and the one caller discarded the return value — so "every digest was
     # dropped" and "every digest was delivered" produced identical observations. A seam built

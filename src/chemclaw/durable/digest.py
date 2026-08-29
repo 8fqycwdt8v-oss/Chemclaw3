@@ -224,7 +224,8 @@ async def deliver_digest_activity(payload: DeliveryInput) -> list[str]:
         taken = await deliver(message)
     except Exception as exc:
         # **Never silently.** Before this, a total delivery failure moved no counter and wrote no
-        # log line anywhere in `chemclaw.deliver`, and the workflow discarded the return value — so
+        # log line anywhere in `chemclaw.deliver.registry`, and the workflow discarded the return
+        # value — so
         # "every digest was dropped" and "every digest was delivered" were the same observation.
         degraded(
             logger,
