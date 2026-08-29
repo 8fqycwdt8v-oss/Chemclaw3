@@ -13,7 +13,7 @@ database an unqualified name resolves through `public` and passes locally while 
 """
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
 import psycopg
@@ -42,10 +42,31 @@ class _Model(GenericFakeChatModel):
 
 
 #: A fresh timestamp per run, so seeded threads are always young relative to the sweep.
-_NOW_ISO = datetime.now(UTC).isoformat()
+_NOW = datetime.now(UTC)
 
 
-async def _seed(thread_id: str, *, versions: tuple[str, ...] = ("1", "2")) -> None:
+def _seeded_ts(index: int) -> str:
+    """The `ts` for the `index`-th seeded checkpoint — **distinct, and ordered oldest first**.
+
+    Distinct because `_RESTAMP_NEWEST` picks one row by `ORDER BY ts DESC LIMIT 1`, and a fixture
+    that stamps every checkpoint with the same instant makes `DESC` and `ASC` interchangeable. A
+    mutation audit measured exactly that: stamping the *oldest* row instead of the newest, and
+    stamping *every* row, both passed the entire 6,154-test suite. The module's docstring claims in
+    bold that only the newest is restamped and that older checkpoints keep the times the parent
+    wrote them; neither half was established anywhere, because no thread reaching that code had two
+    different timestamps in it.
+
+    An hour apart, so ordering is unambiguous and both rows still sit inside any realistic
+    retention window.
+    """
+    return (_NOW - timedelta(hours=len(_VERSIONS) - index)).isoformat()
+
+
+#: The checkpoint versions `_seed` writes, named once because `_seeded_ts` counts them.
+_VERSIONS = ("1", "2")
+
+
+async def _seed(thread_id: str, *, versions: tuple[str, ...] = _VERSIONS) -> None:
     """A thread with two checkpoints and one blob per version — the shape a fork must preserve.
 
     **Two versions is the point, not padding.** `checkpoint_blobs` rows are shared across a
@@ -69,7 +90,7 @@ async def _seed(thread_id: str, *, versions: tuple[str, ...] = ("1", "2")) -> No
                         # written the aged-fork test's `prune_expired_rows()` — which sweeps the
                         # whole schema, not one thread — would start expiring the other tests'
                         # fixtures and failing them for a reason none of them names.
-                        Jsonb({"v": 1, "id": f"ckpt-{index}", "ts": _NOW_ISO}),
+                        Jsonb({"v": 1, "id": f"ckpt-{index}", "ts": _seeded_ts(index)}),
                     ),
                 )
                 await cur.execute(
@@ -715,3 +736,59 @@ def test_deleting_a_fork_and_its_parent_reclaims_the_shared_blob() -> None:
         f"{blobs} blob(s) and {links} link row(s) outlived every session that named them — a fork "
         "made its parent's tool results permanently unreclaimable"
     )
+
+
+def test_only_the_newest_checkpoint_is_restamped_and_the_rest_keep_the_parents_times() -> None:
+    """Both halves of the claim `_RESTAMP_NEWEST` makes in bold, neither of which was pinned.
+
+    The module says only the newest copied checkpoint is restamped, and that the older ones keep
+    "their true creation times, which are facts about when the parent wrote them and are not this
+    module's to rewrite". A mutation audit found **both** halves free: stamping the oldest row
+    instead of the newest, and stamping every row of the thread, each passed the entire suite.
+
+    The cause was the fixture rather than the assertions. Every seeded checkpoint carried the same
+    literal `ts`, so `ORDER BY ts DESC LIMIT 1` and `ASC LIMIT 1` selected interchangeably and
+    `max(ts)` came out `now()` whichever row moved — retention's question was answered correctly by
+    a fork that had rewritten the wrong row, or all of them. `_seeded_ts` now spaces them an hour
+    apart, which is what makes this test able to tell the three cases apart.
+
+    Rewriting the whole thread is the more damaging of the two: it destroys the parent-authored
+    history the fork copied in order to preserve, and does it silently.
+    """
+
+    async def _run() -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
+        await migrated_db_or_skip()
+        await create_checkpoint_tables()
+        await _seed("fork-restamp-selection")
+
+        child = await fork_session("fork-restamp-selection", "owner-1", None)
+
+        async def _stamps(thread: str) -> list[tuple[str, str]]:
+            async with db.connection(settings.postgres_dsn) as conn, conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT checkpoint_id, checkpoint->>'ts' FROM checkpoints "
+                    "WHERE thread_id = %s ORDER BY checkpoint_id",
+                    (thread,),
+                )
+                return [(str(r[0]), str(r[1])) for r in await cur.fetchall()]
+
+        return await _stamps(child), await _stamps("fork-restamp-selection")
+
+    child_stamps, parent_stamps = asyncio.run(_run())
+
+    assert len(child_stamps) == 2, f"the fixture no longer seeds two checkpoints: {child_stamps}"
+    (older_id, older_ts), (newer_id, newer_ts) = child_stamps
+    assert (older_id, newer_id) == ("ckpt-1", "ckpt-2")
+
+    # The newest moved to now...
+    assert newer_ts != dict(parent_stamps)[newer_id], (
+        "the newest checkpoint kept the parent's timestamp — retention still dates this fork from "
+        "the parent's last turn"
+    )
+    # ...and the older one did not, which is the half that fails when every row is restamped.
+    assert older_ts == dict(parent_stamps)[older_id], (
+        "the older checkpoint was rewritten too, destroying the parent-authored history the fork "
+        "copied in order to preserve"
+    )
+    # And the parent is untouched throughout.
+    assert dict(parent_stamps)[newer_id] == _seeded_ts(2)
