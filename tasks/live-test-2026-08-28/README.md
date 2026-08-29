@@ -269,3 +269,42 @@ an answer certainly asked a model at least once. Deliberately loose, and loose i
 direction. Both lessons are in `tasks/lessons.md`, including the second one — that attempts 2 and 3
 each shipped behind a green unit test, because the test drove counters set by hand and could only
 confirm the arithmetic already assumed.
+
+## The quiet-box waves
+
+Run one at a time on an otherwise idle box, soak stopped first and resumed after — the standing
+rule this campaign produced.
+
+| wave | result |
+| --- | --- |
+| `live-degradation` (Temporal deliberately stopped) | **3/3** — `capability_degraded` named `['durable-jobs (Temporal)']` at event 1, with the first token at event 2, and the durable launcher really was reached. REV-6's claim holds as an *ordering*, which is the only form of it that means anything |
+| `live-template-args` | **9/9** template steps validated against the live tool surface — every step's arguments checked against the running server's actual signature, across `chem`, `safety`, `molfp` and `calc` |
+| `leak-probe` | ran, and found more about the instrument than about the product — below |
+
+### The leak probe could not see the bound it exists to check
+
+`make leak-probe` after the documented `make live-up` **fails outright**, and for a reason worth
+keeping: `_refuse_unauthenticated_exposure` correctly refuses to build an app that binds `0.0.0.0`
+with `entra_required` off. The probe knows this — it sets `CHEMCLAW_SERVICE_HOST=127.0.0.1` with a
+comment saying the loopback host "is not cosmetic either" — and sets it with
+`os.environ.setdefault`, which is **too late**. `settings` is a singleton built on first import and
+`configure_logging()` two lines above imports it. Measured:
+
+```
+os.environ.setdefault("CHEMCLAW_SERVICE_HOST", "127.0.0.1")   ->  env is 127.0.0.1
+settings.service_host                                          ->  still 0.0.0.0
+```
+
+The file states that exact hazard itself, three lines later, for `connector_urls` — written for one
+field and not applied to the seven above it. So all seven pins were decorative: the probe measured
+whatever the caller's shell happened to hold rather than the lane configuration its comment claims
+to drive. Fixed by assigning onto `settings`, with the environment still winning where the caller
+set it.
+
+**And its default run cannot answer its own question.** 300 turns (275 after warm-up) produced
+`TurnSession +1.00 per turn, +275 total` — which reads like a per-turn retention and is not: the
+live-session map is a bounded LRU at `service_max_live_sessions = 1000`, so the probe stops at
+**27% of the bound** and never evicts once. At that length "filling a bounded cache" and "leaking"
+are the same curve. The RSS verdict was `grows and slowing` and still `resolved`, which is what a
+cache filling looks like. A 1300-turn run past the bound is what distinguishes them, and is the
+measurement this row is waiting on.
