@@ -228,17 +228,6 @@ topic).
 
 
 
-- [ ] **`/readyz` now waits on Temporal inside a 1-second kubelet probe** — [M], found by the
-      correctness review of the branch that added the queue probe. `readyz` calls
-      `probe_connectors()` on every poll, and a jobs-only bundle now routes to a
-      `DescribeTaskQueue` RPC. Measured: 0.013 s with the broker reachable, **2.001 s with it
-      blackholed**. `deployment-service.yaml`'s `readinessProbe` sets no `timeoutSeconds`, so
-      Kubernetes uses 1 s with `failureThreshold` 3 — about 30 s of an unreachable broker takes the
-      front door out of its Service. The ADR is careful that `unknown` never *gates*; the latency
-      it introduces gates one layer down. Note `/readyz` could already exceed 1 s on a blackholed
-      connector endpoint, so the fix is probably an explicit `timeoutSeconds` plus a bound on the
-      sweep, not reverting the probe.
-
 - [ ] **The ORD pre-flight maps the whole fetch, once per drain chunk** — [M]. `_unmappable` maps
       every entry `fetch_new_entries` returns, and `eln_sync_batch_size` is applied by
       `_BoundedIngest` *after* the adapter returns. The docstring prices this as "~6.5 ms on a full

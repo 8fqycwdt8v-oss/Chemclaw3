@@ -348,6 +348,30 @@ probes:
       periodSeconds: 10
       failureThreshold: 30
       timeoutSeconds: 5
+    # **`/readyz` does work, so its probe needs a timeout that says how much.** It sweeps every
+    # enabled connector and then asks Postgres — bounded by `connector_health_timeout_seconds`
+    # (2 s) and `service_readiness_db_timeout_seconds` (2 s) respectively, which is 4 s of budget
+    # against Kubernetes' **default `timeoutSeconds: 1`**. That default is what this block exists
+    # to replace: a jobs-only bundle routes to a `DescribeTaskQueue` RPC, so a blackholed broker
+    # took ~2 s and `failureThreshold: 3` then removed a perfectly serving front door from its
+    # Service after ~30 s of somebody else's outage. The connector sweep never gates readiness by
+    # design (`api/routes/ops.py`); this is the latency it introduces one layer down.
+    #
+    # 5 s rather than 4 leaves the request itself a margin, and
+    # `tests/test_deploy_chart.py::test_the_readiness_probe_outlasts_the_work_readyz_does` derives
+    # the floor from those two settings so raising either one without raising this fails.
+    readiness:
+      periodSeconds: 10
+      timeoutSeconds: 5
+      failureThreshold: 3
+    # Liveness asks `/healthz`, which does no work at all — so its budget is about a wedged event
+    # loop rather than about a dependency, and it stays the slower of the two: readiness drains a
+    # struggling pod from the Route, and only a pod that has stopped answering anything is worth
+    # restarting.
+    liveness:
+      periodSeconds: 20
+      timeoutSeconds: 5
+      failureThreshold: 3
   worker:
     # The same 30 x 10 s budget, and it is the same measurement: core's worker and every bundle's
     # worker run the *same image* and import the same tree — `chemclaw.durable.serve` pulls the

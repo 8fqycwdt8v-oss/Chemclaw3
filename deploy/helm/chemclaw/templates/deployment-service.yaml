@@ -67,18 +67,26 @@ spec:
             periodSeconds: {{ .Values.probes.service.startup.periodSeconds }}
             failureThreshold: {{ .Values.probes.service.startup.failureThreshold }}
             timeoutSeconds: {{ .Values.probes.service.startup.timeoutSeconds }}
+          {{- /* `/readyz` sweeps the connectors and then asks Postgres, so it is the one probe in
+                 this chart whose *own* work has a budget — and Kubernetes' unstated default is
+                 `timeoutSeconds: 1`, which a blackholed broker exceeds on the queue leg alone.
+                 The numbers and the arithmetic behind them are in `values.yaml`. */}}
           readinessProbe:
             httpGet:
               path: /readyz
               port: {{ .Values.service.port }}
             initialDelaySeconds: 5
-            periodSeconds: 10
+            periodSeconds: {{ .Values.probes.service.readiness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.service.readiness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.service.readiness.failureThreshold }}
           livenessProbe:
             httpGet:
               path: /healthz
               port: {{ .Values.service.port }}
             initialDelaySeconds: 10
-            periodSeconds: 20
+            periodSeconds: {{ .Values.probes.service.liveness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.service.liveness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.service.liveness.failureThreshold }}
           {{- /* Kubernetes removes the Endpoint and sends SIGTERM concurrently, so a pod that shut
                  down promptly would refuse requests the router was still sending it. The sleep is
                  the whole hook: it does not drain anything itself, it buys the router time to stop
