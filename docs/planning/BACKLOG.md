@@ -248,12 +248,6 @@ topic).
       the drain. `record_refusals` is likewise handed the whole directory's refusals every chunk and
       issues one upsert round trip per row in a Python loop.
 
-- [ ] **The session list advertises a cursor it then refuses** — [S]. `list_sessions` emits
-      `X-Next-Cursor` on a full page outside the branch that checks the registry can resume, so a
-      deployment with a custom non-durable registry gets a `200` with a cursor and a `422` when it
-      follows it. Only reachable through `create_app(owner_store=...)`, so the blast radius is
-      small; the route is nonetheless internally inconsistent.
-
 - [ ] **`delete_session` and the owner prune take two rows in opposite orders** — [S], not
       reproduced. `_session_delete_statements` deletes `session_turns` then `session_owners`;
       `retention._DELETE_SESSIONS` takes `session_owners` then `session_turns`. The window is narrow
