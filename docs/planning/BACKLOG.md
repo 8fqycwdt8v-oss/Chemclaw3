@@ -473,9 +473,10 @@ only holds defects can only ever restore the system to what it already intended 
       (`D-2026-08-28-a-protocol-is-prescriptive-and-a-record-is-not`). `Chemclaw3-mcp`'s
       `servers/rxnpredict` is **built** and serves six read-only tools — among them
       `predict_reaction_conditions`, an ensemble of open predictors with the per-model spread
-      returned beside the consensus — and `grep -rn rxnpredict src/` in this tree finds nothing: no
-      bundle under `src/chemclaw/connectors/`, no `connectors:` entry in
-      `deploy/helm/chemclaw/values.yaml`, no token obligation. So
+      returned beside the consensus — and `grep -rn rxnpredict src/` in this tree finds one
+      docstring mention in `publish/record.py` and nothing else: no bundle under
+      `src/chemclaw/connectors/`, no `connectors:` entry in `deploy/helm/chemclaw/values.yaml`, no
+      token obligation. Re-verified 2026-08-29. So
       `skills/protocol-generation` routes a chemist's "how would people run this" question entirely
       through precedent (`conditions_for_similar_reaction`, `reagent_frequency`), which answers from
       what *this* corpus holds and is silent on a transformation nobody here has run.
@@ -533,14 +534,34 @@ only holds defects can only ever restore the system to what it already intended 
       drift. The allow-list's **-5,787** is larger than either surface cost and larger than the
       headroom now left. Still blocked on the live lane for the reason above.
 
-- [ ] **Four `KNOWN_OVERSIZED` tools are one defect wearing four names** — [M], and the honest
-      trigger is upstream rather than here. All four take a **domain document** as their argument —
-      a BoFire campaign declaration, the note frontmatter contract, a structured ask, a laboratory
-      procedure — and `convert_to_openai_tool` inlines every nested pydantic model in full rather
-      than emitting `$defs` and `$ref`. Measured 2026-08-28 while narrowing the protocol pair from
-      6,231 tokens to 3,380: `SpeciesRole`'s class docstring shipped **three times** in one schema
-      and `RequestField`'s **four times**, purely because the same model appears at several fields.
-      A `$ref`-emitting conversion would cut all four entries at once and touch no first-party code.
+      **Every absolute above is a lower bound, and the case is stronger rather than weaker for it.**
+      All of them were measured on a basis the 2026-08-29 re-baseline corrected: the ratchet counted
+      the registry's callables, not the tools the graph binds, and under-measured `default` by
+      **8,059 tokens (23%)** — 34,399 reported against 42,458 paid, ceiling now 43,500. So 28,114
+      and −5,787 both understate what this narrowing is worth, and the eleven names should be
+      re-measured on the bound basis when the row is worked. What does not change is why it is
+      blocked: the saving is still partly in endpoint tools no offline floor can see, and it still
+      needs the skill gate beside the allow-list.
+
+- [ ] **Ten `KNOWN_OVERSIZED` tools are one defect wearing ten names** — [M], and the honest
+      trigger is upstream rather than here. Each takes a **domain document** as its argument — a
+      BoFire campaign declaration, the note frontmatter contract, a structured ask, a laboratory
+      procedure, a job spec — and `convert_to_openai_tool` inlines every nested pydantic model in
+      full rather than emitting `$defs` and `$ref`. Measured 2026-08-28 while narrowing the protocol
+      pair from 6,231 tokens to 3,380: `SpeciesRole`'s class docstring shipped **three times** in one
+      schema and `RequestField`'s **four times**, purely because the same model appears at several
+      fields. A `$ref`-emitting conversion would cut every entry at once and touch no first-party
+      code.
+
+      **It said four until the basis was corrected, and the extra six are the same defect, not new
+      debt.** The 2026-08-29 re-baseline measured the tools the graph *binds* rather than the
+      callables the registry holds, and six that read as under `MAX_SINGLE_TOOL_TOKENS` were over it
+      all along — `rank_species` 885 as a callable, **1,094** as the object the model is sent, and
+      likewise `rank_species_across_solvents`, `compute_reaction_energy`, `survey_bond_strengths`,
+      `refine_ensemble` and `profile_rotation`. Nothing was added; the six were invisible for eleven
+      weeks to the test written to catch exactly them. It widens this row rather than changing it:
+      the entries are still nested-model inlining, and the job specs make the `$defs` question
+      *more* worth answering, not less.
 
       **So the row is a measurement, not a rewrite.** What is owed first: does the installed
       `langchain_core` have a switch for it, and do the providers this deployment targets accept a
@@ -570,28 +591,6 @@ only holds defects can only ever restore the system to what it already intended 
       `tests/test_context_floor.py::KNOWN_OVERSIZED`, `protocols/models.py`,
       `science/bo/problem.py`.
 
-- [ ] **The static-prefix ratchet gates a number 24% below what the deployment pays** — [S], found
-      2026-08-29 while measuring for `D-2026-08-29-a-tool-schema-nobody-calls-is-still-paid-for`.
-      `tests/test_context_floor.py` counts `convert_to_openai_tool` over `_capability_tools`, and
-      its docstring claims that is "the payload rather than an approximation of it". Measured
-      against the tools actually bound on the compiled graph, it is short by **7,799 tokens**:
-      25,511 over 49 counted, 33,310 over 56 sent. Two causes, both structural rather than a drift
-      — `core/tool_registry`'s `@tool` is identity, so the file measures *raw callables* while
-      `create_agent` binds wrapped objects with larger derived schemas (**all 49** differ;
-      `get_durable_job_status` 274 → 662, `gather_evidence` 490 → 878), and 7 tools registered by
-      `FilesystemMiddleware`/`SubAgentMiddleware` (`ls`, `read_file`, `write_file`, `edit_file`,
-      `glob`, `grep`, `task`) are bound every turn and counted never. The file already records the
-      same trap one layer deeper, in the other direction (reading `.name` off a callable measured
-      ~11 tokens per tool).
-
-      **Why it is a row and not a fix in that commit.** The corrected floor is ~39,983 against a
-      ceiling of 33,000 that today reads 32,184 and passes. Fixing the basis therefore *requires*
-      raising the ceiling, and this file's own rule is that raising one "belongs in a commit that
-      says why" — riding it along in an ADR about something else is how a ratchet turns freely.
-      The fix is: measure the bound surface (spy on `bind_tools`, as `tests/test_middleware_order.py`
-      already spies on `create_agent`), re-baseline every ceiling in one commit, and say in it that
-      the number grew because the measurement got honest rather than because the surface did.
-
 - [ ] **A tool schema is 38% developer rationale, and it ships on every turn** — [M], and it is
       what `§ 5`'s deferral row turned into once measured. `science/bo/problem.py`'s nested models
       carry design arguments in their class docstrings — *"One `objectives` field rather than a lead
@@ -609,8 +608,9 @@ only holds defects can only ever restore the system to what it already intended 
       finding tools is a regression with a good-looking metric. Blocked on the live-lane row in § 1.
 
 - [ ] **Half the probe corpus tests one tool** — [S]. `gather_evidence` is in `expects_tools` for
-      124 of 261 probes (re-counted 2026-08-27; the corpus has grown by 29 probes since the
-      2026-08-25 figures of 116/232); `find_notes` 95; `expand_note` 60; bucket C is 53 probes; the
+      **125 of 288** probes (re-counted 2026-08-29; 124/261 on 2026-08-27, 116/232 on 2026-08-25 —
+      the corpus keeps growing and the concentration is not shrinking with it, 43% against 47%);
+      `find_notes` 96; `expand_note` 60; bucket C is **48** probes against bucket A's 169; the
       tail is thin. Two consequences worth separating: the corpus mostly measures one retrieval path,
       and ChemToolAgent's finding — that tool augmentation **does not consistently beat the base
       LLM**, and hurts on general chemistry questions — cannot be reproduced here. Bucket C scores
@@ -736,8 +736,13 @@ breaks on a bump. Nothing guarded its **decisions** against upstream shipping th
 why the Temporal LangGraph plugin sat five weeks old and reached no list here. This is prose rather
 than a test, deliberately: what is being watched is judgement, and a test cannot hold one.
 
-Pinned at the time of writing: `temporalio` 1.31.0 · `langchain` 1.3.15 · `langgraph` 1.2.11 ·
-`langchain-core` 1.5.5 · `deepagents` 0.7.6.
+Pinned when the standings below were derived: `temporalio` 1.31.0 · `langchain` 1.3.15 ·
+`langgraph` 1.2.11 · `langchain-core` 1.5.5 · `deepagents` 0.7.6. **Installed on 2026-08-29:
+`langchain` 1.3.16, `langchain-core` 1.6.0, `deepagents` 0.7.8** — the other two unmoved. Three
+bumps have landed since, and nobody has re-read the release notes against the middle column, which
+is the one job this table asks for. Re-derive it with
+`uv run python -c "from importlib.metadata import version; ..."` rather than trusting this line:
+it is provenance for the standings, not a claim that they are current.
 
 | Upstream ships | We | Standing |
 | --- | --- | --- |
@@ -811,9 +816,9 @@ Wants its own ADR and a measurement of what the extra column costs on a real cor
 
 ## Everything else
 
-223 open findings live in [`docs/archive/findings-2026-08.md`](../archive/findings-2026-08.md)
-(`grep -c '^- \[ \]'` on that file), grouped by the review that found them, with their full
-measurements. That set **overlaps** this queue rather than extending it — promotion restates a row,
+The open findings live in [`docs/archive/findings-2026-08.md`](../archive/findings-2026-08.md)
+(`grep -c '^- \[ \]'` on that file counts them), grouped by the review that found them, with their
+full measurements. That set **overlaps** this queue rather than extending it — promotion restates a row,
 so a queued row is still open there under its original wording, and the header's "~185 further"
 was a subtraction nobody could reproduce. They are open, not abandoned — promote one into the queue
 above when it becomes the next thing worth doing, and delete it from here when it is done.

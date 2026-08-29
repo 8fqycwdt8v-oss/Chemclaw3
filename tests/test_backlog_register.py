@@ -28,6 +28,11 @@ _ROW_TITLE = re.compile(r"^- \[ \] \*\*(.+?)\*\*", re.MULTILINE)
 # A count of this file's own rows, or of the archive's, written as prose. "7 of the 30" is not this
 # shape: it is a historical measurement of an overlap, naming no unit a `grep` re-derives.
 _ROW_COUNT = re.compile(r"\b\d+\s+(?:of its\s+)?rows\b|\bholds\s+\d+\b|\b\d+\s+are open\b")
+# The same claim as `_ROW_COUNT`, worded as a count of what a register *holds* rather than of its
+# rows — the phrasing that escaped it. Narrow to the three nouns these two files are counted in, so
+# a genuine measurement of something else ("124 of 261 probes", "a 39-note knowledge graph") is
+# untouched: those name a corpus, not the queue's own length.
+_LIVE_COUNT = re.compile(r"\b\d+\s+open\s+(?:findings|rows|items)\b")
 
 
 def _titles() -> list[str]:
@@ -76,4 +81,31 @@ def test_the_header_still_shows_how_to_derive_the_count() -> None:
     """Removing the number must not remove the way to get it — that would be the other failure."""
     assert "grep -c '^- \\[ \\]'" in _header(), (
         "the header no longer shows the command that counts the rows"
+    )
+
+
+def test_no_section_below_the_header_states_a_live_row_count() -> None:
+    """The same failure, one section lower, where the guard above could not see it.
+
+    The header test was written for "223 of its rows are open" and scoped to the header, so it
+    missed **"223 open findings live in `findings-2026-08.md`"** in the *Everything else* section —
+    stale by two, printed beside the `grep -c` that answers 221, and phrased differently enough to
+    escape the pattern as well as the scope. A guard aimed at one sentence catches that sentence;
+    the failure is the *shape*, and the shape can appear anywhere.
+
+    Scoped to the body deliberately. The header's own narrative is retrospective — it says this file
+    once "reached 4,717 lines and 237 open rows", which is a measurement of a past state and exactly
+    the evidence the rule rests on. A body section has no such reason: a count written beside a
+    register that grows and shrinks is a live claim, and it is wrong on the next commit.
+    """
+    # `split(maxsplit=1)` returns one element when the file has no section heading at all, and
+    # taking [-1] there would hand the *header* to a check written to exempt it — a false positive
+    # on the very prose the docstring above says must stay. Two elements or no body.
+    sections = _BACKLOG.read_text(encoding="utf-8").split("\n## ", 1)
+    body = sections[1] if len(sections) == 2 else ""
+    stated = _LIVE_COUNT.findall(body)
+    assert not stated, (
+        f"BACKLOG.md states a live row count below its header: {stated}. Cite the `grep -c` and "
+        "let it answer; a number here is stale the next time a row lands or closes "
+        "(D-2026-08-01-the-count-lives-in-the-test-not-in-the-prose)."
     )
