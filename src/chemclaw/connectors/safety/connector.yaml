@@ -20,7 +20,11 @@
 # **The tool list below now exists in two repositories** — here and in that server's own
 # `connector.yaml` — and nothing structurally forces them to agree. The server's copy is
 # authoritative, because it is what actually answers; this one is what this repository validates
-# against. `make connector-validate` against a running server is the check that catches a drift.
+# against. **`make connector-validate` is not what catches a drift here** — it answers by
+# importing the bundle's own `server/` module in-process, and this bundle ships none, so it
+# reports these names as `unverified_tool_surfaces` and checks nothing. The two checks that do
+# reach the server are `make live-template-args` (every template step's *arguments* against the
+# running connector) and `Chemclaw3-mcp`'s own `assert_manifest_matches`.
 name: safety
 description: >-
   Cited safety and impurity reference tables, three separate questions kept separate: structural

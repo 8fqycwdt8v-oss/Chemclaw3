@@ -55,7 +55,7 @@ from chemclaw.agent.framing import frame_untrusted
 from chemclaw.connectors.jobs import failed_job_reason
 from chemclaw.core.config import settings
 from chemclaw.core.errors import SubsystemUnavailableError
-from chemclaw.core.identity_context import get_current_roles
+from chemclaw.core.identity_context import get_current_correlation_id, get_current_roles
 from chemclaw.core.ids import canonical_text, stable_hash
 from chemclaw.core.temporal_client import connect
 from chemclaw.core.tool_registry import tool
@@ -207,6 +207,11 @@ async def request_development_report(title: str, sections: list[ReportSection]) 
         sections=sections,
         requested_by=require_actor(),
         requested_roles=sorted(get_current_roles()),
+        # This tool only ever runs inside a turn, where the front door has bound the id — so the
+        # run's own log lines and its PR-gated draft join back to the conversation that asked.
+        # `or ""` rather than a minted id: a launch outside a turn is unjoined, and saying so is
+        # the point (`D-2026-08-27-a-step-runs-under-the-correlation-id-it-was-launched-with`).
+        correlation_id=get_current_correlation_id() or "",
     )
     client = await connect()
     workflow_id = _report_id(request)

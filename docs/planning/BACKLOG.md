@@ -85,10 +85,10 @@ topic).
 - [ ] **The unauthenticated `X-Chemclaw-Actor` header becomes durable attribution** — [M], and
       **narrower than this row used to claim**. It does not reach `job_records` or the audit trail:
       the durable path takes the actor as an argument sourced from core's validated front-door
-      principal (`ConnectorJobInput.requested_by`, `durable/connector_job.py:126` — the row named a
+      principal (`ConnectorJobInput.requested_by`, `durable/connector_job.py:160` — the row named a
       field called `actor`, which does not exist), and never reads the header. The real reach is two
       columns on the synchronous MCP path — `bo_campaigns.opened_by` and `bo_suggestions.actor`, via
-      `connectors/bo/server/tools.py:393`. The `unverified:<id>` marking is in place (D-2026-08-13),
+      `connectors/bo/server/tools.py::_recorded_provenance` (:374). The `unverified:<id>` marking is in place (D-2026-08-13),
       so what is open is that a caller still chooses the string. A bearer on the row above proves
       *core called*, not *which chemist*, so full closure needs an actor assertion bound to the call
       (OBO or a signed memo) — which is the `DEFERRED.md` warehouse row's blocker too.
@@ -133,34 +133,7 @@ topic).
       reserved for this and 068 says so; `tests/test_eln.py` fails a re-add that does not bring the
       readers.
 
-- [ ] **The `chem` enumerations and `compute_fukui_at` are served; the merge has landed and what
-      remains is a live-lane confirmation** — [S]. `Chemclaw3-mcp#18` merged 2026-08-27 (commit
-      `90e7486`): `enumerate_tautomers`, `enumerate_protonation_states`, `enumerate_stereoisomers`,
-      `enumerate_bond_cleavages` and their siblings now exist in `servers/chem/.../tools.py`, and
-      `compute_fukui_at` (which `connectors/calc/compose.py::ensemble_property` calls) exists in
-      `servers/calc/.../tools.py`, so the six templates `D-2026-08-25-the-loop-is-a-composite-not-a-template`
-      added can complete. Delete this row once the live lane has actually run one of those templates
-      end to end — `make template-validate` still cannot see the difference (`chem` is a bundle this
-      repository declares and does not run, so its tools are name-checked and argument-unchecked),
-      and `make connector-validate` against a running server is what would; no live-lane transcript
-      postdating the merge exists yet.
-      **`transform_structure` was the seventh name and is now gone from the manifest** rather than
-      implemented: it had no caller, no template, no skill reference and no documented signature in
-      either repository, so serving it would have meant inventing its contract.
-
 ## 3 — Work that is lost, dropped or invisible
-
-- [ ] **A development report's durable run has no correlation id to stamp** — [S].
-      `ReportRequest` and `SectionRequest` (`retrieval/harness.py:38,68`) carry `requested_by` and
-      `requested_roles` and no correlation id, so `report_workflow.retrieve_section` and
-      `propose_report` stamp an actor and nothing that joins the run to the turn that asked for it —
-      the log lines and the PR-gated draft both book an empty one. `ConnectorJobInput.correlation_id`
-      (`durable/connector_job.py:142`) is the shape to copy, and `request_development_report` runs
-      inside a turn where `get_current_correlation_id()` is bound, so the id exists at the launch.
-      Left out of `D-2026-08-27-a-step-runs-under-the-correlation-id-it-was-launched-with`
-      deliberately: that ADR fixed the sites that already carried an id, and inventing one here
-      would make an unjoined run look joined. `durable/memory_jobs.py:178` is the same shape and is
-      *not* this row — a synthesis job is system-triggered, so there is genuinely no turn.
 
 - [ ] **A timed-out parse still runs to completion on the worker thread** — [L]. **The cheap half
       is closed**: `ingest/documents/sync.py::_parse_changed` now bounds its `asyncio.to_thread`
@@ -173,7 +146,7 @@ topic).
       new child-OOM failure mode to classify (~150-250 lines).
 
 - [ ] **A schedule whose every run is killed by the ceiling reads as healthy on
-      `describe_schedules`** — [M]. `durable/schedules.py:364` — `ScheduleHealth` carries `paused`,
+      `describe_schedules`** — [M]. `durable/schedules.py:399` — `ScheduleHealth` carries `paused`,
       `last_run`, `runs_total`, `skipped_overlap`, `running_now` and `note`, and no run outcome;
       `_describe` reads none either, because `ScheduleInfo.recent_actions` names the workflow and
       when it started and nothing more. Measured against a live broker: a schedule built like
@@ -186,7 +159,7 @@ topic).
       here; `config/temporal.py` no longer claims otherwise, but
       `D-2026-08-27-a-start-to-close-timeout-does-not-bound-the-wait.md` still does and wants a
       superseding ADR — as do three further claims in the pair of 2026-08-27 ADRs that the tree has
-      since falsified or fixed: that "the ELN and corpus syncs are cursored" — `document_sync.py:213`
+      since falsified or fixed: that "the ELN and corpus syncs are cursored" — `document_sync.py:238`
       says in its own words that it keeps no `sync_cursors` row, and `corpus_sync.py` keeps one only
       for a source whose binding sets `append_only`
       (`D-2026-08-28-a-feed-is-a-corpus-that-does-not-stop`), never in the release mode this claim
