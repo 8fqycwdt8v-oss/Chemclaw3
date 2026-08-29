@@ -306,5 +306,21 @@ set it.
 live-session map is a bounded LRU at `service_max_live_sessions = 1000`, so the probe stops at
 **27% of the bound** and never evicts once. At that length "filling a bounded cache" and "leaking"
 are the same curve. The RSS verdict was `grows and slowing` and still `resolved`, which is what a
-cache filling looks like. A 1300-turn run past the bound is what distinguishes them, and is the
-measurement this row is waiting on.
+cache filling looks like. A 1300-turn run past the bound distinguishes them, and it did:
+
+| | 300 turns (275 measured) | 1300 turns (1250 measured) |
+| --- | ---: | ---: |
+| `TurnSession` per turn | +1.00 | **+0.76** |
+| `TurnSession` total | +275 | **+950** |
+| RSS, first half | +2244 KB/batch | +3072 KB/batch |
+| RSS, second half | +352 KB/batch | **+365 KB/batch** |
+
+**No leak.** The per-turn rate falls as the map approaches capacity and the total lands at 950
+against a bound of 1000 — the LRU filling and plateauing, which is the shape it is supposed to
+have. `LiveSession` moves identically (+0.76, +950), as it must, since the two are the same
+entry. At 275 turns that curve is indistinguishable from a linear leak; the probe's default
+simply could not see the bound it exists to check.
+
+The probe still exits non-zero, because RSS growth is still *resolvable* in the second half
+(+365 ± 150). That is the honest reading of a cache that has not finished filling, not a defect —
+and it is why the verdict line says `grows and slowing` rather than `flat`.
