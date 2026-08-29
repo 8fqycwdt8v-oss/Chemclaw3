@@ -88,9 +88,17 @@ _OPEN = """
        OR pending_requests.run_id <> EXCLUDED.run_id
 """
 
+# `answered_at` only where somebody answered. It was stamped unconditionally, so an `expired` or
+# `cancelled` row carried a timestamp with an empty `answered_by` — a column saying "somebody
+# answered at some point" about a question nobody answered, surfaced to the agent and the front door
+# that way. `076`'s `pending_requests_answer_is_attributed` constraint exists to stop exactly that
+# claim and only fires on `state = 'answered'`; this walked around it from the other side.
 _SETTLE = """
     UPDATE pending_requests
-    SET state = %s, answered_at = now(), answered_by = %s, answer = %s
+    SET state = %s,
+        answered_at = CASE WHEN %s = 'answered' THEN now() ELSE NULL END,
+        answered_by = %s,
+        answer = %s
     WHERE request_id = %s AND state = 'waiting'
 """
 
@@ -153,7 +161,9 @@ async def settle_request(
     guard is what makes the first writer win rather than the last.
     """
     async with _connect() as conn:
-        cursor = await conn.execute(_SETTLE, (state, answered_by, json.dumps(answer), request_id))
+        cursor = await conn.execute(
+            _SETTLE, (state, state, answered_by, json.dumps(answer), request_id)
+        )
         return cursor.rowcount == 1
 
 

@@ -163,11 +163,18 @@ async def report_measurement(
         property_name: Which predicted property was measured — "solubility" or "pka".
         smiles: The molecule measured, as SMILES.
         measured_value: The experimental value.
-        unit: The unit the chemist reported it in. Leave empty when they gave the value in the
-            property's own unit ("log S" for solubility, "pKa"). State it when they did not —
-            "mg/mL", "%", "uM" — and the call is **refused** rather than converted, because a
-            solubility in mg/mL cannot become a log S without the molar mass. Reporting the wrong
-            unit silently is the failure this argument exists to prevent.
+        unit: The unit the chemist reported it in — **required for a calibrated property**, and
+            stated exactly as they said it: "log S", "pKa", "mg/mL", "%", "uM". A unit this ledger
+            does not hold is **refused** rather than converted, because a solubility in mg/mL
+            cannot become a log S without the molar mass.
+
+            Required rather than optional-with-a-default, which is what it was: omitting it meant
+            the value was stamped with the ledger's own unit regardless, so a chemist saying
+            "0.5 mg/mL" had `0.5` recorded as **log S** — for MW 300 the truth is −2.78, and the
+            trust ledger then reported that calculator as biased by 3.3 log units, a factor of
+            ~2000, on the strength of one row. That is worse than the empty string it replaced,
+            because an empty unit at least marked the row as unstated; asserting the wrong one
+            removes the only signal anybody could find it by.
 
     Returns:
         Whether the measurement matched an existing prediction. "No prediction on file" is a normal
@@ -182,6 +189,15 @@ async def report_measurement(
     # chemist reporting 0.5 mg/mL was indistinguishable from one reporting log S = 0.5
     # (D-2026-08-29-a-quantity-without-a-unit-is-a-number).
     _tool, ledger_unit = _CALIBRATED.get(property_name, ("", ""))
+    if ledger_unit and not unit.strip():
+        # Refuse rather than assume. The assumption is invisible in the data afterwards, and it is
+        # wrong exactly when a chemist reports in the unit they measure in rather than the one this
+        # ledger happens to store.
+        raise ValueError(
+            f"{property_name!r} is calibrated in {ledger_unit!r}: state the unit the measurement "
+            f"was reported in (say {ledger_unit!r} if that is what the chemist gave), because a "
+            "value recorded under the wrong unit cannot be found again."
+        )
     if ledger_unit:
         # Raises `UnitError` (a `ValueError`) on a mismatch, which the server's error sanitiser
         # passes through verbatim — so the chemist is told what unit the ledger holds rather than

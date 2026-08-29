@@ -76,3 +76,30 @@ def test_two_compiles_hand_the_executor_the_same_tool_objects() -> None:
         f"{rebuilt} were re-derived on the second compile — `agent/tool_schema.py`'s cache is not "
         "on the path build_langgraph_agent hands to the executor"
     )
+
+
+def test_the_cache_holds_one_entry_per_registered_tool_however_many_turns_run() -> None:
+    """The bound on the cache was documented and not checked, which is this repo's own failure mode.
+
+    `functools.cache` is unbounded, and the only thing between it and a leak is the docstring's
+    claim that every caller passes a module-level function out of `chemclaw.core.tool_registry`.
+    That claim is true today and is one edit from false: `connectors.registry.job_tools()` and
+    `templates.registry.template_tools()` mint **fresh closures on every call**, so relaxing the
+    by-name guard in `_register_generated_tools` — to re-read manifests on a config reload, say,
+    which looks harmless — would grow this cache by one entry per generated tool per build, forever,
+    in a long-lived pod. Nothing would turn red.
+
+    Asserted across several builds rather than one, because a single build cannot distinguish a
+    cache from a fresh conversion.
+    """
+    model = _model()
+    for _ in range(3):
+        build_langgraph_agent(model, audit_sink=NullAuditSink())
+
+    info = as_structured_tool.cache_info()
+    registered = len(_capability_tools())
+    assert info.currsize <= registered, (
+        f"the schema cache holds {info.currsize} entries for {registered} registered tools; "
+        "something is minting a fresh callable per build and the cache grows without bound"
+    )
+    assert info.hits > 0, "nothing is reusing the cache; every build is re-deriving schemas"

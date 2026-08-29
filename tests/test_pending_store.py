@@ -242,3 +242,34 @@ def test_a_retry_of_the_opening_activity_does_not_disturb_a_settled_row() -> Non
         )
 
     asyncio.run(_run())
+
+
+def test_an_expiry_does_not_claim_somebody_answered() -> None:
+    """`answered_at` is a fact about a person, not about a state transition.
+
+    It was stamped on every settle, so an `expired` row carried a timestamp beside an empty
+    `answered_by` — the front door and the agent both read that as "somebody answered at some
+    point". Migration 076's `pending_requests_answer_is_attributed` exists to prevent exactly that
+    claim and only fires on `state = 'answered'`; the write walked around it from the other side.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        await _clean()
+        await _open("req-expiry-stamp", days=1)
+        await pending_store.settle_request(
+            "req-expiry-stamp", state="expired", answered_by="", answer={}
+        )
+        stored = await pending_store.get_request("req-expiry-stamp")
+        assert stored is not None
+        assert stored.state == "expired"
+        assert not stored.answered_at, "an unanswered request carries an answered-at timestamp"
+
+        await _open("req-answered-stamp", days=1)
+        await pending_store.settle_request(
+            "req-answered-stamp", state="answered", answered_by="u-2", answer={"ok": True}
+        )
+        answered = await pending_store.get_request("req-answered-stamp")
+        assert answered is not None and answered.answered_at, "a real answer lost its timestamp"
+
+    asyncio.run(_run())

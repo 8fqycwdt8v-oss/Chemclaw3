@@ -1282,6 +1282,51 @@ and one specific to build artefacts: when a test harness consumes a build direct
 are part of the fixture.** Rebuild the way the harness does, and check `.github/workflows/` for
 which flags that is rather than guessing.
 
+## 2026-08-29 — a test written by the author inherits the author's belief
+
+Seven reviewers with fresh context read a change I had just shipped green — `make lint type test`
+passing with Postgres and Temporal up, every declaration gate held, and six defects I had already
+found while building it. They found about thirty more, and I reproduced every one before acting.
+
+The pattern in almost all of them: **a docstring stating the correct control, beside code that does
+not implement it.** Not a control I forgot — one I described. The MCP face documented its read-only
+export surface and served *zero* tools in production. The pending route says "'I asked the QA lead
+to approve this' must not mean 'and I may approve it myself'" and the only producer of approvals
+left the routing unset, so the requester could self-approve. The evidence tool claimed an ownership
+check that lives on a FastAPI route it never touches. The digest's comment says delivery runs after
+the acknowledgement; it ran before.
+
+The rule I need, because it is the mechanism rather than the symptom:
+
+**When I write a test for code I just wrote, it inherits what I believed the code does — so it
+proves the mechanism and never the instance.**
+
+Three of my own tests demonstrate it exactly:
+
+- `test_mcp_face.py` imports `chemclaw_agent` to populate the tool registry. That import is what
+  production lacked. The test could not fail.
+- `test_operations.py` asserts no caller free text escapes a reading, and writes its marker into
+  four columns the reading never selects — while seeding the one column that *is* attacker-
+  influenceable with a safe literal.
+- `test_units.py` proves case separates molarity from length using `M`/`m` and `mM`/`mm`. Those two
+  rungs were right. `nM` resolved to nanometre and `µm` to micromolar.
+
+So, concretely, for the next change:
+
+1. **Test the production entrypoint, not a convenient import of it.** If a module is populated by
+   import side effect, assert it in a subprocess that imports only what the deployment imports.
+2. **Seed the adversarial value into the field the code actually reads**, and check the read path
+   selects that field. A marker in a column nobody selects proves nothing.
+3. **When a mechanism has a series (a prefix ladder, a state vocabulary, a status set), test the
+   whole series or state which rungs are untested.** Two examples prove the mechanism exists, not
+   that the table is right.
+4. **When a docstring names a control, go and find the code that enforces it before believing the
+   docstring** — including, especially, my own from an hour ago.
+
+And the cheap fix that found all of it: fan reviewers out over a diff with **fresh context**, scoped
+by failure domain. A reviewer who shares my belief about the code cannot see any of these; one who
+has only the code can.
+
 ## 2026-08-29 — a red check is a claim about the system *or* about the check, and the odds are even
 
 A four-repo e2e campaign produced six findings. **Three of them were the check being wrong, not the
