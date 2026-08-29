@@ -552,7 +552,7 @@ _PROSE_TIME = re.compile(r"for\s+(\d+(?:\.\d+)?)\s*h\b")
 
 
 async def check_prose_yields_its_numbers(eln_export_dir: Path) -> Check:
-    """A condition stated only in prose reaches the **step** — and is not invented as a headline.
+    """A condition stated only in prose reaches the record — as a **step**, not as a setpoint.
 
     Both halves, because they are the two ways this can go wrong and they fail in opposite
     directions. `D-2026-08-26-a-transcription-may-not-infer-a-setpoint` forbids deriving a headline
@@ -561,16 +561,21 @@ async def check_prose_yields_its_numbers(eln_export_dir: Path) -> Check:
     may not present a derived number as a recorded one. Segmentation is a different claim — a step
     says what its own sentence says — so `_segment_steps` does extract per-step values, losslessly.
 
-    **This check used to assert the opposite of the ADR and failed 0/12 permanently**, which made
-    `make live-data` exit 1 for a reason that was correct behaviour. Its docstring justified itself
-    on the premise that "if the extraction fails, the condition is simply gone, and nothing
-    downstream can tell the difference between 'ran at 82 °C' and 'temperature unrecorded'". That
-    premise is false, and one measurement settles it — `uspto-suzuki-biphenyl-1` step 2 carries
-    `temperature_c=82.0, duration_h=4.0` with its sentence verbatim, while the headline is `None`.
-    Nothing is lost; it is recorded where it was actually stated.
+    Which field it may be recovered *into* is decided, and the decision is the whole point.
+    `D-2026-08-26-a-transcription-may-not-infer-a-setpoint` removed the headline prose fallback
+    after measuring what it produced: a reaction run at 80 °C for 12 h, stored as 0 °C for 0.5 h,
+    because a procedure begins by charging a vessel and the *addition* temperature is simply the
+    first number it states. So `OrdReaction.temperature_c`/`.time_h` are the structured field or
+    absent, and the regex result lives on `ReactionStep`, where "0 °C" belongs to the charging step
+    and says so.
 
-    Only records whose prose states both are checked, and the count is reported, because a silent
-    denominator is how a check that stopped matching anything keeps passing.
+    Both halves are asserted here, because each without the other is a check that passes for the
+    wrong reason: a record carrying no step temperature would mean the prose was lost entirely, and
+    a record carrying a *headline* setpoint it never stated would mean the fallback is back.
+
+    Only records whose prose states both a temperature and a time are checked, and the count is
+    reported, because a silent denominator is how a check that stopped matching anything keeps
+    passing.
     """
     adapter = JsonExportAdapter(str(eln_export_dir))
     raws = await adapter.fetch_new_entries(_EPOCH)
@@ -587,33 +592,39 @@ async def check_prose_yields_its_numbers(eln_export_dir: Path) -> Check:
         except Exception:
             continue
         checked += 1
-        want = (float(temperature.group(1)), float(time_h.group(1)))
-        # `is not None` on each, and not a truthiness test: one fixture reads "cooled to 0 °C",
-        # and `0.0 or None` would report a recovered zero as a failure that it is not.
-        carried = {
-            (step.temperature_c, step.duration_h)
-            for step in reaction.steps
-            if step.temperature_c is not None and step.duration_h is not None
-        }
-        if want not in carried:
+        # `is not None` on the step values, and not a truthiness test: one fixture reads "cooled to
+        # 0 °C", and `0.0 or None` would report the extraction as a failure that it is not.
+        steps_carry = any(step.temperature_c is not None for step in reaction.steps) and any(
+            step.duration_h is not None for step in reaction.steps
+        )
+        # The setpoint may be present only if the entry stated it in its own field. Read from the
+        # payload rather than assumed absent, so an entry that legitimately carries both is not
+        # counted as a regression.
+        stated = (
+            raw.payload.get("temperature_c") is not None,
+            raw.payload.get("time_h") is not None,
+        )
+        setpoint_invented = (
+            reaction.temperature_c is not None and not stated[0],
+            reaction.time_h is not None and not stated[1],
+        )
+        if not steps_carry:
             wrong.append(
-                f"{raw.entry_id}: prose says {want}, no step carries it (steps: {carried})"
+                f"{raw.entry_id}: prose states "
+                f"{(float(temperature.group(1)), float(time_h.group(1)))} and no step carries both"
             )
-            continue
-        # The other half of the ADR: the headline must stay absent unless the entry stated it as a
-        # structured field. A record that grew one from the prose has inferred a setpoint.
-        stated = raw.payload.get("temperature_c") is not None
-        if not stated and reaction.temperature_c is not None:
+        elif any(setpoint_invented):
             wrong.append(
-                f"{raw.entry_id}: headline temperature_c={reaction.temperature_c} was inferred "
-                "from prose, which D-2026-08-26-a-transcription-may-not-infer-a-setpoint forbids"
+                f"{raw.entry_id}: headline setpoint "
+                f"{(reaction.temperature_c, reaction.time_h)} was derived from prose, which "
+                f"D-2026-08-26 forbids"
             )
     return Check(
-        name="prose reaches the step, and is not inferred as a headline",
+        name="prose reaches the steps, and never the setpoint",
         passed=checked > 0 and not wrong,
         observed=(
             f"{checked - len(wrong)}/{checked} procedures state a temperature and a time in prose, "
-            f"carry both on a step, and infer no headline"
+            f"carry both on a step, and invent no setpoint"
             + (f" · first miss: {wrong[0]}" if wrong else "")
         ),
     )

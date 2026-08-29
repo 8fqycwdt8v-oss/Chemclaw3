@@ -20,15 +20,18 @@ Closes the gap `tasks/todo.md` used to name: *"the cross-repo sequence `Chemclaw
 | `chem` (RDKit: resolve, stoichiometry, green metrics, render) | Chemclaw3-mcp | 8858 | `infra/live/processes.sh` |
 | `safety` (structural hazard / genotoxicity screen, ICH limits) | Chemclaw3-mcp | 8859 | `infra/live/processes.sh` |
 | `pyexec` (bounded offline Python analysis sandbox) | Chemclaw3-mcp | 8899 | this script |
-| `calc` (the physics behind this repo's calculator tools — *not* a connector) | Chemclaw3-mcp | 8860 | this script |
+| `calc` (the physics behind this repo's calculator tools — *not* a connector) | Chemclaw3-mcp | 8860 | `infra/live/processes.sh` |
 | `mock-eln` (ELN/ORD data) | Chemclaw3_mock | 8090 | this script |
 | `mock-vendor` (building-block search/pricing MCP tool) | Chemclaw3_mock | 8091 | this script |
 | connectors, 4 Temporal workers, front door | this repo | 8810+, 9000-9003, 8000 | `infra/live/processes.sh` |
 | BFF + SPA | Chemclaw3_ui | 8787, 5173 | this script |
 
-**`chem` and `safety` are started by `infra/live/processes.sh`, which this script calls** — one
-lane starts them, and it is the one that cannot boot without them
-(`docs/decisions/D-2026-08-27-one-lane-starts-the-fleet.md`). Both scripts used to start them, and
+**`chem`, `safety` and the `calc` backend are started by `infra/live/processes.sh`, which this
+script calls** — one lane starts them, and it is the one that cannot do its work without them
+(`docs/decisions/D-2026-08-27-one-lane-starts-the-fleet.md`, extended to `calc` by
+`docs/decisions/D-2026-08-28-the-durable-half-has-a-backend-too.md`: that lane's durable jobs are
+what `calc` is a run-time dependency of, and `make live-jobs` could not pass a single check
+without it). Both scripts used to start them, and
 because a pidfile is a per-lane record of a machine-wide port the duplication was silent: the
 second uvicorn died on the bound address while readiness was answered by the first, so every
 four-repo bring-up left two dead pidfiles and `make live-e2e-full-stack-status` printed `chem DOWN`
@@ -60,10 +63,10 @@ make live-e2e-full-stack-down
 ```
 
 Or drive it directly: `infra/live/e2e-full-stack/up.sh [up|down|status|restart <name>]`.
-`restart <name>` (`props`, `rxnpredict`, `pyexec`, `calc`, `mock-eln`, `mock-vendor`, or `ui-bff`) kills and
+`restart <name>` (`props`, `rxnpredict`, `pyexec`, `mock-eln`, `mock-vendor`, or `ui-bff`) kills and
 restarts one external process in place — the primitive the chaos round uses. Restarting a piece of
-this repo's own stack (a connector, a worker, and `chem` or `safety`) is
-`infra/live/processes.sh restart <name>` instead; asking this script for one of those two says so
+this repo's own stack (a connector, a worker, and `chem`, `safety` or `calc`) is
+`infra/live/processes.sh restart <name>` instead; asking this script for one of those three says so
 rather than reporting an unknown process.
 
 ## The corpus is backfilled on bring-up, and it takes hours

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Bring up the four-repo ChemClaw3 stack for a full end-to-end pass: this backend, the
-# Chemclaw3-mcp tool fleet (props, rxnpredict, calc here; chem and safety via processes.sh),
+# Chemclaw3-mcp tool fleet (props and rxnpredict here; chem, safety and calc via processes.sh),
 # Chemclaw3_mock (the eln-json/eln-ord data sources, the mock-vendor MCP tool), and Chemclaw3_ui.
 #
 # Deliberately does not reimplement readiness polling for pieces that already have it:
@@ -124,7 +124,7 @@ assert_credential_accepted() {
 # here is the *check* — `assert_credential_accepted` below, after processes.sh returns — because
 # that is this lane's own lesson (D-2026-08-17) and a check is not a start.
 #
-# `calc` is started here, and it is NOT a connector and its manifest must stay
+# `calc` is started by `processes.sh`, not here, and it is NOT a connector and its manifest must stay
 # off `CHEMCLAW_CONNECTORS_DIR` — it says so in a box. Chemclaw3 keeps its own `calc` bundle and
 # all fifteen tools; what moved to the fleet is the *physics* behind them
 # (D-2026-08-16-the-physics-leaves-the-cache-stays), which `connectors/calc/remote.py::calc_session`
@@ -178,15 +178,6 @@ start_pyexec() {
     start pyexec "$python" -m uvicorn chemclaw_mcp_pyexec.app:app --host 127.0.0.1 --port 8899
   wait_for pyexec "http://127.0.0.1:8899/healthz"
   assert_credential_accepted pyexec "http://127.0.0.1:8899/mcp" "${CHEMCLAW_PYEXEC_TOKEN:-dev-token}"
-}
-
-# Not a connector — see the fleet comment above. `calc_server_url` defaults to 8860.
-start_calc() {
-  local python="$1"
-  CHEMCLAW_CALC_TOKEN="${CHEMCLAW_CALC_TOKEN:-dev-token}" \
-    start calc "$python" -m uvicorn chemclaw_mcp_calc.app:app --host 127.0.0.1 --port 8860
-  wait_for calc "http://127.0.0.1:8860/healthz"
-  assert_credential_accepted calc "http://127.0.0.1:8860/mcp" "${CHEMCLAW_CALC_TOKEN:-dev-token}"
 }
 
 # ---------------------------------------------------------------------------- Chemclaw3_mock
@@ -301,12 +292,11 @@ up() {
   # this lane resolved is what makes one owner work from either lane's default.
   export CHEMCLAW_MCP_REPO="$MCP_REPO"
 
-  log "starting the Chemclaw3-mcp fleet (props, rxnpredict, calc; chem and safety via processes.sh)"
+  log "starting the Chemclaw3-mcp fleet (props, rxnpredict; chem, safety and calc via processes.sh)"
   local mcp_python; mcp_python="$(mcp_python_bin)"
   start_props "$mcp_python"
   start_rxnpredict "$mcp_python"
   start_pyexec "$mcp_python"
-  start_calc "$mcp_python"
 
   log "starting Chemclaw3_mock (ELN mock + mock-vendor MCP tool)"
   local mock_python; mock_python="$(mock_venv_bin)"
@@ -323,6 +313,11 @@ up() {
   # so without it a mismatch shows up only as a degraded turn with nothing naming a credential.
   assert_credential_accepted chem "http://127.0.0.1:8858/mcp" "$CHEMCLAW_CHEM_TOKEN"
   assert_credential_accepted safety "http://127.0.0.1:8859/mcp" "$CHEMCLAW_SAFETY_TOKEN"
+  # The calc backend is checked on exactly the same terms even though it is not a connector: the
+  # credential has the same two halves, and a mismatch here is worse than a degraded turn — it is a
+  # `CalcServerError` from a server whose `/healthz` is green, which is how this lane once
+  # misdiagnosed a 401 all the way into Temporal.
+  assert_credential_accepted calc "http://127.0.0.1:8860/mcp" "${CHEMCLAW_CALC_TOKEN:-dev-token}"
 
   log "starting Chemclaw3_ui (BFF + SPA)"
   start_ui
@@ -394,15 +389,16 @@ status() {
 }
 
 # Stop one named external process and bring it back — the shape the chaos round needs. Only
-# covers the processes this script owns (props, rxnpredict, calc, mock-eln, mock-vendor, ui-bff);
+# covers the processes this script owns (props, rxnpredict, mock-eln, mock-vendor, ui-bff);
 # restarting a piece of this repo's own stack is infra/live/processes.sh's `restart` verb — and
-# since D-2026-08-27-one-lane-starts-the-fleet that includes chem and safety. They get a named arm
+# since D-2026-08-27-one-lane-starts-the-fleet that includes chem and safety, and since
+# D-2026-08-28-the-durable-half-has-a-backend-too the calc backend as well. They get a named arm
 # below rather than falling through to "unknown process", because they *are* known: they are
 # simply somebody else's to restart.
 restart() {
   local name="$1" pidfile="$RUN_DIR/$1.pid"
   case "$name" in
-    chem|safety)
+    chem|safety|calc)
       die "$name is started by infra/live/processes.sh, which this lane calls — restart it there:
   bash infra/live/processes.sh restart $name"
       ;;
@@ -417,7 +413,6 @@ restart() {
     props) start_props "$(mcp_python_bin)" ;;
     rxnpredict) start_rxnpredict "$(mcp_python_bin)" ;;
     pyexec) start_pyexec "$(mcp_python_bin)" ;;
-    calc) start_calc "$(mcp_python_bin)" ;;
     mock-eln) start_mock_eln "$(mock_venv_bin)" ;;
     mock-vendor) start_mock_vendor "$(mock_venv_bin)" ;;
     ui-bff) start_ui ;;
