@@ -177,9 +177,13 @@ the model was sent, because `@tool` is identity so it measured raw callables rat
 objects, and never saw the seven `FilesystemMiddleware`/`SubAgentMiddleware` tools at all.
 **That second half is closed.** `_bound_tools` now reads the surface off the compiled graph's
 `ToolNode` — so any future tool source lands in the count the moment it is bound — and every
-ceiling was re-baselined in one commit: `default` measures **42,458** where the old basis reported
-34,399, six tools turned out to have been over `MAX_SINGLE_TOOL_TOKENS` all along, and **nothing
+ceiling was re-baselined in one commit: `default` measures **42,505** where the old basis reported
+34,379, six tools turned out to have been over `MAX_SINGLE_TOOL_TOKENS` all along, and **nothing
 was added**. The number grew because the measurement got honest, not because the surface did.
+(Those two figures shipped as 42,458 and 34,399 and were corrected the same day by re-measuring at
+`HEAD`: the first was taken on a branch that landed *after* the helper-subagent commit rewrote the
+`task` tool's description, and the second was a transcription error nothing had ever measured. The
+mechanism did not change — the numbers were simply taken again.)
 The deferral itself stands.
 
 M13 removed the dependency itself: `agent-framework-*` is out of `pyproject.toml` and the suite is

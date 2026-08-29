@@ -214,6 +214,27 @@ class ObservabilitySettings(BaseSettings):
     # SIGKILLs through the drain and the setting buys nothing; `tests/test_deploy_chart.py` pins
     # that ordering.
     worker_graceful_shutdown_seconds: float = Field(default=120.0, gt=0)
+    # How long `kg/graph.py::knowledge_sync_age_seconds` may reuse one stat scan of the knowledge
+    # tree. That gauge is a *live* callback, so it ran an O(notes) `rglob` + `stat` sweep on every
+    # scrape, synchronously, inside the `async def` that serves `/metrics` — measured, `render()`
+    # went from 0.128 ms on an empty tree to 102.6 ms at 10k notes, and that is the whole front
+    # door's event loop stalled for the duration, not one request's latency.
+    #
+    # It is a scan budget rather than a metric-staleness budget, and the difference is the reason a
+    # number this large is safe: what gets cached is the newest note's **mtime**, while the age is
+    # recomputed from `time.time()` on every scrape. So a corpus that stopped arriving keeps
+    # reporting an age that grows in real time however long the cache lives — the failure this gauge
+    # exists for cannot be cached away. The only thing the window delays is noticing a corpus got
+    # *newer*, which makes a reading at most this many seconds too old: it errs toward alerting and
+    # never toward silence.
+    #
+    # 300 s for the reason `graph_cache_ttl_seconds` gives for its own number, one step further: the
+    # only out-of-process writer of this tree is the knowledge-sync sidecar, whose shipped cadence
+    # (`knowledge.sync.intervalSeconds`) is 300 s. The corpus cannot get newer more often than that,
+    # so a shorter window surfaces nothing sooner and only re-scans — and a window *below* the
+    # scrape interval buys nothing at all, since every scrape would miss. 0 restores the
+    # scan-every-scrape behaviour.
+    knowledge_age_scan_ttl_seconds: float = Field(default=300.0, ge=0.0)
 
     @model_validator(mode="after")
     def _the_two_metrics_ports_are_not_the_same_port(self) -> Self:

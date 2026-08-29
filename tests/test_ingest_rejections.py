@@ -22,12 +22,14 @@ Postgres-backed, because a ledger nothing durably wrote is the thing this replac
 
 import asyncio
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import pytest
+from temporalio.testing import ActivityEnvironment
 
+import chemclaw.durable.eln_sync as eln_sync
 from chemclaw.agent import research_tools
 from chemclaw.agent.framing import ENVELOPE_TAG, defang
 from chemclaw.core import db
@@ -35,9 +37,12 @@ from chemclaw.core.config import settings
 from chemclaw.ingest import rejections
 from chemclaw.ingest.eln.ord_adapter import DEFAULT_LEDGER_SOURCE as LEDGER_SOURCE
 from chemclaw.ingest.eln.ord_adapter import OrdJsonAdapter
+from chemclaw.ingest.eln.records import InMemoryReactionRecordStore
+from chemclaw.ingest.eln.sync import IngestSummary
 from chemclaw.ingest.rejections import IngestRejection, record_refusals, refusals_matching
-from chemclaw.ingest.sources import registry
 from chemclaw.retrieval.evidence import EvidenceChunk
+from chemclaw.science.fingerprints.store import InMemoryFingerprintStore
+from chemclaw.science.labels.store import InMemoryLabelIndex
 from tests.pg import migrated_db_or_skip
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
@@ -116,6 +121,48 @@ def _write(directory: Path, reaction_id: str, yield_percent: float) -> None:
     )
 
 
+def _write_at(directory: Path, reaction_id: str, created: datetime, yield_percent: float) -> None:
+    """Drop one ORD export stamped at `created` — which is what the fetch window filters on."""
+    payload = _ord_payload(reaction_id, yield_percent)
+    payload["provenance"] = {"record_created": {"time": {"value": created.isoformat()}}}
+    (directory / f"{reaction_id}.json").write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _ord_source(monkeypatch: pytest.MonkeyPatch, root: Path, source: str = LEDGER_SOURCE) -> Path:
+    """Declare an ORD drop directory as a data source; return the directory to drop exports into.
+
+    The manifest is what makes the drain reachable by name and what files its refusals under the
+    source's own identity, so a ledger test drives the wiring a deployment actually has. It has to:
+    the ledger row for a record that cannot be *mapped* is written by `durable/eln_sync.py`, the
+    only layer that knows which entries a chunk processes — see
+    `test_every_processed_refusal_reaches_the_ledger` for the bound that has to be shared.
+    """
+    drop = root / source
+    drop.mkdir(parents=True, exist_ok=True)
+    folder = root / "manifests" / source
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "datasource.yaml").write_text(
+        f"name: {source}\n"
+        f"description: An ORD drop directory belonging to {source}.\n"
+        "ingest: chemclaw.ingest.eln.ord_adapter:OrdJsonAdapter\n"
+        f"config:\n  export_dir: {drop}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(settings, "data_sources_dir", str(root / "manifests"))
+    monkeypatch.setattr(settings, "knowledge_dir", str(root))  # no merged notes
+    monkeypatch.setattr(eln_sync, "_reaction_store", InMemoryFingerprintStore)
+    monkeypatch.setattr(eln_sync, "_molecule_store", InMemoryFingerprintStore)
+    monkeypatch.setattr(eln_sync, "_record_store", InMemoryReactionRecordStore)
+    monkeypatch.setattr(eln_sync, "_label_index", InMemoryLabelIndex)
+    return drop
+
+
+async def _drain(source: str = LEDGER_SOURCE, since: datetime = _EPOCH) -> IngestSummary:
+    """Run one real drain chunk over `source`, exactly as the durable sync's activity does."""
+    chunk = await ActivityEnvironment().run(eln_sync.sync_eln_entries, source, since, True)
+    return chunk.summary
+
+
 async def _rows(source: str) -> list[tuple[str, str, datetime, datetime, int]]:
     """Every ledger row for `source`, read back through SQL rather than through the reader."""
     async with db.connection(settings.postgres_dsn) as conn:
@@ -134,21 +181,23 @@ async def _clear(source: str) -> None:
         await conn.commit()
 
 
-def test_the_119_percent_well_is_refused_and_lands_in_the_ledger(tmp_path: Path) -> None:
+def test_the_119_percent_well_is_refused_and_lands_in_the_ledger(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The defect itself: the one entry that can never arrive, now with its reason on file."""
 
     async def _run() -> None:
         await migrated_db_or_skip()
         await _clear(LEDGER_SOURCE)
-        _write(tmp_path, _WELL_ID, 119.43)
+        drop = _ord_source(monkeypatch, tmp_path)
+        _write(drop, _WELL_ID, 119.43)
 
-        entries = await OrdJsonAdapter(str(tmp_path)).fetch_new_entries(_EPOCH)
+        summary = await _drain()
 
-        # The refusal is unchanged: the entry is still fetched and still refused by the mapper, so
-        # the sync's own summary reports it exactly as before.
-        assert [entry.entry_id for entry in entries] == [_WELL_ID]
-        with pytest.raises(ValueError, match="119.43"):
-            OrdJsonAdapter(str(tmp_path)).map_to_ord(entries[0])
+        # The refusal is unchanged: the entry is still fetched, still refused by the mapper, and
+        # still reported in the sync's own summary exactly as before.
+        assert [entry.entry_id for entry in summary.rejected] == [_WELL_ID]
+        assert summary.ingested == []
 
         rows = await _rows(LEDGER_SOURCE)
         assert len(rows) == 1, "the refused well must leave exactly one ledger row"
@@ -162,18 +211,20 @@ def test_the_119_percent_well_is_refused_and_lands_in_the_ledger(tmp_path: Path)
     asyncio.run(_run())
 
 
-def test_re_offering_the_same_record_moves_last_seen_and_adds_no_row(tmp_path: Path) -> None:
+def test_re_offering_the_same_record_moves_last_seen_and_adds_no_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A ledger, not a second log: the row is the record, and the run is a timestamp on it."""
 
     async def _run() -> None:
         await migrated_db_or_skip()
         await _clear(LEDGER_SOURCE)
-        _write(tmp_path, _WELL_ID, 119.43)
-        adapter = OrdJsonAdapter(str(tmp_path))
+        drop = _ord_source(monkeypatch, tmp_path)
+        _write(drop, _WELL_ID, 119.43)
 
-        await adapter.fetch_new_entries(_EPOCH)
+        await _drain()
         first = await _rows(LEDGER_SOURCE)
-        await adapter.fetch_new_entries(_EPOCH)
+        await _drain()
         second = await _rows(LEDGER_SOURCE)
 
         assert len(second) == 1, "a record refused twice is one row, or this is a log again"
@@ -184,18 +235,20 @@ def test_re_offering_the_same_record_moves_last_seen_and_adds_no_row(tmp_path: P
     asyncio.run(_run())
 
 
-def test_a_record_that_ingests_cleanly_leaves_no_ledger_row(tmp_path: Path) -> None:
+def test_a_record_that_ingests_cleanly_leaves_no_ledger_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The control. The ledger is about refusals, so a good corpus writes nothing at all."""
 
     async def _run() -> None:
         await migrated_db_or_skip()
         await _clear(LEDGER_SOURCE)
-        _write(tmp_path, "well-ok", 84.0)
+        drop = _ord_source(monkeypatch, tmp_path)
+        _write(drop, "well-ok", 84.0)
 
-        entries = await OrdJsonAdapter(str(tmp_path)).fetch_new_entries(_EPOCH)
+        summary = await _drain()
 
-        assert [entry.entry_id for entry in entries] == ["well-ok"]
-        assert OrdJsonAdapter(str(tmp_path)).map_to_ord(entries[0]).yield_percent == 84.0
+        assert summary.ingested == ["well-ok"] and summary.rejected == []
         assert await _rows(LEDGER_SOURCE) == []
 
     asyncio.run(_run())
@@ -214,8 +267,9 @@ def test_the_gr_08_question_reaches_the_refusal_through_gather_evidence(
     async def _run() -> None:
         await migrated_db_or_skip()
         await _clear(LEDGER_SOURCE)
-        _write(tmp_path, _WELL_ID, 119.43)
-        await OrdJsonAdapter(str(tmp_path)).fetch_new_entries(_EPOCH)
+        drop = _ord_source(monkeypatch, tmp_path)
+        _write(drop, _WELL_ID, 119.43)
+        await _drain()
 
         monkeypatch.setattr(research_tools, "_sources", lambda _anchor: [("graph", _Empty())])
         sweep = await research_tools.gather_evidence(query=_GR_08)
@@ -363,28 +417,12 @@ def test_two_ord_sources_file_their_refusals_under_their_own_names(
 
     async def _run() -> None:
         await migrated_db_or_skip()
-        manifests = tmp_path / "manifests"
         for name in ("ord-site-a", "ord-site-b"):
-            drop = tmp_path / name
-            drop.mkdir()
-            folder = manifests / name
-            folder.mkdir(parents=True)
-            (folder / "datasource.yaml").write_text(
-                f"name: {name}\n"
-                f"description: An ORD drop directory belonging to {name}.\n"
-                "ingest: chemclaw.ingest.eln.ord_adapter:OrdJsonAdapter\n"
-                "config:\n"
-                f"  export_dir: {drop}\n",
-                encoding="utf-8",
-            )
-            _write(drop, f"{name}-well", 119.43)
+            _write(_ord_source(monkeypatch, tmp_path, name), f"{name}-well", 119.43)
             await _clear(name)
 
-        monkeypatch.setattr(settings, "data_sources_dir", str(manifests))
         for name in ("ord-site-a", "ord-site-b"):
-            ingest = registry.make_data_source(name).ingest
-            assert ingest is not None
-            await ingest.fetch_new_entries(_EPOCH)
+            await _drain(name)
 
         for name in ("ord-site-a", "ord-site-b"):
             assert [row[0] for row in await _rows(name)] == [f"{name}-well"], (
@@ -395,25 +433,26 @@ def test_two_ord_sources_file_their_refusals_under_their_own_names(
     asyncio.run(_run())
 
 
-def test_the_pre_flight_maps_the_chunk_rather_than_the_whole_directory(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The refusal pre-flight is priced per entry and was paid per *directory*, once per chunk.
+def test_the_fetch_maps_nothing_at_all(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A fetch is a fetch: the unmappable pre-flight it used to carry is not its work.
 
-    `fetch_new_entries` returns everything past the cursor and `durable/eln_sync.py::_BoundedIngest`
-    truncates it afterwards, so mapping the whole return meant a 100k-entry backfill re-mapped all
-    100k once per 100-entry chunk. Measured at 68 us an entry, that is hours of pure re-mapping
-    added to a drain.
+    The pre-flight was priced per entry and paid per *directory*, once per chunk: the fetch returns
+    everything past the cursor and `durable/eln_sync.py::_BoundedIngest` truncates it afterwards, so
+    a 100k-entry backfill re-mapped all 100k once per 100-entry chunk — hours of pure re-mapping at
+    the measured 68 µs an entry. Bounding it to `eln_sync_batch_size` was the first answer and it
+    was the wrong one: the adapter is handed the *floor* (`since` minus the overlap window) and
+    knows neither the run's cursor nor the chunk limit, so any slice it takes is a guess at its
+    caller's, and the guess was short by the size of the overlap window
+    (`test_every_processed_refusal_reaches_the_ledger`).
 
-    Asserted by counting `map_to_ord` calls rather than by timing one, so it is a statement about
-    the bound and not about how fast this machine is. Every entry is still *returned*: the bound is
-    on the pre-flight's work, and an entry past it is refused by the chunk that reaches it.
+    So the mapping now happens exactly once, in the sync that was going to do it anyway, and this
+    counts `map_to_ord` calls rather than timing one — a statement about the work, not about how
+    fast this machine is.
     """
 
     async def _run() -> None:
         await migrated_db_or_skip()
         await _clear(LEDGER_SOURCE)
-        monkeypatch.setattr(settings, "eln_sync_batch_size", 3)
         for index in range(10):
             _write(tmp_path, f"well-{index}", 42.0)
 
@@ -429,9 +468,79 @@ def test_the_pre_flight_maps_the_chunk_rather_than_the_whole_directory(
         entries = await adapter.fetch_new_entries(_EPOCH)
 
         assert len(entries) == 10, "the fetch still returns everything past the cursor"
-        assert len(mapped) == 3, (
-            f"the pre-flight mapped {len(mapped)} of 10 entries against a batch size of 3"
+        assert mapped == [], f"the fetch mapped {len(mapped)} entries; mapping is the sync's work"
+
+    asyncio.run(_run())
+
+
+def test_every_processed_refusal_reaches_the_ledger(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The drain's refusals and the ledger's rows are one set, over the overlap-plus-batch chunk.
+
+    **The defect.** Two functions derived "which entries does this chunk process" independently.
+    `OrdJsonAdapter.fetch_new_entries` sorted by `created_at` and pre-flighted
+    `entries[:eln_sync_batch_size]`; `_BoundedIngest.fetch_new_entries` sorts by
+    `(created_at, entry_id)` and returns *every* overlap entry plus a batch-size slice of the new
+    ones. Overlap entries always sort first, so the adapter's flat slice spent its budget on them
+    and fell short of the real chunk by exactly the overlap count — here 2 overlap entries against
+    a batch size of 4 leaves the last 2 of 6 new entries mapped, refused and **unrecorded**.
+
+    **And it does not heal.** `ElnSyncWorkflow` stores `summary.next_cursor` after every chunk and
+    the cursor advances past a rejection, so a missed entry falls behind `since` and no later fetch
+    ever offers it again. The ledger loss is permanent and silent — the entry is absent from the
+    corpus and the system has no record of ever having seen it, which is the one thing the ledger
+    exists to prevent.
+
+    Driven through the real activity with a real drop directory, because the bug lives in the
+    *composition* of the two bounds and neither half can see it alone.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        source = "ord-drain"
+        await _clear(source)
+        # In-memory stores: nothing here reaches one (every entry is refused at mapping), but the
+        # activity builds them before it knows that.
+        monkeypatch.setattr(eln_sync, "_reaction_store", InMemoryFingerprintStore)
+        monkeypatch.setattr(eln_sync, "_molecule_store", InMemoryFingerprintStore)
+        monkeypatch.setattr(eln_sync, "_record_store", InMemoryReactionRecordStore)
+        monkeypatch.setattr(eln_sync, "_label_index", InMemoryLabelIndex)
+
+        drop = tmp_path / "drop"
+        drop.mkdir()
+        folder = tmp_path / "manifests" / source
+        folder.mkdir(parents=True)
+        (folder / "datasource.yaml").write_text(
+            f"name: {source}\n"
+            "description: An ORD drop directory drained in overlap-plus-batch chunks.\n"
+            "ingest: chemclaw.ingest.eln.ord_adapter:OrdJsonAdapter\n"
+            f"config:\n  export_dir: {drop}\n",
+            encoding="utf-8",
         )
+        monkeypatch.setattr(settings, "data_sources_dir", str(tmp_path / "manifests"))
+        monkeypatch.setattr(settings, "eln_sync_batch_size", 4)
+
+        since = datetime(2026, 3, 10, tzinfo=UTC)
+        # Two entries inside the overlap window (at or behind the cursor) and six past it. Every
+        # one of them is the 119.43% well, so every entry the chunk processes is a refusal and the
+        # two sets are directly comparable.
+        for index in range(2):
+            _write_at(drop, f"overlap-{index}", since - timedelta(hours=index), 119.43)
+        for index in range(6):
+            _write_at(drop, f"new-{index}", since + timedelta(hours=index + 1), 119.43)
+
+        chunk = await ActivityEnvironment().run(eln_sync.sync_eln_entries, source, since, True)
+
+        refused = {entry.entry_id for entry in chunk.summary.rejected}
+        assert refused == {f"overlap-{i}" for i in range(2)} | {f"new-{i}" for i in range(4)}, (
+            "the chunk must process the whole overlap window plus one batch of new entries"
+        )
+        assert {row[0] for row in await _rows(source)} == refused, (
+            "every entry this chunk refused must carry a ledger row: the cursor has already "
+            "advanced past it, so no later run will ever offer it again"
+        )
+        await _clear(source)
 
     asyncio.run(_run())
 
@@ -453,8 +562,8 @@ def test_an_injected_refusal_reason_reaches_the_model_inside_the_data_envelope(
     async def _run() -> None:
         await migrated_db_or_skip()
         await _clear(LEDGER_SOURCE)
-        _write_raw(tmp_path, "attacker-well-1", _INJECTION)
-        await OrdJsonAdapter(str(tmp_path)).fetch_new_entries(_EPOCH)
+        _write_raw(_ord_source(monkeypatch, tmp_path), "attacker-well-1", _INJECTION)
+        await _drain()
 
         monkeypatch.setattr(research_tools, "_sources", lambda _anchor: [("graph", _Empty())])
         sweep = await research_tools.gather_evidence(query=_UNRELATED)

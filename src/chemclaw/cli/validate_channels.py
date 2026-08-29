@@ -16,6 +16,12 @@ records: `CHEMCLAW_DELIVERY_CHANNELS` is empty in CI, so iterating the enabled s
 zero drivers and bind zero config blocks — a gate that could only ever fail on rule 1, which is
 empty too.
 
+**Rule 4 needed the same workaround one layer in, and shipped without it.** It asks the posture
+question with `enforced=True` rather than letting `plaintext_channel_refusal` read
+`settings.entra_required`, which is `False` by default and set by nothing that invokes this gate —
+so the rule written to stop a plaintext channel merging silently was itself inert in CI. A gate
+that only fires once the setting it guards is already on is not a gate.
+
 **Rule 4 is here because it had nowhere else to be.** `deliver.driver` refuses a non-loopback
 `http://` channel under `entra_required`, and that raise happens inside driver construction — which
 `registry.deliver` performs inside the per-channel `try` that exists so one broken channel does not
@@ -86,8 +92,32 @@ def _driver_problems(manifest: DeliveryChannelManifest) -> list[str]:
     return problems
 
 
+def _config_strings(value: object, depth: int = 2) -> list[str]:
+    """Every string a driver could read a destination out of, to a bounded depth.
+
+    The `config:` block is free-form by design — the driver's own signature is the schema — so a
+    destination is not always a top-level string. A site's driver may take `urls: [a, b]` for a
+    fan-out, or `endpoints: {primary: …, fallback: …}`; the first version of rule 4 looked only at
+    top-level `str` values, so both of those shapes passed a check written to catch exactly them.
+
+    Bounded rather than fully recursive on purpose. This is not a config-schema validator: it walks
+    the three shapes a destination is realistically written in — a bare string, a list, and one
+    level of nesting inside either — and stops. A driver that buries its URL deeper than that is
+    outside what this rule claims to see, which is better stated here than believed.
+    """
+    if isinstance(value, str):
+        return [value]
+    if depth <= 0:
+        return []
+    if isinstance(value, list):
+        return [found for item in value for found in _config_strings(item, depth - 1)]
+    if isinstance(value, dict):
+        return [found for item in value.values() for found in _config_strings(item, depth - 1)]
+    return []
+
+
 def _posture_problems(manifest: DeliveryChannelManifest) -> list[str]:
-    """A destination this deployment's posture forbids (rule 4).
+    """A destination the enforced posture forbids (rule 4).
 
     Every value in the `config:` block that *is* a URL is asked, rather than a key named `url`. The
     block is free-form by design — the driver's own signature is the schema — so a site's driver may
@@ -102,16 +132,28 @@ def _posture_problems(manifest: DeliveryChannelManifest) -> list[str]:
     change to a Postgres constant silently refusing every file channel as a cleartext destination.
     So this asks only about `http`/`https` values, and says so.
 
+    **`enforced=True` unconditionally**, which is the same workaround rules 2 and 3 already take one
+    step further out. Those two iterate *discovered* rather than enabled manifests because
+    `CHEMCLAW_DELIVERY_CHANNELS` is empty in CI; this one had the identical blindness one layer in,
+    because `plaintext_channel_refusal` read `settings.entra_required` — `False` by default, `False`
+    in CI, and set by nothing in `.github/workflows/ci.yml`, the chart or the runbook that invokes
+    this gate. So the rule written to stop an enabled plaintext channel merging silently merged
+    silently itself. A validator must ask the question the deployment is heading for, not the one
+    its own ambient config already answers: a manifest that will be refused the day enforcement is
+    turned on is a broken manifest today.
+
     The rule itself comes from `deliver.driver` rather than a second copy here: one definition,
-    asked at construction *and* at validation.
+    asked at construction *and* at validation, differing only in who supplies the posture.
     """
     token_env = str(manifest.config.get("token_env", "") or "")
     urls = [
-        value
-        for value in manifest.config.values()
-        if isinstance(value, str) and urlsplit(value).scheme in ("http", "https")
+        found
+        for found in _config_strings(manifest.config)
+        if urlsplit(found).scheme in ("http", "https")
     ]
-    reasons = (plaintext_channel_refusal(manifest.name, url, token_env) for url in urls)
+    reasons = (
+        plaintext_channel_refusal(manifest.name, url, token_env, enforced=True) for url in urls
+    )
     return [reason for reason in reasons if reason]
 
 

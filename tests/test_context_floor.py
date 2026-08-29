@@ -34,7 +34,7 @@ percent; the ceilings here are set against this one.
 corrections rather than one.** The first is in `_tool_schema`: a hand-serialised name and docstring
 measured ~11 tokens per tool. The second was still standing on 2026-08-29 — converting the
 *callables* out of `_capability_tools` rather than the `BaseTool`s `build_langgraph_agent` binds,
-which under-measured the `default` profile by **8,059 tokens (23%)** while this file's own prose
+which under-measured the `default` profile by **8,126 tokens (24%)** while this file's own prose
 called it "the payload rather than an approximation of it". `_bound_tools` reads the surface off the
 graph's `ToolNode`, so the ratchet gates what a deployment pays. The lesson is the file's own: a
 ratchet is only as honest as its basis, and a basis that is re-derived rather than observed will
@@ -214,18 +214,31 @@ load_profiles()
 #: **43,500 as of 2026-08-29, and no tool was added.** Every paragraph above measured the wrong
 #: thing: the basis moved from `convert_to_openai_tool` over `_capability_tools` to the tools the
 #: compiled graph actually binds (`_bound_tools`, which says what the two are and why they differ),
-#: and the `default` profile measures **42,458** where the old basis reported 34,399. **The number
+#: and the `default` profile measures **42,505** where the old basis reported 34,379. **The number
 #: grew because the measurement got honest, not because the surface did** — nothing shipped, nothing
-#: regressed, and a deployment was already paying every one of these 8,059 tokens on every turn
+#: regressed, and a deployment was already paying every one of these 8,126 tokens on every turn
 #: while this file called the smaller figure "the payload rather than an approximation of it".
 #:
 #: So every figure above is a *lower bound* on what its own change actually cost, and none of them
 #: is restated here: they were each right about the delta they measured and wrong about the base,
 #: and rewriting them would be inventing measurements nobody took.
 #:
-#: The headroom is ~1,042 tokens against 42,458 — under what `propose_knowledge_note` costs on the
+#: The headroom is **995** tokens against 42,505 — under what `propose_knowledge_note` costs on the
 #: honest basis (1,126), so it still cannot absorb another tool of that size unnoticed, which is the
 #: property every raise above was chosen for.
+#:
+#: **The three figures in the two paragraphs above were re-measured on 2026-08-29 and each moved,
+#: and the reason is the same one they are about.** They were written on a branch and landed after
+#: `D-2026-08-29-a-helper-is-cheaper-and-narrower-than-its-caller`, which rewrote the `task` tool's
+#: description — so the basis shifted underneath the commit that was correcting the basis, exactly
+#: as the 2026-08-25 paragraph at the top describes happening to the ceiling itself. Re-derived at
+#: `HEAD`: `default` is **42,505** (was written as 42,458), the old basis is **34,379** (written as
+#: 34,399, which was a transcription error rather than a stale reading — nothing ever measured
+#: 34,399), the gap between them is **8,126** (written as 8,059) and the seven middleware tools are
+#: **2,636** (written as 2,569). The ceiling is untouched: 43,500 still holds with 995 to spare, and
+#: the load-bearing property — headroom under one `propose_knowledge_note` — survives the
+#: correction. **Nothing about the mechanism changed; the numbers moved because they were taken
+#: again.**
 CEILINGS: dict[str, int] = {"__default__": 43_500}
 
 #: How much of the floor one tool may be. A schema above this is not expensive, it is *badly
@@ -317,8 +330,8 @@ def _bound_tools(profile: Any) -> list[Any]:
     **Read off the graph rather than re-derived, because re-deriving is the defect.** For eleven
     weeks this file measured `convert_to_openai_tool` over `_capability_tools(profile)`, and its own
     docstring called that "the payload rather than an approximation of it". Measured against the
-    compiled graph it was short by **8,059 tokens — 23% of the bill** — in two structural ways, both
-    invisible to any assertion built on the same callables:
+    compiled graph it was short by **8,126 tokens — 24% of what it reported** — in two structural
+    ways, both invisible to any assertion built on the same callables:
 
     1. **A callable's schema is not its `BaseTool`'s schema.** `@tool` is identity, so this file
        converted raw functions while `build_langgraph_agent:247` binds `as_structured_tool(fn)`.
@@ -327,14 +340,19 @@ def _bound_tools(profile: Any) -> list[Any]:
     2. **Seven tools were bound every turn and counted never.** `ls`, `read_file`, `write_file`,
        `edit_file`, `glob`, `grep` (this repository's `FilesystemMiddleware`) and `task`
        (`SubAgentMiddleware`) come from middleware rather than from the registry, so no walk of
-       `_capability_tools` can ever see them. **2,569 tokens.**
+       `_capability_tools` can ever see them. **2,636 tokens.**
 
     Reading the `ToolNode` is deliberate and is why this cannot drift again: any future tool source
     — a middleware, a connector, upstream — lands here the moment it is bound, without this file
     being taught about it. The backlog row that asked for this proposed spying on `bind_tools`
     instead; the node holds the same 61 tools and needs no model call to say so, so the graph is
-    built and never invoked. `_tools_by_name` is upstream-private and pinned in
-    `tests/test_upstream_surface.py`.
+    built and never invoked.
+
+    **Three upstream shapes are read below, and all three are pinned in
+    `tests/test_upstream_surface.py`**: the node key `"tools"`, `PregelNode.bound`, and the private
+    `ToolNode._tools_by_name`. Only the last was pinned when this function was written, which left
+    two thirds of the read able to break on a bump with nothing in the upstream-surface file going
+    red — loudly rather than silently, but in the wrong file.
     """
     graph = build_langgraph_agent(
         model=GenericFakeChatModel(messages=iter([AIMessage(content="")])),

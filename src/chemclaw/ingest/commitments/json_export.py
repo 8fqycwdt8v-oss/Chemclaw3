@@ -71,6 +71,28 @@ class JsonCommitmentExport:
             )
             return []
         files = sorted(self.path.glob("*.json")) if self.path.is_dir() else [self.path]
+        if not files:
+            # **The same silence, one step later, and the first version of this guard missed it.**
+            # A directory that exists and holds nothing this reads — the wrong subdirectory, a mount
+            # that came up empty, an export written as `.jsonl` — produces the identical symptom the
+            # missing-path branch above was added to end: zero commitments, a successful sync,
+            # `mirror_freshness` NULL, and a project leader told the portfolio is empty. The
+            # existence check alone covers only the mistyped half of a mistyped knob.
+            #
+            # Same `commitment_mirror` subsystem as the branch above, deliberately: both mean
+            # "nothing was mirrored and the pointer is why", which is one alert and one operator
+            # action. The *content* faults below are a different subsystem, so that "found nothing"
+            # and "found something and could not read it" are distinguishable from the metric alone.
+            degraded(
+                logger,
+                "commitment_mirror",
+                "commitments.export_empty: %s read %s and found no *.json file; nothing will be "
+                "mirrored and the portfolio will read as empty",
+                self.name,
+                self.path,
+                exc_info=False,
+            )
+            return []
         found: list[Commitment] = []
         rejected = 0
         unreadable = 0
@@ -108,18 +130,36 @@ class JsonCommitmentExport:
                     # Counted and skipped, the reject-and-continue rule the ELN ingest uses: one
                     # malformed row in a thousand-row export must not cost the other 999.
                     rejected += 1
+        # **Both totals are counted, not only logged, and for the reason `degraded()` exists.** A
+        # `logger.warning` with no series behind it is visible to a person already reading the log
+        # of the pod they already suspect — and nobody suspects a mirror that reports success. These
+        # are the two ways an export can be *present* and still not become a portfolio: the files
+        # would not parse, or the rows would not validate. Neither is a missing knob, so neither
+        # belongs on `commitment_mirror`: `commitment_export` is the content's own subsystem, which
+        # is what lets an operator read "found nothing because the export is empty" apart from
+        # "found nothing because none of it parsed" off the metric rather than off the prose.
         if unreadable:
-            logger.warning(
-                "commitments.files_unreadable: %s skipped %d unreadable file(s) of %d",
+            degraded(
+                logger,
+                "commitment_export",
+                "commitments.files_unreadable: %s skipped %d unreadable file(s) of %d; %d "
+                "commitment(s) were mirrored from the rest",
                 self.name,
                 unreadable,
                 len(files),
+                len(found),
+                exc_info=False,
             )
         if rejected:
-            logger.warning(
-                "commitment_export_rejected: %s rejected %d row(s) that did not validate",
+            degraded(
+                logger,
+                "commitment_export",
+                "commitment_export_rejected: %s rejected %d row(s) that did not validate; %d "
+                "commitment(s) were mirrored from the rest",
                 self.name,
                 rejected,
+                len(found),
+                exc_info=False,
             )
         return found
 

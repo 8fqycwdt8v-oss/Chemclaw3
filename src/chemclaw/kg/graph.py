@@ -74,6 +74,15 @@ _LAST_SCAN: dict[str, float] = {}
 # reads one directory.
 _COMPUTE_LOCKS: dict[str, threading.RLock] = {}
 
+# The newest note's mtime per knowledge tree, with the `time.monotonic()` of the scan that found it:
+# `path -> (scanned_at, newest_mtime or None)`. `None` is a tree holding no note, kept as a cached
+# answer rather than a cache miss so an empty volume does not rescan on every scrape.
+#
+# Separate from `_LAST_SCAN` above, which stamps the *notes* cache: that one is only refreshed when
+# somebody reads the graph, so binding the gauge to it would make the metric's freshness depend on
+# whether a chemist happened to run a query.
+_NEWEST_MTIME: dict[str, tuple[float, float | None]] = {}
+
 
 @contextlib.contextmanager
 def _corpus_lock(key: str) -> Iterator[None]:
@@ -92,7 +101,7 @@ def _corpus_lock(key: str) -> Iterator[None]:
 
 
 def invalidate_cache(notes_dir: Path | None = None) -> None:
-    """Drop cached notes/graph so the next read re-scans immediately (the explicit bust hook).
+    """Drop cached notes/graph/age so the next read re-scans immediately (the explicit bust hook).
 
     The TTL window trades a little freshness for latency, but a change this process *makes* should
     never wait it out — so every local writer of notes (today: the PR-gate submitter) calls this
@@ -105,11 +114,13 @@ def invalidate_cache(notes_dir: Path | None = None) -> None:
             _NOTES_CACHE.clear()
             _GRAPH_CACHE.clear()
             _LAST_SCAN.clear()
+            _NEWEST_MTIME.clear()
             return
         key = str(notes_dir)
         _NOTES_CACHE.pop(key, None)
         _GRAPH_CACHE.pop(key, None)
         _LAST_SCAN.pop(key, None)
+        _NEWEST_MTIME.pop(key, None)
 
 
 def scan_notes_dir(notes_dir: Path) -> Iterator[tuple[Path, os.stat_result]]:
@@ -500,6 +511,54 @@ def neighborhood(graph: nx.DiGraph, note_id: str, hops: int = 1) -> set[str]:
     return set(lengths) - {note_id}
 
 
+def _newest_note_mtime(notes_dir: Path) -> float | None:
+    """The newest note's mtime under `notes_dir`, or None for a tree with no note in it.
+
+    One stat scan per `knowledge_age_scan_ttl_seconds`, not one per caller. The scan is O(notes) —
+    the same sweep `_dir_fingerprint` pays on a cold graph read — and its only caller is a *live*
+    gauge callback, so before this it ran on every Prometheus scrape: measured, `METRICS.render()`
+    went from 0.128 ms on an empty tree to 8.7 ms at 1k notes and 102.6 ms at 10k, and because
+    `api/routes/ops.py::metrics` renders synchronously inside an `async def`, that is the front
+    door's whole event loop stalled every 30 s rather than one request's latency.
+
+    **Why a cached scan rather than `asyncio.to_thread` at the route.** Threading would take the
+    stall off the loop and leave the cost paid in full on every scrape, per pod — and it would have
+    to be repeated at all three renderers (`api/routes/ops.py`, `connectors/server.py`,
+    `core/worker_http.py`), because what is expensive is the gauge, not the route that happens to
+    read it. Fixing it at the source is the smaller change and the one every future reader
+    inherits, and it is already this codebase's answer to an expensive read on an unauthenticated
+    infra endpoint — `/readyz`, the sibling route in that same file, caches its database round trip
+    for `service_readiness_cache_seconds` on exactly this argument.
+
+    **What is cached is the mtime, and that is what makes the window safe.** The *age* is
+    recomputed from `time.time()` against this value on every scrape, so a pod whose sync stopped
+    six hours ago reports six hours and keeps counting, however long the entry lives — the failure
+    the gauge exists for cannot be cached away, because nothing about it is stored. The window
+    delays only the opposite observation, that the corpus got *newer*, which makes a reading at most
+    `ttl` seconds too old: it errs toward firing `ChemclawKnowledgeCorpusStale` and never toward
+    silencing it. `invalidate_cache` drops it with the rest, so a note this process writes is
+    reflected at once.
+
+    **Deliberately not under `_corpus_lock`.** A scrape must never queue behind a cold
+    `_parse_notes` of the same tree — 198 ms for 2k notes, seconds under concurrency. Two scrapes
+    racing a cold entry both scan, which costs one duplicated stat sweep and nothing else.
+    """
+    key = str(notes_dir)
+    ttl = settings.knowledge_age_scan_ttl_seconds
+    if ttl > 0:
+        with _CACHE_LOCK:
+            cached = _NEWEST_MTIME.get(key)
+            if cached is not None and time.monotonic() - cached[0] < ttl:
+                return cached[1]
+    # Stamped from before the scan, not after: the entry is only as fresh as the moment the scan
+    # started looking, and dating it later would extend the window by the scan's own duration.
+    scanned_at = time.monotonic()
+    newest = max((stat.st_mtime for _, stat in scan_notes_dir(notes_dir)), default=None)
+    with _CACHE_LOCK:
+        _NEWEST_MTIME[key] = (scanned_at, newest)
+    return newest
+
+
 #: What `knowledge_sync_age_seconds` reports for a tree that holds no note at all. Negative so it
 #: can never be read as an age — the direction matters, because the fabricated alternative (0) is
 #: indistinguishable from a corpus that has just been refreshed, which is the reassuring lie. A
@@ -529,12 +588,10 @@ def knowledge_sync_age_seconds() -> float:
     the threshold is a deployment's to state (`monitoring.alerts.knowledgeCorpusStaleSeconds`, off
     by default) and the sidecar's own probe stays as the sync-side half.
 
-    Costs one `stat` per note, the same scan `_dir_fingerprint` pays on a cold graph read — ~76 ms
-    at 10k notes, once per scrape rather than once per query.
+    **The scan behind it is cached; the age is not.** See `_newest_note_mtime` for why those are
+    different budgets, and why the cache cannot make a frozen corpus read as a fresh one.
     """
-    newest = max(
-        (stat.st_mtime for _, stat in scan_notes_dir(settings.knowledge_path)), default=None
-    )
+    newest = _newest_note_mtime(settings.knowledge_path)
     if newest is None:
         return NO_NOTES
     # Clamped at zero: a note written by a sidecar whose clock is a second ahead of this container's
