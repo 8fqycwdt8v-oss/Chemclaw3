@@ -143,11 +143,11 @@ def summarise(design: ExperimentDesign, checks: list[ProtocolCheck]) -> str:
         # separately, in the release whose own note says that is how the second and third got it
         # wrong.
         shape = "the structured ask, no procedure yet"
-    elif len(design.arms) <= 1 and not design.factors:
+    elif len(design.arms) == 1 and not design.factors:
         # **The design, not the ask.** This branched on `request.mode`, so a 4-arm 2-factor plate
-        # whose ask still said `single` summarised as "1 experiment" — in the one sentence a model
-        # is told it can quote to a chemist without re-reading the design. Nothing forces `mode` to
-        # match the arms, so the sentence has to read them.
+        # whose ask still said `single` summarised as "1 experiment". `== 1` rather than `<= 1`:
+        # the first rewrite swallowed the zero-arm case too and described a body with no arms
+        # declared as one experiment, which is a count nobody wrote.
         shape = "1 experiment"
     else:
         controls = sum(1 for a in design.arms if a.control)
@@ -194,20 +194,41 @@ def receipt(
     )
 
 
+def _cell(text: str) -> str:
+    """One table cell, escaped so free text cannot restructure the table.
+
+    Cell contents are a chemist's own words — a level's rationale, a charge line's note, an arm's
+    note — and none of them was escaped. A `|` overflowed the row, so GFM dropped the surplus cells
+    and the text after the pipe vanished; a newline *terminated the table* and dumped the rest of
+    the run sheet into the page as a paragraph. Both are reachable from any free-text field.
+    """
+    return text.replace("\\", "\\\\").replace("|", "\\|").replace("\n", " ").replace("\r", " ")
+
+
 def _table(headers: list[str], rows: list[list[str]]) -> str:
     """A GitHub-flavoured Markdown table, or an empty string when there are no rows."""
     if not rows:
         return ""
-    head = "| " + " | ".join(headers) + " |"
+    head = "| " + " | ".join(_cell(h) for h in headers) + " |"
     rule = "| " + " | ".join("---" for _ in headers) + " |"
-    body = ["| " + " | ".join(cell or "—" for cell in row) + " |" for row in rows]
+    body = ["| " + " | ".join(_cell(cell) or "—" for cell in row) + " |" for row in rows]
     return "\n".join([head, rule, *body])
 
 
 def _number(value: float | None) -> str:
-    # `.6g` is `%g`'s default and turns a kilogram-scale charge into `1.23457e+06` mg. `.10g` keeps
-    # every weight a laboratory can measure exact while still trimming a float's tail.
-    return "" if value is None else f"{value:.10g}"
+    """One number as a chemist reads it: exact when it is whole, six figures when it is not.
+
+    `%g` alone turns a kilogram-scale charge into `1.23457e+06` mg. `.10g`, which replaced it,
+    fixed that and bought false precision everywhere else — a 1/6 M concentration rendered
+    `0.1666666667 M` and a 200/3 yield `66.66666667%`, ten significant figures off a balance that
+    reads four, on the document a chemist runs from. A whole number is printed whole (no exponent
+    below 1e15, which is past any laboratory quantity); everything else keeps `%g`'s six.
+    """
+    if value is None:
+        return ""
+    if value == int(value) and abs(value) < 1e15:
+        return str(int(value))
+    return f"{value:g}"
 
 
 def _level(level: FactorLevel) -> str:
@@ -249,7 +270,11 @@ def render_markdown(design: ExperimentDesign, checks: list[ProtocolCheck] | None
     # 16 h / dioxane for an arm the design runs at 120 °C / 2 h / toluene, with every blocker
     # passing and nothing on the page hinting a second set of conditions existed. This is a
     # document a chemist runs from.
-    solo = design.arms[0] if len(design.arms) == 1 and not design.factors else None
+    # One arm is one arm whether or not the design declares factors. Gating this on `not
+    # design.factors` restored the exact bug it was written for: a one-arm design with one factor
+    # rendered `## Conditions` from the body while its run sheet showed the arm's own — the page
+    # stating two different sets of conditions for the one experiment it describes.
+    solo = design.arms[0] if len(design.arms) == 1 else None
     points = design.setpoints_for(solo) if solo is not None else design.base.setpoints
     stated = [
         (label, value)
@@ -337,9 +362,11 @@ def render_markdown(design: ExperimentDesign, checks: list[ProtocolCheck] | None
         ]
 
     rows = run_sheet_rows(design)
-    # Every design with arms gets a run sheet. The old gate hid it for exactly the design that
-    # needed it most — one arm, no factors, its own setpoints — see `solo` above.
-    if len(rows) > 1 or design.factors:
+    # **Every design with arms gets a run sheet, and this comment used to say so over an unchanged
+    # gate.** The gate really was left as it was, so a single-arm design still had no run sheet —
+    # and for a lone *negative control* the words `control` and `negative` then appeared nowhere on
+    # the page. `if rows:` is what the sentence claimed.
+    if rows:
         factor_names = [f.name for f in design.factors]
         parts += [
             "## Run sheet",
@@ -383,7 +410,7 @@ def render_markdown(design: ExperimentDesign, checks: list[ProtocolCheck] | None
             *[f"- {c}" for c in design.base.in_process_controls],
             "",
         ]
-    if design.base.waste:
+    if design.base.waste.strip():
         # A `ProtocolBody` field with no reader anywhere: waste-disposal instructions were absent
         # from the bench document.
         parts += ["## Waste", "", design.base.waste, ""]
@@ -428,7 +455,13 @@ def render_markdown(design: ExperimentDesign, checks: list[ProtocolCheck] | None
         ]
 
     if checks:
-        failed = [c for c in checks if not c.passed]
+        # **Failed checks, plus every `note`.** Listing failures only is what made a finding
+        # invisible, and flipping four checks to `_fail` was the wrong half of that fix: a note is
+        # advisory content rather than a verdict, so `coverage_is_stated`'s sentence about what a
+        # reduced design confounds belongs on the page whether or not it "failed". That check is a
+        # passing note again, and a correct fractional plate no longer reports a failure it cannot
+        # clear.
+        failed = [c for c in checks if not c.passed or c.severity == "note"]
         parts += ["## Checks", ""]
         parts += (
             [f"- **{c.severity}** `{c.check_id}` — {c.detail}" for c in failed]

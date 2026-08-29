@@ -14,7 +14,9 @@ closed is not "the wrong function was called", it is "nothing was emitted at all
 
 import asyncio
 import logging
+import os
 import subprocess
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -32,6 +34,7 @@ from chemclaw.ingest.documents.external_index import _report_unresolved
 from chemclaw.ingest.documents.index import InMemoryDocumentIndex
 from chemclaw.ingest.documents.sync import reembed_stale, sync_share
 from chemclaw.ingest.eln import cursor as eln_cursor
+from chemclaw.kg import graph as kg_graph
 from chemclaw.kg.git_submitter import GitNoteSubmitter, GitRemoteError, _is_auth_failure
 from chemclaw.publish import outbox
 from chemclaw.retrieval.evidence import EvidenceChunk, SourceRetriever
@@ -155,6 +158,58 @@ def test_a_cursor_that_stands_still_reports_a_growing_lag() -> None:
     fresh = _series("chemclaw_ingest_cursor_lag_seconds", source="fresh-eln")
     assert 10_000 < wedged < 11_000  # three hours, in seconds
     assert fresh < 60
+
+
+def _gauge(name: str) -> float:
+    """One unlabelled gauge's reading, out of the rendered exposition.
+
+    Read from the text for the reason `_series` gives: a gauge bound to a source that raises is
+    *omitted* from the scrape and counted as a read failure, so the in-memory callable answering
+    correctly is not evidence that anything can be alerted on.
+    """
+    for line in METRICS.render().splitlines():
+        if line.startswith(f"{name} "):
+            return float(line.split(" ", 1)[1])
+    raise AssertionError(f"{name} is absent from the exposition")
+
+
+def test_a_pod_serving_a_frozen_knowledge_corpus_says_how_old_it_is(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The knowledge graph coming *in* had no first-party signal, only the graph going out.
+
+    `ChemclawKnowledgeNotesLost` covers a note that failed to reach the PR-gate. Nothing covered a
+    pod whose corpus stopped arriving: `knowledge-sync.sh`'s `loop` swallows a failed refresh so a
+    dead remote cannot kill the pod, and the pod then serves the frozen snapshot indefinitely while
+    logging one WARNING per interval into a stream nobody tails. The sidecar's heartbeat lives in
+    its own container's `/tmp`, so this is the half that is readable from the process that answers
+    from the tree.
+
+    Driven through the real registry's rendered exposition, because that is the contract the rule
+    evaluates against — and because a gauge whose source raises is silently absent from it.
+    """
+    # Through the two settings `knowledge_path` derives from, because it is a read-only property:
+    # one definition of where notes live, which is the point of it being derived at all.
+    corpus = tmp_path / "knowledge"
+    (corpus / "insight").mkdir(parents=True)
+    monkeypatch.setattr(settings, "note_repo_dir", str(tmp_path))
+    monkeypatch.setattr(settings, "knowledge_dir", "knowledge")
+
+    assert _gauge("chemclaw_knowledge_sync_age_seconds") == kg_graph.NO_NOTES, (
+        "a tree with no note at all is the volume that was never populated, and 0 would read as a "
+        "corpus that has just been refreshed"
+    )
+
+    note = corpus / "insight" / "frozen.md"
+    note.write_text("---\nid: frozen\n---\nbody\n", encoding="utf-8")
+    os.utime(note, (time.time() - 7200, time.time() - 7200))
+    fresh = corpus / "insight" / "fresh.md"
+    fresh.write_text("---\nid: fresh\n---\nbody\n", encoding="utf-8")
+
+    # The *newest* note decides: one stale file beside a fresh one is an ordinary corpus.
+    assert _gauge("chemclaw_knowledge_sync_age_seconds") < 60
+    fresh.unlink()
+    assert 7_000 < _gauge("chemclaw_knowledge_sync_age_seconds") < 7_400
 
 
 # --- G1: what survived the merge, and how long a source took ----------------------------------

@@ -37,6 +37,7 @@ from typing import Annotated
 from fastapi import Depends, HTTPException, Request
 
 from chemclaw.agent.session import TurnSession
+from chemclaw.agent.session_store import owner_permits
 from chemclaw.api.auth import Principal, require_principal
 from chemclaw.api.middleware import bind_request_session, clip_for_log
 from chemclaw.api.state import LiveSession, SessionOwners, state
@@ -113,10 +114,12 @@ def _owner_authorizes(owner: str | None, principal: Principal) -> bool:
     "anyone's" would let it be read, resumed or decided by every authenticated principal instead
     of nobody. `owner` is falsy for both `None` and `""`, so a row written without one and a row
     whose owner column holds the empty-string sentinel are refused the same way.
+
+    **The rule itself lives in `agent/session_store.owner_permits`**, because the agent resolves the
+    same question for a tool handed an explicit session id and two copies would drift. This keeps
+    the `Principal` signature the routes read against; only the predicate moved.
     """
-    if not owner:
-        return not settings.entra_required
-    return owner == principal.oid
+    return owner_permits(owner, principal.oid)
 
 
 def _refuse_unless_owner(

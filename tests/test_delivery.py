@@ -170,3 +170,232 @@ def test_nothing_reads_from_a_channel() -> None:
             f"{verb!r} appears in the delivery driver. A channel is outbound only; a reader here "
             "is an ingest source that declared its way in through the wrong seam."
         )
+
+
+def test_a_connector_bearer_token_is_scrubbed_from_an_outbound_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The claim this module made in prose and did not implement.
+
+    `Message.redacted()`'s docstring said "the same filter runs here" about `core/logging`'s scrub.
+    It did not: `redact_secrets` reaches a connector's bearer token only through its `extra_secrets`
+    argument, and nothing passed one — so a tool error quoting its own `Authorization` header was
+    scrubbed from the log line and shipped verbatim to the webhook host. Both sides now resolve the
+    names through `connectors.registry.bearer_token_env_names`, so they cannot cover different sets.
+
+    Reverting the `extra_secrets=` argument leaves every suite green, which is why this exists.
+    """
+    from chemclaw.deliver.message import Message
+
+    secret = "sk-connector-token-abc123"
+    monkeypatch.setenv("CHEMCLAW_CALC_MCP_TOKEN", secret)
+    # **Bare, deliberately.** An "Authorization: Bearer …" spelling is caught by the structural
+    # patterns whatever \ holds, so a test written that way passes with the fix
+    # reverted and proves nothing — which is exactly what the first version of this test did. Only a
+    # value recognisable *as a configured credential* exercises the argument that was missing.
+    body = f"the server refused; the token it rejected was {secret}"
+    scrubbed = Message(recipient="u-1", subject="digest", body=body).redacted()
+    assert secret not in scrubbed.body, "a connector bearer token reached an outbound message"
+    assert "***" in scrubbed.body
+
+
+def test_the_webhook_sends_the_recipients_view_and_not_the_join_key() -> None:
+    """`correlation_id` is the key that joins a delivery to this system's audit trail.
+
+    Its own field docstring says "never rendered to the recipient". The file driver honoured that;
+    the webhook driver serialised the whole model with `model_dump()` and posted it to a third-party
+    chat or ticketing host. The projection is an allow-list rather than a deny-list, so a field
+    added later is omitted rather than leaked.
+    """
+    from chemclaw.deliver.message import Message
+
+    message = Message(
+        recipient="u-1", subject="s", body="b", kind="digest", correlation_id="corr-secret"
+    )
+    payload = message.model_dump(include={"recipient", "subject", "body", "kind"})
+    assert "correlation_id" not in payload
+    assert set(payload) == {"recipient", "subject", "body", "kind"}
+
+
+def test_a_plaintext_channel_is_refused_under_the_enforced_posture(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The floor the sibling outbound seam already had and this one shipped without.
+
+    `publish/drivers/http` refuses a non-loopback `http://` sink under `entra_required` because
+    confidential chemistry would cross the wire in cleartext. A delivery carries *more*
+    human-readable content than a sink record does — a chemist's standing query, note ids, an
+    escalation body — and, when `token_env` is set, a bearer credential in every request.
+    """
+    from chemclaw.deliver.driver import WebhookDeliveryDriver
+
+    monkeypatch.setattr(settings, "entra_required", True)
+    with pytest.raises(ValueError, match="cleartext"):
+        WebhookDeliveryDriver(name="ops", url="http://hooks.example.com/x")
+    # Loopback stays available for local development, as it does for the sink.
+    WebhookDeliveryDriver(name="ops", url="http://127.0.0.1:9000/x")
+    WebhookDeliveryDriver(name="ops", url="https://hooks.example.com/x")
+
+    monkeypatch.setattr(settings, "entra_required", False)
+    WebhookDeliveryDriver(name="ops", url="http://hooks.example.com/x")
+
+
+def test_a_message_kind_cannot_escape_the_outbox() -> None:
+    """`kind` is a path component in the file driver, and was documented-but-unbounded.
+
+    The docstring called it "a bounded vocabulary" and the type was `str`, while
+    `FileDeliveryDriver` builds `directory / f"{kind}-{identity}{suffix}"` — so an absolute or
+    `../`-bearing value escapes the outbox, with `mkdir(parents=True)` creating whatever it
+    traverses to. The `Literal` is the bound; the prose was not.
+    """
+    from pydantic import ValidationError
+
+    from chemclaw.deliver.message import Message
+
+    for hostile in ("/etc/cron.d/x", "../../../etc/x", "digest/../.."):
+        with pytest.raises(ValidationError):
+            Message(recipient="u-1", subject="s", kind=hostile)  # type: ignore[arg-type]
+
+
+def _channel(root: Path, name: str, body: str) -> None:
+    """Write one `channel.yaml` under `root`, so a test can enable a channel it made up."""
+    folder = root / name
+    folder.mkdir(parents=True)
+    (folder / "channel.yaml").write_text(body, encoding="utf-8")
+
+
+def test_the_config_gate_refuses_a_plaintext_channel_the_delivery_path_only_swallows(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The refusal had nowhere to be heard, which is why it was not a refusal.
+
+    `_refuse_plaintext_channel` raises from driver construction, and construction happens inside
+    `deliver()`'s per-channel `try` — the swallow that exists so one broken channel does not cost
+    every other recipient their message, and that is correct. Measured before this test existed:
+    with `entra_required=true` and an enabled `http://` channel, `enabled()` returned it,
+    `deliver()` returned `[]`, and `make channel-validate` reported **no problems at all**. The
+    control named itself a refusal and was a per-message drop on a deployment that looked healthy.
+
+    So the gate an operator runs before delivering is where the question gets asked, and this
+    asserts it in both directions — including that the shipped `https://` manifest still passes,
+    since a posture check that failed everything would be removed by the next person.
+    """
+    from chemclaw.cli.validate_channels import problems
+
+    root = tmp_path / "channels"
+    _channel(
+        root,
+        "plainhook",
+        "name: plainhook\ndescription: a site's own webhook\n"
+        "driver: chemclaw.deliver.driver:webhook_channel\n"
+        "config:\n  url: http://chat.internal/hooks/chemclaw\n"
+        "  token_env: CHEMCLAW_DELIVERY_WEBHOOK_TOKEN\n",
+    )
+    monkeypatch.setattr(settings, "delivery_channels_dir", str(root))
+
+    monkeypatch.setattr(settings, "entra_required", False)
+    assert problems() == [], "the posture check must not fire where the posture is not enforced"
+
+    monkeypatch.setattr(settings, "entra_required", True)
+    found = problems()
+    assert len(found) == 1 and "cleartext" in found[0] and "plainhook" in found[0], found
+
+
+def test_the_posture_check_reads_the_destination_whatever_the_driver_calls_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A `config:` block is free-form on purpose, so the check cannot key on the word `url`.
+
+    The driver's own signature is the schema, so a site's driver may name its destination
+    `endpoint`, `hook` or `webhook_url`. A check that knew one spelling would pass every channel it
+    was written to catch — and would do so silently, which is the shape of the defect it exists to
+    end. Every value that *is* a URL is asked instead.
+
+    The `mounted` half is the one that would rot quietly: a mounted share's `directory` and `suffix`
+    are not URLs, and the first version of this check passed them only because
+    `PG_LOOPBACK_HOSTS` contains `''` for a Postgres DSN with no host. Asserted here so that
+    depending on somebody else's constant cannot come back — if it did, every file channel in every
+    enforced deployment would fail validation as a cleartext destination.
+    """
+    from chemclaw.cli.validate_channels import problems
+
+    root = tmp_path / "channels"
+    _channel(
+        root,
+        "oddkey",
+        "name: oddkey\ndescription: names its destination something else\n"
+        "driver: chemclaw.deliver.driver:webhook_channel\n"
+        "config:\n  endpoint: http://chat.internal/hooks\n",
+    )
+    _channel(
+        root,
+        "mounted",
+        "name: mounted\ndescription: a mounted share, no destination at all\n"
+        "driver: chemclaw.deliver.driver:file_channel\n"
+        f"config:\n  directory: {tmp_path / 'outbox'}\n  suffix: .md\n",
+    )
+    monkeypatch.setattr(settings, "delivery_channels_dir", str(root))
+    monkeypatch.setattr(settings, "entra_required", True)
+
+    found = problems()
+    assert [problem for problem in found if "mounted" in problem] == [], (
+        "a mounted share has no URL in its config and must not be refused as a cleartext "
+        f"destination: {found}"
+    )
+    assert any("oddkey" in problem and "cleartext" in problem for problem in found), found
+
+
+def test_a_channel_that_cannot_be_built_is_not_counted_as_a_destination_outage(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The two facts have different lifetimes, and one counter could not tell them apart.
+
+    A send failure is usually a host having a bad afternoon. A channel whose driver will not build
+    — a bad `config:` block, an unimportable `module:callable`, a destination the posture forbids —
+    fails identically on every message until somebody edits a manifest. Both continue to the next
+    channel; only one of them is still true tomorrow, so the permanent fault goes to
+    `chemclaw_degraded_total{subsystem="delivery_channel_config"}` rather than hiding inside the
+    transient one's series.
+    """
+    from chemclaw.core.metrics import METRICS
+
+    root = tmp_path / "channels"
+    _channel(
+        root,
+        "good",
+        "name: good\ndescription: works\ndriver: chemclaw.deliver.driver:file_channel\n"
+        f"config:\n  directory: {tmp_path / 'out'}\n",
+    )
+    _channel(
+        root,
+        "broken",
+        "name: broken\ndescription: no such driver\n"
+        "driver: chemclaw.deliver.no_such_module:nothing\nconfig: {}\n",
+    )
+    monkeypatch.setattr(settings, "delivery_channels_dir", str(root))
+    monkeypatch.setattr(settings, "delivery_channels", "broken,good")
+
+    def _series(line_prefix: str) -> float:
+        """One labelled series out of the exposition.
+
+        `value()` sums across every label set, and the label is the whole point of this assertion.
+        """
+        for line in METRICS.render().splitlines():
+            if line.startswith(line_prefix):
+                return float(line.rsplit(" ", 1)[1])
+        return 0.0
+
+    config = 'chemclaw_degraded_total{subsystem="delivery_channel_config"}'
+    outage = "chemclaw_delivery_failures_total"
+    config_before = _series(config)
+    outage_before = METRICS.value(outage)
+
+    assert asyncio.run(deliver(Message(recipient="u-1", subject="s", body="b"))) == ["good"]
+
+    assert _series(config) == config_before + 1, (
+        "an unbuildable channel left no configuration-degradation signal"
+    )
+    assert METRICS.value(outage) == outage_before, (
+        "an unbuildable channel was counted as a destination outage, which is the conflation "
+        "that made a permanent misconfiguration read as a transient one"
+    )

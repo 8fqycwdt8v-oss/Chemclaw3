@@ -41,6 +41,7 @@ from temporalio import activity, workflow
 with workflow.unsafe.imports_passed_through():
     from chemclaw.agent.subscriptions import Subscription, all_subscriptions, mark_reported
     from chemclaw.core.config import settings
+    from chemclaw.core.metrics_bridge import degraded
     from chemclaw.deliver.message import Message
     from chemclaw.deliver.registry import deliver, delivery_enabled
     from chemclaw.durable.registry import durable_activity, durable_workflow
@@ -193,20 +194,61 @@ class DeliveryInput(BaseModel):
 async def deliver_digest_activity(payload: DeliveryInput) -> list[str]:
     """Send one subscriber's digest on every enabled outbound channel, and say which took it.
 
-    An activity because it is I/O, and one that never raises for an unreachable destination: the
-    registry's `deliver` swallows a single channel's failure so one broken webhook is not everyone's
-    outage. What it *does* raise on is a misconfigured seam — a channel named in
-    `CHEMCLAW_DELIVERY_CHANNELS` with no folder — because an operator who spelled a channel wrong
-    means to be delivering and is not.
+    An activity because it is I/O, and **the enablement check belongs here rather than in the
+    workflow**: `delivery_enabled()` reads `settings`, and a workflow that branched on it decided
+    whether to emit a command at all — so enabling a channel and restarting a worker made an
+    in-flight digest replay a command its history does not contain.
+
+    It never raises. The registry's `deliver` already swallows a single channel's failure so one
+    broken webhook is not everyone's outage; a misconfigured seam — a channel named in
+    `CHEMCLAW_DELIVERY_CHANNELS` with no folder — raises `DeliveryChannelError`, which is in
+    `_BAD_DATA_TYPES` and would therefore fail this activity **non-retryably**. That mattered
+    because the caller is ordered before `acknowledge_digest`: one misspelled channel name meant the
+    watermark never advanced, so subscriber #1 received the identical digest every night and
+    everyone after them received nothing, indefinitely. The failure is caught and reported instead,
+    and the caller now runs after the acknowledgement regardless.
+
+    Returns:
+        The channels that took the message. Empty means either that delivery is off or that every
+        channel refused — which the log line distinguishes and a caller cannot.
     """
-    return await deliver(
-        Message(
+    if not delivery_enabled():
+        return []
+    try:
+        # **Inside the `try`, and this is not tidiness.** `Message.recipient` is `min_length=1`, so
+        # an empty `Subscription.owner` raises `ValidationError` — which is in `_BAD_DATA_TYPES` and
+        # would therefore fail this activity *non-retryably*, aborting the run and every subscriber
+        # after it. The docstring said "it never raises" while two lines sat outside the guard that
+        # makes that true.
+        message = Message(
             recipient=payload.owner,
             subject=f"New for your standing query: {payload.query}",
             body="\n".join(f"- {note_id}" for note_id in payload.note_ids),
             kind="digest",
         )
-    )
+        taken = await deliver(message)
+    except Exception as exc:
+        # **Never silently.** Before this, a total delivery failure moved no counter and wrote no
+        # log line anywhere in `chemclaw.deliver.registry`, and the workflow discarded the return
+        # value — so
+        # "every digest was dropped" and "every digest was delivered" were the same observation.
+        degraded(
+            logger,
+            "digest_delivery",
+            "digest delivery failed for %s: %s",
+            payload.owner,
+            exc,
+        )
+        return []
+    if not taken:
+        degraded(
+            logger,
+            "digest_delivery",
+            "no channel took the digest for %s; %d channel(s) are enabled",
+            payload.owner,
+            len(settings.delivery_channel_list),
+        )
+    return taken
 
 
 @durable_workflow("background")
@@ -241,24 +283,28 @@ class DigestWorkflow:
             # that actually happens.
             if not sent:
                 continue
-            # **Also out of the building, when a deployment has said where.** The mailbox above is
-            # still the durable handover and still what the watermark turns on — a chemist who does
-            # open the app must see the digest whether or not a channel took it, and a channel
-            # outage must not re-report matches the mailbox already holds. So this runs *after* the
-            # acknowledging condition is already satisfied and its result is deliberately not part
-            # of it: outbound delivery is a courtesy on top of a delivered digest, not a second
-            # delivery the watermark waits on.
-            if delivery_enabled():
-                await workflow.execute_activity(
-                    deliver_digest_activity,
-                    DeliveryInput(owner=item.owner, query=item.query, note_ids=list(item.note_ids)),
-                    start_to_close_timeout=timeout,
-                    schedule_to_start_timeout=queue_wait_timeout(),
-                    retry_policy=BAD_DATA_RETRY,
-                )
             await workflow.execute_activity(
                 acknowledge_digest,
                 args=[item.subscription_id, item.note_ids],
+                start_to_close_timeout=timeout,
+                schedule_to_start_timeout=queue_wait_timeout(),
+                retry_policy=BAD_DATA_RETRY,
+            )
+            # **Also out of the building, when a deployment has said where — and strictly after
+            # the acknowledgement.** The mailbox above is the durable handover and is what the
+            # watermark turns on: a chemist who opens the app must see the digest whether or not a
+            # channel took it, and a channel outage must not re-report matches the mailbox already
+            # holds. That was the stated intent and the code did the opposite — this ran *before*
+            # `acknowledge_digest`, and `deliver_digest_activity` could fail non-retryably on a
+            # misspelled channel name, so the watermark never advanced: subscriber #1 got the same
+            # digest every night and everyone after them got nothing. The activity now reports its
+            # own failures and never raises, and it runs last so that even a raise could not
+            # unacknowledge a delivered digest. Its result is deliberately not part of the
+            # acknowledging condition: outbound delivery is a courtesy on top of a delivered digest,
+            # not a second delivery the watermark waits on.
+            await workflow.execute_activity(
+                deliver_digest_activity,
+                DeliveryInput(owner=item.owner, query=item.query, note_ids=list(item.note_ids)),
                 start_to_close_timeout=timeout,
                 schedule_to_start_timeout=queue_wait_timeout(),
                 retry_policy=BAD_DATA_RETRY,

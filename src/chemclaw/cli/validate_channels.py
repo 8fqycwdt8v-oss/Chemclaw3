@@ -1,19 +1,29 @@
 """Validate the delivery-channel manifests — `make channel-validate`.
 
-Three checks pydantic cannot make from a manifest alone, in the shape `validate_sinks` established.
-Rule 1 is a property of the enabled set; rules 2 and 3 run over every **discovered** manifest,
+Four checks pydantic cannot make from a manifest alone, in the shape `validate_sinks` established.
+Rule 1 is a property of the enabled set; rules 2 to 4 run over every **discovered** manifest,
 because a channel that is broken while disabled is a channel nobody can enable:
 
 1. an **enabled** channel that no manifest declares — a deployment believing it delivers and not
    doing so is indistinguishable from one with nothing to deliver;
 2. a **driver** that cannot be imported or is not callable;
 3. a **config block** the driver's signature will not accept — the same "the callable is the
-   schema" rule the other three seams apply, checked by binding rather than by a second model.
+   schema" rule the other three seams apply, checked by binding rather than by a second model;
+4. a **cleartext destination** under the enforced posture.
 
 Rules 2 and 3 run over *discovered* rather than enabled manifests for the reason `validate_sinks`
 records: `CHEMCLAW_DELIVERY_CHANNELS` is empty in CI, so iterating the enabled set would resolve
 zero drivers and bind zero config blocks — a gate that could only ever fail on rule 1, which is
 empty too.
+
+**Rule 4 is here because it had nowhere else to be.** `deliver.driver` refuses a non-loopback
+`http://` channel under `entra_required`, and that raise happens inside driver construction — which
+`registry.deliver` performs inside the per-channel `try` that exists so one broken channel does not
+cost every other recipient their message. Measured, the refusal therefore never refused: the
+channel stayed enabled, every delivery returned `[]`, and the single WARNING per message read as
+the destination being down. A posture violation is a *configuration* fault, so it belongs in the
+gate an operator runs before delivering, and this is that gate.
+
 
 Deliberately does **not** connect to anything. A channel's reachability is a deployment fact, and
 this runs in CI with no webhook host and no mounted share in sight.
@@ -23,10 +33,12 @@ import argparse
 import inspect
 import logging
 import sys
+from urllib.parse import urlsplit
 
 from chemclaw.core.config import settings
 from chemclaw.core.connect import ENV_SUFFIX, check_env_name
 from chemclaw.core.logging import configure_logging
+from chemclaw.deliver.driver import plaintext_channel_refusal
 from chemclaw.deliver.manifest import DeliveryChannelManifest
 from chemclaw.deliver.registry import DeliveryChannelError, _resolve, discovered
 
@@ -74,12 +86,42 @@ def _driver_problems(manifest: DeliveryChannelManifest) -> list[str]:
     return problems
 
 
+def _posture_problems(manifest: DeliveryChannelManifest) -> list[str]:
+    """A destination this deployment's posture forbids (rule 4).
+
+    Every value in the `config:` block that *is* a URL is asked, rather than a key named `url`. The
+    block is free-form by design — the driver's own signature is the schema — so a site's driver may
+    call its destination `endpoint`, `webhook_url` or `hook`, and a check that only knew one
+    spelling would pass every channel it was written to catch.
+
+    **The scheme test is what makes that safe, and leaving it out only worked by accident.**
+    `plaintext_channel_refusal` exempts a loopback host, and `PG_LOOPBACK_HOSTS` contains `''` — so
+    a value with no host at all (`/var/chemclaw/outbox`, `.md`) was already answered `""`, and the
+    shipped `share` channel passed for a reason that has nothing to do with delivery: that empty
+    string is there so a Postgres DSN with no host reads as local. Depending on it would mean a
+    change to a Postgres constant silently refusing every file channel as a cleartext destination.
+    So this asks only about `http`/`https` values, and says so.
+
+    The rule itself comes from `deliver.driver` rather than a second copy here: one definition,
+    asked at construction *and* at validation.
+    """
+    token_env = str(manifest.config.get("token_env", "") or "")
+    urls = [
+        value
+        for value in manifest.config.values()
+        if isinstance(value, str) and urlsplit(value).scheme in ("http", "https")
+    ]
+    reasons = (plaintext_channel_refusal(manifest.name, url, token_env) for url in urls)
+    return [reason for reason in reasons if reason]
+
+
 def problems() -> list[str]:
     """Every finding across every discovered channel, plus rule 1 over the enabled set."""
     manifests = discovered()
     found = _enabled_problems(manifests)
     for manifest in manifests.values():
         found.extend(_driver_problems(manifest))
+        found.extend(_posture_problems(manifest))
     return found
 
 

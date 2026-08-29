@@ -13,6 +13,7 @@ something out of the building*, and turning that on by finding a folder is the s
 """
 
 import importlib
+import logging
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,8 @@ import yaml
 
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
+from chemclaw.core.metrics import METRICS
+from chemclaw.core.metrics_bridge import degraded
 from chemclaw.deliver.driver import DeliveryDriver
 from chemclaw.deliver.manifest import DeliveryChannelManifest
 from chemclaw.deliver.message import Message
@@ -30,6 +33,9 @@ _MANIFEST = "channel.yaml"
 
 class DeliveryChannelError(ChemclawError):
     """A channel could not be discovered, enabled or built."""
+
+
+logger = logging.getLogger(__name__)
 
 
 def _channel_dirs() -> list[Path]:
@@ -146,17 +152,53 @@ async def deliver(message: Message) -> list[str]:
     message. The return value is what a caller advances a watermark on — "delivered" and
     "swallowed" are different facts, and `durable/digest.py` is the caller that must not conflate
     them.
+
+    **A channel that cannot be built and a channel that would not answer are different facts**, and
+    they are reported on different series — the first through `degraded()`, the second on
+    `chemclaw_delivery_failures_total`. Both continue to the next channel; only one of them will
+    still be true tomorrow.
     """
     scrubbed = message.redacted()
     delivered: list[str] = []
     for manifest in enabled():
         try:
             driver = build(manifest)
+        except Exception as exc:
+            # **A channel that cannot be *built* is a configuration fault, not a destination
+            # outage, and sharing one counter with the outage hid it.** A bad `config:` block, an
+            # unimportable driver, or a destination this deployment's posture forbids will fail
+            # identically on every message for the life of the process — while
+            # `chemclaw_delivery_failures_total` is the series an operator reads as "the webhook
+            # host is having a bad afternoon". `degraded()` is this repository's chokepoint for
+            # exactly that distinction: it counts `chemclaw_degraded_total{subsystem}`, which is
+            # alerted rather than skimmed. `make channel-validate` is where such a channel should
+            # have been caught; this is the second line, for the deployment that did not run it.
+            degraded(
+                logger,
+                "delivery_channel_config",
+                "delivery channel %s (%s) cannot be built, so it will deliver nothing until its "
+                "configuration is fixed: %s",
+                manifest.name,
+                manifest.driver,
+                exc,
+                exc_info=False,
+            )
+            continue
+        try:
             await driver.deliver(scrubbed)
-        except Exception:
-            # Logged by the caller with its own context; swallowed here so one channel's outage is
-            # one channel's outage. Re-raising would make a message undeliverable to everyone
-            # because it was undeliverable to one.
+        except Exception as exc:
+            # **Swallowed for the other channels' sake, and never silently.** Re-raising would make
+            # a message undeliverable to everyone because it was undeliverable to one. But the
+            # comment here used to say "logged by the caller with its own context" and there was no
+            # such caller: nothing in this package held a logger or a metric, and the one caller
+            # discarded the return value — so every digest being dropped and every digest being
+            # delivered were the same observation from outside. That is the failure this seam was
+            # built to end, one layer further in.
+            logger.warning(
+                "deliver.channel_failed: %s (%s): %s", manifest.name, manifest.driver, exc
+            )
+            METRICS.increment("chemclaw_delivery_failures_total", labels={"channel": manifest.name})
             continue
         delivered.append(manifest.name)
+        METRICS.increment("chemclaw_deliveries_total", labels={"channel": manifest.name})
     return delivered

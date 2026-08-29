@@ -341,6 +341,35 @@ def test_the_filesystem_tool_surface_is_still_the_eight_names_the_gate_answers_f
     )
 
 
+def test_the_tool_node_still_holds_its_bound_tools_under_tools_by_name() -> None:
+    """`tests/test_context_floor.py` reads the bound tool surface off this private attribute.
+
+    That ratchet exists to bound what every turn pays before the user speaks, and it can only do
+    that if it measures the tools the graph *binds* rather than the callables the registry holds —
+    the two differ by 8,059 tokens, and re-deriving the second was how the file under-measured by
+    23% for eleven weeks (`_bound_tools` records the two causes). `ToolNode` publishes no accessor
+    for what it holds, so `_tools_by_name` is the seam, and a rename upstream must be a red build
+    rather than a `KeyError` somebody edits around.
+
+    Asserted over a real `ToolNode` rather than the class, because the attribute is created in
+    `__init__` and a `hasattr` on the type would pass while the instance had nothing.
+    """
+    from langchain_core.tools import tool as create_tool
+    from langgraph.prebuilt.tool_node import ToolNode
+
+    @create_tool
+    def probe(value: str) -> str:
+        """A tool whose only job is to be held."""
+        return value
+
+    held = ToolNode([probe])._tools_by_name
+    assert held == {"probe": probe}, (
+        "ToolNode no longer holds its bound tools under `_tools_by_name`; "
+        "tests/test_context_floor.py::_bound_tools reads the static prefix off exactly that "
+        "attribute and would silently measure nothing"
+    )
+
+
 def test_the_filesystem_middleware_still_offloads_oversized_tool_results() -> None:
     """The capability the scratchpad exists for, and the reason `compaction.py` shrank.
 

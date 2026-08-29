@@ -29,6 +29,16 @@ that is what `agent_context_token_budget` budgets against, which made its number
 code's own estimator. A *gate* wants the one function this repository can keep consistent, and
 LangChain's counter is what the compaction middleware already uses. The two disagree by a few
 percent; the ceilings here are set against this one.
+
+**What this file measures is the tools the compiled graph binds, and getting there took two
+corrections rather than one.** The first is in `_tool_schema`: a hand-serialised name and docstring
+measured ~11 tokens per tool. The second was still standing on 2026-08-29 — converting the
+*callables* out of `_capability_tools` rather than the `BaseTool`s `build_langgraph_agent` binds,
+which under-measured the `default` profile by **8,059 tokens (23%)** while this file's own prose
+called it "the payload rather than an approximation of it". `_bound_tools` reads the surface off the
+graph's `ToolNode`, so the ratchet gates what a deployment pays. The lesson is the file's own: a
+ratchet is only as honest as its basis, and a basis that is re-derived rather than observed will
+agree with itself forever.
 """
 
 from __future__ import annotations
@@ -37,12 +47,16 @@ import json
 from typing import Any
 
 import pytest
+from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
+from langchain_core.messages import AIMessage
 
+from chemclaw.agent.audit import NullAuditSink
 from chemclaw.agent.chemclaw_agent import _capability_tools, instructions_for
 from chemclaw.agent.langgraph_agent import (
     _labelled,
     _skill_dirs,
     _skills_middleware,
+    build_langgraph_agent,
     skills_backend,
 )
 from chemclaw.agent.profile_discovery import load_profiles
@@ -196,7 +210,23 @@ load_profiles()
 #: The headroom is ~620 tokens against a measured 34,379 — tighter again than the ~816 the protocol
 #: surface left, and now well under what a single tool of `propose_knowledge_note`'s size costs. The
 #: next surface to arrive here should expect to be asked for the allow-list first.
-CEILINGS: dict[str, int] = {"__default__": 35_000}
+#:
+#: **43,500 as of 2026-08-29, and no tool was added.** Every paragraph above measured the wrong
+#: thing: the basis moved from `convert_to_openai_tool` over `_capability_tools` to the tools the
+#: compiled graph actually binds (`_bound_tools`, which says what the two are and why they differ),
+#: and the `default` profile measures **42,458** where the old basis reported 34,399. **The number
+#: grew because the measurement got honest, not because the surface did** — nothing shipped, nothing
+#: regressed, and a deployment was already paying every one of these 8,059 tokens on every turn
+#: while this file called the smaller figure "the payload rather than an approximation of it".
+#:
+#: So every figure above is a *lower bound* on what its own change actually cost, and none of them
+#: is restated here: they were each right about the delta they measured and wrong about the base,
+#: and rewriting them would be inventing measurements nobody took.
+#:
+#: The headroom is ~1,042 tokens against 42,458 — under what `propose_knowledge_note` costs on the
+#: honest basis (1,126), so it still cannot absorb another tool of that size unnoticed, which is the
+#: property every raise above was chosen for.
+CEILINGS: dict[str, int] = {"__default__": 43_500}
 
 #: How much of the floor one tool may be. A schema above this is not expensive, it is *badly
 #: shaped* — the fix is pagination, a narrower argument, or splitting a tool that does two things.
@@ -220,16 +250,32 @@ MAX_SINGLE_TOOL_TOKENS = 900
 #: `docs/planning/BACKLOG.md` carries the row for revisiting it, and the honest trigger is a
 #: provider that `$ref`s a repeated model instead of inlining it — which would cut every entry here
 #: at once and is a measurement to take rather than a change to make.
+#:
+#: **Re-measured 2026-08-29 on the bound basis, and six names arrived without anything being
+#: added.** Every figure below grew (`draft_experiment_protocol` 2,419 → 2,568), and six tools that
+#: read as under the bound were over it all along: `rank_species` measured 885 as a callable and
+#: **1,094** as the object the model is sent. That is the ceiling comment's point at per-tool
+#: resolution — these are not new debt, they are debt that was never visible, and the assertion
+#: below is the reason six of them stayed invisible for eleven weeks while a test claimed to catch
+#: exactly this. They are recorded rather than hidden by a bigger `MAX_SINGLE_TOOL_TOKENS`, which
+#: is the same choice the four original entries were recorded under; the bound stays 900.
 KNOWN_OVERSIZED: dict[str, int] = {
-    "start_optimization_campaign": 2_020,
-    "propose_knowledge_note": 1_077,
-    "draft_experiment_protocol": 2_419,
-    # 961 before `source_text` left the signature and the `salt` argument gained the sentence that
-    # makes its docstring true (a correction to the title, goal, transformation or mode opens a new
-    # design rather than revising this one — the promise the old text made backwards). Removing a
-    # `str` parameter and adding two lines of caller-facing prose nets **+7**, which is the whole
-    # shape of this list: the schema is mostly description, and description is what a caller needs.
-    "structure_experiment_request": 968,
+    "start_optimization_campaign": 2_307,
+    "propose_knowledge_note": 1_126,
+    # Both +22 against the re-measurement above, and it is the same 22 twice: they share the
+    # `ExperimentDesign` schema, and the `max_length` ceilings
+    # `D-2026-08-29-a-check-a-reader-never-sees-is-not-a-check` put on its six keyed lists render as
+    # `maxItems`. `structure_experiment_request` also lost `source_text` and gained the sentence
+    # that makes its `salt` docstring true, and those two cancel to nothing measurable here — the
+    # ADR's "net +7" was taken on the raw-callable basis this file has since abandoned.
+    "draft_experiment_protocol": 2_590,
+    "structure_experiment_request": 1_075,
+    "rank_species": 1_094,
+    "rank_species_across_solvents": 1_039,
+    "compute_reaction_energy": 1_018,
+    "survey_bond_strengths": 989,
+    "refine_ensemble": 984,
+    "profile_rotation": 936,
 }
 
 
@@ -255,13 +301,47 @@ def _tool_schema(tool: Any) -> str:
     and `.args_schema` off one therefore finds a repr, an empty string and `None`, and the whole
     tool surface measured ~11 tokens per tool: a ratchet that would have held nothing.
 
-    `convert_to_openai_tool` is the function LangChain itself calls when binding tools to a model,
-    so this is the payload rather than an approximation of it. It derives the schema from the
-    signature and the docstring, which is exactly why the docstrings are the expensive part.
+    `convert_to_openai_tool` is the function LangChain itself calls when binding tools to a model.
+    What it is handed is the half this file got wrong a second time, and `_bound_tools` is the fix:
+    converting the *callable* and converting the `BaseTool` the graph actually binds are two
+    different schemas, and the second is the one that gets sent.
     """
     from langchain_core.utils.function_calling import convert_to_openai_tool
 
     return json.dumps(convert_to_openai_tool(tool))
+
+
+def _bound_tools(profile: Any) -> list[Any]:
+    """The tools this profile's compiled graph actually binds — every one, as the object it binds.
+
+    **Read off the graph rather than re-derived, because re-deriving is the defect.** For eleven
+    weeks this file measured `convert_to_openai_tool` over `_capability_tools(profile)`, and its own
+    docstring called that "the payload rather than an approximation of it". Measured against the
+    compiled graph it was short by **8,059 tokens — 23% of the bill** — in two structural ways, both
+    invisible to any assertion built on the same callables:
+
+    1. **A callable's schema is not its `BaseTool`'s schema.** `@tool` is identity, so this file
+       converted raw functions while `build_langgraph_agent:247` binds `as_structured_tool(fn)`.
+       Measured, **all 54** differ and every one is *larger* — `gather_evidence` 490 → 878,
+       `get_durable_job_status` 274 → 662.
+    2. **Seven tools were bound every turn and counted never.** `ls`, `read_file`, `write_file`,
+       `edit_file`, `glob`, `grep` (this repository's `FilesystemMiddleware`) and `task`
+       (`SubAgentMiddleware`) come from middleware rather than from the registry, so no walk of
+       `_capability_tools` can ever see them. **2,569 tokens.**
+
+    Reading the `ToolNode` is deliberate and is why this cannot drift again: any future tool source
+    — a middleware, a connector, upstream — lands here the moment it is bound, without this file
+    being taught about it. The backlog row that asked for this proposed spying on `bind_tools`
+    instead; the node holds the same 61 tools and needs no model call to say so, so the graph is
+    built and never invoked. `_tools_by_name` is upstream-private and pinned in
+    `tests/test_upstream_surface.py`.
+    """
+    graph = build_langgraph_agent(
+        model=GenericFakeChatModel(messages=iter([AIMessage(content="")])),
+        profile=profile,
+        audit_sink=NullAuditSink(),
+    )
+    return list(graph.nodes["tools"].bound._tools_by_name.values())
 
 
 def _skills_listing(profile: Any, tools: list[Any]) -> str:
@@ -279,14 +359,20 @@ def _skills_listing(profile: Any, tools: list[Any]) -> str:
 
 
 def _floor(profile_name: str) -> tuple[int, dict[str, int]]:
-    """The static prefix for one profile: its total, and the per-part breakdown behind it."""
+    """The static prefix for one profile: its total, and the per-part breakdown behind it.
+
+    The two prose parts are measured from the *capability* tools deliberately, and only the tool
+    schemas come from `_bound_tools`. `build_langgraph_agent:228` hands `skills_backend` the raw
+    callables, so narrowing the skills listing by the bound list instead would measure a backend
+    production never builds — a second implementation of upstream's narrowing, which is the
+    mistake one layer over.
+    """
     profile = get_profile(profile_name)
-    tools = _capability_tools(profile)
     parts = {
         "instructions": _count(instructions_for(profile)),
-        "skills-listing": _count(_skills_listing(profile, tools)),
+        "skills-listing": _count(_skills_listing(profile, _capability_tools(profile))),
     }
-    for tool in tools:
+    for tool in _bound_tools(profile):
         parts[f"tool:{_tool_name(tool)}"] = _count(_tool_schema(tool))
     return sum(parts.values()), parts
 

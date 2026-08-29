@@ -411,6 +411,22 @@ _COUNTERS: dict[str, str] = {
     # A model call that needed no reduction increments neither, so a flat zero means "never over
     # budget" and an absent series means "not wired" — the distinction the previous state of this
     # subsystem could not express.
+    # **Outbound delivery, which shipped with no signal of any kind.** `chemclaw.deliver.registry`
+    # held no
+    # logger and no metric, `deliver()` swallowed every per-channel failure with a comment saying
+    # the caller would log it, and the one caller discarded the return value — so "every digest was
+    # dropped" and "every digest was delivered" produced identical observations. A seam built
+    # because a project leader could not be reached on a Monday morning could fail totally and
+    # silently, which is the same failure one layer in.
+    #
+    # Two counters rather than one, because a ratio is the question an operator actually has: a
+    # channel that takes nothing while another takes everything is a broken webhook, and both
+    # failing is an outage.
+    "chemclaw_deliveries_total": ("Messages a delivery channel accepted, by channel."),
+    "chemclaw_delivery_failures_total": (
+        "Messages a delivery channel refused or could not be sent, by channel. A failure here is "
+        "swallowed so one channel's outage is not everyone's, which is exactly why it must count."
+    ),
     "chemclaw_context_compactions_total": (
         "Model calls whose message list was reduced to stay inside the context token budget."
     ),
@@ -521,9 +537,11 @@ _COUNTERS: dict[str, str] = {
     "chemclaw_invalid_tool_calls_total": (
         "Tool calls the model emitted with unparseable arguments, by tool. LangChain puts these on "
         "`AIMessage.invalid_tool_calls` rather than `tool_calls`, and nothing read that field — so "
-        "the call vanished with no `tool_failed`, no `tool_result` and no trace of any kind. Both "
-        "halves are fed from `agent/model_calls`: this counter, and the `tool_failed` the chemist "
-        "sees, which the tool chain's own announcer cannot raise for a call that never reaches it."
+        "the call vanished with no `tool_failed`, no `tool_result` and no trace of any kind. This "
+        "counts malformed *emissions*, once per model call, so a repaired turn books two; the "
+        "`tool_failed` a chemist sees counts unmet *intents*, once per turn, and books none when "
+        "the repair worked. The two are meant to differ — see "
+        "`D-2026-08-29-a-discarded-call-is-not-a-lost-call`."
     ),
     "chemclaw_skill_reads_denied_total": (
         "Skill body reads refused by the role gate. The gate lives on the skills backend because "
@@ -790,6 +808,10 @@ _COUNTER_LABELS: dict[str, tuple[str, ...]] = {
     # Four values, fixed by a CHECK constraint in `infra/sql/027_note_proposals.sql` — the only
     # label in this registry whose cardinality is bounded by the database rather than by trust.
     "chemclaw_note_proposals_total": ("state",),
+    # Bounded by `CHEMCLAW_DELIVERY_CHANNELS` — a deployment's own list of channel folder names,
+    # never a caller's string. Same rule as every label here.
+    "chemclaw_deliveries_total": ("channel",),
+    "chemclaw_delivery_failures_total": ("channel",),
     # Three values, fixed in `agent/condense.py`'s own `DigestSource` literal rather than by a
     # caller: `extracted`, `degraded`, `oversized`. Bounded by the code that emits it, which is the
     # same guarantee `state` above gets from a CHECK constraint.
@@ -902,6 +924,16 @@ _GAUGES: dict[str, str] = {
     # Out-of-process capability can fail independently of the chat service, so its reachability
     # is a first-class signal rather than something to find in a log (`connectors.health`).
     "chemclaw_connectors_unhealthy": "Enabled connectors that could not be reached (0 = all up).",
+    # The knowledge graph coming *in*, which had no signal at all: `chemclaw_notes_publish_failures
+    # _total` covers a note failing to reach the PR-gate and nothing covered the corpus failing to
+    # reach a pod. `deploy/knowledge-sync.sh`'s loop swallows a failed refresh on purpose, so the
+    # pod serves a frozen graph and keeps citing it. Read from the volume by the process that
+    # answers from it (`kg/graph.py::knowledge_sync_age_seconds`), so it needs no sidecar and no
+    # kube-state-metrics.
+    "chemclaw_knowledge_sync_age_seconds": (
+        "Age of the newest note on this pod's knowledge tree, in seconds (-1 = the tree holds no "
+        "note at all). Measures what this pod knows, not when the sync last ran."
+    ),
     # Pool saturation (D-119). `requests_waiting` above zero is the signal that `pg_pool_max_size`
     # is too small for the offered load — the thing that used to show up as a connect timeout with
     # an idle database, which is unreadable from any other metric.

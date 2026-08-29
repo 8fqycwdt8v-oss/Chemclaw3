@@ -1282,6 +1282,51 @@ and one specific to build artefacts: when a test harness consumes a build direct
 are part of the fixture.** Rebuild the way the harness does, and check `.github/workflows/` for
 which flags that is rather than guessing.
 
+## 2026-08-29 — a test written by the author inherits the author's belief
+
+Seven reviewers with fresh context read a change I had just shipped green — `make lint type test`
+passing with Postgres and Temporal up, every declaration gate held, and six defects I had already
+found while building it. They found about thirty more, and I reproduced every one before acting.
+
+The pattern in almost all of them: **a docstring stating the correct control, beside code that does
+not implement it.** Not a control I forgot — one I described. The MCP face documented its read-only
+export surface and served *zero* tools in production. The pending route says "'I asked the QA lead
+to approve this' must not mean 'and I may approve it myself'" and the only producer of approvals
+left the routing unset, so the requester could self-approve. The evidence tool claimed an ownership
+check that lives on a FastAPI route it never touches. The digest's comment says delivery runs after
+the acknowledgement; it ran before.
+
+The rule I need, because it is the mechanism rather than the symptom:
+
+**When I write a test for code I just wrote, it inherits what I believed the code does — so it
+proves the mechanism and never the instance.**
+
+Three of my own tests demonstrate it exactly:
+
+- `test_mcp_face.py` imports `chemclaw_agent` to populate the tool registry. That import is what
+  production lacked. The test could not fail.
+- `test_operations.py` asserts no caller free text escapes a reading, and writes its marker into
+  four columns the reading never selects — while seeding the one column that *is* attacker-
+  influenceable with a safe literal.
+- `test_units.py` proves case separates molarity from length using `M`/`m` and `mM`/`mm`. Those two
+  rungs were right. `nM` resolved to nanometre and `µm` to micromolar.
+
+So, concretely, for the next change:
+
+1. **Test the production entrypoint, not a convenient import of it.** If a module is populated by
+   import side effect, assert it in a subprocess that imports only what the deployment imports.
+2. **Seed the adversarial value into the field the code actually reads**, and check the read path
+   selects that field. A marker in a column nobody selects proves nothing.
+3. **When a mechanism has a series (a prefix ladder, a state vocabulary, a status set), test the
+   whole series or state which rungs are untested.** Two examples prove the mechanism exists, not
+   that the table is right.
+4. **When a docstring names a control, go and find the code that enforces it before believing the
+   docstring** — including, especially, my own from an hour ago.
+
+And the cheap fix that found all of it: fan reviewers out over a diff with **fresh context**, scoped
+by failure domain. A reviewer who shares my belief about the code cannot see any of these; one who
+has only the code can.
+
 ## 2026-08-29 — a red check is a claim about the system *or* about the check, and the odds are even
 
 A four-repo e2e campaign produced six findings. **Three of them were the check being wrong, not the
@@ -1491,7 +1536,9 @@ reason to accept a loss. So:
 
 PR #282 merged green: `make lint type test`, a live storm family going 7/8 → 8/8, and a live
 measurement of the exact behaviour. Four adversarial reviewers over the merged commit then found
-four real defects, three of them *introduced by the change* and one it made reachable.
+four real problems: one defect introduced by the change, one pre-existing field it made
+reachable, one process failure, and one false claim in its own ADR. "Three introduced" is what I
+first wrote, and it is not what the four bullets below say.
 
 What the green gate could not see, and why:
 
@@ -1507,8 +1554,10 @@ What the green gate could not see, and why:
   repaired step from a broken tool. `reason` names five gates and both cases carry `None` — one
   grep would have shown it. That is the same class as the handover measurement I had corrected in
   this very session, committed by me, in the document recording the correction.
-- **A field documented as bounded was not.** `BrokenCall.error`'s own docstring said every field
-  was bounded on the way out; I read the docstring instead of the constructor three lines below it.
+- **A field documented as bounded was not.** `invalid_tool_calls`' docstring said every field was
+  bounded on the way out; I read the docstring instead of the constructor three lines below it.
+  (An earlier version of this line attributed that claim to `BrokenCall.error`'s own docstring,
+  which says no such thing — a correction about misreading prose, itself misreading prose.)
 
 **The rule: when a change adds a second producer of an existing event, record, or metric, list
 every consumer of it and say what each now sees.** Not "does my new case work" — "what does the
@@ -1519,3 +1568,76 @@ and the sibling repos, then one sentence per hit.
 success path.** For any change that fires on a condition, write the test where the condition is
 absent first. `test_a_repair_that_works_announces_nothing_because_nothing_was_lost` is the test
 that should have existed before the feature did.
+
+
+## 2026-08-29 (third entry) — the third pass, and a self-inflicted wound in the middle of it
+
+A fresh four-way review of the two merged commits found seven more things. The pattern across all
+three passes is one thing, stated three ways:
+
+- **#282**: I tested the failure path and not the success path, so a new event firing on turns that
+  succeeded was invisible.
+- **#284**: I fixed the announcement and shipped `_empty_answer_event` with **no test at all** —
+  `grep "reason to start from" tests/` returned only the source line — and its one behaviour I did
+  think about (failures) folded in the one I did not (refusals), contradicting a merged ADR.
+- Both: prose asserting the rule the same commit had just reverted, 200 lines below the paragraph I
+  corrected.
+
+**The rule, and it is the same rule each time: the thing I did not think about is the thing with no
+test.** Before committing, list every input the new code branches on and name the test for each
+branch. `tool_refusals` was a term in an expression I wrote and never once considered.
+
+**And a mistake made while proving the fix.** My mutation script restored with
+`git checkout -- src/` between runs. `src/` held all of the session's uncommitted work, so the first
+"restore" discarded every source fix I had just made — silently, because the tests live in `tests/`
+and only the *baseline* went red. I noticed because the baseline read `8 failed` when it should have
+read all-pass, and I nearly read that as a real regression.
+
+**The rule: commit before you mutate.** A revert-to-prove loop must restore from a committed
+baseline (`git checkout HEAD -- <one file>`), never from the index of a dirty tree, and never with a
+directory-wide path. Check the baseline is green *first*: a mutation run whose baseline is red is
+measuring nothing.
+
+**One more, from the same loop:** `str.replace(old, new, 1)` hits the first occurrence, and this
+middleware writes its guard twice — once per hook. The mutation landed on the sync path while the
+test drove the async one, so the guard read as unpinned when it was pinned. The parametrized test
+that came out of that now covers both, which is the coverage the accident found.
+
+
+## 2026-08-29 (fourth entry) — three numbers I published that were not properties
+
+A fourth review cycle, this time over my own fixes rather than over the code they fixed,
+**falsified three measurements I had already written into an ADR.** Every one of them was a real
+number when I took it. Every one was then written down as a fact about the system.
+
+- *"A chemist's abandonment was reverted 20 times out of 20."* Re-run five times: 20, 18, 18, 20,
+  17 — 93 of 100. The race is overwhelmingly likely, not certain. I ran it once, saw a clean sweep,
+  and reported the sweep.
+- *"2.61 s at the 4 MB cap payload, down from 46 s."* That payload cannot be constructed any more —
+  the same commit added the `max_length` ceilings that refuse it. The largest design now legal
+  diffs in 0.060 s, and at its ceiling the quadratic scan costs 22.4 ms against `Counter`'s 0.107
+  ms. **Two fixes shipped together and I gave the credit to the wrong one**, which then went into a
+  code comment as the reason that line exists.
+- *"90.6 ms → 15.7 ms."* Reproduces at 384 arms, not at 24 (4x there). And the method it described
+  was reverted in the same cycle, so the claim outlived its subject.
+
+**The rule: a number going into the record is run more than once, and reported as what varied.**
+One run, in one configuration, immediately after the change it is meant to justify, is the most
+flattering measurement available — and it is the one I reach for, because at that moment I am
+looking for confirmation rather than for the distribution. `CLAUDE.md` says "measure it, don't argue
+it" and says nothing about how many times; for a claim that ends up in an ADR or a code comment, the
+answer is more than once.
+
+**The corollary, which is the part that generalises past measurement.** When two changes ship in one
+commit and the outcome improves, I attribute the improvement to the more interesting one. Here the
+interesting change was an algorithm (O(n²) → `Counter`) and the boring one was a refusal
+(`max_length`), and the boring one did all the work. Before writing "X fixed Y", disable X alone and
+check that Y comes back.
+
+**And the same instrument found four more of the same kind in the UI**, all fixture-shaped: a
+transcript index I "corrected" to a value that gave two messages one key, a plate axis where rows
+and columns used different rules, an error path written for a `detail` shape and blind to the one it
+was written for, and an interface promising a field no read returns. Each was found by reading the
+*producer* — `_transcript`'s `enumerate`, `place()`'s label arithmetic, the route's 409 body,
+`DesignOut`'s `extra="forbid"`. **When a fixture and the code agree, that is not evidence; the
+producer is the evidence.** I now read the producer before writing the fixture, in both repositories.

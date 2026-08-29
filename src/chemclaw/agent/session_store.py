@@ -371,6 +371,17 @@ _OWNER_TITLE = "UPDATE session_owners SET title = %s WHERE session_id = %s AND t
 # `tool_result_links` on purpose — a link may only disappear behind its blob. What is left is a row
 # naming a session id that no longer resolves to anything, and `durable/retention.py`'s age sweep
 # collects it with the blob.
+#
+# **The `NOT EXISTS` arm counts only links whose session still exists**, and without that clause
+# those surviving orphan rows blocked the blob for ever. Two sessions sharing bytes, both deleted:
+# the first delete spares the blob (the second session still links it) and leaves an orphan link;
+# the second delete then finds *that* row and spares the blob again. Nothing owns it, nothing can
+# reach it, and the only collector left is `retention_tool_results_days`, which ships at 0.
+#
+# Coincidental sharing made this rare — two sessions had to run one tool over identical arguments
+# and get byte-identical output. `agent/session_fork.py` made it certain: a fork copies the
+# parent's links by design, so *every* forked conversation left its parent's results unreclaimable.
+# That is what surfaced it; the defect is older than the fork and the fix is not fork-specific.
 _SESSION_DELETE: dict[str, str] = {
     "tool_result_blobs": (
         "DELETE FROM tool_result_blobs b WHERE EXISTS ("
@@ -378,7 +389,8 @@ _SESSION_DELETE: dict[str, str] = {
         "   WHERE l.content_hash = b.content_hash AND l.session_id = %(session_id)s"
         ") AND NOT EXISTS ("
         "  SELECT 1 FROM tool_result_links l"
-        "   WHERE l.content_hash = b.content_hash AND l.session_id <> %(session_id)s)"
+        "   WHERE l.content_hash = b.content_hash AND l.session_id <> %(session_id)s"
+        "     AND EXISTS (SELECT 1 FROM session_owners o WHERE o.session_id = l.session_id))"
     ),
     "session_messages": "DELETE FROM session_messages WHERE session_id = %(session_id)s",
     "session_events": "DELETE FROM session_events WHERE session_id = %(session_id)s",
@@ -590,6 +602,35 @@ class PostgresHistoryProvider:
             async with conn.cursor() as cur:
                 await cur.executemany(_INSERT, rows)
             await conn.commit()
+
+
+def owner_permits(owner: str | None, actor: str | None) -> bool:
+    """Whether a stored session owner lets `actor` reach that session — the one ownership rule.
+
+    **One definition, because there are now two callers and they must not drift.** The HTTP layer
+    resolves ownership for `/sessions/{id}/…` (`api/deps._owner_authorizes`, which delegates here)
+    and the agent resolves it for a tool handed an explicit session id
+    (`agent/evidence_tools.assemble_evidence_pack`). A second copy of this predicate is how one
+    surface ends up stricter than the other, and the loose one is the one that matters.
+
+    The dev/enforced split is deliberate and is `_is_reviewer`'s, applied to ownership: with
+    `entra_required` off there is no real actor, so an owner-less row degrades open exactly as
+    every other route does. Once identity is enforced a *recorded* absence of an owner is no longer
+    "everyone's" — enforcement never mints an owner-less row, so one surviving into it is a
+    leftover from a dev-mode write, and treating it as anyone's would hand it to every
+    authenticated principal instead of to nobody. `owner` is falsy for both `None` and `""`, so a
+    row written without one and one holding the empty-string sentinel are refused alike.
+
+    Args:
+        owner: The session's recorded owner, or `None`/`""` when it has none.
+        actor: The reader's Entra object id, or `None`/`""` when there is no authenticated actor.
+
+    Returns:
+        Whether the read is permitted.
+    """
+    if not owner:
+        return not settings.entra_required
+    return bool(actor) and owner == actor
 
 
 class SessionOwnerStore:

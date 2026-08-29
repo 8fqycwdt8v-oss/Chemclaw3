@@ -439,6 +439,15 @@ _ALLOWED_LAZY_EDGES: dict[Edge, str] = {
         "core.logging - imported by every entrypoint first - must not hard-depend on the connector "
         "registry at import time (see its docstring)"
     ),
+    ("chemclaw.deliver", "chemclaw.connectors"): (
+        "Message.redacted resolves the same connector bearer-token env names core.logging's filter "
+        "does, through the one definition both share, so the log scrub and the outbound scrub "
+        "cannot cover different sets - which they did: this file claimed 'the same filter runs "
+        "here' and redact_secrets reaches connector tokens only through an argument nothing "
+        "passed. "
+        "Lazy for the reason the core.logging exception above is: the outbound seam must not "
+        "hard-depend on the connector registry at import time"
+    ),
     ("chemclaw.kg", "chemclaw.connectors"): (
         "known_note_types/known_relations union core's closed vocabulary with what the enabled "
         "bundles declare, because two shipped note types (job-result, bo-candidate) are minted by "
@@ -682,8 +691,11 @@ def test_core_has_one_lazy_exception_and_the_dict_says_which() -> None:
 
     `chemclaw.core` is imported by every entrypoint first, which is why a lazy edge out of it is a
     measurement worth keeping at exactly one: each is a place where the shared kernel reaches back
-    into a layer above it, deferred to call time so the import graph stays acyclic. The other two
-    entries in `_ALLOWED_LAZY_EDGES` do not originate in `core` and say nothing about this.
+    into a layer above it, deferred to call time so the import graph stays acyclic. The remaining
+    entries in `_ALLOWED_LAZY_EDGES` do not originate in `core` and say nothing about this — a
+    count is deliberately not written here, because the sentence that said "the other two" went
+    stale in the very commit that added a third, three lines from the data that refutes it, in the
+    file whose closing paragraph is about exactly that.
 
     The comment above the dict claimed "there is exactly one left" of the whole dict, and stayed
     there through two additions — a count in prose, three lines from the data that refutes it, in

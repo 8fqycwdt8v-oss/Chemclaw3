@@ -932,36 +932,59 @@ def _empty_answer_event(
     **"A narrower question" is the wrong advice when a tool failed, and the turn used to give it
     anyway.** `trace.called_tools` counts calls that were *announced*, and a call whose arguments
     the model could not write never is — so a turn in which the model asked for exactly the right
-    tool and got the JSON wrong twice read "after 0 tool call(s) … a narrower or more specific
-    question is the useful next step", directly beneath the two `tool_failed` events naming that
-    tool (`D-2026-08-29-a-call-the-tool-chain-never-sees-is-a-call-the-tool-chain-cannot-announce`
-    added the events and left this sentence alone, so the turn contradicted itself). The count of
-    failures comes from the ledger rather than the trace precisely because those two disagree: the
-    ledger counts what the turn *reported*, which is the set this sentence has to be consistent
-    with.
+    tool and got the JSON wrong read "after 0 tool call(s) … a narrower or more specific question
+    is the useful next step", directly beneath the `tool_failed` event naming that tool
+    (`D-2026-08-29-a-call-the-tool-chain-never-sees-is-a-call-the-tool-chain-cannot-announce` added
+    the event and left this sentence alone, so the turn contradicted itself).
+
+    **A refusal is not a failure, and the first fix said it was.**
+    `D-2026-08-29-a-discarded-call-is-not-a-lost-call` replaced the advice with
+    `tool_failures + tool_refusals` rendered as "N tool call(s) failed" — so a dry run the chemist
+    themselves switched on reported three failures, while `_TurnLedger.tool_refusals` one screen
+    above says in as many words that a refusal is "the control working, which must not be read as
+    a failure". That is what
+    `D-2026-08-28-a-refusal-the-wire-cannot-name-is-a-fault-to-everyone-downstream` exists to stop,
+    reintroduced one layer further out. They are counted apart here and lead to different next
+    steps, because they *are* different: a fault is something to read, a refusal something to
+    approve.
+
+    **What happened is always stated; only the advice branches.** The earlier form replaced the
+    narrower-question line entirely, so one failure among twenty-nine calls deleted the only useful
+    next step on the exact du-03 shape this docstring is about. The counts are their own clause now
+    and the remedy follows from what dominates.
     """
     if ledger.answer_text.strip():
         return None
     METRICS.increment("chemclaw_turn_empty_answers_total")
+    ran, failed, refused = len(trace.called_tools), ledger.tool_failures, ledger.tool_refusals
     logger.warning(
-        "turn for session %s ended with no answer text after %d tool call(s), %d failed",
+        "turn for session %s ended with no answer text: %d tool call(s) ran, %d failed, %d refused",
         session.session_id,
-        len(trace.called_tools),
-        ledger.tool_failures,
+        ran,
+        failed,
+        refused,
     )
-    lost = ledger.tool_failures + ledger.tool_refusals
-    remedy = (
-        f"{lost} tool call(s) failed and are reported above, which is the reason to start from. "
-        if lost
-        else "A narrower or more specific question is the useful next step "
-    )
+    counts = f"{ran} tool call(s) ran"
+    if failed:
+        counts += f", {failed} failed"
+    if refused:
+        counts += f", {refused} refused by a gate"
+    # No trailing stop on any of these: the session id closes the sentence, and a period before it
+    # leaves the `(session …)` reading as a fragment — which is what the first version shipped.
+    if failed:
+        remedy = "The failure(s) reported above are the place to start"
+    elif refused:
+        remedy = (
+            "Nothing failed — the call(s) above were held by a gate, so approving the plan or "
+            "leaving dry-run mode is what unblocks them"
+        )
+    else:
+        remedy = "A narrower or more specific question is the useful next step"
     return ErrorEvent(
         message=(
-            "The turn ended without producing an answer, after "
-            f"{len(trace.called_tools)} tool call(s). Nothing was written, so "
+            f"The turn ended without producing an answer: {counts}. Nothing was written, so "
             "there is nothing below to read — this is a failure, not an empty result. "
-            f"{remedy}"
-            f"(session {session.session_id})."
+            f"{remedy} (session {session.session_id})."
         ),
         code="empty_answer",
         retryable=True,

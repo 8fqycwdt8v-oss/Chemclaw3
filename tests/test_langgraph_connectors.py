@@ -366,16 +366,28 @@ def test_compiling_the_graph_per_turn_stays_within_the_maf_agent_build_budget() 
       evidence the diagnosis was right.
     - **14 ms** of the 33 is the helper graph, down from ~61 ms.
 
+    **Those figures were already stale when the audit re-measured them, which is the reason to say
+    which tree a number was taken on.** The merged tree gained the spend cap and its tools, and the
+    same benchmark now measures 47-54 ms unloaded here. The 6x reduction holds; the absolute figure
+    moves with the tool surface, because what is left is upstream's per-build middleware tools —
+    `tests/test_tool_schema.py` measured that seven of them are still rebuilt on every compile,
+    which is where the remaining cost lives.
+
     It also removed the lever the previous version of this docstring named as the remaining one:
     `_labelled(_skill_dirs())` still runs twice per turn, and at 14 ms for the entire helper it is
     no longer worth passing down.
 
-    **The bound moves 400 → 250, and the number is an estimate rather than a measurement, which is
-    the honest way to say it.** This sandbox is not the CI runner: the same code measured ~130 ms
-    here and 340 ms there, so the conservative transfer factor is ~2.6x and the expected CI figure
-    is ~90 ms. 250 is ~2.7x that — the same ratio the 270 bound held against its ~90 ms baseline and
-    the 400 held against 130. Leaving it at 400 would have made this test near-useless as a ratchet:
-    a regression could put twelve times the measured cost back before anything went red.
+    **The bound stays 250, and the margin is narrower than the number that set it.** It was chosen
+    against an unloaded 33 ms and a ~2.6x sandbox-to-CI transfer factor, giving an expected ~90 ms
+    and a 2.7x margin. Measured properly since — the audit's own reviewer checked it — this tree
+    runs **47-54 ms** unloaded and **124 ms** under 2x CPU oversubscription, which is closer to what
+    a shared CI runner presents than "four cores saturated" was. So the real headroom is between
+    **~1.9x and ~3x** depending on which figure CI resembles, not the 2.7x derived from an unloaded
+    measurement while the historical failures it cites (516 and 498 ms) were contended. Still a
+    working ratchet — it catches an order-of-magnitude regression, which is all this test is for —
+    and now stated as what it is rather than reading better than it is. Leaving it at 400 would have
+    made it near-useless: a regression could put eight times the measured cost back before anything
+    went red.
 
     **550 ms as of 2026-08-29, and the +150 is a measured regression rather than a flake.** The
     prescriptive-protocol tier (`D-2026-08-28-a-protocol-is-prescriptive-and-a-record-is-not`) added
@@ -433,5 +445,5 @@ def test_compiling_the_graph_per_turn_stays_within_the_maf_agent_build_budget() 
     )
     print(
         f"\nper-turn graph compile: {per_compile_ms:.0f} ms median, {samples_ms} raw "
-        "(~33 ms unloaded, of which ~14 ms is the helper graph; prior agent build baseline ~90 ms)"
+        "(~50 ms unloaded here; baseline ~90 ms — the docstring carries the history)"
     )

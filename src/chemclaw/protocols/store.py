@@ -49,7 +49,6 @@ from chemclaw.protocols.models import (
     DesignStatus,
     DesignSummary,
     ExperimentDesign,
-    ExperimentRequest,
     ProtocolCheck,
     StatusEvent,
 )
@@ -59,13 +58,6 @@ logger = logging.getLogger(__name__)
 _REVISION_COLUMNS = (
     "revision, kind, author_kind, author, parent_revision, change_note, "
     "document, checks, created_at"
-)
-
-#: The same row without the document, for `history()`. A revision's `document` is kilobytes of
-#: JSONB and a pydantic validation each; the history list renders seven scalars and a blocker
-#: count, and touches none of it.
-_HEADER_COLUMNS = (
-    "revision, kind, author_kind, author, parent_revision, change_note, checks, created_at"
 )
 
 _UPSERT_DESIGN = """
@@ -125,7 +117,6 @@ _SELECT_HEAD = (
 _SET_STATUS = """
 UPDATE experiment_protocols SET status = %(status)s, updated_at = now()
 WHERE design_id = %(design_id)s
-RETURNING head_revision
 """
 
 _INSERT_STATUS_EVENT = """
@@ -219,12 +210,25 @@ class DesignStore(Protocol):
         ...
 
     async def set_status(
-        self, design_id: str, status: DesignStatus, actor: str = "", reason: str = ""
+        self,
+        design_id: str,
+        status: DesignStatus,
+        *,
+        expected_revision: int,
+        actor: str = "",
+        reason: str = "",
     ) -> None:
         """Move a design's lifecycle status, recording who moved it, why, and from which revision.
 
+        `expected_revision` is the revision the person was *looking at*, and a move against anything
+        else is refused. Required and keyword-only for the reason `RevisionIn.parent_revision` is
+        both: a sign-off that did not say what it signed off on is exactly the one that ends up
+        attributed to a document nobody read, and defaulting it to the head "for convenience" would
+        remove the control rather than provide one.
+
         Raises:
             UnknownDesign: nothing in the store answers to `design_id`.
+            RevisionConflict: a revision landed between the read and this move.
         """
         ...
 
@@ -258,7 +262,14 @@ class InMemoryDesignStore:
         status: DesignStatus = "draft",
     ) -> DesignRevision:
         """Store the next revision, refusing when `parent_revision` is not the head."""
-        require_storable(design, change_note)
+        require_storable(
+            design,
+            change_note=change_note,
+            author=author,
+            design_id=design_id,
+            session_id=session_id,
+            correlation_id=correlation_id,
+        )
         existing = self._revisions.get(design_id, [])
         head = existing[-1].revision if existing else 0
         _require_head(design_id, head, parent_revision)
@@ -373,17 +384,30 @@ class InMemoryDesignStore:
         return sorted(summaries, key=lambda s: s.updated_at, reverse=True)[:bounded]
 
     async def set_status(
-        self, design_id: str, status: DesignStatus, actor: str = "", reason: str = ""
+        self,
+        design_id: str,
+        status: DesignStatus,
+        *,
+        expected_revision: int,
+        actor: str = "",
+        reason: str = "",
     ) -> None:
-        """Move a design's lifecycle status, recording the move against the head revision."""
+        """Move a design's lifecycle status, recording the move against the revision it names."""
+        require_storable(None, design_id=design_id, actor=actor, reason=reason)
         if design_id not in self._meta:
             raise UnknownDesign(f"no design {design_id!r}")
+        head = self._revisions[design_id][-1].revision
+        if expected_revision != head:
+            raise RevisionConflict(
+                f"revision {expected_revision} is not the head ({head}); "
+                "re-read the design before signing off on it"
+            )
         self._meta[design_id]["status"] = status
         self._meta[design_id]["updated_at"] = datetime.now(UTC)
         self._status_events.setdefault(design_id, []).append(
             StatusEvent(
                 status=status,
-                revision=self._revisions[design_id][-1].revision,
+                revision=head,
                 actor=actor,
                 reason=reason,
             )
@@ -434,7 +458,14 @@ class PostgresDesignStore:
         — the revision you built on is not the head any more — and a caller that had to tell them
         apart would be a caller with two ways to do one thing.
         """
-        require_storable(design, change_note)
+        require_storable(
+            design,
+            change_note=change_note,
+            author=author,
+            design_id=design_id,
+            session_id=session_id,
+            correlation_id=correlation_id,
+        )
         async with self._connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(_SELECT_HEAD, (design_id,))
@@ -522,27 +553,33 @@ class PostgresDesignStore:
         return _summary(row) if row else None
 
     async def history(self, design_id: str) -> list[DesignRevision]:
-        """Every revision, oldest first.
+        """Every revision, oldest first — documents included, as the Protocol says.
 
-        **Reads the checks and not the documents.** `GET /protocols/{id}` renders seven scalars per
-        revision and `len(blockers)`; it never touches `item.design`. Selecting `document` anyway
-        cost a JSONB read and an `ExperimentDesign.model_validate` per row — measured at **39x** the
-        rest of the query over 40 revisions of a 24-arm plate (90.6 ms against 2.3 ms), on the
-        event loop, unbounded because the table is append-only and has no revision cap.
+        **A `document`-free variant was tried here and reverted, and the reason is worth keeping.**
+        The route renders seven scalars and `len(blockers)` and never touches `item.design`, so
+        selecting the document looked like pure waste: it measured 4x on a 24-arm plate and 39x on
+        a 384-arm one, and the property worth having is better than either ratio — the header-only
+        read is *flat* in document size, O(revisions) rather than O(bytes).
 
-        The `design` on each row is therefore the empty design rather than the stored one, which is
-        why this returns headers and the docstring says so: `read()` is how a caller gets a
-        document, and it is the only caller that needs one.
+        It was reverted because of what it did to the value it returned. Filling `design` with a
+        placeholder made this method answer differently on the two backends — the one thing
+        `InMemoryDesignStore`'s docstring forbids — and the placeholder is an ordinary
+        `ExperimentDesign` that nothing refuses, so a caller that read it and appended it wrote
+        `title="(not read)"` into the header row `GET /protocols` renders. Measured, both.
+
+        The optimisation is sound and belongs behind its own name, returning a type with no
+        `design` field at all, so a caller that wants a document cannot silently get a fiction.
+        That is a `docs/planning/BACKLOG.md` row rather than a second method with one caller.
         """
         async with self._connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
-                    f"SELECT {_HEADER_COLUMNS} FROM experiment_protocol_revisions "
+                    f"SELECT {_REVISION_COLUMNS} FROM experiment_protocol_revisions "
                     "WHERE design_id = %s ORDER BY revision",
                     (design_id,),
                 )
                 rows = await cur.fetchall()
-        return [_revision_header(design_id, row) for row in rows]
+        return [_revision(design_id, row) for row in rows]
 
     async def listing(
         self,
@@ -574,26 +611,58 @@ class PostgresDesignStore:
         return [_summary(row) for row in rows]
 
     async def set_status(
-        self, design_id: str, status: DesignStatus, actor: str = "", reason: str = ""
+        self,
+        design_id: str,
+        status: DesignStatus,
+        *,
+        expected_revision: int,
+        actor: str = "",
+        reason: str = "",
     ) -> None:
-        """Move a design's lifecycle status, recording the move against the head revision.
+        """Move a design's lifecycle status, recording the move against the revision it names.
 
-        The event row is the whole reason this is two statements in one transaction. `advanced()`
-        demotes an approved or executed design back to `draft` when a revision lands on it, so the
-        header cannot say which document a person signed off on — and until this table existed
-        nothing could, while `advanced()`'s own docstring said `set_status` recorded it.
+        The event row is the whole reason this is several statements in one transaction.
+        `advanced()` demotes an approved or executed design back to `draft` when a revision lands on
+        it, so the header cannot say which document a person signed off on — and until this table
+        existed nothing could, while `advanced()`'s own docstring said `set_status` recorded it.
+
+        **The head is read under `FOR UPDATE` and compared, which is what makes the recorded
+        revision the one the approver saw.** Without it this stamped whatever `head_revision` had
+        become by the time the UPDATE ran, so a chemist who opened revision 1, thought about it and
+        clicked Approve after a colleague saved revision 2 signed a document they had never read —
+        and the status-event table, whose whole purpose is to say *which* document was signed, said
+        revision 2 with their name beside it.
+
+        **And this one needs no race at all**, which is why it is worth more than the concurrency
+        bugs beside it: the sign-off is wrong on plain latency, from reading a design, thinking
+        about it, and clicking. Measured that way it is **100 of 100** across five runs of twenty,
+        and 0 of 100 with the comparison — where the same scenario driven as a true `gather` race
+        reproduced 0 of 100, because the two statements serialise on the pool. A defect that needs
+        no interleaving is not a rare one.
+
+        It is the identical control `append(parent_revision=…)` already is one statement below, and
+        the `FOR UPDATE` is doing a second job besides: it serialises a status move against a
+        concurrent `append`, which is the interleaving the deterministic case does not need.
         """
+        require_storable(None, design_id=design_id, actor=actor, reason=reason)
         async with self._connection() as conn:
             async with conn.cursor() as cur:
-                await cur.execute(_SET_STATUS, {"status": status, "design_id": design_id})
-                row = await cur.fetchone()
-                if row is None:
+                await cur.execute(_SELECT_HEAD, (design_id,))
+                head_row = await cur.fetchone()
+                if head_row is None:
                     raise UnknownDesign(f"no design {design_id!r}")
+                head = int(head_row[0])
+                if expected_revision != head:
+                    raise RevisionConflict(
+                        f"revision {expected_revision} is not the head ({head}); "
+                        "re-read the design before signing off on it"
+                    )
+                await cur.execute(_SET_STATUS, {"status": status, "design_id": design_id})
                 await cur.execute(
                     _INSERT_STATUS_EVENT,
                     {
                         "design_id": design_id,
-                        "revision": row[0],
+                        "revision": head,
                         "status": status,
                         "actor": actor,
                         "reason": reason,
@@ -604,7 +673,7 @@ class PostgresDesignStore:
             "protocol.status design_id=%s status=%s revision=%s actor=%s",
             design_id,
             status,
-            row[0],
+            head,
             actor,
         )
 
@@ -662,29 +731,35 @@ def advanced(current: DesignStatus, kind: str) -> DesignStatus:
 _UNSTORABLE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 
 
-def require_storable(design: ExperimentDesign, change_note: str) -> None:
-    """Refuse a document Postgres cannot hold, in this process, naming what is wrong.
+def require_storable(design: ExperimentDesign | None, **text: str) -> None:
+    """Refuse anything Postgres cannot hold, in this process, naming what is wrong.
 
     Both backends call it, which is the point: without it the in-memory store accepted a NUL and
     Postgres answered **500**, so whether a write was possible depended on which backend a
     deployment had configured — the divergence `InMemoryDesignStore`'s own docstring forbids.
 
+    **Every caller-supplied string, not the document and the change note only.** The first version
+    covered two of eight and left six diverging: `author`, `session_id`, `correlation_id`,
+    `design_id`, `actor` and — browser-supplied, and therefore the one that mattered —
+    `set_status`'s `reason`, which `Chemclaw3_ui` collects from a chemist and which answered a raw
+    **500** one route over from the docstring saying that failure was fixed.
+
     Raises:
-        UnstorableDocument: the design or its change note carries a NUL or a C0 control character.
+        UnstorableDocument: something carries a NUL or a C0 control character.
     """
-    # The **values**, not the JSON encoding of them: `model_dump_json` escapes a NUL as the six
-    # characters `\u0000`, so a regex over the serialised form finds nothing and the guard passes
-    # exactly the input it exists to refuse. Measured — the first version of this function did.
-    for label, text in _strings(design.model_dump(), "the document"):
-        if _UNSTORABLE.search(text):
-            raise UnstorableDocument(
-                f"{label} contains a control character no text column can store (NUL or C0). "
-                "Remove it and send the document again."
-            )
-    if _UNSTORABLE.search(change_note):
+    if design is not None:
+        for label, value in _strings(design.model_dump(), "the document"):
+            _require_clean(label, value)
+    for label, value in text.items():
+        _require_clean(label, value)
+
+
+def _require_clean(label: str, value: str) -> None:
+    """Refuse one string, naming where it came from."""
+    if _UNSTORABLE.search(value):
         raise UnstorableDocument(
-            "change_note contains a control character no text column can store (NUL or C0). "
-            "Remove it and send the document again."
+            f"{label} contains a control character no text column can store (NUL or C0). "
+            "Remove it and send it again."
         )
 
 
@@ -694,6 +769,10 @@ def _strings(value: Any, path: str) -> Iterator[tuple[str, str]]:
         yield path, value
     elif isinstance(value, dict):
         for key, item in value.items():
+            # The key as well as the value: `ProtocolArm.levels` is `dict[str, str]` with no
+            # constraint on its keys, so a NUL in a factor name reached `jsonb` and raised
+            # `UntranslatableCharacter` — the exact exception `UnstorableDocument` names.
+            yield f"{path}.<key>", key
             yield from _strings(item, f"{path}.{key}")
     elif isinstance(value, list):
         for index, item in enumerate(value):
@@ -728,26 +807,6 @@ def _summary(row: tuple[Any, ...]) -> DesignSummary:
         blockers=row[8],
         created_at=row[9],
         updated_at=row[10],
-    )
-
-
-def _revision_header(design_id: str, row: tuple[Any, ...]) -> DesignRevision:
-    """Build a `DesignRevision` from a `_HEADER_COLUMNS` row, with no document in it.
-
-    `design` is the empty design rather than the stored one — see `history()`. Every reader of this
-    shape wants the scalars and `blockers`; the one reader that wants a document calls `read()`.
-    """
-    return DesignRevision(
-        design_id=design_id,
-        revision=row[0],
-        kind=row[1],
-        author_kind=row[2],
-        author=row[3],
-        parent_revision=row[4],
-        change_note=row[5],
-        design=ExperimentDesign(request=ExperimentRequest(title="(not read)", goal="(not read)")),
-        checks=[ProtocolCheck.model_validate(c) for c in row[6]],
-        created_at=row[7],
     )
 
 

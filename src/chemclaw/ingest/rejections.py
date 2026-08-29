@@ -144,15 +144,17 @@ async def record_refusals(source: str, refusals: Mapping[str, str]) -> None:
             settings.postgres_dsn, operation="ingest_rejections.record"
         ) as conn:
             async with conn.cursor() as cur:
-                for entry_id, reason in refusals.items():
-                    await cur.execute(
-                        _UPSERT,
-                        {
-                            "source": source,
-                            "entry_id": entry_id,
-                            "reason": _truncated(reason),
-                        },
-                    )
+                # `executemany`, not a loop of `execute`: psycopg pipelines the batch, where the
+                # loop paid one round trip per refused record. A source with a systematically
+                # broken field offers hundreds per chunk, and every one of them was a round trip
+                # inside the sync activity's own start-to-close window.
+                await cur.executemany(
+                    _UPSERT,
+                    [
+                        {"source": source, "entry_id": entry_id, "reason": _truncated(reason)}
+                        for entry_id, reason in refusals.items()
+                    ],
+                )
                 # Once per batch rather than once per row: the bound is on what the table holds,
                 # and every row of this batch is newer than everything it would evict.
                 await cur.execute(_EVICT, {"source": source, "cap": _MAX_ROWS_PER_SOURCE})

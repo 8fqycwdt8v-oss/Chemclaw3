@@ -85,6 +85,33 @@ _EXPECTED_SUBSYSTEMS = {
     # moving, which reads as "no durable work" rather than as "nobody asked".
     "jobs_in_flight",
     "log_redaction",
+    # `durable/digest.deliver_digest_activity`. Outbound delivery shipped with no signal of any
+    # kind: `deliver()` swallows a per-channel failure so one broken webhook is not everyone's
+    # outage, the caller discarded the return value, and nothing in `chemclaw.deliver.registry` held
+    # a logger
+    # or a metric — so every digest being dropped and every digest being delivered produced
+    # identical observations. Swallowed deliberately (the mailbox is the durable handover and the
+    # watermark turns on it), which is exactly why it has to be counted.
+    "digest_delivery",
+    # `deliver/message._connector_secret_envs`. The half of the redaction inventory that leaves the
+    # cluster: if the connector bearer-token names cannot be resolved, tokens quoted inside a tool
+    # error stop being scrubbed from outbound webhook bodies for the life of the process. Its
+    # sibling in `core/logging` has had this signal since it was written; this one shipped with a
+    # bare `logger.error`, which is the only security degradation in the tree with no counter.
+    "deliver_redaction",
+    # `deliver/registry.deliver`, on a channel that cannot be *built* — a `config:` block its driver
+    # will not take, an unimportable `module:callable`, or a destination `entra_required` forbids.
+    # Split off `chemclaw_delivery_failures_total` because the two facts have different lifetimes: a
+    # send failure is usually a destination having a bad afternoon, and a build failure is a
+    # misconfiguration that will fail identically on every message until somebody edits a manifest.
+    # Sharing one series made the permanent fault read as the transient one.
+    "delivery_channel_config",
+    # `ingest/commitments/json_export.fetch_commitments`, on an export path that does not exist — a
+    # mistyped `CHEMCLAW_COMMITMENT_EXPORT_DIR` or a mount that failed. The whole symptom is
+    # silence: the sync succeeds, nothing is mirrored, `mirror_freshness` stays NULL, and
+    # `review_commitments` presents that to a project leader as a truthful empty portfolio. It had
+    # a WARNING and no counter, which is the `deliver_redaction` shape one seam over.
+    "commitment_mirror",
     "plan_approval",
     "preferences",
     # `agent.condense`, added with the protocol condenser. Two degradations share it and both

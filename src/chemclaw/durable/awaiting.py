@@ -80,7 +80,8 @@ class AwaitRequest(BaseModel):
     requested_by: str = ""
     session_id: str = ""
     correlation_id: str = ""
-    #: How long the question stays open. Clamped by `awaiting_max_days` at open time.
+    #: How long the question stays open. Clamped against `awaiting_max_days` by
+    #: `open_pending_request_activity` — one place, so no caller can pass an unbounded value.
     deadline_days: float = 7.0
     #: How often to re-notify while it is open. 0 disables escalation.
     reminder_hours: float = 24.0
@@ -124,7 +125,15 @@ class _OpenInput(BaseModel):
 
     request_id: str
     request: AwaitRequest
-    due_at: str
+    #: The workflow's own clock at the moment it opened the wait. The activity adds the *clamped*
+    #: deadline to this and returns the result, so the ceiling is enforced in one place and the
+    #: value the workflow schedules timers against comes back through history.
+    started_at: str
+    #: The Temporal run this projection belongs to. It is what lets the store tell a *retry* of this
+    #: activity (same run, update in place) from a *re-ask* after a lapsed deadline (new run, reopen
+    #: the row) — two cases the projection used to collapse into one, leaving the re-asked question
+    #: invisible and permanently unanswerable.
+    run_id: str = ""
 
 
 class _SettleInput(BaseModel):
@@ -138,8 +147,24 @@ class _SettleInput(BaseModel):
 
 @durable_activity("background")
 @activity.defn
-async def open_pending_request_activity(payload: _OpenInput) -> None:
-    """Project the open wait into `pending_requests`. Idempotent; never reopens a settled one."""
+async def open_pending_request_activity(payload: _OpenInput) -> str:
+    """Project the open wait into `pending_requests`, and return the deadline it was opened with.
+
+    Idempotent within a run and reopening across runs — `pending_store._OPEN` carries the argument.
+
+    **The clamp against `awaiting_max_days` lives here**, because an activity may read `settings`
+    and a workflow may not, and because one place is the only arrangement a caller cannot skip. The
+    return value is what the workflow schedules its timers against: an activity result is recorded
+    in history, so a replay reads the deadline the original execution used even if the ceiling has
+    since moved.
+
+    Returns:
+        The clamped `due_at`, ISO-8601.
+    """
+    deadline = timedelta(
+        days=max(0.0, min(payload.request.deadline_days, settings.awaiting_max_days))
+    )
+    due_at = datetime.fromisoformat(payload.started_at) + deadline
     await pending_store.open_request(
         request_id=payload.request_id,
         kind=payload.request.kind,
@@ -149,8 +174,10 @@ async def open_pending_request_activity(payload: _OpenInput) -> None:
         requested_by=payload.request.requested_by,
         session_id=payload.request.session_id,
         correlation_id=payload.request.correlation_id,
-        due_at=datetime.fromisoformat(payload.due_at),
+        due_at=due_at,
+        run_id=payload.run_id,
     )
+    return due_at.isoformat()
 
 
 @durable_activity("background")
@@ -206,17 +233,43 @@ class AwaitAnswerWorkflow:
         """Open the wait, escalate on a timer, and settle on the first of answer or deadline."""
         request = AwaitRequest.model_validate(payload)
         request_id = workflow.info().workflow_id
+        # A `settings` read that is safe where the deadline's was not, and the difference is worth
+        # stating: this feeds an activity *timeout*, which is an attribute of a command, while the
+        # deadline fed the *number* of commands. Temporal's replay check compares the sequence and
+        # type of commands, so a timeout that changed between runs is tolerated and a timer that
+        # appears or vanishes is not.
         activity_timeout = timedelta(seconds=settings.awaiting_activity_timeout_seconds)
 
-        deadline = timedelta(days=max(0.0, min(request.deadline_days, settings.awaiting_max_days)))
-        due_at = workflow.now() + deadline
-        await workflow.execute_activity(
+        # **The clamp is applied by the activity, and `due_at` comes back from it.**
+        #
+        # It cannot be computed here: `due_at` decides how many timers `_wait_until` schedules, so a
+        # `settings` read on this line puts the *number of commands* under a value that can change
+        # between an execution and its replay — lower `CHEMCLAW_AWAITING_MAX_DAYS` while a 30-day
+        # wait is open, restart the worker, and the replay computes a `due_at` already in the past,
+        # returns from the first iteration, and emits a settle where history holds a timer. That is
+        # a `NonDeterminismError` retried forever, on the workflow with the longest designed
+        # lifetime in the tree.
+        #
+        # The first fix moved the clamp to the callers, and that was wrong in the way a per-caller
+        # rule always is: it reached two of the three. `connectors/bo/workflows.py` passes
+        # `bo_measurement_deadline_days` straight through, so a mis-set value opened a ten-year run
+        # on the broker — exactly what `awaiting_max_days` exists to prevent — while two docstrings
+        # went on claiming the value was clamped. An activity's *result* is recorded in history, so
+        # taking `due_at` from it is both deterministic on replay and impossible for a caller to
+        # skip. One definition, on the path every caller already takes.
+        opened = await workflow.execute_activity(
             open_pending_request_activity,
-            _OpenInput(request_id=request_id, request=request, due_at=due_at.isoformat()),
+            _OpenInput(
+                request_id=request_id,
+                request=request,
+                started_at=workflow.now().isoformat(),
+                run_id=workflow.info().run_id,
+            ),
             start_to_close_timeout=activity_timeout,
             schedule_to_start_timeout=queue_wait_timeout(),
             retry_policy=BAD_DATA_RETRY,
         )
+        due_at = datetime.fromisoformat(opened)
         await self._notify(request, request_id, due_at.isoformat())
 
         try:

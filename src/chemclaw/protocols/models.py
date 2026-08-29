@@ -413,13 +413,27 @@ class ExperimentDesign(BaseModel):
 
     request: ExperimentRequest
     base: ProtocolBody = Field(default_factory=ProtocolBody)
-    # **Every list here is bounded, and the bound is a refusal rather than a nicety.** Nothing
-    # capped them, and `POST /protocols/{id}/revisions` takes a whole design from a browser — so a
-    # caller chose `n` for a diff that was O(n²), and one authenticated request inside every other
-    # declared bound (the 4 MB body cap, the per-principal rate limit) blocked the front door's
-    # event loop for **46 s**. The quadratic scan is gone, and so is the unbounded input: the
-    # ceilings below are an order of magnitude above the largest real design — 1536 arms is the
-    # largest plate this system knows — so nothing a chemist writes can reach one.
+    # **These ceilings are what closed the event-loop stall, and they are tight rather than
+    # generous.** Nothing capped these lists, and `POST /protocols/{id}/revisions` takes a whole
+    # design from a browser — so a caller chose `n` for a diff that was O(n²), and one
+    # authenticated request inside every other declared bound (the 4 MB body cap, the per-principal
+    # rate limit) blocked the front door's event loop for **46 s**. `diff._labelled` no longer
+    # scans quadratically, but that is a constant-factor tidy-up (22.4 ms → 0.107 ms at n=1536):
+    # the refusal is the control.
+    #
+    # `max_length=1536` is **exactly** the largest plate this system knows, not an order of
+    # magnitude above it — an earlier version of this comment said the latter, which would have
+    # made a 1536-well design sound like an absurdity rather than the case the number was chosen to
+    # admit. The largest design these ceilings permit serialises to 414 KB (a tenth of the body
+    # cap) and diffs in 0.060 s, which is the measurement that says the ceilings, not the cap, are
+    # what bound the cost.
+    #
+    # **What is bounded is the lists a diff keys by an identifier**, which are the six in
+    # `diff._KEYED_LISTS` and the only ones whose cost was ever superlinear. The per-item
+    # collections below them — `Factor.levels`, `ProtocolArm.levels`, `ProtocolStep.components`,
+    # `Analytic.measures`, `EvidenceRef.supports` — are index-keyed, walked linearly, and bounded
+    # by the body cap alone. That is deliberate: a ceiling with no cost behind it is a refusal a
+    # chemist meets for no reason.
     factors: list[Factor] = Field(default_factory=list, max_length=50)
     arms: list[ProtocolArm] = Field(default_factory=list, max_length=1536)
     layout: PlateLayout | None = None
@@ -445,16 +459,28 @@ class ExperimentDesign(BaseModel):
         dangling = sorted({arm.replicate_of for arm in self.arms if arm.replicate_of} - set(ids))
         if dangling:
             raise ValueError(f"replicate_of names no arm in this design: {', '.join(dangling)}")
-        # **An arm cannot be a replicate of itself**, which the two guards around this one could not
-        # see: the name is not dangling, and the conditions trivially match. It silenced both
-        # readers at once — `arms_are_distinct` skips every arm carrying `replicate_of`, and
-        # `coverage_is_stated` counts none of them — so three identical arms reported "no unmarked
-        # duplicate conditions" and a grid coverage of zero.
-        itself = sorted(arm.arm_id for arm in self.arms if arm.replicate_of == arm.arm_id)
-        if itself:
+        # **A replicate chain has to terminate**, and testing `arm.replicate_of == arm.arm_id` was
+        # only the length-1 case of that. A 2-cycle (A1→A2→A1) names no arm that does not exist and
+        # no arm that is itself, so it walked straight past — and reproduced the defect verbatim:
+        # `arms_are_distinct` skips every arm carrying `replicate_of` and `coverage_is_stated`
+        # counts none of them, so three identical arms in a ring reported "no unmarked duplicate
+        # conditions" over a grid coverage of zero. Following each chain to its end is the
+        # invariant that was actually wanted.
+        parent = {arm.arm_id: arm.replicate_of for arm in self.arms}
+        looped: list[str] = []
+        for start in parent:
+            seen, node = {start}, parent[start]
+            while node:
+                if node in seen:
+                    looped.append(start)
+                    break
+                seen.add(node)
+                node = parent.get(node, "")
+        if looped:
             raise ValueError(
-                f"these arms name themselves in replicate_of: {', '.join(itself)}. A replicate "
-                "names the arm it repeats, which is a different arm"
+                f"replicate_of forms a cycle through these arms: {', '.join(sorted(looped))}. "
+                "A replicate names the arm it repeats, and that chain has to end at an arm that "
+                "is not itself a replicate"
             )
         # **A replicate has to run the same conditions**, which is the second half of the same
         # hole. `replicate_of` naming a *real* arm with different levels was accepted, and it
@@ -466,12 +492,18 @@ class ExperimentDesign(BaseModel):
         # answer. An arm that varies something is not a replicate, and clearing `replicate_of` is
         # what says so.
         by_id = {arm.arm_id: arm for arm in self.arms}
+        # **`setpoints_for`, not `arm.setpoints`** — the *effective* conditions, which is the
+        # definition `checks.arms_are_distinct` uses when it tells a chemist to mark a repeat with
+        # `replicate_of`. Comparing the raw overrides refused arms whose conditions are provably
+        # identical (one stating nothing and inheriting, one restating the body verbatim), so the
+        # check prescribed a remedy this validator rejected — the exact contradiction the check's
+        # own comment claims to have closed, re-opened by fixing only one side of it.
         differing = [
             arm.arm_id
             for arm in self.arms
             if arm.replicate_of
-            and (arm.levels, arm.setpoints)
-            != (by_id[arm.replicate_of].levels, by_id[arm.replicate_of].setpoints)
+            and (arm.levels, self.setpoints_for(arm))
+            != (by_id[arm.replicate_of].levels, self.setpoints_for(by_id[arm.replicate_of]))
         ]
         if differing:
             raise ValueError(

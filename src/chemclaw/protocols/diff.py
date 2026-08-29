@@ -134,10 +134,14 @@ def _labelled(items: list[Any], identifier: str | None) -> list[tuple[str, Any]]
         str(item.get(identifier, index)) if isinstance(item, dict) else str(index)
         for index, item in enumerate(items)
     ]
-    # `Counter`, not `labels.count(label)` in a comprehension: that is O(n²) over a list whose
-    # length a browser chooses through `POST /protocols/{id}/revisions`, and it measured **46 s of
-    # blocked event loop** for one authenticated request inside every declared bound — the 4 MB
-    # body cap and the per-principal rate limit both bound size and count, neither bounds cost.
+    # `Counter`, not `labels.count(label)` in a comprehension, which is O(n²) over a list whose
+    # length a browser chooses through `POST /protocols/{id}/revisions`. That scan measured **46 s
+    # of blocked event loop** for one authenticated request — but on a payload that predated the
+    # `max_length` ceilings and can no longer be posted, so **the ceilings are what closed that,
+    # not this line.** At the largest list those ceilings now admit (1536, a full plate) the scan
+    # costs 22.4 ms against this `Counter`'s 0.107 ms, and the whole largest legal design diffs in
+    # 0.060 s. The right claim for `Counter` here is that it keeps a bounded cost flat rather than
+    # quadratic in the bound; the earlier comment credited it with the 46 s, which was false.
     repeated = {label for label, n in Counter(labels).items() if n > 1}
     seen: Counter[str] = Counter()
     resolved: list[str] = []

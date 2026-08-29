@@ -317,7 +317,9 @@ def test_set_status_on_an_unknown_design_is_refused(backend: str) -> None:
     async def _body() -> None:
         store = await _backend(backend)
         with pytest.raises(UnknownDesign, match="no design"):
-            await store.set_status(_id(backend, "ghost"), "approved", "chemist-a")
+            await store.set_status(
+                _id(backend, "ghost"), "approved", expected_revision=1, actor="chemist-a"
+            )
 
     _run(_body)
 
@@ -330,7 +332,7 @@ def test_set_status_moves_a_design_a_write_never_would(backend: str) -> None:
         await store.append(
             design_id, _design(), [], kind="protocol", author_kind="agent", status="draft"
         )
-        await store.set_status(design_id, "approved", "chemist-a")
+        await store.set_status(design_id, "approved", expected_revision=1, actor="chemist-a")
         summary = await store.summary(design_id)
         assert summary is not None and summary.status == "approved"
 
@@ -372,7 +374,7 @@ def test_the_one_automatic_status_transition_and_the_two_that_are_not(backend: s
         second = await store.summary(design_id)
         assert second is not None and second.status == "draft"
 
-        await store.set_status(design_id, "approved")
+        await store.set_status(design_id, "approved", expected_revision=2)
         await store.append(
             design_id,
             _design(),
@@ -389,7 +391,7 @@ def test_the_one_automatic_status_transition_and_the_two_that_are_not(backend: s
             "for a document nobody signed off"
         )
 
-        await store.set_status(design_id, "abandoned")
+        await store.set_status(design_id, "abandoned", expected_revision=3)
         await store.append(
             design_id,
             _design(),
@@ -423,7 +425,13 @@ def test_every_status_the_type_allows_is_a_status_the_schema_accepts(backend: st
             design_id, design, run_checks(design), kind="protocol", author_kind="agent"
         )
         for status in get_args(DesignStatus):
-            await store.set_status(design_id, status, "chemist-a", f"moving to {status}")
+            await store.set_status(
+                design_id,
+                status,
+                expected_revision=1,
+                actor="chemist-a",
+                reason=f"moving to {status}",
+            )
             summary = await store.summary(design_id)
             assert summary is not None and summary.status == status
 
@@ -470,7 +478,13 @@ def test_a_status_move_records_which_revision_it_was_made_against(backend: str) 
         await store.append(
             design_id, design, run_checks(design), kind="protocol", author_kind="agent"
         )
-        await store.set_status(design_id, "approved", "chemist-a", "80 C is the precedent")
+        await store.set_status(
+            design_id,
+            "approved",
+            expected_revision=1,
+            actor="chemist-a",
+            reason="80 C is the precedent",
+        )
 
         # The revision that un-approves it.
         await store.append(
@@ -508,8 +522,12 @@ def test_status_history_is_newest_first_and_empty_before_any_move(backend: str) 
         )
         assert await store.status_history(design_id) == []
 
-        await store.set_status(design_id, "approved", "chemist-a", "fine")
-        await store.set_status(design_id, "executed", "chemist-b", "ran it Tuesday")
+        await store.set_status(
+            design_id, "approved", expected_revision=1, actor="chemist-a", reason="fine"
+        )
+        await store.set_status(
+            design_id, "executed", expected_revision=1, actor="chemist-b", reason="ran it Tuesday"
+        )
         events = await store.status_history(design_id)
         assert [event.status for event in events] == ["executed", "approved"]
         assert [event.reason for event in events] == ["ran it Tuesday", "fine"]

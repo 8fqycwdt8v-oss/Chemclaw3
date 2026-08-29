@@ -81,6 +81,27 @@ outlives all of this: deepagents builds a bare `SubAgent` dict with *only* `spec
 anything not compiled by `build_langgraph_agent` runs with no audit trail, no authz and no plan
 gate — silently.
 
+**There is, however, exactly one subagent, on every turn, and this file used to omit it**
+(`D-2026-08-29-a-helper-is-cheaper-and-narrower-than-its-caller`). `SubAgentMiddleware` is in
+`create_deep_agent`'s `_REQUIRED_MIDDLEWARE` and `_apply_excluded_middleware` *raises* rather than
+let a profile strip it, so `task` ships whether or not this deployment wants helpers and the only
+decidable thing is what it reaches: `agent/subagents.py` claims upstream's `general-purpose` name —
+the one suppression that is a string comparison rather than a registry lookup that fails open on a
+model swap — so the roster is a graph `build_langgraph_agent` compiled, carrying the whole chain.
+Reading the deletion paragraph above as "no delegation" is therefore wrong in the direction that
+matters, and it stayed wrong long enough for the helper's surface to drift from its description:
+the `task` tool said isolation and parallel reading while the helper held its caller's **54**
+in-process tools, nine `run_*` launchers and `propose_knowledge_note` among them. It now holds
+**24** — its caller's set minus `authz.side_effecting_tools()` (derived from the partition that
+already exists, so a bundle added next year is out of reach the day it is enabled) and minus
+`ask_clarifying_question`, which changes nothing and still writes a question onto the *chemist's*
+stream from a context the chemist cannot see. `AgentProfile.model_route` names a key in
+`model_routes` — a key, never a model id, which would be a site's model name in git — so
+`CHEMCLAW_MODEL_ROUTES='{"helper": "…"}'` makes delegated reading cheaper with no code change.
+**The delegation question is still open**: the corpus that was supposed to settle it measured
+delegation *rate* over one-tool probes, which is a mediator rather than an outcome and gave
+isolation no mechanism to appear.
+
 **That sweep missed one, and 2026-08-26 finished it**
 (`D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution`): `audit_events.agent` was
 empty on **every row that trail has ever written**, because `set_current_specialist` had no caller
@@ -151,9 +172,15 @@ kwarg — the per-provider translation everyone expects turned out not to exist 
 (`D-2026-08-29-a-tool-schema-nobody-calls-is-still-paid-for`): deferring connector tool schemas.
 Measuring for it found the prefix is **33,310 tokens over 56 bound tools**, re-sent every model
 call and uncached on the shipped `openai_compatible` stack — and that
-`tests/test_context_floor.py`, the ratchet that exists to bound this, counts **7,799 fewer** than
-the model is sent, because `@tool` is identity so it measures raw callables rather than the bound
-objects, and never sees the seven `FilesystemMiddleware`/`SubAgentMiddleware` tools at all.
+`tests/test_context_floor.py`, the ratchet that exists to bound this, counted **7,799 fewer** than
+the model was sent, because `@tool` is identity so it measured raw callables rather than the bound
+objects, and never saw the seven `FilesystemMiddleware`/`SubAgentMiddleware` tools at all.
+**That second half is closed.** `_bound_tools` now reads the surface off the compiled graph's
+`ToolNode` — so any future tool source lands in the count the moment it is bound — and every
+ceiling was re-baselined in one commit: `default` measures **42,458** where the old basis reported
+34,399, six tools turned out to have been over `MAX_SINGLE_TOOL_TOKENS` all along, and **nothing
+was added**. The number grew because the measurement got honest, not because the surface did.
+The deferral itself stands.
 
 M13 removed the dependency itself: `agent-framework-*` is out of `pyproject.toml` and the suite is
 green with it uninstalled, which is how that was verified. Taking it out is also what exposed

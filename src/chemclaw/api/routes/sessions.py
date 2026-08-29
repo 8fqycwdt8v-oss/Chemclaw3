@@ -191,23 +191,28 @@ async def list_sessions(
     # front door handed some other registry through `create_app(owner_store=...)` can answer the
     # first page and nothing further, and saying so is better than silently answering the first
     # page again and leaving a client to page forever.
+    # **The cursor is advertised in the branch that can honour it, and nowhere else.** It used to
+    # be set on any full page, so a deployment whose `create_app(owner_store=...)` registry is not
+    # a `SessionOwnerStore` answered `200` with an `X-Next-Cursor` and then `422` to the client
+    # that followed it — the route telling a caller to do the one thing it refuses. Absent is
+    # already this header's word for "there is no next page", and for such a registry there is not.
     if isinstance(owners, SessionOwnerStore):
         try:
             rows = await owners.page_for_owner(principal.oid, after=after or None)
         except ValueError as exc:  # a cursor this service did not mint
             raise HTTPException(status_code=422, detail="not a session cursor") from exc
+        if len(rows) == settings.service_max_listed_sessions:
+            # A full page is the only evidence there might be more — asking for one row beyond the
+            # ceiling to know for sure would cost every listing an extra row to answer a question
+            # the next request answers for free by coming back empty.
+            last_id, _, last_activity = rows[-1][:3]
+            response.headers[_NEXT_CURSOR] = encode_session_cursor(last_activity, last_id)
     elif after:
         raise HTTPException(
             status_code=422, detail="this deployment's session registry cannot resume a listing"
         )
     else:
         rows = await owners.list_for_owner(principal.oid)
-    if len(rows) == settings.service_max_listed_sessions:
-        # A full page is the only evidence there might be more — asking for one row beyond the
-        # ceiling to know for sure would cost every listing an extra row to answer a question the
-        # next request answers for free by coming back empty.
-        last_id, _, last_activity = rows[-1][:3]
-        response.headers[_NEXT_CURSOR] = encode_session_cursor(last_activity, last_id)
     return [
         SessionSummary(
             session_id=session_id, created_at=created_at, updated_at=updated_at, title=title

@@ -1,134 +1,89 @@
-# Anthropic Agent SDK features worth having here — implementation
+# The remaining actionable parts of C, D and E
 
-Four items came out of an audit of the Claude Agent SDK against this repository's LangGraph
-stack. Three are implemented here; the fourth is a design pass, because it touches the
-middleware chain and the ADR has to come before the edit.
+Follow-up to `D-2026-08-29-a-helper-is-cheaper-and-narrower-than-its-caller`, which investigated
+C (per-helper connector sessions), D (an advisor) and E (a second roster name) and built none of
+them. What each investigation left actionable *now*, as distinct from what it left to a measurement:
 
-## 1. A turn's *spend* cap, beside its *iteration* cap — DONE
+## C — the stated reason is not the binding one
 
-**The gap, corrected against the code rather than the prose.** The proposal said "Chemclaw only
-caps by call count". That was half wrong: `api/budget.py` already meters tokens. What it does
-with them is the gap — `check()` runs *before* a turn against usage already booked, and
-`record()` books the turn *after* it finished. Nothing bounds spend **inside** a turn, and
-`api/budget.py`'s own docstring states the belief that leaves the hole: "A single agent turn is
-already iteration-capped, so one turn cannot loop forever." That caps *iterations*, not tokens.
-A turn inside its 25-call ceiling can bill unboundedly — a wide fan-out of large tool results
-against a 200k context is ~25 calls and millions of tokens — and the session budget finds out
-one turn too late.
+- [x] `agent/subagents.py` and `langgraph_agent._subagents` both give "two concurrent turns over one
+      MCP tool object deadlock" as why a helper reaches no connector. That measurement is real and
+      it is about **sharing one session object**; a helper holding sessions of its own shares
+      nothing, and `open_connector_specs` already opens a fleet concurrently by design.
+- [x] Replace it with the constraint that actually binds — the lifecycle — which is also the
+      stronger argument: connectors are opened by the *async caller* into an `AsyncExitStack`
+      before the *synchronous* builder runs, and the roster is frozen per compiled graph, so a
+      per-helper set means a second full set opened eagerly on every turn.
+- [x] `tests/test_subagents.py::test_a_helper_holds_no_connector_tool` cites the same wrong reason.
+- [x] Behaviour unchanged. The BACKLOG row keeps the behavioural half, gated on the measurement.
 
-- [x] `agent/spend_cap.py`: meter in `wrap_model_call`, enforce in `before_model`
-- [x] `billed_tokens` (`TurnTotal`) and `spend_capped` (`TurnFlag`) channels on `ChemclawState`
-- [x] `agent_max_turn_billed_tokens` setting (0 = off, matching `_over`'s convention)
-- [x] wire into `_middleware()` beside the loop cap
-- [x] `spend_cap_reached` error code + `chemclaw_turn_spend_caps_total` + runner event
-- [x] tests on a **compiled graph**, not on the hook
+## D — the guard the advisor investigation exposed, fixed without building the advisor
 
-**Two design points, both measured rather than assumed.**
+- [x] `tests/test_spend_cap.py::test_no_in_tool_model_call_passes_its_own_callbacks` guards the
+      chain that puts a tool body's model call on the turn's ledger — and it guards it in
+      **`agent/condense.py`**, by name. A second in-tool model call walks past it in silence.
+- [x] The realistic mistake is not hypothetical: `verifier.py` passes `config=off_stream_metering()`
+      deliberately, and `off_stream_metering`'s own docstring says attaching it to an in-graph call
+      would take that call off the stream. Copying that line into a tool body is one edit.
+- [x] Derive the module set instead: every module that defines a registered tool **and** makes a
+      model call. Module granularity, not per-function — in `condense.py` the `.ainvoke` is in
+      `_read_prose`, and the tool is `condense_protocols`, so a per-function scan misses it.
+- [x] The advisor itself is **not** built: it cannot be enabled without a second model tier this
+      deployment does not have, which is the shape `D-2026-08-15` deleted 3,300 lines for.
 
-*Why `before_model` enforces.* `D-2026-08-15-an-after-model-counter-is-a-counter-that-can-be-skipped`
-— an `after_model` counter is short-circuited by any middleware that jumps from `after_model`.
-`before_model` cannot be skipped. This is the same slot `loop_cap` occupies, for the same reason.
+## E — nothing to implement, and saying so is the deliverable
 
-*Why the count is a state channel and not the ambient.* The turn's spend has to cross the
-subagent boundary or a fan-out gets one budget each — regression 3 in `agent/loop_cap.py`'s
-list. `TurnTotal` already folds concurrent writes additively. Probed on a compiled graph before
-committing to it: `wrap_model_call` returning `ExtendedModelResponse(command=Command(update=…))`
-reaches the channel and `before_model` reads it back — `[0, 100, 200]`, final `300`. The first
-probe wrote a channel `ChemclawState` did not declare and LangGraph dropped it in silence,
-which is the failure `tests/test_state_channels.py` exists to catch and is why the probe came
-before the design.
+- [x] The recommendation was to leave it closed; the BACKLOG row already carries the trigger. No
+      code follows from "not yet", and adding a second roster name to be ready for one is the
+      capability-that-ships-off shape again.
 
-## 2. Session fork — DONE
+## Verification
 
-Branch a thread at its current checkpoint without mutating the original.
-
-- [x] `agent/session_fork.py` — the copy, as SQL
-- [x] `POST /sessions/{session_id}/fork`, authorized by the existing `resolve_session`
-- [x] tests against a real Postgres schema
-
-**Three things the research turned up that a naive fork gets wrong:**
-- Every checkpoint PK leads with `thread_id`, so the fork is an `INSERT … SELECT` with the id
-  swapped — no LangGraph API needed, and none exists (`adelete_thread` is the only thread-level verb).
-- `checkpoint_blobs` is keyed `(thread_id, ns, channel, version)` and is **shared across a
-  thread's checkpoints**, so copying only the tip loses channel values written at an earlier
-  version. The whole thread is copied.
-- A fork with no `session_messages` rows is **invisible** to `GET /sessions`: the owner listing
-  `LATERAL`-joins `max(created_at)` and drops sessions with none. The transcript is copied too.
-- The fork inherits the parent's **profile**, because a profile is attenuation-only and
-  restoring the default would silently widen the tool surface.
-
-## 3. Per-profile effort — DONE
-
-- [x] `effort` on `AgentProfile` and `llm_effort` in settings
-- [x] per-provider translation, gated the way `prompt_caching_middleware` is
-- [x] tests asserting the constructed client, and asserting absence when unset
-
-**Why this is not one shared kwarg.** The shipped chart runs `openai_compatible` against
-`gpt-oss`, where `reasoning_effort` is a real parameter; `ChatAnthropic` has no such parameter
-and spells the same idea `thinking={"type": "enabled", "budget_tokens": N}`, which additionally
-must be under `max_tokens` and refuses a set `temperature`. So it cannot join
-`_generation_options()`, whose contract is "caps both providers accept". An unset effort stays
-**absent** from the request, which is that module's existing rule and matters more here than
-elsewhere: a 400 from a rejected parameter is deliberately *not* failed over
-(`_failover_exceptions`), so a bad value fails every turn rather than degrading.
-
-## 4. Deferred connector tool schemas — DESIGN ONLY, NOT IMPLEMENTED
-
-The most valuable of the four and the only one that needs an ADR before an edit, which is what
-this item delivers. `docs/decisions/D-2026-08-29-a-tool-schema-nobody-calls-is-still-paid-for.md`
-states the measurement, the design, the three rejected alternatives and the restart condition.
-No code in `agent/` is touched.
+- [x] The derived scan finds exactly the module the hardcoded one named, and would fail on a
+      planted second offender.
+- [x] `make lint type test`, reporting what it skipped.
+- [x] Two ADRs, one decision each, and their ledger rows.
 
 ## Review
 
-**What shipped.** Three guards (`agent/spend_cap.py`, `agent/session_fork.py` +
-`POST /sessions/{id}/fork`, `AgentProfile.effort`), two ADRs, 21 new tests, and one design document
-for the fourth item. `make lint` and `make type` green.
+**Two of the three had an implementable part; E did not, and that is the finding rather than an
+omission.**
 
-**Four things found while building that were not the task.** Each is the same shape — a claim in
-prose that the code did not support — which is why they are listed rather than quietly fixed:
+**C — done, and the correction made the bound stronger rather than weaker.** The three places that
+said "two concurrent turns over one MCP tool object deadlock" now say what actually binds: a
+connector's tools do not exist until its session is live, so the async caller opens them into an
+exit stack *before* the synchronous builder runs, and `SubAgentMiddleware` freezes the roster at
+compile time — a helper cannot open sessions at spawn time even in principle, and its own set would
+mean a second full set opened eagerly on every turn, spawned or not. The deadlock measurement keeps
+the one job it fits, in `test_a_helper_holds_no_connector_tool`: it is why the caller's *already
+open* tools must not be passed down, which is the edit that test exists to catch. No behaviour
+changed.
 
-1. **My own first finding was wrong in the reassuring direction.** "Chemclaw only caps by call
-   count" — `api/budget.py` meters tokens and has done all along. The real gap was narrower and
-   more interesting: both its halves sit *outside* the turn. Writing the proposal from the
-   architecture docs rather than the code produced a finding that was true in outline and wrong in
-   the part that decides the design.
-2. **`tests/pg.py::create_checkpoint_tables` ran `MIGRATIONS[1:4]`** — three `CREATE TABLE`s, none
-   of the `ALTER`s — while its docstring claimed "the shape under test is the shape production
-   has". Invisible to every test that only `INSERT`s named columns; immediate for the first one
-   driving a real saver. Fixed here, since a fork test cannot exist without it.
-3. **`tests/test_context_floor.py` undercounts by 7,799 tokens (~24%)**, in a file whose docstring
-   argues its number "is the payload rather than an approximation of it". `@tool` is identity, so it
-   measures raw callables while `create_agent` binds larger wrapped objects (all 49 differ), and it
-   never sees the 7 `FilesystemMiddleware`/`SubAgentMiddleware` tools. **Not fixed here** — the
-   corrected floor (~39,983) exceeds the ceiling it would have to be measured against, and this
-   repository's rule is that raising a ceiling is its own deliberate commit. `BACKLOG.md` row added.
-4. **`events.py` said `loop_cap_reached` was the *only* error sharing its turn with an answer.**
-   True until this change, false after it; corrected in the same commit rather than left to rot.
+**D — the advisor is still not built, and the trap it exposed is closed.** Building it now would
+create a capability that cannot be enabled without a second model tier this deployment does not
+have, which is the exact shape `D-2026-08-15` deleted 1,442 lines for. What *was* implementable is
+the guard: `test_no_in_tool_model_call_passes_its_own_callbacks` scanned `agent/condense.py` **by
+name**, so it guarded one file rather than the invariant, and a second in-tool model call would have
+walked past it in silence — silence being the defect's own signature, since what fails is that spend
+stops being counted. It now derives its module set from the tool registry: every module that defines
+a registered tool *and* builds a model.
 
-**One thing deliberately not done.** Item 2 is designed and unbuilt. It changes what the model can
-see, inside the chain that authorizes tool calls, and its failure mode is a wrong answer that never
-names the capability it needed — not a slow turn. The ADR carries the measurement, three rejected
-alternatives, and an explicit **stop**: if the eval corpus cannot separate the deferred arm from the
-bound arm on *tool selection*, the schemas stay bound. That is the D-2026-08-12/13 precedent applied
-before the work rather than after it.
+*Two things that decided the derivation's shape, both found by looking rather than reasoning.*
+`agent/verifier.py` passes `config=off_stream_metering()` and is **right** to — a judge runs outside
+the graph where nothing else meters it — and it holds **zero** registered tools, so requiring both
+halves excludes it precisely; a naive "every module that builds a model" scan would have failed on
+correct code. And in `condense.py` the `.ainvoke` is in `_read_prose` while the tool is
+`condense_protocols`, so a per-function scan would have found **nothing** — module granularity is
+not looseness here, it is the only granularity that sees the one call there is to see.
 
-**A false alarm I raised and then disproved, kept because the reasoning error is the lesson.**
-Five `tests/test_api_sessions.py` tests failed with `psycopg.errors.UndefinedObject: operator class
-"bit_jaccard_ops" does not exist`, and I called them pre-existing and environmental on the strength
-of reproducing them on a stashed clean tree. That check was **confounded**: the full suite was
-running in the background at the time, so both arms ran two pytest sessions against one Postgres.
-With the suite finished the same five pass. The cause was concurrency, not the database.
-"Reproduces without my change" is not the same claim as "reproduces in isolation", and only the
-second one was worth making.
+**The new scan was verified to fail rather than assumed to.** A planted second module holding a
+registered tool and an `ainvoke(..., config=off_stream_metering())` failed the test naming the file
+and the line; the by-name scan passed on the same tree. Then removed.
 
-**One genuinely pre-existing failure, established the second way.**
-`tests/test_message_migration.py::test_erasure_still_works_where_the_checkpointer_has_never_run`
-fails with the same error *in isolation, on a stashed clean tree, with nothing else running* —
-which is the test the paragraph above should have been. Root cause is the sandbox database rather
-than the code: the `chemclaw` database has only `plpgsql` installed (`pg_extension` lists no
-`vector`, and `pg_am` has no `hnsw`), so the migration that builds a bit-vector index has no
-operator class to name. Untouched by this change and left alone.
+**E — nothing to implement, recorded in the row so nobody looks again.** Everything a second roster
+name needs already exists — `AgentProfile.model_route` for its model, `helper_profile` for its
+surface, `governed_roster` for its governance. What is missing is the reason, and a name added to be
+ready for one is the capability that ships off and stays off.
 
 `draft_experiment_protocol` **refuses a design with no precedent citation and no tool citation.** A
 protocol with neither is a guess, and the refusal is what makes "use the tools massively" a property

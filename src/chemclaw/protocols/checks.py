@@ -78,15 +78,22 @@ def _all_charge_lines(design: ExperimentDesign) -> list[ChargeLine]:
 def _structures(design: ExperimentDesign) -> list[tuple[str, str]]:
     """Every `(where, smiles)` the design names, so one pass can check them all.
 
-    **The reaction SMILES is in here, and its absence was a hole in two blockers.** It is the one
-    structure a design always has, and neither `components_resolve` (whose docstring says "every
-    structure the design names parses whole") nor `forbidden_absent` could see it: a request naming
-    `'CCO junk>>QQQ notreal'` cleared the parse blocker with a passing detail reading
-    `0 structures parse`.
+    **The reaction SMILES is deliberately NOT in here, and putting it in was a measured mistake.**
+    It reads like the one structure a design always has, so it was added to close a hole in
+    `components_resolve`. Two things broke at once. `forbidden_absent` reads this same set, and a
+    precedent's record form carries the *old* solvent in its agent slot — so the canonical
+    "get me out of DMF" design, whose own solvent is 2-MeTHF, was refused at intake with "the
+    design uses reagents the request forbids: DMF", permanently and with no way to state both the
+    precedent and the exclusion. And an agent block is routinely written as a *name* rather than a
+    structure, so `CCO.CC(=O)Cl>DMF>CCOC(C)=O` became a blocker while `A>B>C>D` and
+    `Suzuki coupling` passed, because the gate was triggered by counting `>`.
+
+    The distinction the hole and the fix both missed: `reaction_smiles` says what is being *asked
+    for*; this set says what the design *does*. `atom_balance` reads the reaction on its own terms
+    and reports an unreadable species as a failed warning, which is the right severity for a field
+    that is free text by declaration (`models.py`: "Empty for an ask that is not one").
     """
     found: list[tuple[str, str]] = []
-    for side, species in _reaction_species(design.request.reaction_smiles):
-        found.append((f"reaction {side}", species))
     for component in design.request.components:
         if component.smiles:
             found.append((f"request component {component.name_as_written!r}", component.smiles))
@@ -270,22 +277,6 @@ def _split_species(side: str) -> list[str]:
     return [part for part in side.split(".") if part]
 
 
-def _reaction_species(reaction: str) -> list[tuple[str, str]]:
-    """Every `(side, smiles)` in a reaction SMILES, or nothing when it is not one.
-
-    Both forms, as `atom_balance` reads them: `a>>c` and the record form `a>b>c` that
-    `ingest.eln.ord.reaction_smiles()` emits.
-    """
-    parts = reaction.strip().split(">")
-    if len(parts) != 3:
-        return []
-    return [
-        (side, species)
-        for side, block in zip(("reactants", "agents", "products"), parts, strict=True)
-        for species in _split_species(block)
-    ]
-
-
 def factor_levels_declared(design: ExperimentDesign) -> ProtocolCheck:
     """Every arm sets levels its factors declare, and sets all of them."""
     declared = {f.name: {level.label for level in f.levels} for f in design.factors}
@@ -380,8 +371,10 @@ def layout_fits(design: ExperimentDesign) -> ProtocolCheck:
     # missing, never one placed twice. Measured: three wells over two arms with A1 in two of them
     # passed as `3 of 96 wells used`, and `run_sheet_rows` — which keys wells by arm — then dropped
     # a well, so the chemist's run sheet started at run 2 and put A1 at the wrong position.
-    # `Counter` rather than `list.count` in a comprehension, which is the O(n²) shape that made one
-    # request block the event loop for 46 s (`diff._labelled`).
+    # `Counter` rather than `list.count` in a comprehension — the O(n²) shape `diff._labelled`
+    # carried, kept out of a second place for the same reason and with the same honest weight: at
+    # this list's ceiling (1536 wells) that scan is 22 ms, not the 46 s measured before the
+    # ceilings existed.
     occupants = Counter(w.arm_id for w in layout.wells)
     twice = sorted(arm for arm, n in occupants.items() if n > 1)
     if twice:
@@ -643,10 +636,14 @@ def coverage_is_stated(design: ExperimentDesign) -> ProtocolCheck:
     real = len([a for a in design.arms if not a.control and not a.replicate_of])
     if real >= full:
         return _ok("coverage_is_stated", "note", f"full grid: {real} of {full} combinations")
-    # Failed, so it reaches the page. This was the extreme case of the same defect: the check had
-    # no `_fail` in any branch, so its only substantive sentence — the one naming the confounding a
-    # reduced design buys — could not reach a reader through any rendering path.
-    return _fail(
+    # **Passing, and the sentence reaches the page anyway** — `render_markdown` now lists every
+    # `note`, not only failed checks. Flipping this to `_fail` was the wrong half of the fix: a
+    # fractional factorial is a deliberate, textbook design and `generate_screening_design` emits
+    # them, so every correct reduced plate reported a failed check it could not clear — the check
+    # reads only factors and arms, and nothing in `ExperimentDesign` records the confounding
+    # statement it asks for. That is this file's own `_REQUEST_STAGE` warning, one severity down:
+    # a check that fires on the normal path is one a reader learns to ignore.
+    return _ok(
         "coverage_is_stated",
         "note",
         f"reduced design: {real} of {full} combinations. Say which combinations were given up and "

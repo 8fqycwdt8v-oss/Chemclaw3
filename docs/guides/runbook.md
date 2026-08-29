@@ -1015,6 +1015,19 @@ Two things to know before reading any of them:
 already lost are not recoverable — `durable/retention.py` refuses to prune this table for the same
 reason this is critical.
 
+#### ChemclawDeliveryChannelFailing
+`warning`. An outbound channel is refusing messages, and the digest that could not be sent was
+**still acknowledged** — the watermark turns on the in-app mailbox, deliberately, so nothing
+retries this. Recipients on that channel are simply not being reached, and the notes it covered
+will not re-qualify. The `channel` label names the folder; the `deliver.channel_failed` log marker
+carries the driver and the error. Check the destination first (a rotated webhook secret and a
+retired URL are the two common ones), then `CHEMCLAW_DELIVERY_CHANNELS` against the folders on
+`CHEMCLAW_DELIVERY_CHANNELS_DIR`.
+
+This counter and `chemclaw_deliveries_total` are the pair worth reading together: one channel at
+zero while another climbs is a broken destination, and both at zero with delivery configured is an
+outage of the seam itself.
+
 #### ChemclawVerifierDegraded
 `warning`. Answers are being scored by the citation gate instead of the judge, so every affected
 turn goes to human review: this is a review-queue load signal as much as a model one. Check the
@@ -1035,6 +1048,18 @@ workers: `ChemclawTargetDown` covers the pods, this covers the thing they dial. 
 fail a finished calculation. Usual causes are a dead git remote, an expired push credential, or two
 processes sharing one `note_repo_dir`. §(ix) is the PR-gate queue; the notes lost here never reached
 it.
+
+#### ChemclawKnowledgeCorpusStale
+`warning`, and **only rendered when `monitoring.alerts.knowledgeCorpusStaleSeconds` is non-zero** —
+the chart ships it at 0 because the threshold is how often *your* chemists merge notes. The same
+failure as the alert above in the other direction: notes reach the PR-gate and stop reaching the
+pods. `knowledge-sync.sh`'s `loop` swallows a failed refresh on purpose (a dead remote must not kill
+the pod), so the pod serves the frozen snapshot indefinitely and every answer keeps citing it.
+`chemclaw_knowledge_sync_age_seconds` is the age of the newest note on that pod's tree; **-1 means
+the tree holds no note at all**, which is a volume that was never populated rather than a stale one.
+Read the sync sidecar's log and its restart count (its `staleness` liveness probe is the sync-side
+half of this signal) before concluding the corpus is merely quiet — this gauge cannot tell those
+two apart, which is why its threshold is yours to state.
 
 ### chemclaw.correctness — an invariant is at risk
 

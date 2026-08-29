@@ -426,7 +426,8 @@ def test_moving_a_designs_status_answers_204(
 ) -> None:
     _seed(store, _design(), status="draft")
     response = client.post(
-        f"/protocols/{_DESIGN_ID}/status", json={"status": "approved", "reason": "looks right"}
+        f"/protocols/{_DESIGN_ID}/status",
+        json={"status": "approved", "expected_revision": 1, "reason": "looks right"},
     )
     assert response.status_code == 204
     assert response.content == b""
@@ -448,7 +449,11 @@ def test_the_reason_the_ui_makes_mandatory_is_actually_recorded(
     _seed(store, _design(), status="draft")
     client.post(
         f"/protocols/{_DESIGN_ID}/status",
-        json={"status": "abandoned", "reason": "the SM decomposes above 40 C"},
+        json={
+            "status": "abandoned",
+            "expected_revision": 1,
+            "reason": "the SM decomposes above 40 C",
+        },
     )
 
     events = asyncio.run(store.status_history(_DESIGN_ID))
@@ -468,7 +473,8 @@ def test_reading_a_design_carries_who_signed_off_on_which_revision(
     """
     _seed(store, _design(), status="draft")
     client.post(
-        f"/protocols/{_DESIGN_ID}/status", json={"status": "approved", "reason": "80 C is right"}
+        f"/protocols/{_DESIGN_ID}/status",
+        json={"status": "approved", "expected_revision": 1, "reason": "80 C is right"},
     )
 
     body = client.get(f"/protocols/{_DESIGN_ID}").json()
@@ -478,8 +484,50 @@ def test_reading_a_design_carries_who_signed_off_on_which_revision(
     assert body["status_history"][0]["actor"] == _OID
 
 
+def test_a_sign_off_against_a_stale_revision_is_a_409(
+    client: TestClient, store: InMemoryDesignStore
+) -> None:
+    """The approver names the revision they read, and a colleague's save refuses the sign-off.
+
+    Without it `set_status` stamped whatever `head_revision` had become by the time it ran, so a
+    chemist who opened revision 1, thought about it, and clicked Approve while somebody saved
+    revision 2 signed a document they had never seen — and the status-event table, which exists to
+    say *which* document was signed, recorded revision 2 with their name on it. This is the same
+    control, the same status and the same machine-readable code as an edit against a stale parent.
+    """
+    _seed(store, _design(), status="draft")
+    _seed(store, _design(arms=2), status="draft", parent_revision=1)
+
+    response = client.post(
+        f"/protocols/{_DESIGN_ID}/status",
+        json={"status": "approved", "expected_revision": 1, "reason": "read revision 1"},
+    )
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "revision_conflict"
+    # And nothing was recorded: a refused sign-off is not a quieter sign-off.
+    assert asyncio.run(store.status_history(_DESIGN_ID)) == []
+
+    named = client.post(
+        f"/protocols/{_DESIGN_ID}/status",
+        json={"status": "approved", "expected_revision": 2, "reason": "read revision 2"},
+    )
+    assert named.status_code == 204
+    assert asyncio.run(store.status_history(_DESIGN_ID))[0].revision == 2
+
+
+def test_a_sign_off_that_names_no_revision_is_refused(
+    client: TestClient, store: InMemoryDesignStore
+) -> None:
+    """422 rather than a default to the head — the default is what the field exists to remove."""
+    _seed(store, _design(), status="draft")
+    response = client.post(f"/protocols/{_DESIGN_ID}/status", json={"status": "approved"})
+    assert response.status_code == 422
+
+
 def test_moving_an_unknown_designs_status_is_a_404(client: TestClient) -> None:
-    response = client.post("/protocols/design-nothing/status", json={"status": "approved"})
+    response = client.post(
+        "/protocols/design-nothing/status", json={"status": "approved", "expected_revision": 1}
+    )
     assert response.status_code == 404
 
 
@@ -488,7 +536,10 @@ def test_a_status_that_is_not_a_status_is_refused(
 ) -> None:
     _seed(store, _design())
     assert (
-        client.post(f"/protocols/{_DESIGN_ID}/status", json={"status": "in-progress"}).status_code
+        client.post(
+            f"/protocols/{_DESIGN_ID}/status",
+            json={"status": "in-progress", "expected_revision": 1},
+        ).status_code
         == 422
     )
 

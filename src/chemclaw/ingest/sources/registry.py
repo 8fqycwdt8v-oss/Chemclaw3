@@ -174,10 +174,18 @@ def _build_ingest_half(manifest: DataSourceManifest) -> Any:
     rdkit are in the registry's closure before this line and a module-scope import here would cost
     nothing today. It is written lazily anyway because that dependency is an accident of where a
     Protocol happens to live, and this file's stated property should not rest on it.
+
+    **An ingest half is told which source it is, exactly as a retrieve half is**, and for the
+    reason stated there: a half that guesses its own name collapses two instances of one engine
+    into one identity. Here the identity is the rejection ledger's `source` — `ingest_rejections`
+    is keyed `(source, entry_id)` and its eviction cap is per source, so two ORD drop directories
+    filing under one hardcoded name would share a bucket and mis-attribute each other's refusals.
+    Passed to *every* ingest half rather than to the ones that need it, so "an ingest half knows
+    its own name" is part of the contract and not a rule the next adapter can fall outside of.
     """
     from chemclaw.ingest.eln.adapter import DatedIngest
 
-    return DatedIngest(_build_half(manifest, manifest.ingest or ""))
+    return DatedIngest(_build_half(manifest, manifest.ingest or "", name=manifest.name))
 
 
 def _build_retrieve_half(manifest: DataSourceManifest) -> Any:
