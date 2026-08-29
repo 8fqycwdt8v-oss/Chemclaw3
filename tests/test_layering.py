@@ -691,8 +691,11 @@ def test_core_has_one_lazy_exception_and_the_dict_says_which() -> None:
 
     `chemclaw.core` is imported by every entrypoint first, which is why a lazy edge out of it is a
     measurement worth keeping at exactly one: each is a place where the shared kernel reaches back
-    into a layer above it, deferred to call time so the import graph stays acyclic. The other two
-    entries in `_ALLOWED_LAZY_EDGES` do not originate in `core` and say nothing about this.
+    into a layer above it, deferred to call time so the import graph stays acyclic. The remaining
+    entries in `_ALLOWED_LAZY_EDGES` do not originate in `core` and say nothing about this — a
+    count is deliberately not written here, because the sentence that said "the other two" went
+    stale in the very commit that added a third, three lines from the data that refutes it, in the
+    file whose closing paragraph is about exactly that.
 
     The comment above the dict claimed "there is exactly one left" of the whole dict, and stayed
     there through two additions — a count in prose, three lines from the data that refutes it, in

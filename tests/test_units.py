@@ -259,3 +259,21 @@ def test_no_prefix_is_registered_on_one_ladder_and_not_the_other() -> None:
         f"{sorted(unpaired)} exist on one of the concentration/length ladders and not the "
         "other, so each resolves silently to whichever family has it instead of refusing"
     )
+
+
+def test_reconcile_refuses_a_basis_mismatch_the_way_compare_does() -> None:
+    """The two public comparison entry points must agree, and only one had the check.
+
+    `reconcile` is the one a ledger actually calls (`report_measurement` goes through it), and it
+    consulted `basis` not at all — so the exact mismatch `compare` was taught to refuse was silently
+    permitted on the path that writes to the calibration ledger. Fixing one and leaving its sibling
+    is how an area percent reaches a weight-percent column.
+    """
+    with pytest.raises(UnitError):
+        reconcile(0.15, "area%", "% w/w")
+    # Capitalised too, because `parse_unit` is case-insensitive and the basis map now is as well.
+    with pytest.raises(UnitError):
+        reconcile(0.15, "Area%", "% W/W")
+    # An unstated basis on either side is "nobody said" and must not block an ordinary conversion.
+    assert reconcile(0.15, "area%", "%") == pytest.approx(0.15)
+    assert reconcile(0.15, "%", "area%") == pytest.approx(0.15)

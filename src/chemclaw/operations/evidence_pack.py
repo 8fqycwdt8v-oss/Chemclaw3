@@ -42,6 +42,7 @@ from pydantic import BaseModel, Field
 
 from chemclaw.core import db
 from chemclaw.core.config import settings
+from chemclaw.operations.activity import safe_tool_name
 
 #: The sentences the pack refuses to let a reader supply for themselves. Carried on every pack.
 LIMITS: tuple[str, ...] = (
@@ -199,7 +200,12 @@ async def assemble(session_id: str, *, limit: int = 200) -> EvidencePack:
     """
     calls = [
         ToolCall(
-            tool=str(tool),
+            # Bounded the same way `activity.tool_usage` bounds it, and for the same reason:
+            # `audit_events.tool` is the model's raw string, not a registered name. The
+            # sanitisation went into one reader of this column and not its sibling in the same
+            # package — the ownership gate narrows this to same-session replay rather than
+            # cross-session, but the pack is also the artefact a person reads.
+            tool=safe_tool_name(str(tool)),
             outcome=str(outcome),
             actor=str(actor),
             at=_stamp(ts),

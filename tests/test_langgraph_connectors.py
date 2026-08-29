@@ -445,5 +445,5 @@ def test_compiling_the_graph_per_turn_stays_within_the_maf_agent_build_budget() 
     )
     print(
         f"\nper-turn graph compile: {per_compile_ms:.0f} ms median, {samples_ms} raw "
-        "(~33 ms unloaded, of which ~14 ms is the helper graph; prior agent build baseline ~90 ms)"
+        "(~50 ms unloaded here; baseline ~90 ms — the docstring carries the history)"
     )

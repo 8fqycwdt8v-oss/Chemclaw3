@@ -23,7 +23,7 @@ implement it.** Not a missing control — a *described* one. The list is uncomfo
 - `api/mcp_face.py` documented at length what its read-only surface exports. It exported **nothing**:
   the capability-tool registry is filled by import side effect and the face never imported the
   modules that fill it, so the pod logged "serving 0 read-only tool(s)" and answered `tools/list`
-  with an empty array. Five tests passed because the test file imports the seeder itself.
+  with an empty array. Six tests passed because the test file imports the seeder itself.
 - `api/routes/pending.py` says "'I asked the QA lead to approve this' must not mean 'and I may
   approve it myself'". The only producer of approval waits raised them with `asked_of` unset, which
   takes the "anyone authenticated" branch — so the requester could approve their own irreversible
@@ -44,8 +44,8 @@ implement it.** Not a missing control — a *described* one. The list is uncomfo
 - `core/units.py` says case separates molarity from length. It does, for `M`/`m` and `mM`/`mm` —
   the two pairs its test covers — and `nM` resolved to *nanometre* while `µm` resolved to
   *micromolar*.
-- `effects.external_ref` is called "the only handle an operator can undo this by hand" by three
-  readers, and `SettleEffectInput` had no such field, so every row it would ever hold was empty.
+- `effects.external_ref` is called "the only handle an operator can undo this by hand" in the ledger
+  it belongs to and read by the evidence pack, and `SettleEffectInput` had no such field, so every row it would ever hold was empty.
 
 This repository already has a name for the last shape:
 `D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution`. What #280 shows is that the
@@ -87,7 +87,7 @@ at the launch site, refused outright when unrouted, and `SECOND_PERSON_KINDS` re
 before routing is consulted. `assemble_evidence_pack` resolves ownership through `owner_permits`, the
 one definition the HTTP routes now share. The face's deny-list is reframed on the predicate that is
 actually load-bearing — *about this deployment's people, or about its chemistry* — which withheld
-four more read-only tools. The face gained a Service, an optional Route and an ingress NetworkPolicy;
+five more read-only tools. The face gained a Service, an optional Route and an ingress NetworkPolicy;
 a pod no ingress policy selects is unrestricted for ingress.
 
 **Corruption and wedges.** `effects._SETTLE` gained the guard `_BEGIN` already had, so a failure

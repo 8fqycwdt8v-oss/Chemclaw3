@@ -9,9 +9,9 @@ That edge drew blood. The import block lived inside `agent/chemclaw_agent.py`, s
 `build_langgraph_agent` was correct and `api/mcp_face.py` — a second consumer written later, which
 imports `authz`, `settings` and the registry but not the agent — served **zero tools** in
 production: `advertised_tools()` returned `[]`, the pod logged "serving 0 read-only tool(s)",
-answered `tools/list` with an empty array, and passed its readiness probe. Five tests covered it and
-all five passed, because `tests/test_mcp_face.py` imports `chemclaw_agent` itself to populate the
-registry — so the suite tested a registry the shipped process never had.
+answered `tools/list` with an empty array, and passed its readiness probe. Six tests covered
+it and all six passed, because `tests/test_mcp_face.py` imports `chemclaw_agent` itself to
+populate the registry — so the suite tested a registry the shipped process never had.
 
 One module both consumers import is what makes that unrepeatable: the seeding has a name, the
 dependency is explicit at each call site, and `tests/test_tool_modules.py` asserts in a *fresh

@@ -214,13 +214,18 @@ async def deliver_digest_activity(payload: DeliveryInput) -> list[str]:
     """
     if not delivery_enabled():
         return []
-    message = Message(
-        recipient=payload.owner,
-        subject=f"New for your standing query: {payload.query}",
-        body="\n".join(f"- {note_id}" for note_id in payload.note_ids),
-        kind="digest",
-    )
     try:
+        # **Inside the `try`, and this is not tidiness.** `Message.recipient` is `min_length=1`, so
+        # an empty `Subscription.owner` raises `ValidationError` — which is in `_BAD_DATA_TYPES` and
+        # would therefore fail this activity *non-retryably*, aborting the run and every subscriber
+        # after it. The docstring said "it never raises" while two lines sat outside the guard that
+        # makes that true.
+        message = Message(
+            recipient=payload.owner,
+            subject=f"New for your standing query: {payload.query}",
+            body="\n".join(f"- {note_id}" for note_id in payload.note_ids),
+            kind="digest",
+        )
         taken = await deliver(message)
     except Exception as exc:
         # **Never silently.** Before this, a total delivery failure moved no counter and wrote no

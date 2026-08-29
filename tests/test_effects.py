@@ -13,14 +13,18 @@ records the attempt *before* it is made.
 """
 
 import asyncio
+import inspect
 from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
 
+from chemclaw.connectors import jobs as connector_jobs
 from chemclaw.connectors.manifest import EffectSpec, JobSpec
 from chemclaw.core.config import settings
 from chemclaw.core.db import connect
+from chemclaw.durable import connector_job
+from chemclaw.durable.connector_job import ConnectorJobInput
 from chemclaw.durable.effect_ledger import (
     EffectRecord,
     begin_effect,
@@ -358,3 +362,81 @@ def test_an_applied_effect_can_still_be_compensated() -> None:
         assert again is not None and again.state == "applied"
 
     asyncio.run(_run())
+
+
+def test_an_irreversible_effect_without_a_named_approver_refuses_to_run() -> None:
+    """The producer side of the separation-of-duties control, which had no test at all.
+
+    `grep -rn "effect_approv" tests/` returned nothing: the config setting, the launch-site read and
+    the fail-closed refusal all shipped unexercised, and only the third layer — `_may_answer`'s kind
+    check — was covered. A security control claimed in an ADR with nothing checking its producer is
+    this repository's own `D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution`
+    shape, which is exactly what the audit that produced the control was about.
+
+    Asserted through the manifest and the job input rather than by driving a broker: what matters is
+    that an irreversible job cannot reach the approval wait carrying an empty `asked_of`, because
+    that is the branch `_may_answer` opens to everyone.
+    """
+    # An irreversible effect must carry a named approver into the workflow, or the launch is not
+    # capable of raising a routed approval.
+    spec = JobSpec(
+        name="file_deviation",
+        workflow="FileDeviationWorkflow",
+        description="File a deviation in the QMS.",
+        summary="Filed a deviation.",
+        expensive=True,
+        effect=EffectSpec(system="the QMS", reversal="irreversible"),
+    )
+    assert spec.effect is not None
+    assert spec.effect.reversal == "irreversible"
+
+    # The input the launch site builds carries the approver, and it defaults to empty — which the
+    # workflow refuses rather than treating as "anybody".
+    empty = ConnectorJobInput(
+        connector="qms",
+        job="file_deviation",
+        workflow="FileDeviationWorkflow",
+        task_queue="connector-qms",
+        rationale="a deviation was observed",
+        requested_by="u-1",
+        effect_system="the QMS",
+        effect_reversal="irreversible",
+    )
+    assert empty.effect_approver == "", "the field must default empty so the refusal is reachable"
+
+    routed = empty.model_copy(update={"effect_approver": "qa-leads"})
+    assert routed.effect_approver == "qa-leads"
+
+
+def test_the_launch_site_reads_the_approver_from_configuration() -> None:
+    """The read must happen outside workflow code, and it must actually happen.
+
+    In the workflow it would change the scheduled child on replay; absent entirely, every
+    irreversible job refuses to run and the control reads as broken rather than unconfigured. This
+    pins the source rather than the value, because the value is a deployment's.
+    """
+    source = inspect.getsource(connector_jobs)
+    assert "effect_approver=settings.effect_approval_role" in source, (
+        "the launch site no longer reads the approver from configuration, so every irreversible "
+        "job refuses to run"
+    )
+
+
+def test_an_unrouted_irreversible_approval_is_refused_rather_than_opened() -> None:
+    """`asked_of=""` is `_may_answer`'s "anyone authenticated" branch, including the requester.
+
+    That is how the seam shipped: `_approve_effect` raised every approval with no routing, so the
+    person who launched an irreversible change could approve it themselves. The refusal is
+    unconditional — dev as well as under Entra — because a workflow may not read `settings`, and
+    because there is no version of "nobody in particular signs off an unrecoverable change" that is
+    right.
+    """
+    source = inspect.getsource(connector_job)
+    approve = source[source.index("async def _approve_effect") :]
+    approve = approve[: approve.index("async def _begin_effect")]
+    assert "if not job.effect_approver:" in approve, (
+        "the unrouted-approval refusal is gone; an irreversible effect is self-approvable again"
+    )
+    assert "asked_of=job.effect_approver" in approve, (
+        "the approval wait is raised unrouted, which opens the anyone-authenticated branch"
+    )

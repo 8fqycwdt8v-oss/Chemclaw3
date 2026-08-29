@@ -168,7 +168,12 @@ async def report_measurement(
             does not hold is **refused** rather than converted, because a solubility in mg/mL
             cannot become a log S without the molar mass.
 
-            Required rather than optional-with-a-default, which is what it was: omitting it meant
+            The parameter keeps its empty default so the *uncalibrated* properties this tool also
+            accepts are unaffected; what changed is that omitting it for a **calibrated** one is now
+            refused at call time rather than silently filled in. (An earlier version of this
+            sentence said the parameter had stopped being optional, which it had not — the signature
+            is unchanged, and in a docstring that *is* the tool's schema that distinction is the
+            whole contract.) Omitting it used to mean
             the value was stamped with the ledger's own unit regardless, so a chemist saying
             "0.5 mg/mL" had `0.5` recorded as **log S** — for MW 300 the truth is −2.78, and the
             trust ledger then reported that calculator as biased by 3.3 log units, a factor of

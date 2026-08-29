@@ -265,6 +265,17 @@ _SAFE_TOOL_NAME = re.compile(r"^[a-z_][a-z0-9_]{0,63}$")
 #: are not.
 _UNRECOGNISED = "(unrecognised)"
 
+
+def safe_tool_name(name: str) -> str:
+    """A tool name bounded to the shape this system actually serves, or `(unrecognised)`.
+
+    Shared with `operations.evidence_pack`, because the column is the same column and a bound
+    applied to one reader of it is not a bound. Counted rather than dropped: a burst of hallucinated
+    calls is a real signal, and the *number* of them is safe to report where the strings are not.
+    """
+    return name if _SAFE_TOOL_NAME.match(name) else _UNRECOGNISED
+
+
 _TOOL_USAGE = """
     SELECT tool, outcome, count(*), count(DISTINCT actor), min(ts), max(ts)
     FROM audit_events
@@ -294,7 +305,7 @@ async def tool_usage(window: Window, *, tool: str | None = None) -> ToolUsage:
     actors: dict[str, int] = {}
     scanned = 0
     for name, outcome, calls, distinct_actors, first, last in await _rows(sql, params):
-        safe = str(name) if _SAFE_TOOL_NAME.match(str(name)) else _UNRECOGNISED
+        safe = safe_tool_name(str(name))
         use = per_tool.setdefault(safe, ToolUse(tool=safe))
         use.calls += int(calls)
         scanned += int(calls)

@@ -382,17 +382,33 @@ def same_dimension(first: str, second: str) -> bool:
 def reconcile(value: float, reported: str, expected: str) -> float:
     """`value`, reported in `reported`, expressed in `expected` — or refuse.
 
-    The one call a ledger makes. `reported` empty means the caller stated no unit, which is
-    accepted as "the ledger's own unit" rather than refused: every measurement stored before this
-    existed carries an empty unit, and refusing the unstated case would make the common path fail
-    while the *wrong* path (a number in the wrong unit, silently stored) is the one this exists to
-    catch.
+    The one call a ledger makes.
+
+    `reported` empty means the caller stated no unit. This still accepts it as "the ledger's own
+    unit", and the branch is now **unreachable from production**: `report_measurement` refuses an
+    unstated unit for a calibrated property before it gets here. It is kept because the refusal
+    belongs to the caller that knows which properties are calibrated, and because every measurement
+    stored before that control existed carries an empty unit — a backfill reading those rows is the
+    second caller this branch is for.
+
+    **The basis is checked here too, not only in `compare`.** They are the two public comparison
+    entry points and this is the one a ledger actually calls; fixing one and leaving the other is
+    how an area percent reaches a weight-percent column. Only two *stated* bases that disagree are
+    refused — an unstated one is "nobody said" and must not block an ordinary conversion.
 
     Raises:
-        UnitError: When `reported` is unknown, or measures something `expected` does not. A pKa
-            reported into the solubility ledger, or a `mg/mL` where the column holds log S, is
-            refused here rather than becoming a residual nobody can explain.
+        UnitError: When `reported` is unknown, measures something `expected` does not, or states a
+            basis that disagrees with `expected`'s. A pKa reported into the solubility ledger, a
+            `mg/mL` where the column holds log S, or an `area%` into a `% w/w` column is refused
+            here rather than becoming a residual nobody can explain.
     """
     if not reported.strip():
         return value
-    return Measurement.of(value, reported).to(expected).value
+    measured = Measurement.of(value, reported)
+    target = Measurement.of(0.0, expected)
+    if measured.basis and target.basis and measured.basis != target.basis:
+        raise UnitError(
+            f"cannot record a {measured.basis} value in a {target.basis} column: {reported!r} and "
+            f"{expected!r} are the same unit measured against different things"
+        )
+    return measured.to(expected).value
