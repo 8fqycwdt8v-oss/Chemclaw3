@@ -42,6 +42,15 @@ _EXPECTED_INPROCESS_TOOLS = {
     "expand_note",
     "gather_evidence",
     "condense_protocols",
+    # The prescriptive half of the same pair: `condense_protocols` reads many recorded procedures,
+    # these write one proposed design and read it back
+    # (`D-2026-08-28-a-protocol-is-prescriptive-and-a-record-is-not`). In-process rather than a
+    # connector job for the reason the note tools are: the store is core's, and the drafting itself
+    # is a turn's composition rather than durable work.
+    "structure_experiment_request",
+    "draft_experiment_protocol",
+    "read_experiment_protocol",
+    "find_experiment_protocols",
     "find_knowledge_gaps",
     "propose_knowledge_note",
     "record_confirmed_answer",

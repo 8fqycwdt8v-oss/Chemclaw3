@@ -44,6 +44,7 @@ from chemclaw.agent import memory_tools as _memory_tools  # noqa: F401
 from chemclaw.agent import operations_tools as _operations_tools  # noqa: F401
 from chemclaw.agent import pending_tools as _pending_tools  # noqa: F401
 from chemclaw.agent import preferences as _preferences  # noqa: F401
+from chemclaw.agent import protocol_design_tools as _protocol_design_tools  # noqa: F401
 from chemclaw.agent import protocol_tools as _protocol_tools  # noqa: F401
 from chemclaw.agent import research_tools as _research_tools  # noqa: F401
 from chemclaw.agent import subscriptions as _subscriptions  # noqa: F401

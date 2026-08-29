@@ -258,6 +258,9 @@ _ALLOWED_MODULE_STACKS: dict[Edge, str] = {
     ),
     ("chemclaw.publish", "httpx"): "the shipped HTTP driver POSTs records to a results service",
     ("chemclaw.kg", "postgres"): "the note-proposal store",
+    ("chemclaw.protocols", "postgres"): (
+        "a design and its append-only revision history are two tables (migration 073)"
+    ),
     ("chemclaw.ingest", "postgres"): "the document chunk index",
     ("chemclaw.ingest", "rdkit"): "an ELN row's structure is canonicalised on the way in",
     ("chemclaw.memory", "postgres"): "the memory layers are tables",

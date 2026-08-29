@@ -166,6 +166,20 @@ start_rxnpredict() {
   assert_credential_accepted rxnpredict "http://127.0.0.1:8857/mcp" "${CHEMCLAW_RXNPREDICT_TOKEN:-dev-token}"
 }
 
+start_pyexec() {
+  local python="$1"
+  # A connector like props and rxnpredict, and it is here for the reason the front door found out
+  # the hard way: `manifests/pyexec/` is on `CHEMCLAW_CONNECTORS_DIR` (line ~268), so the bundle is
+  # *discovered* whether or not anything serves it, and under `CHEMCLAW_CONNECTORS_REQUIRED=true`
+  # an unreachable discovered connector is fatal at startup rather than degraded at call time.
+  # Before this the whole four-repo lane died at `api exited before becoming ready`, with the real
+  # reason four lines deep in `.live/api.log`.
+  CHEMCLAW_PYEXEC_TOKEN="${CHEMCLAW_PYEXEC_TOKEN:-dev-token}" \
+    start pyexec "$python" -m uvicorn chemclaw_mcp_pyexec.app:app --host 127.0.0.1 --port 8899
+  wait_for pyexec "http://127.0.0.1:8899/healthz"
+  assert_credential_accepted pyexec "http://127.0.0.1:8899/mcp" "${CHEMCLAW_PYEXEC_TOKEN:-dev-token}"
+}
+
 # ---------------------------------------------------------------------------- Chemclaw3_mock
 # Its own venv (start.sh/start-mcp.sh hard-code `.venv/bin/python`), created once, idempotently.
 
@@ -282,6 +296,7 @@ up() {
   local mcp_python; mcp_python="$(mcp_python_bin)"
   start_props "$mcp_python"
   start_rxnpredict "$mcp_python"
+  start_pyexec "$mcp_python"
 
   log "starting Chemclaw3_mock (ELN mock + mock-vendor MCP tool)"
   local mock_python; mock_python="$(mock_venv_bin)"
@@ -397,6 +412,7 @@ restart() {
   case "$name" in
     props) start_props "$(mcp_python_bin)" ;;
     rxnpredict) start_rxnpredict "$(mcp_python_bin)" ;;
+    pyexec) start_pyexec "$(mcp_python_bin)" ;;
     mock-eln) start_mock_eln "$(mock_venv_bin)" ;;
     mock-vendor) start_mock_vendor "$(mock_venv_bin)" ;;
     ui-bff) start_ui ;;

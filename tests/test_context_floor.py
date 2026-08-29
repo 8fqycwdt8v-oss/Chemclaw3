@@ -127,40 +127,104 @@ load_profiles()
 #:
 #: **Lowering this constant is the commit that proves a reduction happened, so it is not lowered by
 #: a commit that only measured one.**
-#: **Raised twice on 2026-08-29, 28,210 → 30,390, and the arithmetic is recorded rather than
-#: assumed.** The eight infrastructure findings of the 2026-08-28 audit added five tools to the
-#: `default` surface, measured at **2,170 tokens between them** after a trimming pass took 225 out
-#: of the two largest by moving developer rationale out of the docstrings a schema ships:
-#: `review_activity` 585, `request_external_input` 533, `review_commitments` 421,
-#: `assemble_evidence_pack` 350, `check_pending_requests` 281.
+#:
+#: **33,000 as of 2026-08-28**, raised from 29,500 by the prescriptive protocol surface
+#: (`D-2026-08-28-a-protocol-is-prescriptive-and-a-record-is-not`), which measures **32,184** with
+#: it. Four tools: `structure_experiment_request`, `draft_experiment_protocol`,
+#: `read_experiment_protocol` and `find_experiment_protocols`, at **961 / 2,419 / 165 / 128**.
+#:
+#: **It arrived at 35,035 and this is the narrowed figure**, which is the number the convention
+#: above says to judge a new tool by. What the −2,851 was, measured rather than estimated, because
+#: three of the four causes are reusable and one is not:
+#:
+#: 1. **`draft_experiment_protocol` stopped taking the ask back.** It took a whole
+#:    `ExperimentDesign`, whose `request` half `structure_experiment_request` had already stored —
+#:    so the largest single item in the schema was a copy of a document the design already held, and
+#:    one that could disagree with the copy the chemist had corrected. It now takes `design_id` plus
+#:    the protocol half only, which makes the documented two-phase flow structural instead of
+#:    advisory. −1,600.
+#: 2. **It stopped taking a `layout`.** A plate layout is computed from `plate_format` by
+#:    `protocols.layout.place`; a model-supplied one could contradict the format it was asked for.
+#:    An argument that should never be filled in was costing its own schema on every turn.
+#: 3. **`SpeciesRole` shipped its class docstring once per field that named it.** Pydantic publishes
+#:    a referenced enum's docstring as the field description and `convert_to_openai_tool` inlines
+#:    rather than `$ref`s, so `science/labels/vocabulary`'s 180-token argument for why the derived
+#:    vocabulary is not `Role` — the right docstring for a reader of that module — was in this
+#:    schema three times. One shared `Field(description=…)` naming the values replaces it.
+#: 4. **Fifteen model docstrings moved into `#` comments**, the fix that took `profile_rotation`
+#:    from 1,499 to ~870 four paragraphs up. `RequestField`'s alone shipped **four times** in one
+#:    request. −457 on `structure_experiment_request`.
+#:
+#: **Both writing tools remain over `MAX_SINGLE_TOOL_TOKENS` and are recorded in `KNOWN_OVERSIZED`
+#: below rather than narrowed further, and that is a decision rather than an omission.** The
+#: irreducible core is `base: ProtocolBody` at **922 tokens on its own** — setpoints, a charge
+#: table, ordered steps, analytics and an expected outcome, each a small model with a one-line
+#: description. A typed laboratory procedure is about 900 tokens of schema, so no narrowing gets
+#: this tool under a 900-token bound; only deleting the schema does. The alternatives were measured
+#: against and rejected: taking the payload as a JSON string or a scratchpad path drops the schema
+#: to ~150 tokens and takes schema-guided generation with it, trading a reliability property for a
+#: context one on the tool where a malformed call is most expensive; and splitting it three ways
+#: leaves the sum unchanged, the first piece still over, and a protocol costing three round trips
+#: against the loop cap.
+#:
+#: **316 of the total are not tools at all.** The skills listing measured 3,034 and then 3,350
+#: across two runs on this branch as the two new skills' frontmatter was still being edited. Worth
+#: recording because it is the second time this file has caught a cost arriving from beside the tool
+#: surface rather than from it — a skill's `description` is published into the prompt on every turn
+#: exactly as a tool's is.
+#:
+#: The headroom is ~816 tokens, tighter in proportion than the 29,500 it replaces: less than
+#: `propose_knowledge_note` costs, so it cannot absorb another tool of that size unnoticed.
+#:
+#: **Raised again on 2026-08-29 by the eight infrastructure findings**, which added five tools to
+#: the `default` surface: `review_activity` 585, `request_external_input` 533, `review_commitments`
+#: 421, `assemble_evidence_pack` 350, `check_pending_requests` 281 — **2,170 between them**, after a
+#: trimming pass took 225 out of the two largest by moving developer rationale out of the docstrings
+#: a schema ships. On that branch alone the prefix went 28,210 → 30,390; **merged with the protocol
+#: surface above it measures 34,379**, which is 32,184 + 2,170 to within 25 tokens — the two
+#: surfaces are additive, as they should be, and neither absorbed the other's headroom.
 #:
 #: Four of the five are the reason a project leader can be answered at all — the operational read
 #: model, the inbox over the durable wait, the commitment mirror and the evidence pack — so this is
 #: capability rather than drift. It is also **exactly the growth § 5's row is about**, and two
-#: raises in one day is the argument for that row rather than against it: the `default` allow-list
-#: measures **-5,787 tokens (-21%)**, which is more than twice what this work added, and it is a
-#: `data/profiles` edit rather than a tool change. That row is now the next thing worth doing here,
-#: and it stays blocked on the live lane for the reason it gives — a cheaper prompt that stops
-#: finding tools is a regression with a good-looking metric.
+#: independent surfaces raising this ceiling within two days is the argument *for* that row rather
+#: than against it: the `default` allow-list measures **-5,787 tokens (-21%)**, more than twice what
+#: this work added and more than the protocol surface's headroom, and it is a `data/profiles` edit
+#: rather than a tool change. It stays blocked on the live lane for the reason it gives — a cheaper
+#: prompt that stops finding tools is a regression with a good-looking metric.
 #:
-#: **Lowering this constant is the commit that proves a reduction happened, so it is not lowered by
-#: a commit that only measured one.**
-CEILINGS: dict[str, int] = {"__default__": 30_500}
+#: The headroom is ~620 tokens against a measured 34,379 — tighter again than the ~816 the protocol
+#: surface left, and now well under what a single tool of `propose_knowledge_note`'s size costs. The
+#: next surface to arrive here should expect to be asked for the allow-list first.
+CEILINGS: dict[str, int] = {"__default__": 35_000}
 
 #: How much of the floor one tool may be. A schema above this is not expensive, it is *badly
 #: shaped* — the fix is pagination, a narrower argument, or splitting a tool that does two things.
 MAX_SINGLE_TOOL_TOKENS = 900
 
-#: The two that are already over it, with what they cost on 2026-08-25.
+#: The tools already over it, with what they cost when they were measured.
 #:
-#: Recorded rather than hidden by a bigger bound, so the *third* one fails this test. Both are real
-#: debt and neither is a mystery: `start_optimization_campaign` carries a BoFire campaign
-#: declaration — objectives, constraints and parameter domains — as nested argument schema, and
-#: `propose_knowledge_note` carries the note frontmatter contract. Each is a candidate for taking
-#: its payload as one structured argument documented in a skill instead of as a wide signature.
+#: Recorded rather than hidden by a bigger bound, so the *next* one fails this test. Every entry is
+#: real debt and none is a mystery: each takes a **domain document** as its argument, which
+#: `convert_to_openai_tool` inlines model by model. `start_optimization_campaign` carries a BoFire
+#: campaign declaration — objectives, constraints and parameter domains; `propose_knowledge_note`
+#: carries the note frontmatter contract; and the two protocol writers carry a structured ask and a
+#: laboratory procedure (`D-2026-08-28-a-protocol-is-prescriptive-and-a-record-is-not`).
+#:
+#: **Adding to this list is not the way past this test**, and the two 2026-08-28 entries are here
+#: only after the narrowing the ceiling comment above measures in four parts — 6,231 tokens to
+#: 3,380, a 46% reduction — established that the remainder is the schema of the document itself.
+#: `ProtocolBody` is 922 tokens with every description already one line, so a 900-token bound cannot
+#: be met by a tool that authors a procedure; what would meet it is deleting the schema, which
+#: trades constrained generation for context on the call where a malformed argument costs most.
+#: `docs/planning/BACKLOG.md` carries the row for revisiting it, and the honest trigger is a
+#: provider that `$ref`s a repeated model instead of inlining it — which would cut every entry here
+#: at once and is a measurement to take rather than a change to make.
 KNOWN_OVERSIZED: dict[str, int] = {
     "start_optimization_campaign": 2_020,
     "propose_knowledge_note": 1_069,
+    "draft_experiment_protocol": 2_419,
+    "structure_experiment_request": 961,
 }
 
 

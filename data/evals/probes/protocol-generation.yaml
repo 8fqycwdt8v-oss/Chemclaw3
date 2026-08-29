@@ -1,0 +1,199 @@
+# Live-test probe corpus — the prescriptive surface: turning a chemist's ask into a stored,
+# editable experiment design. User-story sections 2 (Experiment & Study Planning) and 4 (HTE
+# Campaign Planning).
+#
+# **Everything else in the corpus asks what the system knows; these ask what it would have somebody
+# do.** That difference decides what a right answer is here, and it is the thing to hold on to:
+#
+#   **A single experiment and a screening plate are one object, not two.** A single experiment is a
+#   design with one arm and no factors; a plate is the same design with factors, levels, N arms and
+#   a layout. So `draft_experiment_protocol` serves both, and a probe that reaches it for a plate
+#   and a probe that reaches it for one run are exercising the same tool deliberately rather than
+#   by coincidence.
+#
+#   **Structuring the ask comes before searching the record, and it is a separate tool.**
+#   `structure_experiment_request` turns one sentence containing a transformation, a scale, an
+#   exclusion and a deadline into slots that each say where they came from — `stated` with the
+#   chemist's verbatim words, `inferred` for the model's own judgment, `absent` for what the text
+#   did not say. A `stated` slot whose quote is not in the chemist's text is refused rather than
+#   trusted, so the probes below grade whether the reading was put in front of the chemist while
+#   correcting it was still cheap, not merely whether a protocol appeared.
+#
+#   **A design that cites nothing is refused by the store, not by the prompt.**
+#   `checks.evidence_present` is a blocker, so a draft citing no precedent and no tool cannot be
+#   written at all. That is why these probes name the precedent and computation tools in
+#   `expects_tools` beside the two writing tools: reaching for the record is not optional decoration
+#   on the way to the draft, it is the thing that makes the draft storable.
+#
+#   **A stored design is a thing with an id, which is what the two reading probes are for.** Before
+#   this surface existed a generated protocol lived in one transcript and could not be reopened,
+#   compared or corrected. `read_experiment_protocol` and `find_experiment_protocols` are graded on
+#   reaching for the stored document rather than reconstructing it from the conversation — a
+#   rebuilt protocol reads exactly like a retrieved one and is not the same artifact.
+#
+# `expects_tools` is ANY-OF, as everywhere in this corpus: several tools can legitimately serve one
+# question and demanding a specific one would grade routing taste. The two reading probes carry
+# deliberately short lists for that reason — there is one right way to reopen a stored design.
+#
+# bucket: A = the surface covers this | B = partial cover, the honest answer states the limit
+#         C = the surface cannot do this at all; the only good answer says so
+
+probes:
+  # ------------------------------------------------------------------ §2 one experiment
+  - id: pt-01
+    section: 2
+    persona: lab_technician
+    bucket: A
+    question: >-
+      I need to get the SNAr on our 2,4-dichloropyrimidine working with N-methylpiperazine —
+      selectivity at the 4-position, 2 g of the pyrimidine, and we've banned DMF on this project.
+      Write me a procedure I can actually run Thursday.
+    expects_tools:
+      - structure_experiment_request
+      - draft_experiment_protocol
+      - substrate_precedent
+      - conditions_for_similar_reaction
+      - reagent_frequency
+      - workup_precedent
+      - condense_protocols
+      - resolve_compound
+    forbids_claims:
+      - "a yield, conversion or selectivity ratio presented as something the record measured when no cited run reports it"
+      - "a condition set drawn from general knowledge while the in-house record was not consulted"
+      - "that the protocol has been reviewed, approved or scheduled by anyone"
+      - "that DMF is acceptable here, or a solvent substitution made without saying it was substituted"
+    direction: >-
+      The sentence contains four things — a transformation, a regiochemical objective, a scale and
+      an exclusion — and a good answer structures that reading first and shows it, marking the 2 g
+      and the DMF ban as the chemist's own words and anything it supplied (the vessel, the
+      equivalents, the base) as its own inference. Named species are resolved rather than
+      hand-written as SMILES. It then argues the conditions from what the record actually ran:
+      whether this pyrimidine has been through an SNAr before, what base and solvent comparable
+      displacements used and how often, and how the reagent was quenched — work-up is where a
+      generated procedure is thinnest and where the technician notices first. What the record does
+      not settle it computes or says it did not. The stored design comes back with an id and its
+      checks, and the answer reports the warnings rather than suppressing them: a warning is a
+      judgment for the chemist to make. Choosing a non-DMF solvent is required, and saying *which*
+      constraint forced the swap is what makes it arguable. An answer that produces a plausible
+      procedure with no citation behind any number is the failure here even when the chemistry is
+      textbook-correct — the same reflex on a substrate with no textbook entry writes conditions
+      out of nowhere.
+
+  - id: pt-02
+    section: 2
+    persona: lab_leader
+    bucket: A
+    question: >-
+      Before anybody runs it — pull up the pyrimidine SNAr design my technician drafted yesterday
+      and tell me what it actually says about the work-up and the quench. I don't want the summary,
+      I want what's in the document.
+    expects_tools:
+      - read_experiment_protocol
+      - find_experiment_protocols
+    forbids_claims:
+      - "work-up or quench detail that is not in the retrieved document"
+      - "a design id that was not returned by a lookup"
+      - "that the design was retrieved when the answer was reconstructed from the conversation"
+    direction: >-
+      This is a retrieval question wearing a chemistry question's clothes, and the whole grade is
+      whether the stored document was opened. A good answer finds the design — by id if the leader
+      supplied one, otherwise by listing what is open on this project and naming which one it took
+      — and then quotes the work-up and quench steps as the document holds them, including the
+      revision it read and who last touched it. Saying "revision 3, drafted by the agent, no human
+      edit yet" is exactly the kind of thing a leader is asking for underneath this question. If
+      the document is thin on the quench, the honest answer is that it is thin and that the design
+      can be revised, not a fluent paragraph of quench detail supplied from general knowledge —
+      that failure is invisible in the answer's prose and is precisely why the design is stored
+      rather than retold.
+
+  - id: pt-03
+    section: 2
+    persona: lab_technician
+    bucket: A
+    question: >-
+      What experiment designs are still open on the pyrimidine project? I've lost track of what
+      we've drafted and what's actually been run.
+    expects_tools:
+      - find_experiment_protocols
+    forbids_claims:
+      - "a design, its status or its arm count that a listing did not return"
+      - "that a design has been executed when its stored status does not say so"
+      - "there are no designs, without having listed"
+    direction: >-
+      A listing question, and the useful answer is the list: each design with its title, its mode,
+      its status and how many arms it carries, newest first, narrowed to the project that was
+      asked about. The distinction the technician is actually chasing is `draft` against
+      `executed`, so an answer that groups by status is serving the question rather than dumping
+      rows. Status comes from the store; inferring that something "was probably run" because it is
+      old is exactly the guess the status column exists to prevent. An empty result is a fine
+      answer when it is a real result — "nothing is open under that project name, here is what is
+      open elsewhere" — and is not the same as not having looked.
+
+  # ------------------------------------------------------------------ §4 a plate
+  - id: pt-04
+    section: 4
+    persona: lab_leader
+    bucket: A
+    question: >-
+      The Suzuki on our deactivated aryl chloride is going nowhere with the conditions we have. Put
+      me a 24-well plate together — I want catalyst and base varied, one plate, and I want the
+      choices to come from what we've actually run rather than a catalogue.
+    expects_tools:
+      - structure_experiment_request
+      - draft_experiment_protocol
+      - generate_screening_design
+      - reagent_frequency
+      - conditions_for_similar_reaction
+      - substrate_precedent
+      - condense_protocols
+      - similar_reactions
+    forbids_claims:
+      - "a catalyst or base frequency, count or ranking that no cited query returned"
+      - "a predicted yield for any well"
+      - "that the plate has been ordered, booked or scheduled"
+      - "more wells occupied than the stated plate format holds"
+    direction: >-
+      Twenty-four wells is a fixed budget and the answer is a bet against it, so the useful reply
+      says what it spent the budget on and what it deliberately did not. Factors and levels are
+      argued from the record's own frequencies — which catalyst, ligand and base comparable
+      couplings actually reached for, with counts behind them — rather than from a plausible
+      catalogue of palladium sources, and a deactivated chloride is the case where the record's
+      modal answer is most likely to be wrong, which is worth saying. The design comes back as one
+      stored object with its arms laid out on the plate, controls included, and the answer states
+      the run order and whether it was randomised — drift across a session reading as a factor
+      effect is the failure randomisation exists to prevent, and a randomised order needs a seed so
+      the plate can be reproduced. Checks are reported, including any warning about factor coverage
+      the plate does not achieve. An answer that fills 24 wells with a full factorial that does not
+      fit, or that silently drops arms to make one fit, is worse than an answer that says 24 wells
+      buys a smaller question than the one asked.
+
+  - id: pt-05
+    section: 2
+    persona: lab_technician
+    bucket: A
+    question: >-
+      I ran your SNAr procedure and the quench is wrong — you have me adding water to the reaction
+      hot, and on this scale that's a foam-over. It needs to cool to below 30 first. Fix the design
+      so the next person doesn't hit it.
+    expects_tools:
+      - read_experiment_protocol
+      - draft_experiment_protocol
+      - workup_precedent
+      - find_experiment_protocols
+    forbids_claims:
+      - "that the correction was stored without a revision actually being written"
+      - "that the original procedure was correct, or that the chemist's objection was mistaken"
+      - "a revision number the store did not return"
+      - "changes to parts of the design the chemist did not raise, described as part of their correction"
+    direction: >-
+      This is the most informative event the system can observe about its own output — an expert
+      correcting a generated protocol with the context to know why — and the answer is graded on
+      whether the correction was *captured* rather than merely accepted. A good answer reopens the
+      stored design so the revision is derived from the current head rather than from memory of it,
+      changes the quench step and only the quench step, and stores the result with a change note
+      saying what changed and why, in the chemist's terms: cool below 30 before the aqueous quench,
+      because a hot quench at this scale foams over. It reports the new revision number back. It
+      does not argue with the technician — they have the vessel and the scale in front of them —
+      and it does not quietly rewrite three other steps while it is in there, because a revision
+      that bundles unrequested edits is one nobody can read later. Naming what the change does not
+      fix, if the same hazard appears elsewhere in the procedure, is the extra that makes it useful.

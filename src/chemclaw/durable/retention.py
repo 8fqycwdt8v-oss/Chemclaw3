@@ -316,6 +316,26 @@ _NOT_PRUNED: dict[str, str] = {
     "argument by the next calculation (D-2026-08-21) — pruning breaks it and reclaims nothing",
     "reaction_records": "refused: a row is the only readable form of an ELN run "
     "(D-2026-08-25), so pruning one deletes a result",
+    # The prescriptive pair, placed beside `reaction_records` because they are its mirror: that
+    # table holds what a chemist did, these hold what somebody is being asked to do. A design is the
+    # record of an experiment somebody may still run or may already have run, and its revisions are
+    # the corrections that make the whole tier worth keeping — an agent's draft and the expert's
+    # edit of it are the two halves of one signal, so a clock that took the second would leave the
+    # suggestion standing with the correction gone.
+    #
+    # **Both refusals are enforced by grant rather than merely intended, which is why they are
+    # stated here rather than left implied.** `infra/sql/grants/app_privileges.sql` gives the app
+    # INSERT/UPDATE on `experiment_protocols` and INSERT **only** on
+    # `experiment_protocol_revisions`, so this sweep holds no DELETE on either and could not prune
+    # them even if somebody added a window. The revision rows also cascade from the header row, and
+    # that cascade is unreachable for the same reason — the parent is refused too — which is why
+    # this entry states its own refusal rather than deferring to the parent the way `bo_suggestions`
+    # does.
+    "experiment_protocols": "refused: the design of an experiment somebody may still run, kept "
+    "through erasure (`leaver._RETAINED`); no DELETE on it is granted, so the refusal is enforced",
+    "experiment_protocol_revisions": "refused: the append-only history of a design, whose human "
+    "revisions are an expert's corrections of a generated protocol — INSERT-only by grant, so "
+    "neither a clock nor an UPDATE can reach one",
     # Disposed by a mechanism that is not an age cutoff, and deliberately not duplicated here.
     "checkpoint_blobs": "swept by `_prune_checkpoints` with the thread it belongs to, not by a "
     "cutoff of its own — `checkpoints` in `_PRUNABLE` is the key that finds it",

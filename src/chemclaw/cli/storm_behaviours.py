@@ -149,7 +149,23 @@ BEHAVIOURS: list[Behaviour] = [
     # ---------------------------------------------------------------- F · adversarial
     Behaviour(
         name="f-malformed-json",
-        calls=[ToolCall(tool="find_notes", arguments={}, raw_arguments='{"text": "unterminated')],
+        # JSON-shaped and **unclosable**, not merely truncated. This is the only argument document
+        # that actually reaches `AIMessage.invalid_tool_calls`, which is the field
+        # `RepairInvalidToolCalls` exists to read — so it is the only one that exercises it.
+        #
+        # It used to be `'{"text": "unterminated'`, and that check could never pass. LangChain runs
+        # a streamed call's fragments through `parse_partial_json`, which closes an unterminated
+        # string and an unclosed brace, so a truncated document arrives as an ordinary valid call
+        # long before anything here sees it. Measured, on the exact two payloads:
+        #
+        #     '{"text": "unterminated'  -> repaired to {'text': 'unterminated'}
+        #     '{"text": }'              -> JSONDecodeError -> invalid_tool_calls
+        #
+        # `agent/model_calls.py` states this and even corrects an earlier draft of its own docstring
+        # for the same confusion. So the old behaviour asserted an outcome the system is documented
+        # and measured never to produce, while the reachable case went untested — a permanently red
+        # check *and* a blind spot over the middleware written for exactly this.
+        calls=[ToolCall(tool="find_notes", arguments={}, raw_arguments='{"text": }')],
         text="",
         adversarial=True,
     ),

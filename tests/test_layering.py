@@ -293,6 +293,8 @@ _ALLOWED_MODULE_EDGES: set[Edge] = {
     # same relationship `agent/memory_tools.py` has to `memory/`: the store is below, the
     # conversation plumbing is here.
     ("chemclaw.agent", "chemclaw.operations"),
+    # The prescriptive-design layer. `agent` writes designs through it, `api` serves them.
+    ("chemclaw.agent", "chemclaw.protocols"),
     ("chemclaw.agent", "chemclaw.retrieval"),
     ("chemclaw.agent", "chemclaw.science"),
     ("chemclaw.agent", "chemclaw.templates"),
@@ -304,6 +306,7 @@ _ALLOWED_MODULE_EDGES: set[Edge] = {
     ("chemclaw.api", "chemclaw.core"),
     ("chemclaw.api", "chemclaw.durable"),
     ("chemclaw.api", "chemclaw.kg"),
+    ("chemclaw.api", "chemclaw.protocols"),
     ("chemclaw.cli", "chemclaw.agent"),
     # `cli.leak_probe` builds the *real* front door in its own process — that is the whole point:
     # the leak it measures is in what a turn retains, and an in-process repro that faked the app
@@ -377,6 +380,16 @@ _ALLOWED_MODULE_EDGES: set[Edge] = {
     # is the caller); it imports nothing back, and nothing reads *from* a channel.
     ("chemclaw.deliver", "chemclaw.core"),
     ("chemclaw.durable", "chemclaw.deliver"),
+    # The prescriptive-design layer (`D-2026-08-28-a-protocol-is-prescriptive-and-a-record-is-not`).
+    # A leaf like `publish`, and narrower: it reads the kernel for SMILES arithmetic, ids and the
+    # connection pool, and `science.labels.vocabulary` for the *one* species-role vocabulary the
+    # precedent questions already use — so "the ligand a precedent used" and "the ligand this design
+    # charges" are the same word rather than two enums that agree by accident. It deliberately
+    # imports neither `ingest` nor `kg`: a design is prescriptive and their shapes are descriptive,
+    # and reusing `OrdReaction.StepKind` or `ProcessConditions` here would have put an instruction
+    # and a measurement in one model.
+    ("chemclaw.protocols", "chemclaw.core"),
+    ("chemclaw.protocols", "chemclaw.science"),
     ("chemclaw.publish", "chemclaw.core"),
     ("chemclaw.publish", "chemclaw.ingest"),
     ("chemclaw.durable", "chemclaw.publish"),

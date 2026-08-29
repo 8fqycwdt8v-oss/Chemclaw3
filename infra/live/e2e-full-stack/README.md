@@ -19,6 +19,7 @@ Closes the gap `tasks/todo.md` used to name: *"the cross-repo sequence `Chemclaw
 | `rxnpredict` (forward/condition prediction, `fake_a`/`fake_c` doubles) | Chemclaw3-mcp | 8857 | this script |
 | `chem` (RDKit: resolve, stoichiometry, green metrics, render) | Chemclaw3-mcp | 8858 | `infra/live/processes.sh` |
 | `safety` (structural hazard / genotoxicity screen, ICH limits) | Chemclaw3-mcp | 8859 | `infra/live/processes.sh` |
+| `pyexec` (bounded offline Python analysis sandbox) | Chemclaw3-mcp | 8899 | this script |
 | `calc` (the physics behind this repo's calculator tools — *not* a connector) | Chemclaw3-mcp | 8860 | `infra/live/processes.sh` |
 | `mock-eln` (ELN/ORD data) | Chemclaw3_mock | 8090 | this script |
 | `mock-vendor` (building-block search/pricing MCP tool) | Chemclaw3_mock | 8091 | this script |
@@ -62,7 +63,7 @@ make live-e2e-full-stack-down
 ```
 
 Or drive it directly: `infra/live/e2e-full-stack/up.sh [up|down|status|restart <name>]`.
-`restart <name>` (`props`, `rxnpredict`, `mock-eln`, `mock-vendor`, or `ui-bff`) kills and
+`restart <name>` (`props`, `rxnpredict`, `pyexec`, `mock-eln`, `mock-vendor`, or `ui-bff`) kills and
 restarts one external process in place — the primitive the chaos round uses. Restarting a piece of
 this repo's own stack (a connector, a worker, and `chem`, `safety` or `calc`) is
 `infra/live/processes.sh restart <name>` instead; asking this script for one of those three says so

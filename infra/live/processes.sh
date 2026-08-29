@@ -525,6 +525,16 @@ restart() {
   local name="$1" pidfile
   pidfile="$RUN_DIR/$name.pid"
   [ -e "$pidfile" ] || die "no $pidfile — is the lane up?"
+  # Every precondition `up` would `die` on, checked *before* anything is killed. `restart` is
+  # "kill, then up", and `up` dies on a missing Chemclaw3-mcp checkout — so a restart run without
+  # `CHEMCLAW_MCP_REPO` used to kill the process, fail to bring the lane back, and leave the lane
+  # in a worse state than it found it. That is the wrong failure mode anywhere and a disqualifying
+  # one here: this verb is the primitive the storm's chaos family uses, so its own environment
+  # became a silent, delayed cause of unrelated red checks two families later. Measured, one such
+  # call killed `mock-llm` and left the whole run driving a lane with no model.
+  [ -d "$MCP_REPO" ] || die "refusing to restart $name: chem and safety are served by Chemclaw3-mcp,
+which is not at $MCP_REPO, so \`up\` could not bring the lane back after the kill. Clone it beside
+this checkout, or set CHEMCLAW_MCP_REPO. Nothing has been killed."
   local pid
   pid="$(cat "$pidfile")"
   # SIGKILL, not SIGTERM: a restart check that let the process drain first would be testing a
