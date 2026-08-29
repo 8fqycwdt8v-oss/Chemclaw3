@@ -112,6 +112,12 @@ _EXPECTED_SUBSYSTEMS = {
     # `review_commitments` presents that to a project leader as a truthful empty portfolio. It had
     # a WARNING and no counter, which is the `deliver_redaction` shape one seam over.
     "commitment_mirror",
+    # The same module, on an export that *is* present and does not become a portfolio: files that
+    # would not parse, or rows that would not validate. A separate subsystem from the one above on
+    # purpose — "found nothing because the knob points nowhere" and "found nothing because none of
+    # it parsed" need different operator actions, and both had a bare `logger.warning` and no
+    # counter, so from outside they were the same silence as a genuinely empty portfolio.
+    "commitment_export",
     "plan_approval",
     "preferences",
     # `agent.condense`, added with the protocol condenser. Two degradations share it and both

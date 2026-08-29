@@ -283,6 +283,78 @@ def test_a_missing_export_directory_is_reported_rather_than_read_as_an_empty_por
     )
 
 
+def _degraded_count(subsystem: str) -> float:
+    """The `chemclaw_degraded_total` series for one subsystem, or 0 before it exists."""
+    from chemclaw.core.metrics import METRICS
+
+    series = f'chemclaw_degraded_total{{subsystem="{subsystem}"}}'
+    for line in METRICS.render().splitlines():
+        if line.startswith(series):
+            return float(line.rsplit(" ", 1)[1])
+    return 0.0
+
+
+def test_an_export_directory_that_exists_and_holds_nothing_is_reported_too(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The existence check covered the mistyped half of a mistyped knob, and no more.
+
+    A directory that exists and holds no `*.json` — the wrong subdirectory, a mount that came up
+    empty, an export written as `.jsonl` — returned `[]` with no counter and no log line at all,
+    which is byte-identical to the silence the missing-path branch was added to end: the sync
+    succeeds, nothing is mirrored, `mirror_freshness` stays NULL, and `review_commitments` presents
+    that to a project leader as a truthful empty portfolio.
+
+    Same `commitment_mirror` subsystem as the missing path, deliberately: both mean "nothing was
+    mirrored and the pointer to the export is why", which is one alert and one operator action.
+    """
+    before = _degraded_count("commitment_mirror")
+    empty = tmp_path / "mounted-but-empty"
+    empty.mkdir()
+    (empty / "commitments.jsonl").write_text('{"external_id": "M-1"}\n', encoding="utf-8")
+
+    export = json_commitment_export(name="probe", path=str(empty))
+    with caplog.at_level(logging.WARNING):
+        assert asyncio.run(export.fetch_commitments(None)) == []
+    assert any("export_empty" in record.message for record in caplog.records), caplog.records
+    assert _degraded_count("commitment_mirror") == before + 1, (
+        "an export directory that exists and holds nothing this reads left no counter, so the "
+        "wrong-subdirectory case is exactly as invisible as the wrong-path case used to be"
+    )
+
+
+def test_unreadable_files_and_rejected_rows_are_counted_not_only_logged(
+    tmp_path: Path,
+) -> None:
+    """An empty export and an export that parsed to nothing are different facts.
+
+    Both totals had a `logger.warning` and no series, which is the `deliver_redaction` shape: a
+    warning nobody alerts on is visible only to a person already reading the log of the pod they
+    already suspect. And the two failures need different operator actions — one is the pointer to
+    the export, the other is the export itself — so they get different subsystems rather than a
+    message an alert cannot read.
+    """
+    before_export = _degraded_count("commitment_export")
+    before_mirror = _degraded_count("commitment_mirror")
+
+    root = tmp_path / "export"
+    root.mkdir()
+    (root / "a.json").write_text("{ this is not json", encoding="utf-8")
+    (root / "b.json").write_text('[{"no_external_id_at_all": true}]', encoding="utf-8")
+
+    export = json_commitment_export(name="probe", path=str(root))
+    assert asyncio.run(export.fetch_commitments(None)) == []
+
+    assert _degraded_count("commitment_export") == before_export + 2, (
+        "an unreadable file and a rejected row left no counter; from outside, an export that "
+        "parsed to nothing is indistinguishable from an export with nothing in it"
+    )
+    assert _degraded_count("commitment_mirror") == before_mirror, (
+        "a content fault was counted as a pointer fault, which sends an operator to the knob "
+        "instead of to the export"
+    )
+
+
 def test_the_commitment_cursor_does_not_share_a_row_with_the_eln_sync() -> None:
     """`sync_cursors` is keyed on the source name alone, and nothing forbids both halves.
 
