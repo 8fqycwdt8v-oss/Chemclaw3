@@ -135,9 +135,9 @@ class JsonExportAdapter:
         """Read from the given directory, or the configured `eln_export_dir`.
 
         `name` is the data source this adapter *is*, passed by the registry from the manifest
-        (`sources/registry.py::_build_ingest_half`). It reaches the two WARNINGs below, which are
-        the only signal an admin gets that a specific export file was dropped — and a deployment
-        running two JSON drop directories got two identical lines naming neither.
+        (`ingest/sources/registry.py::_build_ingest_half`). It reaches the two WARNINGs below,
+        which are the only signal an admin gets that a specific export file was dropped — and a
+        deployment running two JSON drop directories got two identical lines naming neither.
         """
         self._dir = Path(export_dir if export_dir is not None else settings.eln_export_dir)
         self._source = name or "eln-json"
