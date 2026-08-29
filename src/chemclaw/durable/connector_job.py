@@ -198,6 +198,12 @@ class ConnectorJobInput(BaseModel):
     # Additive and defaulted because it crosses the Temporal wire and histories are in flight.
     effect_system: str = ""
     effect_reversal: str = ""
+    # **Who may approve an irreversible one**, resolved from configuration at the launch site for
+    # the same reason `effect_system` is copied there: a workflow may not read `settings`, because a
+    # value that changed mid-flight would make a replay emit a different child than the history
+    # holds. Empty means no approver role is configured, which `_approve_effect` refuses under
+    # enforcement rather than falling back to "anybody".
+    effect_approver: str = ""
 
 
 class ConnectorJobResult(BaseModel):
@@ -597,6 +603,20 @@ class ConnectorJobWorkflow:
         """
         if job.effect_reversal != "irreversible":
             return ""
+        # **Fail closed on an unrouted approval, in dev as well as under Entra.** `asked_of=""`
+        # means "whoever is around" to the answer gate, so an irreversible change would be
+        # approvable by any authenticated caller — including the person who asked for it, which is
+        # the one outcome this gate exists to prevent. Unconditional rather than split on
+        # `entra_required` for two reasons: a workflow may not read `settings` at all (the replay
+        # hazard `commitment_sync` states), and there is no version of "nobody in particular signs
+        # off an unrecoverable change" that is right. A deployment that runs irreversible effects
+        # names an approver; a dev one that wants to exercise the path sets the same variable.
+        if not job.effect_approver:
+            raise ApplicationError(
+                f"{job.job!r} changes {job.effect_system} irreversibly and no approver role is "
+                "configured (CHEMCLAW_EFFECT_APPROVAL_ROLE); nothing was attempted",
+                non_retryable=True,
+            )
         outcome = AwaitOutcome.model_validate(
             await workflow.execute_child_workflow(
                 AwaitAnswerWorkflow.run,
@@ -607,6 +627,9 @@ class ConnectorJobWorkflow:
                     requested_by=job.requested_by,
                     session_id=job.session_id,
                     correlation_id=job.correlation_id,
+                    # Routed, so the answer gate has something to check. Unrouted, this reached
+                    # `_may_answer`'s "anybody" branch and the requester could approve themselves.
+                    asked_of=job.effect_approver,
                     deadline_days=settings.effect_approval_deadline_days,
                 ).model_dump(mode="json"),
                 id=f"{job_id}:approval",

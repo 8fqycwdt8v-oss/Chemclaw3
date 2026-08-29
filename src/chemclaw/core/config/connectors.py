@@ -170,3 +170,10 @@ class ConnectorSettings(BaseSettings):
     # was not taken, and the arguments a chemist approved a week ago describe a situation that has
     # moved. An expiry fails the job and attempts nothing, which is the safe direction.
     effect_approval_deadline_days: float = Field(default=3.0, gt=0)
+    #: The entitlement that may approve an irreversible effect — a role or security-group name, as
+    #: `asked_of` carries elsewhere. **Empty is not "anybody"**: under `entra_required` a job
+    #: declaring an irreversible effect refuses to run until a deployment names an approver, because
+    #: an unrouted approval request is answerable by every authenticated principal, and the first
+    #: version of this seam shipped exactly that — the requester could approve their own
+    #: irreversible change. Off enforcement it stays open, as every other gate degrades in dev.
+    effect_approval_role: str = ""

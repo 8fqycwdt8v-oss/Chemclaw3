@@ -29,25 +29,11 @@ from typing import Any
 
 from langchain.agents.middleware import TodoListMiddleware
 
-# Importing each tool module runs its `@tool` decorators, populating the capability-tool
-# registry (a registration side effect, exactly as `evals/__init__.py` seeds the metric
-# registry). With the registry populated, `_capability_tools` assembles the advertised set from
-# it instead of from a hand-maintained list — so adding a tool is a `@tool` at its definition
-# site, not an edit here.
-from chemclaw.agent import attachments as _attachments  # noqa: F401
-from chemclaw.agent import commitment_tools as _commitment_tools  # noqa: F401
-from chemclaw.agent import dialogue_tools as _dialogue_tools  # noqa: F401
-from chemclaw.agent import durable_tools as _durable_tools  # noqa: F401
-from chemclaw.agent import evidence_tools as _evidence_tools  # noqa: F401
-from chemclaw.agent import graph_tools as _graph_tools  # noqa: F401
-from chemclaw.agent import memory_tools as _memory_tools  # noqa: F401
-from chemclaw.agent import operations_tools as _operations_tools  # noqa: F401
-from chemclaw.agent import pending_tools as _pending_tools  # noqa: F401
-from chemclaw.agent import preferences as _preferences  # noqa: F401
-from chemclaw.agent import protocol_design_tools as _protocol_design_tools  # noqa: F401
-from chemclaw.agent import protocol_tools as _protocol_tools  # noqa: F401
-from chemclaw.agent import research_tools as _research_tools  # noqa: F401
-from chemclaw.agent import subscriptions as _subscriptions  # noqa: F401
+# Importing this module runs every `@tool` decorator, populating the capability-tool
+# registry, so `_capability_tools` assembles the advertised set from it instead of from a
+# hand-maintained list. It is a module rather than a block here because a *second* consumer
+# (`api/mcp_face.py`) needed the same seeding and did not have it — see its docstring.
+from chemclaw.agent import tool_modules as _tool_modules  # noqa: F401
 from chemclaw.agent.framing import ENVELOPE_TAG
 from chemclaw.agent.profiles import AgentProfile, get_profile
 from chemclaw.agent.scratchpad import scratchpad_tools

@@ -399,6 +399,10 @@ def build_job_tool(connector: str, job: JobSpec) -> CapabilityTool:
                     # (`D-2026-08-29-an-effect-declares-whether-it-can-be-undone`).
                     effect_system=job.effect.system if job.effect else "",
                     effect_reversal=job.effect.reversal if job.effect else "",
+                    # Read here rather than in the workflow: `_approve_effect` schedules a child
+                    # from this value, and a config read inside workflow code would change the
+                    # scheduled child on replay.
+                    effect_approver=settings.effect_approval_role,
                 ),
                 id=workflow_id,
                 task_queue=settings.background_task_queue,

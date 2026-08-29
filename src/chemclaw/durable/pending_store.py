@@ -14,6 +14,7 @@ otherwise decide the outcome by whichever transaction commits second. The guard 
 """
 
 import json
+from collections.abc import Sequence
 from contextlib import AbstractAsyncContextManager
 from datetime import datetime
 from typing import Any
@@ -163,18 +164,29 @@ async def get_request(request_id: str) -> PendingRequest | None:
     return _row(tuple(row)) if row else None
 
 
-async def open_requests(*, asked_of: str = "", limit: int = 50) -> list[PendingRequest]:
+async def open_requests(
+    *, asked_of: str = "", identities: Sequence[str] = (), limit: int = 50
+) -> list[PendingRequest]:
     """Everything still waiting, soonest deadline first.
 
     `asked_of` narrows to what is routed to one actor **or to nobody in particular**: an unrouted
     request is waiting on whoever is entitled, so hiding it from a named query would make the
     common case invisible. Routing is advisory either way — the answer route is the control.
+
+    `identities` is the rest of the caller's routing surface — their user principal name and the
+    entitlements they hold — because **routing to a team is the case this was built for and was the
+    one it could not answer.** `request_external_input` documents `asked_of` as "an actor id or a
+    team entitlement", and `_may_answer` honours both, but this read matched the object id alone: a
+    request routed to `qc-team` was answerable by the QC team and appeared in **nobody's** inbox, so
+    it sat invisible until it expired. Passing only `asked_of` keeps the old behaviour for callers
+    that have no role set to offer.
     """
     sql = f"SELECT {_COLUMNS} FROM pending_requests WHERE state = 'waiting'"
     params: list[Any] = []
-    if asked_of:
-        sql += " AND (asked_of = %s OR asked_of = '')"
-        params.append(asked_of)
+    routes = [route for route in (asked_of, *identities) if route]
+    if routes:
+        sql += " AND (asked_of = ANY(%s) OR asked_of = '')"
+        params.append(routes)
     sql += " ORDER BY due_at LIMIT %s"
     params.append(max(1, min(limit, 200)))
     async with _connect() as conn:
