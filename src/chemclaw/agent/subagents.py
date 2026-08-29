@@ -38,18 +38,80 @@ graph is compiled per turn at all. No checkpointer, because upstream's contract 
 sees only the prompt it was given and returns one report. No helpers of its own, which is the
 recursion guard `build_langgraph_agent(helper=…)` carries.
 
-None of those three is a build-time assertion, and that is deliberate rather than an omission. Under
-a one-name roster a helper is built from its caller's own profile, so any check comparing the two
-profiles — which is the shape `reject_widening` had before the specialist team was deleted — would
-compare a value with itself and could never turn red. The invariant is instead asserted where it can
-actually be observed: `tests/test_subagents.py` compiles the caller *and* the helper and compares
-the tool surfaces the two graphs really bound. That is the difference between enforcing an
-attenuation and restating it.
+**And, since `D-2026-08-29-a-helper-is-cheaper-and-narrower-than-its-caller`, nothing that changes
+anything.** `helper_profile` is what made that true, and it was written because the surface and the
+story had drifted apart: the `task` description said isolation and parallel reading while the helper
+held every in-process tool its caller did — measured against the live registry, 54 of them,
+including nine `run_*` durable job launchers, `propose_knowledge_note`,
+`start_optimization_campaign` and `request_external_input`. So a helper spawned on a brief the
+*model* wrote could open a pull
+request against the knowledge graph, start a CREST search costing hours of pod time, and post a
+durable question into a person's inbox, all from a context the chemist never sees. Every gate held —
+the audit row, the authorization decision, the plan gate and the spend cap are the same chain, which
+is why this was a design defect rather than a hole — but "a helper reads, it does not act" was a
+sentence in a docstring rather than a property of the graph.
+
+**The narrowing is derived, not listed.** It subtracts `authz.side_effecting_tools()`, the
+partition this repository already maintains and already tests, so a connector or a template added
+next year is outside a helper's reach on the day it is enabled rather than the day somebody
+remembers this module. The one name subtracted beyond it is `ask_clarifying_question`, subtracted
+for a reason the side-effect classification cannot see: it is a true read of nothing, but it writes
+a turn signal, so a helper calling it puts a question on the *chemist's* stream from a context the
+chemist cannot see, and then never receives the answer.
+
+**A helper may also run on its own model.** Its profile carries `model_route="helper"`, so
+`CHEMCLAW_MODEL_ROUTES='{"helper": "<a smaller model>"}'` is the whole of the cost lever and there
+is no code change in it. Unset — the shipped default — the helper reuses the model its caller
+already built, which is what every helper has always done. This is the one dimension where a helper
+is deliberately *not* an attenuation of its caller: a model carries no tools and therefore no
+authority, so the invariant `AgentProfile` is arranged around has nothing to say about it.
+
+Only some of this is a build-time assertion, and the split is deliberate rather than an omission.
+Under a one-name roster a helper is built from its caller's own profile, so any check comparing the
+two profiles — which is the shape `reject_widening` had before the specialist team was deleted —
+compares a value with itself for every dimension the derivation leaves alone. The invariants are
+therefore asserted where they can be observed: `tests/test_subagents.py` compiles the caller *and*
+the helper and compares the tool surfaces the two graphs really bound. That is the difference
+between enforcing an attenuation and restating it — and the subtraction above is what finally makes
+that comparison a *strict* subset rather than an equality nobody could fail.
 """
 
 from typing import Any
 
+from chemclaw.agent.authz import side_effecting_tools
+from chemclaw.agent.profiles import AgentProfile
 from chemclaw.core.errors import ChemclawError
+
+#: Tools that change nothing and still reach the person on the other side of the conversation.
+#:
+#: `side_effecting_tools()` answers "does this change something outside the turn", which is the
+#: right question for the plan gate and the dry-run refusal and the wrong one here.
+#: `ask_clarifying_question` writes no row and starts no workflow — it is correctly classified as a
+#: read — but it records a turn signal, and a turn signal is delivered on the *turn's* stream. A
+#: helper runs inside its caller's turn, so a question it asks appears to the chemist as though
+#: the agent they are talking to had asked it, while the answer comes back to a conversation the
+#: helper cannot see and has already left. `tests/test_subagents.py` derives this set by scanning
+#: for the
+#: signal writers rather than trusting the constant, so a second tool of this shape fails the suite
+#: instead of quietly reaching a helper.
+SPEAKS_TO_THE_CHEMIST: frozenset[str] = frozenset({"ask_clarifying_question"})
+
+#: What the helper itself is told, beside `general_purpose_helper`'s description of what the
+#: *caller* is told. The two texts live in one module deliberately: `D-2026-08-13` found the
+#: supervisor prompt and the `task` description describing two different mechanisms, and recorded
+#: that the disagreement was the real defect. `tests/test_subagents.py` asserts they still agree —
+#: on the bounds each states, not on wording, because wording that must match cannot be improved.
+HELPER_BRIEF = """
+
+You are a helper spawned by another Chemclaw agent to work one task in your own context window.
+You see nothing of the conversation that spawned you beyond the brief you were given, and nothing
+you write reaches the chemist except the single report you return — so answer the brief you were
+given, completely, and say what you could not establish rather than leaving it out.
+
+You hold read-only tools only. You cannot start a durable job, propose a knowledge note, record an
+answer, ask the chemist a question, or call an external connector tool; the agent that spawned you
+can do all of those, and the right way to make one happen is to say so in your report. Do not
+describe work as started, scheduled or arriving later: nothing you can reach starts anything."""
 
 
 def governed_roster(specs: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -118,10 +180,64 @@ def general_purpose_helper(runnable: Any) -> dict[str, Any]:
             "Spawn one — or several at once — when a task splits into independent pieces whose "
             "intermediate reading would otherwise crowd this conversation: sweeping several "
             "evidence sources in parallel, or working through a long search whose steps do not "
-            "matter to the final answer. It holds the same in-process tools you do and no others, "
-            "so it is never a way to reach something you cannot reach yourself, and it cannot call "
-            "external connector tools — do those here. Give it the full context in the prompt, "
-            "since it sees nothing of this conversation, and say exactly what to return."
+            "matter to the final answer. It reads and it reports, and that is all: it holds the "
+            "read-only subset of the in-process tools you hold, so it cannot start a durable job, "
+            "propose a note, record an answer or ask the chemist anything, and it cannot call "
+            "external connector tools — do all of those here, yourself, after reading what it "
+            "found. It is never a way to reach something you cannot reach yourself. Give it the "
+            "full context in the prompt, since it sees nothing of this conversation, and say "
+            "exactly what to return."
         ),
         "runnable": runnable,
     }
+
+
+def helper_profile(caller: AgentProfile, held: frozenset[str]) -> AgentProfile:
+    """The caller's profile, narrowed to what a helper is for and routed to its own model.
+
+    Three changes and nothing else, so that every dimension this does not name — the instructions,
+    the connector selection, the harness mode, the effort — stays the caller's. A helper is meant to
+    be the same agent working on a smaller piece with a clearer desk, not a different agent.
+
+    1. **The surface loses everything that acts.** `side_effecting_tools()` is subtracted rather
+       than an allow-list being written here, because that set is already the one this repository
+       maintains, already assembled from three sources that own their own knowledge (the in-process
+       classification, every enabled connector's declared `state_changing` names plus its jobs, and
+       every enabled template launcher), and already held to a partition of the tool registry by
+       `tests/test_authz.py`. A list written here would be a fourth source, correct on the day it
+       was written. `SPEAKS_TO_THE_CHEMIST` goes with it, for the reason its own comment gives.
+    2. **`model_route` becomes `"helper"`**, which does nothing at all until a deployment maps that
+       key in `CHEMCLAW_MODEL_ROUTES` — see `AgentProfile.model_route`.
+    3. **The name gains a `-helper` suffix**, so a log line or a span says which of the two graphs
+       in a turn it came from. The profile is deliberately *not* registered: it is derived per
+       build from whatever profile the caller resolved, and a registry entry would be a second,
+       staler answer to a question `build_langgraph_agent` can always compute.
+
+    **The subtraction is the whole attenuation argument.** What comes in is what the caller's own
+    build resolved — a caller that already narrowed itself, like `property-lookup` with its four
+    names, hands in the smaller set — and every operation here removes from it. There is no path
+    that adds a name, which is what makes "a helper holds no tool its caller does not" a property of
+    the construction rather than a check bolted beside it. Connector names are simply not in `held`
+    and do not need to be excluded: a helper is built with no connectors at all.
+
+    Args:
+        caller: The resolved profile of the agent that would spawn this helper.
+        held: The in-process tool names that caller's build actually resolved. Passed in rather than
+            re-derived here because the registry is complete only after `_capability_tools` has run
+            `_register_generated_tools()`, and a set read before that is missing every launcher a
+            deployment generated — see the call site.
+
+    Returns:
+        A profile to build the helper's graph from. Never registered, never cached.
+    """
+    # `model_copy` rather than a fresh `AgentProfile(...)`: a field added to the model later is
+    # carried into the helper automatically, where an explicit constructor call would drop it in
+    # silence and read as deliberate. The three values below are typed as the model declares them,
+    # which is what makes skipping validation safe here.
+    return caller.model_copy(
+        update={
+            "name": f"{caller.name}-helper",
+            "tool_names": held - side_effecting_tools() - SPEAKS_TO_THE_CHEMIST,
+            "model_route": "helper",
+        }
+    )

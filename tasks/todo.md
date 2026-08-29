@@ -1,155 +1,111 @@
-# Review of the eight-findings change (#280), and the fixes
+# Subagents: a helper that is cheaper and narrower than its caller (A + B), and a look at C/D/E
 
-Seven independent reviewers with fresh context read the merged diff. What they found is below,
-in the order it will be fixed. Every item marked **verified** was reproduced by reading the code
-or by executing it, not taken on the reviewer's word.
+Context: `docs/decisions/D-2026-08-15-a-capability-that-ships-off-is-not-a-capability` deleted the
+specialist team as unreachable code, and the delegation *question* was never settled — the two
+measurements it rests on (2/15 and 14/15-vs-14/15) were taken on different harnesses, one sample per
+probe, against the wrong dependent variable (delegation rate rather than cost/quality per task).
+What ships today is one governed `general-purpose` helper built from its caller's *own* profile:
+same model, same instructions, and — measured against the live registry — the same 54 in-process
+tools, including nine durable job launchers, `propose_knowledge_note`, `start_optimization_campaign`
+and `request_external_input`. The helper's own `task` description says it is for isolation and
+parallel reading. Its surface says otherwise.
 
-The pattern worth naming before the list: **in almost every case the docstring states the correct
-control and the code does not implement it.** That is the exact failure this repository's culture
-is built to catch, and one change reproduced it about a dozen times.
+## A — a profile may name the model route it runs on
 
-## Critical — a control that is claimed and absent
+- [x] `AgentProfile.model_route: str | None` — a key into the existing `settings.model_routes`
+      table, **not** a model id (a model id in a checked-in profile YAML would hardcode a site's
+      model names into this repository; `model_routes` is the seam that exists to avoid that).
+- [x] `build_langgraph_agent` resolves it through `build_chat_model(task=...)`, the one place a
+      model is built. Unrouted key ⇒ today's behaviour byte-for-byte (no second client).
+- [x] The helper's derived profile carries `model_route="helper"`, so
+      `CHEMCLAW_MODEL_ROUTES='{"helper":"internal-small"}'` is the whole cost lever.
 
-- [x] **C1** `api/mcp_face.py` serves **zero** tools in production. The registry is populated only as
-      an import side effect of `agent/chemclaw_agent.py`, which the face never imports; the five
-      tests pass because `tests/test_mcp_face.py` imports it itself. *(verified: `advertised_tools()`
-      → `[]` on the production path, 14 with the seeder)*
-- [x] **C2** Irreversible-effect approval is **self-approvable**: `_approve_effect` builds its
-      `AwaitRequest` without `asked_of`, so it defaults to `""`, and `_may_answer` returns `True` for
-      any authenticated caller including the requester. *(verified)*
-- [x] **C3** `assemble_evidence_pack(session_id=…)` reads **any** session with no ownership check,
-      while its docstring claims the check exists. `check_pending_requests` supplies the ids.
-      *(verified)*
-- [x] **C4** The `mcp-face` pod has no Service, no Route and is selected by no ingress
-      NetworkPolicy — unrestricted ingress under Kubernetes semantics.
+## B — a helper holds only what its story claims
 
-## High — corruption, wedges, wrong numbers
-
-- [x] **H5** `effect_ledger._SETTLE` has no state guard where `_BEGIN` has one, and `_finish()` sits
-      inside the `try` after the `applied` settle — so any raise in `_finish` rewrites an applied
-      irreversible effect to `failed`. *(verified)*
-- [x] **H6** A re-asked expired question is invisible and permanently unanswerable: `ALLOW_DUPLICATE`
-      against an upsert guarded `WHERE state='waiting'` that never resets `state`. *(verified, and
-      independently on a live Postgres)*
-- [x] **H7** `external_ref` has **no producer** — `SettleEffectInput` has no such field, so every
-      settle writes `""` — while three readers call it the operator's only handle. This is the
-      `D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution` shape. *(verified)*
-- [x] **H8** The unit registry is wrong one prefix past the tests: `nM` → nanometre, `µm`/`um` →
-      micromolar, `pM` unknown. `area%` and `% w/w` are bare aliases of `%`, so `basis` is empty and
-      they compare **equal**. *(verified by execution)*
-- [x] **H9** Delivery failure is silent (no logger, no metric in `deliver/`) and the activity is
-      ordered **before** `acknowledge_digest`, so a non-retryable channel error wedges the watermark
-      — contradicting the comment directly above it. *(verified)*
-- [x] **H10** `settings` is read inside workflow bodies (`awaiting.py`, `digest.py`), deciding how
-      many commands are emitted — the replay hazard `commitment_sync.py` states the rule against in
-      the same commit. *(verified)*
-
-## Medium
-
-- [x] Evidence pack: silent 200-row truncation with `refusals` counted over the truncated list;
-      `state`/`failure_reason` unselected so a failed job reads as a successful one; `is_empty`
-      ignores `approvals`; no index on `effects(session_id)`.
-- [x] Operations: `authorship` silently drops `superseded`; `job_activity` counts failures as runs;
-      `audit_events.tool` is the model's raw string and reaches a reader undefanged; `distinct_actors`
-      is a lower bound described as a count.
-- [x] Deliver/commitments: `Message.kind` is unvalidated and used as a path component;
-      `correlation_id` is sent to the webhook host; redaction misses connector bearer tokens;
-      one malformed file aborts the whole mirror pass; the commitment cursor shares a row with the
-      ELN sync; `commitments-json` hardcodes a CWD-relative path.
-- [x] Pending: `answered_at` is stamped on expiry and cancellation; the losing concurrent answerer
-      gets 204; a request routed to an entitlement appears in nobody's inbox.
-- [x] `report_measurement` stamps the ledger's unit on a value the caller never gave one for —
-      worse than the empty string it replaced, because the bad rows are no longer identifiable.
-
-## Prose that is false
-
-- [x] `window.py` justifies the 730-day clamp because those tables "are pruned by
-      `durable/retention.py`". Both are in `_NOT_PRUNED`, **"refused"**. *(verified)*
-- [x] "Five tables recorded this system's own work and none had a reader" is false for **four of
-      five** — only `turn_costs` had none. Repeated in the ADR, three docstrings, the README and the
-      merged PR body. *(verified)*
-- [x] `grants/app_privileges.sql` lists `reaction_records` twice.
+- [x] `helper_profile(caller)` in `agent/subagents.py`: the caller's profile minus
+      `authz.side_effecting_tools()` — derived from the existing maintained partition, so a bundle
+      added next year is excluded on the day it is enabled, not the day someone remembers.
+- [x] Minus `ask_clarifying_question` as well: it is classified read-only and it writes a turn
+      signal, so a helper calling it puts a question on the *chemist's* stream from a context the
+      chemist cannot see, and never sees the answer.
+- [x] Applied inside `build_langgraph_agent(helper=True)` rather than in `_subagents`, so the
+      narrowing cannot be forgotten by a future caller.
+- [x] `HELPER_BRIEF` appended to the helper's system prompt, next to the `task` description in the
+      same module — the two texts a helper is defined by, side by side, with a test that they agree.
+- [x] Update the `task` description: "holds the same in-process tools you do" becomes false.
 
 ## Verification
 
-`make lint type test` green with Docker/Postgres/Temporal up, and the full suite reported with what
-it skipped.
+- [x] `tests/test_subagents.py`: attenuation becomes a *strict* subset; new tests for the
+      side-effecting exclusion, the chemist-facing exclusion, the routed/unrouted model, and the
+      two texts agreeing.
+- [x] A scan test deriving the chemist-facing set, so a second such tool fails the suite.
+- [x] `make lint type test`, reporting what the run skipped.
+
+## Then: investigate C, D, E and report whether to build
+
+- [x] C — per-helper connector sessions (is the deadlock a *sharing* hazard or a concurrency one?)
+- [x] D — an advisor (a consult that holds no tools; the invariant never contemplated it)
+- [x] E — a second roster name
 
 ## Review
 
-All of it landed, in five commits. Two migrations (`079_pending_request_run.sql`,
-`078_effects_session_index.sql`), one new setting (`effect_approval_role`), one new module
-(`agent/tool_modules.py`), and one behaviour change a deployment must know about: **a job declaring
-an irreversible effect refuses to run until `CHEMCLAW_EFFECT_APPROVAL_ROLE` names an approver.**
-Nothing in this repository declares such a job, so nothing breaks today — the refusal is the point,
-because the alternative is the self-approval the seam shipped with.
+**A and B are implemented, measured and merged into one change.**
 
-Three fixes were verified by reverting them and watching the new test go red, rather than by
-reading: the empty tool registry, the applied-effect overwrite, and the re-asked question. The unit
-ladders were verified by execution, in both directions, at every rung.
+*A landed as `AgentProfile.model_route` rather than `AgentProfile.model`, and that is the one
+deviation from the plan as asked.* A model *id* on a profile would put a site's model names into a
+checked-in `data/profiles/*.yaml`, which is precisely what `settings.model_routes` — the per-task
+routing table `build_chat_model(task)` already reads — exists so that nobody has to do. A route
+*key* keeps the deployment's answer in the deployment. It also gave the field a second real caller
+without inventing one: a session profile may name a route too.
 
-**What the audit found beyond the individual defects** is recorded in
-`D-2026-08-29-a-review-with-fresh-context-is-a-different-instrument` and in `tasks/lessons.md`:
-almost every finding was a docstring stating the correct control beside code that did not implement
-it, and the tests that should have caught them were written by the same author and inherited the
-same belief — importing the seeder the production path lacked, seeding a marker into columns the
-read never selects, checking the two prefixes that happened to work.
+*B landed as a subtraction of `authz.side_effecting_tools()` rather than a hand-written allow-list*,
+because that partition already exists, is already assembled from three sources that own their own
+knowledge, and is already held to the tool registry by `tests/test_authz.py`. A list in
+`agent/subagents.py` would have been a fourth source, correct on the day it was written.
 
-**Two claims of my own are retracted** rather than quietly edited: "five tables had writers and no
-readers" (false for four of five — each had a point lookup; the *aggregate* was missing) and
-`MAX_WINDOW_DAYS`'s justification (it cited a retention that `_NOT_PRUNED` explicitly refuses). The
-merged ADRs are untouched, per the rule on merged ADRs; the correction lives in the new one and in
-the module docstrings.
+**Measured, on the default profile against the two compiled graphs:** the caller binds **61** tools,
+the helper binds **24**. The difference is nine `run_*` durable job launchers, every knowledge-graph
+and preference write, `request_external_input`, `ask_clarifying_question` and `task`. Nothing
+widened. Before this, the two surfaces were identical, which is why the attenuation test could not
+have failed — it is now a strict subset.
 
-**One thing was audited hardest and found sound**: the tool-schema cache, added late under CI
-pressure and the change most likely to be wrong. Its stale performance figures are corrected and its
-documented-but-unchecked cache bound is now a test.
+**One thing found while implementing, and it changed the design.** The first version read the tool
+registry inside `helper_profile`. That is wrong ordering: the registry is complete only after
+`_capability_tools` has run `_register_generated_tools()`, so a set read earlier is missing every
+launcher a deployment generated. It gave the right answer today — those are all side-effecting and
+subtracted anyway — for a reason that stops being true the first time a generated tool is a read.
+The caller's resolved names are now passed in, and the call site says why.
 
----
+**One test was rewritten rather than added.** The first version of the routed-model test read the
+chat model back off the compiled graph; LangGraph's model node is a closure, and prising the client
+out of it would have been a seventh reader of a shape upstream never promised — the thing
+`tests/test_upstream_surface.py` exists to count. The tests now assert what
+`_resolve_chat_model` actually claims, which is about construction: a routed profile builds from its
+route, an unrouted one builds nothing because a usable client already exists.
 
-# Second review (fresh context) — the fixes themselves
+**Gate:** `make lint` clean, `make type` clean (795 files), `make test` **6241 passed, 14 skipped**
+— run with `dockerd` and `make up` first, so the Postgres-backed suite actually ran. The 14 skips
+are `helm` not installed (7), a truncated git history the migration-additivity checks cannot use
+(3), the two live prompt-caching probes whose Anthropic credential has no credit, and two others in
+the same families — not the ~216 that a suite run without Postgres would have skipped silently.
 
-Six reviewers read the *fix* branch. What they found matters more than the individual defects:
+**C, D and E were investigated and none is built.** Findings are `docs/planning/BACKLOG.md` rows in
+§4, each with what would change the answer:
 
-**Two of them mutation-tested the fixes — reverted each and re-ran the suites.** 4 of 5 operations
-changes and 6 of 7 deliver/commitments changes survived with the suite green. Most of what this
-branch fixed is not pinned by anything. `tests/test_delivery.py` and `tests/test_commitments.py` are
-byte-identical to `origin/main`.
+- **C (per-helper connectors): the stated reason is not the binding one.** The deadlock measurement
+  is about *sharing one session object*, not concurrency — a helper with its own sessions shares
+  nothing. What actually binds is the lifecycle: connectors are opened by the async caller into an
+  exit stack *before* the synchronous `build_langgraph_agent` runs, and the roster is frozen per
+  compiled graph, so a per-helper set means opening a second full set eagerly on every turn against
+  an unmeasured spawn rate. Fix the prose now; let the measurement decide the behaviour.
+- **D (an advisor): permitted by every merged decision, and the design is already determined.**
+  `D-2026-08-25`'s thread-versus-tool table resolves all seven rows in an advisor-as-tool's favour,
+  which is the injection objection that killed the summarizer three times; `agent/condense.py` is
+  the precedent for the in-tool model call, including how its spend reaches the cap. It is blocked
+  on a second model tier and on evidence, not on architecture.
+- **E (a second roster name): mostly eaten by B.** The case for it was a read-only reader beside a
+  full-capability helper; the only helper is now read-only. Leave closed until the measurement asks.
 
-**Three regressions were introduced by the fixes themselves**, all in `core/units.py`: `pm`
-(picometre) resolved to picomolar because `pM` was added without its twin — turning a safe refusal
-into a silent wrong dimension, the *same* defect one rung down, made while fixing the rung above;
-`Area%` lost its basis because the basis map was case-sensitive while `parse_unit` is not; and
-`% w/v` was registered as a fraction, hard-coding rho = 1.0 g/mL.
-
-**Three of the prose corrections are themselves false.**
-
-## Fixed in this pass
-
-- [x] `pm`/picometre registered; the ladder test now derives from the registry
-- [x] `_BASIS_SPELLINGS` looked up case-insensitively
-- [x] `% w/v` moved to `mass_concentration` (10 mg/mL, exact by definition)
-- [x] `report_measurement` normalises `property_name` — `"PKA"` walked around the new refusal
-- [x] the re-ask no longer overwrites an **answered** row's attribution, and refreshes
-      `requested_by` — the stale value let a *different* person pass the separation-of-duties gate
-- [x] migration renumbered 077 → 079 (main landed its own 077)
-
-## Still open
-
-- [ ] `get_durable_job_status` is advertised on the face and discloses what `find_past_jobs` was
-      withheld for; job ids are a pure function of connector+job+payload
-- [ ] the `WITHHELD` partition test is tautological — it cannot fail for the case it names
-- [ ] the ownership gate (`_may_read`) has no test at all
-- [ ] `applied` → `compensated` is now unreachable; the shipped test asserts `failed` → `compensated`
-      and passes either way
-- [ ] the deadline clamp reached two of three launch sites; the BO path is unclamped and two
-      comments claim otherwise
-- [ ] `_SAFE_TOOL_NAME` allows `.` and `-`, which no served tool uses and which carry readable
-      injection text; the cardinality claim beside it is false (bucketing runs after the GROUP BY)
-- [ ] the `failed` split counts argument-sets, not runs (`job_records` upserts on `job_id`)
-- [ ] the redaction-failure path logs without a counter, unlike the sibling it was extracted from
-- [ ] the plaintext-channel refusal can only raise on the delivery path, where it is swallowed
-- [ ] a wrong `CHEMCLAW_COMMITMENT_EXPORT_DIR` is still silent
-- [ ] false prose: "point lookup", "unindexed-range aggregate", "five tables", `Coverage`'s
-      retention sentence, `bearer_token_env_names`' return contract
-- [ ] tests for every fix that survived mutation
+**And the delegation question is still open.** This change does not answer it and does not claim to.
+The row that would is in §4, with the arms it needs — which exist as of this change.

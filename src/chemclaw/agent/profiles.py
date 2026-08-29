@@ -80,6 +80,30 @@ class AgentProfile(BaseModel):
     # `LlmSettings._effort_is_provider_scoped`, which reads `self.llm_effort` and therefore never
     # sees this field at all — so the claim was false for exactly the input it was written on.
     effort: Literal["low", "medium", "high"] | None = None
+    # Which entry of `settings.model_routes` this agent's model is built from — a **route key**,
+    # never a model id. `build_chat_model(task)` already resolves a key to whatever model id a
+    # deployment mapped it to, and that indirection is the whole point of the field: a model id
+    # written here would be a site's model name checked into this repository, which is exactly what
+    # `model_routes` exists so that nobody has to do. `None` takes the `"agent"` route, which is
+    # what every build has always used.
+    #
+    # **Unlike the two fields above, this one does not narrow, and it does not need to.** A profile
+    # attenuates a *tool surface*; which model answers is not a capability and carries no authority,
+    # so a route pointing at a larger model is not a widening. What it can move is cost, and cost
+    # already has its own bound one layer down — `agent/spend_cap.py` meters a turn's bill in a
+    # `TurnTotal` channel that a fan-out shares rather than multiplies.
+    #
+    # The reason it exists is the helper: `agent/subagents.py` derives a profile whose route is
+    # `"helper"`, so a deployment makes delegated reading cheaper with
+    # `CHEMCLAW_MODEL_ROUTES='{"helper": "<a smaller model>"}'` and no code change. A session
+    # profile may name one too — `property-lookup` is the shipped profile whose own header calls it
+    # "the question a chemist asks dozens of times a day".
+    #
+    # **A key with no entry in `model_routes` reuses the model already built** rather than building
+    # a second, identical client per turn, so an unconfigured route is today's behaviour exactly.
+    # `build_chat_model`'s own contract for an unrouted task is the same answer stated one level
+    # down (it falls back to `llm_model`/`agent_model`); this only declines to pay for that twice.
+    model_route: str | None = None
 
 
 # The one profile that exists today: every field unset, so it resolves to the global agent verbatim.
